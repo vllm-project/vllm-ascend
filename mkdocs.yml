@@ -279,6 +279,7 @@ nav:
         - tutorials/features/pd_colocated_mooncake_multi_instance.md
         - tutorials/features/pd_disaggregation_mooncake_single_node.md
         - tutorials/features/pd_disaggregation_mooncake_multi_node.md
+        - tutorials/features/sparse_kv_offload_shared_indexer_only.md
         - tutorials/features/ray.md
     - faqs.md
   - User Guide:

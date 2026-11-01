@@ -800,6 +800,10 @@ def test_lim_consumes_shared_state_without_modifying_it(draft_index):
         setattr(impl, name, torch.full(shape, -999, dtype=torch.int32, device="npu"))
     impl.lim_reuse_request_count = 0
     impl.lim_key_scale = None
+    # Group-onboarding attributes normally set in __init__ (inline mode +
+    # empty group: no side-stream launch).
+    impl._lim_share_members = []
+    impl.use_side_stream_onboard = False
     indexer = SimpleNamespace(
         enable_sparse_li_c8=False,
         k_cache=SimpleNamespace(kv_cache=[torch.empty((1, 128, 1, 128), dtype=torch.bfloat16, device="npu")]),

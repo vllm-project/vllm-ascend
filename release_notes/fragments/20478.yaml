@@ -1,0 +1,17 @@
+pr: 20478
+entries:
+  - category: feature
+    text: >-
+      Added sparse_kv_offload_config.offload_shared_indexer_only to keep
+      indexer-owner layers resident in NPU HBM for layered-indexer models
+      (e.g. GLM-5.2) while offloading only the shared-indexer layers, and
+      miss_onboard_mode (inline | side_stream) to select how missed KV rows
+      are onboarded into the hot rows.
+    model: GLM-5.2
+  - category: performance
+    text: >-
+      The new miss_onboard_mode=side_stream pre-copies missed KV rows for
+      shared-indexer layers through the npu_lim_copy_descriptors operator on
+      a side stream, overlapping the copies with the owner layer's SFA and
+      MoE compute to reduce decode TPOT under sparse KV offloading.
+    model: GLM-5.2
