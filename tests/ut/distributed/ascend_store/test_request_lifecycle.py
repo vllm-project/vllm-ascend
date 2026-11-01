@@ -616,7 +616,7 @@ def test_sync_bulk_load_failure_isolated_before_forward(bulk_isolation_runtime, 
         local_prefix = runtime.add("local-prefix", tokens[:129])
         runtime.run_until_finished(local_prefix)
     original_get = pool.m_store.get
-    injected = []
+    injected: list[str] = []
 
     def fail_one_group(keys, addrs, sizes):
         if injected:
