@@ -159,9 +159,6 @@ class HostUvaBuffer:
     def __init__(self, shape, dtype, device):
         self.lib = _host_library()
         self._registered = False
-        self.ptrs = None
-        self.tensor = None
-        self.buffer = None
         rows = int(shape[0])
         row_elements = int(torch.Size(shape[1:]).numel())
         self.row_bytes = row_elements * torch.empty((), dtype=dtype).element_size()
@@ -177,9 +174,9 @@ class HostUvaBuffer:
         if allocation_address is None:
             raise RuntimeError("aclrtMallocHost returned a NULL pointer")
         self.pointer = ctypes.c_void_p((allocation_address + alignment - 1) // alignment * alignment)
+        self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
+        self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
         try:
-            self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
-            self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
             rc = self.lib.aclrtHostRegisterV2(self.pointer, size, DeviceOperator.host_register_flags())
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
