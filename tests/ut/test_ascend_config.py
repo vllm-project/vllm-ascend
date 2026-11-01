@@ -1493,6 +1493,35 @@ class TestUpstreamConfigCompatibility(TestBase):
         "vllm_ascend.ascend_config.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A5),
     )
+    def test_a5_megamoe_deepseek_v4_uses_target_topology(self, _mock_profile):
+        text_config = SimpleNamespace(
+            model_type="deepseek_v4",
+            hidden_size=7168,
+            moe_intermediate_size=3072,
+            num_experts_per_tok=8,
+        )
+        draft_parallel_config = SimpleNamespace(world_size_across_dp=2, pipeline_parallel_size=2)
+        target_parallel_config = SimpleNamespace(world_size_across_dp=4, pipeline_parallel_size=2)
+        vc = SimpleNamespace(
+            model_config=SimpleNamespace(
+                # Draft config reconstruction retains the target model architecture.
+                architectures=["DeepseekV4ForCausalLM"],
+                hf_text_config=text_config,
+                get_num_experts=lambda: 256,
+            ),
+            parallel_config=draft_parallel_config,
+            speculative_config=SimpleNamespace(target_parallel_config=target_parallel_config),
+        )
+
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+
+        vc.speculative_config.target_parallel_config = None
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
     def test_a5_megamoe_other_models_keep_legacy_config_rules(self, _mock_profile):
         text_config = SimpleNamespace(
             hidden_size=4096,
