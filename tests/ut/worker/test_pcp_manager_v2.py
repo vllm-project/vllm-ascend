@@ -108,23 +108,32 @@ def _partition_batch(manager, batch, *, padded_num_tokens=None, batch_desc=None)
         (CUDAGraphMode.FULL_DECODE_ONLY, True, 2, 1, True),
     ],
 )
-def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_size, dcp_size, expected_sharding):
+@pytest.mark.parametrize("upstream_decode_sharding", [False, True])
+def test_decode_sharding_uses_parallel_config(
+    cudagraph_mode, speculative, pcp_size, dcp_size, expected_sharding, upstream_decode_sharding
+):
     config = _make_pcp_config(cudagraph_mode)
     config.parallel_config.prefill_context_parallel_size = pcp_size
     config.parallel_config.decode_context_parallel_size = dcp_size
     config.speculative_config = SimpleNamespace(method="mtp") if speculative else None
     assert is_pcp_decode_sharding_enabled(config) is expected_sharding
     rank = pcp_size - 1
-    manager = AscendPCPManager(pcp_size, rank, torch.device("cpu"), shard_decode_requests=True, dcp_world_size=dcp_size)
-    manager.vllm_config = config
+    manager = AscendPCPManager(
+        pcp_size, rank, torch.device("cpu"), shard_decode_requests=upstream_decode_sharding, dcp_world_size=dcp_size
+    )
+    manager.bind_config(config)
     counts = np.array([1, 1], dtype=np.int32)
     prefilling = np.array([False, False])
 
+    assert manager.vllm_config is config
     assert manager.is_decode_sharded is expected_sharding
-    np.testing.assert_array_equal(
-        manager.replicated_requests(counts, prefilling), [not expected_sharding, not expected_sharding]
-    )
-    assert manager.shard_decode_requests is expected_sharding
+    expected_upstream_sharding = upstream_decode_sharding and expected_sharding
+    assert manager.shard_decode_requests is expected_upstream_sharding
+    for _ in range(2):
+        np.testing.assert_array_equal(
+            manager.replicated_requests(counts, prefilling), [not expected_sharding, not expected_sharding]
+        )
+        assert manager.shard_decode_requests is expected_upstream_sharding
     expected = [(1, 0, 1)] if expected_sharding else [(0, 0, 1), (1, 0, 1)]
     assert list(manager._iter_rank_chunks(rank, counts, prefilling)) == expected
 
@@ -170,7 +179,9 @@ def test_kpool_decode_keeps_replicated_pcp_state(speculative: bool, upstream_dec
     config.speculative_config = SimpleNamespace(method="mtp") if speculative else None
     config.parallel_config = ParallelConfig(prefill_context_parallel_size=2, decode_context_parallel_size=1)
     manager = AscendPCPManager(2, 1, torch.device("cpu"), shard_decode_requests=upstream_decode_sharding)
-    manager.vllm_config = config
+    manager.bind_config(config)
+    assert manager.vllm_config is config
+    assert not manager.shard_decode_requests
     assert config.parallel_config.pcp_shard_decode_requests is True
     replace(config.parallel_config)
     query_len = 6 if speculative else 1
