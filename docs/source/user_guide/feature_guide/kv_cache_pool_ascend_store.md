@@ -1598,6 +1598,15 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `prefill_pp_layer_partition` | str | No default | No | Comma-separated layer numbers, e.g., "30,31" | Prefill PP layer partition. If not configured, layers are evenly divided by `prefill_pp_size`. |
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | KV Pool transfer QoS priority. |
 
+For non-layerwise transfers (`use_layerwise=false`) with multiple KV cache groups,
+a synchronous load failure raises an error before model execution can consume an
+incomplete cache. This can stop the affected EngineCore; synchronous request-only
+recovery or recomputation is not provided by this path. Backend-reported
+asynchronous load failures, including missing results or a result count that
+differs from the requested key count, are reported for the affected request and
+follow `kv_load_failure_policy`. Unexpected exceptions raised by the transfer
+thread retain its fatal-error behavior.
+
 **NOTE:** When using `AscendStoreConnector` together with `MooncakeConnector` (V1) or `MooncakeConnectorV2`, the current TCP port allocations may still overlap ports reserved by other workers or components. This includes V1 worker handshake ports and V2 scheduler control ports. Distinct DP indices do not guarantee disjoint TCP port ranges; check these allocations against worker and component port reservations before deployment. `lookup_rpc_port` only identifies the local IPC endpoint and does not resolve these TCP port conflicts.
 
 ### ASCEND_GLOBAL_RESOURCE_CONFIG

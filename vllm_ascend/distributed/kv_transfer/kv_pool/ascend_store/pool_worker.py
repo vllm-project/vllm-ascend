@@ -964,41 +964,21 @@ class KVPoolWorker:
                 time.perf_counter() - load_get_start,
                 len(key_list_c),
             )
-            if self.backend_name == "memcache" and (
-                ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
-            ):
-                self._record_failed_request(request)
-                continue
-            if ret is not None and any(r != 0 for r in ret):
-                missing_block_ids = record_failed_blocks(
-                    block_id_list_c,
-                    ret,
-                )
-                if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        request.req_id,
-                        missing_block_ids,
+            load_results = ret if ret is not None and len(ret) == len(key_list_c) else [1] * len(key_list_c)
+            if any(result != 0 for result in load_results):
+                if len(request.block_ids_by_group) > 1:
+                    self._record_failed_request(request)
+                    # Request-level failed_recving only recovers requests still
+                    # waiting for asynchronous loads. A synchronous request is
+                    # already RUNNING, so reporting it after forward is too late.
+                    raise RuntimeError(
+                        f"Synchronous KV pool load failed for multi-group request {request.req_id} "
+                        f"(backend={self.backend_name}); cannot safely continue forward with incomplete KV cache"
                     )
-            elif ret is None:
-                missing_block_ids = record_failed_blocks(
-                    block_id_list_c,
-                    [1] * len(block_id_list_c),
-                )
-                if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        request.req_id,
-                        missing_block_ids,
-                    )
+                if self.backend_name == "memcache":
+                    self._record_failed_request(request)
+                    continue
+                self._record_invalid_blocks_ids(list(record_failed_blocks(block_id_list_c, load_results)))
             logger.debug(
                 "KV pool worker backend get returned request=%s token_len=%d groups=%s keys=%d",
                 request.req_id,

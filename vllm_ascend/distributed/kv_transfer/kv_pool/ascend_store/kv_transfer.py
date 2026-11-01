@@ -66,7 +66,7 @@ class KVTransferThread(threading.Thread):
         self.load_disabled = threading.Event()
 
     def _mark_failed_requests(self, requests: list[ReqMeta]) -> None:
-        logger.error("Memcache transfer failed for requests=%s", [request.req_id for request in requests])
+        logger.error("KV pool transfer failed for requests=%s", [request.req_id for request in requests])
         for request in requests:
             request.can_save = False
         with self.done_task_lock:
@@ -1123,44 +1123,19 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     time.perf_counter() - load_get_start,
                     len(key_list_c),
                 )
-            if isinstance(self.m_store, MemcacheBackend) and (
-                ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
-            ):
-                self._mark_failed_requests([req_meta])
-                self.set_finished_request(req_id)
-                return
-            if ret is not None and any(r != 0 for r in ret):
-                missing_block_ids = record_failed_blocks(
-                    block_id_list_c,
-                    ret,
-                )
-                if len(req_meta.block_ids_by_group) == 1:
+            load_results = ret if ret is not None and len(ret) == len(key_list_c) else [1] * len(key_list_c)
+            if any(result != 0 for result in load_results):
+                if len(req_meta.block_ids_by_group) > 1 or isinstance(self.m_store, MemcacheBackend):
+                    # Multi-group block IDs are not globally unique. Report the
+                    # request so the scheduler can recompute or fail it safely.
+                    self._mark_failed_requests([req_meta])
+                else:
+                    missing_block_ids = record_failed_blocks(
+                        block_id_list_c,
+                        load_results,
+                    )
                     with self._invalid_block_ids_lock:
                         self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        req_id,
-                        missing_block_ids,
-                    )
-            elif ret is None:
-                missing_block_ids = record_failed_blocks(
-                    block_id_list_c,
-                    [1] * len(block_id_list_c),
-                )
-                if len(req_meta.block_ids_by_group) == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        req_id,
-                        missing_block_ids,
-                    )
             logger.debug(
                 "KV pool async recv backend get returned request=%s token_len=%d groups=%s keys=%d",
                 req_id,

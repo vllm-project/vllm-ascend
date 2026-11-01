@@ -18,8 +18,10 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
 from tests.ut.distributed.ascend_store import test_pool_scheduler as scheduler_tests
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreRecvingThread
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
@@ -233,6 +235,133 @@ def test_mooncake_preserves_partial_get_errors():
     native.batch_get_into_multi_buffers.return_value = [514, -800]
     backend = make_backend("mooncake", native)
     assert backend.get(["ok", "missing"], [[100], [200]], [[514], [514]]) == [0, -800]
+
+
+def make_bulk_load(worker_factory, backend_name, group_count, load_async, result):
+    worker = worker_factory(backend_name, group_count=group_count)
+    worker.load_async = load_async
+    worker.m_store = make_backend(backend_name, MagicMock())
+    worker.m_store.get = MagicMock(return_value=result)
+    request = ReqMeta(
+        req_id="bulk-load",
+        token_len_chunk=32,
+        # IDs can overlap between groups; a flat invalid-block fallback is
+        # insufficient to identify the affected request for hybrid caches.
+        block_ids_by_group=[[7, 8] for _ in range(group_count)],
+        kv_cache_group_ids=list(range(group_count)),
+        block_hashes=["h0", "h1"],
+        load_spec=LoadSpec(0, 32, can_load=True, token_len=32),
+        can_save=True,
+    )
+    metadata = AscendConnectorMetadata(set(), loading_req_ids={request.req_id})
+    metadata.add_request(request)
+    if load_async:
+        worker.kv_recv_thread = KVCacheStoreRecvingThread(
+            worker.m_store,
+            worker.token_database,
+            worker.grouped_block_size,
+            worker.tp_rank,
+            invalid_block_ids=worker._invalid_block_ids,
+            invalid_block_ids_lock=worker._invalid_block_ids_lock,
+        )
+    return worker, request, metadata
+
+
+@pytest.mark.parametrize("backend_name", ["memcache", "mooncake"])
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param(None, id="missing-results"),
+        pytest.param([0], id="short-results"),
+        pytest.param([0] * 5, id="extra-results"),
+        pytest.param([-800, 0, 0, 0], id="partial-failure"),
+    ],
+)
+def test_sync_hybrid_load_failure_stops_before_forward(worker_factory, backend_name, result):
+    worker, request, metadata = make_bulk_load(worker_factory, backend_name, 2, False, result)
+    forward = MagicMock()
+    with pytest.raises(RuntimeError, match="Synchronous KV pool load failed for multi-group request bulk-load"):
+        worker.start_load_kv(metadata)
+        forward()
+    forward.assert_not_called()
+    worker.m_store.get.assert_called_once()
+    assert len(worker.m_store.get.call_args.args[0]) == 4
+    assert request.can_save is False
+    assert worker.get_failed_requests() == {request.req_id}
+    assert worker.get_failed_requests() == set()
+    assert worker.get_block_ids_with_load_errors() == set()
+
+
+@pytest.mark.parametrize("backend_name", ["memcache", "mooncake"])
+@pytest.mark.parametrize(
+    "result,failed",
+    [
+        pytest.param(None, True, id="missing-results"),
+        pytest.param([0], True, id="short-results"),
+        pytest.param([0] * 5, True, id="extra-results"),
+        pytest.param([-800, 0, 0, 0], True, id="partial-failure"),
+        pytest.param([0] * 4, False, id="success"),
+    ],
+)
+def test_async_hybrid_load_reports_request_failure_and_completes(worker_factory, backend_name, result, failed):
+    worker, request, metadata = make_bulk_load(worker_factory, backend_name, 2, True, result)
+    worker.start_load_kv(metadata)
+    receiver = worker.kv_recv_thread
+    assert receiver.request_queue.unfinished_tasks == 1
+    receiver._handle_request(receiver.request_queue.get_nowait())
+    assert receiver.request_queue.unfinished_tasks == 0
+    worker.m_store.get.assert_called_once()
+    assert len(worker.m_store.get.call_args.args[0]) == 4
+
+    connector = AscendStoreConnector.__new__(AscendStoreConnector)
+    connector.connector_worker = worker
+    connector.use_layerwise = False
+    connector._current_step_has_real_forward = False
+    connector._get_connector_metadata = lambda: metadata
+    output = connector.get_transfer_results(set())
+    assert output.finished_recving == {request.req_id}
+    assert output.failed_recving == ({request.req_id} if failed else set())
+    assert request.can_save is not failed
+    assert worker.get_block_ids_with_load_errors() == set()
+    assert receiver.get_and_clear_failed_requests() == set()
+    output = connector.get_transfer_results(set())
+    assert output.finished_recving == set()
+    assert output.failed_recving == set()
+
+
+@pytest.mark.parametrize("backend_name", ["memcache", "mooncake"])
+def test_sync_hybrid_load_success_preserves_request(worker_factory, backend_name):
+    worker, request, metadata = make_bulk_load(worker_factory, backend_name, 2, False, [0] * 4)
+    worker.start_load_kv(metadata)
+    worker.m_store.get.assert_called_once()
+    assert len(worker.m_store.get.call_args.args[0]) == 4
+    assert request.can_save is True
+    assert worker.get_failed_requests() == set()
+    assert worker.get_block_ids_with_load_errors() == set()
+
+
+@pytest.mark.parametrize("backend_name", ["memcache", "mooncake"])
+@pytest.mark.parametrize("load_async", [False, True])
+@pytest.mark.parametrize(
+    "result,malformed",
+    [
+        pytest.param(None, True, id="missing-results"),
+        pytest.param([0], True, id="short-results"),
+        pytest.param([0] * 3, True, id="extra-results"),
+        pytest.param([-800, 0], False, id="partial-failure"),
+    ],
+)
+def test_single_group_load_keeps_block_error_fallback(worker_factory, backend_name, load_async, result, malformed):
+    worker, request, metadata = make_bulk_load(worker_factory, backend_name, 1, load_async, result)
+    worker.start_load_kv(metadata)
+    if load_async:
+        receiver = worker.kv_recv_thread
+        receiver._handle_request(receiver.request_queue.get_nowait())
+        assert receiver.request_queue.unfinished_tasks == 0
+        assert worker.get_finished(set(), metadata) == (set(), {request.req_id})
+    assert worker.get_failed_requests() == set()
+    assert worker.get_block_ids_with_load_errors() == ({7, 8} if malformed or backend_name == "memcache" else {7})
+    assert worker.get_block_ids_with_load_errors() == set()
 
 
 @pytest.mark.parametrize("backend_name", ["memcache", "mooncake"])
