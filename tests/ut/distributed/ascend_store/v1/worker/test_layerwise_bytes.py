@@ -1,6 +1,7 @@
 """Replay actual CPU payloads through shared preparation and per-layer object sessions."""
 
 import ctypes
+from dataclasses import replace
 
 import pytest
 import torch
@@ -17,6 +18,7 @@ from tests.ut.distributed.ascend_store.v1.worker.fixtures import plan_load
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.resources import Resources
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.protocol.messages import (
     KVTransferStep,
+    LoadCommand,
     LookupRequest,
     RangeStoreCommand,
     StoreCommandBatch,
@@ -160,3 +162,70 @@ def test_shared_layer_buffers_are_rejected_before_registration_or_copy():
         Worker(topology, resources, coordinator=make_coordinator(topology), layerwise=True).bind_kv_caches(caches)
     assert backend.closed
     assert not any(call[0] in ("register_buffer", "batch_copy_get", "batch_copy_put") for call in backend.calls)
+
+
+@pytest.mark.parametrize("layout", ("NHD", "HND"))
+@pytest.mark.parametrize("layerwise", (False, True))
+def test_worker_roundtrip_preserves_packed_multi_kernel_payloads_and_padding(layout, layerwise):
+    topology = make_topology(physical_layers=(0, 1))
+    group = topology.groups[0]
+    spec = replace(group.kv_cache_spec, block_size=256, num_kv_heads=2, head_size=3)
+    topology = replace(
+        topology,
+        groups=(replace(group, kv_cache_spec=spec),),
+        config=replace(topology.config, group_specs=(spec,), hash_block_size=256, cache_transfer_granularity=256),
+    )
+    source, target = {}, {}
+    for layer in group.layers:
+        name = layer.layer_names[0]
+        shape = (6, 128, 2, 3) if layout == "NHD" else (6, 2, 128, 3)
+        page_size = 128 * 2 * 3
+        pitch = 2 * page_size + 16
+        backing = torch.arange(6 * pitch, dtype=torch.float32) + layer.physical_layer_id * 100000
+        strides = (pitch, *torch.empty(shape).stride()[1:])
+        source[name] = tuple(torch.as_strided(backing, shape, strides, index * page_size) for index in range(2))
+        target_backing = torch.full_like(backing, -999)
+        target[name] = tuple(torch.as_strided(target_backing, shape, strides, index * page_size) for index in range(2))
+    backends = (TensorRangeBackend(), TensorRangeBackend())
+    backends[1].objects = backends[0].objects
+    workers = tuple(
+        Worker(
+            topology,
+            Resources(backend, make_backend_spec(requires_exists_before_put=True), topology.transfer_groups),
+            coordinator=make_coordinator(topology, 768),
+            kv_cache_layout=layout,
+            layerwise=layerwise,
+            source_ready_event_factory=FakeEvent,
+            start_gate_factory=lambda: FakeLoadStartGate(opened=True),
+        )
+        for backend in backends
+    )
+    producer, consumer = workers
+    try:
+        producer.bind_kv_caches(source)
+        consumer.bind_kv_caches(target)
+        store = RangeStoreCommand("source", 0, 256, ((1,),), (b"a",), 256, 17)
+        producer.begin_step(KVTransferStep(store=StoreCommandBatch((store,))))
+        for name in source:
+            producer.save_layer(name)
+        producer.finish_step()
+        assert all(result.succeeded for result in producer.fence_previous_store())
+        producer.end_step()
+        query = LookupRequest(end_token=256, transfer_group_ids=(0,), block_hashes=(b"a",), local_available_tokens=0)
+        assert consumer.lookup(query).available_end_token == 256
+        consumer.begin_step(KVTransferStep((LoadCommand("target", 0, 256, ((2,),), (b"a",)),)))
+        consumer.start_load()
+        for name in target:
+            consumer.wait_for_layer_load(name)
+        consumer.end_step()
+        assert consumer.collect_load_result().completed_request_ids == {"target"}
+        for name in source:
+            for original, restored in zip(source[name], target[name], strict=True):
+                torch.testing.assert_close(restored[4:6], original[2:4])
+                assert torch.all(restored[:4] == -999)
+            storage = target[name][0].untyped_storage()
+            raw = torch.empty(0, dtype=torch.float32).set_(storage, 0, (storage.nbytes() // 4,), (1,))
+            assert torch.all(raw.reshape(6, pitch)[:, 2 * page_size :] == -999)
+    finally:
+        for worker in workers:
+            worker.close()

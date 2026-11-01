@@ -12,7 +12,7 @@ import numpy as np
 
 from ...backend import GVABackend, GVAObjectSessions, KeyRangeBackend, LayerwiseAccessKind, ObjectSessions
 from ...infrastructure.executor import LayerwiseExecutor
-from ...infrastructure.mapping import PartitionId, local_addresses
+from ...infrastructure.mapping import PartitionId, local_addresses, local_lengths
 from ...protocol.outcomes import LoadResult, StoreResult
 from ..data.batch import LayerTransferPlan, LoadBatch, StoreBatch
 from ..data.context import TransferContext
@@ -56,18 +56,22 @@ class LayerwiseTransfer:
         self.access = access
         self._geometry: dict[int, dict[tuple[int, PartitionId], tuple[slice, Any, Any]]] = {}
         for group_id, partitions in context.local.items():
-            for partition in partitions:
+            prepared: dict[tuple[int, int], tuple[slice, Any, Any]] = {}
+            for partition, segments in partitions.items():
                 for layer_id, span in context.layers[group_id][partition[0]].items():
                     if span.start != span.stop:
-                        self._geometry.setdefault(layer_id, {})[group_id, partition] = (
-                            span,
-                            np.asarray(context.sizes[group_id][partition][span], dtype=np.uint64)
-                            if self.shared_objects
-                            else list(context.sizes[group_id][partition][span]),
-                            context.remote[group_id][partition[0]]["offsets"][span]
-                            if self.shared_objects
-                            else context.remote[group_id][partition[0]]["offsets"][span].tolist(),
-                        )
+                        coordinate = (partition[0], layer_id)
+                        if coordinate not in prepared:
+                            lengths = local_lengths(segments, span)
+                            offsets = context.remote[group_id][partition[0]]["offsets"][span]
+                            prepared[coordinate] = (
+                                span,
+                                lengths
+                                if self.shared_objects
+                                else np.broadcast_to(lengths, (span.stop - span.start,)).tolist(),
+                                offsets if self.shared_objects else offsets.tolist(),
+                            )
+                        self._geometry.setdefault(layer_id, {})[group_id, partition] = prepared[coordinate]
 
         self._memberships: dict[tuple[tuple[int, PartitionId], ...], list[int]] = {}
         for layer_id, geometry in self._geometry.items():

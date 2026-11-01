@@ -2,3 +2,5 @@ pr: 17822
 entries:
   - category: feature
     text: Added the opt-in AscendStoreV1Connector for external KV cache reuse with shared Bulk and Layerwise transfer preparation.
+  - category: breaking
+    text: "AscendStoreV1Connector now coalesces KV transfers from final Tensor strides, including packed multi-kernel blocks and head subsets. Key naming is unchanged. Where object byte order changes, follow the existing deployment requirements: upgrade readers and writers together and clear affected cache entries or use a fresh cache namespace."

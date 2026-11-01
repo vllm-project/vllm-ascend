@@ -1,7 +1,9 @@
 """Map logical token positions to block hashes and caller-supplied block IDs.
 
 Layout binding defines partition Keys, Local addresses, layer indices and Remote offsets.
-Segments follow layer/name/component/element order. Within one PP partition (DCP rank fixed):
+Objects retain layer order and independent-storage declaration order. Within a storage,
+segment order follows Block 0 / head partition 0 addresses, with padding omitted.
+Each segment retains its own object-coordinate strides. Within one PP partition (DCP rank fixed):
 
     segment              0    1    2  |  3    4
     layer                [ layer A ]    [layer B]
@@ -19,7 +21,8 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from itertools import accumulate
+from heapq import merge
+from itertools import accumulate, product
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict
 
 import numpy as np
@@ -152,6 +155,21 @@ KeyTable = dict[PartitionId, tuple[str, str]]
 KeyBuilder: TypeAlias = Callable[["KeyMetadata"], tuple[str, str]]
 
 
+class _Layout(NamedTuple):
+    """Byte geometry: [logical block, head partition, *content axes].
+
+    The first two axes locate objects and never fold into their contents.
+    Normalized content axes descend by stride, ending in contiguous bytes.
+    """
+
+    offset: int
+    shape: tuple[int, ...]
+    strides: tuple[int, ...]
+
+
+_GeometryCache: TypeAlias = dict[tuple[_Layout, ...], tuple[_Layout, ...]]
+
+
 class LocalSegmentData(TypedDict):
     """Block-zero addresses and byte geometry in segment order.
 
@@ -205,12 +223,12 @@ def build_mappings(
     first_head_rank = metadata.head_or_tp_rank * head_partition_count
     # HND/LBHNC caches arrive as per-layer head-major views.
     head_axis = 1 if kv_cache_layout in ("HND", "LBHNC") else 2
-    token_axis = 2 if head_axis == 1 else 1
     builder = _default_key_builder if key_builder is None else key_builder
 
     keys: KeyTable = {}
     local: LocalTable = {}
     layer_slices: LayerTable | None = {} if layerwise else None
+    geometry_cache: _GeometryCache = {}
     for pp_rank, layers in select_layers(group, topology.config.pp_partition.target_layer_counts).items():
         # DCP tokens are already sliced upstream; PCP does not change local selection.
         partitions = tuple(
@@ -228,28 +246,14 @@ def build_mappings(
         pp_layer_slices: dict[int, slice] | None = {} if layerwise else None
         for layer in layers:
             layer_segment_start = len(lengths)
-            for name in layer.layer_names:
-                spec = group.kv_cache_spec
-                if isinstance(spec, UniformTypeKVCacheSpecs):
-                    spec = spec.kv_cache_specs[name]
-                cache = kv_caches[name]
-                tensors = (cache,) if isinstance(cache, torch.Tensor) else cache
-                for tensor in tensors:
-                    if not tensor.numel():
-                        continue
-                    scale = _kernel_blocks_per_group(tensor, spec, token_axis)
-                    blocks = tensor.unflatten(0, (-1, scale))
-                    element_bytes = tensor.element_size()
-                    stride = blocks.stride(0) * element_bytes
-                    head_views = split_head_partitions(blocks[0], head_partition_count, head_axis)
-                    # Equal head views share shape/strides, so their segments differ only by address offset.
-                    head_offsets = tuple(view.data_ptr() - head_views[0].data_ptr() for view in head_views)
-                    for part in contiguous_subviews(head_views[0]):
-                        address = part.data_ptr()
-                        strides.append(stride)
-                        lengths.append(part.numel() * element_bytes)
-                        for partition_bases, offset in zip(bases, head_offsets, strict=True):
-                            partition_bases.append(address + offset)
+            for origin, segments in _layer_layout(
+                layer, group.kv_cache_spec, kv_caches, head_axis, head_partition_count, geometry_cache
+            ):
+                for segment in segments:
+                    strides.append(segment.strides[0])
+                    lengths.append(segment.shape[-1])
+                    for head, partition_bases in enumerate(bases):
+                        partition_bases.append(origin + segment.offset + head * segment.strides[1])
 
             if pp_layer_slices is not None:
                 pp_layer_slices[layer.physical_layer_id] = slice(layer_segment_start, len(lengths))
@@ -319,22 +323,144 @@ def _kernel_blocks_per_group(tensor: torch.Tensor, spec: KVCacheSpec, token_axis
     return scale
 
 
-def split_head_partitions(tensor: torch.Tensor, head_partition_count: int, head_axis: int) -> tuple[torch.Tensor, ...]:
-    if head_partition_count == 1 or not tensor.numel():
-        return (tensor,) * head_partition_count
-    # Unflatten rejects head counts that cannot be divided equally.
-    return tensor.unflatten(head_axis, (head_partition_count, -1)).unbind(head_axis)
+def _layer_layout(
+    layer: KVPoolLayerTopology,
+    group_spec: KVCacheSpec,
+    kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]],
+    head_axis: int,
+    head_partition_count: int,
+    geometry_cache: _GeometryCache,
+) -> Iterator[tuple[int, tuple[_Layout, ...]]]:
+    """Bind storage origins to reusable layouts, without expanding each component first."""
+    token_axis = 2 if head_axis == 1 else 1
+    storage_layouts: dict[int, tuple[int, list[_Layout]]] = {}
+    for name in layer.layer_names:
+        spec = group_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            spec = spec.kv_cache_specs[name]
+        cache = kv_caches[name]
+        tensors = (cache,) if isinstance(cache, torch.Tensor) else cache
+        for tensor in tensors:
+            if not tensor.numel():
+                continue
+            scale = _kernel_blocks_per_group(tensor, spec, token_axis)
+            if tensor.shape[0] % scale:
+                raise ValueError("Kernel block count must divide into complete logical blocks")
+            element_bytes = tensor.element_size()
+            shape = (tensor.shape[0] // scale, head_partition_count, scale, *tensor.shape[1:], element_bytes)
+            byte_strides = tuple(step * element_bytes for step in tensor.stride())
+            strides = (scale * byte_strides[0], 0, *byte_strides, 1)
+            if head_partition_count > 1:
+                axis = head_axis + 2
+                heads, remainder = divmod(shape[axis], head_partition_count)
+                if remainder:
+                    raise ValueError("Head count must divide into equal partitions")
+                shape = (*shape[:axis], heads, *shape[axis + 1 :])
+                strides = (strides[0], heads * strides[axis], *strides[2:])
+            base = tensor.data_ptr()
+            storage = tensor.untyped_storage().data_ptr()
+            if storage not in storage_layouts:
+                storage_layouts[storage] = (base, [])
+            origin, layouts = storage_layouts[storage]
+            layouts.append(_Layout(base - origin, shape, strides))
+    # Independent allocations keep declaration order; absolute addresses never enter the layout cache.
+    for origin, layouts in storage_layouts.values():
+        geometry = tuple(layouts)
+        if geometry not in geometry_cache:
+            geometry_cache[geometry] = tuple(_storage_segments(layouts))
+        yield origin, geometry_cache[geometry]
 
 
-def contiguous_subviews(view: torch.Tensor) -> Iterator[torch.Tensor]:
-    """Yield contiguous subviews in logical element order without copying data."""
-    if view.numel() == 0:
+def _fold_layout(layout: _Layout) -> _Layout:
+    axes = sorted((step, size) for size, step in zip(layout.shape[2:], layout.strides[2:], strict=True) if size > 1)
+    shape, strides = [1], [1]
+    for step, size in axes:
+        # Flatten adjacent index dimensions; only stride-one repetitions form contiguous bytes.
+        if step == shape[-1] * strides[-1]:
+            shape[-1] *= size
+        else:
+            shape.append(size)
+            strides.append(step)
+    return _Layout(
+        layout.offset,
+        (*layout.shape[:2], *reversed(shape)),
+        (*layout.strides[:2], *reversed(strides)),
+    )
+
+
+def _join_layouts(left: _Layout, right: _Layout) -> _Layout | None:
+    """Add a translated-component axis or extend one content axis, preserving object coordinates."""
+    if left.shape[:2] != right.shape[:2] or left.strides[:2] != right.strides[:2]:
+        return None
+    distance = right.offset - left.offset
+    if left.shape == right.shape and left.strides == right.strides:
+        combined = _Layout(
+            left.offset, (*left.shape[:2], 2, *left.shape[2:]), (*left.strides[:2], distance, *left.strides[2:])
+        )
+    else:
+        # A missing content axis has extent one, allowing another component to extend an existing repetition.
+        left_axes = dict(zip(left.strides[2:], left.shape[2:], strict=True))
+        right_axes = dict(zip(right.strides[2:], right.shape[2:], strict=True))
+        changed = [
+            step for step in left_axes.keys() | right_axes.keys() if left_axes.get(step, 1) != right_axes.get(step, 1)
+        ]
+        if len(changed) != 1:
+            return None
+        step = changed[0]
+        if distance != step * left_axes.get(step, 1):
+            return None
+        left_axes[step] = left_axes.get(step, 1) + right_axes.get(step, 1)
+        combined = _Layout(left.offset, (*left.shape[:2], *left_axes.values()), (*left.strides[:2], *left_axes.keys()))
+    combined = _fold_layout(combined)
+    # Keep expansion address-ordered. Interleaving repetitions retain their original ordered streams.
+    span = 1
+    for size, step in zip(reversed(combined.shape[2:]), reversed(combined.strides[2:]), strict=True):
+        if step < span:
+            return None
+        span += (size - 1) * step
+    return combined
+
+
+def _expand_layout(layout: _Layout) -> Iterator[_Layout]:
+    # Only content gaps expand. Object coordinates stay symbolic, and bytes stay contiguous.
+    shape = (*layout.shape[:2], layout.shape[-1])
+    strides = (*layout.strides[:2], 1)
+    steps = layout.strides[2:-1]
+    for point in product(*(range(size) for size in layout.shape[2:-1])):
+        offset = sum(index * step for index, step in zip(point, steps, strict=True))
+        yield _Layout(layout.offset + offset, shape, strides)
+
+
+def _storage_segments(layouts: list[_Layout]) -> Iterator[_Layout]:
+    """Express component unions as content axes, then emit their contiguous byte intervals."""
+    joined: list[_Layout] = []
+    for current in sorted((_fold_layout(layout) for layout in layouts), key=lambda layout: layout.offset):
+        while joined:
+            combined = _join_layouts(joined[-1], current)
+            if combined is None:
+                break
+            joined.pop()
+            current = combined
+        joined.append(current)
+    if len(joined) == 1 and len(joined[0].shape) == 3:
+        yield joined[0]
         return
-    if view.is_contiguous():
-        yield view
-        return
-    for child in view.unbind(0):
-        yield from contiguous_subviews(child)
+    # A single augmented layout can also have adjacent intervals across repetition boundaries.
+    ordered = iter(merge(*(_expand_layout(layout) for layout in joined)))
+    current = next(ordered)
+    length = current.shape[-1]
+    for following in ordered:
+        if (
+            current.offset + length == following.offset
+            and current.strides == following.strides
+            and current.shape[:2] == following.shape[:2]
+        ):
+            length += following.shape[-1]
+        else:
+            yield current if length == current.shape[-1] else current._replace(shape=(*current.shape[:2], length))
+            current = following
+            length = current.shape[-1]
+    yield current if length == current.shape[-1] else current._replace(shape=(*current.shape[:2], length))
 
 
 # ========================

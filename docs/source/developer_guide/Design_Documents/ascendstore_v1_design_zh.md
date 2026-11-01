@@ -177,11 +177,9 @@ Coordinator 输出逻辑终点与选择掩码，不查询 Backend、不读写 KV
 
 ### 4.5 Mapping
 
-`BlockHashMapping` 表达逻辑位置、内容 hash 与调用方 Block ID 的关系。Worker 装配时按组绑定粒度比例和完整块末尾 hash 的相对偏移，LookupService 与 TransferContext 共享这些不可变实例。运行时结合本次 hash、块表、范围和尾部边界求值，不分配块、不查询后端，也不保存请求状态。Lookup 只使用其 hash 范围能力。
+`BlockHashMapping` 绑定逻辑块与 Hash 的粒度关系，按逻辑位置配对内容 Hash 和调用方 Block ID。物理 Mapping 根据 Topology 与最终 Tensor 的 shape/stride，生成 Key、Local、Remote 和层索引，供 Load、Store 共用。
 
-Mapping 将对象身份、本地字节与远端位置分别绑定为 Key、Local、Remote 三份数据，Layer 记录物理层到 segment 区间的关系。一个 segment 是可连续复制的本地字节段；各份数据通过一致的分区坐标与段顺序对应。
-
-绑定时利用真实 Tensor view 表达切分并识别连续段，形成可复用的数值布局。运行时按内容 hash、本地 Block ID 和层区间求值，Transfer 据此组织 Bulk、KeyRange 或 GVA 参数。对象选择、发布和来源安全由 Service 负责。第 5 章说明具体布局关系。
+初始化时推导对象选区和连续段，运行时按 Hash、Block ID 与层区间求值。Service 负责业务选择与结果归属，Transfer 组织 Backend 参数。第 5 章说明预计算的依据、增广维度和连续段推导规则。
 
 ### 4.6 Executor
 
@@ -223,78 +221,222 @@ Backend 实现原生客户端调用、内存注册、对象保护和结果规范
 
 ## 5. Mapping
 
-### 5.1 逻辑块身份与本地块表
+### 5.1 逻辑映射：BlockHashMapping
 
-`BlockHashMapping` 先解决“这个逻辑块的内容 hash 与本地 Block ID 是什么”，物理布局再解决“这个 Block ID 的字节在哪里”。两种映射放在同一模块，分别处理逻辑身份与内存位置，不相互代替。
+`BlockHashMapping` 将逻辑 Token 位置对应到内容 Hash 和调用方提供的本地 Block ID。逻辑块大小与 Hash 粒度在初始化时确定，因此可以提前绑定每块包含的 Hash 数量，以及完整块末尾 Hash 的相对位置。
 
-例如缓存块覆盖 128 token，hash 粒度为 64 token，完整前缀的 hash 为 `[h0, h1, h2, h3]`，本地块表为 `[7, 11]`。两个逻辑块分别配成 `(逻辑块 0, h1, Block 7)`、`(逻辑块 1, h3, Block 11)`。若本次范围从 token 128 开始，只输出第二组；若调用方仅保留后缀块表 `[11]`，仍按前缀逻辑位置对齐到第二个块，而不是把它误配到 h1。
+例如，一个逻辑块包含 128 Tokens，Hash 粒度为 64 Tokens，每块对应两个 Hash，使用其中第二个标识完整块：
 
-Load 的尾部 key 边界可能晚于恢复终点，此时使用命令保留的边界找到真正存储对象的 hash。Store checkpoint 则使用精确状态边界的 hash 与指定来源块。映射只负责配对，业务的保存掩码、writer 策略和请求归属在 Service 中确定。选中块时立即将这些身份绑定，不先展开通用行再拆出 hash 后重新匹配。
+| 逻辑块 | Token 区间 | 前缀中的 Hash | 完整块 Hash | 本地 Block ID |
+| --- | --- | --- | --- | --- |
+| 0 | `[0, 128)` | `h0, h1` | `h1` | 7 |
+| 1 | `[128, 256)` | `h2, h3` | `h3` | 11 |
 
-### 5.2 物理布局的三份数据
+| 初始化时绑定 | 运行时提供与求值 |
+| --- | --- |
+| 逻辑块大小、Hash 粒度、每块 Hash 数量、末尾 Hash 的相对位置 | 本次 Hash 序列、Block ID 表、选择范围和尾部边界；输出逻辑位置、Hash、Block ID 的配对 |
 
-Mapping 用 Key、Local、Remote 三份数据，分别描述对象身份、本地字节和远端位置。
+本地块表可以只保留后缀。例如上表的块表缩为 `[11]` 时，仍按完整前缀中的逻辑位置与 `h3` 配对。Load 的恢复终点可能位于已存储对象内部，命令保留该尾部对象的 Key 边界，用它定位 Hash；Store checkpoint 则按精确状态边界取得 Hash，并绑定指定来源块。
 
-| 对象 | 回答的问题 | 绑定结果 |
+Lookup 使用 Hash 范围枚举能力；Load、Store 在选中块时完成 Hash、Block ID 和请求归属的绑定。保存掩码、writer 选择等业务规则由 Service 决定。
+
+### 5.2 物理映射：三份数据与求值公式
+
+物理 Mapping 将一个对象的选中字节组织成连续段，每段都可以通过起始地址和长度访问。绑定结果分为 Key、Local、Remote：
+
+| 数据 | 表达什么 | 绑定结果 |
 | --- | --- | --- |
-| Key | 这些字节属于哪个对象？ | 各分区的命名前缀与后缀，运行时填入内容 hash |
-| Local | 本地有哪些字节？ | 每段在 block 0 的基址、块步长和有效长度 |
-| Remote | 每段放在远端对象的哪里？ | 完整对象大小与各段的对象内字节偏移；不保存运行时远端基址 |
+| Key | 对象身份 | 各分区的命名前缀与后缀 |
+| Local | 本地选中字节的位置 | 每段在 Block 0 的基址、逻辑块步长和有效长度 |
+| Remote | 字节在远端对象中的位置 | 完整对象大小与各段的对象内字节偏移 |
 
-一个 segment 是一次可以连续复制的本地字节段。Local 按物理层、缓存条目名、Tensor 分量及逻辑元素顺序排列这些段，Remote 使用相同段序。Layer 将每个物理层对应到这条段序列的半开区间；它是数组下标关系，不是字节偏移，也不生成另一份布局。
+每个原始缓存组独立绑定。模型、缓存规格和本地并行信息确定后，`PartitionId = (PP rank, DCP rank, head/TP rank)` 标识该组的一个分区，内容 Hash 再标识分区中的对象。对齐状态缓存使用 TP rank 作为第三项。Key 与 Local 按 PartitionId 索引；同一 PP 的 head 分区共享段长度、块步长、层索引和 Remote 偏移，Remote 与层索引按 PP rank 保存。
 
-每个原始缓存组（Group）独立绑定，其上下文已经确定模型与缓存规格、原始 group ID、并行规模和当前 Worker 的本地信息。`PartitionId = (PP rank, DCP rank, head/TP rank)` 在这个绑定内唯一标识一个分区：三项分别表示目标 PP 层区间、实际 DCP 分片和 head / TP 分区；需要对齐的状态缓存以 TP rank 作为第三项。
-
-PartitionId 是 Key 与 Local 的共同索引，跨 Group 或绑定实例时仍需要外层上下文；内容 hash 再区分该分区内不同内容的远端对象。
-
-同一 PP 内的 head 分区共享段长度、块步长、Layer 关系和 Remote 偏移，仅本地基址及 Key 身份不同。因此 Key 与 Local 按 PartitionId 索引，Remote 与 Layer 按 PP rank 索引。
-
-### 5.3 三种切分布局
-
-TP、PP、CP 分别沿 head、模型层和上下文 token 划分数据，影响对象归属的不同部分。
-
-| 切分 | 决定什么 | 当前 Mapping 的处理 |
-| --- | --- | --- |
-| TP / head | 每个对象包含哪些 head | TP mismatch 时将本地 head 等分，形成各自的 Key 与 Local 段；普通路径保留本地 head 范围 |
-| PP / layer | 每个对象包含哪些模型层 | 将实际物理层归入目标 PP 区间，只为本地持有的层生成分区 |
-| CP / token | 每个上下文分片包含哪些 token | 本地 Tensor 已完成 DCP 切分，直接保留实际 DCP 身份；按格式确定远端槽位，不再次切本地 token，PCP 也不额外切本地 Tensor |
-
-Layerwise 在已确定的对象内逐层选择 segment，保留其在完整对象中的偏移。它不改变对象的 TP、PP、CP 归属。布局关系可以组合，但生产路径是否开放某种组合，由 Configuration 的支持检查决定。
-
-### 5.4 连续性
-
-一个对象的有效载荷可以来自多个不连续的本地范围。连续性决定需要多少个 segment；对象字节顺序决定这些段怎样排列。两者不能靠排序本地地址来统一，也不能把其他 head 或 padding 当作有效载荷复制。
-
-![同一对象的两个不连续本地片段在远端紧凑排列](../../assets/ascendstore_v1/tp_head_slices.svg)
-
-块步长与段长度也必须分开。例如每块有效载荷为 32 字节、相邻块起点相距 40 字节时，每次复制 32 字节，寻址仍按 40 字节移动。逐层访问同样保留对象偏移：第二层从对象第 32 字节开始，就不能因本次只传第二层而将偏移重置为 0。
-
-### 5.5 用 Tensor view 建立布局
-
-绑定阶段直接使用真实 KV Tensor 的 shape、stride 与 view 表达切分。先按 cache spec 的物理存储行数将 kernel block 归并为 group block，再沿 head 轴形成所需分区。NHD 的块内顺序是 token、head、向量；HND 及 LBHNC 的逐层 view 使用 head 优先的顺序，Mapping 保留各自的逻辑元素顺序。
-
-连续 view 直接形成一个 segment；不连续 view 按逻辑元素顺序拆成连续子段。普通布局与 head 切片共用这一规则，padding 和非连续 stride 由实际 view 决定，不改变有效字节的对象内顺序。
-
-这些 view 操作不复制 KV 数据，也不做布局格式转换。绑定后仅保留基址、块步长、长度和对象偏移等只读数值数组；一致的步长与长度用单元素数组共享。Tensor 的存储生命周期由 Resources 保证，更换底层分配时需要重新绑定。
-
-### 5.6 绑定结果的使用
-
-绑定生成 Key、Local，并按需生成 Layer 关系；Remote 由所选访问方式单独建立。Bulk 使用 Key 和 Local 传输整对象；KeyRange 为各段计算紧凑对象偏移；GVA 根据 Configuration 与 Topology 的约束，在紧凑段序上加入全局层预留、上下文槽位及对齐。Remote 的对象大小因此可以大于本地有效载荷之和。
-
-运行时，Service 提供已绑定 Key 与归属的 Selection，Transfer 根据本地 Block ID 和所需层区间批量计算参数。对段 $j$，令 $\beta_j$ 为 block 0 基址，$\sigma_j$ 为块步长，$\ell_j$ 为长度，$o_j$ 为对象偏移；$b_i$ 为第 $i$ 条记录的本地 Block ID，$G_i$ 为本次对象会话提供的远端基址。地址、步长、长度和偏移均以字节计，$\Vert$ 表示字符串拼接。
+对选中的第 $i$ 个对象，令 $h_i$ 为内容 Hash，$b_i$ 为本地 Block ID；对对象内第 $j$ 段，令 $\beta_j$ 为 Block 0 基址、$\sigma_j$ 为逻辑块步长、$\ell_j$ 为有效长度、$o_j$ 为远端对象内偏移。$G_i$ 是本次 Backend Session 提供的 GVA 对象基址，$\Vert$ 表示字符串拼接。地址、步长、长度和偏移均以字节计：
 
 $$
 \begin{aligned}
-\mathrm{Key}_i &= \mathrm{prefix} \Vert \text{内容 hash}_i \Vert \mathrm{suffix} \\
+\mathrm{Key}_i &= \mathrm{prefix} \Vert h_i \Vert \mathrm{suffix} \\
 \text{本地地址}_{ij} &= \beta_j + b_i \sigma_j \\
 \text{复制长度}_j &= \ell_j \\
 \text{GVA 地址}_{ij} &= G_i + o_j
 \end{aligned}
 $$
 
-KeyRange 直接使用 $o_j$；GVA 的 $G_i$ 由有效 Backend 对象会话提供，不属于永久绑定数据。Layerwise 用同一段区间选择 Local 与 Remote；Bulk 使用完整段序列。Lookup 的命名范围单独建立，可以覆盖本 rank 没有本地来源的分区。
+KeyRange 直接使用对象内偏移 $o_j$。Local 与 Remote 按同一段序对应，Layer 表记录每层在该序列中的半开索引区间，例如第 0 层占 `[0:2]`、第 1 层占 `[2:4]`。
 
-Mapping 只求值位置与身份。Service 负责对象选择与结果归属，Transfer 负责逐层计划复用和 Backend 参数组织；Backend 负责实际复制及对象会话。
+### 5.3 从全集选取子集与提前计算
+
+完整 KV Tensor 包含本 Worker 的所有本地缓存块。Topology 先确定每个对象的层、head 和上下文分区，Spec 再确定一个逻辑块覆盖的存储范围：
+
+| 切分 | 对象包含的子集 | Mapping 使用的事实 |
+| --- | --- | --- |
+| PP / layer | 目标 PP 区间内的模型层 | 实际物理层及其目标 PP 归属 |
+| TP / head | 本地全部 heads，或 TP mismatch 下的一份 head 子集 | 每个本地 rank 对应的对象分区数量 |
+| CP / Token | 对应上下文分片的 Tokens | 上游完成 DCP 切分后的本地 Tensor、实际 DCP 身份与远端槽位；PCP 沿用本地 Tensor 选区 |
+
+```text
+完整 KV Tensor
+    → 按目标 PP 选择本地层
+    → 按对象分区选择 head 范围
+    → 按逻辑块大小确定块内 Kernel Block 范围
+    → 得到一个逻辑块在该分区内的字节选区
+```
+
+一次绑定期间，Tensor 的 shape、stride、分量相对位置和对象分区固定。同一分量的选区随 Block ID 整体平移，选中字节之间的相对距离保持不变。因此可以在 Block 0 上推导连续段，再为每段保留逻辑块步长；各分量的步长由各自 Tensor 决定。
+
+例如每个逻辑块选中 32 字节，相邻逻辑块起点相距 40 字节，绑定结果就是长度 32、步长 40。传输 Block 7 时只需将起点平移 `7 × 40` 字节。同一 head 分区在各逻辑块上的段数、长度和对象内偏移均可复用。
+
+对已绑定分区模板的位置与身份求值，动态输入是 Block ID 和 Hash。业务提供本次选择的块与层范围，Transfer 据此选择已有模板；GVA 的远端基址由本次对象会话提供。几何推导使用 `register_kv_caches` 交来的最终 Tensor 元数据，`data_ptr()` 已包含 view 的 storage offset。普通 Attention 按 Token 数确定 Kernel Block 数量，压缩缓存按 Spec 换算对应的存储大小。
+
+### 5.4 增广维度与布局描述
+
+Mapping 将物理 Tensor 的维度扩充为同时包含对象坐标和内容坐标的**增广维度**。一个维度的拆分遵循同一索引关系：
+
+```text
+原维度：shape = [a × b]，stride = [s]
+拆分后：shape = [a, b]，stride = [b × s, s]
+
+原索引 = 外层索引 × b + 内层索引
+```
+
+例如，640 Token 的逻辑块包含五个 128 Token Kernel Blocks，Kernel Block 轴拆成“逻辑块、块内 Kernel Block”；8 个 heads 分成两个对象分区时，head 轴拆成“head 分区、分区内 head”。将对象坐标移到前两维，并补上元素内字节维度，得到：
+
+```text
+原维度：
+[Kernel Block, Token, head, head_size]
+
+增广维度：
+[逻辑块, head 分区, 块内 Kernel Block, Token, 分区内 head, head_size, 元素内字节]
+ └─ 对象坐标 ──┘  └────────────────── 内容维度 ──────────────────┘
+```
+
+增广描述沿用实际物理 stride，拆出的外层 stride 等于原 stride 乘以内部数量。float16 的元素内字节维度大小为 2、stride 为 1。每个分量最终表示为 `_Layout(offset, shape, strides)`，其中 offset 相对同一 storage 分组中首个分量的起点计算，strides 统一使用字节单位。以下术语用于描述推导过程：
+
+| 术语 | 含义 |
+| --- | --- |
+| 逻辑对象 | 由 Key 标识的内容，可以包含多个分量和连续段 |
+| 分量 | 输入的一个 Tensor view，例如 K、V 或状态 Tensor |
+| 对象坐标 | Layout 的前两维：逻辑块、head 分区；确定正在访问哪个对象实例 |
+| 内容维度 | 固定对象坐标后，用于枚举该对象所选字节的其余维度 |
+| Layout | 一个由相对偏移、shape 和 strides 指定的规则字节选区，可以包含间隔 |
+| Layout 集合 | 多个 Layout 的选中字节共同组成的选区 |
+| 连续段 | 固定对象坐标后，可通过一个起点和长度访问的连续字节区间 |
+
+初始 Layout 描述一个分量；合并后的 Layout 可以包含多个分量；最终每个 Layout 描述一段连续字节及其随对象坐标的平移关系。对象坐标在推导期间保持符号形式，内容维度参与折叠与展开。
+
+同一层的分量按底层 storage 分组，在组内按相对偏移分析接续关系。对象字节顺序依次采用物理层顺序、独立 storage 的声明顺序、同一 storage 内 Block 0、head 分区 0 的选中字节地址顺序。其他对象沿用该段序，各段按自身的对象坐标步长平移。相同的相对 shape/stride 布局共享几何缓存，后续层用各自基址绑定完整段模板。
+
+### 5.5 分量维度与连续段推导
+
+Mapping 先把分量之间的平移或接续关系表达为内容维度，再由同一个维度折叠循环处理。合并限定在同一层、同一 storage 中，对象坐标的 shape 与 strides 保持一致：
+
+| 分量关系 | 维度操作 |
+| --- | --- |
+| 两个 Layout 规范化后的 shape/strides 相同，起点相差固定的字节距离 | 新增大小为 2 的分量轴，以起点距离为 stride |
+| 两个 Layout 规范化后沿一个内容轴接续，其余轴相同 | 将该轴的大小相加；缺少的轴按大小 1 对齐 |
+| 其他关系 | 保留各自 Layout，分别展开为有序字节区间 |
+
+新增分量轴也可以带有间隔。多个等距分量通过扩展该轴表示；不同大小的分量沿可接续的内容轴合并。每次形成的新维度都交给 `fold` 化简。组合后按 stride 规范化，再逐轴检查：每个重复轴的 stride 必须不小于其内层选区的地址跨度，使下一份内层选区从前一份末尾或之后开始。满足时可按维度顺序展开；否则保留原来的多个有序流。
+
+对于按 stride 从小到大排列的相邻内容轴，设内层大小为 `n`、stride 为 `s`，外层大小为 `m`、stride 为 `t`。当 `t = n × s` 时，两轴合成大小 `n × m`、stride 为 `s` 的一轴：
+
+```text
+外层索引 × (n × s) + 内层索引 × s
+    = (外层索引 × n + 内层索引) × s
+```
+
+分量、Token、head、Kernel Block 轴都使用这个条件。stride 为 1 的折叠轴表示连续字节；stride 大于 1 的折叠轴保留等距间隔。对象坐标始终位于前两维，参与分量平移关系的比较，内容轴参与折叠。
+
+| 操作 | 处理范围 | 表示上的变化 | 保持的内容 |
+| --- | --- | --- | --- |
+| `fold` | 一个 Layout 的内容维度 | 按 stride 从小到大合并满足 `t = n × s` 的相邻轴 | 该 Layout 选中的字节集合 |
+| `join` | 两个 Layout 之间 | 新增分量轴或扩展一个内容轴，随后折叠得到的 Layout | 两个 Layout 选中字节的并集 |
+| `expand` | 一个 Layout 尚存的内容重复维度 | 枚举剩余坐标，生成地址有序的连续段 Layout，保留对象坐标 | 展开前后选中字节的并集 |
+
+`_storage_segments` 在同一层、同一 storage 的 Layout 集合上按以下顺序执行：
+
+```text
+各分量的增广 shape/stride
+          │
+          ▼
+fold：化简单个 Layout
+          │
+          ▼
+join：新增分量轴或扩展内容轴
+  每次组合后 fold，并继续尝试组合
+          │
+          ▼
+已化简为一个连续段？
+    ├─ 是 → 直接输出 ─────────────────────────┐
+    │                                         │
+    └─ 否 → 展开 → 有序归并 → 接续相邻字节段 ──┤
+                                              ▼
+                                 缓存完整的相对段模板
+                                              │
+                                              ▼
+                                 绑定基址，生成地址表
+```
+
+展开后的接续条件是前一段末尾等于后一段起点，且对象坐标的平移关系一致。即使只剩一个带间隔的 Layout，重复边界也可能出现接缝，因此同样经过这一步。每一步保持选中字节相同，变化的是维度和 Layout 的数量。
+
+#### 共享 K/V：合并后继续折叠
+
+取一个小型 Attention 布局：每个逻辑块包含 4 Tokens，每个 Kernel Block 包含 2 Tokens，2 heads、head size 为 2、float16。一份 Kernel Block 的 K 占 `2 × 2 × 2 × 2 = 16` 字节，V 同样占 16 字节。本地共三个逻辑块，只有一个 head 分区，K/V 共享 storage：
+
+```text
+逻辑块 0：K0 [0,16)  V0 [16,32)  K1 [32,48)  V1 [48,64)
+逻辑块 1：K2 [64,80) V2 [80,96)  K3 [96,112) V3 [112,128)
+逻辑块 2：从偏移 128 开始，重复相同布局
+```
+
+K、V 的 Tensor shape 都是 `[6,2,2,2]`，字节 strides 都是 `[32,8,4,2]`，起点偏移分别为 0、16。下面的 shape 前两维始终为逻辑块、head 分区；单个 head 分区的 stride 记为 0。
+
+| 阶段 | offset | shape | 字节 strides |
+| --- | --- | --- | --- |
+| 初始 K | 0 | `[3,1,2,2,2,2,2]` | `[64,0,32,8,4,2,1]` |
+| 初始 V | 16 | `[3,1,2,2,2,2,2]` | `[64,0,32,8,4,2,1]` |
+| 分别 fold | K 为 0，V 为 16 | `[3,1,2,16]` | `[64,0,32,1]` |
+| join 引入分量轴，fold 前 | 0 | `[3,1,2,2,16]` | `[64,0,16,32,1]` |
+| 再次 fold | 0 | `[3,1,64]` | `[64,0,1]` |
+
+第一次 fold 得到 K、V 在每个 Kernel Block 内各自连续的 16 字节。join 引入大小为 2、stride 为 16 的分量轴，位于内容维度开头。fold 按 stride 排列内容轴，在同一个循环中先将分量轴与字节轴折叠成 32 字节，再将 Kernel Block 轴折叠成 64 字节，最终直接输出一段。
+
+若每个 Kernel Block 的 K/V 后有 8 字节 padding，重复步长变为 40。分量轴折叠后的 shape 为 `[3,1,2,32]`、strides 为 `[80,0,40,1]`，最终展开成偏移 0、40 的两段，每段 32 字节。有效长度与逻辑块步长分别保留，padding 留在选区之外。
+
+#### 不同重复模式：展开后接续
+
+两个共享 storage 的状态分量使用 uint8，每个逻辑块的起点步长为 160 字节。A 的 Tensor shape/strides 为 `[3,2,4]` / `[160,16,1]`，offset 为 0；B 为 `[3,12]` / `[160,1]`，offset 为 4。各自 fold 后：
+
+| Layout | offset | shape | 字节 strides | Block 0 的选中字节 |
+| --- | --- | --- | --- | --- |
+| A | 0 | `[3,1,2,4]` | `[160,0,16,1]` | `[0,4)`、`[16,20)` |
+| B | 4 | `[3,1,12]` | `[160,0,1]` | `[4,16)` |
+
+A 有两次重复，B 只有一份连续字节，需分别展开内容维度。按偏移归并后，接续关系变得直接：
+
+```text
+A 的第一段 [0,4) → B [4,16) → A 的第二段 [16,20)
+                  接缝归并 → [0,20)
+
+结果：offset = 0，shape = [3,1,20]，strides = [160,0,1]
+```
+
+整个过程保留逻辑块维度。每个实际 Block ID 都使用同一份 20 字节段模板，在自身起点上求值。新增分量轴后的 Layout 也可能存在接缝：例如 `[2,2,4]`、strides 为 `[12,8,1]` 的内容选区展开为 `[0,4)`、`[8,12)`、`[12,16)`、`[20,24)`，接缝归并后保留三段。
+
+### 5.6 绑定结果的使用
+
+绑定结束后，Context 保存只读数值数组和对象大小；相同的段长度与块步长用单元素数组共享。Bulk 和 KeyRange 的长度列表在 Transfer 初始化时准备，GVA 直接使用数组，同一 PP 的 head 分区复用长度与偏移模板。Resources 保活 Tensor 存储，重新分配后重新绑定。
+
+| 传输方式 | 使用绑定结果的方式 |
+| --- | --- |
+| Bulk | 选择对象的完整 Local 段序列，按 Key 传输 |
+| Layerwise / KeyRange | 根据 Layer 索引选择本层段，沿用其在完整对象中的 Remote 偏移 |
+| Layerwise / GVA | 选择本层段，在 Remote 偏移上叠加本次对象会话基址；对象布局包含配置确定的全局层预留、上下文槽位和对齐 |
+
+Service 提供已绑定 Key 与归属的 Selection，Transfer 按所选 Block ID 批量计算地址并组织参数，Backend 执行复制并管理对象会话。Lookup 的 Key 模板按完整远端分区集合建立，可以查询本 rank 以外的分区。
+
+Key 沿用 `PoolKey` 或 Backend 的命名规则。读写端按生产部署约束保持传输方式与缓存布局一致，允许不同 TP 分区数量以相同字节顺序表达同一对象。对象字节顺序调整时，两端一起升级，并清理受影响缓存或使用新的 cache namespace。
 
 ## 6. 时序、发布与资源生命周期
 
@@ -341,6 +483,7 @@ Memcache GVA 的共享对象可能由多个 rank 写入。StoreService 根据实
 | Topology | `infrastructure/test_topology.py` | 本地 rank、PP 范围与实际上下文成员 |
 | 逻辑 hash 与 Block ID | `worker/test_block_hash_mapping.py` | 不同粒度、加载起点、尾部边界与调用方块表 |
 | Key / Local / Remote / Layer | `infrastructure/mapping/test_mapping.py`、`test_partition_bindings.py`（同目录） | 分区、非连续 view、段序、对象偏移与预留 |
+| 分量合并与对象字节顺序 | `infrastructure/mapping/test_object_layout.py` | 物理轴序、padding、分量接续、最小段数与独立 TP 消费端回写 |
 | 三条业务的数据流 | `worker/test_data_flow.py`、`test_store_candidates.py`、`test_single_preparation.py`（同目录） | Lookup 新 Key、重复目标、writer 筛选、exists 过滤与归属保留 |
 | Scheduler 规划与来源保护 | `scheduler/test_scheduler.py`、`test_source_leases.py`（同目录） | 候选采用、快照有效期、整步发布、失败撤销、空步骤 Load 与跨请求生命周期的源引用 |
 | Scheduler / Worker 接口契约 | `test_dataflow_contracts.py` | 候选有效期、V1 / V2 恢复入口、阶段许可、分组失败交付、加载失败到 Store 来源失效及重算恢复 |

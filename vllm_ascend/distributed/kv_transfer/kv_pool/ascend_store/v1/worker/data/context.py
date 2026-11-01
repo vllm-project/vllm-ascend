@@ -14,7 +14,6 @@ from ...infrastructure.mapping import (
     BlockHashMapping,
     LayerTable,
     LocalTable,
-    PartitionId,
     RemoteTable,
     build_gva_remote,
     build_key_range_remote,
@@ -35,7 +34,6 @@ class TransferContext:
     key_parts: dict[int, dict[CachePartition, tuple[str, str]]]
     partition_order: dict[CachePartition, int]
     local: dict[int, LocalTable]
-    sizes: dict[int, dict[PartitionId, tuple[int, ...]]]
     object_sizes: dict[CachePartition, int]
     state_group_ids: frozenset[int]
     layers: dict[int, LayerTable]
@@ -54,7 +52,8 @@ def bind_context(
     key_builder: WireKeyBuilder | None = None,
 ) -> TransferContext:
     groups = {group.group_id: group for group in topology.transfer_groups}
-    key_parts, local, sizes, layers, remote = {}, {}, {}, {}, {}
+    key_parts, local, layers, remote = {}, {}, {}, {}
+    object_sizes: dict[CachePartition, int] = {}
     layer_ids_by_name: dict[str, int] = {}
     for group_id, group in groups.items():
         group_keys, group_local, group_layers = build_mappings(
@@ -69,10 +68,6 @@ def bind_context(
             raise ValueError("KV cache group has no registered memory entries")
         key_parts[group_id] = {(group_id, partition): parts for partition, parts in group_keys.items()}
         local[group_id] = group_local
-        sizes[group_id] = {
-            partition: tuple(np.broadcast_to(local_lengths(segments), segments["bases"].shape).tolist())
-            for partition, segments in group_local.items()
-        }
         if group_layers is not None:
             layers[group_id] = group_layers
             remote[group_id] = (
@@ -80,6 +75,16 @@ def bind_context(
                 if layerwise_access is LayerwiseAccessKind.GVA
                 else build_key_range_remote(group_local)
             )
+        pp_sizes: dict[int, int] = {}
+        for partition, segments in group_local.items():
+            pp = partition[0]
+            if pp not in pp_sizes:
+                if group_layers is not None:
+                    pp_sizes[pp] = remote[group_id][pp]["size_bytes"]
+                else:
+                    lengths = local_lengths(segments)
+                    pp_sizes[pp] = int(lengths[0]) * len(segments["bases"]) if len(lengths) == 1 else int(lengths.sum())
+            object_sizes[group_id, partition] = pp_sizes[pp]
         for layer in group.layers:
             for name in layer.layer_names:
                 previous = layer_ids_by_name.setdefault(name, layer.physical_layer_id)
@@ -91,8 +96,12 @@ def bind_context(
             for partition, segments in partitions.items():
                 for layer_id, span in layers[group_id][partition[0]].items():
                     occupied.extend(
-                        (int(address), int(address) + size, layer_id)
-                        for address, size in zip(segments["bases"][span], sizes[group_id][partition][span], strict=True)
+                        (int(address), int(address) + int(size), layer_id)
+                        for address, size in zip(
+                            segments["bases"][span],
+                            np.broadcast_to(local_lengths(segments, span), segments["bases"][span].shape),
+                            strict=True,
+                        )
                     )
         previous_end, previous_layer = 0, -1
         for start, end, layer_id in sorted(occupied):
@@ -109,15 +118,8 @@ def bind_context(
             coordinate: index
             for index, coordinate in enumerate(coordinate for parts in key_parts.values() for coordinate in parts)
         },
-        object_sizes={
-            (group_id, partition): (
-                remote[group_id][partition[0]]["size_bytes"] if group_id in remote else sum(lengths)
-            )
-            for group_id, partitions in sizes.items()
-            for partition, lengths in partitions.items()
-        },
+        object_sizes=object_sizes,
         local=local,
-        sizes=sizes,
         state_group_ids=topology.config.align_state_group_ids.intersection(groups),
         layers=layers,
         remote=remote,

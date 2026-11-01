@@ -88,6 +88,8 @@ def test_backend_supplied_naming_is_used_for_transfer_keys(configuration_case, m
             layer.layer_names[0]: (torch.zeros(8, 4), torch.zeros(8, 4)) for layer in topology.transfer_groups[0].layers
         }
         worker.bind_kv_caches(caches)
+        worker.lookup(LookupRequest(0, 4, (0,), (b"a",)))
+        assert ("exists", ("custom-wire-61",)) in backend.calls
         assert tuple(map_keys(parts, (b"a",)) for parts in worker.context.key_parts[0].values()) == (
             ("custom-wire-61",),
         )

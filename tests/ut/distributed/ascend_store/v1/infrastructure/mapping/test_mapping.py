@@ -163,7 +163,10 @@ def test_external_builder_preserves_partition_identity_and_source_metadata():
     assert [(meta.pp_rank, meta.dcp_rank, meta.head_or_tp_rank) for meta in seen] == list(keys)
     assert topology.transfer_groups[0].key_metadata.pp_rank == 0
     assert topology.transfer_groups[0].key_metadata.head_or_tp_rank == 1
-    assert map_keys(keys[(2, 1, 3)], (b"a", "hash")) == ("tensor-test@3@pp2@61@3", "tensor-test@3@pp2@hash@3")
+    assert map_keys(keys[(2, 1, 3)], (b"a", "hash")) == (
+        "tensor-test@3@pp2@61@3",
+        "tensor-test@3@pp2@hash@3",
+    )
 
 
 @pytest.mark.parametrize("vary_stride", (False, True))
@@ -247,7 +250,11 @@ def test_block_grouping_matches_upstream_shape_without_scheduler_count(layout):
     for identity, segments in local.items():
         assert np.all(segments["block_strides"] == 4 * tensor.stride(0) * tensor.element_size())
         selected = tensor[8:12].narrow(head_axis, (identity[2] - 2) * 2, 2)
-        assert read_local(segments, 2) == selected.contiguous().numpy().tobytes()
+        # The final view can be a permuted NHD view over head-major storage.
+        addresses = sorted(selected[index].data_ptr() for index in product(*(range(size) for size in selected.shape)))
+        assert read_local(segments, 2) == b"".join(
+            ctypes.string_at(address, tensor.element_size()) for address in addresses
+        )
 
 
 def test_compressed_mla_uses_storage_rows_instead_of_logical_tokens():
@@ -368,14 +375,14 @@ def test_invalid_kernel_rows_and_block_extent_are_rejected():
         build_mappings(topology, caches, group_id=3)
     topology.transfer_groups[0].kv_cache_spec = replace(topology.transfer_groups[0].kv_cache_spec, block_size=4)
     caches["layer0"] = (caches["layer0"][0][:-1],)
-    with pytest.raises(RuntimeError, match="unflatten"):
+    with pytest.raises(ValueError, match="complete logical blocks"):
         build_mappings(topology, caches, group_id=3)
 
 
 def test_invalid_head_partition_and_pp_span_are_rejected():
     topology, caches = make_case(layers=(0,))
     caches["layer0"] = (caches["layer0"][0][:, :, :3],)
-    with pytest.raises(RuntimeError, match="unflatten"):
+    with pytest.raises(ValueError, match="equal partitions"):
         build_mappings(topology, caches, group_id=3)
     topology.config.pp_partition.target_layer_counts = (0, 0)
     with pytest.raises(ValueError, match="do not cover"):

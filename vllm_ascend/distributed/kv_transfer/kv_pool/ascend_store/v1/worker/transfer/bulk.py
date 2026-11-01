@@ -10,9 +10,11 @@ from operator import itemgetter
 from time import perf_counter
 from typing import Any
 
+import numpy as np
+
 from ...backend.interfaces import KVStoreBackend
 from ...infrastructure.executor import BulkExecutor
-from ...infrastructure.mapping import local_addresses
+from ...infrastructure.mapping import local_addresses, local_lengths
 from ...protocol.outcomes import LoadResult, StoreResult
 from ..data.batch import LoadBatch, StoreBatch
 from ..data.context import TransferContext
@@ -33,6 +35,12 @@ class BulkTransfer:
         self._write_async = write_async
         self.shared_objects = False
         self._read_batch: StoreBatch | None = None
+        self._sizes: dict[tuple[int, int], list[int]] = {}
+        for group_id, partitions in context.local.items():
+            for partition, segments in partitions.items():
+                coordinate = (group_id, partition[0])
+                if coordinate not in self._sizes:
+                    self._sizes[coordinate] = np.broadcast_to(local_lengths(segments), segments["bases"].shape).tolist()
 
     @property
     def read_enabled(self) -> bool:
@@ -179,12 +187,12 @@ class BulkTransfer:
             for (group_id, partition), sources in groupby(selection.sources, key=itemgetter(0)):
                 block_ids = [block_id for _, block_id, _ in sources]
                 addresses.extend(local_addresses(self.context.local[group_id][partition], block_ids).tolist())
-                sizes.extend([list(self.context.sizes[group_id][partition])] * len(block_ids))
+                sizes.extend([self._sizes[group_id, partition[0]]] * len(block_ids))
             return selection.keys, addresses, sizes
 
         keys: list[str] = []
         for (group_id, partition), local in selection.iter_local():
             keys.extend(selection.keys[index] for index in local.object_indices)
             addresses.extend(local_addresses(self.context.local[group_id][partition], local.block_ids).tolist())
-            sizes.extend([list(self.context.sizes[group_id][partition])] * len(local.block_ids))
+            sizes.extend([self._sizes[group_id, partition[0]]] * len(local.block_ids))
         return keys, addresses, sizes
