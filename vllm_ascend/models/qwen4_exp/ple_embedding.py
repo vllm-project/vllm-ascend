@@ -21,13 +21,17 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEEmbedding):
         config = get_current_vllm_config().engram_config
         if config is not None and config.dp_shared_memory:
             group = get_engram_dp_group()
-            if group is None or group.world_size <= 1:
-                raise ValueError("PLE shared tables require a local DP group with more than one rank")
-            if not all(in_the_same_node_as(group.cpu_group)):
-                raise ValueError("PLE shared tables require one node and shared IPC namespace")
-            if get_etp_group().world_size != get_tp_group().world_size:
-                raise ValueError("PLE shared tables require ETP=TP")
-            self._shared_group = group
+            if group is not None and group.world_size > 1:
+                if not all(in_the_same_node_as(group.cpu_group)):
+                    raise ValueError("PLE shared tables require one node and shared IPC namespace")
+                if get_etp_group().world_size != get_tp_group().world_size:
+                    raise ValueError("PLE shared tables require ETP=TP")
+                self._shared_group = group
+            else:
+                logger.info(
+                    "PLE dp_shared_memory requested but no local DP peers; "
+                    "falling back to private host tables."
+                )
         try:
             super().__init__(*args, **kwargs)
         except Exception:

@@ -324,7 +324,9 @@ def test_shared_tables_still_reject_elastic_ep():
 
 
 @pytest.mark.parametrize("size", [None, 1])
-def test_shared_tables_require_local_peers(monkeypatch, size):
+def test_shared_tables_fall_back_without_local_peers(monkeypatch, size):
+    from vllm.models.qwen4_exp.common.ngram_embedding import Qwen4ExpPLEEmbedding
+
     from vllm_ascend.models.qwen4_exp import ple_embedding
 
     group = None if size is None else SimpleNamespace(world_size=size)
@@ -334,5 +336,10 @@ def test_shared_tables_require_local_peers(monkeypatch, size):
         lambda: SimpleNamespace(engram_config=SimpleNamespace(dp_shared_memory=True)),
     )
     monkeypatch.setattr(ple_embedding, "get_engram_dp_group", lambda: group)
-    with pytest.raises(ValueError, match="local DP group"):
-        AscendPLEHostEmbedding()
+
+    def stub_init(self, *args, **kwargs):
+        torch.nn.Module.__init__(self)
+
+    monkeypatch.setattr(Qwen4ExpPLEEmbedding, "__init__", stub_init)
+    obj = AscendPLEHostEmbedding()
+    assert obj._shared_group is None
