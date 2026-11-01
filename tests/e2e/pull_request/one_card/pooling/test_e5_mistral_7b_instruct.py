@@ -371,6 +371,12 @@ def _hf_reference_worker(texts: list[str], model_name: str, queue: Any, log_path
     os.dup2(log_fd, 2)
     os.close(log_fd)
 
+    # A spawn child does not inherit the parent's imports, so torch.npu is
+    # absent unless torch_npu is imported in THIS process; without it the
+    # device probe below silently falls back to CPU.
+    with contextlib.suppress(ImportError):
+        import torch_npu  # noqa: F401
+
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModel.from_pretrained(model_name, torch_dtype=torch.float32)
     device = "npu" if hasattr(torch, "npu") and torch.npu.is_available() else "cpu"
