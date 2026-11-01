@@ -336,8 +336,8 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
 
     # Reject the inherited concat helper for all real decode inputs.
     original = layer.rearrange_mixed_qkv.side_effect
-    layer.rearrange_mixed_qkv.side_effect = (
-        lambda x: original(x) if x is None else pytest.fail("decode used inherited QKV concat")
+    layer.rearrange_mixed_qkv.side_effect = lambda x: (
+        original(x) if x is None else pytest.fail("decode used inherited QKV concat")
     )
     with (
         override_forward_context(context),

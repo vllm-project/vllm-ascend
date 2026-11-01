@@ -17,11 +17,12 @@ from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_
 def states(request):
     torch.manual_seed(1234)
     device = torch.device("npu:0")
-    max_query_len = getattr(request, "param", 4)
+    params = getattr(request, "param", 4)
+    max_query_len, state_dtype = params if isinstance(params, tuple) else (params, torch.float32)
     state_len = max_query_len + 2
     num_blocks = 2 * max_query_len + 2
     conv_bytes = state_len * 2560 * 2
-    ssm_bytes = 12 * 128 * 128 * 4
+    ssm_bytes = 12 * 128 * 128 * torch.empty((), dtype=state_dtype).element_size()
     stride = 896 * 1024
     backing = torch.full((num_blocks * stride,), 90, dtype=torch.int8, device=device)
     conv = make_slab_view(
@@ -34,7 +35,7 @@ def states(request):
     )
     ssm = make_slab_view(
         backing,
-        dtype=torch.float32,
+        dtype=state_dtype,
         num_blocks=num_blocks,
         item_shape=(12, 128, 128),
         storage_offset=conv_bytes,
@@ -124,7 +125,29 @@ def test_recurrent_decode_speculation_and_indexed_state_io(states):
     check_states(conv, ssm, dense_conv, dense_ssm)
 
 
-@pytest.mark.parametrize("states", [4, 10], indirect=True, ids=["three-drafts", "nine-drafts"])
+def _reference_gdn_recurrent(q, k, v, g, beta, state, slots, lengths, accepted):
+    """FP32 delta-rule reference, independent of either recurrent kernel."""
+    output = torch.empty_like(v)
+    head_repeats = v.shape[2] // q.shape[2]
+    query = q.float().repeat_interleave(head_repeats, dim=2) * q.shape[-1] ** -0.5
+    key = k.float().repeat_interleave(head_repeats, dim=2)
+    start = 0
+    for row, length in enumerate(lengths):
+        h = state[slots[row, accepted[row] - 1]].float().clone()
+        for offset in range(length):
+            token = start + offset
+            h = h * g[0, token].float().exp()[:, None, None]
+            delta = (v[0, token].float() - (h * key[0, token, :, None, :]).sum(-1)) * beta[0, token].float()[:, None]
+            h = h + delta[:, :, None] * key[0, token, :, None, :]
+            output[0, token] = (h * query[0, token, :, None, :]).sum(-1).to(v.dtype)
+            state[slots[row, offset]] = h.to(state.dtype)
+        start += length
+    return output
+
+
+@pytest.mark.parametrize(
+    "states", [4, 10, (10, torch.bfloat16)], indirect=True, ids=["three-drafts", "nine-drafts", "bf16-state"]
+)
 def test_adaptive_speculation_matches_independent_requests(states):
     """Retain accepted states when the next step trims to one token, with padding."""
     _, conv, ssm, dense_conv, dense_ssm = states
@@ -133,6 +156,7 @@ def test_adaptive_speculation_matches_independent_requests(states):
     slots = torch.arange(1, 2 * max_query_len + 1, dtype=torch.int32, device=device).reshape(2, max_query_len)
     slots = torch.cat([slots, torch.zeros((1, max_query_len), dtype=torch.int32, device=device)])
     conv_indices = slots[:, 0].contiguous()
+    reference_state = ssm.clone()
     weight = torch.randn((4, 2560), dtype=conv.dtype, device=device) * 0.01
     steps = [
         ([max_query_len, max_query_len], [1, 1]),
@@ -180,8 +204,9 @@ def test_adaptive_speculation_matches_independent_requests(states):
         q = torch.nn.functional.normalize(torch.randn((1, total, 4, 128), device=device), dim=-1).bfloat16()
         k = torch.nn.functional.normalize(torch.randn((1, total, 4, 128), device=device), dim=-1).bfloat16()
         v = torch.randn((1, total, 12, 128), dtype=torch.bfloat16, device=device)
-        g = torch.full((1, total, 12), -0.1, device=device)
-        beta = torch.full((1, total, 12), 0.5, dtype=torch.bfloat16, device=device)
+        g = -torch.rand((1, total, 12), device=device)
+        beta = torch.rand((1, total, 12), dtype=torch.bfloat16, device=device)
+        expected = _reference_gdn_recurrent(q, k, v, g, beta, reference_state, slots, lengths, accepted)
         if max_query_len == 4 and lengths == [4, 4]:
             # At the full-width shape both APIs are valid. Check numerical
             # parity with the existing native operator before testing trims.
@@ -209,6 +234,9 @@ def test_adaptive_speculation_matches_independent_requests(states):
             ssm_state_indices=slots,
             num_accepted_tokens=accepted_gpu,
         )
+        torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-3)
+        state_rtol = 1e-2 if ssm.dtype == torch.bfloat16 else 1e-3
+        torch.testing.assert_close(ssm, reference_state, rtol=state_rtol, atol=1e-3)
         if max_query_len == 4 and lengths == [4, 4]:
             torch.testing.assert_close(actual[0], native_output, rtol=1e-3, atol=1e-3)
             torch.testing.assert_close(ssm, native_state, rtol=1e-3, atol=1e-3)

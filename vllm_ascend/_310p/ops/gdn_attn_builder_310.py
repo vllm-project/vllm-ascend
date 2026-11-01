@@ -61,6 +61,10 @@ AscendGDNAttentionMetadataBuilder310 = GDNAttentionMetadataBuilder310
 
 
 class AscendGDNAttentionBackend310(AscendGDNAttentionBackend):
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        return False
+
     @staticmethod
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder310]:
         return AscendGDNAttentionMetadataBuilder310

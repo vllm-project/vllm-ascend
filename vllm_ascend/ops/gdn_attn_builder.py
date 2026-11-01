@@ -30,7 +30,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
@@ -167,7 +167,8 @@ class GDNDecodeMetadata:
 @dataclass
 class GDNSpecDecodeMetadata:
     spec_causal_conv1d: GDNSpecCausalConv1dMetadata
-    # 310P derives lengths in its recurrent wrapper and only consumes conv metadata.
+    # Native common GDN consumes these lengths. Adaptive GDN uses query_start_loc
+    # directly; 310P derives lengths in its recurrent wrapper.
     actual_seq_lengths: torch.Tensor | None
     # Adaptive graphs must retain the state-table row stride independently
     # of the current query length, including accepted_prev > query_len.
@@ -350,6 +351,8 @@ def _split_gdn_batch(
     spec_mask: torch.Tensor | None,
     num_spec: int,
 ) -> tuple[int, int, int, int, int, torch.Tensor | None]:
+    if m.num_reqs == 0:
+        return 0, 0, 0, 0, 0, m.query_start_loc_cpu
     if spec_mask is None:
         return (
             *split_decodes_and_prefills(m, decode_threshold=1, treat_short_extends_as_decodes=False),
@@ -368,6 +371,15 @@ def _split_gdn_batch(
 class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
     build_device_chunk_metadata = True
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(cls, vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec) -> int | None:
+        # Only adaptive verification selects the strided recurrent kernel.
+        # Fixed-length graphs keep the native operator's query-length limits.
+        spec_config = vllm_config.speculative_config
+        if spec_config is None or not spec_config.enable_adaptive_verification:
+            return None
+        return 1 + spec_config.num_speculative_tokens
 
     def __init__(
         self,
@@ -534,10 +546,13 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             actual_seq_lengths_buffer = self.spec_actual_seq_lengths
         spec_num_rows = attn_metadata.spec_query_start_loc.size(0) - 1
 
+        use_upstream_recurrent = bool(
+            self._USE_COMMON_KERNEL_METADATA
+            and self.speculative_config
+            and getattr(self.speculative_config, "enable_adaptive_verification", False)
+        )
         attn_metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
-            use_upstream_recurrent=bool(
-                self.speculative_config and getattr(self.speculative_config, "enable_adaptive_verification", False)
-            ),
+            use_upstream_recurrent=use_upstream_recurrent,
             spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
                 query_start_loc=attn_metadata.spec_query_start_loc,
                 cache_indices=(attn_metadata.spec_state_indices_tensor if cache_indices is None else cache_indices)[
@@ -546,14 +561,16 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 num_accepted_tokens=attn_metadata.num_accepted_tokens[:spec_num_rows],
             ),
             actual_seq_lengths=(
-                actual_seq_lengths[: num_sequences + 1]
-                if actual_seq_lengths is not None
-                else _build_actual_seq_lengths(
-                    attn_metadata.spec_query_start_loc,
-                    num_sequences,
-                    actual_seq_lengths_buffer,
+                (
+                    actual_seq_lengths[: num_sequences + 1]
+                    if actual_seq_lengths is not None
+                    else _build_actual_seq_lengths(
+                        attn_metadata.spec_query_start_loc,
+                        num_sequences,
+                        actual_seq_lengths_buffer,
+                    )
                 )
-                if self._USE_COMMON_KERNEL_METADATA
+                if self._USE_COMMON_KERNEL_METADATA and not use_upstream_recurrent
                 else None
             ),
         )
@@ -997,6 +1014,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         if (
             self.use_full_cuda_graph
+            and num_spec_decodes > 0
             and num_prefills == 0
             and num_decodes == 0
             and self._can_pad_spec_decode(graph_request_count, num_spec_decode_tokens)
@@ -1038,6 +1056,12 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
 
 class AscendGDNAttentionBackend(GDNAttentionBackend):
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # Decode kernels consume device boundaries; CPU lengths only size
+        # the batch and classify request phases during adaptive verification.
+        return True
+
     @staticmethod
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
         return AscendGDNAttentionMetadataBuilder
@@ -1132,6 +1156,15 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             return None
 
         mixed_spec = 0 < num_spec_decodes < m.num_reqs
+        if (
+            mixed_spec
+            and self.speculative_config
+            and getattr(self.speculative_config, "enable_adaptive_verification", False)
+        ):
+            # The fused mixed layout uses CPU group offsets. Adaptive drafts
+            # can redistribute lengths on device; the generic path builds
+            # group boundaries and token partitions from those device lengths.
+            return None
         assert not num_spec_decodes or num_accepted_tokens is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens, num_spec_tokens, non_spec_query_cpu = batch
         spec_rows = num_spec_decodes

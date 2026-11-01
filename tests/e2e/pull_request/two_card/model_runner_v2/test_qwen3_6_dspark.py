@@ -21,6 +21,7 @@ Run "pytest tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dspark.
 """
 
 import os
+from copy import deepcopy
 from unittest.mock import patch
 
 import pytest
@@ -144,8 +145,7 @@ def test_qwen36_dspark_adaptive_gdn_full_to_zero_graph_replay():
         "Explain how photosynthesis works, step by step.",
     ]
     sampling = SamplingParams(temperature=0, max_tokens=64, ignore_eos=True, logprobs=20)
-    with VllmRunner(
-        QWEN36_DENSE_MODEL,
+    runner_kwargs = dict(
         tensor_parallel_size=2,
         max_model_len=2048,
         max_num_seqs=4,
@@ -158,6 +158,14 @@ def test_qwen36_dspark_adaptive_gdn_full_to_zero_graph_replay():
             cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[1, 2, 4, 8, 16, 32]
         ),
         additional_config={"ascend_compilation_config": {"enable_npugraph_ex": False}},
+    )
+    # A non-speculative target is an independent reference: comparing two
+    # adaptive runs alone could miss an error common to both recurrent paths.
+    with VllmRunner(QWEN36_DENSE_MODEL, **deepcopy(runner_kwargs)) as runner:
+        plain_reference = runner.model.generate(prompts, sampling)
+    with VllmRunner(
+        QWEN36_DENSE_MODEL,
+        **deepcopy(runner_kwargs),
         speculative_config={
             "method": "dspark",
             "model": QWEN36_DSPARK_DRAFT_MODEL,
@@ -175,15 +183,20 @@ def test_qwen36_dspark_adaptive_gdn_full_to_zero_graph_replay():
         runner.model.collective_rpc(_install_verification_cost_probe, args=(True,))
         adaptive = runner.model.generate(prompts, sampling)
         for budgets in runner.model.collective_rpc(_read_verification_cost_probe):
-            assert any(admitted > 0 for _, admitted in budgets)
-            assert any(scheduled > 0 and admitted == 0 for scheduled, admitted in budgets)
+            assert any(
+                prev_admitted > 0 and scheduled > 0 and admitted == 0
+                for (_, prev_admitted), (scheduled, admitted) in zip(budgets, budgets[1:])
+            )
 
-    for prompt_idx, (baseline, trimmed) in enumerate(zip(reference, adaptive, strict=True)):
-        base_seq, trimmed_seq = baseline.outputs[0], trimmed.outputs[0]
-        assert len(base_seq.token_ids) == len(trimmed_seq.token_ids) == sampling.max_tokens
-        for token_idx, (base_id, trimmed_id) in enumerate(zip(base_seq.token_ids, trimmed_seq.token_ids, strict=True)):
-            _check_decode_token(base_seq, trimmed_seq, token_idx, prompt_idx, decode_atol=0.0689)
-            if base_id != trimmed_id:
-                # A permitted near-tie changes subsequent contexts. Compare
-                # distributions only while both runs share the same prefix.
-                break
+    for reference_outputs in (plain_reference, reference):
+        for prompt_idx, (baseline, trimmed) in enumerate(zip(reference_outputs, adaptive, strict=True)):
+            base_seq, trimmed_seq = baseline.outputs[0], trimmed.outputs[0]
+            assert len(base_seq.token_ids) == len(trimmed_seq.token_ids) == sampling.max_tokens
+            for token_idx, (base_id, trimmed_id) in enumerate(
+                zip(base_seq.token_ids, trimmed_seq.token_ids, strict=True)
+            ):
+                _check_decode_token(base_seq, trimmed_seq, token_idx, prompt_idx, decode_atol=0.0689)
+                if base_id != trimmed_id:
+                    # A permitted near-tie changes subsequent contexts. Compare
+                    # distributions only while both runs share the same prefix.
+                    break

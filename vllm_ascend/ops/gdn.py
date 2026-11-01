@@ -713,7 +713,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
             if attn_metadata.spec_decode_metadata.use_upstream_recurrent:
@@ -734,6 +733,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
                 )
             else:
+                actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
                 core_attn_out_spec = recurrent_gated_delta_rule(
                     query_spec.squeeze(0),
                     key_spec.squeeze(0),

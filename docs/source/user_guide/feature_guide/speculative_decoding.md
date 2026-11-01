@@ -581,8 +581,15 @@ that accepted multiple tokens. The fixed-length path keeps the native recurrent
 operator. This adaptive path requires triton-ascend and is not supported by the
 310P recurrent backend.
 
-Use a matching vLLM revision with GDN adaptive-verification support and a DSpark
-checkpoint trained for the target model. For Qwen hybrid targets, including
+Ascend declares the device/host query-length mismatch capability and the bounded
+variable-length decode graph capability in its own backend and metadata builder.
+It does not depend on inheriting those declarations from upstream GDN classes.
+The variable-length graph bound is `1 + num_speculative_tokens` with adaptive
+verification enabled; the 310P backend explicitly rejects this capability.
+
+Use a matching vLLM revision with the strided recurrent API and adaptive-verification
+initialization hooks (including revision `544f182d`) and a DSpark checkpoint
+trained for the target model. For Qwen hybrid targets, including
 Qwen3.8-27B, set `num_speculative_tokens` to the draft checkpoint's supported
 length and enable `enable_adaptive_verification` as above. Keep full decode graphs
 enabled; do not set the target's `enforce_eager=True`. M-RoPE positions continue
