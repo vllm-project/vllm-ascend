@@ -1,68 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Model-aware end-to-end tests for NPU IPC live weight updates.
+"""TP2 IPC transactions with one trainer and rollout worker per NPU.
 
-Qwen3-0.6B cannot expose missing START/FINISH hooks because its checkpoint and
-runtime weight representations are compatible. This matrix instead targets
-architectures whose correctness depends on the transaction: fused-MoE layout
-restoration, derived FP32 routing weights, and SFA source/derived-state
-restoration. Cases whose model is not ready for the transaction are skipped in
-both lanes with a per-case ``skip_reason`` — DeepSeek-V4-Flash needs the
-attention-sink fix that lives in #16355. TP=2 IPC runs Qwen3.5-35B-A3B
-GLM-5.3-Flash and MiniMax-M3.
-
-The correctness oracle is *normal startup loading of the same payload*, not the
-first live update: the generator also writes a temporary checkpoint, a reference
-server loads it at startup, and the live-update lane has to reproduce its
-signature exactly —
-
-    normal startup load(W) == first live update(W) == second live update(W)
-
-The dummy-started lane's pre-update signature must differ from the reference, so
-a transfer that never ran cannot pass, and the second update covers the layerwise
-reload lifecycle, runtime/destructive representations, derived state and the
-graph-captured storage of the first update. Enabled models cover unpacked TP=2 IPC;
-Qwen3.5 additionally covers packed IPC. The packed lane is currently skipped
-on this branch — see ``PACKED_LANE_SKIP_REASON`` — so only the unpacked lane runs.
-
-Two trainer ranks each materialize the same full checkpoint on their local
-card and merge IPC handles for both TP workers. Each trainer shares its card
-with one rollout worker, so every round releases the engine's HBM
-with a level-2 sleep and wakes it again afterwards. Level 2
-discards the weights, so the weights allocation is mapped back *before* the
-transaction — the layerwise reload copies the payload into those very buffers —
-while the KV cache is re-allocated last, once the new weights are in place.
+Each trainer generates the full checkpoint locally; Gloo merges both devices'
+IPC handles. Before each update the server sleeps at level 2, wakes its weights,
+receives the update, and wakes its KV cache. The shared server lifecycle supplies
+an independent startup-load reference and the dummy pre-update signature.
 """
 
 import os
 from datetime import timedelta
 
 import pytest
-import requests
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch_npu  # noqa: F401  # registers the NPU backend
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.rlhf.weight_transfer_models.base import WeightUpdateModelCase
+from tests.e2e.pull_request.rlhf.weight_transfer_runners.common import (
+    CONTROL_TIMEOUT,
+    UPDATE_ROUNDS,
+    UPDATE_TIMEOUT,
+    post_control,
+    weight_transfer_servers,
+)
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     PACKED_LANE_SKIP_REASON,
     FixedRandomWeightSource,
     assert_weight_update_matches_reference,
     generation_signature,
-    live_update_serve_args,
     packed_buffer_size_for,
-    reference_signature,
     register_engines_once,
-    wait_for_free_device_memory,
 )
 
 INFERENCE_WORLD_SIZE = 2
-UPDATE_TIMEOUT = 300
-CONTROL_TIMEOUT = 60
 # The trainer is co-located with the server on the same chip, so both models
 # have to fit; keep the budget low enough to leave room for the payload.
 GPU_MEMORY_UTILIZATION = 0.45
@@ -73,12 +47,6 @@ GPU_MEMORY_UTILIZATION = 0.45
 # exporting `VLLM_RL_TEST_DEVICE_INDEX` (leaving `ASCEND_RT_VISIBLE_DEVICES`
 # unset, so the pytest process's logical indices equal the physical ones).
 INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
-
-
-def _post(server: RemoteOpenAIServer, route: str, *, json=None, params=None, timeout=CONTROL_TIMEOUT):
-    response = requests.post(server.url_for(route), json=json, params=params, timeout=timeout)
-    response.raise_for_status()
-    return response
 
 
 def _ipc_trainer_peer(_local_rank: int, case: WeightUpdateModelCase, packed: bool, server_url: str, rendezvous: str):
@@ -108,7 +76,7 @@ def _ipc_trainer_peer(_local_rank: int, case: WeightUpdateModelCase, packed: boo
             source=source,
         )
         try:
-            for _ in range(2):
+            for _ in range(UPDATE_ROUNDS):
                 # Rank 0 releases this barrier after both rollout workers wake.
                 dist.barrier()
                 engine.send_weights()
@@ -130,7 +98,6 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
     source = FixedRandomWeightSource(case, torch.device("npu", INFERENCE_DEVICE_INDEX))
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
     env_dict = {
-        **dict(case.server_env),
         "VLLM_SERVER_DEV_MODE": "1",
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
         "ASCEND_RT_VISIBLE_DEVICES": ",".join(
@@ -138,41 +105,16 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
         ),
     }
 
-    # Independent oracle first: a server that loads exactly this payload at
-    # startup, on its own lifecycle, before the live path touches anything.
-    reference = reference_signature(
+    with weight_transfer_servers(
         source,
         case,
-        port=get_open_port(),
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+        backend="npu_ipc",
         tensor_parallel_size=INFERENCE_WORLD_SIZE,
         device_index=INFERENCE_DEVICE_INDEX,
+        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         env_dict=env_dict,
-    )
-
-    # Dummy sanity, first live update and the reload regression share one lane.
-    # Its pre-update signature is the dummy-sanity check; the *reference* is the
-    # part that must come from a separate server. The reference and the lane share
-    # two cards, so wait for its process tree to hand the HBM back.
-    for rank in range(INFERENCE_WORLD_SIZE):
-        wait_for_free_device_memory(INFERENCE_DEVICE_INDEX + rank, GPU_MEMORY_UTILIZATION)
-    port = get_open_port()
-    with RemoteOpenAIServer(
-        case.model,
-        vllm_serve_args=live_update_serve_args(
-            case,
-            backend="npu_ipc",
-            port=port,
-            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-            tensor_parallel_size=INFERENCE_WORLD_SIZE,
-        ),
-        server_host="127.0.0.1",
-        server_port=port,
-        env_dict=env_dict,
-        auto_port=False,
-    ) as server:
+    ) as (server, reference, dummy_signature):
         client = server.get_client()
-        dummy_signature = generation_signature(client, case.model)
 
         from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
         from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
@@ -207,25 +149,25 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
             )
 
             signatures = []
-            for _ in range(2):
-                _post(server, "pause")
+            for _ in range(UPDATE_ROUNDS):
+                post_control(server, "pause")
                 # Same-chip RL: hand the engine's HBM to the co-located trainer
                 # before generating the payload. Level 2 discards the weights and the
                 # KV cache outright; `/sleep` reads its level from the query string,
                 # a JSON body is ignored.
-                _post(server, "sleep", params={"level": 2})
+                post_control(server, "sleep", params={"level": 2})
                 # Level 2 unmapped the weights pool and `send_weights`' layerwise
                 # reload copies the payload back into exactly those buffers, so the
                 # weights allocation has to be mapped again before the transaction.
                 # The KV cache stays asleep until the update is finished.
-                _post(server, "wake_up", params={"tags": ["weights"]})
+                post_control(server, "wake_up", params={"tags": ["weights"]})
                 # send_weights owns the complete START -> LOAD -> FINISH transaction.
                 dist.barrier()
                 engine.send_weights()
                 # The KV cache is re-allocated last, from the updated weights' state.
                 # That wake leaves nothing asleep, so the engine resumes scheduling on
                 # its own and no explicit `/resume` is needed.
-                _post(server, "wake_up", params={"tags": ["kv_cache"]})
+                post_control(server, "wake_up", params={"tags": ["kv_cache"]})
                 signatures.append(generation_signature(client, case.model))
             if not peer.join(timeout=CONTROL_TIMEOUT):
                 raise TimeoutError("IPC trainer peer did not exit after the two updates")
