@@ -1,0 +1,8 @@
+pr: 20543
+entries:
+  - category: bugfix
+    text: >-
+      Prevented synchronous multi-group AscendStore bulk loads from continuing
+      after a KV load failure; these errors can now stop the affected EngineCore.
+      Asynchronous multi-group load failures now follow the configured request
+      failure policy.
