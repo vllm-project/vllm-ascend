@@ -81,12 +81,17 @@ bool StoreKvBlockMetadataCpuKernel::GenMetaData()
     int32_t idxSlotmap = 0;
     int32_t idxGroups = 0;
 
-    while (idxSlotmap < slotMappingLen && idxGroups < outCapacity) {
+    while (idxSlotmap < slotMappingLen) {
         // Skip dirty values (negative slots)
         int32_t cacheSlot = slotMappingData[idxSlotmap];
         if (cacheSlot < 0) {
             idxSlotmap++;
             continue;
+        }
+
+        if (idxGroups >= outCapacity) {
+            KERNEL_LOG_ERROR("group output capacity %ld is too small to store all groups", outCapacity);
+            return false;
         }
 
         int32_t blockId = cacheSlot / blockSize_;
