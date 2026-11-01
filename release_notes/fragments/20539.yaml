@@ -1,4 +1,0 @@
-pr: 20539
-entries:
-  - category: bugfix
-    text: Fixed MXFP tail-store masks in SwigluGroupQuant to prevent writes into adjacent rows or buffers.
