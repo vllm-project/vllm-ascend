@@ -183,6 +183,70 @@ def test_split_kv_cache_coalesces_kernel_blocks() -> None:
     assert [copy_size for _, copy_size in views] == [4, 4]
 
 
+@pytest.mark.parametrize("factor", [1, 2, 4])
+@pytest.mark.parametrize("padded", [False, True])
+@pytest.mark.parametrize("dtype", [torch.int8, torch.bfloat16])
+def test_ascend_connector_round_trips_interleaved_kernel_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+    factor: int,
+    padded: bool,
+    dtype: torch.dtype,
+) -> None:
+    """Manager-page transfers preserve K/V, padding, and unselected pages."""
+    layer_name = "model.layers.0.self_attn"
+    num_blocks = 4
+    # Prefix storage and one extra manager page exercise offsets and capacity
+    # beyond the cache manager's minimum number of blocks.
+    slot_elements = 6 if padded else 4
+    raw = torch.arange(1 + (num_blocks + 1) * factor * slot_elements, dtype=torch.int64).to(dtype)
+    slots = raw[1:].view(-1, slot_elements)
+    key, value = slots[:, :2], slots[:, 2:4]
+    original = raw.clone()
+    spec = FullAttentionSpec(
+        block_size=factor,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=dtype,
+    )
+    worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
+    worker.kv_cache_config = SimpleNamespace(
+        num_blocks=num_blocks,
+        kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
+        kv_cache_tensors=[],
+    )
+    worker.vllm_config = object()
+    captured: list[CanonicalKVCaches] = []
+    worker._init_worker = captured.append
+    monkeypatch.setattr(connector_mod, "derive_canonical_mappings", lambda *args: {})
+
+    worker.register_kv_caches({layer_name: (key, value)})
+
+    canonical = captured[0]
+    refs = canonical.group_data_refs[0]
+    assert sum(ref.page_size_bytes for ref in refs) == spec.unpadded_page_size_bytes
+    assert len(refs) == 2 * factor
+    blocks = torch.tensor([3, 1])
+    saved = []
+    for ref in refs:
+        view = canonical.tensors[ref.tensor_idx].tensor
+        assert view.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
+        assert view.shape == (num_blocks, 2 * raw.element_size())
+        assert view.stride() == (factor * slot_elements * raw.element_size(), 1)
+        assert ref.mapping is None
+        saved.append(view[blocks].clone())
+        view[blocks] = 0
+
+    expected = original.clone()
+    expected_slots = expected[1:].view(-1, slot_elements)
+    for block in blocks.tolist():
+        expected_slots[block * factor : (block + 1) * factor, :4] = 0
+    torch.testing.assert_close(raw, expected)
+
+    for ref, data in zip(refs, saved):
+        canonical.tensors[ref.tensor_idx].tensor[blocks] = data
+    torch.testing.assert_close(raw, original)
+
+
 def test_extra_physical_blocks_do_not_hide_separate_value_cache() -> None:
     key = torch.empty((10, 2), dtype=torch.int8)
     value = torch.empty((10, 2), dtype=torch.int8)
@@ -216,15 +280,16 @@ def test_split_kv_cache_prefers_complete_overlapping_view() -> None:
     assert views[0][1] == 8
 
 
-def test_split_kv_cache_rejects_noncontiguous_block_payload() -> None:
-    key = torch.empty((4, 2, 3), dtype=torch.int8).transpose(1, 2)
-    value = torch.empty((4, 3, 2), dtype=torch.int8)
+@pytest.mark.parametrize("factor", [1, 2])
+def test_split_kv_cache_rejects_noncontiguous_block_payload(factor: int) -> None:
+    key = torch.empty((4 * factor, 2, 3), dtype=torch.int8).transpose(1, 2)
+    value = torch.empty((4 * factor, 3, 2), dtype=torch.int8)
 
     with pytest.raises(ValueError, match="block payload is non-contiguous"):
         _canonicalize_split_cache(
             (key, value),
             num_blocks=4,
-            unpadded_page_size_bytes=12,
+            unpadded_page_size_bytes=12 * factor,
         )
 
 

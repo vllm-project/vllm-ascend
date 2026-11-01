@@ -138,18 +138,19 @@ def _canonicalize_split_cache(
 
     bytes_per_physical_block = sum(size for _, size in selected)
     factor = unpadded_page_size_bytes // bytes_per_physical_block
-    return tuple(
-        (
-            _make_int8_block_view(
-                part,
-                num_blocks,
-                factor,
-                part_bytes,
-            ),
-            part_bytes * factor,
-        )
-        for part, part_bytes in selected
-    )
+    views: list[tuple[torch.Tensor, int]] = []
+    for part, part_bytes in selected:
+        if factor > 1 and part.stride(0) * part.element_size() > part_bytes:
+            # Interleaved K/V or padded slots cannot be coalesced into one
+            # contiguous payload. Each view selects the same kernel slot in
+            # every manager block, preserving gaps without copying them.
+            for slot in range(factor):
+                view = _make_int8_block_view(part[slot::factor], num_blocks, 1, part_bytes)
+                views.append((view, part_bytes))
+        else:
+            view = _make_int8_block_view(part, num_blocks, factor, part_bytes)
+            views.append((view, part_bytes * factor))
+    return tuple(views)
 
 
 class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
