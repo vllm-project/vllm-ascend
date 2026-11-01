@@ -413,5 +413,62 @@ def test_lookup_omits_retention_for_managers_without_the_keyword():
     assert coordinator._retention_call_kwargs(_RecordingMamba) == {}
 
 
+def test_manager_probe_tolerates_objects_it_cannot_introspect():
+    """Signature probing must degrade to "no forwarding", not crash startup.
+
+    ``inspect.signature`` raises ``ValueError`` on some C callables and
+    ``TypeError`` on anything that is not callable, so a manager class carrying
+    either must not take the coordinator down with it.
+    """
+    class _CLevelLookup:
+        find_longest_cache_hit = range
+
+    class _NotCallableLookup:
+        find_longest_cache_hit = 0
+
+    assert mod._manager_accepts_retention(_CLevelLookup) is False
+    assert mod._manager_accepts_retention(_NotCallableLookup) is False
+    assert mod._manager_accepts_retention(_RecordingFA) is True
+
+
+def test_retention_kwargs_tolerate_instance_built_without_init():
+    """``__init__`` is skipped by some tests, so the attribute may be absent."""
+
+    class _Stub:
+        _retention_forwarding_managers = frozenset({_RecordingFA})
+
+    kwargs = mod.AscendHybridKVCacheCoordinator._retention_call_kwargs(_Stub(), _RecordingFA)
+    assert kwargs == {"retention_interval": None}
+
+
+def test_config_without_the_field_does_not_raise(monkeypatch):
+    """A config object predating the field must not crash coordinator startup."""
+
+    class _ConfigWithoutRetention:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            if name == "prefix_cache_retention_interval":
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
+    monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
+    inner = _hybrid_config()
+    inner.kv_transfer_config = None
+    coordinator = AscendHybridKVCacheCoordinator(
+        kv_cache_config=_ConfigWithoutRetention(inner),
+        max_model_len=4096,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        hash_block_size=HASH_BLOCK_SIZE,
+    )
+    assert coordinator.retention_interval is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

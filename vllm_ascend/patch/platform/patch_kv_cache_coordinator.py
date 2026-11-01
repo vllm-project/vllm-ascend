@@ -97,12 +97,17 @@ def _manager_accepts_retention(manager_cls) -> bool:
     """Whether this manager's lookup takes ``retention_interval``.
 
     vLLM #43447 added the keyword; a lane older than it, or a test double
-    without a lookup at all, must keep the previous call shape.
+    without a lookup at all, must keep the previous call shape. An object whose
+    signature cannot be introspected (a C callable, a non-callable attribute)
+    falls back to that shape too, rather than failing coordinator startup.
     """
     lookup = getattr(manager_cls, "find_longest_cache_hit", None)
     if lookup is None:
         return False
-    return "retention_interval" in inspect.signature(lookup).parameters
+    try:
+        return "retention_interval" in inspect.signature(lookup).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
@@ -152,8 +157,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # vLLM #52216 promoted this from an env var to a CacheConfig field and
         # #55353 removed the env var from vllm.envs in the 0.29 cleanup, so the
         # resolved field is the only source. Reading the old env name here left
-        # it permanently None and skipped the validation below.
-        self.retention_interval = kv_cache_config.prefix_cache_retention_interval
+        # it permanently None and skipped the validation below. `getattr` keeps
+        # this tolerant of config objects that predate the field (test / mock
+        # configs); on a real build the field is always present.
+        self.retention_interval = getattr(
+            kv_cache_config, "prefix_cache_retention_interval", None
+        )
         validate_retention_interval = getattr(
             vllm_kv_cache_coordinator,
             "_validate_prefix_cache_retention_interval",
@@ -382,7 +391,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         """
         if manager_cls not in getattr(self, "_retention_forwarding_managers", ()):
             return {}
-        return {"retention_interval": self.retention_interval}
+        return {"retention_interval": getattr(self, "retention_interval", None)}
 
     def find_longest_cache_hit(
         self,
