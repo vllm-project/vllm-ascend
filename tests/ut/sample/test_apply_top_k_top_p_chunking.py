@@ -23,7 +23,7 @@ def single_row_tile(monkeypatch: pytest.MonkeyPatch):
 
 
 class TestApplyTopKTopPChunked:
-    def test_mixed_rows_chunk_boundaries_and_ties(self, small_tile):
+    def test_mixed_rows_chunk_boundaries_and_ties(self, small_tile, monkeypatch: pytest.MonkeyPatch):
         logits = torch.tensor(
             [
                 [0, 1, 2, 3, 4, 5],
@@ -48,9 +48,20 @@ class TestApplyTopKTopPChunked:
         k = torch.tensor([1, 1, 6, 6, 2, 2, 6], dtype=torch.int64)
         p = torch.tensor([1.0, 1.0, 1.0, 0.55, 1.0, 0.9, 0.9], dtype=torch.float32)
 
+        # 72-byte tiles hold 3 rows of 6 float32, so this 7-row input is [3, 3, 1].
+        chunk_rows: list[int] = []
+        original_chunk = topp_mod._apply_top_k_top_p_chunk
+
+        def _record_chunk_rows(logits_chunk, k_chunk, p_chunk):
+            chunk_rows.append(logits_chunk.shape[0])
+            return original_chunk(logits_chunk, k_chunk, p_chunk)
+
+        monkeypatch.setattr(topp_mod, "_apply_top_k_top_p_chunk", _record_chunk_rows)
+
         src = logits.clone()
         out = topp_mod._apply_top_k_top_p_pytorch(logits.clone(), k, p)
 
+        assert chunk_rows == [3, 3, 1]
         for row, expected in zip(out, expected_keep):
             assert _kept_indices(row) == expected
         # kept logits values must be unchanged (in-place masking only)
