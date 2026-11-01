@@ -109,10 +109,12 @@ def _make_coordinator(
     use_eagle: bool,
     kv_transfer_config=None,
     mamba_eagle: bool = False,
+    retention_interval: int | None = 0,
 ):
     monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
     monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
     kv_cache_config = _hybrid_config(mamba_eagle=mamba_eagle)
+    kv_cache_config.prefix_cache_retention_interval = retention_interval
     # The kv-transfer config is attached by the
     # get_kv_cache_config_from_groups builder in real engine startup.
     kv_cache_config.kv_transfer_config = kv_transfer_config
@@ -258,8 +260,15 @@ class _RecordingManager:
         alignment_tokens,
         dcp_world_size=1,
         pcp_world_size=1,
+        retention_interval=None,
     ):
-        cls.calls.append({"max_length": max_length, "drop_eagle_block": drop_eagle_block})
+        cls.calls.append(
+            {
+                "max_length": max_length,
+                "drop_eagle_block": drop_eagle_block,
+                "retention_interval": retention_interval,
+            }
+        )
         return (([],), max_length)
 
 
@@ -364,6 +373,44 @@ def test_per_group_lookup_matches_scheduler_call_convention():
     assert len(blocks) == 2
     assert _RecordingFA.calls[-1]["max_length"] == 4095
     assert hit_lengths == (4095, 4095)
+
+
+# ---------------------------------------------------------------------------
+# Fix ③ prefix_cache_retention_interval: the resolved config is the source, and
+# the value has to reach the per-group lookup
+# ---------------------------------------------------------------------------
+
+
+def test_retention_interval_comes_from_kv_cache_config(monkeypatch):
+    """vLLM #52216 promoted the knob to CacheConfig and #55353 removed the env
+    var in the 0.29 cleanup, so the resolved field is the only source: a value
+    left in the old env var must not be picked up."""
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "4096")
+    coordinator = _make_coordinator(monkeypatch, use_eagle=False, retention_interval=0)
+    assert coordinator.retention_interval == 0
+
+
+def test_lookup_forwards_retention_interval_to_managers():
+    """Holding the value on the coordinator is not enough.
+
+    The #17480 test only asserted ``coordinator.retention_interval``, which is
+    why the missing propagation into the lookup could go unnoticed.
+    """
+    coordinator = _make_lookup_coordinator(producer=True)
+    coordinator.retention_interval = 4096
+    coordinator._retention_forwarding_managers = frozenset({_RecordingFA, _RecordingMamba})
+    coordinator.find_longest_cache_hit(block_hashes=[], max_cache_hit_length=2048)
+    assert _RecordingFA.calls[-1]["retention_interval"] == 4096
+    assert _RecordingMamba.calls[-1]["retention_interval"] == 4096
+
+
+def test_lookup_omits_retention_for_managers_without_the_keyword():
+    """A lane whose manager predates vLLM #43447 keeps the previous call shape."""
+    coordinator = _make_lookup_coordinator(producer=True)
+    coordinator.retention_interval = 4096
+    coordinator._retention_forwarding_managers = frozenset({_RecordingFA})
+    assert coordinator._retention_call_kwargs(_RecordingFA) == {"retention_interval": 4096}
+    assert coordinator._retention_call_kwargs(_RecordingMamba) == {}
 
 
 if __name__ == "__main__":
