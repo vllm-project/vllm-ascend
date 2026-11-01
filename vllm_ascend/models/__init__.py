@@ -81,6 +81,13 @@ def register_model():
         "DFlash2DraftModel",
         "vllm_ascend.models.qwen3_dflash2:DFlash2Qwen3ForCausalLM",
     )
+    # DSpine parallel drafts ship as DFlashDraftModel checkpoints carrying
+    # dflash_config.selected_prefix_code_bridge; AscendDSpineProposer retargets
+    # the draft architecture to DFlashDSpineDraftModel at init.
+    ModelRegistry.register_model(
+        "DFlashDSpineDraftModel",
+        "vllm_ascend.models.qwen3_dspine:DSpineQwen3ForCausalLM",
+    )
     ModelRegistry.register_model("DeepSeekMTPModel", "vllm_ascend.models.deepseek_mtp:AscendDeepSeekMTP")
     ModelRegistry.register_model("DeepseekV32MTPModel", "vllm_ascend.models.deepseek_mtp:AscendDeepSeekMTP")
     ModelRegistry.register_model("GlmMoeDsaForCausalLM", "vllm_ascend.models.deepseek_mtp:AscendGlmMoeDsaForCausalLM")

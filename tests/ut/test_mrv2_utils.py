@@ -147,6 +147,21 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         SimpleNamespace(speculative_config=SimpleNamespace(method="draft_model", parallel_drafting=True)),
         SimpleNamespace(speculative_config=SimpleNamespace(method="eagle3", parallel_drafting=True)),
         SimpleNamespace(speculative_config=SimpleNamespace(method="eagle", parallel_drafting=True)),
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                method="dflash",
+                draft_model_config=SimpleNamespace(
+                    architectures=["DFlashDraftModel"],
+                    hf_config=SimpleNamespace(dflash_config={"selected_prefix_code_bridge": {"code_size": 1024}}),
+                ),
+            )
+        ),
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                method="dflash",
+                draft_model_config=SimpleNamespace(architectures=["DFlashDSpineDraftModel"]),
+            )
+        ),
     ],
     ids=[
         "dflash2-graph",
@@ -160,6 +175,8 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "draft-model-speculative-decoding",
         "p-eagle",
         "p-eagle-method-eagle",
+        "dspine-code-bridge",
+        "dspine-architecture",
     ],
 )
 def test_blacklisted_features_default_to_v1(monkeypatch, config):

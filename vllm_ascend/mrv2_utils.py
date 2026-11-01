@@ -30,6 +30,7 @@ else:
 _NGRAM_SPEC_METHODS = frozenset({"ngram", "ngram_gpu"})
 _P_EAGLE_SPEC_METHODS = frozenset({"eagle", "eagle3"})
 _DFLASH2_ARCHITECTURES = frozenset({"DFlash2DraftModel"})
+_DSPINE_ARCHITECTURES = frozenset({"DFlashDSpineDraftModel", "DSpineDraftModel"})
 
 
 def _is_configured(value: object) -> bool:
@@ -66,6 +67,24 @@ def _is_dflash2_graph(speculative_config: object) -> bool:
     return any(name in _DFLASH2_ARCHITECTURES for name in _architectures(draft))
 
 
+def _is_dspine_draft(speculative_config: object) -> bool:
+    """DSpine drafts ship as ``DFlashDraftModel`` with a code bridge in
+    ``dflash_config``; only the V1 ``AscendDSpineProposer`` implements them."""
+    if getattr(speculative_config, "method", None) != "dflash":
+        return False
+    draft = getattr(speculative_config, "draft_model_config", None)
+    if any(name in _DSPINE_ARCHITECTURES for name in _architectures(draft)):
+        return True
+    hf_config = getattr(draft, "hf_config", None)
+    dflash_config = getattr(hf_config, "dflash_config", None)
+    bridge = (
+        dflash_config.get("selected_prefix_code_bridge")
+        if isinstance(dflash_config, dict)
+        else getattr(dflash_config, "selected_prefix_code_bridge", None)
+    )
+    return bool(bridge)
+
+
 def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
     """Reasons this config is not V2-ready and should default to V1."""
     reasons: list[str] = []
@@ -97,6 +116,8 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
             reasons.append("draft_model speculative decoding")
         if _is_dflash2_graph(spec_config):
             reasons.append("dflash2 graph")
+        if _is_dspine_draft(spec_config):
+            reasons.append("dspine speculative decoding")
         # V2 FULL capture builds attention metadata inside ACL graph GLOBAL
         # capture. p-eagle reads NPU seq_lens there, and that copy is rejected.
         if method in _P_EAGLE_SPEC_METHODS and getattr(spec_config, "parallel_drafting", False) is True:
@@ -118,6 +139,7 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
     * draft_model speculative decoding
     * dflash2 graph (DFlash2 drafts without ``enforce_eager``)
+    * dspine speculative decoding
     * p-eagle (``eagle`` / ``eagle3`` with ``parallel_drafting``)
 
     Set ``VLLM_USE_V2_MODEL_RUNNER=0`` to force V1.

@@ -1,0 +1,9 @@
+pr: 19682
+entries:
+  - category: feature
+    text: >-
+      Added DSpine speculative decoding support on Ascend NPU (Model Runner
+      V1). DSpine checkpoints are dispatched as method="dflash" and selected
+      via selected_prefix_code_bridge in the draft config, using adjacent
+      causal injection and exact last-write serial-table refinement for
+      higher draft acceptance.
