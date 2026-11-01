@@ -401,7 +401,7 @@ class NPUPlatform(Platform):
                 AscendModelSlimConfig,
             )
         else:
-            from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
+            from vllm_ascend._310p.quantization import AscendCompressedTensorsConfig310, AscendModelSlimConfig310  # noqa: F401
 
         _config_deprecated_logging()
 

@@ -401,6 +401,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         return is_float and is_expected_bits and is_group and is_dynamic and is_symmetric and is_group_size_32
 
     def _is_static_tensor_w8a8(self, weight_quant: "QuantizationArgs", input_quant: "QuantizationArgs") -> bool:
+        is_int = weight_quant.type == input_quant.type == QuantizationType.INT
         is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
         weight_strategy = weight_quant.strategy == QuantizationStrategy.CHANNEL.value
         is_tensor = weight_strategy and input_quant.strategy == QuantizationStrategy.TENSOR.value
@@ -409,9 +410,11 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
         # Only symmetric input quantization supported.
         # Only symmetric weight quantization supported.
-        return is_8_bits and is_tensor and is_symmetric and is_static
+        return is_int and is_8_bits and is_tensor and is_symmetric and is_static
 
     def _is_dynamic_token_w8a8(self, weight_quant: "QuantizationArgs", input_quant: "QuantizationArgs") -> bool:
+        # INT8 and FP8 have separate schemes; mixed types cannot share either kernel.
+        is_same_type = weight_quant.type == input_quant.type
         is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
         weight_strategy = weight_quant.strategy == QuantizationStrategy.CHANNEL.value
         is_token = weight_strategy and input_quant.strategy == QuantizationStrategy.TOKEN.value
@@ -420,9 +423,10 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
         # Only symmetric input quantization supported.
         # Only symmetric weight quantization supported.
-        return is_8_bits and is_token and is_symmetric and is_dynamic
+        return is_same_type and is_8_bits and is_token and is_symmetric and is_dynamic
 
     def _is_dynamic_token_w4a8(self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs) -> bool:
+        is_int = weight_quant.type == input_quant.type == QuantizationType.INT
         is_4_bits = weight_quant.num_bits == 4
         is_8_bits = input_quant.num_bits == 8
         weight_strategy = weight_quant.strategy == QuantizationStrategy.CHANNEL.value
@@ -432,7 +436,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
         # Only symmetric input quantization supported.
         # Only symmetric weight quantization supported.
-        return is_4_bits and is_8_bits and is_token and is_symmetric and is_dynamic
+        return is_int and is_4_bits and is_8_bits and is_token and is_symmetric and is_dynamic
 
     def _is_w4a16(self, weight_quant: "QuantizationArgs", input_quant: Optional["QuantizationArgs"]) -> bool:
         # Confirm weights quantized.
