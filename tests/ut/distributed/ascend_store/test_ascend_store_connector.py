@@ -161,12 +161,37 @@ class TestLookupKeyServer(unittest.TestCase):
 
 
 class TestAscendStoreConnector(unittest.TestCase):
+    def test_bulk_wait_mode_controls_mamba_copy_without_changing_io_mode(self):
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        for use_layerwise in (False, True):
+            for load_async in (False, True):
+                for group_count in (1, 2):
+                    with (
+                        self.subTest(use_layerwise=use_layerwise, load_async=load_async, group_count=group_count),
+                        patch(module + ".create_kv_pool_worker"),
+                        patch(module + ".LookupKeyServer"),
+                    ):
+                        config = self._make_vllm_config(
+                            extra_config={"use_layerwise": use_layerwise, "load_async": load_async}
+                        )
+                        cache_config = types.SimpleNamespace(kv_cache_groups=[object()] * group_count)
+                        connector = AscendStoreConnector(config, KVConnectorRole.WORKER, cache_config)
+                        waits_for_load = not use_layerwise and (load_async or group_count > 1)
+                        self.assertEqual(connector.load_async, load_async)
+                        self.assertEqual(connector.requires_load_wait, waits_for_load)
+                        self.assertEqual(connector.requires_mamba_state_copy_after_layer_load, use_layerwise)
+                        self.assertEqual(
+                            connector.requires_mamba_state_copy_after_load, not use_layerwise and not waits_for_load
+                        )
+
     def test_hybrid_failures_use_request_results(self):
         for layerwise in (False, True):
             with self.subTest(layerwise=layerwise):
                 connector = AscendStoreConnector.__new__(AscendStoreConnector)
                 connector.use_layerwise = layerwise
-                connector.connector_worker = MagicMock(load_async=True)
+                connector.connector_worker = MagicMock(load_async=True, requires_load_wait=not layerwise)
                 connector.connector_worker.get_failed_requests.return_value = {"r1"}
                 connector.get_finished = MagicMock(return_value=(set(), set()))
                 with patch(

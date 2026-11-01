@@ -156,6 +156,10 @@ class TestGLM53Store(unittest.TestCase):
                 self.assertEqual(worker.cacheable_group_ids, [0, 2, 3, 4])
                 self.assertEqual(scheduler.kv_cache_group_ids, [0, 1, 2, 3, 4])
                 self.assertEqual(worker.cache_transfer_granularity, 512)
+                self.assertFalse(worker.load_async)
+                self.assertFalse(scheduler.load_async)
+                self.assertTrue(worker.requires_load_wait)
+                self.assertTrue(scheduler.requires_load_wait)
                 for prompt_len, hit, expected in ((512, 512, 0), (1024, 1024, 512), (1025, 1024, 1024)):
                     scheduler.client = MagicMock()
                     scheduler.client.closed = False
@@ -163,7 +167,7 @@ class TestGLM53Store(unittest.TestCase):
                     request = SimpleNamespace(
                         request_id="hit", prompt_token_ids=[1] * prompt_len, num_tokens=prompt_len, block_hashes=[]
                     )
-                    self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (expected, False))
+                    self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (expected, expected > 0))
                 self.doCleanups()
 
     def test_nonlayerwise_round_trip_keeps_each_tp_state_and_private_tail(self):
@@ -204,6 +208,8 @@ class TestGLM53Store(unittest.TestCase):
                     worker.m_store.get.side_effect = get
                     worker.m_store.exists.side_effect = lambda keys, stored=stored: [int(key in stored) for key in keys]
                     worker.register_kv_caches(caches)
+                    self.assertEqual(worker.load_async, load_async)
+                    self.assertTrue(worker.requires_load_wait)
                     self.assertEqual(worker.kv_send_thread.block_size, [512, 4, 512, 512, 512])
                     self.assertTrue(
                         all(address > 0 for row in worker.group_kv_caches_base_addr.values() for address in row)
@@ -226,12 +232,15 @@ class TestGLM53Store(unittest.TestCase):
                 for worker, caches in workers:
                     self.assertEqual(worker.lookup_scheduler(1024, hashes, list(range(5))), 1024)
                     metadata = self.make_metadata(target, hashes, load=True)
+                    metadata.loading_req_ids = {metadata.requests[0].req_id}
                     worker.start_load_kv(metadata)
                     if load_async:
                         worker.kv_recv_thread.request_queue.join()
                     self.assertTrue(worker.m_store.get.called)
                     masks = worker.token_database.load_mask(hashes, 1024)
                     self.assert_restored(worker, caches, source, target, masks)
+                    self.assertEqual(worker.get_finished(set(), metadata), (set(), metadata.loading_req_ids))
+                    self.assertEqual(worker.get_failed_requests(), set())
                 for rank in range(tp_size):
                     missing = next(
                         key
@@ -326,6 +335,7 @@ class TestGLM53Store(unittest.TestCase):
         # round-trip persists every block, so look it up densely.
         workers[0][0].vllm_config.cache_config.prefix_cache_retention_interval = None
         scheduler = create_kv_pool_scheduler(workers[0][0].vllm_config, True, workers[0][0].kv_cache_config)
+        self.assertFalse(scheduler.requires_load_wait)
         scheduler.store_scheduler.batch_is_readable.side_effect = lambda keys: [key in readable for key in keys]
         hit_request = SimpleNamespace(
             request_id="hit", prompt_token_ids=[1] * 513, num_tokens=513, block_hashes=[block_hash]
@@ -350,6 +360,8 @@ class TestGLM53Store(unittest.TestCase):
         worker = make_worker(self, kv_cache_config=plan, use_layerwise=True, use_mla=True, num_layers=4)
         start_patch(self, "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib")
         scheduler = create_kv_pool_scheduler(worker.vllm_config, True, plan)
+        self.assertFalse(scheduler.requires_load_wait)
+        self.assertFalse(worker.requires_load_wait)
         self.assertTrue(worker.use_block_key_layerwise)
         self.assertTrue(scheduler.use_block_key_layerwise)
         self.assertEqual(worker.cacheable_group_ids, [0, 2, 3, 4])

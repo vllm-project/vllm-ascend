@@ -61,6 +61,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
+    should_wait_for_kv_load,
     uses_hybrid_kv_cache,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
@@ -159,11 +160,11 @@ class KVPoolWorker:
         self._extra_config = extra_config
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.load_async = extra_config.get("load_async", False)
         self._save_disabled = threading.Event()
         self._closed = False
         self._invalid_block_ids: set[int] = set()
         self._failed_requests: set[str] = set()
+        self._completed_bulk_load_req_ids: set[str] = set()
         self._invalid_block_ids_lock = threading.Lock()
         self._retired_store_req_ids: set[str] = set()
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
@@ -172,6 +173,8 @@ class KVPoolWorker:
         self.backend = extra_config.get("backend", "mooncake")
         self.backend_name = self.backend.lower()
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
+        self.load_async = extra_config.get("load_async", False)
+        self.requires_load_wait = should_wait_for_kv_load(extra_config, use_layerwise, kv_cache_groups)
         self.use_hybrid = self._compute_use_hybrid(vllm_config, kv_cache_groups)
         self._attention_saved_layers: set[int] = set()
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
@@ -852,6 +855,7 @@ class KVPoolWorker:
         if len(metadata.requests) == 0:
             return
         for request in metadata.requests:
+            waiting_for_load = self.requires_load_wait and request.req_id in metadata.loading_req_ids
             load_spec = request.load_spec
             if load_spec is None or not load_spec.can_load:  # load =0
                 logger.debug(
@@ -859,6 +863,9 @@ class KVPoolWorker:
                     request.req_id,
                     "no_load_spec" if load_spec is None else f"can_load={load_spec.can_load}",
                 )
+                if waiting_for_load:
+                    self._record_failed_request(request)
+                    self._complete_bulk_load(request.req_id)
                 continue
             request.skip_null_blocks_by_group = self.group_uses_align_state
             load_group_ids = request.kv_cache_group_ids or [0]
@@ -944,6 +951,9 @@ class KVPoolWorker:
                     size_list.append(size)
                     block_id_list.append(block_id)
             if not key_list:
+                if waiting_for_load:
+                    self._record_failed_request(request)
+                    self._complete_bulk_load(request.req_id)
                 continue
             key_list_c = _circular_shift(key_list, self.tp_rank % len(key_list))
             addr_list_c = _circular_shift(addr_list, self.tp_rank % len(addr_list))
@@ -968,9 +978,11 @@ class KVPoolWorker:
             if any(result != 0 for result in load_results):
                 if len(request.block_ids_by_group) > 1:
                     self._record_failed_request(request)
-                    # Request-level failed_recving only recovers requests still
-                    # waiting for asynchronous loads. A synchronous request is
-                    # already RUNNING, so reporting it after forward is too late.
+                    if waiting_for_load:
+                        self._complete_bulk_load(request.req_id)
+                        continue
+                    # Without scheduler admission proof the request may already
+                    # be RUNNING. Reporting failure after forward is too late.
                     raise RuntimeError(
                         f"Synchronous KV pool load failed for multi-group request {request.req_id} "
                         f"(backend={self.backend_name}); cannot safely continue forward with incomplete KV cache"
@@ -986,6 +998,12 @@ class KVPoolWorker:
                 load_group_ids,
                 len(key_list_c),
             )
+            if waiting_for_load:
+                self._complete_bulk_load(request.req_id)
+
+    def _complete_bulk_load(self, req_id: str) -> None:
+        with self._invalid_block_ids_lock:
+            self._completed_bulk_load_req_ids.add(req_id)
 
     def _record_kv_connector_operation(self, operation: str, duration_seconds: float, num_keys: int) -> None:
         with self._kv_stats_lock:
@@ -1362,11 +1380,15 @@ class KVPoolWorker:
         else:
             done_sending = set()
 
-        done_recving = set()
+        # Cancellation may have removed a request from loading_req_ids while its
+        # blocks are still held by the scheduler. Always report its completion.
+        with self._invalid_block_ids_lock:
+            done_recving = self._completed_bulk_load_req_ids.copy()
+            self._completed_bulk_load_req_ids.clear()
         if self.kv_recv_thread is not None:
             self.kv_recv_thread.discard_finished_requests(meta.preempted_req_ids)
             if self.load_async and not self.use_layerwise:
-                done_recving = self.kv_recv_thread.get_and_clear_finished_requests(meta.loading_req_ids)
+                done_recving.update(self.kv_recv_thread.get_and_clear_finished_requests(meta.loading_req_ids))
 
         logger.debug(
             "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",

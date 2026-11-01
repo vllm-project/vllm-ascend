@@ -45,6 +45,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_wor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyServer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
+    should_wait_for_kv_load,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
@@ -128,6 +129,14 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
+        kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
+        self.load_async = extra_config.get("load_async", False)
+        self.requires_load_wait = should_wait_for_kv_load(extra_config, self.use_layerwise, kv_cache_groups)
+        if self.requires_load_wait and not self.load_async:
+            logger.info(
+                "Non-layerwise multi-group KV pool requests wait for load completion before execution; "
+                "backend GET remains synchronous when load_async=False."
+            )
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
@@ -166,8 +175,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._mamba_state: Any = None
         self._loaded_layer: int | None = None
         self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
-        # Opt in only for synchronous bulk loads, not background retrieval.
-        self.requires_mamba_state_copy_after_load = not self.use_layerwise and not extra_config.get("load_async", False)
+        # Waiting requests have finished loading before their next model step.
+        self.requires_mamba_state_copy_after_load = not self.use_layerwise and not self.requires_load_wait
 
         self.connector_scheduler: KVPoolScheduler | None = None
         self.connector_worker: KVPoolWorker | None = None
@@ -479,7 +488,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         done_sending, done_recving = self.get_finished(finished_req_ids)
         assert self.connector_worker is not None
         failed = self.connector_worker.get_failed_requests()
-        if self.connector_worker.load_async and not self.use_layerwise:
+        if self.connector_worker.requires_load_wait:
             done_recving |= failed
         return KVConnectorTransferResults(
             finished_sending=done_sending, finished_recving=done_recving, failed_recving=failed

@@ -2,7 +2,7 @@ pr: 20543
 entries:
   - category: bugfix
     text: >-
-      Prevented synchronous multi-group AscendStore bulk loads from continuing
-      after a KV load failure; these errors can now stop the affected EngineCore.
-      Asynchronous multi-group load failures now follow the configured request
-      failure policy.
+      Isolated backend-reported multi-group AscendStore bulk load failures to
+      affected requests. External cache hits now wait for load completion before
+      model execution, including when backend I/O is configured as synchronous.
+      Single-group and layerwise admission behavior is unchanged.

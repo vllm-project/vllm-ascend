@@ -37,6 +37,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_group_cache_families,
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
+    should_wait_for_kv_load,
     uses_hybrid_kv_cache,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
@@ -88,7 +89,8 @@ class KVPoolScheduler:
         self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_put", False
         )
-        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
+        self.load_async = extra_config.get("load_async", False)
+        self.requires_load_wait = should_wait_for_kv_load(extra_config, use_layerwise, kv_cache_groups)
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = bool(kv_event_config and kv_event_config.enable_kv_cache_events)
         retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
@@ -427,7 +429,7 @@ class KVPoolScheduler:
             self.use_layerwise,
         )
 
-        return need_to_allocate, self.load_async and not self.use_layerwise
+        return need_to_allocate, self.requires_load_wait
 
     def _lookup_external_hit_tokens(self, request: "Request", num_computed_tokens: int) -> int | None:
         prompt_token_len = len(request.prompt_token_ids)
@@ -501,7 +503,7 @@ class KVPoolScheduler:
         )
 
         self.load_specs[request.request_id].can_load = True
-        if self.load_async and not self.use_layerwise:
+        if self.requires_load_wait:
             self._loading_req_ids.add(request.request_id)
         logger.debug(
             "KV pool load spec enabled req=%s num_external_tokens=%d vllm_cached=%d kvpool_cached=%d groups=%s",

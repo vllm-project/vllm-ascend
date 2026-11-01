@@ -29,6 +29,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     KeyMetadata,
     LoadSpec,
     ReqMeta,
+    should_wait_for_kv_load,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
@@ -240,6 +241,9 @@ def test_mooncake_preserves_partial_get_errors():
 def make_bulk_load(worker_factory, backend_name, group_count, load_async, result):
     worker = worker_factory(backend_name, group_count=group_count)
     worker.load_async = load_async
+    worker.requires_load_wait = should_wait_for_kv_load(
+        {"load_async": load_async}, False, worker.kv_cache_config.kv_cache_groups
+    )
     worker.m_store = make_backend(backend_name, MagicMock())
     worker.m_store.get = MagicMock(return_value=result)
     request = ReqMeta(
@@ -277,8 +281,15 @@ def make_bulk_load(worker_factory, backend_name, group_count, load_async, result
         pytest.param([-800, 0, 0, 0], id="partial-failure"),
     ],
 )
-def test_sync_hybrid_load_failure_stops_before_forward(worker_factory, backend_name, result):
+@pytest.mark.parametrize("admission_proof", ["missing-id", "missing-wait-mode"])
+def test_unadmitted_sync_hybrid_load_failure_stops_before_forward(
+    worker_factory, backend_name, result, admission_proof
+):
     worker, request, metadata = make_bulk_load(worker_factory, backend_name, 2, False, result)
+    if admission_proof == "missing-id":
+        metadata.loading_req_ids.clear()
+    else:
+        worker.requires_load_wait = False
     forward = MagicMock()
     with pytest.raises(RuntimeError, match="Synchronous KV pool load failed for multi-group request bulk-load"):
         worker.start_load_kv(metadata)
@@ -290,6 +301,88 @@ def test_sync_hybrid_load_failure_stops_before_forward(worker_factory, backend_n
     assert worker.get_failed_requests() == {request.req_id}
     assert worker.get_failed_requests() == set()
     assert worker.get_block_ids_with_load_errors() == set()
+
+
+@pytest.mark.parametrize("backend_name", ["memcache", "mooncake"])
+@pytest.mark.parametrize(
+    "result,failed",
+    [
+        pytest.param(None, True, id="missing-results"),
+        pytest.param([0], True, id="short-results"),
+        pytest.param([0] * 5, True, id="extra-results"),
+        pytest.param([-800, 0, 0, 0], True, id="partial-failure"),
+        pytest.param([0] * 4, False, id="success"),
+    ],
+)
+def test_sync_waiting_hybrid_load_reports_results_without_recv_thread(worker_factory, backend_name, result, failed):
+    worker, request, metadata = make_bulk_load(worker_factory, backend_name, 2, False, result)
+    assert worker.requires_load_wait
+    assert worker.load_async is False
+    assert worker.kv_recv_thread is None
+    worker.start_load_kv(metadata)
+    worker.m_store.get.assert_called_once()
+    assert len(worker.m_store.get.call_args.args[0]) == 4
+
+    connector = AscendStoreConnector.__new__(AscendStoreConnector)
+    connector.connector_worker = worker
+    connector.use_layerwise = False
+    connector._current_step_has_real_forward = False
+    connector._get_connector_metadata = lambda: metadata
+    # An aborted waiting request can disappear from the next metadata snapshot
+    # before completion is collected; its held blocks still need releasing.
+    metadata.loading_req_ids.clear()
+    output = connector.get_transfer_results(set())
+    assert output.finished_recving == {request.req_id}
+    assert output.failed_recving == ({request.req_id} if failed else set())
+    assert request.can_save is not failed
+    assert worker.get_block_ids_with_load_errors() == set()
+    output = connector.get_transfer_results(set())
+    assert output.finished_recving == set()
+    assert output.failed_recving == set()
+
+
+@pytest.mark.parametrize("backend_name", ["memcache", "mooncake"])
+@pytest.mark.parametrize("load_async", [False, True])
+@pytest.mark.parametrize("missing", ["load-spec", "disabled-spec", "keys"])
+def test_waiting_hybrid_load_without_a_restorable_plan_fails_and_completes(
+    worker_factory, backend_name, load_async, missing
+):
+    worker, request, metadata = make_bulk_load(worker_factory, backend_name, 2, load_async, [0] * 4)
+    if missing == "load-spec":
+        request.load_spec = None
+    elif missing == "disabled-spec":
+        request.load_spec.can_load = False
+    else:
+        worker.token_database.process_token_key_strings_with_block_ids = MagicMock(return_value=iter(()))
+    worker.start_load_kv(metadata)
+    if load_async and missing == "keys":
+        receiver = worker.kv_recv_thread
+        receiver._handle_request(receiver.request_queue.get_nowait())
+    assert worker.get_finished(set(), metadata) == (set(), {request.req_id})
+    assert worker.get_failed_requests() == {request.req_id}
+    assert request.can_save is False
+    worker.m_store.get.assert_not_called()
+
+
+def test_sync_waiting_hybrid_load_does_not_hide_unexpected_backend_exception(worker_factory):
+    worker, request, metadata = make_bulk_load(worker_factory, "memcache", 2, False, [0] * 4)
+    worker.m_store.get.side_effect = RuntimeError("device context unavailable")
+    with pytest.raises(RuntimeError, match="device context unavailable"):
+        worker.start_load_kv(metadata)
+    assert worker.get_finished(set(), metadata) == (set(), set())
+    assert worker.get_failed_requests() == set()
+
+
+@pytest.mark.parametrize("group_count", [None, 1, 2])
+@pytest.mark.parametrize("load_async", [False, True])
+@pytest.mark.parametrize("use_layerwise", [False, True])
+def test_bulk_load_admission_mode_preserves_configured_io(group_count, load_async, use_layerwise):
+    groups = [object()] * group_count if group_count is not None else None
+    config = {"load_async": load_async}
+    assert should_wait_for_kv_load(config, use_layerwise, groups) is (
+        not use_layerwise and (load_async or group_count == 2)
+    )
+    assert config == {"load_async": load_async}
 
 
 @pytest.mark.parametrize("backend_name", ["memcache", "mooncake"])

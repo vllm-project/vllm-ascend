@@ -1099,6 +1099,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     size_list.append(size)
                     block_id_list.append(block_id)
             if not key_list:
+                if len(req_meta.block_ids_by_group) > 1:
+                    # A multi-group external hit cannot be admitted when none
+                    # of its planned state can actually be restored.
+                    self._mark_failed_requests([req_meta])
                 self.set_finished_request(req_id)
                 return
             key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
