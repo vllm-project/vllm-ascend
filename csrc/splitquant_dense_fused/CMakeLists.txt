@@ -21,6 +21,12 @@ ascendc_library(splitquant_cube STATIC
     op_kernel/sparse_cube.cpp
     op_kernel/moe_cube.cpp
 )
+# MatmulImpl and TCubeTiling are provided by the public AscendC advanced API.
+# The precompile target does not inherit the host target's include directories,
+# so add the CANN device headers explicitly for all CANN layouts.
+ascendc_include_directories(splitquant_cube PRIVATE
+    "${ASCEND_CANN_PACKAGE_LINUX_PATH}/asc/include"
+)
 ascendc_compile_definitions(splitquant_cube PRIVATE HAVE_WORKSPACE HAVE_TILING)
 ascendc_library(splitquant_raw STATIC
     op_kernel/raw_cube.cpp
