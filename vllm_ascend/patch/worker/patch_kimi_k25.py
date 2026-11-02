@@ -17,28 +17,13 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from vllm.model_executor.models.kimi_k25_vit import (
     Learnable2DInterpPosEmbDivided_fixed,
     MoonViT3dPretrainedModel,
-    get_rope_shape_decorate,
+    get_rope_shape,
 )
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-
-
-@get_rope_shape_decorate
-def get_rope_shape(org, interpolation_mode, shape):
-    return (
-        F.interpolate(
-            org.permute((2, 0, 1)).unsqueeze(0),
-            size=shape,
-            mode=interpolation_mode,
-        )
-        .squeeze(0)
-        .permute((1, 2, 0))
-        .flatten(end_dim=1)
-    )
 
 
 class AscendLearnable2DInterpPosEmbDivided_fixed(nn.Module):

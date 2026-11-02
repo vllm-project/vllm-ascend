@@ -1827,6 +1827,23 @@
 #       Remove this patch once upstream `IndexerKVDType` includes `"int8"` (or once
 #       the indexer kv dtype is pluggable like the fp8 kv-cache-dtype mechanism).
 #
+# ** 36. File: worker/patch_hisparse_page_descriptors.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `HiSparseConnectorWorker._enqueue_transfers`
+#    Why:
+#       Per-layer CPU metadata reads and descriptor arithmetic delay page
+#       writes. The paired common backend has no descriptor-construction hook.
+#    How:
+#       Install explicitly at AscendHiSparseBackend.check_available, before
+#       serving. Vectorize only CPU address construction on reviewed sources
+#       and NPU workers. Keep the existing DMA callback, events and ownership.
+#       Unknown sources, foreign wrappers and unsupported layouts use original.
+#    Related PR:
+#       vllm-project/vllm-ascend#19109, paired vllm-project/vllm#62592.
+#    Future Plan:
+#       Move vectorization into the common worker or a backend descriptor hook,
+#       then remove this version-pinned wrapper.
+#
 # ** 35. File: platform/patch_parallel_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.parallel.ParallelConfig._validate_parallel_config`

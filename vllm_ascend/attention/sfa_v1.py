@@ -12,7 +12,6 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -56,6 +55,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_KV_CACHE_TUPLE_LEN,
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
+from vllm_ascend.kv_cache_dtype import native_c8_cache_dtype
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
@@ -370,6 +370,16 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
+        if get_current_vllm_config().attention_config.hisparse_config is not None:
+            from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import optimized_profile_enabled
+
+            if optimized_profile_enabled():
+                from vllm_ascend.attention.sfa_hisparse_optimized import AscendHiSparseMetadataBuilder
+
+                return AscendHiSparseMetadataBuilder
+            from vllm_ascend.attention.sfa_hisparse import AscendHiSparseMetadataBuilder
+
+            return AscendHiSparseMetadataBuilder
         if get_ascend_config().sparse_kv_offload_config.enabled:
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadMetadataBuilder
 
@@ -390,6 +400,16 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
+        if get_current_vllm_config().attention_config.hisparse_config is not None:
+            from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import optimized_profile_enabled
+
+            if optimized_profile_enabled():
+                from vllm_ascend.attention.sfa_hisparse_optimized import AscendHiSparseImpl
+
+                return AscendHiSparseImpl
+            from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
+
+            return AscendHiSparseImpl
         if get_ascend_config().sparse_kv_offload_config.enabled:
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
 
@@ -659,9 +679,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        elif self.nope:
+        elif self.nope or self.vllm_config.attention_config.hisparse_config is not None:
             # MTP accepted counts are device-resident. NoPE operators use
-            # device lengths and scheduler upper bounds, so need no CPU copy.
+            # device lengths and scheduler upper bounds, as does HiSparse's
+            # staging plan, so neither path needs an exact CPU copy.
             seq_lens_cpu = None
         else:
             seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
@@ -865,7 +886,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_sparse_sfa_turboquant = ascend_config.enable_sparse_sfa_turboquant
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
         if self.enable_sparse_sfa_c8:
-            self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
+            self.c8_cache_dtype = native_c8_cache_dtype(
                 self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
             )
 
@@ -1075,16 +1096,17 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         qt = self._quant_type
 
+        # PTA cannot clone a slice of NZ storage on A5. Split dense logical
+        # weights before the existing casts to Prolog V3's NZ input format.
+        fused_weight = torch_npu.npu_format_cast(self.fused_qkv_a_proj.weight.data, ACL_FORMAT_FRACTAL_ND)
         if qt is None:
-            self.fused_qkv_a_proj.weight.data = self.fused_qkv_a_proj.weight.data.T
-
-        fused_weight = self.fused_qkv_a_proj.weight.data
+            fused_weight = fused_weight.T
         weight_dq = fused_weight[..., : self.q_lora_rank].contiguous()
         weight_dkv_kr = fused_weight[..., self.q_lora_rank :].contiguous()
         if qt is not None:
-            weight_uq_qr = self.q_proj.weight.data.contiguous()
+            weight_uq_qr = torch_npu.npu_format_cast(self.q_proj.weight.data, ACL_FORMAT_FRACTAL_ND).contiguous()
         else:
-            weight_uq_qr = self.q_proj.weight.data.T.contiguous()
+            weight_uq_qr = torch_npu.npu_format_cast(self.q_proj.weight.data, ACL_FORMAT_FRACTAL_ND).T.contiguous()
 
         self.weight_dq = torch_npu.npu_format_cast(weight_dq, ACL_FORMAT_FRACTAL_NZ)
         self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, ACL_FORMAT_FRACTAL_NZ)

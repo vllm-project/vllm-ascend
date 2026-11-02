@@ -29,6 +29,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -118,6 +119,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         scheduler_block_size: int | None = None,
         num_prefill_lookahead: int = 0,
         allow_partial_hash_hits: bool = True,
+        num_hash_lookahead_tokens: int | None = None,
     ):
         # Keep pcp_world_size in this patched constructor for compatibility
         # with the upstream coordinator interface. PCP is rejected by the platform.
@@ -149,12 +151,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 self.scheduler_block_size,
                 kv_cache_config,
             )
+        hash_lookahead_kwargs = (
+            {} if num_hash_lookahead_tokens is None else {"num_hash_lookahead_tokens": num_hash_lookahead_tokens}
+        )
         self.block_pool = BlockPool(
             num_gpu_blocks=kv_cache_config.num_blocks,
             enable_caching=enable_caching,
             hash_block_size=hash_block_size,
             enable_kv_cache_events=enable_kv_cache_events,
             metrics_collector=metrics_collector,
+            **hash_lookahead_kwargs,
         )
 
         # KV cache group indices that get the EAGLE last-block drop.
@@ -515,11 +521,37 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     metrics_collector: KVCacheMetricsCollector | None = None,
     num_prefill_lookahead: int = 0,
     allow_partial_hash_hits: bool = True,
+    num_hash_lookahead_tokens: int | None = None,
 ) -> KVCacheCoordinator:
     # Keep pcp_world_size in this patched function for upstream call
     # compatibility; platform validation guarantees that it is one.
     del pcp_world_size
     token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens)
+    # Omitted by older paired Core versions. Forward an explicitly supplied
+    # value, including zero, to the coordinator and its BlockPool unchanged.
+    hash_lookahead_kwargs = (
+        {} if num_hash_lookahead_tokens is None else {"num_hash_lookahead_tokens": num_hash_lookahead_tokens}
+    )
+    if any(group.role == KVCacheGroupRole.HISPARSE_SOURCE for group in kv_cache_config.kv_cache_groups):
+        # HiSparse owns the source/resident/hot manager roles. Its common Core
+        # coordinator also owns their prefix and residency semantics; the Ascend
+        # hybrid overrides below target other cache layouts.
+        return _orig_get_kv_cache_coordinator(
+            kv_cache_config=kv_cache_config,
+            max_model_len=max_model_len,
+            max_in_flight_tokens=token_budget,
+            use_eagle=use_eagle,
+            enable_caching=enable_caching,
+            enable_kv_cache_events=enable_kv_cache_events,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=1,
+            scheduler_block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
+            metrics_collector=metrics_collector,
+            num_prefill_lookahead=num_prefill_lookahead,
+            allow_partial_hash_hits=allow_partial_hash_hits,
+            **hash_lookahead_kwargs,
+        )
     hybrid_kwargs = dict(
         kv_cache_config=kv_cache_config,
         max_model_len=max_model_len,
@@ -537,6 +569,7 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     )
     # vLLM main (#54736) added allow_partial_hash_hits.
     hybrid_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
+    hybrid_kwargs.update(hash_lookahead_kwargs)
     # Private state blocks are excluded by the block-size resolver. Keep
     # their independent manager geometry when prefix caching is disabled too.
     num_cacheable_groups = sum(is_prefix_cacheable(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
@@ -570,6 +603,7 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
         orig_kwargs["scheduler_block_size"] = scheduler_block_size
         orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
         orig_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
+        orig_kwargs.update(hash_lookahead_kwargs)
         return _orig_get_kv_cache_coordinator(**orig_kwargs)
 
     return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]

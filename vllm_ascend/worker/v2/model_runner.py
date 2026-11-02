@@ -468,6 +468,13 @@ class NPUModelRunner(GPUModelRunner):
         # Match V1's physical buffer plan without mutating the scheduler's
         # logical cache configuration. Allocation must honor zero-stride aliases.
         kv_cache_config = deepcopy(kv_cache_config)
+        if self.vllm_config.attention_config.hisparse_config is not None:
+            from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import optimized_profile_enabled
+
+            if optimized_profile_enabled():
+                from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd.owners import bind_loaded_owners
+
+                bind_loaded_owners(self.vllm_config, self.speculator, kv_cache_config)
         sparse_cfg = self.ascend_config.sparse_kv_offload_config
         configure_dspark_kv_transfer(
             self.vllm_config, self.speculator, kv_cache_config, is_last_pp_rank=self.is_last_pp_rank
@@ -671,7 +678,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Preemption stores must complete before the parent updates states and
         # reuses or zeroes the preempted requests' physical KV cache blocks.
-        if has_kv_transfer_group():
+        if has_kv_transfer_group() and not (dummy_run or is_profile):
             kv_connector_metadata = scheduler_output.kv_connector_metadata
             assert kv_connector_metadata is not None
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)

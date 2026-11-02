@@ -174,3 +174,9 @@ def register_connector():
         "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector",
         "SfaRemoteD2HConnector",
     )
+
+    KVConnectorFactory.register_connector(
+        "HiSparsePDConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd.connector",
+        "HiSparsePDConnector",
+    )

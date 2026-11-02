@@ -1,0 +1,18 @@
+pr: 19109
+entries:
+  - category: feature
+    text: >-
+      Added the platform-selected Ascend HiSparse backend and an explicit,
+      source-checked A5 C8 optimization profile with reproducible source builds.
+      Final P/D, accuracy and rebased-head model qualification remain pending.
+  - category: performance
+    text: >-
+      Installed the A5 Host-writeback, descriptor, Resident-update, lazy-MTP,
+      invalidation, metadata-view and group-prefetch implementation. Selection
+      preserves the baseline by default and requires the reviewed Core sources.
+  - category: bugfix
+    text: >-
+      Preserved external KV byte-allocation ownership and alignment, resolved
+      native A5 FP8 operand types separately from byte storage, and isolated
+      optional QSA requirements through backend capabilities. Prolog weight
+      preparation retains its source Parameters and final NZ operands.

@@ -9,13 +9,13 @@ from vllm_ascend.core.kv_cache_placement import (
     create_kvpp_cache_allocation_plan,
 )
 from vllm_ascend.distributed.parallel_state import get_kvpp_group
+from vllm_ascend.worker.kv_cache_allocator import ByteAllocator, allocate_zeroed_byte_tensor
 
 KVPP_BUFFER_ALIGNMENT = 2 * 1024 * 1024
 
 
-def _allocate_kvpp_buffer(size: int, device: torch.device) -> torch.Tensor:
-    raw = torch.zeros(size + KVPP_BUFFER_ALIGNMENT, dtype=torch.int8, device=device)
-    return raw.narrow(0, (-raw.data_ptr()) % KVPP_BUFFER_ALIGNMENT, size)
+def _allocate_kvpp_buffer(size: int, device: torch.device, allocate: ByteAllocator | None = None) -> torch.Tensor:
+    return allocate_zeroed_byte_tensor(size, device, alignment=KVPP_BUFFER_ALIGNMENT, allocate=allocate)
 
 
 def get_kvpp_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
@@ -28,7 +28,11 @@ def get_kvpp_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpe
 
 
 def allocate_kvpp_cache(
-    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, device: torch.device
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    *,
+    allocate: ByteAllocator | None = None,
 ) -> dict[str, tuple[torch.Tensor, ...]]:
     """Allocate contiguous layer bundles and two shared Target scratch buffers."""
     plan = create_kvpp_cache_allocation_plan(
@@ -40,14 +44,16 @@ def allocate_kvpp_cache(
     }
     scratch_size = max((size for name, (_, size) in layouts.items() if name in plan.layer_owner_ranks), default=0)
     scratch = (
-        [_allocate_kvpp_buffer(scratch_size, device) for _ in range(KVPP_SCRATCH_BUFFER_COUNT)] if scratch_size else []
+        [_allocate_kvpp_buffer(scratch_size, device, allocate) for _ in range(KVPP_SCRATCH_BUFFER_COUNT)]
+        if scratch_size
+        else []
     )
     caches: dict[str, tuple[torch.Tensor, ...]] = {}
     target_index = 0
     for name, (layout, size) in layouts.items():
         owner = plan.layer_owner_ranks.get(name)
         if owner is None or owner == plan.kvpp_rank:
-            buffer = _allocate_kvpp_buffer(size, device)
+            buffer = _allocate_kvpp_buffer(size, device, allocate)
         else:
             buffer = scratch[target_index % KVPP_SCRATCH_BUFFER_COUNT]
         for cache_name, parts in layout.items():

@@ -164,6 +164,8 @@ class HardwareCapability(Enum):
     TURBOQUANT_4BIT_NC_CACHE = auto()
     # Honor MLAPO enablement on any pipeline role; other profiles limit it to decode consumers.
     UNRESTRICTED_MLAPO = auto()
+    # A5 HiSparse index-map fusion; selected only by its paired optimization profile.
+    HISPARSE_FUSED_INDEX_OPS = auto()
 
 
 class AttentionBackendFamily(Enum):
@@ -387,6 +389,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.SWIGLU_OAI_MX_QUANT,
                     HardwareCapability.TRITON_BATCH_MEMCPY,
                     HardwareCapability.UNRESTRICTED_MLAPO,
+                    HardwareCapability.HISPARSE_FUSED_INDEX_OPS,
                 }
             ),
         ),
