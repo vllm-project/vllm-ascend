@@ -126,6 +126,7 @@ def _initialize_static_kernel_runtime(vllm_config: VllmConfig) -> None:
         "TransposeQuantBatchMatMul",  # dsv4 950
         "QuantLightningIndexer",  # glm5.2 950
         "PoolKeyIndexer",  # glm5.3-flash
+        "KvQuantSparseFlashAttentionVllm",  # glm5.3-flash 950
     ]
     logger.info_once(
         "Skipping static kernel compilation for incompatible ops: %s.",
