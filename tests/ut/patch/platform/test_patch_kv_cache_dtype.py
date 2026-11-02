@@ -88,4 +88,4 @@ class TestMirrorListWidening:
 
         before = list(cache_mod.KV_CACHE_DTYPES)
         _apply_kv_cache_dtype_int8_patch()
-        assert cache_mod.KV_CACHE_DTYPES == before
+        assert before == cache_mod.KV_CACHE_DTYPES
