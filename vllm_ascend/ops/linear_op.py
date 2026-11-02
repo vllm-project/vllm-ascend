@@ -63,6 +63,7 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_reduce_scatter as dense_sp_reduce_scatter,
 )
 from vllm_ascend.utils import (
+    _building_draft_model,
     enable_dense_sp,
     mlp_tp_enable,
     oproj_tp_enable,
@@ -507,7 +508,11 @@ def _get_column_parallel_op(
         return DSV4OProjColumnParallelOp(layer)
     if "gate_up_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPColumnParallelOp(layer)
-    if enable_dense_sp() and _is_dense_sp_decoder_projection(prefix, _DENSE_SP_COLUMN_PROJECTIONS):
+    if (
+        enable_dense_sp()
+        and not _building_draft_model()
+        and _is_dense_sp_decoder_projection(prefix, _DENSE_SP_COLUMN_PROJECTIONS)
+    ):
         return SequenceColumnParallelOp(layer)
     return None
 
@@ -521,7 +526,11 @@ def _get_row_parallel_op(
         return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():
         return OProjRowParallelOp(layer)
-    if enable_dense_sp() and _is_dense_sp_decoder_projection(prefix, _DENSE_SP_ROW_PROJECTIONS):
+    if (
+        enable_dense_sp()
+        and not _building_draft_model()
+        and _is_dense_sp_decoder_projection(prefix, _DENSE_SP_ROW_PROJECTIONS)
+    ):
         return SequenceRowParallelOp(layer)
     return None
 

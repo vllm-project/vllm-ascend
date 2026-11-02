@@ -1029,6 +1029,20 @@ def _flashcomm_switch_enabled(vllm_config) -> bool:
     return switch or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
 
 
+def _building_draft_model() -> bool:
+    """Whether the module currently under construction belongs to a draft head.
+
+    ``load_eagle_model`` builds MTP/eagle draft heads inside the
+    ``set_model_tag("eagle_head")`` context, after the target was built under
+    the default "backbone" tag. Draft heads run the stock full-token layout:
+    their per-step token counts are not runner-padded to the TP multiple, and
+    their embeddings must stay full even when shared with the target.
+    """
+    from vllm.compilation.backends import model_tag as _current_model_tag
+
+    return _current_model_tag == "eagle_head"
+
+
 def enable_dense_sp(vllm_config=None) -> bool:
     """Dense-model sequence parallelism driven by the FlashComm switch.
 
@@ -1095,15 +1109,29 @@ def enable_dense_sp(vllm_config=None) -> bool:
     # full-step shape check cannot validate.
     if getattr(parallel_config, "enable_dbo", False):
         return False
-    if getattr(vllm_config, "speculative_config", None) is not None:
-        return False
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if speculative_config is not None:
+        # Draft heads exchange hidden states with the target through
+        # per-model wiring. Only the MTP-style heads are wired for the dense
+        # layout (the patched Qwen3.5 MTP forward gathers the shared
+        # embedding's token shard back to full rows), and only under the V2
+        # runner: the V1 spec flow carries its own SP handling (e.g. the
+        # draft RoPE positions all-gather) that assumes the MoE-SP layout.
+        from vllm_ascend.mrv2_utils import use_v2_model_runner
+
+        if not (use_v2_model_runner(vllm_config) and getattr(speculative_config, "method", None) == "mtp"):
+            return False
     if getattr(vllm_config, "lora_config", None) is not None:
         return False
 
     model_config = getattr(vllm_config, "model_config", None)
     if model_config is None:
         return False
-    if getattr(model_config, "is_multimodal", False) or getattr(model_config, "use_mla", False):
+    # The VL gate must be structural (a separate vision sub-config), not the
+    # registry-based is_multimodal_model: dense Qwen3.5-family checkpoints
+    # carry the multimodal-registered Qwen3_5ForConditionalGeneration
+    # architecture name, and the registry verdict would wrongly exclude them.
+    if is_vl_model(vllm_config) or getattr(model_config, "use_mla", False):
         return False
     if getattr(model_config, "hf_text_config", None) is None:
         return False

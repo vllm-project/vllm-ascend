@@ -200,7 +200,12 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # construction: the V2 runner does not pin the current vllm config
         # during forwards, so a forward-time enable_dense_sp() probe would
         # silently miss, and the config cannot change after model load.
-        self.dense_sp_entry = enable_dense_sp()
+        # Draft-head builds (model_tag "eagle_head") keep the stock
+        # full-token embedding: their per-step token counts are not
+        # runner-padded to the TP multiple.
+        from vllm_ascend.utils import _building_draft_model
+
+        self.dense_sp_entry = enable_dense_sp() and not _building_draft_model()
 
         if self.token_exchange_group is not None:
             self.embedding_tp_capacity = max(

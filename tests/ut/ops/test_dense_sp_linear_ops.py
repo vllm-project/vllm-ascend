@@ -42,6 +42,11 @@ from vllm_ascend.utils import enable_dense_sp, enable_sp
 
 
 def _make_vllm_config(**overrides):
+    # Dense default: hf_config is the same object as hf_text_config (no
+    # separate vision sub-config), which is vLLM's structural criterion for
+    # a pure-text model. Dense Qwen3.5-family checkpoints also resolve this
+    # way even though their architecture name is multimodal-registered.
+    text_config = SimpleNamespace(model_type="llama", to_dict=lambda: {"hidden_size": 8})
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             tensor_parallel_size=2,
@@ -51,8 +56,8 @@ def _make_vllm_config(**overrides):
             decode_context_parallel_size=1,
         ),
         model_config=SimpleNamespace(
-            hf_text_config=SimpleNamespace(model_type="llama", to_dict=lambda: {"hidden_size": 8}),
-            is_multimodal=False,
+            hf_config=text_config,
+            hf_text_config=text_config,
             use_mla=False,
         ),
         speculative_config=None,
@@ -71,9 +76,16 @@ def _make_vllm_config(**overrides):
 @pytest.fixture(autouse=True)
 def _isolated_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
-    # is_moe_model caches into a module global; reset it so parametrized
-    # configs with different hf configs cannot pollute each other.
+    # is_moe_model / is_vl_model cache into module globals; reset them so
+    # parametrized configs with different hf configs cannot pollute each
+    # other.
     monkeypatch.setattr(utils_module, "_IS_MOE_MODEL", None, raising=False)
+    monkeypatch.setattr(utils_module, "_IS_VL_MODEL", None, raising=False)
+    # Default to the V2 model runner (the production default); the V1 spec
+    # case below opts out.
+    import vllm_ascend.mrv2_utils as mrv2_module
+
+    monkeypatch.setattr(mrv2_module, "use_v2_model_runner", lambda vllm_config: True)
 
 
 class TestEnableDenseSpPredicate:
@@ -104,7 +116,16 @@ class TestEnableDenseSpPredicate:
             {"parallel_config.enable_dbo": True},
             {"speculative_config": SimpleNamespace(method="eagle3")},
             {"lora_config": SimpleNamespace(max_lora_rank=16)},
-            {"model_config.is_multimodal": True},
+            # Structural VL gate: a separate vision sub-config
+            # (hf_config is not hf_text_config), not the registry-based
+            # is_multimodal_model (dense Qwen3.5 checkpoints carry the
+            # multimodal-registered architecture name).
+            {
+                "model_config.hf_config": SimpleNamespace(
+                    vision_config=SimpleNamespace(),
+                    to_dict=lambda: {"vision_config": {}},
+                )
+            },
             {"model_config.use_mla": True},
             {"model_config": None},
         ],
@@ -112,11 +133,42 @@ class TestEnableDenseSpPredicate:
     def test_structural_gates_disable_dense_sp(self, override):
         assert not enable_dense_sp(_make_vllm_config(**override))
 
-    def test_moe_model_excluded_even_with_switch(self):
+    def test_mtp_spec_enabled_under_v2(self):
+        # The patched Qwen3.5 MTP forward gathers the shared embedding's
+        # token shard back to full rows, so MTP drafts coexist with dense SP.
+        config = _make_vllm_config(speculative_config=SimpleNamespace(method="mtp"))
+        assert enable_dense_sp(config)
+        assert enable_sp(config)
+
+    def test_mtp_spec_disabled_under_v1(self, monkeypatch):
+        # The V1 spec flow carries its own SP handling (e.g. the draft RoPE
+        # positions all-gather) that assumes the MoE-SP layout.
+        import vllm_ascend.mrv2_utils as mrv2_module
+
+        monkeypatch.setattr(mrv2_module, "use_v2_model_runner", lambda vllm_config: False)
+        config = _make_vllm_config(speculative_config=SimpleNamespace(method="mtp"))
+        assert not enable_dense_sp(config)
+
+    def test_vl_gate_is_structural_not_registry_based(self):
+        # Dense Qwen3.5-family checkpoints: multimodal-registered
+        # architecture name, but hf_config is hf_text_config (pure text).
+        text_config = SimpleNamespace(model_type="qwen3_5_text", to_dict=lambda: {"hidden_size": 8})
         config = _make_vllm_config(
             model_config=SimpleNamespace(
-                hf_text_config=SimpleNamespace(model_type="qwen3_moe", to_dict=lambda: {"num_experts": 8}),
-                is_multimodal=False,
+                hf_config=text_config,
+                hf_text_config=text_config,
+                is_multimodal_model=True,
+                use_mla=False,
+            ),
+        )
+        assert enable_dense_sp(config)
+
+    def test_moe_model_excluded_even_with_switch(self):
+        moe_config = SimpleNamespace(model_type="qwen3_moe", to_dict=lambda: {"num_experts": 8})
+        config = _make_vllm_config(
+            model_config=SimpleNamespace(
+                hf_config=moe_config,
+                hf_text_config=moe_config,
                 use_mla=False,
             ),
         )
@@ -125,10 +177,11 @@ class TestEnableDenseSpPredicate:
     def test_no_model_family_whitelist(self):
         # Any dense family qualifies: the point of the generic path.
         for model_type in ("llama", "qwen2", "qwen3", "glm4", "qwen3_5_text", "internlm2"):
+            text_config = SimpleNamespace(model_type=model_type, to_dict=lambda: {})
             config = _make_vllm_config(
                 model_config=SimpleNamespace(
-                    hf_text_config=SimpleNamespace(model_type=model_type, to_dict=lambda: {}),
-                    is_multimodal=False,
+                    hf_config=text_config,
+                    hf_text_config=text_config,
                     use_mla=False,
                 ),
             )
@@ -195,6 +248,13 @@ class TestProjectionSelection:
 
     def test_selection_off_without_dense_sp(self, monkeypatch):
         monkeypatch.setattr(linear_op, "enable_dense_sp", lambda: False)
+        assert _get_column_parallel_op("model.layers.0.self_attn.qkv_proj", MagicMock()) is None
+        assert _get_row_parallel_op("model.layers.0.self_attn.o_proj", MagicMock()) is None
+
+    def test_selection_off_for_draft_head_builds(self, monkeypatch):
+        # load_eagle_model builds MTP draft heads under the "eagle_head"
+        # model tag; drafts run the stock full-token layout.
+        monkeypatch.setattr(linear_op, "_building_draft_model", lambda: True)
         assert _get_column_parallel_op("model.layers.0.self_attn.qkv_proj", MagicMock()) is None
         assert _get_row_parallel_op("model.layers.0.self_attn.o_proj", MagicMock()) is None
 
@@ -588,3 +648,70 @@ class TestEmbeddingEntryShard:
         out = emb._forward_standard(input_ids)
         # Without dense SP the embedding returns full-token rows.
         assert out.shape == (4, 4)
+
+
+class _FakeMtpLayer:
+    use_attn_reduce_scatter_for_moe = False
+
+    def __init__(self):
+        self.rows_seen: list[int] = []
+
+    def __call__(self, positions, hidden_states, residual):
+        self.rows_seen.append(hidden_states.shape[0])
+        return hidden_states, residual
+
+
+class TestMtpDraftFullTokenLayout:
+    """The patched Qwen3.5 MTP forward restores full rows from the shared
+    embedding's token shard, so the draft runs the stock full-token layout
+    whatever its per-step token count is."""
+
+    def _make_predictor(self, dense_sp_entry, layer):
+        return SimpleNamespace(
+            embed_tokens=SimpleNamespace(dense_sp_entry=dense_sp_entry),
+            pre_fc_norm_embedding=lambda x: x,
+            pre_fc_norm_hidden=lambda x: x,
+            fc=lambda x: x,
+            num_mtp_layers=1,
+            layers=[layer],
+            norm=lambda h, r: (h, r),
+        )
+
+    def _run(self, monkeypatch, dense_sp_entry, num_embed_rows):
+        from vllm_ascend.patch.worker import patch_qwen3_5
+
+        def fake_all_gather(x, dim):
+            # TP=2 simulation: duplicate rows; the rows beyond the true
+            # count are the reduce-scatter zero padding.
+            return torch.cat([x, x], dim=dim)
+
+        monkeypatch.setattr(patch_qwen3_5, "tensor_model_parallel_all_gather", fake_all_gather)
+        monkeypatch.setattr(patch_qwen3_5, "get_pp_group", lambda: SimpleNamespace(is_last_rank=True))
+        layer = _FakeMtpLayer()
+        predictor = self._make_predictor(dense_sp_entry, layer)
+        # T=5 with tp=2: under dense SP the shared embedding emitted
+        # ceil(5/2)=3 shard rows; without it the embedding is full (5 rows).
+        # The target's hidden states are always full.
+        inputs_embeds = torch.arange(num_embed_rows * 2, dtype=torch.float64).reshape(num_embed_rows, 2)
+        hidden_states = torch.arange(5 * 2, dtype=torch.float64).reshape(5, 2) + 10
+        out = patch_qwen3_5.qwen3_5_mtp_forward(
+            predictor,
+            input_ids=torch.zeros(5, dtype=torch.int64),
+            positions=torch.arange(5, dtype=torch.int64),
+            hidden_states=hidden_states,
+            inputs_embeds=inputs_embeds,
+            spec_step_idx=0,
+        )
+        return out, layer
+
+    def test_dense_sp_mtp_forward_gathers_and_trims_the_embedding_shard(self, monkeypatch):
+        out, layer = self._run(monkeypatch, dense_sp_entry=True, num_embed_rows=3)
+        # The draft layer ran on the full 5 rows, not the 3-row shard.
+        assert layer.rows_seen == [5]
+        assert out.shape[0] == 5
+
+    def test_mtp_forward_stays_stock_without_dense_sp(self, monkeypatch):
+        out, layer = self._run(monkeypatch, dense_sp_entry=False, num_embed_rows=5)
+        # No gather: the full rows flow through unchanged.
+        assert layer.rows_seen == [5]
+        assert out.shape[0] == 5

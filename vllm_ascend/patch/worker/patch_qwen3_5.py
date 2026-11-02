@@ -162,6 +162,15 @@ if Qwen3_5MultiTokenPredictor is not None:
         # target hidden states instead of consuming PP intermediate tensors.
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
+        if getattr(self.embed_tokens, "dense_sp_entry", False):
+            # Dense sequence parallelism: the drafter shares the target's
+            # embedding, whose output arrives on the rank-local token shard
+            # (the reduce-scatter padding rows are zeros). The drafter itself
+            # runs the stock full-token layout — its per-step token counts
+            # are not runner-padded to the TP multiple — so restore the full
+            # rows here and trim the padding with the true position count.
+            inputs_embeds = tensor_model_parallel_all_gather(inputs_embeds, 0)
+            inputs_embeds = inputs_embeds[: positions.shape[-1]]
         assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
         inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
         hidden_states = self.pre_fc_norm_hidden(hidden_states)

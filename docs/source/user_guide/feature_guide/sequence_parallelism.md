@@ -102,6 +102,13 @@ existing `_pad_for_sequence_parallelism`), so the padding rows ride along
 exactly like graph-bucket padding rows (PAD_SLOT_ID cache slots,
 `is_padding` mask) and are dropped before logits.
 
+MTP speculative decoding (`qwen3_5_mtp`) is supported together with dense SP
+under the V2 model runner: the drafter shares the target's embedding, and the
+patched MTP forward gathers the embedding's token shard back to full rows
+before combining them with the target's hidden states, so the draft head
+itself runs the stock full-token layout. Other speculative methods (EAGLE,
+DSpark, ...) and the V1 runner keep the SP-off layout.
+
 Unsupported topologies keep the stock all-reduce layout: MoE checkpoints
 (upstream SP MoE owns their layout), MLA checkpoints, multimodal and
 speculative-decoding deployments, PCP/DCP topologies, pipeline parallelism,
