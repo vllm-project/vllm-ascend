@@ -177,7 +177,7 @@ jobs:
     name: Run Presmoke Smoke Tests ${{ inputs.target }}-${{ inputs.os }}
     needs: gen-presmoke-groups
     if: ${{ inputs.run_presmoke && needs.gen-presmoke-groups.result == 'success' }}
-    uses: ./.github/workflows/_presmoke_tests.yaml
+    uses: ./.github/workflows/presmoke_tests.yaml
     with:
       vllm: ${{ inputs.vllm_ref_for_test }}
       test_groups: ${{ needs.gen-presmoke-groups.outputs.presmoke_groups_json }}
