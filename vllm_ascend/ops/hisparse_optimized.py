@@ -89,18 +89,23 @@ class MappedHostTensor:
 
 
 def allocate_mapped_host(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
-    """Allocate page-aligned CPU storage and attach its explicit mapping owner."""
+    """Allocate page-locked, aligned storage for both DMA and AIV access."""
     count = math.prod(shape)
     nbytes = count * torch.empty((), dtype=dtype).element_size()
     if nbytes <= 0:
         raise ValueError("HiSparse host allocation must be nonempty")
     allocated_bytes = triton.cdiv(nbytes, mmap.PAGESIZE) * mmap.PAGESIZE
-    owner = mmap.mmap(-1, allocated_bytes)
-    raw = torch.frombuffer(owner, dtype=torch.uint8)
+    # MAPPED alone permits AIV access but does not make a pageable mmap a
+    # valid asynchronous DMA destination on every supported CANN runtime.
+    # Use PTA's pinned allocator, then retain an aligned alias of that same
+    # allocation for registration. No payload conversion or second pool.
+    owner = torch.empty(allocated_bytes + mmap.PAGESIZE - 1, dtype=torch.uint8, pin_memory=True)
+    offset = (-owner.data_ptr()) % mmap.PAGESIZE
+    raw = owner[offset : offset + allocated_bytes]
     mapping = MappedHostTensor(raw)
     tensor = raw[:nbytes].view(dtype).view(shape)
-    # The mapping owns raw; frombuffer keeps the mmap alive. Runtime owns the
-    # registration through this base tensor until its explicit shutdown.
+    # The mapping and tensor aliases retain the original pinned allocation.
+    # Runtime owns the registration until its explicit, drained shutdown.
     tensor._hisparse_registration = mapping
     return tensor
 

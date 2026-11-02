@@ -309,3 +309,24 @@ the real cold adapters, three device-write graph replays with no capture Host
 callbacks, a real Core finish submission and the preserved duplicate guard.
 These component checks do not establish full-model correctness, performance
 or the active-concurrency limit. Full ON-model validation is continuing.
+
+### Page-locked Host storage for both writeback paths
+
+The first new-main natural request exposed a native D2H failure at
+`aclrtMemcpyAsync`, reported asynchronously at a later operation. A focused
+same-payload matrix on the new A5 image passed public Torch copies, queued
+native copies to pinned storage and queued copies to registered pinned
+storage. Both legacy-registered mmap and V2 MAPPED-only mmap reproduced the
+native DMA failure. Device-accessible mapping alone was insufficient for
+the asynchronous DMA path on this runtime.
+
+The optimized Host allocator now requests PTA pinned storage and retains a
+page-aligned view of that same allocation for its existing mapping owner.
+Pool size, payload format, descriptor order, streams and completion fences
+are unchanged; there is no second Host pool or Attention kernel change.
+Three CPU ownership/alignment cases passed. Runtime
+`c7f5536467c329294aab58baf3339160fd5f793c` passed five actual A5 cases: cold
+adapters, byte-exact native and AIV queued writes, resolver/gather graph
+replay and an actual 128 GiB allocation with first/last native copies.
+Full-model ON measurements remain pending; the earlier failed request is
+excluded from performance results.
