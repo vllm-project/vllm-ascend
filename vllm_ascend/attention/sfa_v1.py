@@ -1102,6 +1102,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.fused_qkv_a_proj.weight.data = self.fused_qkv_a_proj.weight.data.T
 
         fused_weight = self.fused_qkv_a_proj.weight.data
+        if self.qk_rope_head_dim == 0:
+            # Unpack before slicing INT8 NZ weights; preserve the native indexer's original weight.
+            fused_weight = torch_npu.npu_format_cast(fused_weight, ACL_FORMAT_FRACTAL_ND)
         weight_dq = fused_weight[..., : self.q_lora_rank].contiguous()
         weight_dkv_kr = fused_weight[..., self.q_lora_rank :].contiguous()
         if qt is not None:

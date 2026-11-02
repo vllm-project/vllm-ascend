@@ -129,6 +129,52 @@ def test_nope_does_not_require_custom_operator_registration(state, monkeypatch):
     state.impl._process_weights_for_fused_prolog_v3.assert_called_once()
 
 
+@pytest.mark.parametrize("is_kv_consumer", [False, True])
+def test_nope_unpacks_projection_before_splitting_and_preserves_indexer_weight(state, is_kv_consumer):
+    class PackedWeight:
+        def __getitem__(self, key):
+            raise AssertionError("NZ weights must be unpacked before slicing")
+
+    impl = state.impl
+    packed = PackedWeight()
+    original = torch.arange(20, dtype=torch.int8).reshape(4, 5)
+    up = torch.arange(6, dtype=torch.int8).reshape(3, 2)
+    impl.fused_qkv_a_proj.weight = SimpleNamespace(data=packed)
+    impl.fused_qkv_a_proj.weight_scale = torch.arange(5, dtype=torch.float32)
+    impl.q_proj.weight = SimpleNamespace(data=up)
+    impl.q_proj.weight_scale = torch.arange(2, dtype=torch.float32)
+    impl.q_lora_rank = 3
+    impl._quant_type = state.scope["AscendW8A8DynamicLinearMethod"]
+    impl._nope_native_indexer_query = True
+    impl.is_kv_consumer = is_kv_consumer
+    impl.rl_weight_update_enabled = False
+    dispose = Mock()
+
+    def format_cast(weight, fmt):
+        if fmt == 2:
+            assert weight is packed
+            return original.clone()
+        assert fmt == 29
+        return weight.clone()
+
+    state.scope.update(ACL_FORMAT_FRACTAL_ND=2, ACL_FORMAT_FRACTAL_NZ=29, dispose_layer=dispose)
+    state.scope["torch_npu"].npu_format_cast = Mock(side_effect=format_cast)
+    prepare = _load(
+        "vllm_ascend/attention/sfa_v1.py",
+        "_process_weights_for_fused_prolog_v3",
+        state.scope,
+        "AscendSFAImpl",
+    )
+    prepare(impl)
+
+    torch.testing.assert_close(impl.weight_dq, original[:, :3])
+    torch.testing.assert_close(impl.weight_dkv_kr, original[:, 3:])
+    torch.testing.assert_close(impl.weight_uq_qr, up)
+    assert impl.fused_qkv_a_proj.weight.data is packed
+    assert impl.q_proj.weight.data is up
+    dispose.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "unsupported",
     [
