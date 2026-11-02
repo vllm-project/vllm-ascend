@@ -30,7 +30,7 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, select_moe_comm_method, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
@@ -39,6 +39,7 @@ from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
+from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
 from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
 from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
@@ -46,6 +47,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
     get_moe_comm_method,
 )
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
+from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
@@ -415,6 +417,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.router: FusedMoERouter | None = None
         ascend_config = get_ascend_config()
         vllm_config = get_current_vllm_config()
+        self._vllm_config = vllm_config
         self.n_shared_experts = n_shared_experts
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
@@ -694,7 +697,26 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         enable_force_load_balance = _EXTRA_CTX.in_profile_run
 
         lora_context = getattr(self, "_ascend_moe_lora_context", None)
-        moe_comm_method = get_moe_comm_method(_EXTRA_CTX.moe_comm_type, self.moe_config)
+        comm_type = _EXTRA_CTX.moe_comm_type
+        if (
+            getattr(_EXTRA_CTX, "use_mega_moe", False)
+            and self._vllm_config.model_config.runner_type == "draft"
+            and self.quant_type == QuantType.NONE
+            and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        ):
+            # V2 selects the target model's FUSED_MC2 route before entering the
+            # unquantized MTP draft. Select this layer's capacity-based route.
+            num_tokens = _EXTRA_CTX.max_tokens_across_dp
+            if num_tokens is None:
+                num_tokens = _EXTRA_CTX.num_tokens
+            comm_type = select_moe_comm_method(
+                num_tokens,
+                self._vllm_config,
+                is_draft_model=True,
+                draft_moe_quant_type=self.quant_type,
+            )
+        _EXTRA_CTX.moe_comm_type = comm_type
+        moe_comm_method = get_moe_comm_method(comm_type, self.moe_config)
         _EXTRA_CTX.moe_comm_method = moe_comm_method
         assert moe_comm_method is not None
         if lora_context is not None:
@@ -740,13 +762,17 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             eplb_state = self.router.eplb_state
             if eplb_state is not None:
                 assert isinstance(eplb_state, AscendEplbLayerState)
+                all_gather_mask = None
+                if use_allgather_eplb():
+                    assert isinstance(moe_comm_method.prepare_finalize, PrepareAndFinalizeWithAllGather)
+                    all_gather_mask = moe_comm_method.prepare_finalize.all_gather_eplb_mask
                 eplb_state.record_load(
                     fused_experts_results.expert_tokens,
                     fused_experts_results.group_list_type,
                     topk_ids=topk_ids,
                     num_source_tokens=num_source_tokens,
                     is_sequence_parallel=self.moe_config.is_sequence_parallel,
-                    prepare_finalize=moe_comm_method.prepare_finalize,
+                    all_gather_mask=all_gather_mask,
                 )
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:

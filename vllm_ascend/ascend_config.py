@@ -1065,7 +1065,7 @@ class AscendConfig:
             hidden_size = vllm_config.model_config.get_hidden_size()
         if hidden_size is None:
             return False
-        supported_hidden_sizes = {1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192}
+        supported_hidden_sizes = {1024, 2048, 2560, 3072, 4096, 5120, 6144, 7168, 8192}
         if is_kimi_k3:
             supported_hidden_sizes.add(3584)
         if int(hidden_size) not in supported_hidden_sizes:

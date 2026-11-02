@@ -36,6 +36,7 @@ from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     get_dtype_size,
 )
+from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -52,6 +53,7 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_fused,
 )
 
+from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
 from .lightning_indexer import qsa_select_paged_tokens_lightning
 
@@ -417,7 +419,6 @@ class AscendQSAImpl:
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del key, value
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("QSA output quantization is not supported on Ascend")
         num_tokens = attn_metadata.num_actual_tokens
@@ -430,9 +431,23 @@ class AscendQSAImpl:
         value_cache = canonicalize_singleton_dim_strides(value_cache)
         packed_width = layer.indexer.token_topk // layer.indexer.compress_ratio + layer.indexer.compress_ratio - 1
         compact_indices = selected_indices[:, :packed_width]
-        logger.info_once("QSA attention is using the CANN GBSA backend.")
-        return qsa_gbsa_attention(
+        request_plan = getattr(attn_metadata, "qsa_request_plan", None)
+        if request_plan is None:
+            return qsa_gbsa_attention(
+                query[:num_tokens],
+                key_cache,
+                value_cache,
+                compact_indices,
+                attn_metadata.block_table,
+                token_to_req[:num_tokens],
+                logical_positions[:num_tokens],
+                seq_lens,
+                output[:num_tokens],
+            )
+        return dispatch_qsa_attention(
             query[:num_tokens],
+            key[:num_tokens],
+            value[:num_tokens],
             key_cache,
             value_cache,
             compact_indices,
@@ -441,6 +456,7 @@ class AscendQSAImpl:
             logical_positions[:num_tokens],
             seq_lens,
             output[:num_tokens],
+            request_plan,
         )
 
     @staticmethod
@@ -453,6 +469,37 @@ class AscendQSAImpl:
         draft_attn_metadatas=None,
     ):
         """QSA replay parameters live in persistent buffers; nothing to rebind."""
+
+
+class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
+    # FULL_DECODE_ONLY captures a fixed GBSA path. Unlike sequence thresholds,
+    # decode phase cannot cross into FIA when a request grows during replay.
+    _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+
+    def build(self, common_prefix_len: int, common_attn_metadata: CommonAttentionMetadata, fast_build: bool = False):
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        phases = common_attn_metadata.is_prefilling
+        if phases is None or phases.device.type != "cpu":
+            raise ValueError("QSA phase dispatch requires scheduler CPU is_prefilling metadata")
+        metadata.qsa_request_plan = None
+        if any(phases.tolist()):
+            lengths = common_attn_metadata.seq_lens_cpu_upper_bound
+            if lengths is None:
+                raise ValueError("QSA prefill dispatch requires scheduler CPU KV lengths")
+            metadata.qsa_request_plan = build_qsa_request_plan(
+                common_attn_metadata.query_start_loc_cpu,
+                lengths,
+                common_attn_metadata.num_actual_tokens,
+                phases,
+            )
+        return metadata
+
+    def build_for_cudagraph_capture(self, common_attn_metadata: CommonAttentionMetadata):
+        # Capture dummy metadata need not carry live phase flags. Explicitly
+        # bypass the prefill planner for the decode-only graph contract.
+        metadata = super().build(0, common_attn_metadata, fast_build=True)
+        metadata.qsa_request_plan = None
+        return metadata
 
 
 class AscendQSABackend(upstream_qsa.Qwen4ExpQSAFlashAttentionBackend):
@@ -473,6 +520,10 @@ class AscendQSABackend(upstream_qsa.Qwen4ExpQSAFlashAttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[AscendQSAImpl]:
         return AscendQSAImpl
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendQSAMetadataBuilder]:
+        return AscendQSAMetadataBuilder
 
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
@@ -515,6 +566,69 @@ qsa_cache.build_qsa_metadata = qsa_cache._build_qsa_metadata_torch
 
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
+
+    def _main_fused_norm_rope_eligible(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> bool:
+        section = getattr(self.rotary_emb, "mrope_section", None)
+        return bool(
+            self.attn_output_gate
+            and qkv.dtype == torch.bfloat16
+            and qkv.ndim == 2
+            and qkv.shape[1] == 2 * self.q_size + 2 * self.kv_size
+            and self.num_heads > 0
+            and self.num_kv_heads > 0
+            and self.head_dim == 256
+            and getattr(self.rotary_emb, "rotary_dim", None) == 64
+            and getattr(self.rotary_emb, "is_neox_style", False)
+            and getattr(self.rotary_emb, "mrope_interleaved", False)
+            and section is not None
+            and list(section) == [11, 11, 10]
+            and positions.ndim in (1, 2)
+            and (positions.ndim == 1 or positions.shape[0] == 3)
+        )
+
+    def _project_qkv_gate(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        # The Ascend fused MRoPE path gathers a temporary rotary-cache tensor.
+        # That temporary is not replay-safe in the MTP FULL graph: after the
+        # graph reuses its memory, the source QKV remains finite while the
+        # fused result can contain NaNs in Q/K. The draft model has only one
+        # QSA layer, so keep the target-model fusion and use the graph-safe
+        # decomposition for MTP.
+        if getattr(get_forward_context(), "is_draft_model", False):
+            return super()._project_qkv_gate(qkv, positions)
+        if not self._main_fused_norm_rope_eligible(qkv, positions):
+            raise ValueError("QSA main-attention fused norm+RoPE ABI is not satisfied")
+
+        # Preserve valid scheduler positions while mapping padded profiling rows
+        # to a safe cache entry, matching the QSA indexer path above.
+        cache = self.rotary_emb.cos_sin_cache
+        safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
+        cos_sin = cache[safe_positions]
+        if cos_sin.device != qkv.device:
+            cos_sin = cos_sin.to(qkv.device)
+        if cos_sin.dtype != qkv.dtype:
+            cos_sin = cos_sin.to(qkv.dtype)
+        return torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+            qkv=qkv,
+            q_weight=1.0 + self.q_norm.weight,
+            k_weight=1.0 + self.k_norm.weight,
+            cos_sin=cos_sin,
+            num_q_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_dim,
+            eps=self.q_norm.variance_epsilon,
+            mrope_section=list(self.rotary_emb.mrope_section),
+            is_interleaved=self.rotary_emb.mrope_interleaved,
+            rope_dim=self.rotary_emb.rotary_dim,
+            has_gate=True,
+        )
 
     def bind_kv_cache(self, kv_cache: QSAKVCache) -> None:
         self.kv_cache = kv_cache

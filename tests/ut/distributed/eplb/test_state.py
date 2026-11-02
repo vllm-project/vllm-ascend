@@ -152,7 +152,7 @@ def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
         lambda: SimpleNamespace(rank_in_group=1, world_size=2),
     )
     monkeypatch.setattr(
-        eplb_state._eplb_ops,
+        eplb_state,
         "build_expert_replica_routing_table",
         build_routing_table,
     )
