@@ -27,9 +27,7 @@ _ASCEND_CACHE_DTYPES = ("int8", "mxfp8")
 
 # The patch derives the widened Literal from the running vLLM's members, so
 # every member of the running Literal must still construct.
-_UPSTREAM_DTYPES = tuple(
-    d for d in typing.get_args(cache_mod.CacheDType) if d not in _ASCEND_CACHE_DTYPES
-)
+_UPSTREAM_DTYPES = tuple(d for d in typing.get_args(cache_mod.CacheDType) if d not in _ASCEND_CACHE_DTYPES)
 
 # The KV_CACHE_DTYPES mirror list only exists on newer vLLM main; releases
 # (e.g. v0.32.0) gate on the Literal alone.
