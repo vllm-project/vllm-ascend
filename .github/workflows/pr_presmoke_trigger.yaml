@@ -12,7 +12,7 @@ jobs:
       os: "ubuntu"
       soc: "910b"
       target: "a2"
-      dockerfile: "Dockerfile.runtime"
+      dockerfile: "Dockerfile"
       suffix: "presmoke"
       # ========== 核心修改：head.ref → head.sha ==========
       vllm_ascend_branch: ${{ github.event.pull_request.head.sha }}
