@@ -175,11 +175,19 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
     model.needs_moe_input_ids = False
     model.decoder_replay_start = 1
     model.aux_hidden_state_layers = (1, 3)
+    model.decoder_replay_layer_name = "decoder_replay"
     replay = replay_mod.AscendDecoderReplayLayers(2, model._run_replay_layers, [])
     replay.rows = torch.tensor([2, 3])
     replay.num_actual_rows = 2
     replay.context_factory = nullcontext
     model.decoder_replay_layers = replay
+
+    def run_replay(hidden, mix, positions, input_ids, num_late_aux, layer_name):
+        assert num_late_aux == 1
+        assert layer_name == model.decoder_replay_layer_name
+        return list(model.decoder_replay_layers(hidden, mix, positions, input_ids))
+
+    monkeypatch.setattr(torch.ops.vllm, "dsv41_decoder_replay_forward", run_replay, raising=False)
     output, aux = DeepseekV41Model.forward(
         model,
         torch.arange(4),
