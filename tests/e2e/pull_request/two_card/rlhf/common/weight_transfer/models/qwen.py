@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Qwen model configurations for weight-transfer coverage."""
 
-from tests.e2e.pull_request.rlhf.weight_transfer.models.base import WeightUpdateModelCase
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.base import WeightUpdateModelCase
 
 QWEN35_CASE = WeightUpdateModelCase(
     id="qwen3.5-35b-a3b-moe-layout",

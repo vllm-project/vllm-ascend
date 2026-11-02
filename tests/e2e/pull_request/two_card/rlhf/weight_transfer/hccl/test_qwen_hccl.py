@@ -5,10 +5,12 @@
 
 import pytest
 
-from tests.e2e.pull_request.rlhf.weight_transfer.models.base import WeightUpdateModelCase
-from tests.e2e.pull_request.rlhf.weight_transfer.models.qwen import QWEN_CASES
-from tests.e2e.pull_request.rlhf.weight_transfer.models.registry import pytest_model_cases
-from tests.e2e.pull_request.rlhf.weight_transfer.runners.hccl import run_hccl_weight_transfer_transaction
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.base import WeightUpdateModelCase
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.qwen import QWEN_CASES
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.registry import pytest_model_cases
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.runners.hccl import (
+    run_hccl_weight_transfer_transaction,
+)
 
 
 @pytest.mark.parametrize(("case", "packed"), pytest_model_cases("hccl", model_cases=QWEN_CASES))

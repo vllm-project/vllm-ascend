@@ -27,7 +27,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 
-from tests.e2e.pull_request.rlhf.weight_transfer.models.base import WeightUpdateModelCase
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.base import WeightUpdateModelCase
 
 
 def expand_fused_expert_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:

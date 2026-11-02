@@ -5,7 +5,7 @@
 
 import regex as re
 
-from tests.e2e.pull_request.rlhf.weight_transfer.models.base import WeightUpdateModelCase
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.base import WeightUpdateModelCase
 
 
 def minimax_m3_checkpoint_name(name: str) -> str:

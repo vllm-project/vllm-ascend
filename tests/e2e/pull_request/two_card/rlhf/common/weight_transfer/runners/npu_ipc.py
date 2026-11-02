@@ -19,8 +19,8 @@ import torch.multiprocessing as mp
 import torch_npu  # noqa: F401  # registers the NPU backend
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.pull_request.rlhf.weight_transfer.models.base import WeightUpdateModelCase
-from tests.e2e.pull_request.rlhf.weight_transfer.runners.common import (
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.base import WeightUpdateModelCase
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.runners.common import (
     CONTROL_TIMEOUT,
     UPDATE_ROUNDS,
     UPDATE_TIMEOUT,
@@ -28,7 +28,7 @@ from tests.e2e.pull_request.rlhf.weight_transfer.runners.common import (
     server_visible_devices,
     weight_transfer_servers,
 )
-from tests.e2e.pull_request.rlhf.weight_transfer.utils import (
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.utils import (
     PACKED_LANE_SKIP_REASON,
     FixedRandomWeightSource,
     assert_weight_update_matches_reference,

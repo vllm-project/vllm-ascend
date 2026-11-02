@@ -5,11 +5,11 @@
 
 from typing import Any
 
-from tests.e2e.pull_request.rlhf.weight_transfer.models.base import WeightUpdateModelCase
-from tests.e2e.pull_request.rlhf.weight_transfer.models.deepseek import DEEPSEEK_CASES
-from tests.e2e.pull_request.rlhf.weight_transfer.models.glm import GLM_CASES
-from tests.e2e.pull_request.rlhf.weight_transfer.models.minimax import MINIMAX_CASES
-from tests.e2e.pull_request.rlhf.weight_transfer.models.qwen import QWEN_CASES
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.base import WeightUpdateModelCase
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.deepseek import DEEPSEEK_CASES
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.glm import GLM_CASES
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.minimax import MINIMAX_CASES
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.qwen import QWEN_CASES
 
 MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *GLM_CASES, *MINIMAX_CASES)
 

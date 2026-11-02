@@ -32,14 +32,14 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 import torch
 
-from tests.e2e.pull_request.rlhf.weight_transfer import utils
-from tests.e2e.pull_request.rlhf.weight_transfer.models.deepseek import DEEPSEEK_CASES
-from tests.e2e.pull_request.rlhf.weight_transfer.models.glm import GLM_CASES
-from tests.e2e.pull_request.rlhf.weight_transfer.models.minimax import MINIMAX_CASES
-from tests.e2e.pull_request.rlhf.weight_transfer.models.qwen import QWEN_CASES
-from tests.e2e.pull_request.rlhf.weight_transfer.models.registry import MODEL_CASES, pytest_model_cases
-from tests.e2e.pull_request.rlhf.weight_transfer.runners import common
-from tests.e2e.pull_request.rlhf.weight_transfer.utils import (
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer import utils
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.deepseek import DEEPSEEK_CASES
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.glm import GLM_CASES
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.minimax import MINIMAX_CASES
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.qwen import QWEN_CASES
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.registry import MODEL_CASES, pytest_model_cases
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.runners import common
+from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.utils import (
     live_update_serve_args,
     reference_serve_args,
     reference_signature,
