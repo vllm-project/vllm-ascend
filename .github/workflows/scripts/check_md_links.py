@@ -54,6 +54,12 @@ SKIP_DOMAINS = {
 }
 
 
+# Exact URLs only; other pages on these sites are still checked.
+SKIP_URLS = {
+    "https://www.image-net.org/download.php": "ImageNet service is unstable (HTTP 503/504); verify manually.",
+}
+
+
 @dataclass(frozen=True)
 class Settings:
     global_concurrency: int = 10
@@ -204,7 +210,7 @@ class LinkChecker:
             link = Link(url, sources)
             links.append(link)
             try:
-                reason = example_reason(url)
+                reason = SKIP_URLS.get(url) or example_reason(url)
                 if not reason:
                     reason = SKIP_DOMAINS.get(httpx.URL(url).host.rstrip("."), "")
                 if not reason and is_contributor_profile(url, sources):
