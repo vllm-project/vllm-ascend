@@ -107,8 +107,7 @@ def _stub_torch_npu():
         current_device=lambda: 0,
         current_stream=lambda: active,
         synchronize=lambda *a, **kw: None,
-        # ``torch.npu.stream(s)`` returns a context manager; the fake stream
-        # already implements ``__enter__``/``__exit__`` so just return it.
+        # Match torch.npu.stream by restoring the previous stream on exit.
         stream=stream_context,
     )
     original_empty = torch.empty

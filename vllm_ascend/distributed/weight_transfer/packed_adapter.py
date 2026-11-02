@@ -43,29 +43,14 @@ def _install() -> None:
             streams = get_streams(device_idx, num_buffers)
             state = _ACTIVE.get()
             if state is not None:
-                state.streams = list(streams)
-                state.buffers = [torch.empty(0, dtype=torch.uint8, device="npu") for _ in streams]
-                state.readers = (*streams, state.caller)
-                state.events = [torch.npu.Event() for _ in streams] if state.receiving else []
-                for stream in streams:
-                    stream.wait_stream(state.caller)
+                state.initialize(streams)
             return streams
 
         def owning_unpack(packed, names, shapes, dtypes, sizes):
             state = _ACTIVE.get()
             if state is None:
                 return unpack(packed, names, shapes, dtypes, sizes)
-            stream = torch.npu.current_stream()
-            if state.previous_ready is not None:
-                stream.wait_event(state.previous_ready)
-            weights = [
-                (name, raw.clone().view(dtype).reshape(shape))
-                for name, shape, dtype, raw in zip(names, shapes, dtypes, packed.split(sizes))
-            ]
-            for _, tensor in weights:
-                for reader in state.readers:
-                    tensor.record_stream(reader)
-            return weights
+            return state.unpack(packed, names, shapes, dtypes, sizes)
 
         streams_for_transfer._ascend_packed_hook = True
         upstream._get_streams = streams_for_transfer
@@ -84,6 +69,27 @@ class _Transfer:
         self.events = []
         self.previous_ready = None
         self.previous_broadcast = None
+
+    def initialize(self, streams):
+        self.streams = list(streams)
+        self.buffers = [torch.empty(0, dtype=torch.uint8, device="npu") for _ in streams]
+        self.readers = (*streams, self.caller)
+        self.events = [torch.npu.Event() for _ in streams] if self.receiving else []
+        for stream in streams:
+            stream.wait_stream(self.caller)
+
+    def unpack(self, packed, names, shapes, dtypes, sizes):
+        stream = torch.npu.current_stream()
+        if self.previous_ready is not None:
+            stream.wait_event(self.previous_ready)
+        weights = [
+            (name, raw.clone().view(dtype).reshape(shape))
+            for name, shape, dtype, raw in zip(names, shapes, dtypes, packed.split(sizes))
+        ]
+        for _, tensor in weights:
+            for reader in self.readers:
+                tensor.record_stream(reader)
+        return weights
 
     def slot(self, stream):
         return self.streams.index(stream)

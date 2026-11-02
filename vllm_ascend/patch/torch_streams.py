@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Minimal CUDA stream API compatibility for NPU-only vLLM processes.
 
-Shared by platform startup, standalone weight-transfer trainers and the V2
-CUDA wrapper. No graph, IPC, allocation or generic torch.Event API is patched.
+Shared by platform startup and standalone weight-transfer trainers.
+No graph, IPC, allocation or generic torch.Event API is patched.
 Remove these aliases once supported vLLM pairings use device-neutral stream
 creation/contexts and no longer need CUDA stream compatibility.
 """

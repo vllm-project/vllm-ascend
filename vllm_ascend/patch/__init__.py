@@ -787,7 +787,7 @@
 #      `torch.accelerator.reset_peak_memory_stats`, `torch.accelerator.get_memory_info`,
 #      `torch.accelerator.empty_cache`
 #   2. Shared `torch.cuda.Stream/stream/current_stream` NPU aliases, defined in
-#      `patch/torch_streams.py` and also used by standalone trainers and V2.
+#      `patch/torch_streams.py` and also used by standalone trainers.
 #    Why:
 #       Upstream vLLM (commit 747b068) replaced `current_platform.memory_stats()`
 #       with `torch.accelerator.memory_stats()`, but `torch.accelerator` does not
