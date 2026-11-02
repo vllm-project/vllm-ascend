@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 
 @pytest.fixture
@@ -46,3 +47,34 @@ def test_custom_callback_is_not_silently_ignored(allocator):
     with pytest.raises(NotImplementedError, match="external allocation callback"):
         function(SimpleNamespace(kv_cache_groups=[]), "npu", None, [], allocate=lambda size: None)
     assert not calls
+
+
+@pytest.mark.parametrize("cache_dtype,expected", [("fp8", torch.float8_e4m3fn), ("turboquant_4bit_nc", torch.int8)])
+def test_packed_sfa_cache_retains_native_dtype_and_exact_storage(cache_dtype, expected):
+    source = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/attn_utils.py"
+    branch = next(
+        n
+        for n in ast.walk(ast.parse(source.read_text()))
+        if isinstance(n, ast.If)
+        and isinstance(n.test, ast.Name)
+        and n.test.id == "packed_sfa_main_cache"
+        and isinstance(n.body[0], ast.Assign)
+        and isinstance(n.body[0].targets[0], ast.Name)
+        and n.body[0].targets[0].id == "raw_k_tensor"
+    )
+    raw = torch.arange(256, dtype=torch.uint8)
+    namespace = {
+        "torch": torch,
+        "raw_cache": raw,
+        "k_shape": (2, 128, 1, 1),
+        "vllm_config": SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=cache_dtype), model_config=object()),
+        "TURBOQUANT_CACHE_DTYPE": "turboquant_4bit_nc",
+        "native_c8_cache_dtype": lambda *args: torch.float8_e4m3fn,
+        "kv_cache_dtype_str_to_dtype": lambda *args: torch.uint8,
+    }
+    module = ast.fix_missing_locations(ast.Module(body=branch.body[:3], type_ignores=[]))
+    exec(compile(module, str(source), "exec"), namespace)
+    view = namespace["k_cache"]
+    assert view.dtype == expected
+    assert view.data_ptr() == raw.data_ptr()
+    assert torch.equal(view.view(torch.uint8).flatten(), raw)

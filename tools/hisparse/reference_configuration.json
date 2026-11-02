@@ -91,5 +91,17 @@
     "{\"sparse_li_c8_layer_policy\": \"all\"}",
     "--per-request-spec-decode-metrics",
     "detailed"
-  ]
+  ],
+  "checkpoint_contract": {
+    "model_quant_type": "W4A8_MXFP",
+    "group_size": 32,
+    "attention_projection_quant": "W8A8_MXFP8",
+    "reference_metadata_sha256": {
+      "config.json": "817f5fb39ca5d4c4b5648de89ca00deaea7537d8c2f130172a459252a05c1073",
+      "quant_model_description.json": "1f06f3908b757f5708776d56970f96ff86172c29e3409c4662ea54bff7924177",
+      "quant_model_weights.safetensors.index.json": "ddd7e397bf2769da7ee9029bb5e8b6890fe1b2d07aad29907915c936db264bd1",
+      "tokenizer.json": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d"
+    },
+    "scope": "Historical A5 MXFP checkpoint; INT8 W4A8 is a different numerical contract"
+  }
 }

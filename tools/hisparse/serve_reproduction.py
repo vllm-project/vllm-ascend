@@ -4,9 +4,24 @@
 import argparse
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
+
+
+def validate_checkpoint(model: str, contract: dict) -> None:
+    description = Path(model) / "quant_model_description.json"
+    if not description.is_file():
+        raise ValueError(f"The A5 reference requires a local MXFP checkpoint with {description.name}.")
+    actual = json.loads(description.read_text())
+    expected = {
+        "model_quant_type": contract["model_quant_type"],
+        "group_size": contract["group_size"],
+        "model.layers.0.self_attn.q_a_proj.weight": contract["attention_projection_quant"],
+    }
+    mismatches = {key: (actual.get(key), value) for key, value in expected.items() if actual.get(key) != value}
+    if mismatches:
+        raise ValueError(f"Checkpoint quantization differs from the A5 reference (actual, expected): {mismatches}")
 
 
 def main():
@@ -26,6 +41,7 @@ def main():
     if args.print_command:
         print(json.dumps(command, indent=2))
         return
+    validate_checkpoint(args.model, config["checkpoint_contract"])
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     os.environ["VLLM_ASCEND_HISPARSE_PROFILE"] = "a5_c8_62592"
     if args.host_ip:

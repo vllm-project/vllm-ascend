@@ -79,3 +79,35 @@ def test_optional_backend_keeps_classification_and_rejection(classifier, monkeyp
     else:
         classifier["classify"](instance)
         assert instance.attn_architecture == expected
+
+
+@pytest.mark.parametrize("missing", [None, "vllm.models.qwen4_exp.common.qsa_cache", "unrelated_dependency"])
+def test_optional_qsa_metadata_only_suppresses_its_own_absence(monkeypatch, missing):
+    source = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/attn_utils.py"
+    node = next(
+        n
+        for n in ast.parse(source.read_text()).body
+        if isinstance(n, ast.Try)
+        and isinstance(n.body[0], ast.ImportFrom)
+        and n.body[0].module == "vllm.models.qwen4_exp.common.qsa_cache"
+    )
+    original = builtins.__import__
+    marker = type("QSAMetadataBuilder", (), {})
+
+    def optional_import(name, *args, **kwargs):
+        if name == "vllm.models.qwen4_exp.common.qsa_cache":
+            if missing is not None:
+                raise ModuleNotFoundError("missing dependency", name=missing)
+            return SimpleNamespace(QSAMetadataBuilder=marker)
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", optional_import)
+    namespace = {}
+    code = compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), str(source), "exec")
+    if missing == "unrelated_dependency":
+        with pytest.raises(ModuleNotFoundError) as error:
+            exec(code, namespace)
+        assert error.value.name == missing
+    else:
+        exec(code, namespace)
+        assert namespace["QSAMetadataBuilder"] == (() if missing else marker)
