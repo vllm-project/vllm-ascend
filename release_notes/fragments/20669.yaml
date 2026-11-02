@@ -1,0 +1,4 @@
+pr: 20669
+entries:
+  - category: bugfix
+    text: Fixed MiniMax DSpark FA3 scheduler metadata failures with rounded or padded graph batches and synchronized idle-DP requests. Retained compatibility with both supported ecosystem scheduler softcap APIs.
