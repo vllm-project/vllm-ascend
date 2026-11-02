@@ -132,10 +132,28 @@ def test_a_row_wise_norm_before_the_combine_is_the_per_route_norm():
     torch.testing.assert_close(combined, reference)
 
 
-def _bare_moe_method() -> nn.Module:
-    """The MoE method without its constructor, which needs a live vLLM config."""
-    method = object.__new__(muse_spark.AscendMuseSparkFusedMoEMethod)
-    nn.Module.__init__(method)
+class _StubMlpStage(nn.Module):
+    """An Ascend MoE method reduced to the one call the norm wraps."""
+
+    rows: torch.Tensor
+
+    def apply_gmm2(self, mlp_compute_input, hidden_states, act_out_scale):
+        return self.rows
+
+
+class _StubAdapter(nn.Module):
+    """``AscendFusedMoEMethod``'s shape: an adapter holding the live scheme."""
+
+    def __init__(self, scheme: nn.Module) -> None:
+        super().__init__()
+        self.quant_method = scheme
+
+
+def _bare_moe_method(rows: torch.Tensor | None = None) -> nn.Module:
+    method = _StubMlpStage()
+    if rows is not None:
+        method.rows = rows
+    muse_spark.adopt_post_expert_norm(method)
     return method
 
 
@@ -143,16 +161,15 @@ def test_fused_moe_method_normalizes_the_rows_gmm2_returns():
     """The norm is installed on the down-projection output, one row per route."""
     torch.manual_seed(0)
     hidden_size = 8
-    method = _bare_moe_method()
+    routed_rows = torch.randn(NUM_TOKENS * 3, hidden_size)
+    method = _bare_moe_method(routed_rows)
     norm = _post_expert_norm(hidden_size)
     method.post_expert_norm_fn = norm.forward
-    routed_rows = torch.randn(NUM_TOKENS * 3, hidden_size)
 
-    with (
-        patch.object(muse_spark.AscendUnquantizedFusedMoEMethod, "apply_gmm2", return_value=routed_rows),
-        # Complete rows, as on one card or under expert parallelism.
-        patch.object(muse_spark, "tensor_model_parallel_all_reduce", side_effect=AssertionError("all-reduce")),
+    with patch.object(
+        muse_spark, "tensor_model_parallel_all_reduce", side_effect=AssertionError("all-reduce")
     ):
+        # Complete rows, as on one card or under expert parallelism.
         output = method.apply_gmm2(None, None, None)
 
     expected = norm.forward_native(routed_rows, out_dtype=routed_rows.dtype)
@@ -161,16 +178,42 @@ def test_fused_moe_method_normalizes_the_rows_gmm2_returns():
 
 
 @pytest.mark.parametrize(("tp_size", "pre_norm_all_reduce"), [(1, False), (2, True)])
-def test_fused_moe_method_sums_rows_before_the_norm_only_under_tp(tp_size, pre_norm_all_reduce):
-    """Expert parallelism leaves the MoE TP size at 1; plain TP does not."""
-    moe = SimpleNamespace(moe_parallel_config=SimpleNamespace(tp_size=tp_size))
+def test_routed_experts_set_the_pre_norm_all_reduce_from_the_moe_config(tp_size, pre_norm_all_reduce):
+    """Expert parallelism leaves the MoE TP size at 1; plain TP does not.
 
-    with patch.object(
-        muse_spark.AscendUnquantizedFusedMoEMethod, "__init__", lambda self, moe, tid2eid=None: nn.Module.__init__(self)
-    ):
-        method = muse_spark.AscendMuseSparkFusedMoEMethod(moe)
+    The flag is set by the routed experts, not by the method's constructor:
+    the norm is mixed in by reassigning ``__class__`` on a method the factory
+    already built, so there is no constructor of ours to read the config in.
+    """
+    experts = object.__new__(muse_spark.AscendMuseSparkRoutedExperts)
+    nn.Module.__init__(experts)
+    experts.moe_config = SimpleNamespace(moe_parallel_config=SimpleNamespace(tp_size=tp_size))
+    experts.quant_method = method = _StubMlpStage()
+
+    experts.adopt_mlp_stage()
 
     assert method.pre_norm_all_reduce is pre_norm_all_reduce
+
+
+def test_the_pre_norm_all_reduce_reaches_a_quantized_checkpoints_scheme():
+    """A quantized checkpoint's MLP stage is the scheme the adapter wraps, and
+    the TP all-reduce has to land there too.
+
+    This is what a subclass of the unquantized MoE method cannot do: the
+    quantized path never constructs one, so the partial rows would be
+    normalized unreduced and every TP rank would return a different answer.
+    """
+    experts = object.__new__(muse_spark.AscendMuseSparkRoutedExperts)
+    nn.Module.__init__(experts)
+    experts.moe_config = SimpleNamespace(moe_parallel_config=SimpleNamespace(tp_size=2))
+    scheme = _StubMlpStage()
+    adapter = _StubAdapter(scheme)
+    experts.quant_method = adapter
+
+    assert experts.adopt_mlp_stage() is scheme
+
+    assert scheme.pre_norm_all_reduce is True
+    assert not isinstance(adapter, muse_spark.MuseSparkPostExpertNormMixin)
 
 
 def test_tp_partial_rows_are_summed_before_the_norm():
@@ -189,17 +232,14 @@ def test_tp_partial_rows_are_summed_before_the_norm():
 
     outputs = []
     for rank_rows in partial_rows:
-        method = _bare_moe_method()
+        method = _bare_moe_method(rank_rows)
         method.post_expert_norm_fn = norm.forward
         method.pre_norm_all_reduce = True
-        with (
-            patch.object(muse_spark.AscendUnquantizedFusedMoEMethod, "apply_gmm2", return_value=rank_rows),
-            patch.object(
-                muse_spark,
-                "tensor_model_parallel_all_reduce",
-                side_effect=lambda rows: partial_rows[0] + partial_rows[1],
-            ) as all_reduce,
-        ):
+        with patch.object(
+            muse_spark,
+            "tensor_model_parallel_all_reduce",
+            side_effect=lambda rows: partial_rows[0] + partial_rows[1],
+        ) as all_reduce:
             outputs.append(method.apply_gmm2(None, None, None))
         assert all_reduce.call_count == 1
         assert all_reduce.call_args.args[0] is rank_rows
@@ -209,6 +249,41 @@ def test_tp_partial_rows_are_summed_before_the_norm():
         torch.testing.assert_close(output, expected)
     normalized_partials = sum(norm.forward_native(rows, out_dtype=torch.float32) for rows in partial_rows)
     assert not torch.allclose(normalized_partials, expected)
+
+
+def test_the_mlp_stage_raises_when_the_norm_was_never_attached():
+    """Silently skipping the norm would be a wrong model, not a slower one."""
+    method = _bare_moe_method(torch.zeros(2, 4))
+
+    with pytest.raises(RuntimeError, match="post-expert norm"):
+        method.apply_gmm2(None, None, None)
+
+
+def test_the_norm_lands_on_the_scheme_a_quantized_checkpoint_installs():
+    """Quantized, ``apply_gmm2`` runs on the scheme the adapter wraps, not the
+    adapter, because that is the object handed to ``fused_experts``."""
+    torch.manual_seed(0)
+    hidden_size = 8
+    routed_rows = torch.randn(NUM_TOKENS, hidden_size)
+    scheme = _StubMlpStage()
+    scheme.rows = routed_rows
+    adapter = _StubAdapter(scheme)
+
+    target = muse_spark.adopt_post_expert_norm(adapter)
+
+    assert target is scheme
+    assert not isinstance(adapter, muse_spark.MuseSparkPostExpertNormMixin)
+    norm = _post_expert_norm(hidden_size)
+    target.post_expert_norm_fn = norm.forward
+    torch.testing.assert_close(
+        scheme.apply_gmm2(None, None, None),
+        norm.forward_native(routed_rows, out_dtype=routed_rows.dtype),
+    )
+
+
+def test_a_method_without_an_mlp_stage_is_rejected_rather_than_left_unnormalized():
+    with pytest.raises(RuntimeError, match="MLP stage"):
+        muse_spark.adopt_post_expert_norm(nn.Module())
 
 
 class _Container(nn.Module):
@@ -323,12 +398,43 @@ def test_output_gate_uses_the_weightless_ascend_gated_norm():
     torch.testing.assert_close(output, expected.reshape(NUM_TOKENS, -1))
 
 
-def test_quantized_checkpoints_are_rejected_before_construction():
+def _init_with_quantization(name: str | None):
     model = object.__new__(muse_spark.AscendMuseSpark1xForCausalLM)
-    vllm_config = SimpleNamespace(quant_config=SimpleNamespace(get_name=lambda: "ascend"))
+    quant_config = None if name is None else SimpleNamespace(get_name=lambda: name)
+    with (
+        patch.object(muse_spark.MuseSpark1xForCausalLM, "__init__", return_value=None) as upstream_init,
+        patch.object(muse_spark, "adopt_ascend_modules") as adopt,
+    ):
+        muse_spark.AscendMuseSpark1xForCausalLM.__init__(model, vllm_config=SimpleNamespace(quant_config=quant_config))
+    return upstream_init, adopt
 
-    with pytest.raises(NotImplementedError, match="unquantized"):
+
+def test_quantization_configs_other_than_modelslim_are_rejected():
+    """Their schemes reach method classes the per-route norm was never put on."""
+    model = object.__new__(muse_spark.AscendMuseSpark1xForCausalLM)
+    vllm_config = SimpleNamespace(quant_config=SimpleNamespace(get_name=lambda: "compressed-tensors"))
+
+    with pytest.raises(NotImplementedError, match="ModelSlim"):
         muse_spark.AscendMuseSpark1xForCausalLM.__init__(model, vllm_config=vllm_config)
+
+
+@pytest.mark.parametrize("name", [None, "ascend"])
+def test_unquantized_and_modelslim_checkpoints_pass_the_quantization_gate(name):
+    upstream_init, adopt = _init_with_quantization(name)
+
+    assert upstream_init.called
+    assert adopt.called
+
+
+def test_the_fused_qkv_o_gate_projection_is_declared_for_the_quant_lookup():
+    """Upstream drops ``qkv_proj`` from its own mapping, so the quantization
+    lookup cannot resolve the fused module without this entry."""
+    from vllm_ascend.quantization.configs.modelslim_config import UPDATED_PACKED_MODULES_MAPPING
+
+    for model_type in ("muse_spark", "muse_spark_text", "musespark1x_text"):
+        mapping = UPDATED_PACKED_MODULES_MAPPING[model_type]
+        # The output gate is the fourth shard the stock q/k/v packing misses.
+        assert mapping["qkv_proj"] == ["q_proj", "k_proj", "v_proj", "gate_proj"]
 
 
 def _moe_vllm_config(
@@ -371,7 +477,14 @@ class _StubLinear(nn.Module):
 
 
 class _FakeRoutedExperts(nn.Module):
-    pass
+    """The container the factory returns, with the real norm plumbing on it.
+
+    The methods are taken from the class under test rather than reimplemented,
+    so a change to how the norm is installed shows up here.
+    """
+
+    mlp_stage_method = muse_spark.AscendMuseSparkRoutedExperts.mlp_stage_method
+    attach_post_expert_norm = muse_spark.AscendMuseSparkRoutedExperts.attach_post_expert_norm
 
 
 class _FakeRunner(nn.Module):

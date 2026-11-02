@@ -167,6 +167,18 @@ MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 # Note: Currently, only models that do not have the `packed_modules_mapping` attribute
 # in the vLLM upstream need to be added here.
 UPDATED_PACKED_MODULES_MAPPING: dict[str, dict[str, list[str]]] = {
+    # Muse Spark Open fuses Q, K, V and the attention output gate into one
+    # QKVOGate projection, and upstream drops ``qkv_proj`` from its own mapping
+    # at instance level because the stock three-way packing cannot describe the
+    # fourth shard. Without an entry here the quantization lookup has nothing
+    # to resolve the fused module from, and the checkpoint keeps the four as
+    # separate tensors. Keyed under every model_type that can reach this: the
+    # multimodal config, the text config a text-only checkpoint carries, and
+    # the 1x text config the released checkpoint's backbone uses.
+    **{
+        model_type: {"qkv_proj": ["q_proj", "k_proj", "v_proj", "gate_proj"]}
+        for model_type in ("muse_spark", "muse_spark_text", "musespark1x_text")
+    },
     # GLM-5.3-Flash (glm5_next): KDA layers ship a fused q/k/v/b/f_a/g_a
     # projection; sparse-MLA layers keep the DeepSeek-style q_a/kv_a pair.
     # Native HF FP8 checkpoints leave the KDA projections in bf16 via

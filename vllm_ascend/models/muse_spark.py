@@ -29,14 +29,22 @@ cannot express it, and is rejected.
 Tensor parallelism without expert parallelism slices every expert along its
 intermediate size, so each rank's down-projection rows are partial sums, and
 RMS is not linear in them. As upstream does, the rows are all-reduced over TP
-before the norm, and the MoE output then skips its final all-reduce.
+before the norm, and the MoE output then skips its final all-reduce. That
+holds whether the checkpoint is quantized or not, because the norm and the
+all-reduce travel together in one mixin.
 
-Quantized checkpoints, EPLB, sequence-parallel MoE, data or prefill context
+ModelSlim quantized checkpoints are accepted, but no accuracy claim is made
+and none has been run: the per-route norm is mixed into whichever Ascend MoE
+scheme the quantization description selects, and the fused QKVOGate projection
+is declared in this model's packed-module mapping so the scheme lookup can
+resolve it from the four tensors the checkpoint keeps separate. The other
+quantization configs, EPLB, sequence-parallel MoE, data or prefill context
 parallelism without expert parallelism, and the DSpark draft are not
 supported yet.
 """
 
 from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -44,7 +52,7 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_ep_group
-from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEFactory, GateLinear
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.models.muse_spark.amd.model import (
@@ -71,11 +79,9 @@ from vllm.models.muse_spark.common.omni import (
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-from vllm_ascend.ops.fused_moe.routed_experts import (
-    AscendRoutedExperts,
-    AscendUnquantizedFusedMoEMethod,
-)
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.triton.kda.kda import rms_norm_gated
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 ROUTER_DTYPE = torch.float32
 ROUTER_SCORE_NORMALIZATION = "sigmoid"
@@ -180,7 +186,7 @@ def adopt_ascend_modules(model: nn.Module) -> None:
             module.attn.kv_cache_update_bypass = False
 
 
-class AscendMuseSparkFusedMoEMethod(AscendUnquantizedFusedMoEMethod):
+class MuseSparkPostExpertNormMixin:
     """Normalize every route's output before the combine weights and sums it.
 
     Muse Spark normalizes each expert's output and only then takes the weighted
@@ -204,27 +210,77 @@ class AscendMuseSparkFusedMoEMethod(AscendUnquantizedFusedMoEMethod):
     ``needs_pre_norm_all_reduce`` path does, in the activation dtype the down
     projection already rounded them to. Every TP rank routes the same tokens
     through the same permutation, so the rows line up across ranks.
+
+    This is a mixin rather than a subclass of one method because which class
+    owns ``apply_gmm2`` depends on the checkpoint: the MoE method itself when
+    the weights are unquantized, and the quantization scheme the Ascend
+    adapter wraps when they are not. ``adopt_post_expert_norm`` picks the live
+    one and mixes this in, so the norm lands on the MLP stage either way. --
+    and so does the all-reduce, which a quantized checkpoint needs just as
+    much and would not get from a subclass of the unquantized method.
     """
 
     # Attached by the owning MoE once the factory has built the layer, as
     # upstream attaches its own post_expert_norm_fn to the routed experts.
-    # The bound method is held, not the module: this class is an ``nn.Module``,
-    # so holding the norm itself would register its weight a second time under
-    # the quant method and put a key in the state dict no checkpoint carries.
+    # The bound method is held, not the module: the host class can be an
+    # ``nn.Module``, so holding the norm itself would register its weight a
+    # second time and put a key in the state dict no checkpoint carries.
     post_expert_norm_fn: Callable[..., torch.Tensor] | None = None
+    # Set by AscendMuseSparkRoutedExperts, not by an __init__ here: this mixin
+    # is installed by reassigning __class__ on an object the factory already
+    # built, so an __init__ on it would never run.
     pre_norm_all_reduce: bool = False
 
-    def __init__(self, moe: FusedMoEConfig, tid2eid=None) -> None:
-        super().__init__(moe, tid2eid=tid2eid)
-        self.pre_norm_all_reduce = needs_pre_norm_all_reduce(moe)
-
     def apply_gmm2(self, mlp_compute_input, hidden_states, act_out_scale):
-        routed_rows = super().apply_gmm2(mlp_compute_input, hidden_states, act_out_scale)
+        routed_rows = super().apply_gmm2(mlp_compute_input, hidden_states, act_out_scale)  # type: ignore[misc]
         if self.post_expert_norm_fn is None:
             raise RuntimeError("Muse Spark routed experts ran without their post-expert norm.")
         if self.pre_norm_all_reduce:
             routed_rows = tensor_model_parallel_all_reduce(routed_rows)
         return self.post_expert_norm_fn(routed_rows, out_dtype=routed_rows.dtype)
+
+
+_NORMED_METHOD_CLASSES: dict[type, type] = {}
+
+
+def _normed_method_class(base: type) -> type:
+    """``base`` with the Muse Spark per-route norm on its MLP stage.
+
+    One class per base, cached, so two layers with the same method do not end
+    up with two classes that behave identically.
+    """
+    normed = _NORMED_METHOD_CLASSES.get(base)
+    if normed is None:
+        normed = type(f"MuseSpark{base.__name__}", (MuseSparkPostExpertNormMixin, base), {})
+        _NORMED_METHOD_CLASSES[base] = normed
+    return normed
+
+
+def adopt_post_expert_norm(method: Any) -> Any:
+    """Give the object that runs the MLP stage the Muse Spark per-route norm.
+
+    The MLP stage calls ``apply_gmm2`` on whichever object passed itself to
+    ``fused_experts`` as ``quant_method``. Unquantized, that is the MoE method
+    on the routed experts. Quantized, ``AscendFusedMoEMethod`` is only an
+    adapter and hands the scheme it wraps, so the norm has to go on the scheme.
+
+    Returns the object the norm was installed on, which is the one that then
+    takes ``post_expert_norm_fn``.
+    """
+    if isinstance(method, MuseSparkPostExpertNormMixin):
+        return method
+    target = method
+    if not hasattr(type(target), "apply_gmm2"):
+        # The adapter keeps the scheme under the same attribute name it is
+        # itself held by, so one step in reaches the object that runs.
+        target = getattr(target, "quant_method", None)
+        if target is None or not hasattr(type(target), "apply_gmm2"):
+            raise RuntimeError(
+                "Muse Spark could not find the MoE method that runs the MLP stage, so its "
+                f"per-route output norm has nowhere to go; got {type(method).__name__}."
+            )
+    target.__class__ = _normed_method_class(type(target))
+    return target
 
 
 class AscendMuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts, AscendRoutedExperts):
@@ -241,15 +297,45 @@ class AscendMuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts, AscendRou
     loader keeps this rank's experts and TP slice. Everything else is
     ``AscendRoutedExperts``.
 
-    ``AscendRoutedExperts`` installs the stock unquantized method itself, so
-    the Muse Spark one replaces it here rather than being passed in.
+    The MoE method is not replaced, because for a quantized checkpoint the
+    quantization description picks it: the per-route norm is mixed into
+    whichever method is already installed, and the pre-norm all-reduce is set
+    on that same object. Setting it here rather than in the mixin is what
+    makes the all-reduce reach a quantized checkpoint at all -- the mixin is
+    installed by reassigning ``__class__``, so it has no constructor to read
+    the MoE config in, and this is the one place holding both that config and
+    the object the norm landed on.
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._replace_quant_method(
-            AscendMuseSparkFusedMoEMethod(self.moe_config, tid2eid=self.tid2eid),
-        )
+        self.adopt_mlp_stage()
+
+    def adopt_mlp_stage(self) -> Any:
+        """Install the per-route norm on the live MLP stage and tell it whether
+        its rows are TP partials.
+
+        Both belong on the same object and neither can be set in the mixin:
+        it is installed by reassigning ``__class__`` on a method the factory
+        already built, so it has no constructor of ours to run. This is the
+        one place that holds the MoE config and the object the norm landed on.
+        """
+        method = adopt_post_expert_norm(self.quant_method)
+        method.pre_norm_all_reduce = needs_pre_norm_all_reduce(self.moe_config)
+        return method
+
+    def mlp_stage_method(self) -> Any:
+        """The object whose ``apply_gmm2`` the MLP stage calls.
+
+        Resolved on each call rather than stored: the hosts can be
+        ``nn.Module``s, and holding one as an attribute here would register it
+        as a submodule and duplicate its parameters in the state dict.
+        """
+        return adopt_post_expert_norm(self.quant_method)
+
+    def attach_post_expert_norm(self, norm_fn: Callable[..., torch.Tensor]) -> None:
+        """Hand the per-route norm to the MLP stage; it raises without one."""
+        self.mlp_stage_method().post_expert_norm_fn = norm_fn
 
 
 class AscendMuseSparkMoERunner(AscendMoERunner):
@@ -488,7 +574,7 @@ class AscendMuseSpark1xMoE(MuseSpark1xMoE):
             routed_experts_cls=AscendMuseSparkRoutedExperts,
             runner_cls=AscendMuseSparkMoERunner,
         )
-        self.experts.routed_experts.quant_method.post_expert_norm_fn = self.post_expert_norm.forward
+        self.experts.routed_experts.attach_post_expert_norm(self.post_expert_norm.forward)
 
     def _pool(self, hidden_states: torch.Tensor) -> torch.Tensor:
         pooled, _ = self.pooler(hidden_states)
@@ -516,10 +602,17 @@ class AscendMuseSpark1xForCausalLM(MuseSpark1xForCausalLM):
         prefix: str = "",
         layer_type: type[MuseSpark1xDecoderLayer] | None = None,
     ) -> None:
-        if vllm_config.quant_config is not None:
+        quant_config = vllm_config.quant_config
+        if quant_config is not None and quant_config.get_name() != ASCEND_QUANTIZATION_METHOD:
+            # ModelSlim checkpoints are the only quantized ones wired up: the
+            # per-route norm is mixed into whichever Ascend MoE scheme the
+            # description selects (see MuseSparkPostExpertNormMixin), and the
+            # fused QKVOGate projection is resolved through this model's
+            # packed-module mapping. The other quantization configs reach
+            # different method classes and have had neither done for them.
             raise NotImplementedError(
-                "Muse Spark on Ascend supports unquantized (BF16) checkpoints only; "
-                f"got quantization {vllm_config.quant_config.get_name()!r}."
+                "Muse Spark on Ascend supports unquantized (BF16) checkpoints and ModelSlim "
+                f"({ASCEND_QUANTIZATION_METHOD!r}) ones; got {quant_config.get_name()!r}."
             )
         super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
         adopt_ascend_modules(self)
