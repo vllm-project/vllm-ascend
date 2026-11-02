@@ -8,6 +8,7 @@ from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import (
 )
 
 from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
+from vllm_ascend.patch.worker.patch_lilicorr import apply_lilicorr_patch
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
     AscendDFlash2Speculator,
 )
@@ -28,6 +29,10 @@ class AscendLiLiCorrSpeculator(LiLiCorrSpeculator, AscendDFlash2Speculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
+        # The lattice attention scores with a learned per-head additive bias
+        # that Ascend's SDPA path cannot take as a sliced, non-contiguous mask,
+        # so install the fp32 fallback before the draft weights load.
+        apply_lilicorr_patch()
         model = super().load_draft_model(target_model, target_attn_layer_names)
         # The upstream candidate path assumes standard TP: get_top_k_tokens
         # gathers vocabulary shards only over TP, and target_embeddings receives
