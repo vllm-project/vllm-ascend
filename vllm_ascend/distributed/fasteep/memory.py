@@ -3,6 +3,7 @@
 """Discard idle weights/KV and refill identical shards through retained HCCL."""
 
 import gc
+from typing import Any
 
 import torch
 import torch_npu
@@ -22,7 +23,7 @@ class PeerMemory:
         ranges = [
             (ptr, ptr + data.handle[1]) for ptr, data in self.allocator.pointer_to_data.items() if data.tag == "weights"
         ]
-        buckets = {}
+        buckets: dict[int, dict[str, Any]] = {}
         # Buffers are rank-local metadata and are backed up separately below.
         for name, tensor in self.model.named_parameters():
             if tensor.device.type != "npu" or not tensor.numel():

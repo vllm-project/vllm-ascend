@@ -39,13 +39,16 @@ class FastEEPMiddleware:
         self.authentication = None
         inner = app
         while inner is not None:
-            if type(inner).__name__ == "AuthenticationMiddleware":
+            if callable(getattr(inner, "verify_token", None)):
                 self.authentication = inner
                 break
             inner = getattr(inner, "app", None)
 
     async def rpc(self, method, **kwargs):
-        values = await self.client.engine_core.call_utility_all_async("collective_rpc", method, 240, (), kwargs)
+        client = self.client
+        if client is None:
+            raise RuntimeError("FastEEP frontend is not initialized.")
+        values = await client.engine_core.call_utility_all_async("collective_rpc", method, 240, (), kwargs)
         return [value for rank in values for value in rank]
 
     async def initialize(self, scope):
@@ -68,12 +71,14 @@ class FastEEPMiddleware:
 
         def route(engine, request):
             # Delegate affinity, counters, and abort bookkeeping to upstream.
+            active = self.active
+            assert active is not None
             rank = request.data_parallel_rank
-            if rank is not None and not 0 <= rank < self.active:
+            if rank is not None and not 0 <= rank < active:
                 raise ValueError("Requested DP rank is inactive.")
-            if rank is None and self.active < self.maximum:
+            if rank is None and active < self.maximum:
                 request.data_parallel_rank = min(
-                    range(self.active), key=lambda i: engine.engine_inflight[engine.core_engines[i]]
+                    range(active), key=lambda i: engine.engine_inflight[engine.core_engines[i]]
                 )
             try:
                 return original(request)
@@ -101,6 +106,9 @@ class FastEEPMiddleware:
             try:
                 try:
                     await self.initialize(scope)
+                    client = self.client
+                    assert client is not None
+                    assert self.active is not None
                     validate_target(target, self.maximum)
                     await self.rpc("fasteep_validate", target=target)
                 except ValueError as error:
@@ -109,15 +117,15 @@ class FastEEPMiddleware:
                     return 200, {"active": target, "changed": False}
                 async with self.condition:
                     await asyncio.wait_for(self.condition.wait_for(lambda: self.inflight == 0), timeout)
-                if self.client.engine_core.streaming_reqs:
+                if client.engine_core.streaming_reqs:
                     return 409, {"error": "Close streaming-input sessions before resizing."}
                 # Keep every scheduler alive; only workers leave the active group.
                 paused = True
-                await asyncio.wait_for(self.client.pause_generation(mode="wait", clear_cache=True), timeout)
+                await asyncio.wait_for(client.pause_generation(mode="wait", clear_cache=True), timeout)
                 states = await self.rpc("fasteep_resize", target=target)
                 self.check_states(states, target)
                 self.active = target
-                await self.client.resume_generation()
+                await client.resume_generation()
                 return 200, {"active": target, "changed": True, "seconds": time.monotonic() - start}
             except asyncio.TimeoutError:
                 self.failed = paused

@@ -287,7 +287,7 @@ class NPUPlatform(Platform):
         """
         from datetime import timedelta as _timedelta
 
-        from torch.distributed import ProcessGroup, is_hccl_available
+        from torch.distributed import PrefixStore, ProcessGroup, is_hccl_available
         from torch.distributed.distributed_c10d import Backend
         from torch_npu._C._distributed_c10d import ProcessGroupHCCL
 
@@ -310,7 +310,9 @@ class NPUPlatform(Platform):
         # netloader does (group_id = init_method-based string); an empty
         # group_id lets sequentially created comms collide on HCCL's
         # identity-scoped resources (e.g. the EI0019 port-60000 bind).
-        underlying_store = prefix_store.underlying_store
+        underlying_store = prefix_store
+        while isinstance(underlying_store, PrefixStore):
+            underlying_store = underlying_store.underlying_store
         pg_options.group_id = f"tcp://{underlying_store.host}:{underlying_store.port}/"
         # Give each stateless group its own HCCL host-socket port window.
         # Listeners used for rootInfo detection are not always released
