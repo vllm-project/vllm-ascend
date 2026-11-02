@@ -494,7 +494,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<QSFAT>::Init(__gm__ ui
     softmaxSumGm.SetGlobalBuffer((__gm__ T *)softmaxSum);
 
     if ASCEND_IS_AIV {
-        if (constInfo.needInit && LAYOUT_T != QSFA_LAYOUT::TND) {
+        if (constInfo.needInit) {
             InitOutputSingleCore();
         }
     }
