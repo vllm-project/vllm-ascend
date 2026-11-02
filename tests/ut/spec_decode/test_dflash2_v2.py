@@ -380,9 +380,8 @@ def test_lilicorr_uses_ascend_dflash_runtime_hooks():
     assert issubclass(AscendLiLiCorrSpeculator, AscendDFlash2Speculator)
     assert AscendLiLiCorrSpeculator.build_draft_attn_metadatas is AscendDFlashSpeculator.build_draft_attn_metadatas
     assert AscendLiLiCorrSpeculator.propose is AscendDFlashSpeculator.propose
-    assert "init_cudagraph_manager" in AscendLiLiCorrSpeculator.__dict__
+    assert AscendLiLiCorrSpeculator.init_cudagraph_manager is AscendDFlashSpeculator.init_cudagraph_manager
     assert AscendLiLiCorrSpeculator._generate_draft is LiLiCorrSpeculator._generate_draft
-    assert AscendLiLiCorrSpeculator._score_candidates is LiLiCorrSpeculator._score_candidates
 
 
 @REQUIRES_LILICORR
@@ -419,31 +418,37 @@ def test_lilicorr_rejects_lmhead_tp_before_candidate_sampling(monkeypatch):
 
 
 @REQUIRES_LILICORR
-def test_lilicorr_requires_enforce_eager(monkeypatch):
-    calls: list[CUDAGraphMode] = []
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dflash.speculator.AscendDFlashSpeculator.init_cudagraph_manager",
-        lambda self, mode: calls.append(mode),
-    )
+def test_lilicorr_scores_in_request_scoped_context(monkeypatch):
+    config, context, result = SimpleNamespace(), object(), object()
     speculator = AscendLiLiCorrSpeculator.__new__(AscendLiLiCorrSpeculator)
+    speculator.vllm_config = config
+    candidates = torch.zeros(2, 7, 8, dtype=torch.int64)
+    unary = torch.zeros(2, 7, 8)
+    hidden = torch.zeros(2, 7, 4)
+    create = MagicMock(return_value=context)
+    override = MagicMock(return_value=nullcontext())
+    monkeypatch.setattr("vllm_ascend.worker.v2.spec_decode.lilicorr.speculator.create_forward_context", create)
+    monkeypatch.setattr("vllm_ascend.worker.v2.spec_decode.lilicorr.speculator.override_forward_context", override)
+    with patch.object(LiLiCorrSpeculator, "_score_candidates", autospec=True, return_value=result) as score:
+        assert speculator._score_candidates(candidates, unary, hidden) is result
+        score.assert_called_once_with(speculator, candidates, unary, hidden)
 
-    speculator.speculative_config = SimpleNamespace(enforce_eager=True)
-    speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
-    assert calls == [CUDAGraphMode.NONE]
-
-    speculator.speculative_config = SimpleNamespace(enforce_eager=False)
-    with pytest.raises(NotImplementedError, match="graph mode"):
-        speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
-    assert calls == [CUDAGraphMode.NONE]
+    create.assert_called_once_with(None, config, batch_descriptor=BatchDescriptor(num_tokens=2))
+    override.assert_called_once_with(context)
 
 
+@pytest.mark.parametrize(
+    "speculator_name",
+    ["AscendDFlash2Speculator", pytest.param("AscendLiLiCorrSpeculator", marks=REQUIRES_LILICORR)],
+)
 @pytest.mark.parametrize(
     "enforce_eager,expected_mode",
     [(False, CUDAGraphMode.FULL_DECODE_ONLY), (None, CUDAGraphMode.FULL_DECODE_ONLY), (True, CUDAGraphMode.NONE)],
 )
-def test_init_cudagraph_manager_preserves_graph_mode(monkeypatch, enforce_eager, expected_mode):
+def test_init_cudagraph_manager_preserves_graph_mode(monkeypatch, speculator_name, enforce_eager, expected_mode):
     calls = []
-    speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
+    speculator_class = globals()[speculator_name]
+    speculator = speculator_class.__new__(speculator_class)
     speculator.speculative_config = SimpleNamespace(enforce_eager=enforce_eager)
     speculator.update_stream = object()
 

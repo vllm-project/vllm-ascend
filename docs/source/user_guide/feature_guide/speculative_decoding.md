@@ -436,10 +436,13 @@ one (the example below assumes a block size of eight). Shorter lengths down to
 one token are supported, but may reduce acceptance; measure them with your
 checkpoint and workload. Longer lengths are unsupported.
 
-LiLiCorr currently uses Model Runner V2 and eager draft execution on Ascend.
-Set `VLLM_USE_V2_MODEL_RUNNER=1` and set the nested speculative
-`enforce_eager` option to `true`. The target model retains its independently
-configured execution mode.
+LiLiCorr uses Model Runner V2 on Ascend. Set `VLLM_USE_V2_MODEL_RUNNER=1`.
+To test full draft ACL graphs, enable `FULL_DECODE_ONLY` in the compilation
+configuration and leave the nested speculative `enforce_eager` option unset
+or set it to `false`. LiLiCorr graph capture, replay, and graph/eager equivalence
+still require validation on the intended NPU configuration. Set the nested
+`enforce_eager` option to `true` for the eager baseline shown below; the target
+model retains its independently configured execution mode.
 
 ```shell
 VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <target-model> \
