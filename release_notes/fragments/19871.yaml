@@ -1,5 +1,0 @@
-pr: 19871
-entries:
-  - category: bugfix
-    text: Fixed prepared Kimi K3 state-copy launches with Triton versions that retain constexpr argument slots.
-    model: kimi-k3
