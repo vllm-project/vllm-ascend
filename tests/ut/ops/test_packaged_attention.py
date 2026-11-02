@@ -120,6 +120,7 @@ def test_native_mla_retires_same_stream_use_after_device_wait(monkeypatch, captu
     order = []
     stream = MagicMock()
     event = object()
+
     def record_event():
         order.append("record")
         return event
