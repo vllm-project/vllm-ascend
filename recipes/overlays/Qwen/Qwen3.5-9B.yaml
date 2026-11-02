@@ -1,0 +1,115 @@
+# Ascend 310P overlay for Qwen/Qwen3.5-9B.
+# Provenance: vllm-ascend-recipes PR #131. Measured path = Eco-Tech W8A8-310P
+# (FP16 9B not smoke-tested on ~21GB).
+meta:
+  hardware:
+    ascend_310p: verified
+    ascend_310p_2x: verified
+
+variants:
+  ascend_310p_w8a8:
+    model_id: "Eco-Tech/Qwen3.5-9B-W8A8-310P"
+    label: "W8A8 (Ascend 310P)"
+    precision: int8
+    vram_minimum_gb: 16
+    description: "Eco-Tech W8A8-310P on single ~21GB 310P3. Measured TP1 floor: no MTP, text-only MM limits, len=8192, seqs=8, util=0.90, cudagraph [1,8]. gsm8k 95.15. Omit fuse_norm_quant on v0.30."
+    supported_hardware: [ascend_310p]
+    tp: 1
+    min_vllm_version: "0.23.0"
+    extra_args:
+      - "--dtype"
+      - "float16"
+      - "--mamba-ssm-cache-dtype"
+      - "float16"
+      - "--served-model-name"
+      - "qwen3.5"
+      - "--max-num-seqs"
+      - "8"
+      - "--max-model-len"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--limit-mm-per-prompt"
+      - '{"image":0,"video":0}'
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,8]}'
+      - "--additional-config"
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":false}}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: "True"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+    hardware_overrides:
+      ascend_310p:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.30.0rc1-310p"
+        install:
+          pip: false
+
+  ascend_310p_w8a8_tp2_mtp:
+    model_id: "Eco-Tech/Qwen3.5-9B-W8A8-310P"
+    label: "W8A8 TP2+MTP (Ascend 310P)"
+    precision: int8
+    vram_minimum_gb: 16
+    description: "Same W8A8 checkpoint on two ~21GB chips. Measured TP2 + qwen3_5_mtp function smoke PASS (2026-10-30 Asia/Shanghai). gsm8k not re-run (table remains TP1 95.15). Single-chip + MTP still OOM."
+    supported_hardware: [ascend_310p_2x]
+    tp: 2
+    min_vllm_version: "0.23.0"
+    extra_args:
+      - "--dtype"
+      - "float16"
+      - "--mamba-ssm-cache-dtype"
+      - "float16"
+      - "--served-model-name"
+      - "qwen3.5"
+      - "--max-num-seqs"
+      - "8"
+      - "--max-model-len"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--speculative-config"
+      - '{"method":"qwen3_5_mtp","num_speculative_tokens":1}'
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,8]}'
+      - "--additional-config"
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":false}}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: "True"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      ASCEND_RT_VISIBLE_DEVICES: "0,1"
+    hardware_overrides:
+      ascend_310p_2x:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.30.0rc1-310p"
+        install:
+          pip: false
+
+notes:
+  - title: "Ascend 310P measured lane (9B W8A8)"
+    when: { hardware: [ascend_310p, ascend_310p_2x] }
+    body: |
+      Prefer `Eco-Tech/Qwen3.5-9B-W8A8-310P` on ~21 GB. FP16 9B not smoke-tested here.
+      Image: `quay.io/ascend/vllm-ascend:v0.30.0rc1-310p`.
+      Community recipe: https://github.com/vllm-ascend/vllm-ascend-recipes/pull/131
+
+      TP1 floor (no MTP) — gsm8k **95.15** (2026-10-29 Asia/Shanghai; tutorial ref 95.30):
+
+      ```bash
+      export VLLM_USE_MODELSCOPE=True
+      export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+      vllm serve your_model_path \
+        --host 127.0.0.1 --port 8080 \
+        --tensor-parallel-size 1 \
+        --served-model-name qwen3.5 \
+        --max-num-seqs 8 --max-model-len 8192 \
+        --trust-remote-code --gpu-memory-utilization 0.90 \
+        --mamba-ssm-cache-dtype float16 --dtype float16 \
+        --limit-mm-per-prompt '{"image":0,"video":0}' \
+        --mm-processor-cache-gb 0 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,8]}' \
+        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":false}}'
+      ```
+
+      Do not pass `fuse_norm_quant` on v0.30. TP2+MTP function smoke PASS on two chips (2026-10-30); gsm8k/perf not re-run.
