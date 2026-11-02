@@ -38,7 +38,12 @@ def copy_kv_cache_blocks_inplace(
         return
 
     cache_tensors: list[torch.Tensor] = []
-    seen_tensors: set[int] = set()
+    # Dedupe exact duplicates only. Distinct views over the same storage start
+    # at the same data_ptr (e.g. a narrowed slice alongside the full tensor);
+    # deduping by data_ptr alone would drop the wider view and copy only part
+    # of the page, leaving the rest stale. Two identical views copied twice
+    # are idempotent because both source and destination use the same layout.
+    seen_views: set[tuple[int, tuple[int, ...], tuple[int, ...]]] = set()
     for entry in kv_caches:
         if entry is None:
             continue
@@ -49,10 +54,10 @@ def copy_kv_cache_blocks_inplace(
         for tensor in tensors:
             if tensor is None:
                 continue
-            data_ptr = tensor.data_ptr()
-            if data_ptr in seen_tensors:
+            view = (tensor.data_ptr(), tuple(tensor.shape), tuple(tensor.stride()))
+            if view in seen_views:
                 continue
-            seen_tensors.add(data_ptr)
+            seen_views.add(view)
             cache_tensors.append(tensor)
 
     if not cache_tensors:
