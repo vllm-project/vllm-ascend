@@ -156,6 +156,9 @@ def _serve_args(port: int) -> list[str]:
 
 
 def _server_environment(model_runner: str) -> dict[str, str]:
+    hccl_socket_ifname = os.environ.get("HCCL_SOCKET_IFNAME")
+    if not hccl_socket_ifname:
+        raise KeyError("HCCL_SOCKET_IFNAME environment variable must be set for Ascend multi-card execution.")
     return {
         "VLLM_USE_V2_MODEL_RUNNER": model_runner,
         "VLLM_USE_V1": "1",
@@ -166,9 +169,9 @@ def _server_environment(model_runner: str) -> dict[str, str]:
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
         "OMP_PROC_BIND": "false",
         "OMP_NUM_THREADS": "10",
-        "HCCL_SOCKET_IFNAME": os.environ["HCCL_SOCKET_IFNAME"],
-        "GLOO_SOCKET_IFNAME": os.environ.get("GLOO_SOCKET_IFNAME", os.environ["HCCL_SOCKET_IFNAME"]),
-        "TP_SOCKET_IFNAME": os.environ.get("TP_SOCKET_IFNAME", os.environ["HCCL_SOCKET_IFNAME"]),
+        "HCCL_SOCKET_IFNAME": hccl_socket_ifname,
+        "GLOO_SOCKET_IFNAME": os.environ.get("GLOO_SOCKET_IFNAME", hccl_socket_ifname),
+        "TP_SOCKET_IFNAME": os.environ.get("TP_SOCKET_IFNAME", hccl_socket_ifname),
         "TOKENIZERS_PARALLELISM": "false",
     }
 
@@ -234,7 +237,7 @@ def _response_comparison(left: dict[str, Any], right: dict[str, Any]) -> dict[st
         if left_token != right_token:
             first_divergence = index
             candidate_value = None
-            if index < len(right_top_logprobs):
+            if index < len(right_top_logprobs) and isinstance(right_top_logprobs[index], dict):
                 candidate_value = right_top_logprobs[index].get(left_token)
             cross_lookup = {
                 "baseline_token": left_token,
@@ -592,8 +595,10 @@ def test_deepseek_v3_2_mrv1_mrv2_parity_and_performance():
     _write_results(results)
 
     for left, right in zip(mrv1["accuracy"]["greedy"], mrv2["accuracy"]["greedy"], strict=True):
-        assert left["choices"][0]["text"], "MRV1 returned an empty greedy response"
-        assert right["choices"][0]["text"], "MRV2 returned an empty greedy response"
+        assert left.get("choices"), "MRV1 response is missing choices"
+        assert right.get("choices"), "MRV2 response is missing choices"
+        assert left["choices"][0].get("text"), "MRV1 returned an empty greedy response"
+        assert right["choices"][0].get("text"), "MRV2 returned an empty greedy response"
     assert greedy_logprob_deltas, "No comparable greedy logprobs were returned"
     assert results["accuracy_comparison"]["greedy_repo_tolerance_pass"]
     assert results["accuracy_comparison"]["mrv1_sampled_repo_tolerance_pass"]
