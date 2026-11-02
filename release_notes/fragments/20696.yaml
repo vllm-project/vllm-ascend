@@ -1,0 +1,6 @@
+pr: 20696
+entries:
+  - category: bugfix
+    text: >-
+      Corrected the fallback next token for partial-prefill requests in V1 padded speculative decoding.
+      Valid sampled tokens retain priority, and the draft boundary input now follows the scheduled prefix.
