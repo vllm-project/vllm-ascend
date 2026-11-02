@@ -265,19 +265,51 @@ class CpuAlloc:
                 result[npu] = cpu_list[start_index:end_index]
         return result
 
-    def extend_numa(self, cpu_list: list[int]) -> list[int]:
-        if not cpu_list:
+    def _borrow_cpus(
+        self,
+        base: list[int],
+        local: list[int],
+        need: int,
+        taken: set[int],
+        cpu_owner: dict[int, str],
+        surplus: dict[str, int],
+    ) -> list[int]:
+        """Borrow just enough remote CPUs to cover a local pool deficit.
+
+        The traversal is the ascending NUMA node-id ring starting right after
+        the pool's own node (wrapping around, own node last), so the borrowing
+        plan is a pure function of the node table and stays identical across
+        worker processes. Borrowing stops as soon as the deficit is covered.
+        Only cpuset-allowed CPUs that no earlier group has taken (and that are
+        not already local) are considered. A CPU claimed by another group's
+        base pool is only borrowed while that group still has surplus beyond
+        its own per-NPU role reservations, so a lending group always keeps at
+        least its minimum reservation. The own node is derived from the full
+        base pool so that borrowing still works when earlier groups have
+        already consumed every local CPU.
+        """
+        own_node = self.get_single_numa_node(base)
+        if own_node is None or own_node not in self.numa_to_cpu_map:
             return []
-        nodes = {self.cpu_node[c] for c in cpu_list}
-        if len(nodes) != 1:
-            return cpu_list
-        node = list(nodes)[0]
-        next_node = (node + 1) % len(self.numa_to_cpu_map)
-        extended = cpu_list[:]
-        for cpu in self.numa_to_cpu_map[next_node]:
-            if cpu in self.device_info.allowed_cpus:
-                extended.append(cpu)
-        return sorted(set(extended))
+        nodes = sorted(self.numa_to_cpu_map)
+        start = nodes.index(own_node) + 1
+        borrowed: list[int] = []
+        for offset in range(len(nodes)):
+            if len(local) + len(borrowed) >= need:
+                break
+            node = nodes[(start + offset) % len(nodes)]
+            for cpu in sorted(self.numa_to_cpu_map[node]):
+                if len(local) + len(borrowed) >= need:
+                    break
+                if cpu not in self.device_info.allowed_cpus or cpu in taken or cpu in local:
+                    continue
+                owner = cpu_owner.get(cpu)
+                if owner is not None and surplus.get(owner, 0) <= 0:
+                    continue
+                if owner is not None:
+                    surplus[owner] -= 1
+                borrowed.append(cpu)
+        return borrowed
 
     def build_cpu_node_map(self) -> None:
         cpu_numa_map, _ = execute_command(["lscpu", "-e=CPU,NODE"])
@@ -584,20 +616,53 @@ class CpuAlloc:
             base_pools[npu] = base_cpu_list
             groups[str(base_cpu_list)].append(npu)
 
-        min_cpus_per_group = self._min_cpus_per_npu()
+        min_cpus_per_npu = self._min_cpus_per_npu()
         final: dict[int, list[int]] = {}
-        for key, npu_list in groups.items():
-            pool = base_pools[npu_list[0]]
-            # Only extend to the next NUMA node when the local pool is too
-            # small to host the whole group with per-NPU role reservations.
-            if len(pool) < min_cpus_per_group * len(npu_list):
-                pool = self.extend_numa(pool)
+        taken: set[int] = set()
+        # Per-group CPU surplus (local pool beyond what the group needs for
+        # its per-NPU role reservations) and the group owning each candidate
+        # CPU's base pool. Borrowers may only take surplus CPUs of other
+        # groups or CPUs that no group claims, so every group processed later
+        # keeps at least its minimum reservation on its own node.
+        surplus: dict[str, int] = {}
+        cpu_owner: dict[int, str] = {}
+        for group_key, npu_list in groups.items():
+            group_need = min_cpus_per_npu * len(npu_list)
+            surplus[group_key] = max(0, len(base_pools[npu_list[0]]) - group_need)
+            for cpu in base_pools[npu_list[0]]:
+                cpu_owner.setdefault(cpu, group_key)
+        # Serve deficient groups (local pool too small to host the whole
+        # group with per-NPU role reservations) first: every group adds its
+        # whole effective pool to `taken` before the next group runs, and the
+        # next group subtracts `taken` from its local pool, so effective CPU
+        # pools stay globally disjoint even when a deficient group borrows
+        # CPUs from another NUMA node (the node's own group then sees a
+        # smaller pool instead of silently sharing the borrowed CPUs).
+        # Deficient groups must also go first because they can only borrow
+        # the surplus of groups that have not consumed it yet.
+        for key, npu_list in sorted(
+            groups.items(),
+            key=lambda item: (len(base_pools[item[1][0]]) >= min_cpus_per_npu * len(item[1]), min(item[1])),
+        ):
+            need = min_cpus_per_npu * len(npu_list)
+            # Local CPUs first, borrowed CPUs appended at the tail: a
+            # single-NPU group then keeps its IRQ slots (pool[0:2]) and
+            # memory-migration anchor (pool[0]) on the local NUMA node
+            # whenever local CPUs remain; multi-NPU groups split the pool
+            # numerically, so a borrowed CPU may land in any slice.
+            local = sorted(set(base_pools[npu_list[0]]) - taken)
+            pool = local
+            # Only borrow remote CPUs when the pool is too small to host the
+            # whole group with per-NPU role reservations.
+            if len(pool) < need and self.numa_to_cpu_map:
+                pool = local + self._borrow_cpus(base_pools[npu_list[0]], local, need, taken, cpu_owner, surplus)
             for npu in npu_list:
                 self.npu_cpu_pool[npu] = pool
             if len(npu_list) == 1:
                 final[npu_list[0]] = pool
             else:
                 final.update(self.average_distribute({key: npu_list}))
+            taken.update(pool)
         # Keep only visible NPUs in the final binding pool. Non-visible NPUs are used only to avoid overlap.
         self.npu_cpu_pool = {npu: final[npu] for npu in self.device_info.running_npu_list}
 

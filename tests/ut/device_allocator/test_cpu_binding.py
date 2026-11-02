@@ -371,17 +371,37 @@ class TestCpuAlloc(unittest.TestCase):
         mock_build_cpu_node_map.assert_called_once()
         mock_build_global_slice_cpu_pool.assert_called_once()
 
-    def test_extend_numa(self):
-        result = self.cpu_alloc.extend_numa([])
-        self.assertEqual(result, [])
-        self.cpu_alloc.cpu_node = {0: 0, 1: 0, 2: 1, 3: 1}
-        self.cpu_alloc.numa_to_cpu_map = {0: [0, 1], 1: [2, 3]}
-        self.cpu_alloc.device_info.allowed_cpus = [0, 1, 2, 3]
-        result = self.cpu_alloc.extend_numa([0, 1])
-        self.assertEqual(result, [0, 1, 2, 3])
-        self.cpu_alloc.device_info.allowed_cpus = [0, 1, 3]
-        result = self.cpu_alloc.extend_numa([0, 1])
-        self.assertEqual(result, [0, 1, 3])
+    def test_borrow_cpus(self):
+        # Deficit-only borrowing on the ascending node ring, own node last.
+        cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.allowed_cpus = [0, 1, 2, 3, 8, 9]
+        cpu_alloc.cpu_node = {0: 0, 1: 0, 2: 1, 3: 1, 8: 2, 9: 2}
+        cpu_alloc.numa_to_cpu_map = {0: [0, 1], 1: [2, 3], 2: [8, 9]}
+        # Pool on node 1 (own node skipped, node 2 is next on the ring).
+        self.assertEqual(cpu_alloc._borrow_cpus([2, 3], [2, 3], 4, set(), {}, {}), [8, 9])
+        # Wrap-around: pool on node 2 borrows from node 0 first.
+        self.assertEqual(cpu_alloc._borrow_cpus([8, 9], [8, 9], 4, set(), {}, {}), [0, 1])
+        # Already-taken or non-allowed CPUs are never borrowed.
+        self.assertEqual(cpu_alloc._borrow_cpus([2, 3], [2, 3], 4, {8}, {}, {}), [9, 0])
+        # A pool spanning several nodes is never extended.
+        self.assertEqual(cpu_alloc._borrow_cpus([0, 2], [0, 2], 4, set(), {}, {}), [])
+        # Partial borrow: the deficit exceeds what other nodes can supply.
+        self.assertEqual(cpu_alloc._borrow_cpus([2, 3], [2, 3], 9, set(), {}, {}), [8, 9, 0, 1])
+        # The own node comes from the full base, so borrowing still works when
+        # earlier groups have already consumed every local CPU.
+        self.assertEqual(cpu_alloc._borrow_cpus([2, 3], [], 2, {2, 3}, {}, {}), [8, 9])
+        # CPUs of another group's base are only borrowed while that group has
+        # surplus left, so the lender keeps its minimum reservation.
+        owner = {0: "other", 1: "other", 8: "lender", 9: "lender"}
+        capped = {"lender": 1, "other": 0}
+        self.assertEqual(cpu_alloc._borrow_cpus([2, 3], [2, 3], 4, set(), owner, capped), [8])
+        self.assertEqual(cpu_alloc._borrow_cpus([2, 3], [2, 3], 4, set(), owner, {"lender": 0, "other": 0}), [])
+        # Single-node system: borrow own-node leftovers (allowed, not local).
+        cpu_alloc_single = make_cpu_alloc()
+        cpu_alloc_single.device_info.allowed_cpus = [0, 1, 2, 3, 4]
+        cpu_alloc_single.cpu_node = {c: 0 for c in range(5)}
+        cpu_alloc_single.numa_to_cpu_map = {0: [0, 1, 2, 3, 4]}
+        self.assertEqual(cpu_alloc_single._borrow_cpus([0, 1], [0, 1], 5, set(), {}, {}), [2, 3, 4])
 
     @patch("vllm_ascend.cpu_binding.execute_command")
     def test_build_cpu_node_map(self, mock_execute_command):
@@ -624,12 +644,6 @@ class TestCpuBindingSupplemental(unittest.TestCase):
 
         mock_execute_command.assert_called_once_with(["taskset", "-cp", "1,2", "123"])
 
-    def test_extend_numa_returns_original_list_when_multiple_nodes_present(self):
-        cpu_alloc = make_cpu_alloc()
-        cpu_alloc.cpu_node = {0: 0, 1: 1}
-
-        self.assertEqual(cpu_alloc.extend_numa([0, 1]), [0, 1])
-
     def test_parse_threads_per_core(self):
         self.assertEqual(CpuAlloc.parse_threads_per_core("CPU(s): 384\nThread(s) per core: 1\n"), 1)
         self.assertEqual(CpuAlloc.parse_threads_per_core("Thread(s) per core: 2\nCore(s) per socket: 96\n"), 2)
@@ -754,10 +768,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         cpu_alloc.device_info.allowed_cpus = [0, 1, 2, 3]
         cpu_alloc.device_info.npu_affinity = {0: [0, 1], 1: [2, 3], 2: [2, 3]}
 
-        with (
-            patch.object(cpu_alloc, "build_cpu_node_map"),
-            patch.object(cpu_alloc, "extend_numa", side_effect=lambda cpus: cpus),
-        ):
+        with patch.object(cpu_alloc, "build_cpu_node_map"):
             cpu_alloc.build_cpu_pools()
 
         self.assertEqual(cpu_alloc.npu_cpu_pool, {0: [0, 1], 1: [2], 2: [3]})
@@ -772,10 +783,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         cpu_alloc.device_info.allowed_cpus = [192, 193]
         cpu_alloc.device_info.npu_affinity = {0: [192, 193], 1: [128, 129]}
 
-        with (
-            patch.object(cpu_alloc, "build_cpu_node_map"),
-            patch.object(cpu_alloc, "extend_numa", side_effect=lambda cpus: cpus),
-        ):
+        with patch.object(cpu_alloc, "build_cpu_node_map"):
             cpu_alloc.build_cpu_pools()
 
         self.assertEqual(cpu_alloc.npu_cpu_pool, {0: [192, 193]})
@@ -793,10 +801,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
             1: list(range(192, 202)),
         }
 
-        with (
-            patch.object(cpu_alloc, "build_cpu_node_map"),
-            patch.object(cpu_alloc, "extend_numa", side_effect=lambda cpus: cpus),
-        ):
+        with patch.object(cpu_alloc, "build_cpu_node_map"):
             cpu_alloc.build_cpu_pools()
             cpu_alloc.allocate()
 
@@ -860,10 +865,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
                 for cpu in cpus:
                     cpu_alloc.cpu_node[cpu] = node
 
-        with (
-            patch.object(cpu_alloc, "build_cpu_node_map", side_effect=fake_build_cpu_node_map),
-            patch.object(cpu_alloc, "extend_numa", wraps=cpu_alloc.extend_numa) as mock_extend,
-        ):
+        with patch.object(cpu_alloc, "build_cpu_node_map", side_effect=fake_build_cpu_node_map):
             cpu_alloc.build_cpu_pools()
             cpu_alloc.allocate()
 
@@ -877,8 +879,49 @@ class TestCpuBindingSupplemental(unittest.TestCase):
                 self.assertFalse(pools[i] & pools[j])
         # ...the split is even...
         self.assertEqual(sorted(len(p) for p in pools), [24, 24, 24, 24])
-        # ...and the local pools are large enough, so no NUMA extension is needed.
-        mock_extend.assert_not_called()
+
+    @patch(
+        "vllm_ascend.cpu_binding.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+    )
+    def test_build_cpu_pools_topo_mode_borrowed_cpus_stay_disjoint_across_groups(self, _mock_get_device_type):
+        # A deficient group that borrows CPUs from another NUMA node must
+        # reserve them globally: the node's own group sees a smaller pool
+        # instead of silently sharing the borrowed CPUs (A2 keeps 5 CPUs per
+        # NPU for role reservations, so NPU0/1 with only 8 shared local CPUs
+        # borrow 2 CPUs from node 1).
+        cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.all_logic_npus = [0, 1, 2, 3]
+        cpu_alloc.device_info.running_npu_list = [0, 1, 2, 3]
+        cpu_alloc.device_info.allowed_cpus = list(range(8)) + list(range(48, 96))
+        cpu_alloc.device_info.npu_affinity = {
+            0: list(range(0, 8)),
+            1: list(range(0, 8)),
+            2: list(range(48, 96)),
+            3: list(range(48, 96)),
+        }
+
+        def fake_build_cpu_node_map():
+            for node, cpus in enumerate((range(0, 48), range(48, 96), range(96, 144), range(144, 192))):
+                cpu_alloc.numa_to_cpu_map[node] = list(cpus)
+                for cpu in cpus:
+                    cpu_alloc.cpu_node[cpu] = node
+
+        with patch.object(cpu_alloc, "build_cpu_node_map", side_effect=fake_build_cpu_node_map):
+            cpu_alloc.build_cpu_pools()
+            cpu_alloc.allocate()
+
+        pools = [set(pool) for pool in cpu_alloc.npu_cpu_pool.values()]
+        for i in range(len(pools)):
+            for j in range(i + 1, len(pools)):
+                self.assertFalse(pools[i] & pools[j], f"pools of NPU{i} and NPU{j} overlap")
+        # The deficient group on node 0 (need 10, 8 local) borrowed 2 CPUs
+        # from node 1; every visible NPU still gets its minimum reservation.
+        self.assertEqual(len(cpu_alloc.npu_cpu_pool[0]) + len(cpu_alloc.npu_cpu_pool[1]), 10)
+        node1_cpus = set(range(48, 96)) - set(cpu_alloc.npu_cpu_pool[0]) - set(cpu_alloc.npu_cpu_pool[1])
+        self.assertEqual(len(node1_cpus), 46)
+        for npu in (2, 3):
+            self.assertTrue(set(cpu_alloc.npu_cpu_pool[npu]) <= set(range(48, 96)))
+            self.assertGreaterEqual(len(cpu_alloc.npu_cpu_pool[npu]), 5)
 
     @patch(
         "vllm_ascend.cpu_binding.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A5)
