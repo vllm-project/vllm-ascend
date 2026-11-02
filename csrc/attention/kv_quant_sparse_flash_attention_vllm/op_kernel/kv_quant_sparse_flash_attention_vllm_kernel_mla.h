@@ -302,14 +302,48 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<QSFAT>::InitOutputSing
 {
     uint32_t qsfaCoreNum = GetBlockNum();
     if (qsfaCoreNum != 0) {
-        uint64_t qsfaTotalOutputSize = constInfo.batchSize * constInfo.qHeadNum * constInfo.qSeqSize *
-            constInfo.headDim;
-        // 2 means c:v = 1:2
-        uint64_t qsfaSingleCoreSize = (qsfaTotalOutputSize + (2 * qsfaCoreNum) - 1) / (2 * qsfaCoreNum);
-        uint64_t qsfaTailSize = qsfaTotalOutputSize - tmpBlockIdx * qsfaSingleCoreSize;
-        uint64_t qsfaSingleInitOutputSize = qsfaTailSize < qsfaSingleCoreSize ? qsfaTailSize : qsfaSingleCoreSize;
-        if (tmpBlockIdx * qsfaSingleCoreSize < qsfaTotalOutputSize && qsfaSingleInitOutputSize > 0) {
-            matmul::InitOutput<OUT_T>(attentionOutGm[tmpBlockIdx * qsfaSingleCoreSize], qsfaSingleInitOutputSize, 0);
+        uint64_t qsfaTotalOutputSize;
+        uint64_t qsfaOutputStart = 0;
+        bool qsfaNeedOutputInit = true;
+        if constexpr (LAYOUT_T == QSFA_LAYOUT::TND) {
+            // TND lengths are cumulative: the last entry is the number of valid
+            // rows. Only initialize [actual, T); valid rows are written by the
+            // compute path. The early-skip is kept as a flag (instead of return)
+            // so the softmax-LSE init below still runs.
+            if (constInfo.batchSize == 0 || constInfo.actualLenDimsQ == 0) {
+                qsfaNeedOutputInit = false;
+            } else {
+                uint32_t qsfaActualRows = actualSeqLengthsQGm.GetValue(constInfo.batchSize - 1);
+                if (qsfaActualRows >= constInfo.qSeqSize) {
+                    qsfaNeedOutputInit = false;
+                } else {
+                    uint64_t qsfaOutputRowSize =
+                        static_cast<uint64_t>(constInfo.kvHeadNum) * constInfo.gSize * constInfo.headDim;
+                    qsfaOutputStart = static_cast<uint64_t>(qsfaActualRows) * qsfaOutputRowSize;
+                    qsfaTotalOutputSize = (constInfo.qSeqSize - qsfaActualRows) * qsfaOutputRowSize;
+                }
+            }
+        } else {
+            qsfaTotalOutputSize = constInfo.batchSize * constInfo.qHeadNum * constInfo.qSeqSize *
+                constInfo.headDim;
+        }
+        if (qsfaNeedOutputInit) {
+            // 2 means c:v = 1:2
+            uint64_t qsfaSingleCoreSize = (qsfaTotalOutputSize + (2 * qsfaCoreNum) - 1) / (2 * qsfaCoreNum);
+            if constexpr (LAYOUT_T == QSFA_LAYOUT::TND) {
+                // Keep adjacent AIV partitions on separate 32-byte GM blocks.
+                constexpr uint64_t qsfaAlignElements = 32 / sizeof(OUT_T);
+                qsfaSingleCoreSize =
+                    (qsfaSingleCoreSize + qsfaAlignElements - 1) / qsfaAlignElements * qsfaAlignElements;
+            }
+            uint64_t qsfaCoreOffset = tmpBlockIdx * qsfaSingleCoreSize;
+            if (qsfaCoreOffset < qsfaTotalOutputSize) {
+                uint64_t qsfaTailSize = qsfaTotalOutputSize - qsfaCoreOffset;
+                uint64_t qsfaSingleInitOutputSize =
+                    qsfaTailSize < qsfaSingleCoreSize ? qsfaTailSize : qsfaSingleCoreSize;
+                matmul::InitOutput<OUT_T>(attentionOutGm[qsfaOutputStart + qsfaCoreOffset],
+                                          qsfaSingleInitOutputSize, 0);
+            }
         }
         if (constInfo.returnSoftmaxLse) {
             uint64_t totalReturnSoftmaxSize = constInfo.batchSize * constInfo.kvHeadNum * constInfo.qSeqSize * constInfo.gSize;
@@ -494,7 +528,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<QSFAT>::Init(__gm__ ui
     softmaxSumGm.SetGlobalBuffer((__gm__ T *)softmaxSum);
 
     if ASCEND_IS_AIV {
-        if (constInfo.needInit && LAYOUT_T != QSFA_LAYOUT::TND) {
+        if (constInfo.needInit) {
             InitOutputSingleCore();
         }
     }
