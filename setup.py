@@ -333,7 +333,7 @@ class cmake_build_ext(build_ext):
                 subprocess.check_call(
                     [
                         sys.executable,
-                        os.path.join(ROOT_DIR, "tools", "build_deepgemm.py"),
+                        os.path.join(ROOT_DIR, "tools", "deepgemm", "build.py"),
                         "--source",
                         os.path.join(ROOT_DIR, ".deps", "deepgemm-ascend"),
                         "--work-dir",
