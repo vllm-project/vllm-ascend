@@ -123,8 +123,8 @@ __aicore__ inline void DispatchKernelDtype310(
     __gm__ uint8_t *actualSeqLengthsKV, __gm__ uint8_t *attentionOut,
     __gm__ uint8_t *softmaxMax, __gm__ uint8_t *softmaxSum, __gm__ uint8_t *user, __gm__ uint8_t *tiling, TPipe &tPipe)
 {
-    __gm__ const KvQuantSparseFlashAttentionVllmTilingDataMla *meta =
-        reinterpret_cast<__gm__ const KvQuantSparseFlashAttentionVllmTilingDataMla *>(tiling);
+    GET_TILING_DATA_WITH_STRUCT(KvQuantSparseFlashAttentionVllmTilingDataMla, dispatchTiling, tiling);
+    const KvQuantSparseFlashAttentionVllmTilingDataMla *meta = &dispatchTiling;
     if constexpr (ORIG_DTYPE_KEY == DT_INT8 && PAGE_ATTENTION) {
         if (qsfa_a5::CanPrecomputeAddresses(meta->baseParams.blockSize, meta->baseParams.maxBlockNumPerBatch,
                 meta->baseParams.sparseBlockCount, meta->baseParams.sparseMode,
