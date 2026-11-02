@@ -1,0 +1,4 @@
+pr: null
+entries:
+  - category: feature
+    text: Enabled DFlash2 full decode ACL graphs on Model Runner V2, preserving target compilation settings. PIECEWISE uses eager drafting, matching upstream vLLM.

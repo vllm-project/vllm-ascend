@@ -348,11 +348,14 @@ def test_dflash2_acceptance(
 
 @pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [7])
+@pytest.mark.parametrize("cudagraph_mode", ["NONE", "FULL_DECODE_ONLY", "FULL_AND_PIECEWISE", "PIECEWISE"])
 def test_dflash2_v2_acceptance(
     method: str,
     num_speculative_tokens: int,
+    cudagraph_mode: str,
+    monkeypatch,
 ):
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 
@@ -386,7 +389,7 @@ def test_dflash2_v2_acceptance(
         "method": "dflash",
         "model": spec_model_name,
         "num_speculative_tokens": num_speculative_tokens,
-        "enforce_eager": True,
+        "enforce_eager": cudagraph_mode == "NONE",
     }
 
     with VllmRunner(
@@ -394,11 +397,16 @@ def test_dflash2_v2_acceptance(
         max_model_len=2048,
         disable_log_stats=False,
         tensor_parallel_size=2,
-        max_num_seqs=1,
+        # Capture two requests while generating one to exercise padded replay.
+        max_num_seqs=2,
         distributed_executor_backend="mp",
         gpu_memory_utilization=0.9,
         speculative_config=speculative_config,
-        enforce_eager=True,
+        enforce_eager=cudagraph_mode == "NONE",
+        compilation_config=CompilationConfig(
+            cudagraph_mode=cudagraph_mode,
+            cudagraph_capture_sizes=[2 * (num_speculative_tokens + 1)],
+        ),
         enable_prefix_caching=False,
     ) as llm:
         outputs = llm.model.generate(prompts, sampling_params)

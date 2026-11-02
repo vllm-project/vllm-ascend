@@ -111,14 +111,14 @@ def test_pa_params_preserve_cache_storage_and_stride(use_bnsd, state):
         torch.testing.assert_close(actual.reshape(original.shape), original)
 
 
-@pytest.mark.parametrize("branch", ["causal", "non_causal", "sliding_window"])
+@pytest.mark.parametrize("branch", ["causal", "non_causal", "sliding_window", "non_causal_sliding_window"])
 @pytest.mark.parametrize("contiguous", [False, True])
 @pytest.mark.parametrize("cross_attention", [False, True])
 def test_forward_non_pa_branches_receive_contiguous_kv(branch, contiguous, cross_attention):
     impl = _make_impl()
     metadata = _make_metadata()
-    metadata.causal = branch != "non_causal"
-    impl.sliding_window = 16 if branch == "sliding_window" else None
+    metadata.causal = branch not in ("non_causal", "non_causal_sliding_window")
+    impl.sliding_window = 16 if "sliding_window" in branch else None
     if cross_attention:
         impl.attn_type = AttentionType.ENCODER_DECODER
         metadata.seq_lens = torch.tensor([5], dtype=torch.int32)
@@ -142,6 +142,10 @@ def test_forward_non_pa_branches_receive_contiguous_kv(branch, contiguous, cross
 
     selected_fia.assert_called_once()
     kwargs = selected_fia.call_args.kwargs
+    if branch == "non_causal_sliding_window":
+        assert kwargs["sparse_mode"] == 4
+        assert kwargs["pre_tokens"] == 15
+        assert kwargs["next_tokens"] == 15
     assert kwargs["block_table"] is None
     assert kwargs["actual_seq_lengths_kv"] == ([5] if cross_attention else [3])
     for name, original in (("key", key), ("value", value)):
@@ -154,9 +158,21 @@ def test_forward_non_pa_branches_receive_contiguous_kv(branch, contiguous, cross
 
 @pytest.mark.parametrize("v2", [False, True])
 @pytest.mark.parametrize("use_pa", [False, True])
-def test_graph_workspace_and_task_preserve_fia_layout_contract(v2, use_pa):
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("sliding_window", [None, 16])
+@pytest.mark.parametrize("shared_band_mask", [False, True])
+@pytest.mark.parametrize("is_draft_model", [False, True])
+def test_graph_workspace_and_task_preserve_fia_layout_contract(
+    v2, use_pa, causal, sliding_window, shared_band_mask, is_draft_model
+):
     impl = _make_impl()
     metadata = _make_metadata(AscendAttentionState.DecodeOnly if use_pa else AscendAttentionState.PrefillNoCache)
+    impl.sliding_window = sliding_window
+    metadata.causal = causal
+    shared_mask = torch.triu(torch.ones(3, 3, dtype=torch.bool), diagonal=1)
+    metadata.attn_mask = shared_mask if shared_band_mask or causal or sliding_window is not None else None
+    original_mask = metadata.attn_mask
+    expected_mask = None if not causal and sliding_window is None else original_mask
     query = torch.zeros(3, 2, 4)
     key, value = _strided_kv(), _strided_kv()
     if use_pa:
@@ -170,7 +186,7 @@ def test_graph_workspace_and_task_preserve_fia_layout_contract(v2, use_pa):
     )
     op_name = "npu_fused_infer_attention_score_v2" if v2 else "npu_fused_infer_attention_score"
     with (
-        patch.object(attn_module, "_EXTRA_CTX", SimpleNamespace(is_draft_model=False)),
+        patch.object(attn_module, "_EXTRA_CTX", SimpleNamespace(is_draft_model=is_draft_model)),
         patch.object(attn_module.torch_npu, op_name, create=True),
         patch.object(attn_module.torch_npu, workspace_name, create=True) as get_workspace,
         patch.object(attn_module, "get_capture_resource", side_effect=lambda _, factory, *args: factory()),
@@ -186,6 +202,13 @@ def test_graph_workspace_and_task_preserve_fia_layout_contract(v2, use_pa):
     expected_key = impl.key_cache.view(2, 3, 4) if use_pa else key
     expected_value = impl.value_cache.view(2, 3, 4) if use_pa else value
     for kwargs in (workspace_kwargs, task_kwargs):
+        assert kwargs["atten_mask"] is expected_mask
+        expected_window = sliding_window if causal else sliding_window - 1 if sliding_window is not None else None
+        assert kwargs["sparse_mode"] == (4 if sliding_window is not None else 3 if causal else 0)
+        assert kwargs["pre_tokens"] == (expected_window if sliding_window is not None else attn_module.SWA_INT_MAX)
+        assert kwargs["next_tokens"] == (
+            0 if causal else expected_window if sliding_window is not None else attn_module.SWA_INT_MAX
+        )
         assert kwargs["block_table"] is (metadata.block_tables if use_pa else None)
         for name, original in (("key", expected_key), ("value", expected_value)):
             assert kwargs[name].is_contiguous() == (not use_pa)
@@ -201,11 +224,25 @@ def test_graph_workspace_and_task_preserve_fia_layout_contract(v2, use_pa):
         )
         provider = register.call_args.args[2]
         runtime_kwargs = {**task_kwargs, **provider.resolve({"layer": runtime_metadata})}
-        assert runtime_kwargs["block_table"] is (runtime_metadata.block_tables if use_pa else None)
+        assert runtime_kwargs["atten_mask"] is expected_mask
+        assert runtime_kwargs["sparse_mode"] == task_kwargs["sparse_mode"]
+        assert runtime_kwargs["pre_tokens"] == task_kwargs["pre_tokens"]
+        assert runtime_kwargs["next_tokens"] == task_kwargs["next_tokens"]
+        # Non-draft SWA keeps the captured table; drafts refresh it each step.
+        expected_table = (
+            task_kwargs["block_table"]
+            if sliding_window is not None and not is_draft_model
+            else runtime_metadata.block_tables
+            if use_pa
+            else None
+        )
+        assert runtime_kwargs["block_table"] is expected_table
         assert runtime_kwargs["key"] is task_kwargs["key"]
         assert runtime_kwargs["value"] is task_kwargs["value"]
     assert result is output
     assert num_tokens == 3
+
+    assert metadata.attn_mask is original_mask
 
 
 @pytest.mark.parametrize("continuing_prefill", [False, True])
@@ -289,3 +326,25 @@ def test_graph_provider_preserves_captured_pa_mode(sliding_window, is_draft_mode
         assert runtime_kwargs["block_table"] is captured_block_table
     else:
         assert runtime_kwargs["block_table"] is (None if is_non_pa else metadata.block_tables)
+
+
+@pytest.mark.parametrize("sliding_window", [None, 16])
+def test_noncausal_sink_fia_selects_mask_without_mutating_shared_metadata(sliding_window):
+    impl = _make_impl()
+    impl.sinks = torch.zeros(impl.num_heads)
+    impl.sliding_window = sliding_window
+    metadata = _make_metadata()
+    metadata.causal = False
+    metadata.attn_mask = torch.triu(torch.ones(3, 3, dtype=torch.bool), diagonal=1)
+    shared_mask = metadata.attn_mask
+    query = torch.zeros(3, 2, 4)
+    key, value = _strided_kv(), _strided_kv()
+    output = torch.empty_like(query)
+    with (
+        patch.object(attn_module, "_EXTRA_CTX", SimpleNamespace(capturing=False)),
+        patch.object(attn_module.torch_npu, "npu_fused_infer_attention_score_v2", create=True) as fia,
+    ):
+        fia.return_value = (torch.ones_like(query), None)
+        impl.forward_fused_infer_attention(query, key, value, metadata, output)
+    assert fia.call_args.kwargs["atten_mask"] is (shared_mask if sliding_window is not None else None)
+    assert metadata.attn_mask is shared_mask

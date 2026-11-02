@@ -367,15 +367,16 @@ A few important things to consider when using DFlash2 draft models:
       --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens": 8, "enforce_eager": true}'
     ```
 
-2. **Model runner V2 requires an eager draft**: DFlash2 on model runner V2
-   does not yet support graph mode for the draft. Set `"enforce_eager": true`
-   in `speculative_config`; the target model keeps its own graph mode (e.g.
-   `FULL_DECODE_ONLY`).
+2. **Model runner V2 draft graphs**: set `"enforce_eager": false` in
+   `speculative_config` to allow full decode ACL graphs. `FULL_DECODE_ONLY`,
+   `FULL`, and `FULL_AND_PIECEWISE` use full draft graphs when the draft
+   attention backend supports them. `PIECEWISE` uses eager drafting, matching
+   upstream vLLM. Setting `"enforce_eager": true` keeps the draft eager while
+   preserving the target's graph mode. See [DFlash2 ACL graphs](dflash2_acl_graph.md).
 
-3. **Graph capture sizes**: each decode step runs `(1 + K)` tokens per
-   request, so every capture size must be `n * (num_speculative_tokens + 1)`
-   for each batch size `n` you want to support — `[9]` above, for batch size
-   1 with `num_speculative_tokens = 8`.
+3. **Graph capture sizes**: each draft step runs `(1 + K)` query tokens per
+   request. V2 rounds capture sizes up to whole query blocks; explicit multiples
+   such as `[9]` for one request with `num_speculative_tokens = 8` are convenient.
 
 4. **The draft must use the target's unquantized LM head**: the candidate
    top-k is taken over the full-vocabulary logits, so a reduced draft

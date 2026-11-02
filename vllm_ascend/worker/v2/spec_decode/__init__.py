@@ -36,7 +36,13 @@ def init_speculator(
     """
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
-    if speculative_config.enforce_eager:
+    # Capture DFlash2 directly with ACL graphs. Its NPU RoPE meta kernels
+    # do not support the symbolic shapes used by the compiled draft model.
+    # Keep this config local so target compilation and graph mode are preserved.
+    is_dflash2 = speculative_config.method == "dflash" and "DFlash2DraftModel" in (
+        speculative_config.draft_model_config.architectures or []
+    )
+    if speculative_config.enforce_eager or is_dflash2:
         vllm_config = copy.copy(vllm_config)
         vllm_config.compilation_config = copy.copy(vllm_config.compilation_config)
         vllm_config.compilation_config.mode = CompilationMode.NONE
