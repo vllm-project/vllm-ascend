@@ -1425,6 +1425,11 @@ def test_packed_reuse_orders_callback_completion_and_tracks_owning_clones(num_bu
     adapter_events = []
 
     class Event:
+        def synchronize(self):
+            # Latest vLLM uses a completion event, rather than draining the
+            # whole stream, before reusing a slot.
+            pass
+
         def record(self, stream):
             state = packed_adapter._ACTIVE.get()
             if self in state.events:

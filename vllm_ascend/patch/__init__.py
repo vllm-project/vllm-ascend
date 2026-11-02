@@ -786,6 +786,8 @@
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
 #      `torch.accelerator.reset_peak_memory_stats`, `torch.accelerator.get_memory_info`,
 #      `torch.accelerator.empty_cache`
+#   2. Shared `torch.cuda.Stream/stream/current_stream` NPU aliases, defined in
+#      `patch/torch_streams.py` and also used by standalone trainers and V2.
 #    Why:
 #       Upstream vLLM (commit 747b068) replaced `current_platform.memory_stats()`
 #       with `torch.accelerator.memory_stats()`, but `torch.accelerator` does not
@@ -795,11 +797,14 @@
 #       Monkey-patch `torch.accelerator` memory APIs to delegate to the
 #       corresponding `torch.npu` implementations, and patch `empty_cache` to a
 #       compatible wrapper.
+#       Install the shared stream aliases without replacing generic torch.Event.
 #    Related PR (if no, explain why):
 #       No, maps upstream torch.accelerator memory APIs to the NPU backend.
 #    Future Plan:
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
+#       Remove stream aliases when supported vLLM pairings use device-neutral
+#       stream creation and contexts (vLLM #63457 only migrates some APIs).
 #
 # ** 22. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

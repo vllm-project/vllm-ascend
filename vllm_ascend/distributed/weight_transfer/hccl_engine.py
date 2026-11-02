@@ -5,7 +5,7 @@
 Reload lifecycle, ``send_weights`` orchestration, metadata checks and the worker
 init payload stay upstream. Only NPU operations, the HCCL rendezvous and the
 legacy per-update packed wire parameters are local. Packed producer/consumer
-loops run in vLLM, with module-local NPU and HCCL boundary adapters.
+loops run in vLLM, with shared NPU stream aliases and HCCL boundary adapters.
 """
 
 from concurrent.futures import ThreadPoolExecutor
