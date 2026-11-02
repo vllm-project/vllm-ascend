@@ -4,6 +4,7 @@
 
 import importlib.util
 import os
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -13,6 +14,17 @@ from unittest.mock import patch
 import pytest
 
 ROOT = Path(__file__).resolve().parents[4]
+
+
+def test_build_entrypoint_does_not_shadow_stdlib(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "tools/deepgemm/build.py"), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--destination" in result.stdout
 
 
 def load_file(name, path):
@@ -101,7 +113,7 @@ def test_already_loaded_cuda_is_not_mixed_with_npu(loader, monkeypatch):
 
 
 def test_packaged_headers_and_no_build_environment(tmp_path):
-    builder = load_file("test_builder", ROOT / "tools/build_deepgemm.py")
+    builder = load_file("test_builder", ROOT / "tools/deepgemm/build.py")
     wheel = tmp_path / "operator.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("deep_gemm/_C.cpython-test.so", b"extension")
@@ -126,7 +138,7 @@ def test_default_cache_preserves_existing_setting(loader, monkeypatch):
 
 
 def test_device_header_fix_is_explicit_and_version_scoped(tmp_path):
-    builder = load_file("test_builder", ROOT / "tools/build_deepgemm.py")
+    builder = load_file("test_builder", ROOT / "tools/deepgemm/build.py")
     common = tmp_path / "include/deep_gemm/common.hpp"
     comm = tmp_path / "include/deep_gemm/comm/mega_moe.hpp"
     comm.parent.mkdir(parents=True)
