@@ -406,6 +406,48 @@ def test_pcp_only_eplb_draft_reaches_inherited_loader(eplb_worker_config):
     assert eplb_worker_config.parallel_config.eplb_config.__dict__["_vllm_ascend_eplb_auto_selected"]
 
 
+@pytest.mark.parametrize("draft_kv_dtype", [None, "bfloat16"])
+def test_eagle_loader_uses_draft_runtime_identity(eplb_worker_config, draft_kv_dtype):
+    """Draft MLA must not see the target's generate identity and enable MLAPO."""
+    spec_config = eplb_worker_config.speculative_config
+    spec_config.kv_cache_dtype = draft_kv_dtype
+    eplb_worker_config.cache_config = replace(eplb_worker_config.cache_config, cache_dtype="fp8")
+    speculator = object.__new__(AscendEagleSpeculator)
+    speculator.vllm_config, speculator.replicated_pcp = prepare_replicated_pcp_config(eplb_worker_config)
+    speculator.draft_model_config = spec_config.draft_model_config
+    speculator.speculative_config = spec_config
+    speculator.draft_vllm_config = speculator._create_draft_vllm_config()
+    with (
+        patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=1)),
+        patch.object(eagle_utils, "get_model", side_effect=RuntimeError("reached draft construction")) as get_model,
+        pytest.raises(RuntimeError, match="reached draft construction"),
+    ):
+        speculator.load_draft_model(torch.nn.Module(), set())
+    loading_config = get_model.call_args.kwargs["vllm_config"]
+    assert loading_config.model_config is speculator.draft_model_config
+    assert loading_config.model_config.runner_type == "draft"
+    assert loading_config.cache_config.cache_dtype == (draft_kv_dtype or "fp8")
+    assert not loading_config.parallel_config.enable_expert_parallel
+    assert not loading_config.parallel_config.enable_eplb
+    assert eplb_worker_config.model_config.runner_type == "generate"
+    assert eplb_worker_config.cache_config.cache_dtype == "fp8"
+    assert eplb_worker_config.parallel_config.enable_expert_parallel
+    assert eplb_worker_config.parallel_config.enable_eplb
+
+
+def test_eagle_loader_preserves_full_vocab_d2t_cleanup():
+    speculator = object.__new__(AscendEagleSpeculator)
+    speculator.method = "eagle3"
+    speculator.draft_vllm_config = object()
+    speculator.draft_model_config = SimpleNamespace(get_vocab_size=lambda: 100)
+    draft_model = SimpleNamespace(config=SimpleNamespace(draft_vocab_size=100), draft_id_to_target_id=object())
+    target_model = torch.nn.Module()
+    with patch.object(eagle_speculator_module, "load_eagle_model", return_value=draft_model) as load_model:
+        assert speculator.load_draft_model(target_model, set()) is draft_model
+    load_model.assert_called_once_with(target_model, speculator.draft_vllm_config)
+    assert draft_model.draft_id_to_target_id is None
+
+
 def test_eagle_draft_config_disables_profiling_chunk() -> None:
     additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": "yes"}}}
     target_config = SimpleNamespace(
