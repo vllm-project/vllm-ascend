@@ -619,6 +619,7 @@ def test_propose_accepts_main_dp_sync_state_and_num_speculative_tokens():
     # vLLM #60754 renamed the DP-sync argument to `dp_sync_state` on main and
     # vLLM #60335 added `num_speculative_tokens`; both are keyword-only upstream.
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.pcp_manager = None
     input_batch = object()
     args = [object() for _ in range(10)]
     dp_sync = object()
