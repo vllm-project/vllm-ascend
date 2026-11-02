@@ -15,6 +15,13 @@ def install():
         enabled = all(os.getenv(name) == '1' for name in (
             'SPLITQUANT_DENSE', 'SPLITQUANT_MOE',
             'SPLITQUANT_FUSED_ROUTER', 'SPLITQUANT_ROUTER_QUANT_FUSED'))
+        # The fused router path is optional.  Older or partially built native
+        # libraries may not export these operators; fall back to the regular
+        # MoE implementation instead of raising AttributeError at runtime.
+        npu_ops = torch.ops.npu
+        if not all(hasattr(npu_ops, name) for name in (
+                'splitquant_router_quant', 'splitquant_moe_fused_prequant')):
+            return original(self, x)
         if not (enabled and x.dtype == torch.bfloat16 and x.numel() == 2048
                 and x.shape[-1] == 2048 and self.top_k == 8
                 and hasattr(self.experts, '_prepared')
