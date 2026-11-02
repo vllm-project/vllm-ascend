@@ -83,8 +83,8 @@ def _normalize_kimi_dflash_rope(hf_config: PretrainedConfig) -> None:
     setattr(hf_config, rope_field, {**rope_params, "attention_factor": legacy_attention_factor})
 
 
-def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> PretrainedConfig:
-    hf_config = _orig_hf_config_override(hf_config)
+def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig, *args, **kwargs) -> PretrainedConfig:
+    hf_config = _orig_hf_config_override(hf_config, *args, **kwargs)
     _normalize_kimi_dflash_rope(hf_config)
     architectures = hf_config.architectures or ()
     if hf_config.model_type == "qwen3" and "DSparkDraftModel" in architectures:
