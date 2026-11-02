@@ -161,6 +161,9 @@ def test_aot_save_uses_device_isolated_path():
     saved_paths = []
 
     class CompiledModel:
+        _aot_compilation_path: str
+        _aot_cache_dir: str
+
         def save_aot_compiled_function(self):
             saved_paths.append((self._aot_compilation_path, self._aot_cache_dir))
 
