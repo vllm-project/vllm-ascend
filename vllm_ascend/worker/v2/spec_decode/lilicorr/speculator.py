@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
 import torch
-from vllm.forward_context import BatchDescriptor, create_forward_context, override_forward_context
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import (
     LiLiCorrSpeculator,
 )
@@ -16,21 +16,12 @@ from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
 class AscendLiLiCorrSpeculator(LiLiCorrSpeculator, AscendDFlash2Speculator):
     """Keep upstream LiLiCorr scoring and reuse Ascend DFlash2 runtime guards."""
 
-    def _score_candidates(
-        self,
-        candidate_ids: torch.Tensor,
-        unary_logits: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        # LiLiCorr overrides DFlash2 scoring, so its compiled head needs its own
-        # request-shaped context after the backbone's forward context exits.
-        forward_context = create_forward_context(
-            None,
-            self.vllm_config,
-            batch_descriptor=BatchDescriptor(num_tokens=candidate_ids.shape[0]),
-        )
-        with override_forward_context(forward_context):
-            return super()._score_candidates(candidate_ids, unary_logits, hidden_states)
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        # DFlash2 supports ACL graphs, but LiLiCorr's scoring path still
+        # requires eager execution. Keep this restriction local to LiLiCorr.
+        if not self.speculative_config.enforce_eager:
+            raise NotImplementedError("LiLiCorr does not currently support graph mode; please enable enforce_eager.")
+        super().init_cudagraph_manager(CUDAGraphMode.NONE)
 
     def load_draft_model(
         self,
