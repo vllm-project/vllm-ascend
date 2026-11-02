@@ -74,8 +74,6 @@ MINIMAX_M3_CASE = WeightUpdateModelCase(
             "mlp_layer_types": ["dense", "dense", "dense", "sparse"],
         },
     },
-    # The original layer schedules already make layers 0..2 dense and
-    # layer 3 sparse/MoE; preserve them and the sparse kernel settings.
     meta_config_attribute="text_config",
     checkpoint_model_prefix="language_model.model.",
     checkpoint_name_map=minimax_m3_checkpoint_name,

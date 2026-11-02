@@ -42,10 +42,6 @@ TRAINER_DEVICE_INDEX = INFERENCE_DEVICE_INDEX + 1
 GPU_MEMORY_UTILIZATION = 0.75
 
 
-def _log(message: str) -> None:
-    print(f"[trainer] {message}", flush=True)
-
-
 def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
     if INFERENCE_DEVICE_INDEX < 0 or torch.npu.device_count() <= TRAINER_DEVICE_INDEX:
         pytest.skip("HCCL weight transfer e2e test requires at least 2 NPUs.")
@@ -90,9 +86,10 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
         signatures = []
         try:
             for update_round in range(UPDATE_ROUNDS):
-                _log(
-                    f"{case.id}: sending {('packed' if packed else 'unpacked')} "
-                    f"fixed-random update round={update_round + 1}"
+                print(
+                    f"[trainer] {case.id}: sending {('packed' if packed else 'unpacked')} "
+                    f"fixed-random update round={update_round + 1}",
+                    flush=True,
                 )
                 post_control(server, "pause")
                 try:
