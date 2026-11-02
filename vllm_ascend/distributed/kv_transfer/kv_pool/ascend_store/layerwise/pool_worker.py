@@ -400,9 +400,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             gbl = self.group_block_len.get(group_id) or []
             if not self.use_block_key_layerwise and gbl and group_num_layers > 0:
                 if self.dcp_size > 1 and self.put_step > 1:
-                    # Use the GLOBAL region size (PP-aware) as the basis for
-                    # the per-shard stride; under PP>1 the local sum(gbl) only
-                    # covers this stage's layers and would under-allocate.
+                    # Derive shard origins from the same PP-aware allocation size.
                     shard_stride = self._global_group_alloc_size(group_id) // self.dcp_size
                     shard_idx = self.dcp_rank
                     layer_byte_offset += shard_idx * shard_stride
