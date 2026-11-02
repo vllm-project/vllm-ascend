@@ -741,7 +741,7 @@ class AscendConfig:
             )
 
         # enable_shared_expert_dp = val and ep and tp>1
-        from vllm_ascend.utils import enable_dense_sp, enable_sp
+        from vllm_ascend.utils import dense_sp_unavailable_reason, enable_dense_sp, enable_sp
 
         self.enable_shared_expert_dp = (
             self.enable_shared_expert_dp
@@ -766,7 +766,10 @@ class AscendConfig:
                     "through the generic projection gather/scatter path."
                 )
             else:
-                logger.warning_once("FlashComm1 is enabled, but the current config does not support sp MoE. Disabling")
+                logger.warning_once(
+                    "FlashComm1 is enabled, but dense sequence parallelism is unavailable: %s. Disabling for this run.",
+                    dense_sp_unavailable_reason(vc),
+                )
         else:
             logger.info_once("FlashComm1 is enabled.")
 

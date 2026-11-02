@@ -1043,6 +1043,53 @@ def _building_draft_model() -> bool:
     return _current_model_tag == "eagle_head"
 
 
+def dense_sp_unavailable_reason(vllm_config) -> str | None:
+    """Name the first structural gate that blocks dense sequence parallelism.
+
+    Returns None when the topology allows dense SP (the FlashComm switch may
+    still be off — that is a user choice, not unavailability). Used by the
+    config-time log so a dense deployment sees the precise blocker instead
+    of the SP-MoE message.
+    """
+    parallel_config = vllm_config.parallel_config
+    if getattr(parallel_config, "tensor_parallel_size", 1) <= 1:
+        return "tensor_parallel_size <= 1"
+    pp_size = getattr(parallel_config, "pipeline_parallel_size", 1)
+    if pp_size != 1:
+        return f"pipeline_parallel_size = {pp_size} (dense SP requires PP == 1)"
+    if getattr(parallel_config, "use_sequence_parallel_moe", False):
+        return "use_sequence_parallel_moe is on (upstream SP-MoE owns the layout)"
+    if getattr(parallel_config, "prefill_context_parallel_size", 1) > 1:
+        return "prefill_context_parallel_size > 1"
+    if getattr(parallel_config, "decode_context_parallel_size", 1) > 1:
+        return "decode_context_parallel_size > 1"
+    if getattr(parallel_config, "enable_dbo", False):
+        return "enable_dbo is on"
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if speculative_config is not None:
+        from vllm_ascend.mrv2_utils import use_v2_model_runner
+
+        if not use_v2_model_runner(vllm_config):
+            return "speculative decoding on the V1 model runner (dense SP supports MTP under V2 only)"
+        method = getattr(speculative_config, "method", None)
+        if method != "mtp":
+            return f"speculative method {method!r} is not wired for dense SP (only mtp)"
+    if getattr(vllm_config, "lora_config", None) is not None:
+        return "LoRA is enabled"
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return "model_config is missing"
+    if is_vl_model(vllm_config):
+        return "multimodal checkpoint (the vision feature scatter needs a full-token embedding)"
+    if getattr(model_config, "use_mla", False):
+        return "MLA checkpoint (stacked projections break the gather-per-block invariant)"
+    if getattr(model_config, "hf_text_config", None) is None:
+        return "hf_text_config is missing"
+    if is_moe_model(vllm_config):
+        return "MoE checkpoint (upstream SP-MoE owns the layout)"
+    return None
+
+
 def enable_dense_sp(vllm_config=None) -> bool:
     """Dense-model sequence parallelism driven by the FlashComm switch.
 
@@ -1089,56 +1136,7 @@ def enable_dense_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         return False
 
-    # getattr with "off" defaults throughout: the predicate also serves
-    # unit-test config doubles (SimpleNamespace) that only carry a subset of
-    # the parallel-config fields.
-    parallel_config = vllm_config.parallel_config
-    if getattr(parallel_config, "tensor_parallel_size", 1) <= 1 or (
-        getattr(parallel_config, "pipeline_parallel_size", 1) != 1
-    ):
-        return False
-    if getattr(parallel_config, "use_sequence_parallel_moe", False):
-        return False
-    if (
-        getattr(parallel_config, "prefill_context_parallel_size", 1) > 1
-        or getattr(parallel_config, "decode_context_parallel_size", 1) > 1
-    ):
-        return False
-    # DBO splits the batch into microbatches inside the compiled graph, so
-    # the projections see per-ubatch token counts that the row wrapper's
-    # full-step shape check cannot validate.
-    if getattr(parallel_config, "enable_dbo", False):
-        return False
-    speculative_config = getattr(vllm_config, "speculative_config", None)
-    if speculative_config is not None:
-        # Draft heads exchange hidden states with the target through
-        # per-model wiring. Only the MTP-style heads are wired for the dense
-        # layout (the patched Qwen3.5 MTP forward gathers the shared
-        # embedding's token shard back to full rows), and only under the V2
-        # runner: the V1 spec flow carries its own SP handling (e.g. the
-        # draft RoPE positions all-gather) that assumes the MoE-SP layout.
-        from vllm_ascend.mrv2_utils import use_v2_model_runner
-
-        if not (use_v2_model_runner(vllm_config) and getattr(speculative_config, "method", None) == "mtp"):
-            return False
-    if getattr(vllm_config, "lora_config", None) is not None:
-        return False
-
-    model_config = getattr(vllm_config, "model_config", None)
-    if model_config is None:
-        return False
-    # The VL gate must be structural (a separate vision sub-config), not the
-    # registry-based is_multimodal_model: dense Qwen3.5-family checkpoints
-    # carry the multimodal-registered Qwen3_5ForConditionalGeneration
-    # architecture name, and the registry verdict would wrongly exclude them.
-    if is_vl_model(vllm_config) or getattr(model_config, "use_mla", False):
-        return False
-    if getattr(model_config, "hf_text_config", None) is None:
-        return False
-    if is_moe_model(vllm_config):
-        return False
-
-    return _flashcomm_switch_enabled(vllm_config)
+    return dense_sp_unavailable_reason(vllm_config) is None and _flashcomm_switch_enabled(vllm_config)
 
 
 def enable_sp(vllm_config=None) -> bool:
