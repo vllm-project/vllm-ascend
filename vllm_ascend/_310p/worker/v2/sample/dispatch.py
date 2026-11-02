@@ -2,15 +2,26 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """310P PyTorch implementations of upstream sampling kernel launch ABIs."""
 
+from collections.abc import Mapping
 from functools import cache
+from typing import Any
 
 import torch
-from vllm.triton_utils import triton
+from vllm.triton_utils import dispatcher, triton
 from vllm.triton_utils.dispatcher import register_kernels
 from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend._310p.worker.v2.sample.min_p import apply_min_p
 from vllm_ascend._310p.worker.v2.sample.temperature import apply_temperature
+
+
+def _kernel_owner_vars(value: Any) -> Mapping[str, Any]:
+    """Read real owner attributes without invoking a lazy object's __getattr__."""
+    try:
+        namespace = object.__getattribute__(value, "__dict__")
+    except (AttributeError, TypeError):
+        return {}
+    return namespace if isinstance(namespace, Mapping) else {}
 
 
 def temperature_kernel(logits_ptr, logits_stride, expanded_idx_mapping_ptr, temperature_ptr, vocab_size, BLOCK_SIZE):
@@ -81,6 +92,11 @@ def bias_kernel(
 @cache
 def register_sampling_kernel_overrides() -> None:
     """Register once per 310P worker, before upstream sampling helpers launch."""
+    # Upstream scans every imported object with vars(value).get("kernel").
+    # Lazy FFI objects can fabricate a non-mapping __dict__. Limit this guard
+    # to the dispatcher's namespace; leave builtins.vars and kernel binding intact.
+    # Remove once supported vLLM versions guard owner namespace reads upstream.
+    dispatcher.vars = _kernel_owner_vars
     # The upstream bias wrapper calculates its launch block size on the host.
     # TritonPlaceholder has cdiv but omits this equally device-independent helper.
     if not hasattr(triton, "next_power_of_2"):

@@ -20,7 +20,7 @@ from vllm_ascend._310p.worker.v2.spec_decode.aclgraph import AutoRegressiveAclGr
 def test_decode_capture_retains_only_recorded_metadata():
     manager = object.__new__(AutoRegressiveAclGraphManager310)
     manager.max_num_reqs = 2
-    manager.dp_size = 1
+    manager.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=1))
     tensor_refs = []
 
     def build_metadata(**kwargs):

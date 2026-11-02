@@ -4,15 +4,19 @@
 
 import importlib
 import inspect
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
+from vllm.triton_utils import dispatcher
 from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
 from vllm.v1.worker.gpu.sample.logit_bias import apply_logit_bias
 from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 
 from vllm_ascend._310p.worker.v2.sample.dispatch import (
+    _kernel_owner_vars,
     bias_kernel,
     min_p_kernel,
     register_sampling_kernel_overrides,
@@ -24,6 +28,42 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import NPUPlatform
 
 pytestmark = pytest.mark.usefixtures("sampling_kernel_overrides")
+
+
+def test_dispatcher_skips_lazy_non_mapping_dict_and_rebinds_real_owners(monkeypatch):
+    class LazyForeignLibrary:
+        __slots__ = ()
+
+        def __getattr__(self, name):
+            if name == "__dict__":
+                return object()  # Reproduce the FFI object's fake attribute dictionary.
+            raise AttributeError(name)
+
+    def original(value):
+        return value
+
+    module = ModuleType("_310p_dispatch_regression")
+    namespace = vars(module)
+    namespace.update(
+        lazy=LazyForeignLibrary(),
+        alias=original,
+        owner=SimpleNamespace(kernel=original, _kernel_arg_names=("stale",)),
+    )
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    wrapper = dispatcher.KernelOverride(original, lambda value: value + 1)
+    dispatcher._rebind_kernels([(original, wrapper)])
+    assert _kernel_owner_vars(namespace["lazy"]) == {}
+    assert namespace["alias"] is wrapper
+    assert namespace["owner"].kernel is wrapper
+    assert "_kernel_arg_names" not in vars(namespace["owner"])
+    assert namespace["alias"][1](value=4) == 5
+
+
+def test_dispatcher_reads_class_owner_namespace():
+    class Owner:
+        kernel = object()
+
+    assert _kernel_owner_vars(Owner)["kernel"] is Owner.kernel
 
 
 @pytest.mark.parametrize(
