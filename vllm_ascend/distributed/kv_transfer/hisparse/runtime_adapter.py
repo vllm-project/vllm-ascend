@@ -307,6 +307,32 @@ def _invalidate_written_slots(self, written_slots, req_id_per_token):
     owner([self], written_slots, req_id_per_token)
 
 
+def install_private_host_allocator():
+    """Use pinned private storage at Core's pre-view allocation boundary.
+
+    Remove this exact-source adapter when common HiSparse exposes a backend
+    host-allocation hook. Existing shared regions and non-owning backends keep
+    their original allocation and registration owners.
+    """
+    from vllm.v1.hisparse import runtime as common
+    from vllm.v1.hisparse.backend import get_hisparse_backend
+
+    original = common.allocate_pinned_host_pool
+    if getattr(original, "_ascend_private_host_allocator", False):
+        return
+    _verify_source(original, COMMON_RUNTIME_SHA256)
+
+    @wraps(original)
+    def allocate(size):
+        backend = get_hisparse_backend()
+        allocator = getattr(backend, "allocate_private_host_pool", None)
+        return original(size) if allocator is None else allocator(size)
+
+    allocate._ascend_private_host_allocator = True
+    allocate._ascend_original = original
+    common.allocate_pinned_host_pool = allocate
+
+
 def install_call_sites():
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
     from vllm.v1.hisparse.runtime import HiSparsePrefillStagingPlan

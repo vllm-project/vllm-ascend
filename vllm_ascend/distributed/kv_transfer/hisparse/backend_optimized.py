@@ -36,6 +36,9 @@ class AscendHiSparseBackend(HiSparseBackend):
         from vllm_ascend.patch.worker.patch_hisparse_streams import install
 
         install()
+        from .runtime_adapter import install_private_host_allocator
+
+        install_private_host_allocator()
         from vllm_ascend.ops.hisparse_optimized import HiSparseNPUOps
         from vllm_ascend.utils import bootstrap_custom_op_env
 
@@ -52,6 +55,17 @@ class AscendHiSparseBackend(HiSparseBackend):
                 raise RuntimeError("Ascend HiSparse requires the Ascend swap_blocks_batch operator.")
         if not callable(HiSparseNPUOps):
             raise RuntimeError("Ascend HiSparse device kernels are unavailable.")
+
+    def allocate_private_host_pool(self, size: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Supply Core's exact registered range before it creates cache views."""
+        from vllm_ascend.ops.hisparse_optimized import allocate_mapped_host
+
+        payload = allocate_mapped_host((size,), torch.int8)
+        registration = payload._hisparse_registration
+        registered = registration.tensor.view(torch.int8)
+        registered._hisparse_registration = registration
+        self._host_dma.retain_host(registered)
+        return registered[:size], registered
 
     def pin_tensor(self, tensor: torch.Tensor) -> None:
         from vllm_ascend.ops.hisparse_optimized import MappedHostTensor

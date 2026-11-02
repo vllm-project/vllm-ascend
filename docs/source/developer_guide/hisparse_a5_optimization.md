@@ -330,3 +330,19 @@ adapters, byte-exact native and AIV queued writes, resolver/gather graph
 replay and an actual 128 GiB allocation with first/last native copies.
 Full-model ON measurements remain pending; the earlier failed request is
 excluded from performance results.
+
+The first allocator-only model attempt still failed: common HiSparse creates
+its own private backing before calling `pin_tensor`, so the standalone
+allocator change had not reached that path. The optimized backend now installs
+an exact-source adapter at `allocate_pinned_host_pool`, before any Host cache
+views exist. It returns one pinned backing and its exact registered alias to
+Core, and retains that registered owner in the existing DMA lifetime manager.
+Non-owning backends retain their original allocator; shared-region allocation
+is untouched. Remove this adapter when Core exposes a backend allocation hook.
+
+Three forwarding/fallback/source-rejection CPU cases passed. Runtime
+`2a95cc754bada8c8a9ca74ef2cbd92dff16c6ca6` passed five actual A5 cases through
+the real `HiSparseHostPool.allocate` entry, including the actual 128 GiB pool,
+registered-owner retention, byte-exact native/AIV writes and mapped graph
+replay. This closes the component integration gap; full-model requests and
+performance still require their own results.
