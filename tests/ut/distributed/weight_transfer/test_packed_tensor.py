@@ -28,6 +28,7 @@ from __future__ import annotations
 import sys
 import types
 import weakref
+from contextlib import contextmanager
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -57,6 +58,15 @@ class _FakeNpuStream:
     ``with torch.npu.stream(s):`` context manager to work.
     """
 
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def wait_stream(self, stream):
+        pass
+
+    def wait_event(self, event):
+        pass
+
     def synchronize(self) -> None:
         return None
 
@@ -79,13 +89,27 @@ def _stub_torch_npu():
     to redirect ``device="npu"`` to ``device="cpu"`` (the packing logic under test
     is dtype/shape/byte-correctness, which is device-agnostic).
     """
+    caller = _FakeNpuStream()
+    active = caller
+
+    @contextmanager
+    def stream_context(stream):
+        nonlocal active
+        previous, active = active, stream
+        try:
+            yield
+        finally:
+            active = previous
+
     fake_npu = types.SimpleNamespace(
         Stream=_FakeNpuStream,
-        current_stream=_FakeNpuStream,
+        Event=MagicMock,
+        current_device=lambda: 0,
+        current_stream=lambda: active,
         synchronize=lambda *a, **kw: None,
         # ``torch.npu.stream(s)`` returns a context manager; the fake stream
         # already implements ``__enter__``/``__exit__`` so just return it.
-        stream=lambda s: s,
+        stream=stream_context,
     )
     original_empty = torch.empty
 
@@ -95,7 +119,18 @@ def _stub_torch_npu():
             kwargs["device"] = "cpu"
         return original_empty(*args, **kwargs)
 
-    with patch.object(torch, "npu", fake_npu, create=True), patch.object(torch, "empty", _fake_empty):
+    from vllm.distributed.weight_transfer import packed_tensor as upstream
+
+    cached = upstream._get_streams
+    if hasattr(cached, "__wrapped__") and not hasattr(cached, "cache_clear"):
+        cached = cached.__wrapped__
+    cached.cache_clear()
+    with (
+        patch.object(torch, "npu", fake_npu, create=True),
+        patch.object(torch, "empty", _fake_empty),
+        patch.object(torch.accelerator, "current_device_index", return_value=0),
+        patch.object(torch.Tensor, "record_stream", return_value=None),
+    ):
         yield
 
 
@@ -1249,6 +1284,7 @@ def test_packed_producer_passes_packing_stream_to_broadcast(num_buffers):
     with (
         patch.object(torch.npu, "Stream", side_effect=streams),
         patch.object(torch.npu, "stream", side_effect=StreamContext) as context,
+        patch.object(torch.npu, "current_stream", side_effect=lambda: active[-1] if active else streams[0]),
     ):
         packed_broadcast_producer(
             iter((f"w{i}", torch.ones(1)) for i in range(7)), group, 0, lambda item: item[1], 1, num_buffers
@@ -1315,7 +1351,9 @@ def test_packed_cleanup_drains_all_slots_reports_retention_and_prioritizes_signa
         else:
             packed_broadcast_consumer(iter([("w", ([1], torch.float32))]), group, 0, finish, 8, 3)
     assert error.value is expected
-    assert drained == [0, 1, 2]
+    # vLLM may attempt its own normal drain first; the adapter must still drain
+    # every slot after an upstream drain fails, preserving exception priority.
+    assert drained[-3:] == [0, 1, 2]
     assert len(pinned) == 1
     assert pinned[0].numel() == 4
     log_error.assert_called_once()
@@ -1349,3 +1387,73 @@ def test_packed_roundtrip_odd_bf16_followed_by_unaligned_int64(backend):
     # Three BF16 elements put int64 at byte offset 6, not divisible by 8.
     assert tensors[0][1].numel() * tensors[0][1].element_size() == 6
     assert _assert_packed_roundtrip(backend, tensors, 32) == 1
+
+
+def test_packed_reuse_keeps_vllm_loops_and_global_cuda_unchanged():
+    from vllm.distributed.weight_transfer import packed_tensor as upstream
+
+    from vllm_ascend.distributed.weight_transfer import packed_adapter
+
+    cuda_stream = torch.cuda.stream
+    producer = upstream.packed_nccl_broadcast_producer
+    consumer = upstream.packed_nccl_broadcast_consumer
+    with patch.object(upstream, "packed_nccl_broadcast_producer", wraps=producer) as called:
+        packed_broadcast_producer(iter([("w", torch.ones(1))]), _make_group_mock(), 0, lambda item: item[1], 16)
+        called.assert_called_once()
+    assert upstream.packed_nccl_broadcast_producer is producer
+    assert upstream.packed_nccl_broadcast_consumer is consumer
+    assert torch.cuda.stream is cuda_stream
+    assert packed_adapter._ACTIVE.get() is None
+
+
+@pytest.mark.parametrize("num_buffers", [2, 3])
+def test_packed_reuse_orders_callback_completion_and_tracks_owning_clones(num_buffers):
+    from vllm_ascend.distributed.weight_transfer import packed_adapter
+
+    completed = []
+    waited = []
+    retained = []
+    adapter_events = []
+
+    class Event:
+        def record(self, stream):
+            state = packed_adapter._ACTIVE.get()
+            if self in state.events:
+                assert len(completed) > len(adapter_events), "completion must be recorded after the callback"
+                adapter_events.append(self)
+
+    def wait(stream, event):
+        state = packed_adapter._ACTIVE.get()
+        if event in state.events:
+            assert event is adapter_events[-1]
+            waited.append(event)
+
+    def receive(tensor, **kwargs):
+        tensor.fill_(len(completed) + 1)
+
+    def load(weights):
+        state = packed_adapter._ACTIVE.get()
+        assert len(state.events) == num_buffers
+        retained.extend(tensor for _, tensor in weights)
+        completed.append(len(completed))
+
+    chunks = 3 * num_buffers + 1
+    with (
+        patch.object(torch.npu, "Event", Event),
+        patch.object(_FakeNpuStream, "wait_event", wait),
+        patch.object(torch.Tensor, "record_stream", return_value=None) as tracking,
+    ):
+        packed_broadcast_consumer(
+            iter((f"w{i}", ([1], torch.float32)) for i in range(chunks)),
+            types.SimpleNamespace(broadcast=receive),
+            0,
+            load,
+            1,
+            num_buffers,
+        )
+        assert tracking.call_count >= chunks * (num_buffers + 1)
+    assert len(completed) == chunks
+    assert len(waited) == chunks - 1
+    assert len({id(event) for event in adapter_events}) == num_buffers
+    assert len({tensor.data_ptr() for tensor in retained}) == chunks
+    assert packed_adapter._ACTIVE.get() is None
