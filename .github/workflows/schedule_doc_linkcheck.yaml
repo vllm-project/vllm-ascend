@@ -13,7 +13,6 @@ on:
       - 'mkdocs.yml'
       - '.github/workflows/schedule_doc_linkcheck.yaml'
       - '.github/workflows/scripts/check_md_links.py'
-      - 'tests/ut/_tools/test_check_md_links.py'
   workflow_dispatch:
 
 defaults:
@@ -62,7 +61,6 @@ jobs:
               - 'mkdocs.yml'
               - '.github/workflows/schedule_doc_linkcheck.yaml'
               - '.github/workflows/scripts/check_md_links.py'
-              - 'tests/ut/_tools/test_check_md_links.py'
 
       - name: Install checker dependencies
         run: |
@@ -88,7 +86,7 @@ jobs:
           if [[ -f docs/_build/linkcheck/summary.md ]]; then
             cat docs/_build/linkcheck/summary.md >> "${GITHUB_STEP_SUMMARY}"
           else
-            printf '%s\n' 'Link check produced no report; inspect setup, unit-test, and input errors in the job log.' >> "${GITHUB_STEP_SUMMARY}"
+            printf '%s\n' 'Link check produced no report; inspect setup and checker errors in the job log.' >> "${GITHUB_STEP_SUMMARY}"
           fi
 
       - name: Upload linkcheck reports
