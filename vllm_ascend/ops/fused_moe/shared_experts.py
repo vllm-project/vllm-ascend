@@ -39,7 +39,12 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import npu_stream_switch, shared_experts_calculation_stream
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
+    npu_stream_switch,
+    shared_experts_calculation_stream,
+)
 
 # CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
 SITU_MX_DST_TYPE_E4M3FN = 36
@@ -543,6 +548,23 @@ class AscendSharedExperts:
                 linear_beta=self.situ_activation.linear_beta or 0.0,
                 activate_left=True,
                 quant_mode="dynamic",
+            )
+        elif (
+            get_ascend_device_type() == AscendDeviceType.A5
+            and self.swiglu_limit == 0.0
+            and self.swiglu_alpha == 1.0
+            and self.swiglu_beta == 0.0
+        ):
+            # CANN 9.2 rejects mode 1 with a zero clamp on A5. Mode 0 is
+            # standard, unbounded SwiGLU over contiguous [gate, up] halves;
+            # the native API's mode-1 tuning defaults do not apply to it.
+            quantized_x, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
+                submitted_gate_up.gate_up,
+                weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
+                activation_scale=pertoken_scale,
+                activate_left=True,
+                quant_mode=1,
+                swiglu_mode=0,
             )
         else:
             quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
