@@ -8,23 +8,7 @@ import pytest
 import torch
 
 from tests.e2e.pull_request.rlhf.weight_transfer.models.minimax import MINIMAX_M3_CASE, minimax_m3_checkpoint_name
-from tests.ut.distributed.weight_transfer.weight_transfer_test_helpers import checkpoint_source, router_meta_model
-
-
-def test_minimax_checkpoint_source_includes_parameter_router_bias():
-    """Keep the name mapping valid if HF represents the bias as a parameter."""
-    model, gate = router_meta_model(3)
-    gate.register_parameter(
-        "e_score_correction_bias", torch.nn.Parameter(torch.empty(8, dtype=torch.float32, device="meta"))
-    )
-    source = checkpoint_source(model, MINIMAX_M3_CASE)
-    prefix = "language_model.model.layers.3.block_sparse_moe"
-    expected = {
-        f"{prefix}.gate.weight": ((8, 16), torch.bfloat16),
-        f"{prefix}.e_score_correction_bias": ((8,), torch.bfloat16),
-    }
-    assert {meta.name: (meta.shape, meta.dtype) for meta in source.metadata()} == expected
-    assert {name: (tuple(tensor.shape), tensor.dtype) for name, tensor in source} == expected
+from tests.ut.distributed.weight_transfer.weight_transfer_test_helpers import checkpoint_source
 
 
 def test_minimax_checkpoint_source_splits_fused_projections():

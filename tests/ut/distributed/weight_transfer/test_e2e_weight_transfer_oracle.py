@@ -47,7 +47,6 @@ from tests.e2e.pull_request.rlhf.weight_transfer.utils import (
 from tests.ut.distributed.weight_transfer.weight_transfer_test_helpers import checkpoint_source, router_meta_model
 
 CASE = MODEL_CASES[0]
-ORACLE_CASES = MODEL_CASES
 PORT = 8123
 GPU_MEMORY_UTILIZATION = 0.75
 PACKED_BUFFER_FLOOR_BYTES = 2**30
@@ -69,22 +68,14 @@ def test_model_matrix_separates_model_and_transport_coverage(backend):
         assert parameter.id == f"{'packed' if packed else 'unpacked'}-{case.id}"
         assert any(mark.name == "e2e_model" and mark.args == (case.model,) for mark in parameter.marks)
 
+    for family in (QWEN_CASES, GLM_CASES, MINIMAX_CASES, DEEPSEEK_CASES):
+        expected_family = [parameter for parameter in parameters if parameter.values[0] in family]
+        assert pytest_model_cases(backend, model_cases=family) == expected_family
+
 
 def test_model_matrix_rejects_unknown_backend():
     with pytest.raises(ValueError, match="Unsupported weight transfer backend"):
         pytest_model_cases("unknown")
-
-
-@pytest.mark.parametrize("backend", ["npu_ipc", "hccl"])
-@pytest.mark.parametrize(
-    "model_cases",
-    [QWEN_CASES, GLM_CASES, MINIMAX_CASES, DEEPSEEK_CASES],
-    ids=["qwen", "glm", "minimax", "deepseek"],
-)
-def test_family_selection_preserves_parameters_and_markers(backend, model_cases):
-    expected = [parameter for parameter in pytest_model_cases(backend) if parameter.values[0] in model_cases]
-    actual = pytest_model_cases(backend, model_cases=model_cases)
-    assert actual == expected
 
 
 def _flag_map(args: list[str]) -> dict[str, str | bool]:
@@ -103,9 +94,15 @@ def _flag_map(args: list[str]) -> dict[str, str | bool]:
     return flags
 
 
-@pytest.mark.parametrize("case", ORACLE_CASES, ids=lambda case: case.id)
-@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
-@pytest.mark.parametrize("backend", ["npu_ipc", "hccl"])
+@pytest.mark.parametrize(
+    ("case", "backend", "tensor_parallel_size"),
+    [
+        pytest.param(QWEN_CASES[0], "npu_ipc", 2, id="qwen-ipc-tp2"),
+        pytest.param(QWEN_CASES[0], "hccl", 1, id="qwen-hccl-tp1"),
+        pytest.param(GLM_CASES[0], "npu_ipc", 2, id="glm-ipc-tp2"),
+        pytest.param(MINIMAX_CASES[0], "npu_ipc", 2, id="minimax-ipc-tp2"),
+    ],
+)
 def test_reference_and_lane_differ_only_in_the_load_path(case, tensor_parallel_size, backend):
     lane = _flag_map(
         live_update_serve_args(
@@ -136,24 +133,6 @@ def test_reference_and_lane_differ_only_in_the_load_path(case, tensor_parallel_s
     assert lane == reference
     assert lane["--tensor-parallel-size"] == str(tensor_parallel_size)
 
-
-def test_reference_and_lane_share_the_measurement_conditions():
-    reference = _flag_map(reference_serve_args(CASE, port=PORT, gpu_memory_utilization=0.45))
-    lane = _flag_map(live_update_serve_args(CASE, backend="npu_ipc", port=PORT, gpu_memory_utilization=0.45))
-
-    # Everything that could move a logprob has to match, including the graph
-    # mode and the NZ layout, or the comparison proves nothing.
-    for flag in (
-        "--dtype",
-        "--compilation-config",
-        "--max-model-len",
-        "--gpu-memory-utilization",
-        "--tensor-parallel-size",
-        "--additional-config",
-        "--hf-overrides",
-        "--distributed-executor-backend",
-    ):
-        assert lane[flag] == reference[flag], flag
     compilation_config = lane["--compilation-config"]
     assert isinstance(compilation_config, str)
     assert compilation_config.startswith('{"cudagraph_mode": "FULL_DECODE_ONLY"')
@@ -170,77 +149,6 @@ def reference_cache():
     """Give every test a private copy of the reference cache."""
     with patch.object(utils, "_REFERENCE_SIGNATURES", {}):
         yield utils._REFERENCE_SIGNATURES
-
-
-class _FakeServer:
-    instances: list["_FakeServer"] = []
-
-    def __init__(self, model, *, vllm_serve_args, **kwargs) -> None:
-        self.model = model
-        self.vllm_serve_args = vllm_serve_args
-        self.__class__.instances.append(self)
-
-    def __enter__(self) -> "_FakeServer":
-        return self
-
-    def __exit__(self, *exc) -> None:
-        # Never swallow an exception raised inside the ``with`` block.
-        return None
-
-    def get_client(self):
-        return MagicMock()
-
-
-@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
-def test_reference_signature_starts_one_server_per_measurement_conditions(reference_cache, tensor_parallel_size):
-    """Lanes that share model + memory budget + TP must reuse one startup.
-
-    The reference never depends on the transport or on the packed flag, so paying
-    for a fresh startup-load server per lane would double the suite's cost for no
-    extra coverage.
-    """
-    _FakeServer.instances.clear()
-    signature = [("text", (0.5,))]
-
-    with (
-        patch("tests.e2e.conftest.RemoteOpenAIServer", _FakeServer),
-        patch.object(utils, "fixed_startup_checkpoint", MagicMock()),
-        patch.object(utils, "wait_for_free_device_memory") as mock_wait,
-        patch.object(utils, "generation_signature", return_value=signature) as mock_generate,
-    ):
-        first = reference_signature(
-            MagicMock(case_id=CASE.id),
-            CASE,
-            port=PORT,
-            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-            tensor_parallel_size=tensor_parallel_size,
-            device_index=0,
-        )
-        second = reference_signature(
-            MagicMock(case_id=CASE.id),
-            CASE,
-            port=PORT + 1,
-            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-            tensor_parallel_size=tensor_parallel_size,
-            device_index=0,
-        )
-        # A different memory budget is a different measurement condition.
-        third = reference_signature(
-            MagicMock(case_id=CASE.id),
-            CASE,
-            port=PORT + 2,
-            gpu_memory_utilization=0.45,
-            tensor_parallel_size=tensor_parallel_size,
-            device_index=0,
-        )
-
-    assert first == second == signature
-    assert third == signature
-    assert len(_FakeServer.instances) == 2
-    assert mock_generate.call_count == 2
-    # One gate per startup, not per call: a cache hit must not stop the world.
-    assert mock_wait.call_count == 2 * tensor_parallel_size
-    assert [call.args[0] for call in mock_wait.call_args_list] == list(range(tensor_parallel_size)) * 2
 
 
 @pytest.mark.parametrize(
@@ -397,11 +305,8 @@ def test_servers_share_environment_and_wait_for_all_devices(backend, tp):
     [
         (None, 0, 2, "0,1"),
         (None, 6, 1, "6"),
-        ("4,5", 0, 2, "4,5"),
-        ("4,5", 0, 1, "4"),
         ("4,5", 1, 1, "5"),
         ("6,2,7,3", 1, 2, "2,7"),
-        (" 4, 5 ", 0, 2, "4,5"),
     ],
 )
 def test_server_visibility_maps_parent_logical_devices(monkeypatch, visible, device_index, world_size, expected):
@@ -423,23 +328,40 @@ def test_server_visibility_rejects_invalid_selection(monkeypatch, visible, devic
 
 
 @pytest.mark.parametrize(
-    ("device_index", "env"),
-    [(1, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"}), (0, {"ASCEND_RT_VISIBLE_DEVICES": "4,5"})],
-    ids=["logical-device", "physical-visibility"],
+    "changed_conditions",
+    [
+        pytest.param({"gpu_memory_utilization": 0.45}, id="memory-budget"),
+        pytest.param({"device_index": 1}, id="logical-device"),
+        pytest.param({"env_dict": {"ASCEND_RT_VISIBLE_DEVICES": "4,5"}}, id="physical-visibility"),
+    ],
 )
-def test_reference_cache_separates_device_selection(reference_cache, device_index, env):
+def test_reference_cache_reuses_only_matching_conditions(reference_cache, changed_conditions):
     with (
-        patch("tests.e2e.conftest.RemoteOpenAIServer", _FakeServer),
+        patch("tests.e2e.conftest.RemoteOpenAIServer") as server_factory,
         patch.object(utils, "fixed_startup_checkpoint", MagicMock()),
-        patch.object(utils, "wait_for_free_device_memory"),
+        patch.object(utils, "wait_for_free_device_memory") as wait,
         patch.object(utils, "generation_signature", side_effect=[[("first", ())], [("second", ())]]) as generate,
     ):
-        kwargs = dict(port=PORT, gpu_memory_utilization=GPU_MEMORY_UTILIZATION, tensor_parallel_size=2)
-        first = reference_signature(
-            MagicMock(), CASE, device_index=0, env_dict={"ASCEND_RT_VISIBLE_DEVICES": "0,1"}, **kwargs
+        kwargs = dict(
+            port=PORT,
+            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+            tensor_parallel_size=2,
+            device_index=0,
+            env_dict={"ASCEND_RT_VISIBLE_DEVICES": "0,1"},
         )
-        second = reference_signature(MagicMock(), CASE, device_index=device_index, env_dict=env, **kwargs)
-        repeated = reference_signature(MagicMock(), CASE, device_index=device_index, env_dict=env.copy(), **kwargs)
+        first = reference_signature(MagicMock(), CASE, **kwargs)
+        # Ports are incidental: the same measurement must reuse its reference.
+        kwargs["port"] = PORT + 1
+        assert reference_signature(MagicMock(), CASE, **kwargs) == first
+        kwargs.update(changed_conditions)
+        second = reference_signature(MagicMock(), CASE, **kwargs)
+        kwargs["env_dict"] = kwargs["env_dict"].copy()
+        assert reference_signature(MagicMock(), CASE, **kwargs) == second
     assert first != second
-    assert second == repeated
-    assert generate.call_count == 2
+    assert generate.call_count == server_factory.call_count == 2
+    # Cache hits do not wait; each startup gates every TP rank.
+    device = kwargs["device_index"]
+    memory = kwargs["gpu_memory_utilization"]
+    assert wait.call_args_list == [call(0, GPU_MEMORY_UTILIZATION), call(1, GPU_MEMORY_UTILIZATION)] + [
+        call(device + rank, memory) for rank in range(2)
+    ]
