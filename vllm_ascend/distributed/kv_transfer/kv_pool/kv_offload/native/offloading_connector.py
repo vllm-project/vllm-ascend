@@ -153,6 +153,73 @@ def _canonicalize_split_cache(
     return tuple(views)
 
 
+def _deduplicate_overlapping_views(kv_caches: CanonicalKVCaches) -> CanonicalKVCaches:
+    """Share CPU slots for overlapping pages of hybrid cache groups.
+
+    Attention and Mamba layers can overlay the same pool with different
+    component boundaries. Exact-view deduplication alone counts those bytes
+    twice. Partition each common block stride at component boundaries so
+    every reference still copies exactly its own payload.
+    """
+    pools: dict[tuple[int, int], list[int]] = {}
+    for idx, cache in enumerate(kv_caches.tensors):
+        tensor = cache.tensor
+        pools.setdefault((tensor.untyped_storage().data_ptr(), tensor.stride(0)), []).append(idx)
+
+    tensors: list[CanonicalKVCacheTensor] = []
+    replacements: dict[int, list[tuple[int, int, int]]] = {}
+    for indices in pools.values():
+        boundaries = sorted(
+            {
+                offset
+                for idx in indices
+                for offset in (
+                    kv_caches.tensors[idx].tensor.storage_offset(),
+                    kv_caches.tensors[idx].tensor.storage_offset() + kv_caches.tensors[idx].page_size_bytes,
+                )
+            }
+        )
+        for start, end in zip(boundaries, boundaries[1:]):
+            owners = [
+                idx
+                for idx in indices
+                if kv_caches.tensors[idx].tensor.storage_offset() <= start
+                and end <= kv_caches.tensors[idx].tensor.storage_offset() + kv_caches.tensors[idx].page_size_bytes
+            ]
+            if not owners:
+                continue
+            source = kv_caches.tensors[owners[0]].tensor
+            tensor_idx = len(tensors)
+            tensors.append(
+                CanonicalKVCacheTensor(
+                    tensor=torch.as_strided(source, (source.shape[0], end - start), source.stride(), start),
+                    page_size_bytes=end - start,
+                )
+            )
+            for idx in owners:
+                replacements.setdefault(idx, []).append(
+                    (tensor_idx, start - kv_caches.tensors[idx].tensor.storage_offset(), end - start)
+                )
+
+    group_refs: list[list[CanonicalKVCacheRef]] = []
+    for refs in kv_caches.group_data_refs:
+        new_refs: list[CanonicalKVCacheRef] = []
+        for ref in refs:
+            pieces = replacements[ref.tensor_idx]
+            for tensor_idx, offset, size in pieces:
+                copy_size = min(size, ref.page_size_bytes - offset)
+                if copy_size > 0:
+                    new_refs.append(
+                        CanonicalKVCacheRef(
+                            tensor_idx=tensor_idx,
+                            page_size_bytes=copy_size,
+                            mapping=ref.mapping if len(pieces) == 1 else None,
+                        )
+                    )
+        group_refs.append(new_refs)
+    return CanonicalKVCaches(tensors=tensors, group_data_refs=group_refs)
+
+
 class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
     """Offloading worker boundary supporting Ascend's split KV layouts."""
 
@@ -320,9 +387,11 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
         if not canonical_tensors:
             raise ValueError("No KV cache tensors were registered for native offloading")
         self._init_worker(
-            CanonicalKVCaches(
-                tensors=canonical_tensors,
-                group_data_refs=group_data_refs,
+            _deduplicate_overlapping_views(
+                CanonicalKVCaches(
+                    tensors=canonical_tensors,
+                    group_data_refs=group_data_refs,
+                )
             )
         )
 

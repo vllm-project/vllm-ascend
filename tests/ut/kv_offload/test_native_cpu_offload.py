@@ -11,7 +11,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
 from vllm.utils.math_utils import round_up
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    MambaSpec,
+)
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingWorker
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -209,9 +214,9 @@ def test_ascend_connector_round_trips_interleaved_kernel_blocks(
         dtype=dtype,
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
-    worker.kv_cache_config = SimpleNamespace(
+    worker.kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
-        kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
         kv_cache_tensors=[],
     )
     worker.vllm_config = object()
@@ -303,9 +308,9 @@ def test_ascend_connector_worker_accepts_separate_kv_tensors(
         head_size=3,
         dtype=torch.bfloat16,
     )
-    kv_cache_config = SimpleNamespace(
+    kv_cache_config = KVCacheConfig(
         num_blocks=4,
-        kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
         kv_cache_tensors=[],
         # The connector offloads the groups vLLM selects, not all of them.
         prefix_cacheable_group_ids=(0,),
@@ -350,9 +355,9 @@ def test_ascend_connector_worker_accepts_aligned_mamba_states(
         dtypes=(torch.int8, torch.int8),
         page_size_padded=8,
     )
-    kv_cache_config = SimpleNamespace(
+    kv_cache_config = KVCacheConfig(
         num_blocks=4,
-        kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
         kv_cache_tensors=[],
         # The connector offloads the groups vLLM selects, not all of them.
         prefix_cacheable_group_ids=(0,),
