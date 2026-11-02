@@ -109,8 +109,10 @@ def _widen_cache_dtype_literal_for_worker() -> None:
     missing = tuple(d for d in _ASCEND_CACHE_DTYPES if d not in existing_args)
     if missing:
         # Derive from the current upstream Literal and append the Ascend-only
-        # dtypes so no upstream member is dropped.
-        widened = typing.Literal[*existing_args + missing]  # type: ignore[valid-type]
+        # dtypes so no upstream member is dropped. Subscripting with the plain
+        # tuple is the same __getitem__ call as star-unpacking it and parses
+        # on Python 3.10 (PEP 646 starred subscripts are 3.11+).
+        widened = typing.Literal[existing_args + missing]  # type: ignore[valid-type]
 
         _cache_mod.CacheDType = widened
         CacheConfig.__annotations__["cache_dtype"] = widened
