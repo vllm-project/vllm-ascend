@@ -1,0 +1,4 @@
+pr: 20571
+entries:
+  - category: bugfix
+    text: Preserved Mamba boundary alignment for intermediate chunks of kv_both chunked prefills, improving concurrent prefix-cache reuse.
