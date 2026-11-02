@@ -1348,6 +1348,9 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     this is cheap and avoids id-reuse / stale-cache / init-ordering hazards.
     """
     ascend_config = get_ascend_config()
+    if ascend_config.finegrained_tp_config.kda_tensor_parallel_size > 1:
+        # KDA activation exchanges require the same padded capacity on every DP rank.
+        return False
     # 1. When mc2_comm_alg == "hierarchy", dispatch/combine op don't support dynamic bs;
     # 2. When use mega_moe, op don't support dynamic global_bs;
     # we need to do allreduce and pad token across dp every step.
