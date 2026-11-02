@@ -3,4 +3,4 @@ entries:
   - category: bugfix
     text: Reduced the Qwen4Exp PLE Triton channel tile to 128 on A3 to address its UB compilation failure; A5 now uses a 512-channel tile.
     model: qwen4exp
-    hardware: [A3]
+    hardware: [A3, A5]
