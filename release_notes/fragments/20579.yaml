@@ -1,0 +1,4 @@
+pr: 20579
+entries:
+  - category: bugfix
+    text: Isolated NPU compilation caches by logical device to prevent stale device artifacts from being reused when switching data-parallel launch mappings.
