@@ -25,7 +25,7 @@ Design (multi-DP safe — avoid full-world / cross-PP collectives):
 
 2. **Fixed sync transport** (no JSON ``sync_mode`` knob)
    - last-PP × ``tp_size>1``: wave-head submits TP0-sourced due
-     ``broadcast([wave_idx, config_due, dump_due])`` on ``DueBitsBusWorker``
+     ``broadcast([config_due, dump_due])`` on ``DueBitsBusWorker``
      (``sync_due_bits_from_src``); end-of-wave drains / applies.
    - everyone else (non-last PP, API, ``tp_size<=1``): **local file poll**.
 

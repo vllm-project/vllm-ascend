@@ -75,7 +75,6 @@ def _bind(cfg: RuntimeConfig, *, runner: MagicMock | None = None) -> RuntimeGuar
         self._deferred_kv_dump_jobs = []
         self._scheduler_output_for_step = None
         self._last_input_batch = None
-        self._bus_wave_seq = 0
         self._merged_bus_warn_ts = 0.0
         self._tokenizer = None
         self._tokenizer_failed = False

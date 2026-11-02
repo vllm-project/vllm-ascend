@@ -181,7 +181,6 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         # (after prepare). Same-wave detector arms wait in ``_kv_dump_jobs``
         # until the *next* wave head (accepted +1 wave latency).
         self._deferred_kv_dump_jobs: list[dict[str, Any]] = []
-        self._bus_wave_seq = 0
         self._merged_bus_warn_ts = 0.0
         self.detectors = DetectorManager(
             runtime_config=runtime_config,

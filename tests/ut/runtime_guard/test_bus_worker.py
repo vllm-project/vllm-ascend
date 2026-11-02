@@ -41,7 +41,7 @@ def test_bus_worker_runs_due_bits_off_main_thread():
         gate = threading.Event()
         seen_thread: list[str] = []
 
-        def _fake_sync(group, bits, *, wave_idx=None):
+        def _fake_sync(group, bits):
             seen_thread.append(threading.current_thread().name)
             gate.wait(2.0)
             return [False, False]
@@ -85,7 +85,7 @@ def test_bus_worker_rejects_second_submit_while_inflight():
     try:
         gate = threading.Event()
 
-        def _fake_sync(group, bits, *, wave_idx=None):
+        def _fake_sync(group, bits):
             gate.wait(2.0)
             return list(bits)
 
@@ -141,7 +141,6 @@ def test_async_merged_bus_submit_then_drain_applies_config():
         _pending_merged_bus_dump_jobs=[],
         _pending_merged_bus_can_dump=False,
         _pending_merged_bus_is_first=False,
-        _bus_wave_seq=0,
         _merged_bus_warn_ts=0.0,
         _refund_dropped_dump_arms=MagicMock(),
         _drop_pending_dump_jobs=MagicMock(),
@@ -207,7 +206,6 @@ def test_async_merged_bus_warns_when_drain_waits():
         _pending_merged_bus_dump_jobs=[],
         _pending_merged_bus_can_dump=False,
         _pending_merged_bus_is_first=False,
-        _bus_wave_seq=0,
         _merged_bus_warn_ts=0.0,
         _refund_dropped_dump_arms=MagicMock(),
         _drop_pending_dump_jobs=MagicMock(),
@@ -223,7 +221,7 @@ def test_async_merged_bus_warns_when_drain_waits():
     group.is_first_rank = True
     group.rank_in_group = 0
 
-    def _slow_sync(g, bits, *, wave_idx=None):
+    def _slow_sync(g, bits):
         gate.wait(2.0)
         return [False, False]
 
@@ -329,7 +327,7 @@ def test_drain_timeout_refunds_pending_jobs_and_clears_state():
     gate = threading.Event()
     group = SimpleNamespace(world_size=2, is_first_rank=True, rank_in_group=0)
 
-    def _stuck_sync(g, bits, *, wave_idx=None):
+    def _stuck_sync(g, bits):
         gate.wait(5.0)
         return [False, False]
 
