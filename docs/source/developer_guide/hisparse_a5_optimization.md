@@ -283,3 +283,29 @@ cases, adding two real Core Host-view layouts and reproduction of the rejected
 576-byte source spec to the preceding eight cases. Same allocation addresses
 and all byte patterns were preserved. Full ON-model qualification remains
 pending.
+
+### Current-main Indexer writes and capture-only mirrors
+
+The Indexer write entry now dispatches tagged native HiSparse C8 caches to
+the existing page-stride-aware writer. Flattening these shared slabs with
+`.view()` fails because neighboring pages have gaps. Runtime
+`01420d7d37cd8f3a96f9e0bd2205555ea9b0f4c9` passed seventeen actual A5 component
+cases, including six changed-input writes across eager/graph modes. The
+independent oracle checks K bytes, FP32 scale bits and untouched page gaps.
+The INT8-only fused store and Attention compute kernels are unchanged.
+
+V2's FULL-graph warmup and capture both call forward with runtime mode NONE.
+Submitting a per-layer Host mirror in these forwards incorrectly creates
+connector work without a real step boundary; the second forward then hits
+the existing duplicate-mirror guard. Both Ascend HiSparse metadata builders
+now mark capture metadata explicitly. Device KV writes remain in the graph;
+only the CPU mirror callback is omitted for that metadata. Real eager
+forwards still call the original finish method, and real graph replay keeps
+the connector's post-forward mirror owner.
+
+Four focused CPU checks passed. Runtime
+`a65d03e4c27b4c4e8fa03883cae09c1c28733752` passed six actual A5 component cases:
+the real cold adapters, three device-write graph replays with no capture Host
+callbacks, a real Core finish submission and the preserved duplicate guard.
+These component checks do not establish full-model correctness, performance
+or the active-concurrency limit. Full ON-model validation is continuing.

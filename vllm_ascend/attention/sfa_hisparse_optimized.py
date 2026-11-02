@@ -14,6 +14,7 @@ from vllm.v1.hisparse.runtime import HiSparsePrefillStagingPlan, build_hisparse_
 from vllm.v1.worker.workspace import current_workspace_manager
 
 from vllm_ascend.attention.hisparse_resident_state import resident_eager_transport_allowed
+from vllm_ascend.attention.sfa_hisparse import finish_hisparse_kv_update
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.ops.hisparse_resident import begin_resident_forward, resident_topk_or_none
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
@@ -81,9 +82,15 @@ class AscendHiSparseMetadata(AscendSFAMetadata):
     num_reqs: int = 0
     hisparse_uniform_query_group_size: int = 0
     prefill: AscendHiSparsePrefillMetadata | None = None
+    hisparse_for_capture: bool = False
 
 
 class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
+    def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
+        metadata = super().build_for_cudagraph_capture(common_attn_metadata, **kwargs)
+        metadata.hisparse_for_capture = True
+        return metadata
+
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device, **kwargs):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls=AscendHiSparseMetadata, **kwargs)
         self._request_row_buffers: dict[int | None, torch.Tensor] = {}
@@ -255,7 +262,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             mapping,
             attn_metadata.query_start_loc[-1:],
         )
-        cache.finish_kv_update()
+        finish_hisparse_kv_update(cache, attn_metadata)
         return result
 
     def _compose_sfa_kv_cache(self, kv_cache):
@@ -378,7 +385,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 mapping,
                 attn_metadata.query_start_loc[-1:],
             )
-            self.hisparse_cache.finish_kv_update()
+            finish_hisparse_kv_update(self.hisparse_cache, attn_metadata)
             return rope, latent, scales
         values = kv_no_split.reshape(-1, self.kv_lora_rank + self.qk_rope_head_dim)
         num_tokens = values.shape[0]
@@ -413,7 +420,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # The common connector mirrors resident rows after this write. Draft
         # rows are deferred until the next step, and FULL graphs are mirrored
         # by finish_forward after replay.
-        cache.finish_kv_update()
+        finish_hisparse_kv_update(cache, attn_metadata)
         return rope, latent
 
     def _store_parallel_kv(

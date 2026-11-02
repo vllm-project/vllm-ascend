@@ -16,6 +16,17 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, Ascen
 _ATTENTION_CHUNK_ROWS = 32
 
 
+def finish_hisparse_kv_update(cache, metadata) -> None:
+    """Publish real writes; capture forwards have no connector step to mirror.
+
+    V2 runs both FULL-graph warmup and capture with runtime mode NONE.
+    Preserve the device KV writes in those forwards, but leave Host mirror
+    submission to the real connector step after graph replay.
+    """
+    if not getattr(metadata, "hisparse_for_capture", False):
+        cache.finish_kv_update()
+
+
 @dataclass
 class AscendHiSparsePrefillMetadata:
     host_staging_plan: HiSparsePrefillStagingPlan
@@ -26,9 +37,15 @@ class AscendHiSparseMetadata(AscendSFAMetadata):
     req_id_per_token: torch.Tensor | None = None
     num_reqs: int = 0
     prefill: AscendHiSparsePrefillMetadata | None = None
+    hisparse_for_capture: bool = False
 
 
 class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
+    def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
+        metadata = super().build_for_cudagraph_capture(common_attn_metadata, **kwargs)
+        metadata.hisparse_for_capture = True
+        return metadata
+
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device, **kwargs):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls=AscendHiSparseMetadata, **kwargs)
         self._request_row_buffers: dict[int | None, torch.Tensor] = {}
@@ -196,7 +213,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # The common connector mirrors resident rows after this write. Draft
         # rows are deferred until the next step, and FULL graphs are mirrored
         # by finish_forward after replay.
-        cache.finish_kv_update()
+        finish_hisparse_kv_update(cache, attn_metadata)
         return rope, latent
 
     def _attention_physical(self, query, query_rope, packed_cache, physical_topk):
