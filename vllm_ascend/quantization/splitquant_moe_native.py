@@ -40,11 +40,23 @@ def apply(prepared, x, ids, weights, diagnostic=False):
 
 
 def pack_up_nz(packed):
+    """Pack nibble weights into the MoE NZ layout.
+
+    ``packed`` is stored as ``[expert, N, K/2]`` bytes, with two INT4
+    values per byte.  The NZ kernel consumes ``[expert, N/64, K/16, 16, 32]``
+    bytes.  Since the input's last dimension is ``K/2`` bytes, its NZ block
+    count is ``(K/2)/8``.  The previous code used ``K/2`` directly, leaving
+    the reshape eight times too large for Qwen3-30B.
+    """
     e, n, khalf = packed.shape
+    if n % 64 or khalf % 8:
+        raise ValueError(
+            f"NZ up weight shape must be divisible by (N=64, K/2=8), got {tuple(packed.shape)}"
+        )
     raw = packed.to(torch.uint8)
     codes = torch.stack((raw & 15, raw >> 4), -1).reshape(e, n, khalf * 2).transpose(1, 2).contiguous()
     paired = (codes[:, :, ::2] | (codes[:, :, 1::2] << 4)).contiguous()
-    return paired.reshape(e, khalf, 16, n // 64, 32).permute(0, 3, 1, 2, 4).contiguous()
+    return paired.reshape(e, khalf // 8, 16, n // 64, 32).permute(0, 3, 1, 2, 4).contiguous()
 
 
 def unpack_up_nz(packed):
