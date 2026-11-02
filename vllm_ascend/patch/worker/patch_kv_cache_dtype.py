@@ -97,9 +97,13 @@ def _widen_cache_dtype_literal_for_worker() -> None:
     # ``vllm/v1/attention/selector.py`` reads the same list object). A
     # spawned worker starts from the upstream list, so append the Ascend
     # dtypes here too; idempotent when fork already inherited the append.
-    for dtype in _ASCEND_CACHE_DTYPES:
-        if dtype not in _cache_mod.KV_CACHE_DTYPES:
-            _cache_mod.KV_CACHE_DTYPES.append(dtype)
+    # The mirror list only exists on newer vLLM main; releases (e.g. v0.32.0)
+    # gate on the Literal alone, so the append is main-only.
+    mirror_list = getattr(_cache_mod, "KV_CACHE_DTYPES", None)
+    if mirror_list is not None:
+        for dtype in _ASCEND_CACHE_DTYPES:
+            if dtype not in mirror_list:
+                mirror_list.append(dtype)
 
     existing_args = getattr(_cache_mod.CacheDType, "__args__", ())
     missing = tuple(d for d in _ASCEND_CACHE_DTYPES if d not in existing_args)

@@ -78,10 +78,14 @@ def _apply_kv_cache_dtype_int8_patch() -> None:
     # Widen the mutable mirror list first: ``is_known_kv_cache_dtype`` (the
     # ``_validate_cache_dtype`` field validator and the ``get_attn_backend``
     # assertion) reads this list, so a widened Literal alone still dies with
-    # "Invalid kv_cache_dtype" at CacheConfig construction.
-    for dtype in _ASCEND_CACHE_DTYPES:
-        if dtype not in _cache_mod.KV_CACHE_DTYPES:
-            _cache_mod.KV_CACHE_DTYPES.append(dtype)
+    # "Invalid kv_cache_dtype" at CacheConfig construction. The mirror list
+    # only exists on newer vLLM main; releases (e.g. v0.32.0) gate on the
+    # Literal alone, so the append is main-only.
+    mirror_list = getattr(_cache_mod, "KV_CACHE_DTYPES", None)
+    if mirror_list is not None:
+        for dtype in _ASCEND_CACHE_DTYPES:
+            if dtype not in mirror_list:
+                mirror_list.append(dtype)
 
     # Idempotency: if both are already accepted, nothing to do.
     existing_args = getattr(_cache_mod.CacheDType, "__args__", ())
