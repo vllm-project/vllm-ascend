@@ -787,3 +787,46 @@ def _make_tnd_tail_inputs(capacity, actual=36, nseq=6, per_seq=6, seed=1006):
 
 
 @torch.inference_mode()
+
+
+def test_tnd_output_tail_zeroed():
+    """TND capacity tail [actual, T) must be zeroed by the kernel, not stale memory.
+
+    Regression: a prior larger-capacity call leaves workspace residue that the
+    unfixed kernel exposed as NaN in the padding rows.
+    """
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        bootstrap_custom_op_env()
+        import_module("vllm_ascend.vllm_ascend_C")
+    dim, actual = 512, 36
+
+    def call(capacity):
+        q, kv, idx, bt, aq, akv = _make_tnd_tail_inputs(capacity)
+        out = torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
+            query=q,
+            key=kv,
+            value=kv,
+            sparse_indices=idx,
+            scale_value=dim**-0.5,
+            sparse_block_size=1,
+            block_table=bt,
+            actual_seq_lengths_query=aq,
+            actual_seq_lengths_kv=akv,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=3,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=128,
+            key_quant_mode=2,
+            value_quant_mode=2,
+            rope_head_dim=0,
+            return_softmax_lse=False,
+        )
+        return out[0] if isinstance(out, tuple) else out
+
+    call(128)  # leave residue from a larger-capacity call
+    out = call(64)
+    valid, tail = out[:actual].cpu().float(), out[actual:].cpu().float()
+    assert torch.isfinite(valid).all(), "valid rows must stay finite"
+    assert (tail == 0).all(), "capacity tail rows must be zeroed by the kernel"
