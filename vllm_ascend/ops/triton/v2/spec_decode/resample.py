@@ -252,18 +252,27 @@ def _categorical_finalize_kernel(
     block_mass = tl.where(is_bonus | ~is_valid_rejected_draft, bonus_block_mass, stored_block_mass)
     block_mass = tl.where(valid_block_mask & is_random, block_mass, 0.0)
 
-    total_mass = tl.sum(block_mass, axis=0)
+    # Use one CDF for both its total and interval boundaries. An independent
+    # reduction can round past a scan prefix and make a local threshold negative.
+    block_prefix = tl.cumsum(block_mass, axis=0)
+    total_mass = tl.sum(tl.where(block_ids == num_blocks - 1, block_prefix, 0.0), axis=0)
     has_total_mass = total_mass > 0.0
     global_threshold = uniform * total_mass
-    block_prefix = tl.cumsum(block_mass, axis=0)
     candidate_blocks = tl.where(
         (block_prefix > global_threshold) & valid_block_mask & has_total_mass,
         block_ids,
         PADDED_NUM_BLOCKS,
     )
-    selected_block = tl.minimum(tl.min(candidate_blocks, axis=0), num_blocks - 1)
-    block_prefix_before = tl.sum(tl.where(valid_block_mask & (block_ids < selected_block), block_mass, 0.0), axis=0)
-    remaining_threshold = global_threshold - block_prefix_before
+    last_positive_block = tl.max(tl.where(valid_block_mask & (block_mass > 0.0), block_ids, 0), axis=0)
+    selected_block = tl.minimum(tl.min(candidate_blocks, axis=0), last_positive_block)
+    block_prefix_before = tl.sum(tl.where(block_ids == selected_block - 1, block_prefix, 0.0), axis=0)
+    block_prefix_after = tl.sum(tl.where(block_ids == selected_block, block_prefix, 0.0), axis=0)
+    selected_interval_mass = block_prefix_after - block_prefix_before
+    remaining_threshold = tl.maximum(global_threshold - block_prefix_before, 0.0)
+    # Map the point in this block's scan interval to its token-level CDF.
+    # The scan endpoint need not equal an independent block-mass reduction.
+    conditional_uniform = remaining_threshold / tl.where(selected_interval_mass > 0.0, selected_interval_mass, 1.0)
+    conditional_uniform = tl.minimum(tl.maximum(conditional_uniform, 0.0), 1.0)
 
     # Rebuild token masses only for the selected block.
     block_offsets = tl.arange(0, BLOCK_SIZE)
@@ -322,11 +331,13 @@ def _categorical_finalize_kernel(
 
     token_mass = tl.where(is_bonus | ~is_valid_rejected_draft, bonus_token_mass, residual_token_mass)
     token_mass = tl.where(active_token_mask, token_mass, 0.0)
-    selected_block_mass = tl.sum(token_mass, axis=0)
-    has_selected_block_mass = selected_block_mass > 0.0
     token_prefix = tl.cumsum(token_mass, axis=0)
+    last_valid_offset = tl.minimum(BLOCK_SIZE, vocab_size - selected_block * BLOCK_SIZE) - 1
+    selected_block_mass = tl.sum(tl.where(block_offsets == last_valid_offset, token_prefix, 0.0), axis=0)
+    has_selected_block_mass = selected_block_mass > 0.0
+    local_threshold = conditional_uniform * selected_block_mass
     candidate_offsets = tl.where(
-        (token_prefix > remaining_threshold) & valid_token_mask & has_selected_block_mass,
+        (token_prefix > local_threshold) & (token_mass > 0.0) & valid_token_mask & has_selected_block_mass,
         block_offsets,
         BLOCK_SIZE,
     )
