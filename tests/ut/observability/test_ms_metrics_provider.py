@@ -479,3 +479,28 @@ def test_symbol_hook_handlers_honor_level_and_labels(monkeypatch):
     assert lifecycle.sleep_handler(lambda worker, level: "slept", object(), 2) == "slept"
     assert metrics.record_metric.call_args.kwargs["labels"] == {"level": "2"}
     assert metrics.record_metric.call_args.args[0] == "lifecycle:sleep:duration_ms"
+
+
+def test_record_sleep_freed_gb_honors_level(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_rl_lifecycle_freed_gb", "rl_lifecycle")
+
+    handlers.record_sleep_freed_gb(2, 12.5)
+
+    metrics.record_metric.assert_called_once_with(
+        "lifecycle:sleep:freed_gb",
+        value=12.5,
+        labels={"level": "2"},
+    )
+
+    metrics.reset_mock()
+    sys.modules[_COMMON_MODULE].set_metric_level("off")
+    handlers.record_sleep_freed_gb(1, 8.0)
+    metrics.get_or_create_metric.assert_not_called()
+    metrics.record_metric.assert_not_called()

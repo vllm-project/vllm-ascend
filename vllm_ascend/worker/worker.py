@@ -345,6 +345,10 @@ class NPUWorker(WorkerBase):
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
 
+        from vllm_ascend.observability.ms_metrics.handlers.rl_lifecycle import record_sleep_freed_gb
+
+        record_sleep_freed_gb(level, freed_bytes / GiB_bytes)
+
         logger.info(
             "Sleep mode (level=%s) freed %.2f GiB memory, %.2f GiB memory is still in use.",
             level,

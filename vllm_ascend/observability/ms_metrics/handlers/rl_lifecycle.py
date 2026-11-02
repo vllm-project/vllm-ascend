@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Symbol-hook metrics for the RL 休眠与恢复 directory.
+"""Metrics for the RL 休眠与恢复 directory.
 
 Durations wrap ``NPUWorker.sleep``, ``wake_up``, and ``update_weights``.
-Freed-byte and router-state gauges need values that those functions do not
-return, so they are not recorded here.
+``NPUWorker.sleep`` does not return the freed memory, so it reports that value
+through :func:`record_sleep_freed_gb` instead of a symbol hook.
 """
 
 from typing import Any
@@ -26,6 +26,14 @@ _SLEEP_SPEC = MetricSpec(
     ("level",),
     level=METRIC_LEVEL_BASIC,
 )
+# Reported from ``NPUWorker.sleep`` because the freed memory is measured inside
+# the call and never returned.
+_SLEEP_FREED_SPEC = MetricSpec(
+    "lifecycle:sleep:freed_gb",
+    MetricType.HISTOGRAM,
+    ("level",),
+    level=METRIC_LEVEL_BASIC,
+)
 _WAKE_SPEC = MetricSpec(
     "lifecycle:wake:duration_ms",
     MetricType.HISTOGRAM,
@@ -38,7 +46,7 @@ _UPDATE_WEIGHTS_SPEC = MetricSpec(
     (),
     level=METRIC_LEVEL_BASIC,
 )
-_SPECS = (_SLEEP_SPEC, _WAKE_SPEC, _UPDATE_WEIGHTS_SPEC)
+_SPECS = (_SLEEP_SPEC, _SLEEP_FREED_SPEC, _WAKE_SPEC, _UPDATE_WEIGHTS_SPEC)
 
 
 def _record(spec: MetricSpec, value: float, labels: dict[str, str]) -> None:
@@ -49,6 +57,15 @@ def _tag_label(tags) -> str:
     if not tags:
         return "all"
     return ",".join(str(tag) for tag in tags)
+
+
+def record_sleep_freed_gb(level: int, freed_gb: float) -> None:
+    """Report the memory released by ``NPUWorker.sleep`` for ``level``.
+
+    The freed memory is only measured inside ``NPUWorker.sleep`` and is not
+    returned, so the worker reports it directly instead of a symbol hook.
+    """
+    _record(_SLEEP_FREED_SPEC, freed_gb, {"level": str(level)})
 
 
 def sleep_handler(original_func, worker, level: int = 1, *args, **kwargs):

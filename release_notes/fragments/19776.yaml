@@ -7,3 +7,7 @@ entries:
       (off, basic, detail, or debug; default basic). Hot-reload updates the
       level in each process. The default still records the EPLB hotness
       metrics shipped today.
+  - category: feature
+    text: >
+      Add the lifecycle:sleep:freed_gb histogram so each sleep level reports
+      the memory released by NPUWorker.sleep.
