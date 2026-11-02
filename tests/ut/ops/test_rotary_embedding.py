@@ -104,6 +104,26 @@ def check_parent_init_signature_has_not_changed(parent_func, child_func, allowed
 
 
 class TestRopeForwardOOT:
+    @pytest.mark.parametrize("is_neox_style,rotary_mode", [(True, "half"), (False, "interleave")])
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    @patch("vllm_ascend.ops.rotary_embedding.torch_npu.npu_mrope", create=True)
+    def test_native_rotary_mode(self, mock_mrope, dtype, is_neox_style, rotary_mode):
+        positions, query, key = _make_tensors()
+        query, key = query.to(dtype), key.to(dtype)
+        cache = torch.zeros(MAX_POS, ROTARY_DIM, dtype=dtype)
+        expected_query, expected_key = torch.ones_like(query), torch.ones_like(key)
+        mock_mrope.return_value = expected_query, expected_key
+
+        with patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False):
+            actual_query, actual_key = rope_forward_oot(
+                positions, query, key, cache, HEAD_SIZE, ROTARY_DIM, is_neox_style
+            )
+
+        mock_mrope.assert_called_once()
+        assert mock_mrope.call_args.kwargs["rotary_mode"] == rotary_mode
+        torch.testing.assert_close(actual_query, expected_query, atol=0, rtol=0)
+        torch.testing.assert_close(actual_key, expected_key, atol=0, rtol=0)
+
     @patch("vllm_ascend.ops.rotary_embedding.rope_forward_triton", create=True)
     def test_fp8_dispatch_preserves_index_head_inference(self, mock_rope_triton):
         positions = torch.arange(SEQ_LEN, dtype=torch.long)
