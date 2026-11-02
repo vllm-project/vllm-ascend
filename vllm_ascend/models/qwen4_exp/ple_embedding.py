@@ -23,10 +23,14 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEEmbedding):
             group = get_engram_dp_group()
             if group is not None and group.world_size > 1:
                 if not all(in_the_same_node_as(group.cpu_group)):
-                    raise ValueError("PLE shared tables require one node and shared IPC namespace")
-                if get_etp_group().world_size != get_tp_group().world_size:
+                    logger.info(
+                        "PLE dp_shared_memory requested but DP replicas span multiple nodes; "
+                        "falling back to private host tables."
+                    )
+                elif get_etp_group().world_size != get_tp_group().world_size:
                     raise ValueError("PLE shared tables require ETP=TP")
-                self._shared_group = group
+                else:
+                    self._shared_group = group
             else:
                 logger.info(
                     "PLE dp_shared_memory requested but no local DP peers; falling back to private host tables."
@@ -56,10 +60,12 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEEmbedding):
         if self._shared_group is None:
             self._host_table = HostUvaBuffer((num_embeddings, embedding_dim), dtype, device)
             tensor = self._host_table.tensor
+            assert tensor is not None
             tensor.zero_()
         else:
             self._host_table = SharedUvaBuffer((num_embeddings, embedding_dim), dtype, device, self._shared_group)
             tensor = self._host_table.tensor
+            assert tensor is not None
             if self._shared_group.rank_in_group == 0:
                 tensor.zero_()
             dist.barrier(group=self._shared_group.cpu_group)

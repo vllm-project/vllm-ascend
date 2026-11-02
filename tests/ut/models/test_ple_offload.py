@@ -101,6 +101,11 @@ def test_qwen_offload_uses_upstream_defaults(enabled, has_layers, dp_size, draft
     if not has_layers and enabled is not None:
         with pytest.raises(ValueError, match="non-empty"):
             VllmConfig._resolve_and_verify_engram_config(config)
+    elif enabled is None:
+        # Opt-in: Qwen4Exp never auto-creates EngramConfig when the user
+        # did not pass --engram-config, regardless of layers or draft mode.
+        VllmConfig._resolve_and_verify_engram_config(config)
+        assert config.engram_config is None
     else:
         VllmConfig._resolve_and_verify_engram_config(config)
         if has_layers:
@@ -336,6 +341,26 @@ def test_shared_tables_fall_back_without_local_peers(monkeypatch, size):
         lambda: SimpleNamespace(engram_config=SimpleNamespace(dp_shared_memory=True)),
     )
     monkeypatch.setattr(ple_embedding, "get_engram_dp_group", lambda: group)
+    monkeypatch.setattr(Qwen4ExpPLEEmbedding, "__init__", lambda self, *a, **kw: torch.nn.Module.__init__(self))
+    obj = AscendPLEHostEmbedding()
+    assert obj._shared_group is None
+
+
+def test_shared_tables_fall_back_across_nodes(monkeypatch):
+    """DP replicas on different nodes fall back to private host tables
+    instead of raising — dp_shared_memory is a default-on optimization."""
+    from vllm.models.qwen4_exp.common.ngram_embedding import Qwen4ExpPLEEmbedding
+
+    from vllm_ascend.models.qwen4_exp import ple_embedding
+
+    group = SimpleNamespace(world_size=2, cpu_group=object())
+    monkeypatch.setattr(
+        ple_embedding,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(engram_config=SimpleNamespace(dp_shared_memory=True)),
+    )
+    monkeypatch.setattr(ple_embedding, "get_engram_dp_group", lambda: group)
+    monkeypatch.setattr(ple_embedding, "in_the_same_node_as", lambda cpu_group: [False, False])
     monkeypatch.setattr(Qwen4ExpPLEEmbedding, "__init__", lambda self, *a, **kw: torch.nn.Module.__init__(self))
     obj = AscendPLEHostEmbedding()
     assert obj._shared_group is None
