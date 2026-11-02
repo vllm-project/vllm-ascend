@@ -284,9 +284,14 @@ class AscendEplbState(_eplb_state.EplbState):
                 super().add_model(model, model_config, model_name=model_name)
         finally:
             EXPERT_MAPPING_EP_SIZE.reset(token)
-        if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE:
-            model_state = self.model_states[model_config.compute_hash()]
-            model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
+        # Snapshot the placement for every profile, not just AllGather. The load
+        # history is keyed by physical slot, so a committed rearrangement that
+        # moves a different logical expert into a slot invalidates it, and
+        # refresh_model_routing_tables needs the previous placement to notice.
+        # Seeding here rather than on first use also covers the first commit,
+        # which already carries the new mapping by the time the tables refresh.
+        model_state = self.model_states[model_config.compute_hash()]
+        model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
         if self.uses_custom_load_stats:
             self._initialize_load_stats_state(self.model_states[model_config.compute_hash()])
 
@@ -731,6 +736,7 @@ class AscendEplbState(_eplb_state.EplbState):
                 state._initialize_load_stats_state(model_state)
         for model_state in state.model_states.values():
             refresh_model_routing_tables(model_state)
-            if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE:
-                model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
+            # Elastic EP builds the state here instead of through add_model, so
+            # seed the placement snapshot on the same terms.
+            model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
         return state
