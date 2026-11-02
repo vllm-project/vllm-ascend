@@ -1,0 +1,3 @@
+# Explicit 310P TP1 suite; keep separate from the default accuracy matrix.
+DeepSeek-R1-Distill-Qwen-1.5B-310P.yaml
+DeepSeek-R1-Distill-Llama-8B-310P.yaml

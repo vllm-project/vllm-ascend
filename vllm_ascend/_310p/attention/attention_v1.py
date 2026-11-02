@@ -42,6 +42,7 @@ from vllm_ascend.attention.attention_v1 import (
 
 MASK_TYPE_NORM_COMPRESS_SELF_ATTENTION = 3
 MASK_TYPE_NORM_COMPRESS_PAGED_ATTENTION = 5
+QWEN2_FP16_QUERY_PRE_SCALE = 0.125
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -116,6 +117,19 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.support_compressed_mask = is_compressed_mask_supported()
+        self._query_pre_scale = 1.0
+        model_config = self.vllm_config.model_config
+        if (
+            self.vllm_config.quant_config is None
+            and model_config.dtype == torch.float16
+            and model_config.hf_text_config.model_type == "qwen2"
+        ):
+            # Distill Qwen can produce QK values around 310k before the
+            # attention scale, overflowing the 310P FP16 intermediate. A
+            # power-of-two query scale preserves QK * scale without changing
+            # the cached keys/values or introducing a host synchronization.
+            self._query_pre_scale = QWEN2_FP16_QUERY_PRE_SCALE
+            self.scale /= self._query_pre_scale
 
     def _flash_attention(
         self,
@@ -342,6 +356,8 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         Raises:
             NotImplementedError: If the attention state is not supported on 310P.
         """
+        if self._query_pre_scale != 1.0:
+            query = query * self._query_pre_scale
         state = attn_metadata.attn_state
         # Condition for PrefillNoCache: No previous tokens have been processed yet
         if state == AscendAttentionState.PrefillNoCache:

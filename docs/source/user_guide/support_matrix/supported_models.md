@@ -64,6 +64,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
     | Model | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
     |-------|---------|------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------------------|--------------------|--------------------|---------------|-----|
+    | DeepSeek-R1-Distill Qwen-1.5B / Llama-8B | 🔵 | FP16 TP1 eager/replay validated on 0.23.0.post1; FULL_DECODE_ONLY; Llama tokenizer compatibility required on affected Transformers versions; current-main system validation pending | ❌ | Atlas 300I DUO | | | | | | | TP1 tested | | | 🟡 | 1024 tested | [Distill 310P validation](../../tutorials/models/DeepSeek-R1-Distill-310P-validation.md) |
     | Qwen3-Dense | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 20k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
     | Qwen3-30B-A3B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |
 
