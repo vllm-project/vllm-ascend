@@ -18,6 +18,6 @@ jobs:
       vllm_ascend_branch: ${{ github.event.pull_request.head.sha }}
       # ==================================================
       vllm_ref_for_test: ${{ github.event.pull_request.head.sha }}
-      should_push: true
+      should_push: false
       run_presmoke: true
     secrets: inherit
