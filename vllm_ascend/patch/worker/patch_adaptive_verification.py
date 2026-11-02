@@ -30,8 +30,10 @@ _original_assign_draft_token_budget = getattr(adaptive_verification, "_assign_dr
 
 
 def _assign_draft_token_budget_ascend(*args, **kwargs):
+    original_assign_draft_token_budget = _original_assign_draft_token_budget
+    assert original_assign_draft_token_budget is not None
     with _IndexFillMode():
-        return _original_assign_draft_token_budget(*args, **kwargs)
+        return original_assign_draft_token_budget(*args, **kwargs)
 
 
 # Newer vLLM uses a Triton allocator directly. Reuse it without installing
