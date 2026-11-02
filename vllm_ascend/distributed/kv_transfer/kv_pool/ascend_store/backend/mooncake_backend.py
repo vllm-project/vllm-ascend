@@ -565,11 +565,12 @@ class MooncakeBackend(Backend):
             for ptr, length in zip(ptrs, lengths):
                 ret = self.store.register_buffer(ptr, length)
                 if ret != 0:
-                    logger.error(
-                        "Failed to register buffer via store: ptr=%s, length=%s, ret=%s",
-                        ptr,
-                        length,
-                        ret,
+                    # Fail fast, matching GlobalTE.register_buffer(): KV transfer
+                    # threads must not start over partially registered regions.
+                    raise RuntimeError(
+                        f"Failed to register buffer via store: ptr={ptr}, length={length}, ret={ret}. "
+                        "Aborting KV cache initialization to avoid starting transfers over "
+                        "partially registered regions."
                     )
         elif not self._use_fabric_mem:
             local_hostname = get_ip()
