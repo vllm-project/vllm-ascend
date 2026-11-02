@@ -1,0 +1,20 @@
+name: Presmoke Trigger On Label
+on:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  run-presmoke-pipeline:
+    if: ${{ github.event.label.name == 'presmoke' }}
+    uses: ./.github/workflows/schedule_nightly_image_build_with_base_presmoke.yaml
+    with:
+      vllm_ascend_branch: ${{ github.event.pull_request.head.sha }}
+      should_push: true
+      run_presmoke: true
+      # ========== 这里补齐这个可复用workflow要求的所有必填input ==========
+      dockerfile: "Dockerfile.runtime" # 按你业务实际值改
+      os: "ubuntu22.04"                # 按你业务实际值改
+      soc: "ascend910b"                # 按你业务实际值改
+      suffix: "presmoke"
+      target: "runtime"
+    secrets: inherit
