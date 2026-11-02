@@ -41,8 +41,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
-from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
@@ -130,6 +129,14 @@ from vllm_ascend.worker.utils import (
     get_single_raw_mla_backing,
     make_page_strided_cache_view,
 )
+
+try:
+    from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
+except ModuleNotFoundError as error:
+    if error.name != "vllm.models.qwen4_exp.common.qsa_cache":
+        raise
+    # Other attention builders do not depend on this optional model module.
+    QSAMetadataBuilder = ()
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
