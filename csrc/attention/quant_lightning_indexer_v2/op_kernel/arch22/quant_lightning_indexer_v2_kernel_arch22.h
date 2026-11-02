@@ -412,6 +412,12 @@ __aicore__ void inline QLIV2Preload<QLIV2T>::SplitCore()
             actualSeqQPrefixSum * constInfo.kHeadNum * constInfo.sparseCount +
             static_cast<uint64_t>(ldInfo.n2Idx) * constInfo.sparseCount +
             static_cast<uint64_t>(ldInfo.mIdx) * constInfo.s1BaseSize * constInfo.kHeadNum * constInfo.sparseCount;
+        // mode=1: 块级输出 candidate_topk_index 的初始偏移地址（与上面同构，行宽换成 candidateTopkBlocks）
+        ldInfo.candidateOutCoreOffset =
+            actualSeqQPrefixSum * constInfo.kHeadNum * constInfo.candidateTopkBlocks +
+            static_cast<uint64_t>(ldInfo.n2Idx) * constInfo.candidateTopkBlocks +
+            static_cast<uint64_t>(ldInfo.mIdx) * constInfo.s1BaseSize * constInfo.kHeadNum *
+                constInfo.candidateTopkBlocks;
     }
 }
 
@@ -492,6 +498,18 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Init(
     vec1ResGm.SetGlobalBuffer((__gm__ float *)(workspace + offset));
     offset += GetBlockNum() * constInfo.s1BaseSize * WS_DOUBLE * WS_DOUBLE * BASE_TOPK * sizeof(float);
 
+    // mode=1（candidate source，候选块来源）+ LD（跨核归约）：块级 topk 分段结果的备份区。
+    // 与 vec1ResGm 同构（[核][S2 段][S1 行][value+index 对]），只是每行槽位宽从 topk 换成
+    // 2 × candidateTopkBlocks（块级累加器的对宽）。位置级那条链已验证，块级这条链原缺
+    // 溢写与归约，跨核切分后只剩头段结果（块级输出全错）。
+    GlobalTensor<float> blockVec1ResGm;
+    if (constInfo.candidateMode == CANDIDATE_MODE_SOURCE) {
+        uint64_t singleCoreBlkVec1Res = static_cast<uint64_t>(constInfo.s1BaseSize) * WS_DOUBLE * WS_DOUBLE *
+                                        constInfo.candidateTopkBlocks * 2ULL * sizeof(float);
+        blockVec1ResGm.SetGlobalBuffer((__gm__ float *)(workspace + offset));
+        offset += GetBlockNum() * singleCoreBlkVec1Res;
+    }
+
     GlobalTensor<half> qScaleGm;
     GlobalTensor<half> kScaleGm;
     if ASCEND_IS_AIV {
@@ -515,7 +533,7 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Init(
         vectorService.InitVecInputTensor(weightsGm, qScaleGm, kScaleGm, indiceOutGm, blockTableGm);
         vectorService.InitVecCandidateTensor(candidateTopkIndexInGm, candidateTopkIndexOutGm, outputIdxOffsetGm,
                                              outputIdxOffsetValid);
-        vectorService.InitVecWorkspaceTensor(weightWorkspaceGm, mm1ResGm, vec1ResGm);
+        vectorService.InitVecWorkspaceTensor(weightWorkspaceGm, mm1ResGm, vec1ResGm, blockVec1ResGm);
     } else {
         matmulService.InitParams(constInfo);
         queryGm.SetGlobalBuffer((__gm__ Q_T *)query);

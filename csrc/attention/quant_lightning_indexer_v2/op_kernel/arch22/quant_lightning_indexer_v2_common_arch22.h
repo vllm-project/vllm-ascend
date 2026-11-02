@@ -147,6 +147,10 @@ struct LdSplitCoreInfo {
     uint32_t mStart = 0U;
     uint32_t mNum = 0U;
     uint64_t indiceOutCoreOffset = 0U; // 最终输出索引搬出Topk的初始偏移地址
+    // mode=1（candidate source，候选块来源）块级输出 candidate_topk_index 的初始偏移地址；
+    // 结构与 indiceOutCoreOffset 同构，只是每行的宽度从 sparseCount（最终 topk 数）换成
+    // candidateTopkBlocks（块级 topk 数）
+    uint64_t candidateOutCoreOffset = 0U;
 };
 
 template <typename T1, typename T2>

@@ -335,6 +335,18 @@ void QuantLightningIndexerV2MetadataCpuKernel::CalcSplitInfo(SplitContext &split
             supportFd_ = true;
             return;
         }
+    } else {
+        // 910B（arch22）：按用户要求放开 LD/归约（S2 跨核切分 + AIV 归约）开关，判定条件与 950 一致。
+        // 前提：maxS2Size ≥ topk（每段都要能选出完整 topk 才能归约），且 S2 足够大以摊薄归约开销
+        // （910B 的 s2BaseSize_=2048，阈值 = 5×2048 = 10240）。
+        if (maxS2Size_ < static_cast<uint32_t>(topk_)) {
+            supportFd_ = false;
+            return;
+        }
+        if (maxS2Size_ > fdToleranceRatio * s2BaseSize_) {
+            supportFd_ = true;
+            return;
+        }
     }
 }
 

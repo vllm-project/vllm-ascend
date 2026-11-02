@@ -1717,6 +1717,14 @@ ge::graphStatus QuantLightningIndexerV2Tiling::DoTiling(QLIV2TilingInfo *tilingI
             V1_DECODE_DATA_NUM * S1_BASE_SIZE * V1_RES_ELEM_TYPE * TOPK_MAX_SIZE * V1_RES_ELEM_SIZE * aicNum;
         // 临时存储Decode中间参数信息大小: 2(头/尾)*8(s1Base)*16(paramNum)*sizeof(int64_t)*24=48k
         workspaceSize += V1_DECODE_DATA_NUM * S1_BASE_SIZE * V1_DECODE_PARAM_NUM * V1_DECODE_PARAM_ELEM_SIZE * aicNum;
+        // mode=1（candidate source）+ LD：块级 topk 分段结果备份区（与上面位置级那项同构，
+        // 但每行槽位宽 = 2 × candidate_topk_blocks 个 float，是位置级的 2 倍）
+        if (tilingInfo->candidateMode == CANDIDATE_MODE_SOURCE) {
+            constexpr uint32_t CAND_TOPK_BLOCKS_MAX = 2048;       // 块级 topk 最大块数
+            uint64_t candPairWidth = 2ULL * CAND_TOPK_BLOCKS_MAX; // 每行 value+index 对宽 (float 个数)
+            workspaceSize += V1_DECODE_DATA_NUM * S1_BASE_SIZE * V1_RES_ELEM_TYPE * candPairWidth *
+                             V1_RES_ELEM_SIZE * aicNum;
+        }
     }
     size_t *workSpaces = context_->GetWorkspaceSizes(1);
     workSpaces[0] = workspaceSize;

@@ -50,8 +50,11 @@ public:
                                       const struct QLIV2Common::LdSplitCoreInfo &ldInfo,
                                       const QLIV2TilingData *__restrict tilingData);
     __aicore__ inline void ProcessLD();
+    // mode=1 + LD：块级 topk 分段结果的归并与输出（与位置级归并链完全同构，宽度换成块级口径）
+    __aicore__ inline void ReduceBlockTopkRow(uint32_t rowInBlock);
     __aicore__ inline void InitVecWorkspaceTensor(GlobalTensor<half> vec0OutGm, GlobalTensor<MM1_OUT_T> mm1ResGm,
-                                                  GlobalTensor<float> vec1ResGm);
+                                                  GlobalTensor<float> vec1ResGm,
+                                                  GlobalTensor<float> blockVec1ResGm);
     __aicore__ inline void InitVecCandidateTensor(GlobalTensor<int32_t> candidateTopkIndexInGm,
                                                   GlobalTensor<int32_t> candidateTopkIndexOutGm,
                                                   GlobalTensor<int32_t> outputIdxOffsetGm,
@@ -68,6 +71,8 @@ public:
 protected:
     GlobalTensor<MM1_OUT_T> mm1ResGm;
     GlobalTensor<float> vec1ResGm;
+    // mode=1 + LD：块级 topk 分段结果备份区（布局与 vec1ResGm 相同，行槽位宽 = 2 × candidateTopkBlocks）
+    GlobalTensor<float> blockVec1ResGm_;
     GlobalTensor<half> weightsGm;
     GlobalTensor<half> qScaleGm;
     GlobalTensor<half> kScaleGm;
@@ -88,6 +93,9 @@ private:
     __aicore__ inline void ProcessCandBlockTopk(const QLIV2Common::RunInfo &info, int32_t cuS1Idx, int32_t cuS2Len,
                                                 int32_t cuS2LenVecAlign, int32_t cuRealAcSeq, int32_t innerS1Idx);
     __aicore__ inline void CopyOutCandTopkIndex(const QLIV2Common::RunInfo &info, int32_t cuS1Idx, int32_t innerS1Idx);
+    // mode=1 + LD：把本行块级累积器溢写到 GM，供跨核归约侧（ProcessLD）读取
+    __aicore__ inline void SpillBlockTopkToGm(const QLIV2Common::RunInfo &info, int32_t blockRowIdx,
+                                              int32_t innerS1Idx);
     // candidate 新增向量 op 的 64 元素分块封装 (本版本 Level-2 count > 64 的 vmax 等指令会触发 aicore 异常)
     __aicore__ inline void VecMaxPair(const LocalTensor<float> &dst, const LocalTensor<float> &src0,
                                       const LocalTensor<float> &src1, int32_t n);
@@ -256,10 +264,20 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::InitLDBuffers(TPipe *pipe)
 {
     pipe->Reset();
     // P3: LD 归并缓冲按 topk 实际宽度收缩 (mrgListNum_ 列表 × 每列表 value+idx 对)
-    pipe->InitBuffer(ldToBeMrgBuf_, topkPairWidth_ * mrgListNum_ * sizeof(float));
-    pipe->InitBuffer(ldTmpBuf_, topkPairWidth_ * mrgListNum_ * sizeof(float));
-    pipe->InitBuffer(ldOutValueBuf_, topkWidth_ * sizeof(float));
-    pipe->InitBuffer(ldOutIdxBuf_, topkWidth_ * sizeof(int32_t));
+    // mode=1（candidate source，候选块来源）下同一组缓冲在位置级归并之后还要复用给块级归并：
+    // 块级每行对宽 = 2 × candidateTopkBlocks，故按两者较大值分配，不再单开一组块级缓冲
+    // （UB 预算 192KB：位置级 16KB×2 + 块级 64KB×2 若各开一组会吃掉 160KB，复用后只占 128KB）。
+    uint32_t mrgPairWidth = topkPairWidth_;
+    uint32_t mrgOutWidth = topkWidth_;
+    if (constInfo_.candidateMode == CANDIDATE_MODE_SOURCE) {
+        uint32_t candPairWidth = 2U * constInfo_.candidateTopkBlocks;
+        mrgPairWidth = (candPairWidth > mrgPairWidth) ? candPairWidth : mrgPairWidth;
+        mrgOutWidth = (constInfo_.candidateTopkBlocks > mrgOutWidth) ? constInfo_.candidateTopkBlocks : mrgOutWidth;
+    }
+    pipe->InitBuffer(ldToBeMrgBuf_, mrgPairWidth * mrgListNum_ * sizeof(float));
+    pipe->InitBuffer(ldTmpBuf_, mrgPairWidth * mrgListNum_ * sizeof(float));
+    pipe->InitBuffer(ldOutValueBuf_, mrgOutWidth * sizeof(float));
+    pipe->InitBuffer(ldOutIdxBuf_, mrgOutWidth * sizeof(int32_t));
 }
 
 template <typename QLIV2T>
@@ -303,11 +321,13 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::InitVecInputTensor(GlobalTensor<half
 template <typename QLIV2T>
 __aicore__ inline void QLIV2Vector<QLIV2T>::InitVecWorkspaceTensor(GlobalTensor<half> vec0OutGm,
                                                                    GlobalTensor<MM1_OUT_T> mm1ResGm,
-                                                                   GlobalTensor<float> vec1ResGm)
+                                                                   GlobalTensor<float> vec1ResGm,
+                                                                   GlobalTensor<float> blockVec1ResGm)
 {
     this->mm1ResGm = mm1ResGm;
     this->vec1ResGm = vec1ResGm;
     this->vec0OutGm = vec0OutGm;
+    this->blockVec1ResGm_ = blockVec1ResGm;
 }
 
 template <typename QLIV2T>
@@ -932,6 +952,30 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::CopyOutCandTopkIndex(const QLIV2Comm
     outQueue_.FreeTensor(candIdxULocal);
 }
 
+// mode=1 + LD：块级 topk 累积器溢写到 GM（与位置级 globalTopkUb_ → vec1ResGm 完全对称）。
+// GM 布局 [核][S2 段][S1 行][value+index 对]，行槽位宽 = 2 × candidateTopkBlocks；
+// 段内行号用 **gS1 块内相对行号** blockRowIdx，与 ProcessLD 侧 ldInfo_.mStart + j 同一坐标。
+template <typename QLIV2T>
+__aicore__ inline void QLIV2Vector<QLIV2T>::SpillBlockTopkToGm(const QLIV2Common::RunInfo &info, int32_t blockRowIdx,
+                                                               int32_t innerS1Idx)
+{
+    uint32_t candPairWidth = 2U * constInfo_.candidateTopkBlocks;
+    uint64_t blockWsOffset = static_cast<uint64_t>(info.saveWorkSpaceIdx) * s1BaseSize_ * candPairWidth +
+                             static_cast<uint64_t>(blockRowIdx) * candPairWidth;
+    AscendC::DataCopyExtParams blockWsParams;
+    blockWsParams.blockLen = candPairWidth * sizeof(float);
+    blockWsParams.srcStride = 0;
+    blockWsParams.dstStride = 0;
+    blockWsParams.blockCount = 1;
+    SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
+    AscendC::DataCopyPad(blockVec1ResGm_[blockWsOffset], globalBlockTopkUb_[innerS1Idx * BASE_TOPK_VALUE_IDX_SIZE],
+                         blockWsParams);
+    SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
+    // 溢写后复位本行块级累积器（下一 S2 段/下一行重新累积），与位置级同语义
+    InitSortOutBuf(globalBlockTopkUb_[innerS1Idx * BASE_TOPK_VALUE_IDX_SIZE], BASE_TOPK_VALUE_IDX_SIZE);
+    PipeBarrier<PIPE_V>();
+}
+
 template <typename QLIV2T>
 __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec0(const QLIV2Common::RunInfo &info)
 {
@@ -1041,12 +1085,14 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
         }
         int32_t cuS2Len = cuBaseS2Idx + s2BaseSize_ >= cuRealAcSeq ? cuRealAcSeq - cuBaseS2Idx : s2BaseSize_;
         int32_t cuS1Idx = cuS1BeginIdxPerAiv + innerS1Idx;
-        // 当前vec1ResGm对应S1的位置
-        // P10: LD 布局 = 每核 s1Base 行预留区 (起点 = saveWorkSpaceIdx * s1Base * pairW),
-        // 行内用全局行号 cuS1Idx (0..s1Base-1) 作槽偏移 — 同一全局行在所有分段核的
-        // 槽偏移一致, 头核归并时按 (核i*4 + 全局行) 寻址
+        // 当前 vec1ResGm 对应 S1 的位置。
+        // LD 布局：每分段一份 s1Base 行预留区（起点 = saveWorkSpaceIdx × s1Base × pairW），
+        // 行内槽位用 **gS1 块内相对行号** —— 必须与 ProcessLD 侧 ldInfo_.mStart + j 同一坐标
+        // （metadata 的 fdMStart/fdMNum 也是块内相对行）。原实现用 batch 全局行号 cuS1Idx，
+        // gS1Idx>0 时与归约侧错位，归约会读到相邻行的部分结果（910B 开 LD 后表现为相邻行交换）。
+        int32_t blockRowIdx = cuS1Idx - cuBaseS1Idx;
         uint64_t wsOffset = static_cast<uint64_t>(info.saveWorkSpaceIdx) * s1BaseSize_ * topkPairWidth_ +
-                            static_cast<uint64_t>(cuS1Idx) * topkPairWidth_;
+                            static_cast<uint64_t>(blockRowIdx) * topkPairWidth_;
         if (cuRealAcSeq > 0 && cuS2Len > 0) {
             int32_t cuS2LenVecAlign = AlignS2(cuS2Len);
             LocalTensor<float> mmInUb = inQueue_.AllocTensor<float>();
@@ -1160,6 +1206,12 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
                 SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
                 InitSortOutBuf(globalTopkUb_[innerS1Idx * topkPairWidth_], topkPairWidth_);
                 PipeBarrier<PIPE_V>();
+                // mode=1：块级累积器也必须同样溢写。原实现只在非 LD 分支里直出
+                // candidate_topk_index，跨核切分（LD）后块级累积器没有溢写也没有归约，
+                // 归约侧拿到的是空/旧数据，块级输出整行错误（实测 0/24）。
+                if (constInfo_.candidateMode == CANDIDATE_MODE_SOURCE) {
+                    SpillBlockTopkToGm(info, blockRowIdx, innerS1Idx);
+                }
             }
         } else if (cuRealAcSeq <= 0) {
             // 无效长度处理
@@ -1170,6 +1222,9 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
                 QLIV2ServiceVec::CopyOut(vec1ResGm[wsOffset], globalTopkUb_[innerS1Idx * topkPairWidth_],
                                          topkPairWidth_);
                 SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
+                if (constInfo_.candidateMode == CANDIDATE_MODE_SOURCE) {
+                    SpillBlockTopkToGm(info, blockRowIdx, innerS1Idx); // 与位置级成对溢写
+                }
             } else {
                 CleanInvalidOutput(info.indiceOutOffset + cuS1Idx * constInfo_.sparseCount);
             }
@@ -1182,6 +1237,9 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
                 SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
                 InitSortOutBuf(globalTopkUb_[innerS1Idx * topkPairWidth_], topkPairWidth_);
                 PipeBarrier<PIPE_V>();
+                if (constInfo_.candidateMode == CANDIDATE_MODE_SOURCE) {
+                    SpillBlockTopkToGm(info, blockRowIdx, innerS1Idx); // 与位置级成对溢写
+                }
             }
         }
     }
@@ -1215,6 +1273,111 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
         // S2最后一个Loop后, 下一个基本块初始从0开始
         blockS2StartIdx_ = 0;
     }
+}
+
+// mode=1 + LD：块级 topk 的分段归并。
+// 与位置级（ProcessLD）的 MrgSort 链完全同构，只有三个口径不同：
+//   ① 元素宽度：每段 candidateTopkBlocks 对（value+index），即 2×candidateTopkBlocks 个 float；
+//   ② 槽位步长：块级 GM 区每行 slot = 2×candidateTopkBlocks 个 float；
+//   ③ 输出宽度：candidateTopkIndexOutGm 每行 candidateTopkBlocks 个块号。
+// 归并缓冲与位置级**共用**（InitLDBuffers 已按两者较大宽度分配），故必须在位置级
+// Extract/CopyOut 之后再执行（本函数在 ProcessLD 每行的位置级输出之后调用）。
+template <typename QLIV2T>
+__aicore__ inline void QLIV2Vector<QLIV2T>::ReduceBlockTopkRow(uint32_t rowInBlock)
+{
+    uint32_t candBlocks = constInfo_.candidateTopkBlocks;
+    uint32_t candPairWidth = 2U * candBlocks;
+    LocalTensor<float> curCand = ldToBeMrgBuf_.Get<float>();
+    LocalTensor<float> tmpCand = ldTmpBuf_.Get<float>();
+    LocalTensor<uint32_t> outIdxCand = ldOutIdxBuf_.Get<uint32_t>();
+
+    AscendC::DataCopyPadExtParams<float> candPadParams{true, 0, 0, 0};
+    AscendC::DataCopyExtParams candParams;
+    candParams.blockLen = candPairWidth * sizeof(float);
+    candParams.srcStride = 0;
+    candParams.dstStride = 0;
+    candParams.blockCount = 1;
+
+    uint32_t ldProWorkspaceNum = ldInfo_.workspaceNum;
+    uint32_t ldProcessLen = 4; // 4: 4 段归约任务做一次 MrgSort
+    uint32_t ldProcessNum = (ldProWorkspaceNum - 1) / (ldProcessLen - 1);
+    uint32_t ldTailLen = ldProWorkspaceNum - (ldProcessNum * (ldProcessLen - 1) + 1); // 尾段数
+
+    // 本行在 GM 中的起点：与写侧 SpillBlockTopkToGm 同一公式
+    // （workspaceIdx × s1Base × pairW + 段内相对行号 × pairW）
+    uint64_t rowBase = static_cast<uint64_t>(ldInfo_.workspaceIdx) * s1BaseSize_ * candPairWidth +
+                       static_cast<uint64_t>(rowInBlock) * candPairWidth;
+    uint64_t segGap = static_cast<uint64_t>(s1BaseSize_) * candPairWidth; // 相邻 S2 段起点间隔
+
+    SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
+    AscendC::DataCopyPad(curCand, blockVec1ResGm_[rowBase], candParams, candPadParams);
+    uint32_t nextOffset = candPairWidth;
+    SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+
+    AscendC::MrgSort4Info prm;
+    prm.elementLengths[0] = candBlocks;
+    prm.elementLengths[1] = candBlocks;
+    prm.elementLengths[2] = candBlocks;
+    prm.elementLengths[3] = candBlocks;
+    prm.ifExhaustedSuspension = true;
+    prm.validBit = 0b1111;
+    prm.repeatTimes = 1;
+
+    for (uint32_t i = 0; i < ldProcessNum; i++) {
+        uint64_t segBase = rowBase + static_cast<uint64_t>(i * (ldProcessLen - 1) + 1) * segGap;
+        SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
+        for (uint32_t k = 0; k < ldProcessLen - 1U; k++) {
+            AscendC::DataCopyPad(curCand[nextOffset + k * candPairWidth], blockVec1ResGm_[segBase + k * segGap],
+                                 candParams, candPadParams);
+        }
+        SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+        AscendC::MrgSortSrcList<float> srcList;
+        srcList.src1 = curCand[0];
+        srcList.src2 = curCand[candPairWidth];
+        srcList.src3 = curCand[2 * candPairWidth];
+        srcList.src4 = curCand[3 * candPairWidth];
+        MrgSort(tmpCand, srcList, prm);
+        PipeBarrier<PIPE_V>();
+        DataCopy(curCand, tmpCand, candPairWidth);
+        PipeBarrier<PIPE_V>();
+    }
+
+    if (ldTailLen != 0) {
+        uint64_t tailBase = rowBase + static_cast<uint64_t>(ldProcessNum * (ldProcessLen - 1) + 1) * segGap;
+        AscendC::DataCopyExtParams tailParams = candParams;
+        tailParams.blockCount = ldTailLen;
+        // srcStride 单位是**字节**，填"段间空隙"（段起点间隔 − 一段长度），与位置级同一修法
+        tailParams.srcStride = (s1BaseSize_ * candPairWidth - candPairWidth) * sizeof(float);
+        SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
+        AscendC::DataCopyPad(curCand[nextOffset], blockVec1ResGm_[tailBase], tailParams, candPadParams);
+        SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+        AscendC::MrgSort4Info tailPrm;
+        tailPrm.elementLengths[0] = candBlocks;
+        tailPrm.elementLengths[1] = candBlocks;
+        tailPrm.elementLengths[2] = candBlocks;
+        tailPrm.elementLengths[3] = candBlocks;
+        tailPrm.ifExhaustedSuspension = true;
+        tailPrm.validBit = (ldTailLen == 1) ? 0b0011 : ((ldTailLen == 2) ? 0b0111 : 0b1111);
+        tailPrm.repeatTimes = 1;
+        AscendC::MrgSortSrcList<float> srcList;
+        srcList.src1 = curCand[0];
+        srcList.src2 = curCand[candPairWidth];
+        srcList.src3 = curCand[2 * candPairWidth];
+        srcList.src4 = curCand[3 * candPairWidth];
+        MrgSort(tmpCand, srcList, tailPrm);
+        PipeBarrier<PIPE_V>();
+        DataCopy(curCand, tmpCand, candPairWidth);
+        PipeBarrier<PIPE_V>();
+    }
+
+    // 抽出块号并写到 candidate_topk_index（行偏移 = 行内相对行号 × kHeadNum × candBlocks）
+    ExtractIndex(outIdxCand, curCand.template ReinterpretCast<uint32_t>(), candBlocks);
+    SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
+    uint64_t outOffset = ldInfo_.candidateOutCoreOffset +
+                         static_cast<uint64_t>(rowInBlock) * constInfo_.kHeadNum * candBlocks;
+    QLIV2ServiceVec::CopyOut(candidateTopkIndexOutGm[outOffset], outIdxCand.template ReinterpretCast<int32_t>(),
+                             static_cast<int64_t>(candBlocks));
+    SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
 }
 
 template <typename QLIV2T>
@@ -1301,7 +1464,12 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
                 static_cast<uint64_t>(ldInfo_.workspaceIdx) * s1BaseSize_ * topkPairWidth_ +
                 static_cast<uint64_t>(ldProcessNum * (ldProcessLen - 1) + 1) * s1BaseSize_ * topkPairWidth_ +
                 static_cast<uint64_t>(ldInfo_.mStart + j) * topkPairWidth_;
+            // 尾段一次性跨段搬运（blockCount = ldTailLen）。原实现在这里崩 507015 的原因是
+            // srcStride 单位写错：DataCopyExtParams.srcStride 的单位是**字节**，而原代码按"32B 块"
+            // 除了 32（s1Base*pairW*4/32 = 512），实际只跳 512B 而不是一个槽位 16KB，
+            // 段与段几乎重叠；该路径只在"一行切成 ≥3 段"（ldTailLen≥2）时才走到，故 2 段用例从未暴露。
             indexValueParams.blockCount = ldTailLen;
+            indexValueParams.srcStride = (s1BaseSize_ * topkPairWidth_ - topkPairWidth_) * sizeof(int32_t);  // 字节：段间"空隙"
             SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
             AscendC::DataCopyPad(curValueIdxUb[valueOffset], vec1ResGm[wsOffsetTail], indexValueParams,
                                  indexValuePadParams);
@@ -1354,6 +1522,11 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
             ldInfo_.indiceOutCoreOffset + (ldInfo_.mStart + j) * constInfo_.kHeadNum * constInfo_.sparseCount;
         AscendC::DataCopyPad(indiceOutGm[outOffset], idxULocal1, copyOutParams);
         SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
+        // mode=1：同一行再做一遍块级归约，输出 candidate_topk_index（块级输出无 LD 时由
+        // CopyOutCandTopkIndex 直出；有 LD 时每段只有部分结果，必须在这里归并）
+        if (constInfo_.candidateMode == CANDIDATE_MODE_SOURCE) {
+            ReduceBlockTopkRow(ldInfo_.mStart + j);
+        }
     }
     SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
 }
