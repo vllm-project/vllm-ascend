@@ -134,7 +134,11 @@ def broadcast(iterator, group, src, callback, buffer_size_bytes, num_buffers, *,
         raise RuntimeError("nested packed transfers cannot share vLLM's cached streams")
     _install()
     device = torch.npu.current_device()
-    with _device_lock(device):
+    # functools.cache can evaluate a missing key twice on concurrent first use.
+    # Serialize lookup too, so both transfers obtain the same device lock.
+    with _INSTALL_LOCK:
+        lock = _device_lock(device)
+    with lock:
         state = _Transfer(group, callback, receiving)
         token = _ACTIVE.set(state)
         error = None
