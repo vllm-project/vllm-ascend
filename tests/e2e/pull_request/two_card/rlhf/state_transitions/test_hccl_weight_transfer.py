@@ -318,7 +318,7 @@ def test_hccl_draft_then_target_update(tmp_path, monkeypatch, packed: bool, enfo
     """
     if packed:
         pytest.skip(PACKED_LANE_SKIP_REASON)
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     torch.npu.set_device(TRAINER_DEVICE_INDEX)
     device = torch.device("npu", TRAINER_DEVICE_INDEX)
@@ -333,7 +333,6 @@ def test_hccl_draft_then_target_update(tmp_path, monkeypatch, packed: bool, enfo
     initial.write_checkpoint(initial_path)
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
     }
