@@ -46,6 +46,7 @@ from vllm_ascend.xlite.utils import (
     XModelConfig,
     get_dotted_attr,
     get_layer_weights,
+    is_dummy_tensor,
     set_dummy_tensor,
 )
 
@@ -481,12 +482,17 @@ class StandardXliteModel(XliteModelBase):
             setattr(xlite_model, xlite_attr, get_layer_weights(layers, layer_attr, mask=mask))
 
         wt_kwargs: WeightGetterConfig = {"mask": mask, "post_processor": self._transform_deq_scale}
-        deq_scale = get_layer_weights(layers, f"{model_prefix}.deq_scale", **wt_kwargs)
-        if len(deq_scale) > 0:  # static quant
-            setattr(xlite_model, f"{xlite_prefix}_deq_scale", deq_scale)
-            set_xlite_attr(f"{xlite_prefix}_input_scale", f"{model_prefix}.aclnn_input_scale_reciprocal")
+        # DSA's indexer has shared layers (no own weights), so `mask` pads them with `_DUMMY_TENSOR`; the list is
+        # thus never empty and a naive `len() > 0` check would misclassify dynamic-quant matmuls as static. Static
+        # quant is when `aclnn_input_scale_reciprocal` exists and at least one entry is a real (non-dummy) tensor.
+        input_scale = get_layer_weights(layers, f"{model_prefix}.aclnn_input_scale_reciprocal", mask=mask)
+        is_static = any(not is_dummy_tensor(t) for t in input_scale)
+        if is_static:
+            setattr(xlite_model, f"{xlite_prefix}_input_scale", input_scale)
             set_xlite_attr(f"{xlite_prefix}_input_offset", f"{model_prefix}.aclnn_input_offset")
             set_xlite_attr(f"{xlite_prefix}_quant_bias", f"{model_prefix}.quant_bias")
+            deq_scale = get_layer_weights(layers, f"{model_prefix}.deq_scale", **wt_kwargs)
+            setattr(xlite_model, f"{xlite_prefix}_deq_scale", deq_scale)
         else:
             weight_scale = get_layer_weights(layers, f"{model_prefix}.weight_scale", **wt_kwargs)
             setattr(xlite_model, f"{xlite_prefix}_deq_scale", weight_scale)
