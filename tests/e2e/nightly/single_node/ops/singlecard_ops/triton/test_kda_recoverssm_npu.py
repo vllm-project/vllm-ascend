@@ -17,6 +17,7 @@ import vllm_ascend.ops.triton.kda.recoverssm as recoverssm_module  # noqa: E402
 from vllm_ascend.device.device_config import is_950  # noqa: E402
 from vllm_ascend.ops.triton.kda.recoverssm import (  # noqa: E402
     KDARecoverSSMCommitContext,
+    KDARecoverSSMRecords,
     _compact_conv_state_kernel,
     _conv_compaction_block_d,
     kda_recoverssm_verify,
@@ -74,10 +75,10 @@ def test_accuracy_criteria_enforce_both_limits(dtype, record_property):
 
 
 def assert_verify_records(correction, kg, records, record_property):
-    for block, (expected_correction, expected_kg) in records.items():
+    for row, (expected_correction, expected_kg) in records.items():
         length = expected_correction.shape[1]
-        assert_accuracy(correction[block, :, :length], expected_correction, record_property, f"correction_block{block}")
-        torch.testing.assert_close(kg[block, :, :length].cpu().double(), expected_kg, atol=0, rtol=0)
+        assert_accuracy(correction[row, :, :length], expected_correction, record_property, f"correction_row{row}")
+        torch.testing.assert_close(kg[row, :, :length].cpu().double(), expected_kg, atol=0, rtol=0)
 
 
 def kda_recoverssm_commit(state, correction, kg, a_log, bias, bound, starts, indices, counts):
@@ -89,14 +90,15 @@ def kda_recoverssm_commit(state, correction, kg, a_log, bias, bound, starts, ind
     if not is_conv_state_dim_first():
         conv = conv.transpose(-1, -2).contiguous()
     layer = SimpleNamespace(
-        kv_cache=(conv, state, correction, kg),
+        kv_cache=(conv, state),
+        recoverssm_records=KDARecoverSSMRecords(correction, kg),
         A_log=a_log,
         dt_bias=bias,
         gate_lower_bound=bound,
         local_num_heads=state.shape[1],
         head_dim=state.shape[3],
     )
-    context = KDARecoverSSMCommitContext.create([layer], spec_query_len=length, max_num_reqs=indices.numel())
+    context = KDARecoverSSMCommitContext.create([layer], spec_query_len=length, max_num_reqs=correction.shape[0])
     context.commit(counts, indices, starts)
 
 
@@ -137,8 +139,10 @@ def test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv(
     layers, expectations, backings, head_gaps = [], [], [], []
     for _ in range(2):
         state_backing, state = page_view((slots, heads, dim, dim), state_dtype, padding, head_padding)
-        correction_backing, correction = page_view((slots, heads, length, dim), torch.float32, padding, head_padding)
-        kg_backing, kg = page_view((slots, heads, length, 2 * dim), torch.bfloat16, padding, head_padding)
+        correction_backing, correction = page_view(
+            (len(blocks), heads, length, dim), torch.float32, padding, head_padding
+        )
+        kg_backing, kg = page_view((len(blocks), heads, length, 2 * dim), torch.bfloat16, padding, head_padding)
         conv_shape = (slots, 3 * heads * dim, length + 2)
         if not is_conv_state_dim_first():
             conv_shape = (slots, length + 2, 3 * heads * dim)
@@ -159,16 +163,17 @@ def test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv(
         assert_accuracy(output, expected_output, record_property, "verify")
         assert_verify_records(correction, kg, records, record_property)
         torch.testing.assert_close(state, initial, atol=0, rtol=0)
-        for block, count in zip(blocks[:2], accepted[:2]):
-            correction[block, :, count:] = float("nan")
-            kg[block, :, count:] = float("nan")
+        for row, count in enumerate(accepted[:2]):
+            correction[row, :, count:] = float("nan")
+            kg[row, :, count:] = float("nan")
         expected_conv = original_conv.clone()
         source = original_conv if is_conv_state_dim_first() else original_conv.transpose(-1, -2)
         destination = expected_conv if is_conv_state_dim_first() else expected_conv.transpose(-1, -2)
         for block, count in zip(blocks[:2], accepted[:2]):
             destination[block, :, :3] = source[block, :, count - 1 : count + 2]
         layer = SimpleNamespace(
-            kv_cache=(conv, state, correction, kg),
+            kv_cache=(conv, state),
+            recoverssm_records=KDARecoverSSMRecords(correction, kg),
             A_log=a_log,
             dt_bias=bias,
             gate_lower_bound=-5.0,
@@ -360,7 +365,7 @@ def reference(q, k, v, raw_g, raw_beta, a_log, bias, lower_bound, state, starts,
                 final[block] = current
         if corrections:
             span = slice(starts[row], starts[row + 1])
-            records[block] = (
+            records[row] = (
                 torch.stack(corrections, dim=1),
                 torch.cat((k[0, span], raw_g[0, span]), dim=-1).transpose(0, 1),
             )
@@ -392,8 +397,8 @@ def test_recoverssm_preserves_accepted_state_across_steps(
     query_starts = torch.tensor(starts, dtype=torch.int64, device=device)
     counts = torch.tensor(accepted, dtype=torch.int32, device=device)
     state = (torch.randn(8, heads, dim, dim, device=device) * 0.05).to(state_dtype)
-    correction = torch.full((8, heads, capacity, dim), float("nan"), device=device)
-    kg = torch.full((8, heads, capacity, 2 * dim), float("nan"), dtype=activation_dtype, device=device)
+    correction = torch.full((len(blocks), heads, capacity, dim), float("nan"), device=device)
+    kg = torch.full((len(blocks), heads, capacity, 2 * dim), float("nan"), dtype=activation_dtype, device=device)
     a_log = (0.2 * torch.randn(heads, device=device)).view(1, 1, heads, 1)
     bias = 0.1 * torch.randn(heads * dim, device=device)
 
@@ -431,8 +436,8 @@ def test_recoverssm_preserves_accepted_state_across_steps(
         # Rejected suffix records must never influence the committed state.
         for row, block in enumerate(blocks):
             if block > 0:
-                correction[block, :, accepted[row] :] = float("nan")
-                kg[block, :, accepted[row] :] = float("nan")
+                correction[row, :, accepted[row] :] = float("nan")
+                kg[row, :, accepted[row] :] = float("nan")
         kda_recoverssm_commit(state, correction, kg, a_log, bias, lower_bound, query_starts, indices, counts)
         assert_accuracy(state, expected_state, record_property, "commit")
         # Includes block zero and unused slots as well as zero-acceptance rows.
@@ -613,8 +618,8 @@ def test_align_context(mode, graph_mode, state_dtype, heads, key_dim, value_dim,
     for layer_no in range(2):
         state = (torch.randn(slots, heads, value_dim, key_dim, device="npu") * 0.03).to(state_dtype)
         initial = state.clone()
-        correction = torch.full((slots, heads, capacity, value_dim), float("nan"), device="npu")
-        kg = torch.full((slots, heads, capacity, 2 * key_dim), float("nan"), dtype=torch.bfloat16, device="npu")
+        correction = torch.full((len(blocks), heads, capacity, value_dim), float("nan"), device="npu")
+        kg = torch.full((len(blocks), heads, capacity, 2 * key_dim), float("nan"), dtype=torch.bfloat16, device="npu")
         q, k, v, gate = (
             torch.randn(1, 15, heads, width, dtype=torch.bfloat16, device="npu")
             for width in (key_dim, key_dim, value_dim, key_dim)
@@ -665,7 +670,8 @@ def test_align_context(mode, graph_mode, state_dtype, heads, key_dim, value_dim,
         stored_conv = conv if is_conv_state_dim_first() else conv.transpose(-1, -2)
         layers.append(
             SimpleNamespace(
-                kv_cache=(stored_conv, state, correction, kg),
+                kv_cache=(stored_conv, state),
+                recoverssm_records=KDARecoverSSMRecords(correction, kg),
                 A_log=a_log,
                 dt_bias=bias,
                 gate_lower_bound=-5.0,
@@ -760,14 +766,8 @@ def test_model_commit_context(batch, graph_mode, num_layers, record_property):
         seed = torch.arange(slots, dtype=torch.float32) * 0.002 + (layer_no + 1) * 0.001
         state = allocate((slots, heads, dim, dim), torch.float32, (state_page_stride, dim * dim, dim, 1))
         state.copy_(seed.npu()[:, None, None, None])
-        correction = allocate((slots, heads, span, dim), torch.float32, (state_page_stride, span * dim, dim, 1)).fill_(
-            1
-        )
-        kg = allocate(
-            (slots, heads, span, 2 * dim),
-            torch.bfloat16,
-            (2 * state_page_stride, span * 2 * dim, 2 * dim, 1),
-        ).zero_()
+        records = KDARecoverSSMRecords.allocate(batch, heads, span, dim, torch.bfloat16, torch.device("npu"))
+        correction, kg = records.correction.fill_(1), records.key_gate.zero_()
         conv = allocate((slots, 3 * heads * dim, 8), torch.bfloat16, (2 * state_page_stride, 1, 3 * heads * dim))
         conv.copy_(torch.arange(8, dtype=torch.bfloat16, device="npu").view(1, 1, 8) + layer_no * 4)
         if not is_conv_state_dim_first():
@@ -776,7 +776,8 @@ def test_model_commit_context(batch, graph_mode, num_layers, record_property):
                 conv = conv.contiguous()
         entries.append(
             SimpleNamespace(
-                kv_cache=(conv, state, correction, kg),
+                kv_cache=(conv, state),
+                recoverssm_records=KDARecoverSSMRecords(correction, kg),
                 A_log=torch.zeros(heads, device="npu"),
                 dt_bias=torch.zeros(heads * dim, device="npu"),
                 gate_lower_bound=-5.0,
@@ -789,7 +790,7 @@ def test_model_commit_context(batch, graph_mode, num_layers, record_property):
 
     def reset():
         for layer_no, (entry, seed) in enumerate(zip(entries, seeds)):
-            conv, state, _, _ = entry.kv_cache
+            conv, state = entry.kv_cache
             state.copy_(seed.npu()[:, None, None, None])
             logical = conv if is_conv_state_dim_first() else conv.transpose(-1, -2)
             logical.copy_(torch.arange(8, dtype=torch.bfloat16, device="npu").view(1, 1, 8) + layer_no * 4)
@@ -805,7 +806,7 @@ def test_model_commit_context(batch, graph_mode, num_layers, record_property):
     factors = torch.ones(slots, dtype=torch.float64)
     factors[1 : batch + 1] = torch.exp(-2.5 * counts_cpu.double())
     for layer_no, (entry, seed) in enumerate(zip(entries, seeds)):
-        conv, state, _, _ = entry.kv_cache
+        conv, state = entry.kv_cache
         golden = (seed.double() * factors)[:, None, None, None].expand(slots, heads, dim, dim)
         assert_accuracy(state, golden, record_property, f"layer{layer_no}_full_context")
         assert torch.equal(state[0].cpu(), seed[0].expand(heads, dim, dim))
@@ -850,8 +851,8 @@ def test_commit_window_uses_device_path(
     for layer_no in range(2):
         state = torch.randn(slots, heads, dim, dim, device="npu") * 0.03
         initial = state.clone()
-        correction = torch.full((slots, heads, span, dim), float("nan"), device="npu")
-        kg = torch.full((slots, heads, span, 2 * dim), float("nan"), dtype=activation_dtype, device="npu")
+        correction = torch.full((batch, heads, span, dim), float("nan"), device="npu")
+        kg = torch.full((batch, heads, span, 2 * dim), float("nan"), dtype=activation_dtype, device="npu")
         projections = torch.randn(1, batch * span, 4 * heads * dim, dtype=activation_dtype, device="npu")
         q, k, v, gate = (view.view(1, batch * span, heads, dim) for view in projections.split(heads * dim, dim=-1))
         beta = torch.randn(1, batch * span, heads, dtype=activation_dtype, device="npu")
@@ -866,9 +867,9 @@ def test_commit_window_uses_device_path(
         assert_accuracy(output, golden_output, record_property, f"window_layer{layer_no}_verify")
         assert_verify_records(correction, kg, records, record_property)
         torch.testing.assert_close(state, initial, atol=0, rtol=0)
-        for block, count in zip(blocks[:3], accepted[:3]):
-            correction[block, :, count:] = float("nan")
-            kg[block, :, count:] = float("nan")
+        for row, count in enumerate(accepted[:3]):
+            correction[row, :, count:] = float("nan")
+            kg[row, :, count:] = float("nan")
         conv = torch.randn(slots, 3 * heads * dim, span + 2, dtype=activation_dtype, device="npu")
         golden_conv = conv.clone()
         for block, count in zip(blocks[:2], accepted[:2]):
@@ -876,7 +877,8 @@ def test_commit_window_uses_device_path(
         stored_conv = conv if is_conv_state_dim_first() else conv.transpose(-1, -2)
         layers.append(
             SimpleNamespace(
-                kv_cache=(stored_conv, state, correction, kg),
+                kv_cache=(stored_conv, state),
+                recoverssm_records=KDARecoverSSMRecords(correction, kg),
                 A_log=a_log,
                 dt_bias=bias,
                 gate_lower_bound=lower_bound,

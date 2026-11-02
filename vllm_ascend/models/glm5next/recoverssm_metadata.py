@@ -19,6 +19,7 @@ from vllm_ascend.ops.gdn_attn_builder import (
     _build_actual_seq_lengths,
     _build_non_spec_chunked_prefill_metadata,
 )
+from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMCommitContext
 
 
 @contextmanager
@@ -36,6 +37,19 @@ def _disable_upstream_graph_staging(builder):
 
 class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+
+    def _get_recoverssm_context(self) -> KDARecoverSSMCommitContext:
+        forward_context = self.vllm_config.compilation_config.static_forward_context
+        layers = [forward_context[name] for name in self.layer_names]
+        context = self.recoverssm_context
+        if context is None or not context.is_bound_to(layers):
+            context = KDARecoverSSMCommitContext.create(
+                layers,
+                spec_query_len=1 + self.vllm_config.num_speculative_tokens,
+                max_num_reqs=self.vllm_config.scheduler_config.max_num_seqs,
+            )
+            self.recoverssm_context = context
+        return context
 
     def build(
         self,

@@ -1052,6 +1052,14 @@ RecoverSSM requires speculative decoding and does not support pipeline
 parallelism (PP), prefill context parallelism (PCP), or decode context
 parallelism (DCP). Stochastic rounding must be disabled.
 
+RecoverSSM keeps only convolution and recurrent state in KV pages. Temporary
+verification records are preallocated per layer using `max_num_seqs`, local KDA
+heads and the speculative window. These buffers are reused after each accepted
+state commit and are not transferred by the PD connector or saved in prefix cache.
+Moving records out of KV pages does not by itself enable native-P/RecoverSSM-D
+interoperability; both roles still require the matching convolution/state contract
+below.
+
 For prefill/decode separation, use `MooncakeConnectorV2` or
 `MooncakePullConnector` with matching model weights, TP size, speculative window,
 and RecoverSSM settings on both sides.

@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ascend RecoverSSM verify and batched accepted-state recovery.
 
-Adapted from vLLM c4df37dfcc. Preserve its paged-cache strides and public
-verify/commit contracts. Q/K normalization follows the AscendC KDA kernel.
+Adapted from vLLM c4df37dfcc with request-row scratch records outside KV pages.
+Q/K normalization follows the AscendC KDA kernel.
 """
 
 from collections.abc import Sequence
@@ -31,6 +31,29 @@ RECOVERSSM_VALUE_TILE_LARGE = 128
 RECOVERSSM_LARGE_TILE_MIN_PROGRAMS = 96
 RECOVERSSM_CONV_TILE = 4096
 RECOVERSSM_CONV_STRIDED_TILE = 256
+
+
+@dataclass
+class KDARecoverSSMRecords:
+    correction: torch.Tensor
+    key_gate: torch.Tensor
+
+    @classmethod
+    def allocate(
+        cls,
+        max_num_reqs: int,
+        num_heads: int,
+        spec_query_len: int,
+        head_dim: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> "KDARecoverSSMRecords":
+        return cls(
+            correction=torch.empty(
+                (max_num_reqs, num_heads, spec_query_len, head_dim), dtype=torch.float32, device=device
+            ),
+            key_gate=torch.empty((max_num_reqs, num_heads, spec_query_len, 2 * head_dim), dtype=dtype, device=device),
+        )
 
 
 @triton.jit
@@ -123,11 +146,11 @@ def _kda_recoverssm_verify_kernel(
     stride_state_head,
     stride_state_v,
     stride_state_k,
-    stride_correction_block,
+    stride_correction_request,
     stride_correction_head,
     stride_correction_pos,
     stride_correction_dim,
-    stride_kg_block,
+    stride_kg_request,
     stride_kg_head,
     stride_kg_pos,
     stride_kg_dim,
@@ -245,7 +268,7 @@ def _kda_recoverssm_verify_kernel(
 
         correction_ptr = (
             correction_cache_ptr
-            + state_idx * stride_correction_block
+            + pid_b * stride_correction_request
             + pid_h * stride_correction_head
             + token_offset * stride_correction_pos
         )
@@ -255,7 +278,7 @@ def _kda_recoverssm_verify_kernel(
             mask=mask_v,
         )
         if pid_v == 0:
-            kg_ptr = kg_cache_ptr + state_idx * stride_kg_block + pid_h * stride_kg_head + token_offset * stride_kg_pos
+            kg_ptr = kg_cache_ptr + pid_b * stride_kg_request + pid_h * stride_kg_head + token_offset * stride_kg_pos
             tl.store(
                 kg_ptr + offs_k * stride_kg_dim,
                 k,
@@ -311,7 +334,7 @@ def _kda_recoverssm_verify_kernel(
 
         correction_ptr = (
             correction_cache_ptr
-            + state_idx * stride_correction_block
+            + pid_b * stride_correction_request
             + pid_h * stride_correction_head
             + token_offset * stride_correction_pos
         )
@@ -321,7 +344,7 @@ def _kda_recoverssm_verify_kernel(
             mask=mask_v,
         )
         if pid_v == 0:
-            kg_ptr = kg_cache_ptr + state_idx * stride_kg_block + pid_h * stride_kg_head + token_offset * stride_kg_pos
+            kg_ptr = kg_cache_ptr + pid_b * stride_kg_request + pid_h * stride_kg_head + token_offset * stride_kg_pos
             tl.store(
                 kg_ptr + offs_k * stride_kg_dim,
                 k,
@@ -621,10 +644,10 @@ def _commit_kda_state_kernel(
     state_block_strides_ptr,
     correction_cache_ref_ptr,
     correction_cache_base_addrs_ptr,
-    correction_cache_block_strides_ptr,
+    correction_cache_request_strides_ptr,
     kg_cache_ref_ptr,
     kg_cache_base_addrs_ptr,
-    kg_cache_block_strides_ptr,
+    kg_cache_request_strides_ptr,
     A_log_ptr,
     dt_bias_ptr,
     state_indices_ptr,
@@ -693,13 +716,13 @@ def _commit_kda_state_kernel(
     source_state_ptr = state_ptr + source_state_idx * state_block_stride + pid_h * stride_state_head
 
     correction_cache_base_addr = tl.load(correction_cache_base_addrs_ptr + pid_l)
-    correction_cache_block_stride = tl.load(correction_cache_block_strides_ptr + pid_l)
+    correction_cache_request_stride = tl.load(correction_cache_request_strides_ptr + pid_l)
     correction_cache_ptr = correction_cache_base_addr.to(tl.pointer_type(correction_cache_ref_ptr.dtype.element_ty))
-    correction_cache_ptr += source_state_idx * correction_cache_block_stride + pid_h * stride_correction_cache_head
+    correction_cache_ptr += pid_b * correction_cache_request_stride + pid_h * stride_correction_cache_head
     kg_cache_base_addr = tl.load(kg_cache_base_addrs_ptr + pid_l)
-    kg_cache_block_stride = tl.load(kg_cache_block_strides_ptr + pid_l)
+    kg_cache_request_stride = tl.load(kg_cache_request_strides_ptr + pid_l)
     kg_cache_ptr = kg_cache_base_addr.to(tl.pointer_type(kg_cache_ref_ptr.dtype.element_ty))
-    kg_cache_ptr += source_state_idx * kg_cache_block_stride + pid_h * stride_kg_cache_head
+    kg_cache_ptr += pid_b * kg_cache_request_stride + pid_h * stride_kg_cache_head
 
     offs_k = tl.arange(0, BK)
     offs_v = pid_v * BV + tl.arange(0, BV)
@@ -828,10 +851,10 @@ def _commit_kda_state_grouped_kernel(
     state_block_strides_ptr,
     correction_cache_ref_ptr,
     correction_cache_base_addrs_ptr,
-    correction_cache_block_strides_ptr,
+    correction_cache_request_strides_ptr,
     kg_cache_ref_ptr,
     kg_cache_base_addrs_ptr,
-    kg_cache_block_strides_ptr,
+    kg_cache_request_strides_ptr,
     A_log_ptr,
     dt_bias_ptr,
     state_indices_ptr,
@@ -899,13 +922,13 @@ def _commit_kda_state_grouped_kernel(
     state_ptr = state_base_addr.to(tl.pointer_type(state_ref_ptr.dtype.element_ty))
     source_state_ptr = state_ptr + source_state_idx * state_block_stride + pid_h * stride_state_head
     correction_cache_base_addr = tl.load(correction_cache_base_addrs_ptr + pid_l)
-    correction_cache_block_stride = tl.load(correction_cache_block_strides_ptr + pid_l)
+    correction_cache_request_stride = tl.load(correction_cache_request_strides_ptr + pid_l)
     correction_cache_ptr = correction_cache_base_addr.to(tl.pointer_type(correction_cache_ref_ptr.dtype.element_ty))
-    correction_cache_ptr += source_state_idx * correction_cache_block_stride + pid_h * stride_correction_cache_head
+    correction_cache_ptr += pid_b * correction_cache_request_stride + pid_h * stride_correction_cache_head
     kg_cache_base_addr = tl.load(kg_cache_base_addrs_ptr + pid_l)
-    kg_cache_block_stride = tl.load(kg_cache_block_strides_ptr + pid_l)
+    kg_cache_request_stride = tl.load(kg_cache_request_strides_ptr + pid_l)
     kg_cache_ptr = kg_cache_base_addr.to(tl.pointer_type(kg_cache_ref_ptr.dtype.element_ty))
-    kg_cache_ptr += source_state_idx * kg_cache_block_stride + pid_h * stride_kg_cache_head
+    kg_cache_ptr += pid_b * kg_cache_request_stride + pid_h * stride_kg_cache_head
     offs_k = tl.arange(0, BK)
     offs_v = pid_v * BV + tl.arange(0, BV)
     mask_k = None if K == BK else offs_k < K
@@ -1034,22 +1057,24 @@ def kda_recoverssm_verify(
         raise ValueError("KDA RecoverSSM q, k, and gate heads must be contiguous")
     if v.stride()[2:] != (value_dim, 1) or raw_beta.stride(2) != 1:
         raise ValueError("KDA RecoverSSM v and beta heads must be contiguous")
-    num_blocks = checkpoint_state.shape[0]
     if checkpoint_state.shape[1:] != (
         num_heads,
         value_dim,
         key_dim,
     ):
         raise ValueError("KDA RecoverSSM checkpoint shape is incompatible")
+    batch = state_indices.shape[0]
+    if correction_cache.ndim != 4 or correction_cache.shape[0] < batch:
+        raise ValueError("KDA RecoverSSM records must cover every speculative request")
     expected_correction_shape = (
-        num_blocks,
+        correction_cache.shape[0],
         num_heads,
         spec_query_len,
         value_dim,
     )
     if correction_cache.shape != expected_correction_shape:
         raise ValueError(f"KDA RecoverSSM correction buffer needs shape {expected_correction_shape}")
-    expected_kg_shape = (num_blocks, num_heads, spec_query_len, 2 * key_dim)
+    expected_kg_shape = (correction_cache.shape[0], num_heads, spec_query_len, 2 * key_dim)
     if kg_cache.shape != expected_kg_shape:
         raise ValueError(f"KDA RecoverSSM key/gate buffer needs shape {expected_kg_shape}")
     if correction_cache.dtype != torch.float32:
@@ -1060,7 +1085,6 @@ def kda_recoverssm_verify(
         raise ValueError("KDA RecoverSSM gate parameters are incompatible")
     if not A_log.is_contiguous() or not dt_bias.is_contiguous():
         raise ValueError("KDA RecoverSSM gate parameters must be contiguous")
-    batch = state_indices.shape[0]
     if query_start_loc.shape[0] != batch + 1:
         raise ValueError("KDA RecoverSSM query metadata is incompatible")
     if total_tokens > batch * spec_query_len:
@@ -1169,10 +1193,10 @@ class KDARecoverSSMCommitContext:
     state_block_strides: torch.Tensor
     correction_caches: tuple[torch.Tensor, ...]
     correction_cache_base_addrs: torch.Tensor
-    correction_cache_block_strides: torch.Tensor
+    correction_cache_request_strides: torch.Tensor
     kg_caches: tuple[torch.Tensor, ...]
     kg_cache_base_addrs: torch.Tensor
-    kg_cache_block_strides: torch.Tensor
+    kg_cache_request_strides: torch.Tensor
     commit_lens: torch.Tensor
     state_commit_lens: torch.Tensor
     boundary_commit_lens: torch.Tensor
@@ -1184,6 +1208,20 @@ class KDARecoverSSMCommitContext:
     lower_bound: float | None
     spec_query_len: int
     conv_dim_stride: int | None
+    cache_bindings: tuple[tuple[torch.Tensor, ...], ...]
+
+    def is_bound_to(self, layers: Sequence[Any]) -> bool:
+        if len(layers) != len(self.cache_bindings):
+            return False
+        return all(
+            len(layer.kv_cache) == 2
+            and layer.kv_cache[0] is caches[0]
+            and layer.kv_cache[1] is caches[1]
+            and layer.recoverssm_records is not None
+            and layer.recoverssm_records.correction is self.correction_caches[index]
+            and layer.recoverssm_records.key_gate is self.kg_caches[index]
+            for index, (layer, caches) in enumerate(zip(layers, self.cache_bindings))
+        )
 
     @classmethod
     def create(
@@ -1196,16 +1234,18 @@ class KDARecoverSSMCommitContext:
         """Bind layer-owned page views and allocate reusable commit-plan buffers."""
         if not layers:
             raise ValueError("KDA RecoverSSM commit requires at least one layer")
-        if any(len(layer.kv_cache) != 4 for layer in layers):
-            raise ValueError("KDA RecoverSSM pages must contain conv, state, correction, and key/gate")
+        if any(len(layer.kv_cache) != 2 for layer in layers):
+            raise ValueError("KDA RecoverSSM pages must contain only conv and SSM state")
+        if any(layer.recoverssm_records is None for layer in layers):
+            raise ValueError("KDA RecoverSSM layers require independent verify records")
         init_device_properties_triton()
 
         conv_states = [layer.kv_cache[0] for layer in layers]
         if not is_conv_state_dim_first():
             conv_states = [state.transpose(-1, -2) for state in conv_states]
         checkpoints = [layer.kv_cache[1] for layer in layers]
-        correction_caches = [layer.kv_cache[2] for layer in layers]
-        kg_caches = [layer.kv_cache[3] for layer in layers]
+        correction_caches = [layer.recoverssm_records.correction for layer in layers]
+        kg_caches = [layer.recoverssm_records.key_gate for layer in layers]
         A_log = [layer.A_log.reshape(-1) for layer in layers]
         dt_bias = [layer.dt_bias.view(layer.local_num_heads, layer.head_dim) for layer in layers]
         lower_bounds = {layer.gate_lower_bound for layer in layers}
@@ -1225,7 +1265,7 @@ class KDARecoverSSMCommitContext:
             ):
                 raise ValueError("KDA RecoverSSM layers need matching checkpoint layout")
         expected_correction_shape = (
-            num_blocks,
+            max_num_reqs,
             num_heads,
             spec_query_len,
             value_dim,
@@ -1239,7 +1279,7 @@ class KDARecoverSSMCommitContext:
                 or correction_cache.stride()[1:] != correction_ref.stride()[1:]
             ):
                 raise ValueError(f"KDA RecoverSSM correction buffers need float32 shape {expected_correction_shape}")
-        expected_kg_shape = (num_blocks, num_heads, spec_query_len, 2 * key_dim)
+        expected_kg_shape = (max_num_reqs, num_heads, spec_query_len, 2 * key_dim)
         kg_ref = kg_caches[0]
         for kg_cache in kg_caches:
             if (
@@ -1306,10 +1346,10 @@ class KDARecoverSSMCommitContext:
             state_block_strides=_block_strides(checkpoints),
             correction_caches=tuple(correction_caches),
             correction_cache_base_addrs=_base_addrs(correction_caches),
-            correction_cache_block_strides=_block_strides(correction_caches),
+            correction_cache_request_strides=_block_strides(correction_caches),
             kg_caches=tuple(kg_caches),
             kg_cache_base_addrs=_base_addrs(kg_caches),
-            kg_cache_block_strides=_block_strides(kg_caches),
+            kg_cache_request_strides=_block_strides(kg_caches),
             commit_lens=torch.empty(max_num_reqs, dtype=torch.int32, device=device),
             state_commit_lens=torch.empty(max_num_reqs, dtype=torch.int32, device=device),
             boundary_commit_lens=torch.empty(max_num_reqs, dtype=torch.int32, device=device),
@@ -1323,6 +1363,7 @@ class KDARecoverSSMCommitContext:
             conv_dim_stride=(
                 conv_ref.stride(1) if all(state.stride(1) == conv_ref.stride(1) for state in conv_states) else None
             ),
+            cache_bindings=tuple(tuple(layer.kv_cache) for layer in layers),
         )
 
     def commit(
@@ -1465,10 +1506,10 @@ class KDARecoverSSMCommitContext:
             self.state_block_strides,
             correction_ref,
             self.correction_cache_base_addrs,
-            self.correction_cache_block_strides,
+            self.correction_cache_request_strides,
             self.kg_caches[0],
             self.kg_cache_base_addrs,
-            self.kg_cache_block_strides,
+            self.kg_cache_request_strides,
             self.A_log,
             self.dt_bias,
             state_indices,
@@ -1534,4 +1575,4 @@ class KDARecoverSSMCommitContext:
             )
 
 
-__all__ = ["KDARecoverSSMCommitContext", "kda_recoverssm_verify"]
+__all__ = ["KDARecoverSSMCommitContext", "KDARecoverSSMRecords", "kda_recoverssm_verify"]

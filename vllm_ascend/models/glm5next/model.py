@@ -88,7 +88,6 @@ from .multimodal import (
     Glm5NextVisionTransformer,
 )
 from .ops.mhc_ops import hc_contract, hc_expand
-from .recoverssm_config import use_glm_recoverssm
 
 # Trained GLM-5.3-Flash values formerly supplied by vLLM's vendored config.
 _MHC_TAU = 0.05
@@ -908,14 +907,11 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
-        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
+        return MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
-        if use_glm_recoverssm(vllm_config):
-            return MambaStateDtypeCalculator.append_kda_recoverssm_record(dtypes, vllm_config.model_config.dtype)
-        return dtypes
 
     @classmethod
     def get_mamba_state_shape_from_config(
@@ -925,23 +921,18 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = get_kda_parallel_size(parallel_config)
         num_spec = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
-        shapes = MambaStateShapeCalculator.kda_state_shape(
+        return MambaStateShapeCalculator.kda_state_shape(
             tp_size,
             hf_config.linear_num_heads,
             hf_config.linear_head_dim,
             conv_kernel_size=hf_config.linear_conv_kernel_dim,
             num_spec=num_spec,
         )
-        if use_glm_recoverssm(vllm_config):
-            return MambaStateShapeCalculator.append_kda_recoverssm_record(
-                shapes, hf_config.linear_num_heads, hf_config.linear_head_dim, tp_size, num_spec + 1
-            )
-        return shapes
 
     @classmethod
     def get_mamba_state_copy_func(
         cls,
-    ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc]:
+    ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.kda_state_copy_func()
 
     def compute_logits(

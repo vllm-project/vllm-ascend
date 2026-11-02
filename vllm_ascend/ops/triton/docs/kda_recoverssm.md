@@ -3,7 +3,8 @@
 ## Description
 
 - **Function**: Verify a speculative KDA window using one persistent recurrent
-  checkpoint per cache page. Record each token's correction and raw key/gate,
+  checkpoint per cache page. Record each token's correction and raw key/gate
+  in layer-owned scratch buffers indexed by speculative batch row,
   then reconstruct only the accepted recurrent state after sampling. Commit also
   compacts the convolution history prepared by the caller. This supports GLM
   speculative decoding without keeping a full recurrent checkpoint per draft.
@@ -54,7 +55,7 @@
 ## Parameters
 
 Notation: `B` speculative requests, `T` flattened tokens, `H` local heads,
-`K/V` key/value widths, `P` cache pages, `Q` speculative-window capacity,
+`K/V` key/value widths, `P` cache pages, `R` maximum requests, `Q` speculative-window capacity,
 `L` local KDA layers, `C` convolution channels, `W` convolution history length.
 An optional argument's default is part of its description.
 
@@ -69,8 +70,8 @@ An optional argument's default is part of its description.
 | `dt_bias` | Input | Gate bias with `H * K` elements | FP32 in validated callers | Contiguous ND |
 | `lower_bound` | Attribute | Gate lower bound; `None` selects negative softplus instead of bounded sigmoid | Python float / `None` | Scalar / N/A |
 | `checkpoint_state` | Input | Persistent recurrent state `[P, H, V, K]`, read-only during verification | FP32 / BF16 | Paged ND, explicit strides |
-| `correction_cache` | Output | Per-token correction records `[P, H, Q, V]` | FP32 | Paged ND, explicit strides |
-| `kg_cache` | Output | Raw key and raw gate concatenated on the last axis, `[P, H, Q, 2 * K]` | Same dtype as `k` | Paged ND, explicit strides |
+| `correction_cache` | Output | Per-token correction records `[R, H, Q, V]`, where `R >= B` | FP32 | Request-row ND, explicit strides |
+| `kg_cache` | Output | Raw key and raw gate concatenated on the last axis, `[R, H, Q, 2 * K]` | Same dtype as `k` | Request-row ND, explicit strides |
 | `query_start_loc` | Input | Nondecreasing token offsets `[B + 1]` | INT32 / INT64 | Strided 1D |
 | `state_indices` | Input | Source page per speculative row `[B]`; values at or below `NULL_BLOCK_ID` select null rows | INT32 | Strided 1D |
 | `spec_query_len` | Attribute | `Q`, normally `num_speculative_tokens + 1` | Python int | Positive scalar |
@@ -82,7 +83,7 @@ An optional argument's default is part of its description.
 | --- | --- | --- | --- | --- |
 | `layers` | Input | Nonempty sequence of layer objects exposing the fields below | Python sequence | N/A |
 | `spec_query_len` | Attribute | `Q`, shared by the local layers | Python int | Positive scalar |
-| `max_num_reqs` | Attribute | Capacity of the reusable commit-plan arrays | Python int | Positive scalar |
+| `max_num_reqs` | Attribute | `R`, capacity of the layer scratch records and reusable commit-plan arrays | Python int | Positive scalar |
 | Returned context | Output | Retains references to layer-owned pages, stacks gate parameters and allocates address/stride tables and plan arrays | Context object | N/A |
 
 Required layer fields:
@@ -91,8 +92,8 @@ Required layer fields:
 | --- | --- | --- | --- | --- |
 | `kv_cache[0]` | Input/Output | Convolution state; normalized view `[P, C, Q + W - 1]` | BF16 in validated callers | Paged ND; channel-first or token-first physical layout |
 | `kv_cache[1]` | Input/Output | Recurrent checkpoint `[P, H, V, K]` | FP32 / BF16 | Paged ND |
-| `kv_cache[2]` | Input | Correction records from verification `[P, H, Q, V]` | FP32 | Paged ND |
-| `kv_cache[3]` | Input | Key/gate records from verification `[P, H, Q, 2 * K]` | BF16 / FP16 | Paged ND |
+| `recoverssm_records.correction` | Input | Correction records from verification `[R, H, Q, V]` | FP32 | Request-row ND |
+| `recoverssm_records.key_gate` | Input | Key/gate records from verification `[R, H, Q, 2 * K]` | BF16 / FP16 | Request-row ND |
 | `A_log` | Input | Decay parameter with `H` elements, stacked as `[L, H]` internally | FP32 in validated callers | ND |
 | `dt_bias` | Input | Gate bias with `H * K` elements, stacked as `[L, H, K]` internally | FP32 in validated callers | ND |
 | `gate_lower_bound` | Attribute | Shared `lower_bound` across layers | Python float / `None` | Scalar / N/A |
@@ -190,6 +191,27 @@ for single-layer calls; it does not introduce a layer-count constexpr.
   ordinary commit budget also covers the TP4/H16 case that previously exceeded
   A3 UB capacity with Triton-Ascend 3.2.2.
 
+### Record lifetime and cache ownership
+
+`Glm5NextLinearAttention` preallocates `KDARecoverSSMRecords` after local head
+sharding during model construction. The memory profiler includes these allocations.
+Only convolution state and the recurrent checkpoint belong to the Mamba KV spec;
+records are neither prefix-cache checkpoints nor PD transfer payloads.
+Per layer, scratch memory is `R * H * Q * (4 * V + 2 * K * activation_bytes)`.
+It scales with request capacity rather than the number of KV pages.
+
+Verify writes record row `b`, and commit reads that same row before the next
+forward can reuse it. Physical source/final/boundary page IDs address only
+persistent state. `request_indices` maps acceptance counts and align metadata to
+sampler rows; it does not change the record row. Padded/null rows and rejected
+suffixes are not consumed. This supports mixed prefill/decode batches and request
+reordering without copying scratch records between requests or pages.
+
+The metadata builder reuses a commit context while its cache and record tensors
+remain bound. Rebinding either persistent cache or scratch tensors rebuilds the
+address tables; ordinary steps and graph replays retain the original allocations.
+Cache rebinding must occur outside a captured graph's lifetime.
+
 ## Origin and Differences
 
 - **Origin**: Adapted from upstream vLLM KDA RecoverSSM at `c4df37dfcc`, as recorded
@@ -198,7 +220,7 @@ for single-layer calls; it does not introduce a layer-count constexpr.
 - **Differences**:
     - Q/K normalization follows AscendC KDA: no squared-norm epsilon is added to
     nonzero vectors, and zero vectors normalize to zero.
-    - FP32 recurrent arithmetic, explicit strided paged records and batched
+    - FP32 recurrent arithmetic, explicit strided request-row records and batched
     multi-layer commit are used for Ascend. Persistent state is not advanced
     during verification.
     - Verify avoids the final unnecessary full-state update. A3 ordinary commit
