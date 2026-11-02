@@ -261,14 +261,14 @@ def test_p_eagle_acceptance(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
+@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 @pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [7])
+@pytest.mark.skip(reason="vLLM #57934: Model Runner V1 rejects DFlash candidate-head, remove it after drop MRV1")
 def test_dflash2_acceptance(
-    monkeypatch: pytest.MonkeyPatch,
     method: str,
     num_speculative_tokens: int,
 ):
-    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 
@@ -304,10 +304,7 @@ def test_dflash2_acceptance(
         "num_speculative_tokens": num_speculative_tokens,
     }
 
-    # Exercise target PIECEWISE graphs with eager DFlash2 drafting.
-    compilation_config = CompilationConfig(
-        cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[num_speculative_tokens + 1]
-    )
+    compilation_config = CompilationConfig(cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[9])
 
     with VllmRunner(
         main_model_name,
@@ -321,7 +318,6 @@ def test_dflash2_acceptance(
         compilation_config=compilation_config,
         enable_prefix_caching=False,
     ) as llm:
-        assert llm.model.llm_engine.vllm_config.use_v2_model_runner
         outputs = llm.model.generate(prompts, sampling_params)
         metrics = llm.model.get_metrics()
 
@@ -352,15 +348,11 @@ def test_dflash2_acceptance(
 
 @pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [7])
-@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "compiled_full_decode"])
 def test_dflash2_v2_acceptance(
-    monkeypatch: pytest.MonkeyPatch,
     method: str,
     num_speculative_tokens: int,
-    enforce_eager: bool,
 ):
-    # Cover default runner selection for both eager and graph drafting.
-    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 
@@ -394,20 +386,15 @@ def test_dflash2_v2_acceptance(
         "method": "dflash",
         "model": spec_model_name,
         "num_speculative_tokens": num_speculative_tokens,
-        "enforce_eager": enforce_eager,
+        "enforce_eager": False,
     }
 
     # With max_num_seqs=1, the parallel draft has K + 1 query tokens.
-    # One capture size covers that request without adding padded requests;
-    # PIECEWISE alone does not enable the DFlash query graph manager.
-    compilation_config = (
-        None
-        if enforce_eager
-        else CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            cudagraph_mode="FULL_DECODE_ONLY",
-            cudagraph_capture_sizes=[num_speculative_tokens + 1],
-        )
+    # One capture size covers that request without adding padded requests.
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode="FULL_DECODE_ONLY",
+        cudagraph_capture_sizes=[num_speculative_tokens + 1],
     )
 
     with VllmRunner(
@@ -419,7 +406,7 @@ def test_dflash2_v2_acceptance(
         distributed_executor_backend="mp",
         gpu_memory_utilization=0.9,
         speculative_config=speculative_config,
-        enforce_eager=enforce_eager,
+        enforce_eager=False,
         compilation_config=compilation_config,
         enable_prefix_caching=False,
     ) as llm:

@@ -388,7 +388,7 @@ A few important things to consider when using DFlash2 draft models:
    execution. The compressed mask is a band-mode template, not a causal
    restriction on draft tokens.
 
-   The model-level acceptance test exercises both eager drafting and
+   The model-level acceptance test exercises DFlash2 draft graphs using
    `VLLM_COMPILE` with `FULL_DECODE_ONLY` on two NPUs:
 
    ```shell
