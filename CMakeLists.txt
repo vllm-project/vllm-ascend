@@ -73,6 +73,12 @@ ascendc_library(vllm_ascend_kernels SHARED
     ${VLLM_ASCEND_CUSTOM_OP}
 )
 
+# SplitQuant is currently validated on Atlas A2 (910B). Keep its dedicated
+# library out of builds for other SoCs until those kernels are validated.
+if(SOC_VERSION MATCHES "[Aa][Ss][Cc][Ee][Nn][Dd]910[Bb].*")
+    add_subdirectory(csrc/splitquant_dense_fused)
+endif()
+
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
 
 if(SOC_VERSION STREQUAL "ASCEND310P3")
@@ -104,6 +110,9 @@ set(
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
+if(TARGET vllm_ascend_splitquant_dense)
+    add_dependencies(vllm_ascend_C vllm_ascend_splitquant_dense)
+endif()
 
 target_link_directories(
   vllm_ascend_C

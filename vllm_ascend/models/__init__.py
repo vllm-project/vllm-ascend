@@ -5,6 +5,12 @@ import vllm_ascend.envs as envs_ascend
 
 def register_model():
     ModelRegistry.register_model(
+        "SplitQuantQwen3ForCausalLM",
+        "vllm_ascend.models.qwen3_splitquant:SplitQuantQwen3ForCausalLM")
+    ModelRegistry.register_model(
+        "SplitQuantQwen3MoeForCausalLM",
+        "vllm_ascend.models.qwen3_splitquant:SplitQuantQwen3MoeForCausalLM")
+    ModelRegistry.register_model(
         "Qwen2VLForConditionalGeneration",
         "vllm_ascend.models.qwen2_vl:AscendQwen2VLForConditionalGeneration")
 
@@ -46,3 +52,9 @@ def register_model():
     ModelRegistry.register_model(
         "Qwen3NextForCausalLM",
         "vllm_ascend.models.qwen3_next:CustomQwen3NextForCausalLM")
+    ModelRegistry.register_model(
+        "Qwen3_5ForConditionalGeneration",
+        "vllm_ascend.models.qwen3_5_splitquant:SplitQuantQwen3_5ForConditionalGeneration")
+    ModelRegistry.register_model(
+        "SplitQuantQwen3_5ForConditionalGeneration",
+        "vllm_ascend.models.qwen3_5_splitquant:SplitQuantQwen3_5ForConditionalGeneration")

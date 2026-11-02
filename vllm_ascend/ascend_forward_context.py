@@ -163,6 +163,7 @@ def set_ascend_forward_context(
         from vllm_ascend.quantization.quant_config import AscendQuantConfig
         model_type_scope = ["llama", "qwen2", "qwen3", "qwen3_moe"]
         addrmsnorm_quant_fusion_enabled = isinstance(vllm_config.quant_config, AscendQuantConfig) and \
+            "W4A4_SPLITQUANT" not in vllm_config.quant_config.quant_description.values() and \
             vllm_config.model_config.hf_config.model_type in model_type_scope and \
             forward_context.layer_idx is not None
         if addrmsnorm_quant_fusion_enabled:
