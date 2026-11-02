@@ -1,0 +1,6 @@
+pr: 20264
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DeepSeek V4.1 decoder bounded replay under torch.compile,
+      including DP replicas that keep their input rows while peers trim.
