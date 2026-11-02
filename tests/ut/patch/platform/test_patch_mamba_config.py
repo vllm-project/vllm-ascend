@@ -166,6 +166,53 @@ def test_kpool_page_alignment_preserves_packed_and_regular_geometry(cache_dtype,
 
 
 @pytest.mark.parametrize("cache_dtype", ["int8", "fp8"])
+@pytest.mark.parametrize("head_shards", [1, 8])
+@pytest.mark.parametrize(
+    ("connector_name", "explicit_block_size", "preserve_block_size"),
+    [
+        (None, True, False),
+        ("MooncakeConnectorV2", True, True),
+        ("MooncakeConnectorV2", False, False),
+        ("AscendStoreConnector", True, False),
+    ],
+)
+def test_mooncake_c8_peers_preserve_explicit_shared_blocks(
+    cache_dtype, head_shards, connector_name, explicit_block_size, preserve_block_size
+):
+    connector = None if connector_name is None else SimpleNamespace(kv_connector=connector_name)
+    config = _config(connector=connector, prefix_caching=True, mamba_cache_mode="align")
+    config.cache_config.cache_dtype = cache_dtype
+    config.cache_config.block_size = 8704
+    config.cache_config.user_specified_block_size = explicit_block_size
+    config.parallel_config = SimpleNamespace(tensor_parallel_size=1)
+    config.model_config = SimpleNamespace(
+        architecture="DummyHybridModel",
+        use_mla=True,
+        dtype=torch.bfloat16,
+        max_model_len=32768,
+        hf_text_config=SimpleNamespace(index_topk=2048, index_kpool=4, kv_lora_rank=512, qk_rope_head_dim=0),
+        hf_config=SimpleNamespace(),
+        get_num_kv_heads=lambda _parallel_config: 1,
+    )
+    heads = 64 // head_shards
+    model_cls = SimpleNamespace(
+        get_mamba_state_shape_from_config=lambda _config: ((3 * heads * 128, 8), (heads, 128, 128)),
+        get_mamba_state_dtype_from_config=lambda _config: (torch.bfloat16, torch.float32),
+    )
+
+    with patch(
+        "vllm_ascend.patch.platform.patch_mamba_config.ModelRegistry.resolve_model_cls",
+        return_value=(model_cls, None),
+    ):
+        _run(config)
+
+    expected_block_size = 8704 if preserve_block_size or head_shards == 1 else 1152
+    assert config.cache_config.block_size == expected_block_size
+    assert config.cache_config.mamba_block_size == expected_block_size
+    assert config.cache_config.mamba_page_size_padded == expected_block_size * 528
+
+
+@pytest.mark.parametrize("cache_dtype", ["int8", "fp8"])
 @pytest.mark.parametrize("prefix_caching", [False, True])
 def test_backend_alignment_preserves_kpool_c8_page_geometry(cache_dtype, prefix_caching):
     config = _config(prefix_caching=prefix_caching, mamba_cache_mode="align" if prefix_caching else "none")

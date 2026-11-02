@@ -42,6 +42,8 @@ pytestmark = pytest.mark.usefixtures("keypool_kernels")
 
 @pytest.fixture
 def keypool_kernels(monkeypatch):
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
+
     def metadata(common, buffers, tokens, *_, **kwargs):
         n = common.num_reqs
         keys = "positions slot_mapping seq_lens raw_seq_lens query_start_loc cum_query_lens start_pos pool_tail"
@@ -207,6 +209,7 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
     logical_size = storage_block_size * pool_size
     split = logical_size // 128
     config = SimpleNamespace(
+        kv_transfer_config=None,
         cache_config=SimpleNamespace(block_size=logical_size),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=1),
         model_config=SimpleNamespace(max_model_len=logical_size * 3),
@@ -311,6 +314,7 @@ def test_model_cache_layers_publish_source_compatible_specs():
 
 def test_indexer_metadata_preserves_raw_request_boundaries(keypool_kernels):
     config = SimpleNamespace(
+        kv_transfer_config=None,
         cache_config=SimpleNamespace(block_size=256),
         scheduler_config=SimpleNamespace(
             max_num_batched_tokens=16,
@@ -365,6 +369,7 @@ def test_indexer_metadata_preserves_raw_request_boundaries(keypool_kernels):
 def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, invalid):
     """Keep one global CANN write request for two PCP-local query chunks."""
     config = SimpleNamespace(
+        kv_transfer_config=None,
         cache_config=SimpleNamespace(block_size=128),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=2),
         model_config=SimpleNamespace(max_model_len=512),
@@ -487,6 +492,7 @@ def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, 
 
 def test_indexer_metadata_request_buffers_cover_graph_token_padding():
     config = SimpleNamespace(
+        kv_transfer_config=None,
         cache_config=SimpleNamespace(block_size=256),
         scheduler_config=SimpleNamespace(
             max_num_batched_tokens=8,
@@ -535,6 +541,7 @@ def test_indexer_metadata_request_buffers_cover_graph_token_padding():
 
 def test_indexer_metadata_buffers_are_stable_per_draft_step():
     config = SimpleNamespace(
+        kv_transfer_config=None,
         cache_config=SimpleNamespace(block_size=256),
         scheduler_config=SimpleNamespace(
             max_num_batched_tokens=8,
@@ -622,6 +629,7 @@ def test_indexer_metadata_buffers_are_stable_per_draft_step():
 
 def _config():
     return SimpleNamespace(
+        kv_transfer_config=None,
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=128),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=16, max_num_seqs=2),
@@ -660,6 +668,70 @@ def _common():
         slot_mapping=torch.tensor([2, -1, 4, 5, 6, 7, 135, 136, -1, -1]),
         positions=torch.tensor([2, 3, 4, 5, 6, 7, 7, 8, 3, 7]),
     )
+
+
+@pytest.mark.parametrize("mode", ["normal", "capture", "draft", "replay", "stream_capture", "pcp"])
+def test_query_plan_is_built_only_for_uncaptured_target_queries(keypool_kernels, mode):
+    config, common = _config(), _common()
+    config.model_config.hf_text_config = SimpleNamespace(index_topk=16)
+    common.query_start_loc_cpu = common.query_start_loc.clone()
+    common.seq_lens_cpu = common.seq_lens.clone()
+    common.is_prefilling = torch.ones(common.num_reqs, dtype=torch.bool)
+    common.graph_pad_size = 10 if mode == "replay" else -1
+    builder = _builder(config)
+    if mode == "pcp":
+        builder.pcp_size = 8
+        with patch("vllm_ascend.attention.indexer_kpool.build_kpool_query_plan", side_effect=AssertionError):
+            metadata = builder.build(0, common)
+    elif mode == "capture":
+        metadata = builder.build_for_graph_capture(common)
+    elif mode == "draft":
+        metadata = builder.build_for_drafting(common, 1)
+    elif mode == "stream_capture":
+        with (
+            patch.object(torch.npu, "is_current_stream_capturing", return_value=True),
+            patch("vllm_ascend.attention.indexer_kpool.build_kpool_query_plan", side_effect=AssertionError),
+        ):
+            metadata = builder.build(0, common)
+    else:
+        metadata = builder.build(0, common)
+    if mode == "normal":
+        assert metadata.query_plan is not None
+        assert metadata.query_plan.full_visible_ranges == ((0, 6), (6, 8))
+        assert metadata.query_plan.selective_rows.tolist() == []
+        assert metadata.query_plan.cum_query_lens.tolist() == [0, 0]
+    else:
+        assert metadata.query_plan is None
+
+
+@pytest.mark.parametrize("role", [None, "producer", "consumer", "both"])
+@pytest.mark.parametrize("phase", ["prefill", "decode", "mixed", "missing", "incomplete", "device"])
+def test_query_routing_is_limited_to_pure_prefills_outside_kv_consumers(keypool_kernels, role, phase):
+    config, common = _config(), _common()
+    config.model_config.hf_text_config = SimpleNamespace(index_topk=16)
+    if role is not None:
+        config.kv_transfer_config = SimpleNamespace(is_kv_consumer=role in ("consumer", "both"))
+    common.query_start_loc_cpu = common.query_start_loc.clone()
+    common.seq_lens_cpu = common.seq_lens.clone()
+    flags = {
+        "prefill": torch.tensor([True, True]),
+        "decode": torch.tensor([False, False]),
+        "mixed": torch.tensor([True, False]),
+        "missing": None,
+        "incomplete": torch.tensor([True]),
+        "device": torch.ones(2, dtype=torch.bool, device="meta"),
+    }
+    common.is_prefilling = flags[phase]
+    eligible = phase == "prefill" and role in (None, "producer")
+    with (
+        patch.object(torch.npu, "is_current_stream_capturing", return_value=False) as capturing,
+        patch.object(torch.Tensor, "cpu", side_effect=AssertionError("unexpected D2H")),
+    ):
+        metadata = _builder(config).build(0, common)
+    assert (metadata.query_plan is not None) == eligible
+    assert keypool_kernels.build_keypool_metadata.call_args.args[0] is common
+    if not eligible:
+        capturing.assert_not_called()
 
 
 @pytest.mark.parametrize("input_tokens", [9, 10])

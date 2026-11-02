@@ -101,8 +101,29 @@ def test_business_shape_index_packing_reuses_output_without_running_kernel(monke
     assert args[0] is indices
     assert args[1] is metadata.positions
     assert args[2] is metadata.cum_query_lens
-    assert args[3].data_ptr() == output.data_ptr()
-    assert args[4:11] == (2051, output.stride(0), 2048, 4, 2, output.shape[1], 4096)
+    assert args[3] is None
+    assert args[4].data_ptr() == output.data_ptr()
+    assert args[5:13] == (2051, output.stride(0), 2048, 4, False, 2, output.shape[1], 4096)
+
+
+@pytest.mark.parametrize("selective_rows", [0, 3])
+@pytest.mark.parametrize("reuse_output", [False, True])
+def test_query_plan_packing_restores_all_rows_with_padded_output_stride(monkeypatch, selective_rows, reuse_output):
+    launch = MagicMock()
+    monkeypatch.setattr(adapters, "_pack_indices_kernel", launch)
+    plan = SimpleNamespace(num_tokens=8, selection_index=torch.full((8,), -1, dtype=torch.int32))
+    indices = torch.empty(selective_rows, 11, dtype=torch.int32)
+    storage = torch.empty(20, 32, dtype=torch.int32)[::2, :16] if reuse_output else None
+    metadata = SimpleNamespace(positions=torch.arange(8), cum_query_lens=torch.tensor([8]))
+    result = adapters.pack_keypool_indices(indices, metadata, 8, 4, storage, query_plan=plan)
+    assert result.shape == (8, 1, 11)
+    assert launch.__getitem__.call_args.args == ((8,),)
+    args = launch.__getitem__.return_value.call_args.args
+    assert args[3] is plan.selection_index
+    assert args[9] is True
+    if reuse_output:
+        assert result.data_ptr() == storage.data_ptr()
+        assert result.stride(0) == storage.stride(0)
 
 
 def test_cache_writer_passes_padded_page_and_block_layout_without_running_kernel(monkeypatch):

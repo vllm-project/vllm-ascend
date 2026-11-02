@@ -24,6 +24,8 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
+from vllm_ascend.attention.kpool_dense_attention import supports_dense_kpool_attention
+from vllm_ascend.attention.kpool_query_plan import KPoolQueryPlan, build_kpool_query_plan
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -71,6 +73,7 @@ class AscendIndexerKPoolMetadata:
     write_metadata: "AscendIndexerKPoolMetadata | None" = None
     pcp_hidden_restore_indices: torch.Tensor | None = None
     pcp_local_token_count: int = 0
+    query_plan: KPoolQueryPlan | None = None
 
 
 @dataclass
@@ -124,7 +127,11 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         if self.storage_block_size <= 0:
             raise ValueError(f"Indexer KPool storage block size must be positive, got {self.storage_block_size}.")
         self.compress_ratio = compress_ratio
+        self.topk_tokens = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "index_topk", None)
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        kv_transfer = vllm_config.kv_transfer_config
+        self.plan_prefill_queries = kv_transfer is None or not kv_transfer.is_kv_consumer
+        self.plan_dense_attention = supports_dense_kpool_attention(vllm_config)
         if self.logical_block_size % GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE:
             raise ValueError(
                 "GLM-Next logical block size must be divisible by the SFA "
@@ -209,8 +216,30 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         **kwargs,
     ) -> AscendIndexerKPoolMetadata:
         graph_capture = kwargs.pop("_graph_capture", False)
+        plan_queries = kwargs.pop("_plan_queries", True)
         del common_prefix_len, fast_build
         metadata = self._build_metadata(common_attn_metadata, graph_capture)
+        prefilling = getattr(common_attn_metadata, "is_prefilling", None)
+        # MTP decode capture can call the ordinary builder with runtime mode NONE.
+        if (
+            plan_queries
+            and self.plan_prefill_queries
+            and self.pcp_size == 1
+            and not graph_capture
+            and getattr(common_attn_metadata, "graph_pad_size", -1) == -1
+            and common_attn_metadata.num_reqs > 0
+            and prefilling is not None
+            and prefilling.device.type == "cpu"
+            and prefilling.numel() >= common_attn_metadata.num_reqs
+            and prefilling[: common_attn_metadata.num_reqs].all()
+            and not torch.npu.is_current_stream_capturing()
+        ):
+            metadata.query_plan = build_kpool_query_plan(
+                common_attn_metadata,
+                self.topk_tokens,
+                self.device,
+                plan_dense_attention=self.plan_dense_attention,
+            )
         pcp_context = common_attn_metadata.pcp_context
         if pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any()):
             cache_group_idx = common_attn_metadata.pcp_cache_group_idx
@@ -308,7 +337,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         **kwargs,
     ) -> AscendIndexerKPoolMetadata:
         del draft_index
-        return self.build(0, common_attn_metadata, fast_build=True, **kwargs)
+        return self.build(0, common_attn_metadata, fast_build=True, _plan_queries=False, **kwargs)
 
 
 class AscendIndexerKPoolBackend(AttentionBackend):
@@ -626,6 +655,9 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         num_tokens = hidden_states.shape[0]
         hidden = hidden_states[:num_tokens]
         k_hidden = k_hidden_states[:num_tokens]
+        query_plan = indexer_metadata.query_plan if context.cudagraph_runtime_mode == CUDAGraphMode.NONE else None
+        if query_plan is not None and query_plan.num_tokens != num_tokens:
+            query_plan = None
         if self._key_weight is None:
             self.process_weights_after_loading()
         assert self._key_weight is not None
@@ -634,9 +666,16 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         if compute_topk:
             if isinstance(q_c, tuple):
                 raise TypeError("GLM KPool backend requires an unquantized q_c tensor.")
-            q_values = self.wq_b(q_c[:num_tokens])[0].view(num_tokens, self.n_head, self.head_dim)
-            weights = F.linear(hidden.float(), self._head_weight_f32).to(q_values.dtype)
-            weights = weights * (self.softmax_scale * self.n_head**-0.5)
+            query_input = q_c[:num_tokens]
+            if query_plan is not None and query_plan.selective_rows.numel():
+                query_input = torch.index_select(query_input, 0, query_plan.selective_rows)
+            if query_plan is None or query_plan.selective_rows.numel():
+                q_values = self.wq_b(query_input)[0].view(-1, self.n_head, self.head_dim)
+                # Preserve the head-weight GEMM shape: rounding can change top-k membership.
+                weights = F.linear(hidden.float(), self._head_weight_f32).to(q_values.dtype)
+                if query_plan is not None:
+                    weights = torch.index_select(weights, 0, query_plan.selective_rows)
+                weights = weights * (self.softmax_scale * self.n_head**-0.5)
 
         indexer_cache = self._bound_cache(self.k_cache)
         tail_cache = self._bound_cache(self.tail_cache)
@@ -658,6 +697,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             indexer_metadata,
             tail_metadata,
             compute_topk=compute_topk,
+            query_plan=query_plan,
         )
 
     def _init_cann_ops(self) -> None:
@@ -691,9 +731,14 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         tail_metadata: AscendIndexerKPoolTailMetadata,
         *,
         compute_topk: bool,
+        query_plan: KPoolQueryPlan | None = None,
     ) -> torch.Tensor | None:
         cache_metadata = indexer_metadata.write_metadata or indexer_metadata
-        num_tokens = q_values.shape[0] if q_values is not None else indexer_metadata.positions.shape[0]
+        num_tokens = indexer_metadata.positions.shape[0]
+        if query_plan is not None:
+            num_tokens = query_plan.num_tokens
+        elif q_values is not None:
+            num_tokens = q_values.shape[0]
         output_width = self.topk_tokens + self.index_kpool - 1
         if compute_topk and self.topk_indices_buffer is not None:
             if (
@@ -737,7 +782,8 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         ):
             raise ValueError("GLM KPool APE must be FP32 with shape [pool_size, head_dim].")
 
-        if compute_topk and (q_values is None or weights is None):
+        all_full_visible = query_plan is not None and query_plan.selective_rows.numel() == 0
+        if compute_topk and not all_full_visible and (q_values is None or weights is None):
             raise ValueError("GLM KPool top-k requires query and head weights.")
 
         # Keep history separate: CANN can save the tail before other cores
@@ -781,6 +827,16 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         # Sharing top-k still advances the compressed cache and raw tail.
         if not compute_topk:
             return None
+        if all_full_visible:
+            empty_indices = torch.empty((0, output_width), dtype=torch.int32, device=hidden_states.device)
+            return self._pack_keypool_indices(
+                empty_indices,
+                indexer_metadata,
+                self.topk_tokens,
+                self.index_kpool,
+                self.topk_indices_buffer,
+                query_plan=query_plan,
+            )
         # Empty batches must update caches but skip CANN's unsafe no-work path.
         # FULL capture retains selection because replay may have live queries.
         if num_tokens == 0 or (
@@ -799,7 +855,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             indexer_cache,
             weights.to(torch.bfloat16),
             indexer_metadata.pool_tail,
-            actual_seq_q=indexer_metadata.cum_query_lens,
+            actual_seq_q=indexer_metadata.cum_query_lens if query_plan is None else query_plan.cum_query_lens,
             actual_seq_k=indexer_metadata.seq_lens,
             block_table=indexer_metadata.block_table,
             layout_q="TND",
@@ -809,5 +865,10 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             mask_mode=3,
         )
         return self._pack_keypool_indices(
-            indices, indexer_metadata, self.topk_tokens, self.index_kpool, self.topk_indices_buffer
+            indices,
+            indexer_metadata,
+            self.topk_tokens,
+            self.index_kpool,
+            self.topk_indices_buffer,
+            query_plan=query_plan,
         )

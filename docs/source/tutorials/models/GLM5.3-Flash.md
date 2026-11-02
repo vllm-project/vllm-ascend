@@ -18,8 +18,13 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
-all deployment scripts on this page set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
+The deployment scripts on this page use model runner V1 and set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
+
+Model runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`) can skip redundant KPool query selection for full-visible query prefixes in pure prefill batches. On A3 with TP8, PCP1, DCP1 and `--kv-cache-dtype int8`, eligible prefill batches use projected K/V and request-local masked MHA while preserving KPool selection. Other eligible full-visible prefixes use dense FIA. Routing uses measured shape and workspace limits. In PD deployments, these optimizations apply only to the KV producer. KV consumers, decode and mixed prefill/decode batches retain the existing paths, including MTP decode.
+
+PCP-sharded query layouts retain normal KPool query selection until separate bypass thresholds are established for their global query layout.
+
+Mooncake P/D peers with different TP/PCP layouts must use the same explicit `--block-size`, large enough for both recurrent-state pages. C8 preserves this shared block size for state handoff.
 
 ## 3 Prerequisites
 

@@ -359,12 +359,15 @@
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
 #    Why:
 #       block size is set to 16 in vLLM which is not supported by Ascend.
+#       Mooncake hybrid peers also require matching state block sizes across TP/PCP layouts.
 #    How：
 #       Set block size to 128 on npu.
+#       Preserve explicit Mooncake C8 block sizes instead of applying role-local minimums.
 #    Related PR (if no, explain why):
 #       we'll fix this in vLLM soon.
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
+#       Upstream needs backend-aware alignment and shared hybrid P/D block selection.
 #
 # ** 12. File: platform/patch_mamba_config_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

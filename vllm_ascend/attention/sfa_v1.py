@@ -28,6 +28,13 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.kpool_dense_attention import (
+    can_execute_projected_kpool_attention,
+    execute_kpool_hybrid_attention,
+    execute_projected_kpool_attention,
+    supports_projected_kpool_attention,
+)
+from vllm_ascend.attention.kpool_query_plan import KPoolMHAPlan, build_kpool_mha_plan
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -458,6 +465,7 @@ class AscendSFAMetadata:
     smla_topk_length: torch.Tensor | None = None
     smla_valid_mask: torch.Tensor | None = None
     smla_sinks: torch.Tensor | None = None
+    prefill_mha: KPoolMHAPlan | None = None
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -533,6 +541,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
         self.nope = layer.qk_rope_head_dim == 0
+        self.plan_projected_mha = supports_projected_kpool_attention(vllm_config)
         self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
@@ -707,6 +716,15 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         )
         if self.nope:
             self._prepare_nope_metadata(metadata, draft_index)
+        if (
+            getattr(self, "plan_projected_mha", False)
+            and draft_index is None
+            and metadata.num_prefills > 0
+            and metadata.num_decode_tokens == 0
+            and getattr(common_attn_metadata, "graph_pad_size", -1) == -1
+            and not torch.npu.is_current_stream_capturing()
+        ):
+            metadata.prefill_mha = build_kpool_mha_plan(common_attn_metadata, self.device)
         return metadata
 
     def _prepare_nope_metadata(self, metadata: AscendSFAMetadata, draft_index: int | None) -> None:
@@ -1301,12 +1319,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         return None, None
 
     # Return `ql_nope`, `q_pe`
-    def _q_proj_and_k_up_proj(self, x):
+    def _q_proj_and_k_up_proj(self, x, *, absorb=True):
         q_nope, q_pe = (
             self.q_proj(x)[0]
             .view(-1, self.local_num_heads, self.qk_head_dim)
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
+
+        if not absorb:
+            return q_nope, q_pe
 
         if (
             q_nope.dtype in [torch.float16, torch.bfloat16]
@@ -1876,6 +1897,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_key = parallel_context.actual_seq_lengths_key
 
         fused_type: PreprocessType = self.preprocess_type
+        mha_plan = getattr(attn_metadata, "prefill_mha", None) if type(self) is AscendSFAImpl else None
+        if mha_plan is not None and (
+            fused_type != PreprocessType.NATIVE
+            or get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE
+            or not can_execute_projected_kpool_attention(kv_cache[0], attn_metadata, mha_plan)
+        ):
+            mha_plan = None
         # PROLOG_V3 serves every attention state (decode, spec decoding and
         # prefill); only MLAPO carries a per-call token-count limit.
         if self.preprocess_type == PreprocessType.MLAPO and num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS:
@@ -1960,7 +1988,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
-            ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
+            if mha_plan is None:
+                ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
+            else:
+                ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c, absorb=False)
             if self.qk_rope_head_dim:
                 q_pe = self.rope_single(q_pe, cos, sin)
             self._record_query_gather_context(
@@ -2024,18 +2055,50 @@ class AscendSFAImpl(MLAAttentionImpl):
         # inside the indexer's forward would leave their gate closed.
         with attention_transfer_window():
             if has_local_query:
-                attn_output = self._execute_sparse_flash_attention_process(
-                    ql_nope,
-                    q_pe,
-                    kv_cache,
-                    topk_indices,
-                    attn_metadata,
-                    actual_seq_lengths_query,
-                    actual_seq_lengths_key,
-                )
+                # Subclasses may prepare resident KV or CP views inside sparse dispatch.
+                query_plan = getattr(indexer_attn_metadata, "query_plan", None) if type(self) is AscendSFAImpl else None
+                if query_plan is not None and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE:
+                    query_plan = None
+                attn_output = None
+                if mha_plan is not None:
+                    attn_output = execute_projected_kpool_attention(
+                        ql_nope,
+                        kv_cache[0],
+                        topk_indices,
+                        attn_metadata,
+                        mha_plan,
+                        self.W_UK_T,
+                        self.W_UV,
+                        self.scale,
+                    )
+                elif query_plan is not None and query_plan.dense is not None:
+                    attn_output = execute_kpool_hybrid_attention(
+                        ql_nope,
+                        kv_cache[0],
+                        topk_indices,
+                        attn_metadata,
+                        actual_seq_lengths_key,
+                        query_plan,
+                        self.scale,
+                        self._execute_sparse_flash_attention_process,
+                    )
+                if attn_output is None:
+                    attn_output = self._execute_sparse_flash_attention_process(
+                        ql_nope,
+                        q_pe,
+                        kv_cache,
+                        topk_indices,
+                        attn_metadata,
+                        actual_seq_lengths_query,
+                        actual_seq_lengths_key,
+                    )
 
         if has_local_query:
-            attn_output = self._v_up_proj(attn_output)
+            assert attn_output is not None
+            if mha_plan is None:
+                attn_output = self._v_up_proj(attn_output)
+            else:
+                attn_output = attn_output.reshape(-1, self.local_num_heads * self.v_head_dim)
         else:
             # The O-proj below still joins its PCP/TP collectives.
             attn_output = hidden_states.new_zeros((ql_nope.shape[0], self.local_num_heads * self.v_head_dim))
