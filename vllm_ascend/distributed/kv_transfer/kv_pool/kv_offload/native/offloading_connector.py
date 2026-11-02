@@ -14,6 +14,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
     derive_canonical_mappings,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    get_offloading_group_ids,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
 )
@@ -223,7 +226,18 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                 )
             )
 
-        for group in kv_cache_config.kv_cache_groups:
+        # The scheduler only builds GPULoadStoreSpec.group_sizes / block_indices
+        # for the offload-eligible groups, and SingleDirectionNPUOffloadingHandler
+        # zips them positionally against CanonicalKVCaches.group_data_refs.
+        # Register exactly those groups, in that order, so hybrid caches with a
+        # group that cannot be prefix cached (e.g. CircularBufferSpec state
+        # groups, or SWA groups under bounded replay) stay aligned with the
+        # scheduler instead of producing refs the scheduler never addresses.
+        # Upstream applies the same filter in OffloadingConnectorWorker.
+        selected_group_ids = get_offloading_group_ids(kv_cache_config)
+        selected_groups = tuple(kv_cache_config.kv_cache_groups[group_id] for group_id in selected_group_ids)
+
+        for group in selected_groups:
             group_spec = group.kv_cache_spec
             per_layer_specs = group_spec.kv_cache_specs if isinstance(group_spec, UniformTypeKVCacheSpecs) else {}
             for layer_name in group.layer_names:
@@ -298,12 +312,17 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                 else:
                     raise NotImplementedError(f"Unsupported KV cache spec: {type(layer_spec).__name__}")
 
+        # Iterate in the order returned by get_offloading_group_ids (an ordered
+        # tuple, never a set): the transfer handler resolves each group by
+        # position, so ordering must match the scheduler's kv_group_configs.
         group_data_refs: list[list[CanonicalKVCacheRef]] = []
-        for group in kv_cache_config.kv_cache_groups:
+        for group_idx in selected_group_ids:
+            group = kv_cache_config.kv_cache_groups[group_idx]
             group_refs: list[CanonicalKVCacheRef] = []
             for layer_name in group.layer_names:
                 group_refs.extend(refs_by_layer[layer_name])
             group_data_refs.append(group_refs)
+        assert len(group_data_refs) == len(selected_group_ids)
 
         if not canonical_tensors:
             raise ValueError("No KV cache tensors were registered for native offloading")
