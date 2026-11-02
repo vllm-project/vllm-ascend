@@ -8,7 +8,6 @@ Only a certified all-lazy current target with no pending draft-row consumer can
 discard this map. Page spills continue to use the original page descriptors.
 """
 
-import hashlib
 import inspect
 from pathlib import Path
 
@@ -52,6 +51,8 @@ def install():
 
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker as Worker
 
+    from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import verify_core_source
+
     original = Worker._resolve_row_mirrors
     if getattr(original, "_ascend_discard_unused_lazy_row_map", False):
         from .patch_hisparse_unused_staging import install as install_unused_staging
@@ -62,8 +63,7 @@ def install():
         install_block_table_views()
         return
     path = Path(inspect.getsourcefile(original))
-    if hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest() != COMMON_WORKER_SHA256:
-        raise RuntimeError("Unreviewed HiSparse row-map lifecycle")
+    verify_core_source(path, COMMON_WORKER_SHA256)
     if not getattr(Worker._enqueue_host_mirror, "_ascend_certified_lazy_mtp_mirror_patch", False):
         raise RuntimeError("Install the qualified lazy-MTP mirror policy first")
     source = inspect.getsource(Worker._finish_mirror_phase)

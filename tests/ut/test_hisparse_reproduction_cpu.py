@@ -26,3 +26,22 @@ def test_reference_checkpoint_quantization_contract(tmp_path, quant_type):
     else:
         with pytest.raises(ValueError):
             validate(str(tmp_path), contract)
+
+
+@pytest.mark.parametrize("arm", ["on", "off"])
+@pytest.mark.parametrize("profile", ["a5_c8_62592", "a5_c8_main"])
+def test_profile_arguments_preserve_reference_and_current_checkpoint_policy(arm, profile):
+    root = Path(__file__).resolve().parents[2]
+    build = runpy.run_path(str(root / "tools/hisparse/serve_reproduction.py"))["arguments_for_profile"]
+    config = json.loads((root / "tools/hisparse/reference_configuration.json").read_text())
+    saved = json.dumps(config, sort_keys=True)
+    argv = build(config, arm, profile)
+    assert json.dumps(config, sort_keys=True) == saved
+    additional = json.loads(argv[argv.index("--additional-config") + 1])
+    if profile == "a5_c8_main":
+        assert "sparse_li_c8_layer_policy" not in additional
+        assert additional["weight_nz_mode"] == 1
+    else:
+        assert additional == {"sparse_li_c8_layer_policy": "all"}
+    assert argv[argv.index("--max-num-seqs") + 1] == "32"
+    assert argv[argv.index("--speculative-config") + 1] == config[arm][config[arm].index("--speculative-config") + 1]

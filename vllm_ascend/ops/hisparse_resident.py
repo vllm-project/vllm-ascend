@@ -146,7 +146,13 @@ def resident_topk_or_none(group, layer_index, metadata, logical, *, enforce_eage
         # as the remap. An event recorded before index_select would not order it.
         group.side_stream.wait_stream(compute)
         with backend.stream_context(group.side_stream, generic=True):
-            table = leader.batch_block_table()
+            batch_table = getattr(leader, "batch_block_table", None)
+            if batch_table is not None:
+                table = batch_table()
+            else:
+                # Current Core removed the cached batch view. Preserve its
+                # request-state indirection on this existing ordered stream.
+                table = leader.block_table.index_select(0, leader.runtime.request_state_indices.clamp(min=0))
             physical = group.physical_topk_indices[:rows]
             counts = group.valid_topk_counts[:rows]
             requests = metadata.req_id_per_token[:rows]

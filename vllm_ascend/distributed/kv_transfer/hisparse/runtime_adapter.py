@@ -10,7 +10,6 @@ No scheduler, allocation policy, model-runner timing or global Torch changes.
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 from functools import wraps
 from pathlib import Path
@@ -294,9 +293,10 @@ class AscendHiSparseSlotInvalidator:
 
 
 def _verify_source(obj, digest):
+    from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import verify_core_source
+
     path = Path(inspect.getsourcefile(obj))
-    if hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest() != digest:
-        raise RuntimeError("Unreviewed HiSparse call site; Ascend adapter not installed")
+    verify_core_source(path, digest)
 
 
 def _invalidate_written_slots(self, written_slots, req_id_per_token):

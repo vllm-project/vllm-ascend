@@ -342,7 +342,12 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             cache_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(layer_name)
             cache_sparse_li_c4 = get_ascend_config().is_sparse_li_c4_layer(layer_name)
             if vllm_config.attention_config.hisparse_config is not None and (cache_sparse_li_c8 or cache_sparse_li_c4):
-                raise ValueError("Ascend HiSparse currently requires an unquantized indexer KV cache")
+                from vllm.v1.hisparse.backend import get_hisparse_backend
+
+                if cache_sparse_li_c4 or not getattr(get_hisparse_backend(), "supports_indexer_c8", False):
+                    raise ValueError(
+                        "Quantized HiSparse Indexer KV requires a backend supporting native C8; C4 is unsupported"
+                    )
             head_dim = vllm_config.model_config.hf_text_config.index_head_dim
             kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
                 block_size=vllm_config.cache_config.block_size,

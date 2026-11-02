@@ -159,14 +159,16 @@ class AscendHiSparseImpl(AscendSFAImpl):
             if self.topk_indices_buffer is None:
                 raise ValueError("Ascend HiSparse requires a model sparse-index group")
             builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
+        from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import current_main_profile_enabled
         from vllm_ascend.patch.worker.patch_hisparse_streams import install
 
         install()
+        row_keyword = "row_width" if current_main_profile_enabled() else "head_size"
         self.index_group, self.index_group_index = builder.register_layer(
             self.has_indexer and not self.skip_topk,
             self.vllm_config,
-            head_size=656 if self.enable_sparse_sfa_c8 else self.kv_lora_rank + self.qk_rope_head_dim,
             kv_cache_dtype=self.vllm_config.cache_config.cache_dtype,
+            **{row_keyword: 656 if self.enable_sparse_sfa_c8 else self.kv_lora_rank + self.qk_rope_head_dim},
         )
         if not isinstance(self.index_group, HiSparseMLAIndexGroup):
             raise RuntimeError("Ascend HiSparse was initialized without a HiSparse index group")

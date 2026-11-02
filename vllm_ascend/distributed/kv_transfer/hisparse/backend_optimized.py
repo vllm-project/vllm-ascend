@@ -24,6 +24,7 @@ class AscendHiSparseBackend(HiSparseBackend):
     # The common shared pool currently exchanges CUDA IPC events. Private
     # per-rank pools preserve the same scheduler and transfer completion rules.
     supports_shared_host_pool = False
+    supports_indexer_c8 = True
     stats_dtype = torch.int64
 
     def check_available(self) -> None:

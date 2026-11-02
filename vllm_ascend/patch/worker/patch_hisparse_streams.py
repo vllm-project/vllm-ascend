@@ -11,7 +11,6 @@ capture behavior. The actual torch module and model-runner timing are untouched.
 
 from __future__ import annotations
 
-import hashlib
 import importlib
 import threading
 from pathlib import Path
@@ -132,12 +131,10 @@ def install() -> bool:
             raise RuntimeError("HiSparse stream facade changed after installation")
         return True
     # Validate both files before mutating either module; no partial installation.
+    from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import verify_core_source
+
     for module in modules:
-        if (
-            hashlib.sha256(Path(module.__file__).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
-            != COMMON_SOURCE_SHA256[module.__name__]
-        ):
-            raise RuntimeError("Unreviewed common HiSparse stream/event call sites")
+        verify_core_source(Path(module.__file__), COMMON_SOURCE_SHA256[module.__name__])
         if module.torch is not _torch:
             raise RuntimeError("HiSparse common torch binding was already replaced")
     facade = _TorchFacade()

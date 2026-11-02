@@ -6,7 +6,6 @@ states retain the original staging and waits. No DMA/page ownership or MTP
 ordering changes. Requires actual model qualification before deployment.
 """
 
-import hashlib
 import inspect
 import threading
 from functools import wraps
@@ -122,6 +121,8 @@ def install():
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
 
+    from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import verify_core_source
+
     from . import patch_hisparse_lazy_mtp_mirror as policy
 
     original_load = HiSparseConnector.start_load_kv
@@ -130,8 +131,7 @@ def install():
     original_stage = HiSparseConnectorWorker._stage_row_mirror_mapping
     for function, expected in ((original_load, CONNECTOR_SHA), (original_stage, WORKER_SHA)):
         path = Path(inspect.getsourcefile(inspect.unwrap(function)))
-        if hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest() != expected:
-            raise RuntimeError("Unreviewed HiSparse row-snapshot lifecycle")
+        verify_core_source(path, expected)
     if not getattr(HiSparseConnectorWorker._enqueue_host_mirror, "_ascend_certified_lazy_mtp_mirror_patch", False):
         raise RuntimeError("Install the reviewed D-only lazy mirror policy first")
     eligible, stage, load = make_bindings(original_load, original_stage, policy._eligible)

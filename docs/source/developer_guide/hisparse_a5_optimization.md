@@ -232,3 +232,41 @@ capacity sweeps are still pending. No current-main ON/OFF regression or
 maximum-concurrency result is claimed yet. Both variants' failed preparation
 attempts and raw evidence remain recorded; no failed attempt is counted as a
 pass.
+
+### Reviewed current-main C8 port
+
+`a5_c8_main` is a separate explicit profile for the five reviewed Core files
+at `5c8ae7c74aaa99d1f7fbeea942fd7282e3413810`. It checks the entire file set;
+mixing old/new files or moving to another main revision is rejected. Use
+`tools/hisparse/serve_reproduction.py --profile a5_c8_main` with either arm.
+That launcher removes the obsolete Indexer C8 layer flag and retains the
+reviewed `weight_nz_mode=1` MXFP/Prolog policy.
+
+The port forwards `row_width` instead of the removed `head_size` argument and
+adapts Core's `[group,state,page]` Resident allocation through a stride-only
+`[state,group,page]` view for the existing update kernel. Its fallback receives
+the original Core layout. The eager Resident path constructs a current batch
+view when Core no longer supplies its old helper. No cache contents, selection
+policy, import reservations, Attention compute kernel or common source changes.
+
+Python 3.12 also adds an empty `type_params` field to function ASTs. This made
+the unchanged MTP certificate fail the older Python 3.11 fingerprint. The
+guard now normalizes only that empty field, preserving its original reviewed
+digest and rejecting executable/generic changes. The actual new-image raw
+digest and identical source bytes were checked before activation.
+
+The Indexer spec builder reads the selected backend's explicit C8 capability;
+it retains rejection for C4 and unsupported backends. The selected C8 backend
+still checks the complete native K/scale geometry before allocating storage.
+This fixes an earlier unconditional worker guard encountered after weight
+loading, rather than disabling Indexer format validation.
+
+Fourteen CPU profile/guard cases, four additional launcher cases and eight
+Indexer capability cases passed. Actual A5 runtime
+`f4eed3d77ce602ab0004f4a4c5e4a5a783014046` passed eight
+component cases: the real current-main cold adapter installation, three
+group-first Resident updates against independent CPU values, three changing
+Resident graph replays, and the existing mapped resolver/gather/scatter oracle
+with graph replay. Its native sources were rebuilt in the matching new image.
+The earlier certificate-guard failure is retained. Full ON model, matched
+ON/OFF performance and maximum active concurrency are still pending.

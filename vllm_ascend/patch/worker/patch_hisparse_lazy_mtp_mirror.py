@@ -30,6 +30,20 @@ _PATCH_MARKER = "_ascend_certified_lazy_mtp_mirror_patch"
 _BATCH_FLAG = "_ascend_certified_lazy_mtp_mirror"
 
 
+def _certificate_source_digest(source: str) -> str:
+    """Keep the reviewed certificate stable across Python 3.11/3.12 ASTs.
+
+    Python 3.12 adds an empty type_params field to ordinary functions. Remove
+    only that empty field from this temporary parse tree; nonempty generics
+    and all executable syntax still change the fingerprint.
+    """
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if "type_params" in node._fields and getattr(node, "type_params", None) == []:
+            node._fields = tuple(name for name in node._fields if name != "type_params")
+    return sha256(ast.dump(tree).encode()).hexdigest()
+
+
 def _eligible(metadata: Any | None, max_rows: int) -> bool:
     """Accept only the existing Ascend target graph's CPU layout certificate."""
     if metadata is None:
@@ -60,19 +74,21 @@ def _eligible(metadata: Any | None, max_rows: int) -> bool:
 
 
 def _verify_contract(runtime_module: Any, worker_module: Any) -> None:
+    from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import verify_core_source
+
     for module, expected in (
         (runtime_module, _EXPECTED_RUNTIME_SHA256),
         (worker_module, _EXPECTED_WORKER_SHA256),
     ):
         source = getattr(module, "__file__", None)
-        if source is None or sha256(Path(source).read_bytes().replace(b"\r\n", b"\n")).hexdigest() != expected:
+        if source is None:
             raise RuntimeError("Re-review Ascend lazy MTP mirror for this common HiSparse source version.")
+        verify_core_source(Path(source), expected)
     for source, expected in (
         (Path(runtime_module.__file__).with_name("coordinator.py"), _EXPECTED_COORDINATOR_SHA256),
         (Path(worker_module.__file__).with_name("connector.py"), _EXPECTED_CONNECTOR_SHA256),
     ):
-        if sha256(source.read_bytes().replace(b"\r\n", b"\n")).hexdigest() != expected:
-            raise RuntimeError("Re-review Ascend lazy MTP mirror for these common page-lifetime contracts.")
+        verify_core_source(source, expected)
     prepare = runtime_module.HiSparseCacheHandle._prepare_for_batch
     enqueue = worker_module.HiSparseConnectorWorker._enqueue_host_mirror
     if tuple(signature(prepare).parameters) != ("self", "attn_metadata"):
@@ -133,11 +149,7 @@ def install(config: Any) -> None:
     metadata_module = import_module("vllm_ascend.attention.sfa_hisparse_optimized")
     source = getattr(metadata_module, "__file__", None)
     certificate = getattr(metadata_module, "_hisparse_uniform_mtp_group_size", None)
-    actual = (
-        None
-        if certificate is None
-        else sha256(ast.dump(ast.parse(inspect.getsource(certificate))).encode()).hexdigest()
-    )
+    actual = None if certificate is None else _certificate_source_digest(inspect.getsource(certificate))
     if source is None or actual != _EXPECTED_METADATA_SHA256:
         raise RuntimeError("Re-review the actual Ascend MTP layout certificate before lazy mirror installation.")
     common = import_module("vllm.v1.hisparse.runtime")

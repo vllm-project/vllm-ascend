@@ -6,7 +6,6 @@ This detached module does not install itself. Cache payloads, page ownership,
 transfer IDs, DMA submission and all completion events retain the original path.
 """
 
-import hashlib
 import inspect
 from dataclasses import dataclass
 from functools import wraps
@@ -168,12 +167,13 @@ def install() -> None:
     """Explicit Ascend-only activation; other backends retain the original."""
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
 
+    from .optimization_profile import verify_core_source
+
     original = HiSparseConnectorWorker._enqueue_transfers
     if getattr(original, "_ascend_vector_page_descriptors", False):
         return
     source = Path(inspect.getsourcefile(original))
-    if hashlib.sha256(source.read_bytes().replace(b"\r\n", b"\n")).hexdigest() != _COMMON_WORKER_SHA256:
-        raise RuntimeError("Unreviewed HiSparse worker page-transfer call site")
+    verify_core_source(source, _COMMON_WORKER_SHA256)
 
     @wraps(original)
     def wrapped(worker, transfers):

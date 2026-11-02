@@ -7,7 +7,6 @@ HiSparse exposes a backend hook for recycled-block invalidation. Unsupported
 bindings and graph capture keep the original per-runtime implementation.
 """
 
-import hashlib
 import inspect
 from functools import wraps
 from pathlib import Path
@@ -18,14 +17,12 @@ _COMMON_WORKER_SHA256 = "1953b3e582502d16df38bba4a5966e0b98492feb67b65cdac7f2b03
 def install():
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
 
+    from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import verify_core_source
+
     original = HiSparseConnectorWorker.invalidate_blocks
     if getattr(original, "_ascend_recycled_groups", False):
         return
-    if (
-        hashlib.sha256(Path(inspect.getsourcefile(original)).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
-        != _COMMON_WORKER_SHA256
-    ):
-        raise RuntimeError("Unreviewed HiSparse recycled-block call site")
+    verify_core_source(Path(inspect.getsourcefile(original)), _COMMON_WORKER_SHA256)
 
     @wraps(original)
     def invalidate(worker, block_ids, request_state_indices):
