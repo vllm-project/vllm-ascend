@@ -1,0 +1,1 @@
+$WORKSPACE/.artifacts/hisparse-ops-20261102-161829-all-cpu/venv/bin/python -m pytest --confcutdir=tests/e2e/pull_request/one_card tests/e2e/pull_request/one_card/test_hisparse_ops.py tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py -k not\ npu_ -vv --tb=short --junitxml=$WORKSPACE/.artifacts/hisparse-ops-20261102-161829-all-cpu/results.xml

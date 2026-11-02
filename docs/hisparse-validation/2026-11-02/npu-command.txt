@@ -1,0 +1,1 @@
+python3 -m pytest --confcutdir=tests/e2e/pull_request/one_card tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py -k '' -x -vv --tb=short --basetemp=$WORKSPACE/.artifacts/hisparse-npu-ut-20261102-161847/tmp --junitxml=$WORKSPACE/.artifacts/hisparse-npu-ut-20261102-161847/results.xml

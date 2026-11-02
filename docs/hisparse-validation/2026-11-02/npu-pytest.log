@@ -1,0 +1,181 @@
+NPU: Ascend910_9382
+Python: /usr/local/python3.12.13/bin/python3 3.12.13
+torch 2.10.0+cpu
+torch-npu 2.10.0.post7
+triton-ascend 3.6.0
+pytest 8.4.2
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-8.4.2, pluggy-1.7.0 -- /usr/local/python3.12.13/bin/python3
+cachedir: .pytest_cache
+rootdir: $WORKSPACE/vllm-ascend
+configfile: pyproject.toml
+plugins: cov-7.1.0, platformdirs-4.13.6, asyncio-1.4.1, mock-3.17.0, xdist-3.6.1, anyio-4.15.1
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 145 items
+
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_smoke PASSED [  0%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[0] PASSED [  1%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[1] PASSED [  2%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[2] PASSED [  2%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[3] PASSED [  3%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[4] PASSED [  4%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[5] PASSED [  4%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[6] PASSED [  5%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[7] PASSED [  6%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[8] PASSED [  6%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[9] PASSED [  7%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[10] PASSED [  8%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[11] PASSED [  8%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[12] PASSED [  9%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[13] PASSED [ 10%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[14] PASSED [ 11%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[15] PASSED [ 11%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[16] PASSED [ 12%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[17] PASSED [ 13%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[18] PASSED [ 13%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[19] PASSED [ 14%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[20] PASSED [ 15%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[21] PASSED [ 15%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[22] PASSED [ 16%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[23] PASSED [ 17%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[24] PASSED [ 17%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[25] PASSED [ 18%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[26] PASSED [ 19%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[27] PASSED [ 20%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[28] PASSED [ 20%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[29] PASSED [ 21%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[30] PASSED [ 22%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[31] PASSED [ 22%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[32] PASSED [ 23%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[33] PASSED [ 24%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[34] PASSED [ 24%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[35] PASSED [ 25%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[36] PASSED [ 26%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[37] PASSED [ 26%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[38] PASSED [ 27%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[39] PASSED [ 28%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[40] PASSED [ 28%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[41] PASSED [ 29%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[42] PASSED [ 30%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[43] PASSED [ 31%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[44] PASSED [ 31%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[45] PASSED [ 32%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[46] PASSED [ 33%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[47] PASSED [ 33%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[48] PASSED [ 34%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[49] PASSED [ 35%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[50] PASSED [ 35%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[51] PASSED [ 36%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[52] PASSED [ 37%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[53] PASSED [ 37%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[54] PASSED [ 38%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[55] PASSED [ 39%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[56] PASSED [ 40%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[57] PASSED [ 40%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[58] PASSED [ 41%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[59] PASSED [ 42%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[60] PASSED [ 42%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[61] PASSED [ 43%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[62] PASSED [ 44%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_optional_outputs[63] PASSED [ 44%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_contract[hit] PASSED [ 45%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_contract[mixed] PASSED [ 46%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_contract[resident] PASSED [ 46%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_contract[all_resident] PASSED [ 47%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_contract[padding] PASSED [ 48%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_contract[reorder] PASSED [ 48%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_contract[invalid] PASSED [ 49%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_contract[bad_lru] PASSED [ 50%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_contract[different_blocks] PASSED [ 51%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_contract[resident_zero] PASSED [ 51%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_contract[stats_overflow] PASSED [ 52%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_speculative_rows_resolve_host_misses_consistently[disjoint] PASSED [ 53%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_speculative_rows_resolve_host_misses_consistently[overlap] PASSED [ 53%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_speculative_rows_resolve_host_misses_consistently[long_mtp] PASSED [ 54%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_speculative_rows_count_a_shared_load_once PASSED [ 55%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_union_table_scales_with_union_bound[128] PASSED [ 55%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_union_table_scales_with_union_bound[8192] PASSED [ 56%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_swap_in_preserves_rows_across_eviction[256] PASSED [ 57%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_swap_in_preserves_rows_across_eviction[528] PASSED [ 57%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_swap_in_preserves_rows_across_eviction[656] PASSED [ 58%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_reads_current_request_ids PASSED [ 59%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_multi_step_writes_request_major_output PASSED [ 60%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_regression_shared_plan_and_rewritten_slot PASSED [ 60%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_remaps_strided_hma_rows_for_attention PASSED [ 61%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_preserves_payload_bits[dtype0] PASSED [ 62%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_preserves_payload_bits[dtype1] PASSED [ 62%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_preserves_payload_bits[dtype2] PASSED [ 63%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_zeroes_unaligned_destination PASSED [ 64%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_expanded_hash_keeps_union_bound PASSED [ 64%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_uses_graph_stable_request_state_mapping PASSED [ 65%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_maps_speculative_rows_through_request_state PASSED [ 66%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resident_rows_bypass_hot_lru PASSED [ 66%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_rejects_short_attention_block_stride PASSED [ 67%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_multi_step_swaps_match_independent PASSED [ 68%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_graph_replays_resolver_and_gather_with_current_inputs PASSED [ 68%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_resolver_and_gather_current_stream_event_order PASSED [ 69%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_prefill_cache_prefers_resident_rows[16-dtype0] PASSED [ 70%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_prefill_cache_prefers_resident_rows[528-dtype1] PASSED [ 71%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_prefill_cache_prefers_resident_rows[656-dtype2] PASSED [ 71%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_bytes_and_guards[staging-16] PASSED [ 72%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_bytes_and_guards[staging-64] PASSED [ 73%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_bytes_and_guards[staging-256] PASSED [ 73%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_bytes_and_guards[staging-528] PASSED [ 74%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_bytes_and_guards[staging-656] PASSED [ 75%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_bytes_and_guards[paged-16] PASSED [ 75%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_bytes_and_guards[paged-64] PASSED [ 76%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_bytes_and_guards[paged-256] PASSED [ 77%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_bytes_and_guards[paged-528] PASSED [ 77%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_bytes_and_guards[paged-656] PASSED [ 78%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_bytes_and_guards[compact-16] PASSED [ 79%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_bytes_and_guards[compact-64] PASSED [ 80%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_bytes_and_guards[compact-256] PASSED [ 80%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_bytes_and_guards[compact-528] PASSED [ 81%]
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_gather_bytes_and_guards[compact-656] PASSED [ 82%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_hisparse_invalidation_covers_every_index_group PASSED [ 82%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_shared_state_multiple_rewrites_and_row_boundaries[1] PASSED [ 83%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_shared_state_multiple_rewrites_and_row_boundaries[7] PASSED [ 84%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_shared_state_multiple_rewrites_and_row_boundaries[8] PASSED [ 84%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_shared_state_multiple_rewrites_and_row_boundaries[255] PASSED [ 85%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_shared_state_multiple_rewrites_and_row_boundaries[256] PASSED [ 86%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_shared_state_multiple_rewrites_and_row_boundaries[257] PASSED [ 86%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_shared_state_multiple_rewrites_and_row_boundaries[2048] PASSED [ 87%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_int64_slots_are_checked_before_narrowing PASSED [ 88%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_offset_table_preserves_surrounding_storage[7] PASSED [ 88%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_offset_table_preserves_surrounding_storage[8] PASSED [ 89%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_offset_table_preserves_surrounding_storage[257] PASSED [ 90%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_empty_inputs_leave_tables_unchanged[tokens] PASSED [ 91%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_empty_inputs_leave_tables_unchanged[groups] PASSED [ 91%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_empty_inputs_leave_tables_unchanged[states] PASSED [ 92%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_empty_inputs_leave_tables_unchanged[region] PASSED [ 93%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_empty_inputs_leave_tables_unchanged[requests] PASSED [ 93%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_public_wrapper_rejects_cpu_tensors PASSED [ 94%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_npu_input_validation[dtype] PASSED [ 95%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_npu_input_validation[ndim] PASSED [ 95%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_npu_input_validation[contiguity] PASSED [ 96%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_npu_input_validation[length] PASSED [ 97%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_npu_input_validation[negative_shape] PASSED [ 97%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_npu_input_validation[cpu_tensor] PASSED [ 98%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_npu_graph_replay_reads_changed_inputs_and_table_addresses PASSED [ 99%]
+tests/e2e/pull_request/one_card/test_hisparse_invalidate_written_slots.py::test_npu_current_stream_event_order PASSED [100%]
+
+=============================== warnings summary ===============================
+../../../../../usr/local/python3.12.13/lib/python3.12/site-packages/triton/language/extra/cann/extension/math_ops.py:13
+  /usr/local/python3.12.13/lib/python3.12/site-packages/triton/language/extra/cann/extension/math_ops.py:13: FutureWarning: triton.language.extra.cann.extension.atan2 is deprecated and will be removed in the next release; use triton.language.extra.cann.libdevice.atan2 instead.
+    @_deprecated(replacement="triton.language.extra.cann.libdevice.atan2")
+
+../../../../../usr/local/python3.12.13/lib/python3.12/site-packages/triton/language/extra/cann/extension/math_ops.py:35
+  /usr/local/python3.12.13/lib/python3.12/site-packages/triton/language/extra/cann/extension/math_ops.py:35: FutureWarning: triton.language.extra.cann.extension.isfinited is deprecated and will be removed in the next release; use triton.language.extra.cann.libdevice.isfinited instead.
+    @_deprecated(replacement="triton.language.extra.cann.libdevice.isfinited")
+
+../../../../../usr/local/python3.12.13/lib/python3.12/site-packages/triton/language/extra/cann/extension/math_ops.py:49
+  /usr/local/python3.12.13/lib/python3.12/site-packages/triton/language/extra/cann/extension/math_ops.py:49: FutureWarning: triton.language.extra.cann.extension.finitef is deprecated and will be removed in the next release; use triton.language.extra.cann.libdevice.finitef instead.
+    @_deprecated(replacement="triton.language.extra.cann.libdevice.finitef")
+
+tests/e2e/pull_request/one_card/test_hisparse_ops_npu.py::test_npu_multi_step_swaps_match_independent
+  /usr/local/python3.12.13/lib/python3.12/site-packages/torch_npu/utils/storage.py:55: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+    if self.device.type != 'cpu':
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+- generated xml file: $WORKSPACE/.artifacts/hisparse-npu-ut-20261102-161847/results.xml -
+================= 145 passed, 4 warnings in 164.16s (0:02:44) ==================

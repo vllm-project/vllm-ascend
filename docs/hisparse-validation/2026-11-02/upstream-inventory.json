@@ -1,0 +1,1860 @@
+{
+  "vllm_commit": "d5301a4f5487db1d7e8d87daf7828225b95b1774",
+  "note": "Static upstream inventory with audited operator-port results; original module was not executed",
+  "tests": [
+    {
+      "file": "tests/test_config.py",
+      "name": "test_hisparse_rejects_decode_context_parallelism",
+      "line": 680,
+      "source_sha256": "77f2e6d7490df6445239bfece54ad62634db59dbb7bd0f87dc77c35b3c3e8f92",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/test_config.py",
+      "name": "test_hisparse_rejects_pipeline_parallelism",
+      "line": 697,
+      "source_sha256": "77f2e6d7490df6445239bfece54ad62634db59dbb7bd0f87dc77c35b3c3e8f92",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/test_config.py",
+      "name": "test_hisparse_rejects_full_cudagraph_mode",
+      "line": 711,
+      "source_sha256": "77f2e6d7490df6445239bfece54ad62634db59dbb7bd0f87dc77c35b3c3e8f92",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/test_config.py",
+      "name": "test_hisparse_rejects_disabled_hybrid_kv_cache_manager",
+      "line": 726,
+      "source_sha256": "77f2e6d7490df6445239bfece54ad62634db59dbb7bd0f87dc77c35b3c3e8f92",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/test_config.py",
+      "name": "test_hisparse_rejects_disabled_full_isl_reservation",
+      "line": 744,
+      "source_sha256": "77f2e6d7490df6445239bfece54ad62634db59dbb7bd0f87dc77c35b3c3e8f92",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/test_config.py",
+      "name": "test_hisparse_rejects_unsupported_platform",
+      "line": 761,
+      "source_sha256": "77f2e6d7490df6445239bfece54ad62634db59dbb7bd0f87dc77c35b3c3e8f92",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/test_config.py",
+      "name": "test_hisparse_connector_implies_attention_config",
+      "line": 810,
+      "source_sha256": "77f2e6d7490df6445239bfece54ad62634db59dbb7bd0f87dc77c35b3c3e8f92",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('kv_transfer_config', [KVTransferConfig(kv_connector='HiSparseConnector', kv_role='kv_both', kv_connector_extra_config={'host_pool_gib': 128}), KVTransferConfig(kv_connector='MultiConnector', kv_role='kv_both', kv_connector_extra_config={'connectors': [{'kv_connector': 'OffloadingConnector', 'kv_role': 'kv_both', 'kv_connector_extra_config': {'cpu_bytes_to_use': 1 << 30}}, {'kv_connector': 'HiSparseConnector', 'kv_role': 'kv_both', 'kv_connector_extra_config': {'host_pool_gib': 128}}]}), KVTransferConfig(kv_connector='MultiConnector', kv_role='kv_consumer', kv_connector_extra_config={'connectors': [{'kv_connector': 'NixlConnector', 'kv_role': 'kv_consumer'}, {'kv_connector': 'HiSparseConnector', 'kv_role': 'kv_both', 'kv_connector_extra_config': {'host_pool_gib': 128}}]})], ids=['standalone', 'multi-connector', 'pd-decode'])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/test_config.py",
+      "name": "test_hisparse_connector_preserves_explicit_attention_config",
+      "line": 830,
+      "source_sha256": "77f2e6d7490df6445239bfece54ad62634db59dbb7bd0f87dc77c35b3c3e8f92",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/test_config.py",
+      "name": "test_hisparse_connector_with_unsupported_platform_rejected",
+      "line": 855,
+      "source_sha256": "77f2e6d7490df6445239bfece54ad62634db59dbb7bd0f87dc77c35b3c3e8f92",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/test_config.py",
+      "name": "test_no_hisparse_connector_keeps_attention_config_unset",
+      "line": 867,
+      "source_sha256": "77f2e6d7490df6445239bfece54ad62634db59dbb7bd0f87dc77c35b3c3e8f92",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_backend_per_kind.py",
+      "name": "test_hisparse_device_buffer_size_boundaries",
+      "line": 95,
+      "source_sha256": "5a453a5af51fa7b63304a60f3862cde54ea3ac9bb1846981af6e119ff5957c10",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_backend_per_kind.py",
+      "name": "test_hisparse_device_buffer_covers_speculative_window",
+      "line": 124,
+      "source_sha256": "5a453a5af51fa7b63304a60f3862cde54ea3ac9bb1846981af6e119ff5957c10",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_routes_prefill_to_sparse_mqa",
+      "line": 379,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_metadata_keeps_short_prefill_indexer_enabled",
+      "line": 385,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_flashmla_hisparse_resident_mixed_batch_skips_host_staging",
+      "line": 1483,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_generic_stream_orders_ipc_event",
+      "line": 2107,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_index_group_preserves_row_width",
+      "line": 2257,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize(('kv_cache_dtype', 'row_width', 'kv_dtype'), [('fp8_ds_mla', 528, torch.uint8), ('fp8_ds_mla', 656, torch.uint8), ('bfloat16', 512, torch.bfloat16)])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_uses_graph_stable_request_state_mapping",
+      "line": 2365,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_uses_graph_stable_request_state_mapping"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_maps_speculative_rows_through_request_state",
+      "line": 2399,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_maps_speculative_rows_through_request_state"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_speculative_rows_resolve_host_misses_consistently",
+      "line": 2447,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops",
+        "pytest.mark.parametrize('num_rows,row_stride,top_k', [(8, 128, 128), (4, 32, 128), (8, 2048, 2048)], ids=['disjoint', 'overlap', 'long_mtp'])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_speculative_rows_resolve_host_misses_consistently[disjoint]",
+        "test_npu_speculative_rows_resolve_host_misses_consistently[overlap]",
+        "test_npu_speculative_rows_resolve_host_misses_consistently[long_mtp]"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_speculative_rows_count_a_shared_load_once",
+      "line": 2511,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_speculative_rows_count_a_shared_load_once"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_resolver_reads_current_request_ids",
+      "line": 2549,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_resolver_reads_current_request_ids"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_union_table_scales_with_union_bound",
+      "line": 2637,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops",
+        "pytest.mark.parametrize('top_k', [128, 8192])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_union_table_scales_with_union_bound[128]",
+        "test_npu_union_table_scales_with_union_bound[8192]"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_expanded_hash_keeps_union_bound",
+      "line": 2698,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [
+        "hisparse_resolve_residency"
+      ],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_expanded_hash_keeps_union_bound"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_rejects_union_bound_beyond_shared_memory",
+      "line": 2726,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_resident_rows_bypass_hot_lru",
+      "line": 2733,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_resident_rows_bypass_hot_lru"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_swap_in_preserves_rows_across_eviction",
+      "line": 2795,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops",
+        "pytest.mark.parametrize(('row_width', 'kv_dtype'), [(64, torch.float32), (528, torch.uint8), (656, torch.uint8)])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_swap_in_preserves_rows_across_eviction[256]",
+        "test_npu_swap_in_preserves_rows_across_eviction[528]",
+        "test_npu_swap_in_preserves_rows_across_eviction[656]"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_multi_step_swaps_match_independent",
+      "line": 2868,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_multi_step_swaps_match_independent"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_multi_step_writes_request_major_output",
+      "line": 2962,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_multi_step_writes_request_major_output"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_kv_update_writes_resident_cache",
+      "line": 3032,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_row_dma_copies_discontiguous_spans_across_layers",
+      "line": 3086,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_remaps_strided_hma_rows_for_attention",
+      "line": 3141,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_remaps_strided_hma_rows_for_attention"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_gather_zeroes_unaligned_destination",
+      "line": 3194,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [
+        "hisparse_gather_plan"
+      ],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_gather_zeroes_unaligned_destination"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_gather_rejects_short_attention_block_stride",
+      "line": 3224,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [
+        "hisparse_gather_plan"
+      ],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_gather_rejects_short_attention_block_stride"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_newest_write_and_recycled_slot_invalidation",
+      "line": 3248,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_regression_shared_plan_and_rewritten_slot"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_invalidation_covers_every_index_group",
+      "line": 3344,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_hisparse_invalidation_covers_every_index_group"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_mixed_batch_bf16_row_split",
+      "line": 3378,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": true,
+      "direct_four_ops": [],
+      "decorators": [
+        "requires_hisparse_ops"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_prefill_staging_remap",
+      "line": 3633,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_prefill_staging_plan_masks_unused_blocks",
+      "line": 3655,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_prefill_staging_plan_resolves_resident_sources",
+      "line": 3674,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_prefill_resident_sources_follow_each_resident_group",
+      "line": 3727,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_gather_prefill_cache_prefers_resident_rows",
+      "line": 3769,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.skipif(not torch.cuda.is_available(), reason='requires CUDA')",
+        "pytest.mark.parametrize(('row_width', 'kv_dtype'), [(16, torch.float32), (528, torch.uint8), (656, torch.uint8)])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "PASSED_ON_ASCEND910_9382",
+      "ported_test_cases": [
+        "test_npu_gather_prefill_cache_prefers_resident_rows[16-dtype0]",
+        "test_npu_gather_prefill_cache_prefers_resident_rows[528-dtype1]",
+        "test_npu_gather_prefill_cache_prefers_resident_rows[656-dtype2]"
+      ],
+      "evidence": "/mnt/share/h00954440/HiSparse-Ascend-opsWorkWithCodex/.artifacts/hisparse-npu-ut-20261102-151736/results.xml"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_staged_prefill_cache_backs_min_attention_rows",
+      "line": 3830,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.skipif(not torch.cuda.is_available(), reason='requires CUDA')"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention",
+      "line": 3858,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_keeps_speculative_rows_as_decodes",
+      "line": 3929,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_flashinfer_sm120_hisparse_decode_uses_index_group",
+      "line": 4080,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_sparse_mqa_hisparse_lanes",
+      "line": 4164,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('num_decode_tokens,all_resident,split_q', [pytest.param(0, True, False, id='resident'), pytest.param(0, False, False, id='staged'), pytest.param(2, True, True, id='mixed_resident'), pytest.param(2, False, True, id='mixed_staged'), pytest.param(5, True, False, id='decode')])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_resident_prefill_reads_residency_by_state_row",
+      "line": 4265,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize(('num_decode_tokens', 'max_swap_rows'), [(3, 1), (1, 4)], ids=['over_capacity', 'mixed'])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_flashmla_reorders_full_speculative_window_as_decode",
+      "line": 4325,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_mixed_single_token_batch_is_not_decode_only",
+      "line": 4345,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_prefill_reuses_builder_staging_plan",
+      "line": 4976,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/attention/test_sparse_mla_backends.py",
+      "name": "test_hisparse_fp8_prefill_gather_uses_dedicated_stream",
+      "line": 5020,
+      "source_sha256": "bef5c903ad7144b13eb780dc7a03043218f5ea6b30bfd34cfddd855d2879f312",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_kv_cache_config_builder.py",
+      "name": "test_model_grouping_rejects_hisparse",
+      "line": 123,
+      "source_sha256": "39f72576b2924fa4122afc13d6f8513c3b3e524bc4fb5d903e84824d39b912e3",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_kv_cache_planning.py",
+      "name": "test_hisparse_hma_uses_resolved_gpu_block_size",
+      "line": 70,
+      "source_sha256": "fc8a7674893e0f4ad1e02849e0a14f988946f7ba01213cb48dabaa66f2a72d2c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('gpu_block_size', [32, 64])",
+        "pytest.mark.parametrize('shared_host_pool', [False, True])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_kv_cache_planning.py",
+      "name": "test_hisparse_pool_must_fit_max_model_len",
+      "line": 186,
+      "source_sha256": "fc8a7674893e0f4ad1e02849e0a14f988946f7ba01213cb48dabaa66f2a72d2c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('max_model_len,num_gpu_blocks,ok', [(8192, 160, False), (8192, 1000, True), (32768, 656, False), (32768, 657, True), (-1, 657, True)])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_kv_cache_utils.py",
+      "name": "test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages",
+      "line": 95,
+      "source_sha256": "fccab6c28757143a4503c78cd0d976f63d5a2e6e14fd226a1671959e17cebd34",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_kv_cache_utils.py",
+      "name": "test_hisparse_host_pool_must_fit_max_model_len",
+      "line": 138,
+      "source_sha256": "fccab6c28757143a4503c78cd0d976f63d5a2e6e14fd226a1671959e17cebd34",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('extra_blocks,ok', [(1, False), (2, True)])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_kv_cache_utils.py",
+      "name": "test_hisparse_derived_specs_do_not_affect_kv_cache_layout",
+      "line": 181,
+      "source_sha256": "fccab6c28757143a4503c78cd0d976f63d5a2e6e14fd226a1671959e17cebd34",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_kv_cache_utils.py",
+      "name": "test_hisparse_rejects_deepseek_v4",
+      "line": 225,
+      "source_sha256": "fccab6c28757143a4503c78cd0d976f63d5a2e6e14fd226a1671959e17cebd34",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_does_not_write_back_reprefillable_tokens",
+      "line": 308,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_builds_dma_row_mirrors_across_pages",
+      "line": 319,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_async_speculation_mirrors_uncertain_position_range",
+      "line": 345,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_reports_when_context_is_fully_resident",
+      "line": 384,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_residency_update_sends_only_changed_pages",
+      "line": 415,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_readmitted_request_resends_its_full_residency",
+      "line": 439,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_host_prefix_can_be_completed_by_indexer_offload",
+      "line": 460,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_indexer_offload_is_capped_by_missing_host_prefix",
+      "line": 508,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_nixl_hisparse_full_block_import_keeps_a_writable_tail",
+      "line": 637,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('num_tokens', [1, 15, 16, 17, 31, 32, 33, 127])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_aborted_tail_restore_retains_both_endpoints",
+      "line": 702,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_keeps_resident_pages_until_hot_buffer_is_allocated",
+      "line": 722,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('enable_caching', [False, True])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_full_pool_keeps_pages_pinned_until_preemption",
+      "line": 753,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_materializes_prefix_without_allocating_hot_blocks",
+      "line": 772,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('num_resident_groups', [1, 3])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_materialization_respects_per_step_spill_budget",
+      "line": 826,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('num_resident_groups', [1, 3])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_deferred_free_retains_host_blocks_until_fence",
+      "line": 849,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool",
+      "line": 868,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_inflight_host_import_reserves_remaining_gpu_pages",
+      "line": 906,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_async_admission_fits_beside_inflight_import",
+      "line": 976,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_import_reservation_released",
+      "line": 990,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('release,second_pages', [('free', 6), ('resume', 4)])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_admitted_async_loads_can_finish_with_nothing_running",
+      "line": 1023,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('host_num_blocks,first_pages,matched_tokens,num_speculative_tokens', [(5, 4, HISPARSE_BLOCK_SIZE, None), (7, 3, 3 * HISPARSE_BLOCK_SIZE - 1, 4)])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_import_reservation_does_not_gate_local_admissions",
+      "line": 1050,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_import_capacity_includes_hits_and_cow",
+      "line": 1076,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('evictable,local_tokens,free_blocks,admitted', [(False, HISPARSE_BLOCK_SIZE, 1, True), (True, HISPARSE_BLOCK_SIZE, 1, False), (False, HISPARSE_BLOCK_SIZE - 1, 1, False), (False, HISPARSE_BLOCK_SIZE - 1, 2, True)])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_host_exhaustion_defers_allocation",
+      "line": 1097,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('enable_caching', [False, True])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_recomputation_does_not_complete_failed_host_import",
+      "line": 1161,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_host_import_ignores_unsealed_tail",
+      "line": 1177,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_resident_request_can_grow_without_hot_capacity",
+      "line": 1189,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_capacity_query_does_not_require_hot_blocks",
+      "line": 1202,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_events_report_host_and_device_placement",
+      "line": 1238,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_prefix_hit_adopts_gpu_shadow_pages",
+      "line": 1306,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_prefix_hit_under_pressure_adopts_surviving_copies",
+      "line": 1337,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('free_blocks,adopted_pages', [(7, []), (10, [0, 1])])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_host_backed_request_accepts_local_prefix_hit",
+      "line": 1381,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_finished_request_leaves_free_copies",
+      "line": 1405,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_cleanup_publishes_only_finalized_terminal_pages",
+      "line": 1434,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('status,expected_cached_pages', [(RequestStatus.FINISHED_STOPPED, 2), (RequestStatus.FINISHED_ABORTED, 2), (RequestStatus.RUNNING, 0)], ids=['stopped', 'aborted', 'running'])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_prefill_reads_host_once_it_fills_admission_window",
+      "line": 1463,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('num_pages,reads_host', [(4, True), (3, False)])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_preempted_prefill_resumes_from_durable_prefix",
+      "line": 1495,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_terminal_prefix_waits_for_all_workers_and_preserves_identity",
+      "line": 1522,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_reset_prefix_cache_drops_copies",
+      "line": 1564,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_reused_copy_is_not_adopted",
+      "line": 1579,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_external_import_uses_hard_gpu_footprint",
+      "line": 1609,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_hisparse_external_import_survives_capacity_retry",
+      "line": 1643,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_prefix_caching.py",
+      "name": "test_can_fit_full_sequence_hisparse_caps_resident_pages",
+      "line": 5792,
+      "source_sha256": "b581b8095327d3612b0995fc0e02b70ead4b76edaf684986c42a384bb9e3e96c",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_scheduler.py",
+      "name": "test_pending_hisparse_spill_keeps_scheduler_alive",
+      "line": 372,
+      "source_sha256": "c7395276de9255046d112521600c3213c6d90d1c43f8550c090b8bba12424b8f",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/core/test_scheduler.py",
+      "name": "test_pending_hisparse_reclamation_defers_preemption",
+      "line": 2226,
+      "source_sha256": "c7395276de9255046d112521600c3213c6d90d1c43f8550c090b8bba12424b8f",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/e2e/general/test_hisparse.py",
+      "name": "test_hisparse_spill_and_prefix_restore",
+      "line": 100,
+      "source_sha256": "2144212250c2b22d0fd994a77fc90cdcdfa1fb1fadd2d09c8915d2dcd2b2f012",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.skipif(not current_platform.is_cuda(), reason='HiSparse requires NVIDIA CUDA')",
+        "pytest.mark.parametrize('with_offloading,attention_backend', [pytest.param(False, None, id='standalone'), pytest.param(True, None, id='offload'), pytest.param(False, 'FLASH_ATTN_MLA_SPARSE_FA4', id='standalone-fa4')])",
+        "fork_new_process_for_each_test"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/e2e/general/test_hisparse.py",
+      "name": "test_hisparse_host_exhaustion_defers_requests",
+      "line": 273,
+      "source_sha256": "2144212250c2b22d0fd994a77fc90cdcdfa1fb1fadd2d09c8915d2dcd2b2f012",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.skipif(not current_platform.is_cuda(), reason='HiSparse requires NVIDIA CUDA')",
+        "fork_new_process_for_each_test"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/e2e/general/test_hisparse.py",
+      "name": "test_hisparse_terminal_prefix_reuse",
+      "line": 351,
+      "source_sha256": "2144212250c2b22d0fd994a77fc90cdcdfa1fb1fadd2d09c8915d2dcd2b2f012",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.skipif(not current_platform.is_cuda(), reason='HiSparse requires NVIDIA CUDA')",
+        "fork_new_process_for_each_test"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/kv_connector/unit/offloading_connector/test_config.py",
+      "name": "test_hisparse_offloads_only_indexer_group",
+      "line": 573,
+      "source_sha256": "ddf8472505ba59f848ba39a3b48c66bcd7d3984f5c9f174d675b5fce7d6c40cb",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/kv_connector/unit/offloading_connector/test_config.py",
+      "name": "test_hisparse_partial_group_size_survives_scheduler_flattening",
+      "line": 603,
+      "source_sha256": "ddf8472505ba59f848ba39a3b48c66bcd7d3984f5c9f174d675b5fce7d6c40cb",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/kv_connector/unit/test_hisparse_connector.py",
+      "name": "test_cache_manager_binding_preserves_hisparse_and_legacy_pool_hooks",
+      "line": 45,
+      "source_sha256": "da33ec445187043bf19334f57b6d17ac600295bd592bb352229b09a887015387",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('nested', [False, True])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/kv_connector/unit/test_hisparse_connector.py",
+      "name": "test_hisparse_requires_block_outermost_device_layout",
+      "line": 68,
+      "source_sha256": "da33ec445187043bf19334f57b6d17ac600295bd592bb352229b09a887015387",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/kv_connector/unit/test_hisparse_connector.py",
+      "name": "test_hisparse_host_residency_reported_as_hisparse_metrics",
+      "line": 108,
+      "source_sha256": "da33ec445187043bf19334f57b6d17ac600295bd592bb352229b09a887015387",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/kv_connector/unit/test_hisparse_connector.py",
+      "name": "test_no_forward_enqueues_deferred_hisparse_transfers",
+      "line": 148,
+      "source_sha256": "da33ec445187043bf19334f57b6d17ac600295bd592bb352229b09a887015387",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/kv_connector/unit/test_nixl_connector.py",
+      "name": "test_hisparse_dram_rank0_only_read_keeps_device_part",
+      "line": 2614,
+      "source_sha256": "e7655dafbcc66beb1c9cd4eb909f7c6714aec224ffe795ebc286a97a9eb75ecd",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/kv_connector/unit/test_nixl_connector.py",
+      "name": "test_hisparse_dram_rank0_only_dram_only_read_completes",
+      "line": 2647,
+      "source_sha256": "e7655dafbcc66beb1c9cd4eb909f7c6714aec224ffe795ebc286a97a9eb75ecd",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/kv_connector/unit/test_nixl_connector_hma.py",
+      "name": "test_nixl_keeps_device_block_count_with_hisparse_host_pool",
+      "line": 2145,
+      "source_sha256": "396090778c29d82480549fe247b3e0de9344f1f9e6808a5ece1897e76c7bd526",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.cpu_test",
+        "pytest.mark.parametrize('kernel_block_size', [16, 8])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_attn_utils.py",
+      "name": "test_get_kv_cache_spec_resolves_hisparse_block_size",
+      "line": 68,
+      "source_sha256": "1fbabb590b17a4d5ae4e7b1f7aebecc9866d0792aad0c93f48fc2af0993fb06a",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize(('enabled', 'block_size', 'main_sizes', 'indexer_sizes', 'expected'), [(True, 256, [64], [64], 64), (True, 64, [32, 64], [16, 32], 32), (True, 64, [MultipleOf(16)], [32], 32), (True, 64, [64], [32], None), (False, 256, [64], [64], 256)])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_attn_utils.py",
+      "name": "test_init_hisparse_rolls_back_host_pool",
+      "line": 528,
+      "source_sha256": "1fbabb590b17a4d5ae4e7b1f7aebecc9866d0792aad0c93f48fc2af0993fb06a",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('failure_phase', ['allocation', 'views', 'binding', 'buffers'])",
+        "pytest.mark.parametrize('shared', [False, True])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_attn_utils.py",
+      "name": "test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs",
+      "line": 803,
+      "source_sha256": "1fbabb590b17a4d5ae4e7b1f7aebecc9866d0792aad0c93f48fc2af0993fb06a",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_resident_gather_preserves_stride_and_payload",
+      "line": 43,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('packed_bytes', [False, True])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_worker_get_kv_connector_stats_reads_completed_snapshot",
+      "line": 93,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_row_mirrors_follow_runner_request_order",
+      "line": 130,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_gpu_slots_select_written_rows_from_async_envelope",
+      "line": 141,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_written_rows_preserve_scheduler_page_boundaries",
+      "line": 155,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_written_rows_without_host_destinations_are_skipped",
+      "line": 169,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_appends_reference_slots_within_a_mirror_phase",
+      "line": 175,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_submits_layer_mirror_at_replayed_attention_boundary",
+      "line": 207,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize(('mode', 'expected_calls'), [(CUDAGraphMode.PIECEWISE, 1), (CUDAGraphMode.FULL, 0)])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_shares_host_pool_only_for_local_tp",
+      "line": 241,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_shared_host_pool_uses_one_replicated_mmap",
+      "line": 264,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.skip_global_cleanup"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_registration_chunks_end_between_host_blocks",
+      "line": 448,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_host_copy_waits_for_writes_on_writer_only",
+      "line": 526,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('shared,rank', [(False, 0), (True, 0), (True, 1)])",
+        "pytest.mark.parametrize('has_copies', [False, True])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_worker_updates_request_state_mapping_in_place",
+      "line": 555,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_pre_forward_transfer_builds_page_descriptors",
+      "line": 580,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_eager_mirror_records_transfer_without_page_copy",
+      "line": 607,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_tail_restore_preserves_imported_rows",
+      "line": 628,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('is_host_writer', [False, True])",
+        "pytest.mark.parametrize('device', ['cpu', 'cuda'])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_lazy_mirror_copies_transfer_pages",
+      "line": 697,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_dma_row_mirror_builds_descriptors",
+      "line": 716,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_row_dma_uses_resident_spans",
+      "line": 757,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_finish_forward_mirrors_all_layers_once",
+      "line": 795,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_finish_forward_does_not_repeat_per_layer_mirrors",
+      "line": 849,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group",
+      "line": 881,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_finish_forward_rejects_partial_per_layer_mirror",
+      "line": 925,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_finish_forward_orders_next_forward_after_dma",
+      "line": 955,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_finish_forward_mirrors_standalone_mtp_cache",
+      "line": 980,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_shared_host_reader_skips_mirror",
+      "line": 1018,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_shared_host_reader_skips_transfer_completion",
+      "line": 1051,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_writer_records_transfer_completion_after_dma",
+      "line": 1065,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_step_waits_for_previous_host_write",
+      "line": 1087,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('is_host_writer', [False, True])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_shared_host_block_copy_has_one_writer",
+      "line": 1147,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [
+        "pytest.mark.parametrize('tp_rank, expected_copies', [(0, 1), (1, 0)])"
+      ],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_empty_step_does_not_replay_stale_host_mirror",
+      "line": 1174,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_cache_handles_join_index_groups_during_construction",
+      "line": 1219,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    },
+    {
+      "file": "tests/v1/worker/test_utils.py",
+      "name": "test_hisparse_worker_shutdown_releases_pinned_state",
+      "line": 1315,
+      "source_sha256": "5835de086285c90570539ccdf3bce8b4f7264f4884f2f14423378fc2010b09cc",
+      "requires_hisparse_ops": false,
+      "direct_four_ops": [],
+      "decorators": [],
+      "original_cuda_module_result": "NOT_RUN: CUDA/ROCm module and runtime gates retained",
+      "operator_port_result": "NOT_IN_FOUR_CACHE_OP_PORT_SET; see reproduction scope"
+    }
+  ],
+  "ported_operator_functions": 17,
+  "ported_upstream_parameter_scenarios": 24
+}
