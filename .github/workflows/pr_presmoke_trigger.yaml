@@ -25,7 +25,7 @@ jobs:
     with:
       # 对齐上游workflow注释：os 只允许 ubuntu / openeuler
       os: "ubuntu"
-      soc: "ascend910b"
+      soc: "910b"
       target: "a2"
       dockerfile: "Dockerfile.runtime"
       suffix: "presmoke"
