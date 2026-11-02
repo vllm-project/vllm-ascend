@@ -61,6 +61,7 @@ def test_context_rotates_only_k_when_supported_and_preserves_each_layers_v_and_s
     states = torch.arange(9, dtype=torch.float32).view(3, 3) / 10
     positions = torch.tensor([2, 4, 8])
     model._build_fused_kv_buffers = lambda: module._build_fused_kv_buffers(model)
+    model._project_context_kv = lambda *args: module._project_context_kv(model, *args)
     slots = [torch.tensor([3, 7, 9]), torch.tensor([11, 15, 17])] if per_layer_slots else torch.tensor([3, 7, 9])
     expected = torch.nn.functional.linear(states, model._fused_kv_weight).view(3, 2, 2, 2, 4)
     module.precompute_and_store_context_kv(model, states, positions, slots)
