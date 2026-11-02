@@ -650,6 +650,7 @@ class TestGumbelSampling:
             expanded_local_pos=torch.arange(num_steps + 1, dtype=torch.int32, device=DEVICE).repeat(num_reqs),
             seed=seed,
             num_speculative_steps=num_steps,
+            use_entropy_verify=False,
         )
         sampled, counts = rejection_sample(**inputs, draft_logits=cache, temperature=temperature)
         expected, expected_counts = rejection_sample(

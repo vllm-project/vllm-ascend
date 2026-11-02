@@ -1,0 +1,6 @@
+pr: 18447
+entries:
+  - category: feature
+    text: Added optional FP8 pooled-key indexer caches with FP32 scales for GLM-5.3-Flash on supported Ascend 950 hardware.
+    model: glm-5.3-flash
+    hardware: [Ascend 950]
