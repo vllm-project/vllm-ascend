@@ -141,9 +141,7 @@ def _widen_indexer_kv_dtype_literal_for_worker() -> None:
     if "int8" in existing_args:
         return
 
-    # Plain-tuple subscript: same __getitem__ call as star-unpacking it and
-    # parses on Python 3.10 (PEP 646 starred subscripts are 3.11+).
-    widened = typing.Literal[existing_args + ("int8",)]  # type: ignore[valid-type]
+    widened = typing.Literal[*existing_args + ("int8",)]  # type: ignore[valid-type]
 
     _attention_mod.IndexerKVDType = widened
     AttentionConfig.__annotations__["indexer_kv_dtype"] = widened
