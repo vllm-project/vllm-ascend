@@ -33,6 +33,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
 
+from vllm_ascend.ascend_forward_context import make_draft_moe_vllm_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
@@ -65,6 +66,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _lmhead_tp_sample_draft_supported = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        vllm_config = make_draft_moe_vllm_config(vllm_config)
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
@@ -92,7 +94,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        with disable_profiling_chunk_for_draft(self.vllm_config):
+        with set_current_vllm_config(self.vllm_config), disable_profiling_chunk_for_draft(self.vllm_config):
             model = super().load_draft_model(target_model, target_attn_layer_names)
         if hasattr(model, "post_process"):
             model.post_process(self.vllm_config)

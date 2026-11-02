@@ -6,6 +6,7 @@ import torch.nn as nn
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
+    AscendW4A8MXFPDSDynamicFusedMoEMethod,
     AscendW4A8MXFPDynamicFusedMoEMethod,
     AscendW4A8MXFPDynamicLinearMethod,
 )
@@ -139,6 +140,147 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
         with patch.object(self.scheme, "group_size", 32):
             output = self.scheme.apply(layer, x)
         self.assertEqual(output.shape[0], 32)
+
+
+class TestAscendW4A8MXFPDSMoEMethod(TestBase):
+    def setUp(self):
+        self.scheme = AscendW4A8MXFPDSDynamicFusedMoEMethod.__new__(AscendW4A8MXFPDSDynamicFusedMoEMethod)
+        self.scheme.dynamic_eplb = False
+        prefix = "vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4"
+        patches = {
+            "npu": patch(f"{prefix}.torch_npu"),
+            "use_mega": patch(f"{prefix}.use_cann_megamoe", return_value=True),
+            "config": patch(f"{prefix}.get_current_vllm_config"),
+            "ctx": patch(f"{prefix}._EXTRA_CTX"),
+        }
+        for name, patcher in patches.items():
+            setattr(self, name, patcher.start())
+            self.addCleanup(patcher.stop)
+        self.npu.npu_format_cast.side_effect = lambda tensor, *args, **kwargs: tensor
+        self.ctx.use_mega_moe = True
+
+    @staticmethod
+    def _make_layer():
+        layer = nn.Module()
+        shapes = {
+            "w13_weight": (2, 128, 64),
+            "w2_weight": (2, 128, 32),
+            "w13_weight_scale": (2, 128, 4),
+            "w2_weight_scale": (2, 128, 2),
+        }
+        for name, shape in shapes.items():
+            tensor = torch.arange(shape[0] * shape[1] * shape[2]).to(torch.uint8).reshape(shape)
+            if name.endswith("scale"):
+                tensor = tensor.view(torch.float8_e8m0fnu)
+            setattr(layer, name, nn.Parameter(tensor, requires_grad=False))
+        return layer
+
+    def test_megamoe_weights_are_ready_for_execution(self):
+        layer = self._make_layer()
+        original = {name: tensor.detach().clone() for name, tensor in layer.named_parameters()}
+        self.scheme.process_weights_after_loading(layer)
+        weights = self.scheme.get_fused_mc2_weights(layer)
+        for name, values in (
+            ("w13_weight", weights.w1),
+            ("w2_weight", weights.w2),
+            ("w13_weight_scale", weights.w1_scale),
+            ("w2_weight_scale", weights.w2_scale),
+        ):
+            self.assertEqual(len(values), 2)
+            self.assertEqual(getattr(layer, name).numel(), 0)
+            for index, tensor in enumerate(values):
+                torch.testing.assert_close(
+                    tensor.view(torch.uint8).flatten(), original[name][index].view(torch.uint8).flatten()
+                )
+                self.assertEqual(tensor.storage_offset(), 0)
+                if name.endswith("scale"):
+                    self.assertEqual(tensor.dtype, torch.float8_e8m0fnu)
+                    self.assertEqual(tensor.shape, (128, original[name].shape[-1] // 2, 2))
+                else:
+                    self.assertEqual(tensor.shape, original[name].shape[1:])
+
+    def test_megamoe_preparation_is_idempotent(self):
+        layer = self._make_layer()
+        self.scheme.process_weights_after_loading(layer)
+        weights = self.scheme.get_fused_mc2_weights(layer)
+        self.npu.npu_format_cast.reset_mock()
+        self.scheme.process_weights_after_loading(layer)
+        self.npu.npu_format_cast.assert_not_called()
+        self.assertIs(self.scheme.get_fused_mc2_weights(layer).w1, weights.w1)
+
+    def test_ordinary_gmm_reuses_megamoe_weights_after_packed_parameters_are_released(self):
+        layer = self._make_layer()
+        original = {name: tensor.detach().clone() for name, tensor in layer.named_parameters()}
+        self.scheme.process_weights_after_loading(layer)
+        self.npu.npu_format_cast.reset_mock()
+        for name in ("w13_weight", "w2_weight"):
+            weights = self.scheme._resolve_gmm_weights(layer, name, f"{name}_list")
+            self.assertEqual(len(weights), 2)
+            for index, weight in enumerate(weights):
+                torch.testing.assert_close(weight, original[name][index].transpose(0, 1))
+                self.assertEqual(weight.data_ptr(), getattr(layer, f"cann_mega_moe_{name}_list")[index].data_ptr())
+            scale_name = f"{name}_scale"
+            scales = self.scheme._resolve_gmm_scales(layer, scale_name, f"{scale_name}_list")
+            for index, scale in enumerate(scales):
+                expected = original[scale_name][index].view(torch.uint8)
+                expected = expected.reshape(expected.shape[0], expected.shape[1] // 2, 2).transpose(0, 1)
+                torch.testing.assert_close(scale, expected)
+                self.assertEqual(scale.data_ptr(), getattr(layer, f"cann_mega_moe_{scale_name}_list")[index].data_ptr())
+        self.npu.npu_format_cast.assert_not_called()
+
+    def test_ordinary_gmm_without_megamoe_keeps_packed_parameters(self):
+        self.use_mega.return_value = False
+        layer = self._make_layer()
+        self.scheme.process_weights_after_loading(layer)
+        self.assertIs(self.scheme._resolve_gmm_weights(layer, "w13_weight", "w13_weight_list")[0], layer.w13_weight)
+        self.assertIs(
+            self.scheme._resolve_gmm_scales(layer, "w13_weight_scale", "w13_weight_scale_list")[0],
+            layer.w13_weight_scale,
+        )
+
+    def test_megamoe_reload_restores_checkpoint_and_rebuilds_lists(self):
+        layer = self._make_layer()
+        original = {name: tensor.detach().clone() for name, tensor in layer.named_parameters()}
+        self.scheme.process_weights_after_loading(layer)
+        previous_weights = self.scheme.get_fused_mc2_weights(layer).w1
+        self.scheme.restore_weights_for_rl_loading(layer)
+        for name, expected in original.items():
+            actual = getattr(layer, name)
+            self.assertEqual(actual.dtype, expected.dtype)
+            self.assertEqual(actual.shape, expected.shape)
+            torch.testing.assert_close(actual.view(torch.uint8), expected.view(torch.uint8))
+            self.assertFalse(hasattr(layer, f"cann_mega_moe_{name}_list"))
+        self.assertFalse(layer._mxfp4_transformed)
+        layer.w13_weight.data.fill_(7)
+        self.scheme.process_weights_after_loading(layer)
+        weights = self.scheme.get_fused_mc2_weights(layer)
+        self.assertIsNot(weights.w1, previous_weights)
+        for tensor in weights.w1:
+            torch.testing.assert_close(tensor, torch.full_like(tensor, 7))
+
+    def test_non_megamoe_keeps_existing_layout(self):
+        self.use_mega.return_value = False
+        layer = self._make_layer()
+        self.scheme.process_weights_after_loading(layer)
+        self.assertFalse(hasattr(layer, "cann_mega_moe_w13_weight_list"))
+        self.assertEqual(layer.w13_weight.shape, (2, 64, 128))
+        self.assertEqual(layer.w13_weight_scale.shape, (2, 2, 128, 2))
+
+    def test_non_megamoe_dynamic_eplb_keeps_existing_lists(self):
+        self.use_mega.return_value = False
+        self.scheme.dynamic_eplb = True
+        layer = self._make_layer()
+        self.scheme.process_weights_after_loading(layer)
+        self.assertEqual(len(layer.w13_weight_list), 2)
+        self.assertFalse(hasattr(layer, "cann_mega_moe_w13_weight_list"))
+
+    def test_megamoe_dynamic_eplb_fails_before_mutating_weights(self):
+        self.scheme.dynamic_eplb = True
+        layer = self._make_layer()
+        with self.assertRaisesRegex(ValueError, "dynamic EPLB"):
+            self.scheme.process_weights_after_loading(layer)
+        self.assertEqual(layer.w13_weight.shape, (2, 128, 64))
+        self.assertFalse(hasattr(layer, "_ds_mega_moe_original_dtypes"))
 
 
 class TestAscendW4A8MXFP4MoEMethod(TestBase):

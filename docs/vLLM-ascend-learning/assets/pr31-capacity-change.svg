@@ -1,0 +1,27 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='650' viewBox='0 0 1200 650'><defs><marker id='a' markerWidth='8' markerHeight='8' refX='7' refY='4' orient='auto'><path d='M0 0L8 4L0 8Z' fill='#526175'/></marker></defs><rect width='1200' height='650' fill='white'/><g font-family='Microsoft YaHei, sans-serif' font-size='17' fill='#233247'>
+<text x='30' y='37'>PR31：无 KV 传输配置的 PD 合设实例，容量应该按 Prefill 算</text>
+<rect x='30' y='65' width='1140' height='75' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='46' y='98'>触发场景：同一个实例既处理 Prefill，又处理 Decode；kv_transfer_config 为 None。</text>
+<text x='46' y='125'>Prefill 一轮可能处理较多输入 token，不能只按 Decode 侧的容量估计。</text>
+<text x='30' y='189'>修改前</text>
+<text x='630' y='189'>修改后</text>
+<rect x='30' y='210' width='540' height='80' rx='8' fill='#fff1ed' stroke='#8896a8'/>
+<text x='46' y='243'>没有显式 KV 角色</text>
+<text x='46' y='270'>未进入 Prefill 容量分支</text>
+<rect x='630' y='210' width='540' height='80' rx='8' fill='#e9f5ec' stroke='#8896a8'/>
+<text x='646' y='243'>新增判断：kv_transfer_config is None</text>
+<text x='646' y='270'>进入 Prefill 容量分支</text>
+<path d='M300 290 L300 325' fill='none' stroke='#526175' stroke-width='2' marker-end='url(#a)'/>
+<path d='M900 290 L900 325' fill='none' stroke='#526175' stroke-width='2' marker-end='url(#a)'/>
+<rect x='30' y='325' width='540' height='85' rx='8' fill='#fff1ed' stroke='#8896a8'/>
+<text x='46' y='358'>取 MC2 / Decode 侧容量</text>
+<text x='46' y='385'>可能低估 PD 合设实例的执行容量</text>
+<rect x='630' y='325' width='540' height='85' rx='8' fill='#e9f5ec' stroke='#8896a8'/>
+<text x='646' y='358'>取 scheduler_config.max_num_batched_tokens</text>
+<text x='646' y='385'>按 Prefill 的执行上限准备容量</text>
+<rect x='30' y='450' width='1140' height='80' rx='8' fill='#eaf2ff' stroke='#8896a8'/>
+<text x='46' y='483'>统一容量公式：每 rank 缓冲区容量 = min(配置上限 / EP 大小向下取整, 当前角色执行容量)</text>
+<text x='46' y='510'>PR31 主要修正后一个输入取哪种容量，公式本身不是这个 PR 新增的。</text>
+<rect x='30' y='560' width='1140' height='55' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='46' y='593'>作用：避免容量低估和不必要的回退；仅凭这段修复，不能断言此前必然发生越界。</text>
+</g></svg>

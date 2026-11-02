@@ -1,0 +1,49 @@
+flowchart TB
+    subgraph CPU[CPU 侧]
+        A["进程 A：API 服务<br/>[vllm]"]
+        subgraph ENGINE[进程 B：EngineCore]
+            E["Scheduler：请求调度<br/>[vllm]"]
+            subgraph EXECUTOR[Executor]
+                X["按并行配置启动 Worker，传入通信参数<br/>建立任务与结果队列 [vllm + Ascend]"]
+                D["通过通用机制下发任务<br/>[vllm]"]
+                X -.->|初始化| D
+            end
+            P["平台适配<br/>选择 NPUWorker、NPU Attention 后端<br/>通信和编译组件 [Ascend]"]
+            H["引擎适配<br/>初始化 Ascend 配置<br/>按配置接入负载均衡和执行步骤补丁 [Ascend]"]
+            E --> D
+            P -.-> X
+            H -.-> E
+        end
+        subgraph WORKER0[进程 C：Worker 0]
+            W0["NPUWorker / NPUModelRunner<br/>[Ascend]"]
+            M0["Model<br/>[vllm / Ascend]"]
+            O0["算子 / KV / 通信适配<br/>[Ascend]"]
+            B0["后端<br/>[PyTorch / torch_npu / CANN]"]
+            W0 --> M0 --> O0 --> B0
+        end
+        subgraph WORKER1[进程 D：Worker 1]
+            W1["NPUWorker / NPUModelRunner<br/>[Ascend]"]
+            M1["Model<br/>[vllm / Ascend]"]
+            O1["算子 / KV / 通信适配<br/>[Ascend]"]
+            B1["后端<br/>[PyTorch / torch_npu / CANN]"]
+            W1 --> M1 --> O1 --> B1
+        end
+        A <-->|进程间通信| E
+        D <-->|进程间通信| W0
+        D <-->|进程间通信| W1
+    end
+    subgraph NPU[NPU 侧]
+        direction TB
+        N0["NPU 0<br/>权重 / KV / 中间张量<br/>张量计算 [CANN 等]<br/>自定义算子 [Ascend]"]
+        N1["NPU 1<br/>权重 / KV / 中间张量<br/>张量计算 [CANN 等]<br/>自定义算子 [Ascend]"]
+        C["多卡通信<br/>[HCCL 等]"]
+        N0 <--> C
+        N1 <--> C
+    end
+    B0 -->|提交设备任务| N0
+    B1 -->|提交设备任务| N1
+    L[橙色：vllm-ascend 实现或适配]
+    classDef ascend fill:#fff0d6,stroke:#b85c00,color:#222,stroke-width:2px;
+    class P,H,W0,W1,O0,O1,L ascend;
+    classDef shared fill:#eaf2ff,stroke:#4267a0,color:#222;
+    class X shared;

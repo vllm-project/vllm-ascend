@@ -1,0 +1,43 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='650' viewBox='0 0 1200 650'><defs><marker id='a' markerWidth='8' markerHeight='8' refX='7' refY='4' orient='auto'><path d='M0 0L8 4L0 8Z' fill='#526175'/></marker></defs><rect width='1200' height='650' fill='white'/><g font-family='Microsoft YaHei, sans-serif' font-size='17' fill='#233247'>
+<text x='30' y='37'>PR18：为 DSV4.1 / A5 接入 MegaMoE（满足支持条件时）</text>
+<text x='30' y='84'>修改前：常规 MoE 路由专家路径（教学示意）</text>
+<rect x='30' y='105' width='220' height='75' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='46' y='138'>Router</text>
+<text x='46' y='165'>选择专家及权重</text>
+<rect x='310' y='105' width='240' height='75' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='326' y='138'>Dispatch</text>
+<text x='326' y='165'>将 token 交给专家</text>
+<rect x='610' y='105' width='240' height='75' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='626' y='138'>专家 MLP</text>
+<text x='626' y='165'>执行专家计算</text>
+<rect x='910' y='105' width='260' height='75' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='926' y='138'>Combine</text>
+<text x='926' y='165'>汇总专家输出</text>
+<path d='M250 142 L310 142' fill='none' stroke='#526175' stroke-width='2' marker-end='url(#a)'/>
+<path d='M550 142 L610 142' fill='none' stroke='#526175' stroke-width='2' marker-end='url(#a)'/>
+<path d='M850 142 L910 142' fill='none' stroke='#526175' stroke-width='2' marker-end='url(#a)'/>
+<text x='30' y='234'>修改后：将路由专家的分发、专家计算、汇总接入融合调用</text>
+<rect x='30' y='260' width='240' height='85' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='46' y='293'>输入 / 路由信息</text>
+<text x='46' y='320'>按所选路径准备</text>
+<rect x='330' y='260' width='520' height='85' rx='8' fill='#fff0d6' stroke='#8896a8'/>
+<text x='346' y='293'>MegaMoE 融合执行 [外部 CANN 算子]</text>
+<text x='346' y='320'>Dispatch + 专家计算 + Combine</text>
+<rect x='910' y='260' width='260' height='85' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='926' y='293'>路由专家输出</text>
+<text x='926' y='320'>恢复实际有效行数</text>
+<path d='M270 302 L330 302' fill='none' stroke='#526175' stroke-width='2' marker-end='url(#a)'/>
+<path d='M850 302 L910 302' fill='none' stroke='#526175' stroke-width='2' marker-end='url(#a)'/>
+<rect x='30' y='390' width='1140' height='75' rx='8' fill='#fff0d6' stroke='#8896a8'/>
+<text x='46' y='423'>PR18 的配套工作：后端选择、每 rank 容量、输入补齐与 DP 元数据同步、权重 / 缓冲区接口。</text>
+<text x='46' y='450'>共享专家此时仍独立计算，不能把 PR51 的融合能力算到 PR18 中。</text>
+<rect x='30' y='505' width='540' height='105' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='46' y='538'>原始 PR18</text>
+<text x='46' y='565'>新增 MegaMoEBackend 封装</text>
+<text x='46' y='592'>独立 MegaMoE 通信组及缓冲区管理</text>
+<rect x='630' y='505' width='540' height='105' rx='8' fill='#eaf2ff' stroke='#8896a8'/>
+<text x='646' y='538'>v0.30 RFC 适配</text>
+<text x='646' y='565'>扩展已有 FusedMC2CommImpl</text>
+<text x='646' y='592'>沿用 MC2 组和已有资源生命周期</text>
+<path d='M570 557 L630 557' fill='none' stroke='#526175' stroke-width='2' marker-end='url(#a)'/>
+</g></svg>

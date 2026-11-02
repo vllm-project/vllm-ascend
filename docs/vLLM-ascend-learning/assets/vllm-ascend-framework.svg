@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1370" viewBox="0 0 1200 1370"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto-start-reverse"><path d="M0 0L8 4L0 8Z" fill="#526175"/></marker></defs><rect width="1200" height="1370" fill="white"/><g font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" fill="#233247">
+<text x="30" y="32" font-size="23" font-weight="bold">CPU 侧</text>
+<rect x='350' y='50' width='500' height='65' rx='10' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='600' y='77' text-anchor='middle' font-size='17'>进程 A：API 服务 [vllm]</text>
+<text x='600' y='103' text-anchor='middle' font-size='17'>接收请求、处理输入、返回文本</text>
+<path d='M600 115 L600 155' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#arrow)'/>
+<rect x='30' y='155' width='1140' height='335' rx='10' fill='#f8fafc' stroke='#8896a8'/>
+<text x='600' y='182' text-anchor='middle' font-size='17'>进程 B：EngineCore</text>
+<rect x='55' y='210' width='500' height='65' rx='10' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='305' y='237' text-anchor='middle' font-size='17'>Scheduler：请求调度 [vllm]</text>
+<text x='305' y='263' text-anchor='middle' font-size='17'>决定本轮请求与 token 数量</text>
+<rect x='55' y='305' width='500' height='150' rx='10' fill='#eaf2ff' stroke='#8896a8'/>
+<text x='305' y='332' text-anchor='middle' font-size='17'>Executor</text>
+<text x='305' y='358' text-anchor='middle' font-size='17'>按并行配置启动 Worker，传入通信参数</text>
+<text x='305' y='384' text-anchor='middle' font-size='17'>建立任务与结果队列 [vllm + Ascend]</text>
+<text x='305' y='410' text-anchor='middle' font-size='17'>通过通用机制下发任务 [vllm]</text>
+<path d='M305 275 L305 305' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#arrow)'/>
+<rect x='590' y='210' width='555' height='95' rx='10' fill='#fff0d6' stroke='#8896a8'/>
+<text x='867.5' y='237' text-anchor='middle' font-size='17'>平台适配 [Ascend]</text>
+<text x='867.5' y='263' text-anchor='middle' font-size='17'>选择 NPUWorker、NPU Attention 后端</text>
+<text x='867.5' y='289' text-anchor='middle' font-size='17'>通信和编译组件</text>
+<rect x='590' y='330' width='555' height='95' rx='10' fill='#fff0d6' stroke='#8896a8'/>
+<text x='867.5' y='357' text-anchor='middle' font-size='17'>引擎适配 [Ascend]</text>
+<text x='867.5' y='383' text-anchor='middle' font-size='17'>初始化 Ascend 配置</text>
+<text x='867.5' y='409' text-anchor='middle' font-size='17'>按配置接入负载均衡和执行步骤补丁</text>
+<path d='M600 490 L300 540' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#arrow)'/>
+<rect x='30' y='540' width='540' height='425' rx='10' fill='#f8fafc' stroke='#8896a8'/>
+<text x='300' y='567' text-anchor='middle' font-size='17'>Worker 0 进程（主要执行线程）</text>
+<rect x='55' y='585' width='490' height='65' rx='10' fill='#fff0d6' stroke='#8896a8'/>
+<text x='300' y='612' text-anchor='middle' font-size='17'>NPUWorker / NPUModelRunner [Ascend]</text>
+<text x='300' y='638' text-anchor='middle' font-size='17'>管理设备资源、准备输入、调用模型</text>
+<path d='M300 650 L300 675' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#arrow)'/>
+<rect x='55' y='675' width='490' height='65' rx='10' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='300' y='702' text-anchor='middle' font-size='17'>Model [vllm / Ascend]</text>
+<text x='300' y='728' text-anchor='middle' font-size='17'>本卡模型分片</text>
+<path d='M300 740 L300 765' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#arrow)'/>
+<rect x='55' y='765' width='490' height='65' rx='10' fill='#fff0d6' stroke='#8896a8'/>
+<text x='300' y='792' text-anchor='middle' font-size='17'>算子 / KV / 通信适配 [Ascend]</text>
+<path d='M300 830 L300 855' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#arrow)'/>
+<rect x='55' y='855' width='490' height='65' rx='10' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='300' y='882' text-anchor='middle' font-size='17'>后端 [PyTorch / torch_npu / CANN]</text>
+<path d='M300 965 L300 1080' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#arrow)'/>
+<rect x='30' y='1080' width='540' height='145' rx='10' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='300' y='1107' text-anchor='middle' font-size='17'>NPU 0</text>
+<text x='300' y='1133' text-anchor='middle' font-size='17'>权重 / KV / 中间张量</text>
+<text x='300' y='1159' text-anchor='middle' font-size='17'>张量计算 [CANN 等]</text>
+<text x='300' y='1185' text-anchor='middle' font-size='17'>自定义算子 [Ascend]</text>
+<path d='M600 490 L900 540' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#arrow)'/>
+<rect x='630' y='540' width='540' height='425' rx='10' fill='#f8fafc' stroke='#8896a8'/>
+<text x='900' y='567' text-anchor='middle' font-size='17'>Worker 1 进程（主要执行线程）</text>
+<rect x='655' y='585' width='490' height='65' rx='10' fill='#fff0d6' stroke='#8896a8'/>
+<text x='900' y='612' text-anchor='middle' font-size='17'>NPUWorker / NPUModelRunner [Ascend]</text>
+<text x='900' y='638' text-anchor='middle' font-size='17'>管理设备资源、准备输入、调用模型</text>
+<path d='M900 650 L900 675' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#arrow)'/>
+<rect x='655' y='675' width='490' height='65' rx='10' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='900' y='702' text-anchor='middle' font-size='17'>Model [vllm / Ascend]</text>
+<text x='900' y='728' text-anchor='middle' font-size='17'>本卡模型分片</text>
+<path d='M900 740 L900 765' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#arrow)'/>
+<rect x='655' y='765' width='490' height='65' rx='10' fill='#fff0d6' stroke='#8896a8'/>
+<text x='900' y='792' text-anchor='middle' font-size='17'>算子 / KV / 通信适配 [Ascend]</text>
+<path d='M900 830 L900 855' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#arrow)'/>
+<rect x='655' y='855' width='490' height='65' rx='10' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='900' y='882' text-anchor='middle' font-size='17'>后端 [PyTorch / torch_npu / CANN]</text>
+<path d='M900 965 L900 1080' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#arrow)'/>
+<rect x='630' y='1080' width='540' height='145' rx='10' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='900' y='1107' text-anchor='middle' font-size='17'>NPU 1</text>
+<text x='900' y='1133' text-anchor='middle' font-size='17'>权重 / KV / 中间张量</text>
+<text x='900' y='1159' text-anchor='middle' font-size='17'>张量计算 [CANN 等]</text>
+<text x='900' y='1185' text-anchor='middle' font-size='17'>自定义算子 [Ascend]</text>
+<path d="M30 1015H1170" stroke="#8896a8" stroke-dasharray="6 4"/><text x="30" y="1050" font-size="23" font-weight="bold">NPU 侧</text>
+<path d='M300 1225 L300 1290' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#arrow)'/>
+<path d='M900 1225 L900 1290' stroke='#526175' stroke-width='2' fill='none' marker-end='url(#arrow)'/>
+<rect x='200' y='1290' width='800' height='55' rx='10' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='600' y='1317' text-anchor='middle' font-size='17'>多卡通信 [HCCL 等]（通信关系，不是额外设备）</text>
+</g></svg>

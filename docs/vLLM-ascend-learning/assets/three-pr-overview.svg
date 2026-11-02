@@ -1,0 +1,27 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='520' viewBox='0 0 1200 520'><defs><marker id='a' markerWidth='8' markerHeight='8' refX='7' refY='4' orient='auto'><path d='M0 0L8 4L0 8Z' fill='#526175'/></marker></defs><rect width='1200' height='520' fill='white'/><g font-family='Microsoft YaHei, sans-serif' font-size='17' fill='#233247'>
+<text x='30' y='37'>三个 PR 的位置：模型内部的 MoE 执行路径（非三个进程）</text>
+<rect x='30' y='65' width='1140' height='65' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='46' y='98'>Model / 模型层  →  MoE 模块：路由专家 + 共享专家</text>
+<path d='M600 130 L600 165' fill='none' stroke='#526175' stroke-width='2' marker-end='url(#a)'/>
+<rect x='30' y='165' width='350' height='150' rx='8' fill='#fff0d6' stroke='#8896a8'/>
+<text x='46' y='198'>PR18：接入 A5 MegaMoE</text>
+<text x='46' y='225'>将路由专家的分发、计算、汇总</text>
+<text x='46' y='252'>交给融合执行路径</text>
+<text x='46' y='279'>共享专家仍独立计算</text>
+<rect x='425' y='165' width='350' height='150' rx='8' fill='#eaf2ff' stroke='#8896a8'/>
+<text x='441' y='198'>PR31：修正容量判断</text>
+<text x='441' y='225'>PD 合设且无 KV 传输配置时</text>
+<text x='441' y='252'>按 Prefill 的执行容量准备资源</text>
+<text x='441' y='279'>不是新增一种 MoE 算子</text>
+<rect x='820' y='165' width='350' height='150' rx='8' fill='#e9f5ec' stroke='#8896a8'/>
+<text x='836' y='198'>PR51：融合共享专家</text>
+<text x='836' y='225'>把共享专家权重传给 MegaMoE</text>
+<text x='836' y='252'>满足条件时一起计算</text>
+<text x='836' y='279'>不兼容时仍走独立路径</text>
+<path d='M380 240 L425 240' fill='none' stroke='#526175' stroke-width='2' marker-end='url(#a)'/>
+<path d='M775 240 L820 240' fill='none' stroke='#526175' stroke-width='2' marker-end='url(#a)'/>
+<rect x='30' y='365' width='1140' height='110' rx='8' fill='#f1f5fa' stroke='#8896a8'/>
+<text x='46' y='398'>适配到 v0.30 RFC：保留上述能力，接入已有 FusedMC2CommImpl、MC2 通信组和权重接口。</text>
+<text x='46' y='425'>不是把原始 PR 的独立后端、通信资源管理和旧接口整套复制过来。</text>
+<text x='46' y='452'>箭头表示能力逐步补齐，不表示每个请求按 PR 编号执行三个模块。</text>
+</g></svg>
