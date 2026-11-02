@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression tests for V4.1 index selection and compressor scheduling."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -155,6 +156,108 @@ def _attn(selected):
 
     indexer = SimpleNamespace(select_projected=select_projected)
     return SimpleNamespace(shared_state=shared, indexer=indexer), shared
+
+
+@pytest.mark.parametrize("quantize_query", [False, True])
+def test_indexer_weights_wait_is_deferred_until_selection(monkeypatch, quantize_query):
+    trace = []
+
+    class Stream:
+        def __init__(self, name):
+            self.name = name
+
+        def record_event(self):
+            event = f"{self.name}_event_{len(trace)}"
+            trace.append((self.name, "record", event))
+            return event
+
+        def wait_event(self, event):
+            trace.append((self.name, "wait", event))
+
+    main, aux = Stream("main"), Stream("aux")
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: main)
+    monkeypatch.setattr(dsa_v41, "dsv4_dsa_overlap_stream", lambda: aux)
+    monkeypatch.setattr(dsa_v41, "npu_stream_switch", lambda *args, **kwargs: nullcontext())
+
+    selected = torch.full((TOKENS, TOPK), 3, dtype=torch.int32)
+    shared = SimpleNamespace(
+        topk_indices=torch.full((TOKENS, TOPK), 7, dtype=torch.int32),
+        candidates=torch.full((TOKENS, 1, 8), 7, dtype=torch.int32),
+        candidate_lengths=None,
+        topk_lengths=None,
+    )
+
+    def project_weights(hidden_states):
+        trace.append(("aux", "project_weights", None))
+        return hidden_states[:, :1].clone()
+
+    def select_projected(*args, indices_output, **kwargs):
+        trace.append(("main", "select_projected", None))
+        indices_output.copy_(selected)
+        return indices_output, None
+
+    indexer = SimpleNamespace(
+        project_query=lambda query: query.clone(),
+        project_weights=project_weights,
+        apply_query_rope=lambda *args: trace.append(("main", "query_rope", None)),
+        quantize_query=lambda query: (query.to(torch.int8), torch.ones(query.shape[0])),
+        select_projected=select_projected,
+    )
+    attn = SimpleNamespace(shared_state=shared, indexer=indexer)
+    impl = _impl(
+        SimpleNamespace(
+            has_long_context=True,
+            is_index_source=True,
+            is_candidate_source=False,
+            uses_candidate_filter=False,
+        )
+    )
+    monkeypatch.setattr(
+        dsa_v41,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            no_compile_layers={impl.index_k_source_prefix: SimpleNamespace(kv_cache=[None])}
+        ),
+    )
+    hidden_states = torch.zeros(TOKENS, 8)
+    metadata = SimpleNamespace(
+        swa=SimpleNamespace(num_actual_tokens=TOKENS),
+        indexer=SimpleNamespace(
+            cache=SimpleNamespace(max_cache_seq_len=int(quantize_query))
+        ),
+    )
+
+    prepared = impl._prepare_indexer_inputs(
+        attn,
+        hidden_states,
+        hidden_states,
+        None,
+        None,
+        metadata,
+    )
+    assert prepared is not None
+    assert not any(item[:2] == ("main", "wait") for item in trace)
+
+    impl._quantize_indexer_query(attn, prepared, metadata)
+    impl._select_sparse_indices(
+        attn,
+        hidden_states,
+        hidden_states,
+        torch.arange(TOKENS),
+        None,
+        None,
+        metadata,
+        prepared,
+    )
+
+    ready_event = prepared.quantize_done if quantize_query else prepared.weights_done
+    assert ready_event is not None
+    assert trace[-2:] == [
+        ("main", "wait", ready_event),
+        ("main", "select_projected", None),
+    ]
+    if quantize_query:
+        assert prepared.quantize_done != prepared.weights_done
 
 
 @pytest.mark.parametrize("empty_cache", [True, False])
