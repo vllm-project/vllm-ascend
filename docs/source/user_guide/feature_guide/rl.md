@@ -51,7 +51,7 @@ for field definitions, prerequisites, and migration from legacy settings.
 
 | Deployment mode | Memory management | Weight transfer backend |
 | --- | --- | --- |
-| Trainer and rollout engine share NPUs | Enable sleep mode so the rollout engine can release NPU memory | `ipc` |
+| Trainer and rollout engine share NPUs | Enable sleep mode so the rollout engine can release NPU memory | `npu_ipc` |
 | Trainer and rollout engine use different NPUs | Pause generation during the update; sleep mode is normally unnecessary | `hccl` |
 
 The exact lifecycle is framework-dependent. In particular, level 2 sleep
@@ -121,7 +121,7 @@ vLLM-Ascend exposes two Ascend-specific weight-transfer backends:
 
 | Backend | Use case | Transport |
 | --- | --- | --- |
-| `ipc` | Trainer and rollout engine use the same physical NPU | NPU IPC handles |
+| `npu_ipc` | Trainer and rollout engine use the same physical NPU | NPU IPC handles |
 | `hccl` | Trainer and rollout engine use separate NPUs | HCCL collectives |
 
 Start an HCCL-enabled server with:
@@ -138,7 +138,7 @@ user-facing backend name to `NPUIPCWeightTransferEngine`:
 ```bash
 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
 vllm serve Qwen/Qwen3-0.6B \
-    --weight-transfer-config '{"backend": "ipc"}' \
+    --weight-transfer-config '{"backend": "npu_ipc"}' \
     --additional-config '{"rl_config": {"enabled": true}}'
 ```
 
@@ -163,6 +163,48 @@ The repository contains runnable examples for both backends:
 FRACTAL_NZ must be disabled for weight updates. RL mode forces
 `weight_nz_mode=0`; the weight-transfer start path validates the effective
 Ascend configuration.
+
+#### Update speculative draft weights over IPC
+
+With a model-based `--speculative-config`, the NPU IPC backend also supports
+upstream's draft weight update API on Model Runner V2
+(`VLLM_USE_V2_MODEL_RUNNER=1`). After initializing the transfer engine and
+pausing generation, call `POST /start_draft_weight_update` instead of
+`POST /start_weight_update`. Send the draft checkpoint tensors through the same
+`POST /update_weights` endpoint, then call `POST /finish_weight_update` before
+resuming generation. The offline equivalents are `LLM.start_draft_weight_update`,
+`LLM.update_weights`, and `LLM.finish_weight_update`.
+
+Use parameter names from the draft model's checkpoint, without adding a
+`drafter.` prefix. Both packed and unpacked IPC payloads use the selected draft
+model and its model configuration for the complete layerwise reload lifecycle.
+Finishing the draft session restores the main model as the default update target.
+Update the main and draft models in separate sessions; overlapping sessions are
+rejected. Draft updates preserve the main model's LoRA state. Shared parameters,
+such as tied embeddings, retain the sharing established when the models loaded.
+
+`HTTPVLLMWeightSyncClient.start_weight_update()` starts a main-model session by
+default. When using a trainer engine's `send_weights()` for a draft update,
+provide a client whose `start_weight_update()` calls `/start_draft_weight_update`;
+its initialization, chunk updates, and finish calls remain the same.
+
+These APIs require a loaded draft model. Token-based speculation, such as n-gram
+lookup, has no draft weights to update. Capability discovery and the draft start
+entry point reject Model Runner V1 even when it inherits a draft-model getter.
+Only draft update sessions install the worker's current-vLLM-config context;
+target update sessions retain the caller's existing context.
+
+Level 2 sleep saves registered buffers from both models, including nonpersistent
+draft metadata, and restores them in place when the `weights` allocation wakes.
+A `kv_cache`-only wake leaves those backups pending. Parameter retention patterns
+also accept `draft.<parameter_name>` (or `draft.*`); shared target/draft parameters
+are retained once under the target name. This prefix is for sleep retention only,
+not for checkpoint tensor names passed to `update_weights`.
+
+Reload both models' discarded parameters before resuming generation, except for
+parameters explicitly preserved with `sleep_preserve_parameter_names`. Model
+loaders remain responsible for rebuilding derived tensors that are not registered
+buffers. Saving draft buffers does not replace loading the model's checkpoint.
 
 ### Pause and resume generation
 
@@ -396,7 +438,7 @@ The output tokens will always be `[15, 284, 1026, 374]`. The logprobs reflect th
 | `rl_config.enable_training_consistency=true` | Training-inference consistency | Select FA3; requires the `flash_attn_npu_v3` package |
 | `rl_config.enable_batch_invariant=true` | Reproducible rollouts | Enable batch-invariant kernels and deterministic communication settings |
 | `--weight-transfer-config '{"backend": "hccl"}'` | Cross-NPU weight transfer | Register the Ascend HCCL transfer engine |
-| `--weight-transfer-config '{"backend": "ipc"}'` | Same-NPU weight transfer | Select the Ascend NPU IPC transfer engine |
+| `--weight-transfer-config '{"backend": "npu_ipc"}'` | Same-NPU weight transfer | Select the Ascend NPU IPC transfer engine |
 | `--enable-return-routed-experts` | MoE router replay | Return encoded expert routing decisions |
 | `VLLM_USE_V2_MODEL_RUNNER=1` | Trace replay | Select the required model runner V2 implementation |
 | `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1` | Token-in/token-out requests on a normal server | Register `/inference/v1/generate` |

@@ -1,0 +1,4 @@
+pr: 20130
+entries:
+  - category: feature
+    text: Added speculative draft model weight updates through NPU IPC with explicit Model Runner V2 gating and packed and unpacked payload support. Level-2 sleep preserves draft buffers and supports draft parameter retention patterns.

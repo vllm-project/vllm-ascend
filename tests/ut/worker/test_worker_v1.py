@@ -676,6 +676,7 @@ class TestNPUWorker(TestBase):
             worker.model_runner = mock_model_runner
             worker.vllm_config = mock_vllm_config
             worker._sleep_saved_buffers = {}
+            worker._sleep_saved_draft_buffers = {}
             worker.sleep_wakeup_manager = MagicMock()
             # Test wake_up method
             worker.wake_up(tags=["test_tag"])
@@ -710,6 +711,7 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
         worker.model_runner = SimpleNamespace(model=MagicMock())
         worker._sleep_saved_buffers = {}
+        worker._sleep_saved_draft_buffers = {}
 
         worker.wake_up(tags=["kv_cache"])
 
@@ -796,6 +798,7 @@ class TestNPUWorker(TestBase):
             speculative_config=SimpleNamespace(method="mtp"),
         )
         worker._sleep_saved_buffers = {}
+        worker._sleep_saved_draft_buffers = {}
         worker._sleep_saved_parameters = {}
 
         worker.wake_up(tags=["weights"])
@@ -2294,6 +2297,8 @@ class TestNPUWorkerWeightUpdate(TestBase):
             worker = NPUWorker()
         worker.weight_transfer_engine = engine
         worker._weight_update_active = False
+        worker._weight_update_is_draft = False
+        worker.vllm_config = MagicMock()
         worker.device = torch.device("cpu")
         worker.model_runner = MagicMock()
         worker.model_runner.model = MagicMock()
