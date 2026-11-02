@@ -787,8 +787,6 @@ def _make_tnd_tail_inputs(capacity, actual=36, nseq=6, per_seq=6, seed=1006):
 
 
 @torch.inference_mode()
-
-
 def test_tnd_output_tail_zeroed():
     """TND capacity tail [actual, T) must be zeroed by the kernel, not stale memory.
 
