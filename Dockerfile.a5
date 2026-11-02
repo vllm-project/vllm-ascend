@@ -45,11 +45,11 @@ RUN apt-get update -y && \
     rm -rf /var/lib/apt/lists/*
 
 # Native DeepGEMM-Ascend follows DeepInfer's GCC >= 13 requirement.
-# Upgrade the system C++ runtime together with the compiler so Triton and the
-# operator extension share a compatible runtime without serving-time overrides.
+# The builder selects this compiler only for the dependency; do not change the
+# default framework compiler or add serving-time library-path overrides.
 RUN apt-get update -y && apt-get install -y software-properties-common && \
     add-apt-repository -y ppa:ubuntu-toolchain-r/test && apt-get update -y && \
-    apt-get install -y gcc-13 g++-13 libdw-dev libelf-dev && \
+    apt-get install -y --no-install-recommends g++-13 libdw-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Install modelscope (for fast download) and ray (for multinode)

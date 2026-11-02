@@ -487,8 +487,6 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("requirements.txt")
     except ValueError:
         print("Failed to read requirements.txt in vllm_ascend.")
-    if hardware.device_type_from_soc_version(envs.SOC_VERSION) == hardware.AscendDeviceType.A5:
-        requirements.append("tilelang==0.1.15")
     return requirements
 
 
