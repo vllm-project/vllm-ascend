@@ -28,6 +28,7 @@ from vllm_ascend.utils import vllm_version_is
 def test_kimi_disabling_mlapo_refreshes_projection_nz_management():
     for fa_quant_layer in (False, True):
         impl = AscendMLAImpl.__new__(AscendMLAImpl)
+        impl.use_mla_rope = False
         impl.enable_mlapo = True
         impl.fa_quant_layer = fa_quant_layer
         impl.support_fp8_attention = True

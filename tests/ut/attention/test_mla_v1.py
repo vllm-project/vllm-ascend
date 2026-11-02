@@ -286,6 +286,7 @@ def test_mla_fused_preprocess_checks_weight_support(quant_method, device_type, e
 @pytest.mark.parametrize("scheme_type", [AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod])
 def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, fa_quant_layer, scheme_type):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.use_mla_rope = False
     impl.use_flashmla = False
     impl.dcp_q_replicate_enabled = False
     profile = get_hardware_profile(device_type)
