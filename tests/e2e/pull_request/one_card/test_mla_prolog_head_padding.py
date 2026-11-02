@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""NPU regression for native MLA Q_B head padding before NZ conversion."""
+"""A3 numerical regression for native MLA Q_B head padding before NZ conversion."""
 
 from types import SimpleNamespace
 
@@ -89,4 +89,4 @@ def test_native_padded_q_projection_matches_unfused(heads):
         torch.testing.assert_close(actual_nope.cpu().float(), expected_nope.float(), rtol=0.02, atol=0.01)
         torch.testing.assert_close(actual_rope.cpu().float(), expected_rope.cpu().float(), rtol=0.02, atol=0.02)
     finally:
-        torch_npu._C._npu_setOption({"ALLOW_INTERNAL_FORMAT": (prior_internal_format or b"disable").decode()})
+        torch.npu.config.allow_internal_format = prior_internal_format in (b"enable", "enable")
