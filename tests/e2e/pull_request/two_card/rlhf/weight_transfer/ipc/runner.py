@@ -19,23 +19,25 @@ import torch.multiprocessing as mp
 import torch_npu  # noqa: F401  # registers the NPU backend
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.base import WeightUpdateModelCase
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.runners.common import (
+from tests.e2e.pull_request.two_card.rlhf.conftest import (
     CONTROL_TIMEOUT,
-    UPDATE_ROUNDS,
-    UPDATE_TIMEOUT,
     post_control,
+    register_engines_once,
     server_visible_devices,
-    weight_transfer_servers,
 )
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.utils import (
-    PACKED_LANE_SKIP_REASON,
-    FixedRandomWeightSource,
+from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.cases import WeightUpdateModelCase
+from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.oracle import (
+    UPDATE_ROUNDS,
     assert_weight_update_matches_reference,
     generation_signature,
-    packed_buffer_size_for,
-    register_engines_once,
+    weight_transfer_servers,
 )
+from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.weight_source import (
+    FixedRandomWeightSource,
+    packed_buffer_size_for,
+)
+
+UPDATE_TIMEOUT = 300
 
 INFERENCE_WORLD_SIZE = 2
 # One trainer producer per inference card. This Gloo group aggregates IPC
@@ -91,10 +93,6 @@ def _ipc_trainer_peer(local_rank: int, case: WeightUpdateModelCase, packed: bool
 def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
     if INFERENCE_DEVICE_INDEX < 0 or torch.npu.device_count() < INFERENCE_DEVICE_INDEX + INFERENCE_WORLD_SIZE:
         pytest.skip("NPU IPC weight transfer e2e test requires 2 consecutive NPUs for TP=2.")
-    if case.skip_reason is not None:
-        pytest.skip(f"{case.id}: {case.skip_reason}")
-    if packed:
-        pytest.skip(f"{case.id}: {PACKED_LANE_SKIP_REASON}")
 
     torch.npu.set_device(INFERENCE_DEVICE_INDEX)
     source = FixedRandomWeightSource(case, torch.device("npu", INFERENCE_DEVICE_INDEX))
@@ -181,11 +179,9 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
             if dist.is_initialized():
                 dist.destroy_process_group()
 
-    updated_signature, reloaded_signature = signatures
     assert_weight_update_matches_reference(
         dummy_signature,
         reference,
-        updated_signature,
-        reloaded_signature,
+        signatures,
         case,
     )

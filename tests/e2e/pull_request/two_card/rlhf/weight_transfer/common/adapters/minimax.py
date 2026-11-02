@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""MiniMax model configurations and checkpoint-name conversion."""
+"""MiniMax checkpoint-name conversion."""
 
 import regex as re
-
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.base import WeightUpdateModelCase
 
 
 def minimax_m3_checkpoint_name(name: str) -> str:
@@ -52,40 +50,3 @@ def minimax_m3_checkpoint_name(name: str) -> str:
     if m:
         return f"{m.group(1)}.block_sparse_moe.{m.group(2)}.{m.group(3)}"
     return name
-
-
-# Reserve HBM for M3's FIA graph workspace rather than sizing the KV cache
-# from the memory-utilization fraction. The four-layer, 1024-token test only
-# needs a small cache; keep startup and live-update servers identical.
-MINIMAX_M3_KV_CACHE_BYTES = 128 * 2**20
-
-
-MINIMAX_M3_CASE = WeightUpdateModelCase(
-    id="minimax-m3-sparse-moe-layout",
-    model="MiniMax/MiniMax-M3",
-    hf_overrides={
-        "architectures": ["MiniMaxM3SparseForCausalLM"],
-        "text_config": {
-            "num_hidden_layers": 4,
-            "num_local_experts": 8,
-            # Explicit schedules for the fixed four-layer test model;
-            # native config derives these before overrides are applied.
-            "layer_types": ["full_attention", "full_attention", "full_attention", "minimax_m3_sparse"],
-            "mlp_layer_types": ["dense", "dense", "dense", "sparse"],
-        },
-    },
-    meta_config_attribute="text_config",
-    checkpoint_model_prefix="language_model.model.",
-    checkpoint_name_map=minimax_m3_checkpoint_name,
-    # Disable the checkpoint's auto_map remote config and use Transformers'
-    # native MiniMaxM3VLConfig, whose text_config is MiniMaxM3VLTextConfig.
-    # AutoModelForCausalLM resolves that text config to MiniMaxM3VLForCausalLM
-    # for meta-model construction. The legacy remote config instead yields
-    # a generic text PreTrainedConfig that AutoModel cannot resolve.
-    trust_remote_code=False,
-    split_fused_mlp=True,
-    extra_server_args=("--block-size", "128", "--kv-cache-memory-bytes", str(MINIMAX_M3_KV_CACHE_BYTES)),
-)
-
-
-MINIMAX_CASES = (MINIMAX_M3_CASE,)

@@ -5,10 +5,12 @@
 
 import pytest
 
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.base import WeightUpdateModelCase
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.qwen import QWEN_CASES
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.registry import pytest_model_cases
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.runners.hccl import (
+from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.cases import (
+    QWEN_CASES,
+    WeightUpdateModelCase,
+    pytest_model_cases,
+)
+from tests.e2e.pull_request.two_card.rlhf.weight_transfer.hccl.runner import (
     run_hccl_weight_transfer_transaction,
 )
 

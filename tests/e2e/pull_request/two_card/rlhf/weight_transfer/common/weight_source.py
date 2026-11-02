@@ -1,24 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Shared checkpoint generation and assertions for weight-update E2Es.
-
-The oracle these suites share is *normal startup loading of the payload*, not the
-first live update: a temporary checkpoint is written from the very same
-generator the transfer ships, a reference server loads it at startup, and every
-live-update lane has to reproduce that reference exactly. Comparing two live
-updates with each other could only prove the transfer is *deterministic*; a
-transfer that consistently drops, renames or reshapes parameters would still
-pass. See ``assert_weight_update_matches_reference``.
-"""
+"""Deterministic checkpoint payloads for weight-transfer tests."""
 
 import contextlib
 import hashlib
-import json
 import math
 import shutil
 import tempfile
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -27,7 +16,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.base import WeightUpdateModelCase
+from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.cases import WeightUpdateModelCase
 
 
 def expand_fused_expert_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
@@ -88,40 +77,6 @@ def resize_expert_shape(name: str, shape: tuple[int, ...], intermediate_size: in
     if ".mlp.experts." in name and name.endswith(".down_proj.weight"):
         return (shape[0], intermediate_size)
     return shape
-
-
-# Keep packed lanes skipped until #18763 fixes cross-stream chunk loading.
-# HCCL's second update diverged in #18726 (38570793020, attempts 1/2) and
-# main daily runs 38186343470, 38325024027, 38657430708 and 38679145716;
-# unpacked passed. Remove the shared skip after validating the fix.
-PACKED_LANE_SKIP_REASON = (
-    "packed weight transfer is flaky: the receive buffer of a chunk is filled and "
-    "loaded on different NPU streams, so the layerwise reload can read tensors "
-    "retained from an earlier chunk without ordering against their allocation "
-    "(#18726; fix proposed in #18763)"
-)
-
-
-_ENGINES_REGISTERED = False
-
-
-def register_engines_once() -> None:
-    """Register the Ascend weight transfer engines exactly once per process.
-
-    ``register_engine()`` is not idempotent: the underlying factories raise
-    ``ValueError: Weight transfer trainer engine 'hccl' is already registered``
-    when a backend name is registered twice. Every test module that needs the
-    engines must therefore share this process-wide guard instead of keeping a
-    per-module flag, which would raise as soon as two modules run in the same
-    pytest session (e.g. the NPU IPC and HCCL suites).
-    """
-    global _ENGINES_REGISTERED
-    if _ENGINES_REGISTERED:
-        return
-    from vllm_ascend.distributed.weight_transfer import register_engine
-
-    register_engine()
-    _ENGINES_REGISTERED = True
 
 
 def _apply_hf_overrides(config, overrides: dict[str, Any]) -> None:
@@ -302,261 +257,9 @@ def packed_buffer_size_for(source: FixedRandomWeightSource) -> int:
     return max(max_tensor_bytes + 128 * 2**20, 2**30)
 
 
-FULL_DECODE_ONLY_CONFIG = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}'
-
-
-def _common_serve_args(
-    case: WeightUpdateModelCase,
-    *,
-    port: int,
-    gpu_memory_utilization: float,
-    tensor_parallel_size: int,
-) -> list[str]:
-    """Flags a live-update lane and its reference share.
-
-    Holding them in one place is what makes the two signatures comparable: the
-    reference may differ from the lane in exactly one way — it loads the payload
-    at startup instead of starting from dummy weights and receiving it live.
-    dtype, graph mode, NZ layout, memory budget, max length, tokenizer/executor
-    backend and config overrides all stay identical.
-    """
-    return [
-        "--dtype",
-        "bfloat16",
-        "--compilation-config",
-        FULL_DECODE_ONLY_CONFIG,
-        # Each NPU IPC trainer rank shares a chip with a rollout worker: the co-located
-        # trainer only gets the HBM it needs once the rollout engine sleeps, so
-        # the lane releases the engine with a level-2 sleep before every
-        # transfer. That requires the CaMem pool, and both builders enable it so
-        # the reference stays a plain startup load of the same payload under the
-        # very same allocation pool; the reference itself never sleeps.
-        "--enable-sleep-mode",
-        "--max-model-len",
-        "1024",
-        "--gpu-memory-utilization",
-        str(gpu_memory_utilization),
-        "--tensor-parallel-size",
-        str(tensor_parallel_size),
-        "--port",
-        str(port),
-        # Independent of case.trust_remote_code, which controls HF meta-model
-        # enumeration. Both vLLM servers allow repository config/tokenizer code;
-        # the case's checkpoint adapter supplies the runtime loader's names.
-        "--trust-remote-code",
-        "--additional-config",
-        '{"weight_nz_mode": 0}',
-        *case.server_args(),
-    ]
-
-
-def live_update_serve_args(
-    case: WeightUpdateModelCase,
-    *,
-    backend: str,
-    port: int,
-    gpu_memory_utilization: float,
-    tensor_parallel_size: int = 1,
-) -> list[str]:
-    """A lane that starts from dummy weights and receives W over ``backend``."""
-    return [
-        "--load-format",
-        "dummy",
-        "--weight-transfer-config",
-        json.dumps({"backend": backend}),
-        *_common_serve_args(
-            case,
-            port=port,
-            gpu_memory_utilization=gpu_memory_utilization,
-            tensor_parallel_size=tensor_parallel_size,
-        ),
-    ]
-
-
-def reference_serve_args(
-    case: WeightUpdateModelCase,
-    *,
-    port: int,
-    gpu_memory_utilization: float,
-    tensor_parallel_size: int = 1,
-) -> list[str]:
-    """A server that loads the transfer's payload at normal startup.
-
-    No ``--load-format dummy`` and no transfer backend: this server must be
-    correct on its own. It serves under the case's model name and tokenizer so
-    both servers answer to the same ``model`` argument in the client calls.
-    """
-    return [
-        "--tokenizer",
-        case.model,
-        "--served-model-name",
-        case.model,
-        *_common_serve_args(
-            case,
-            port=port,
-            gpu_memory_utilization=gpu_memory_utilization,
-            tensor_parallel_size=tensor_parallel_size,
-        ),
-    ]
-
-
 @contextlib.contextmanager
 def fixed_startup_checkpoint(source: FixedRandomWeightSource) -> Iterator[str]:
     """Expose the source's payload as a throwaway startup-load checkpoint."""
     with tempfile.TemporaryDirectory(prefix=f"fixed-startup-{source.case_id}-") as directory:
         source.write_checkpoint(directory)
         yield directory
-
-
-def wait_for_free_device_memory(
-    device_index: int,
-    gpu_memory_utilization: float,
-    *,
-    timeout: float = 300.0,
-    margin_bytes: int = 2 * 2**30,
-) -> None:
-    """Block until a card has enough free HBM for a server at this utilization.
-
-    The reference server and the live-update lane share one card, and a vLLM
-    server reserves ``gpu_memory_utilization`` of whatever HBM is free *when it
-    starts*. The previous server's process tree needs a moment to hand its HBM
-    back after it exits, so a lane started in that window dies in
-    ``init_device`` with "Free memory ... is less than desired GPU memory
-    utilization" — an environment race, not a transfer bug. Waiting here turns
-    that into a short pause. A device that reports no total (stubbed CPU
-    environments) is not gated at all.
-    """
-    deadline = time.monotonic() + timeout
-    while True:
-        free_bytes, total_bytes = torch.npu.mem_get_info(device_index)
-        if total_bytes <= 0:
-            return
-        if free_bytes >= gpu_memory_utilization * total_bytes + margin_bytes:
-            return
-        if time.monotonic() >= deadline:
-            raise RuntimeError(
-                f"device {device_index} did not free enough HBM for "
-                f"gpu_memory_utilization={gpu_memory_utilization}: "
-                f"{free_bytes / 2**30:.1f}/{total_bytes / 2**30:.1f} GiB free after {timeout:.0f}s"
-            )
-        time.sleep(5)
-
-
-# Reuse a startup reference only for the same model, memory, TP, logical device
-# and effective child-server environment. Transport and packing do not affect it.
-_REFERENCE_SIGNATURES: dict[
-    tuple[str, float, int, int, tuple[tuple[str, str], ...]], list[tuple[str, tuple[float, ...]]]
-] = {}
-
-
-def reference_signature(
-    source: FixedRandomWeightSource,
-    case: WeightUpdateModelCase,
-    *,
-    port: int,
-    gpu_memory_utilization: float,
-    tensor_parallel_size: int,
-    device_index: int,
-    env_dict: dict[str, str] | None = None,
-    server_host: str = "127.0.0.1",
-) -> list[tuple[str, tuple[float, ...]]]:
-    """Signature of a server that loaded the payload at normal startup.
-
-    This is the correctness oracle and it never runs the live-update path, so a
-    transfer that silently drops, renames, reshapes or recasts part of the
-    payload cannot make the comparison pass. Independent server processes also
-    keep the baseline free of whatever the live path does to the model (graph
-    capture, layerwise reload state, derived representations).
-    """
-    from tests.e2e.conftest import RemoteOpenAIServer
-
-    cache_key = (
-        case.id,
-        gpu_memory_utilization,
-        tensor_parallel_size,
-        device_index,
-        tuple(sorted((env_dict or {}).items())),
-    )
-    cached = _REFERENCE_SIGNATURES.get(cache_key)
-    if cached is not None:
-        return cached
-
-    for rank in range(tensor_parallel_size):
-        wait_for_free_device_memory(device_index + rank, gpu_memory_utilization)
-    with (
-        fixed_startup_checkpoint(source) as checkpoint_dir,
-        RemoteOpenAIServer(
-            checkpoint_dir,
-            vllm_serve_args=reference_serve_args(
-                case,
-                port=port,
-                gpu_memory_utilization=gpu_memory_utilization,
-                tensor_parallel_size=tensor_parallel_size,
-            ),
-            server_host=server_host,
-            server_port=port,
-            env_dict=env_dict,
-            auto_port=False,
-        ) as server,
-    ):
-        signature = generation_signature(server.get_client(), case.model)
-
-    _REFERENCE_SIGNATURES[cache_key] = signature
-    return signature
-
-
-PROMPTS = [
-    "The capital of France is",
-    "Explain why the sky is blue in one sentence:",
-]
-
-
-def generation_signature(client, model: str) -> list[tuple[str, tuple[float, ...]]]:
-    """Capture deterministic text and logprobs for exact reload comparison."""
-    signature = []
-    for prompt in PROMPTS:
-        response = client.completions.create(
-            model=model,
-            prompt=prompt,
-            max_tokens=8,
-            temperature=0,
-            logprobs=1,
-            seed=0,
-        )
-        choice = response.choices[0]
-        token_logprobs = tuple(choice.logprobs.token_logprobs or ())
-        assert token_logprobs, f"{model}: generation returned no token logprobs"
-        signature.append((choice.text, token_logprobs))
-    return signature
-
-
-def assert_weight_update_matches_reference(
-    dummy_signature,
-    reference_signature,
-    updated_signature,
-    reloaded_signature,
-    case: WeightUpdateModelCase,
-) -> None:
-    """The transfer has to reproduce normal startup loading of the same weights.
-
-    * ``dummy_signature`` proves the dummy-started lane can infer at all and that
-      the payload is observable, so a transfer that never ran cannot pass.
-    * ``updated_signature`` is the first live update: it must equal the
-      independent startup-load reference, which is what makes a dropped,
-      renamed, reshaped or recast parameter a failure instead of a
-      consistent-but-wrong result.
-    * ``reloaded_signature`` is a second update of the same payload: it must stay
-      on the reference too, which covers the layerwise reload lifecycle,
-      runtime/destructive representations, derived state and the graph-captured
-      storage of the first update.
-    """
-    assert dummy_signature != reference_signature, (
-        f"{case.id}: a dummy-loaded model already matches a normally loaded one; "
-        "the reference cannot observe the payload"
-    )
-    assert updated_signature == reference_signature, (
-        f"{case.id}: first live weight update does not match normal startup loading of the same weights"
-    )
-    assert reloaded_signature == reference_signature, (
-        f"{case.id}: repeated live reload changed model behavior away from normal startup loading"
-    )

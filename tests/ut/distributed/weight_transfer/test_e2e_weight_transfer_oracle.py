@@ -32,14 +32,17 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 import torch
 
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer import utils
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.deepseek import DEEPSEEK_CASES
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.glm import GLM_CASES
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.minimax import MINIMAX_CASES
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.qwen import QWEN_CASES
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.registry import MODEL_CASES, pytest_model_cases
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.runners import common
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.utils import (
+from tests.e2e.pull_request.two_card.rlhf.conftest import server_visible_devices
+from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common import oracle, weight_source
+from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.cases import (
+    DEEPSEEK_CASES,
+    GLM_CASES,
+    MINIMAX_CASES,
+    MODEL_CASES,
+    QWEN_CASES,
+    pytest_model_cases,
+)
+from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.oracle import (
     live_update_serve_args,
     reference_serve_args,
     reference_signature,
@@ -67,6 +70,11 @@ def test_model_matrix_separates_model_and_transport_coverage(backend):
         case, packed = parameter.values
         assert parameter.id == f"{'packed' if packed else 'unpacked'}-{case.id}"
         assert any(mark.name == "e2e_model" and mark.args == (case.model,) for mark in parameter.marks)
+        skip_marks = [mark for mark in parameter.marks if mark.name == "skip"]
+        assert len(skip_marks) == int(packed or case.skip_reason is not None)
+        if skip_marks:
+            assert case.id in skip_marks[0].kwargs["reason"]
+            assert ("#18763" if packed else case.skip_reason) in skip_marks[0].kwargs["reason"]
 
     for family in (QWEN_CASES, GLM_CASES, MINIMAX_CASES, DEEPSEEK_CASES):
         expected_family = [parameter for parameter in parameters if parameter.values[0] in family]
@@ -242,13 +250,13 @@ def test_checkpoint_source_buffer_metadata(
 )
 def test_packed_buffer_size_uses_largest_tensor_bytes(dtype, tensor_bytes, expected_capacity):
     """Exercise the 1-GiB floor and growth without allocating large tensors."""
-    source = MagicMock(spec=utils.FixedRandomWeightSource)
+    source = MagicMock(spec=weight_source.FixedRandomWeightSource)
     source.metadata.return_value = [
-        utils.ParamMeta("small_before", torch.bfloat16, (8, 16)),
-        utils.ParamMeta("largest", dtype, (1, tensor_bytes // dtype.itemsize)),
-        utils.ParamMeta("small_after", torch.float32, (8,)),
+        weight_source.ParamMeta("small_before", torch.bfloat16, (8, 16)),
+        weight_source.ParamMeta("largest", dtype, (1, tensor_bytes // dtype.itemsize)),
+        weight_source.ParamMeta("small_after", torch.float32, (8,)),
     ]
-    assert utils.packed_buffer_size_for(source) == expected_capacity
+    assert weight_source.packed_buffer_size_for(source) == expected_capacity
     source.metadata.assert_called_once_with()
     source.__iter__.assert_not_called()
 
@@ -260,13 +268,13 @@ def test_servers_share_environment_and_wait_for_all_devices(backend, tp):
     reference, dummy = ["startup"], ["dummy"]
     env = {"ASCEND_RT_VISIBLE_DEVICES": "6,7" if tp == 2 else "6"}
     with (
-        patch.object(common, "reference_signature", return_value=reference) as startup,
-        patch.object(common, "wait_for_free_device_memory") as wait,
-        patch.object(common, "RemoteOpenAIServer") as server_factory,
-        patch.object(common, "generation_signature", return_value=dummy),
-        patch.object(common, "get_open_port", return_value=8123),
+        patch.object(oracle, "reference_signature", return_value=reference) as startup,
+        patch.object(oracle, "wait_for_free_device_memory") as wait,
+        patch("tests.e2e.conftest.RemoteOpenAIServer") as server_factory,
+        patch.object(oracle, "generation_signature", return_value=dummy) as generate,
+        patch.object(oracle, "get_open_port", return_value=8123) as get_port,
     ):
-        with common.weight_transfer_servers(
+        with oracle.weight_transfer_servers(
             source,
             case,
             backend=backend,
@@ -278,6 +286,8 @@ def test_servers_share_environment_and_wait_for_all_devices(backend, tp):
             assert server is server_factory.return_value.__enter__.return_value
             assert actual_reference == reference
             assert actual_dummy == dummy
+            generate.assert_called_once_with(server.get_client(), case.model)
+            assert get_port.call_count == 2
             startup.assert_called_once_with(
                 source,
                 case,
@@ -307,7 +317,7 @@ def test_server_visibility_maps_parent_logical_devices(monkeypatch, visible, dev
         monkeypatch.delenv("ASCEND_RT_VISIBLE_DEVICES", raising=False)
     else:
         monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", visible)
-    assert common.server_visible_devices(device_index, world_size) == expected
+    assert server_visible_devices(device_index, world_size) == expected
 
 
 @pytest.mark.parametrize(
@@ -317,7 +327,7 @@ def test_server_visibility_maps_parent_logical_devices(monkeypatch, visible, dev
 def test_server_visibility_rejects_invalid_selection(monkeypatch, visible, device_index, world_size):
     monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", visible)
     with pytest.raises(ValueError):
-        common.server_visible_devices(device_index, world_size)
+        server_visible_devices(device_index, world_size)
 
 
 @pytest.mark.parametrize(
@@ -341,11 +351,11 @@ def test_reference_cache_reuses_only_matching_conditions(memory: float, device: 
         )
 
     with (
-        patch.object(utils, "_REFERENCE_SIGNATURES", {}),
+        patch.object(oracle, "_REFERENCE_SIGNATURES", {}),
         patch("tests.e2e.conftest.RemoteOpenAIServer") as server_factory,
-        patch.object(utils, "fixed_startup_checkpoint", MagicMock()),
-        patch.object(utils, "wait_for_free_device_memory") as wait,
-        patch.object(utils, "generation_signature", side_effect=[[("first", ())], [("second", ())]]) as generate,
+        patch.object(oracle, "fixed_startup_checkpoint", MagicMock()),
+        patch.object(oracle, "wait_for_free_device_memory") as wait,
+        patch.object(oracle, "generation_signature", side_effect=[[("first", ())], [("second", ())]]) as generate,
     ):
         env = {"ASCEND_RT_VISIBLE_DEVICES": "0,1"}
         first = measure(PORT, GPU_MEMORY_UTILIZATION, 0, env)
@@ -360,3 +370,23 @@ def test_reference_cache_reuses_only_matching_conditions(memory: float, device: 
     assert wait.call_args_list == [call(0, GPU_MEMORY_UTILIZATION), call(1, GPU_MEMORY_UTILIZATION)] + [
         call(device + rank, memory) for rank in range(2)
     ]
+
+
+@pytest.mark.parametrize("invalid", [None, "dummy", "first-update", "second-update", "missing-update"])
+def test_oracle_requires_observable_payload_and_every_update(invalid):
+    reference = [("reference", (0.5,))]
+    dummy = [("dummy", (0.1,))]
+    updates = [reference] * oracle.UPDATE_ROUNDS
+    if invalid == "dummy":
+        dummy = reference
+    elif invalid == "first-update":
+        updates[0] = dummy
+    elif invalid == "second-update":
+        updates[-1] = dummy
+    elif invalid == "missing-update":
+        updates.pop()
+    if invalid is None:
+        oracle.assert_weight_update_matches_reference(dummy, reference, updates, CASE)
+    else:
+        with pytest.raises(AssertionError):
+            oracle.assert_weight_update_matches_reference(dummy, reference, updates, CASE)

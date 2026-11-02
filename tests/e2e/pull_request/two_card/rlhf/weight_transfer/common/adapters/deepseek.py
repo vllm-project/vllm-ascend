@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""DeepSeek model configurations and checkpoint-name conversion."""
+"""DeepSeek checkpoint-name conversion."""
 
 import regex as re
-
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.base import WeightUpdateModelCase
 
 _DSV4_SELF_ATTN_RENAMES = (
     # Descriptive HF names -> the compact names the checkpoint/loader expect.
@@ -80,28 +78,3 @@ def deepseek_v4_checkpoint_name(name: str) -> str:
         if name.endswith(old):
             return name[: -len(old)] + new
     return name
-
-
-DEEPSEEK_V4_CASE = WeightUpdateModelCase(
-    id="deepseek-v4-flash-bf16-derived-gate",
-    model="kylesayrs/DeepSeek-V4-Flash-bf16",
-    hf_overrides={
-        "num_hidden_layers": 4,
-        "n_routed_experts": 8,
-    },
-    checkpoint_name_map=deepseek_v4_checkpoint_name,
-    # The HF ``from_config`` model sizes every expert MLP by
-    # ``intermediate_size`` (18432), while the checkpoint - and therefore the
-    # served model - use ``moe_intermediate_size`` (2048); verified against
-    # the real safetensors header of ``experts.0.w1.weight`` == [2048, 4096].
-    expert_intermediate_size=2048,
-    extra_server_args=("--tokenizer-mode", "deepseek_v4"),
-    skip_reason=(
-        "DeepSeek-V4-Flash is skipped in both lanes for now: its reload needs "
-        "the attention-sink fix that lives in #16355, and the two-card HCCL "
-        "lane has an open problem with the model as well"
-    ),
-)
-
-
-DEEPSEEK_CASES = (DEEPSEEK_V4_CASE,)

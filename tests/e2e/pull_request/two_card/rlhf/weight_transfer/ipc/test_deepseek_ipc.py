@@ -5,10 +5,12 @@
 
 import pytest
 
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.base import WeightUpdateModelCase
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.deepseek import DEEPSEEK_CASES
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.models.registry import pytest_model_cases
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer.runners.npu_ipc import (
+from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.cases import (
+    DEEPSEEK_CASES,
+    WeightUpdateModelCase,
+    pytest_model_cases,
+)
+from tests.e2e.pull_request.two_card.rlhf.weight_transfer.ipc.runner import (
     run_npu_ipc_weight_transfer_transaction,
 )
 

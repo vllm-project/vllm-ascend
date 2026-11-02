@@ -7,7 +7,7 @@ from unittest.mock import patch
 import torch
 from transformers import PretrainedConfig
 
-from tests.e2e.pull_request.two_card.rlhf.common.weight_transfer import utils
+from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common import weight_source
 
 
 def checkpoint_source(model, case):
@@ -23,10 +23,10 @@ def checkpoint_source(model, case):
         PretrainedConfig(**{case.meta_config_attribute: meta_config}) if case.meta_config_attribute else meta_config
     )
     with (
-        patch.object(utils.AutoConfig, "from_pretrained", return_value=config),
-        patch.object(utils.AutoModelForCausalLM, "from_config", return_value=model),
+        patch.object(weight_source.AutoConfig, "from_pretrained", return_value=config),
+        patch.object(weight_source.AutoModelForCausalLM, "from_config", return_value=model),
     ):
-        source = utils.FixedRandomWeightSource(case, torch.device("cpu"))
+        source = weight_source.FixedRandomWeightSource(case, torch.device("cpu"))
     assert source._num_experts == 8
     return source
 
