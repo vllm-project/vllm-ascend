@@ -83,7 +83,7 @@ class _NpuMemoryMonitor:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self.peak_total_mb = 0
         self.peak_per_npu_mb: dict[str, int] = {}
-        self.sampling_error = None
+        self.sampling_error: str | None = None
 
     @staticmethod
     def _sample() -> dict[str, int]:
