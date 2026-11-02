@@ -19,6 +19,22 @@ builders = pcp_builders
 
 
 class TestSharedPCPMetadata:
+    def test_build_rebinds_shared_caches_for_each_invocation(self, builders, monkeypatch):
+        builder = builders(specialized=True)["long_kv"]._global_builder
+        prepare = Mock(wraps=builder._build_batch_metadata)
+        monkeypatch.setattr(builder, "_build_batch_metadata", prepare)
+        batches = []
+        for _ in range(2):
+            common = _batch(2, 0, "prefill").local
+            group_cache: dict[str, Any] = {}
+            batch_cache: dict[str, Any] = {}
+            builder.build(0, common, common_v41_metadata=group_cache, common_v41_batch_metadata=batch_cache)
+            assert builder.common_v41_metadata is group_cache
+            assert builder.common_v41_batch_metadata is batch_cache
+            batches.append(batch_cache["batch"])
+        assert prepare.call_count == 2
+        assert batches[0] is not batches[1]
+
     @pytest.mark.parametrize("kind", ["swa", "long_kv", "index_k", "compressor_state"])
     def test_request_metadata_accepts_optional_common_fields(self, builders, kind):
         owner = builders(specialized=True)[kind]

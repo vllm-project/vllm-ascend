@@ -41,7 +41,7 @@ def get_v41_cp_classes():
 class _ReplicatedCacheMetadataBuilder(AscendDSAV41MetadataBuilder):
     """Keep global cache metadata independent from local query buffers."""
 
-    _local_metadata_builder_cls = AscendDSAV41MetadataBuilder
+    _global_metadata_builder_cls = AscendDSAV41MetadataBuilder
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device, *, build_local_compressor_metadata=False):
         super().__init__(
@@ -51,7 +51,7 @@ class _ReplicatedCacheMetadataBuilder(AscendDSAV41MetadataBuilder):
             device,
             build_compressor_metadata=build_local_compressor_metadata,
         )
-        self._global_builder = self._local_metadata_builder_cls(
+        self._global_builder = self._global_metadata_builder_cls(
             kv_cache_spec, layer_names, vllm_config, device, build_query_metadata=False
         )
 
@@ -480,35 +480,35 @@ class AscendDSAV41PCPStateMetadataBuilder(
     AscendDSAV41PCPMetadataBuilder,
     v41.AscendDSAV41StateMetadataBuilder,
 ):
-    _local_metadata_builder_cls = v41.AscendDSAV41StateMetadataBuilder
+    _global_metadata_builder_cls = v41.AscendDSAV41StateMetadataBuilder
 
 
 class AscendDSAV41PCPSWAMetadataBuilder(
     AscendDSAV41PCPMetadataBuilder,
     v41.AscendDSAV41SWAMetadataBuilder,
 ):
-    _local_metadata_builder_cls = v41.AscendDSAV41SWAMetadataBuilder
+    _global_metadata_builder_cls = v41.AscendDSAV41SWAMetadataBuilder
 
 
 class AscendDSAV41PCPAttentionMetadataBuilder(
     AscendDSAV41PCPMetadataBuilder,
     AscendDSAV41AttentionMetadataBuilder,
 ):
-    _local_metadata_builder_cls = AscendDSAV41AttentionMetadataBuilder
+    _global_metadata_builder_cls = AscendDSAV41AttentionMetadataBuilder
 
 
 class AscendDSAV41PCPIndexerMetadataBuilder(
     AscendDSAV41PCPMetadataBuilder,
     AscendDSAV41IndexerMetadataBuilder,
 ):
-    _local_metadata_builder_cls = AscendDSAV41IndexerMetadataBuilder
+    _global_metadata_builder_cls = AscendDSAV41IndexerMetadataBuilder
 
 
 class AscendDSAV41PCPFoldedIndexMetadataBuilder(
     AscendDSAV41PCPMetadataBuilder,
     AscendDSAV41FoldedIndexMetadataBuilder,
 ):
-    _local_metadata_builder_cls = AscendDSAV41FoldedIndexMetadataBuilder
+    _global_metadata_builder_cls = AscendDSAV41FoldedIndexMetadataBuilder
 
 
 class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):

@@ -846,6 +846,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         max_tokens = getattr(vllm_config.scheduler_config, "max_num_batched_tokens", 4096)
         max_reqs = getattr(vllm_config.scheduler_config, "max_num_seqs", 256)
+        self.common_v41_metadata: dict[str, Any] = {}
+        self.common_v41_batch_metadata: dict[str, Any] = {}
         self._supports_device_ops = getattr(device, "type", "cpu") != "cpu"
         # Allocate both decode and prefill owners before graph capture.
         self._build_query_metadata = build_query_metadata
@@ -1042,7 +1044,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
     def _new_req_metadata(
         self,
         common,
-        coordinates,
         num_actual_reqs: int,
     ) -> AscendDSAV41Metadata:
         """Keep the existing metadata interface without preparing unused work"""
@@ -1050,7 +1051,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         num_tokens = common.num_input_tokens
         is_state = self._cache_kind == "compressor_state"
 
-        values = dict(coordinates)
+        values = dict(self.common_v41_batch_metadata["batch"])
         values["cache_seq_lens"] = values["seq_lens"]
 
         return AscendDSAV41Metadata(
@@ -1078,41 +1079,38 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._device_metadata_tasks = ()
         common = common_attn_metadata
         num_reqs = int(getattr(common, "num_reqs", common.seq_lens.shape[0]))
-        num_actual_reqs = min(int(kwargs.get("num_actual_reqs", num_reqs)), num_reqs)
+        num_actual_reqs = min(int(kwargs.pop("num_actual_reqs", num_reqs)), num_reqs)
         num_input_tokens = int(getattr(common, "num_input_tokens", common.slot_mapping.shape[0]))
         shared = kwargs.get("common_v41_metadata")
-        if shared is None:
-            shared = {}
+        self.common_v41_metadata = {} if shared is None else shared
         batch_shared = kwargs.get("common_v41_batch_metadata")
-        if batch_shared is None:
-            batch_shared = shared
-        # Batch coordinates are shared; physical addresses remain group-local.
-        coordinates = batch_shared.get("batch")
-        if coordinates is None:
-            coordinates = self._build_batch_metadata(common, num_reqs, num_actual_reqs, num_input_tokens)
-            batch_shared["batch"] = coordinates
-        req = self._new_req_metadata(common, coordinates, num_actual_reqs)
-        return self.build_req_metadata(common, req, shared, batch_shared, **kwargs)
+        self.common_v41_batch_metadata = self.common_v41_metadata if batch_shared is None else batch_shared
+        # Cache references are rebound for every build. Physical addressing is
+        # group-local; compatible request coordinates span cache groups.
+        if "batch" not in self.common_v41_batch_metadata:
+            self.common_v41_batch_metadata["batch"] = self._build_batch_metadata(
+                common, num_reqs, num_actual_reqs, num_input_tokens
+            )
+        return self.build_req_metadata(common, num_actual_reqs, **kwargs)
 
     def build_req_metadata(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
+        self, common, num_actual_reqs: int, *, build_query: bool = True, update_cache: bool = True, **kwargs
     ) -> AscendDSAV41Metadata:
         """Preserve the generic non-PCP and legacy CP metadata contract."""
-        self._prepare_cache_lengths(common, req, shared, batch_shared, **kwargs)
-        self._build_cache_slots(common, req, shared, batch_shared, **kwargs)
-        self._prepare_rope(common, req, shared, batch_shared, **kwargs)
-        max_ori_seq_len = self._prepare_query_inputs(common, req, shared, batch_shared, **kwargs)
+        req = self._new_req_metadata(common, num_actual_reqs)
+        self._prepare_cache_lengths(common, req, **kwargs)
+        self._build_cache_slots(common, req, **kwargs)
+        self._prepare_rope(common, req, **kwargs)
+        max_ori_seq_len = self._prepare_query_inputs(common, req, **kwargs)
         if self._build_query_metadata:
             AscendDSAV41AttentionMetadataBuilder._build_smla_metadata(
-                self, common, req, shared, batch_shared, max_ori_seq_len=max_ori_seq_len, **kwargs
+                self, common, req, max_ori_seq_len=max_ori_seq_len, **kwargs
             )
-            AscendDSAV41IndexerMetadataBuilder._build_qli_metadata(self, common, req, shared, batch_shared, **kwargs)
-        AscendDSAV41StateMetadataBuilder._build_compressor_cache(self, common, req, shared, batch_shared, **kwargs)
+            AscendDSAV41IndexerMetadataBuilder._build_qli_metadata(self, common, req, **kwargs)
+        AscendDSAV41StateMetadataBuilder._build_compressor_cache(self, common, req, **kwargs)
         return req
 
-    def _build_cache_slots(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
-    ) -> None:
+    def _build_cache_slots(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
         # SWA uses original-token coordinates; circular state has no token slots.
         # Long KV and index K are addressed in completed compression groups.
         compressed = req.cache_kind in {"long_kv", "index_k"}
@@ -1127,8 +1125,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             # group owns a distinct mapping buffer.
             slot_key = f"slot:coordinates:c{req.compress_ratio}:b{req.storage_block_size}"
             flat_slot_key = f"slot:flat:c{req.compress_ratio}:b{req.storage_block_size}"
-            prepared_slots = shared.get(slot_key)
-            prepared_flat_slots = shared.get(flat_slot_key)
+            prepared_slots = self.common_v41_metadata.get(slot_key)
+            prepared_flat_slots = self.common_v41_metadata.get(flat_slot_key)
             if prepared_slots is None or prepared_flat_slots is None:
                 active_slots = common.slot_mapping[: req.num_input_tokens]
                 if self._uses_a5_packed_cache and active_slots.device.type == "npu":
@@ -1172,28 +1170,26 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     self._flat_slot_mapping[: req.num_input_tokens].copy_(torch.where(valid, active_slots, -1))
                     prepared_slots = self._slot_mapping_2d[: req.num_input_tokens]
                     prepared_flat_slots = self._flat_slot_mapping[: req.num_input_tokens]
-                shared[slot_key] = prepared_slots
-                shared[flat_slot_key] = prepared_flat_slots
+                self.common_v41_metadata[slot_key] = prepared_slots
+                self.common_v41_metadata[flat_slot_key] = prepared_flat_slots
             req.slot_mapping = prepared_slots
             req.flat_slot_mapping = prepared_flat_slots
 
-    def _prepare_cache_lengths(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
-    ) -> None:
+    def _prepare_cache_lengths(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
         compressed = req.cache_kind in {"long_kv", "index_k"}
         full_graph_mode = bool(kwargs.get("full_graph_mode", False))
         plane_ratio = req.compress_ratio if compressed else 1
         req.cache_seq_lens = req.seq_lens
         req.cmp_residual = None
         if compressed and req.compress_ratio == 2:
-            compressed_lengths = batch_shared.get("lengths:c2")
+            compressed_lengths = self.common_v41_batch_metadata.get("lengths:c2")
             if compressed_lengths is None:
                 torch.div(
                     req.seq_lens, req.compress_ratio, rounding_mode="floor", out=self._cache_seq_lens[: req.num_reqs]
                 )
                 torch.remainder(req.seq_lens, req.compress_ratio, out=self._cmp_residual[: req.num_reqs])
                 compressed_lengths = (self._cache_seq_lens[: req.num_reqs], self._cmp_residual[: req.num_reqs])
-                batch_shared["lengths:c2"] = compressed_lengths
+                self.common_v41_batch_metadata["lengths:c2"] = compressed_lengths
             req.cache_seq_lens, req.cmp_residual = compressed_lengths
         # Capture the indexer path even when a dummy C2 decode has no
         # completed compression group. Device cache lengths remain exact.
@@ -1201,23 +1197,19 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             req.max_cache_seq_len = max(plane_ratio, req.max_cache_seq_len)
         req.max_cache_seq_len //= plane_ratio
 
-    def _prepare_rope(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
-    ) -> None:
+    def _prepare_rope(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
         full_graph_mode = bool(kwargs.get("full_graph_mode", False))
         req.cos = req.sin = None
         if req.cache_kind == "swa" and req.positions is not None:
             rope = kwargs.get("rope_views")
             if rope is None:
-                rope = batch_shared.get("rope")
+                rope = self.common_v41_batch_metadata.get("rope")
             if rope is None:
                 rope = get_cos_and_sin_dsa(req.positions, use_cache=(req.num_prefills == 0 or full_graph_mode))
-                batch_shared["rope"] = rope
+                self.common_v41_batch_metadata["rope"] = rope
             req.cos, req.sin = rope
 
-    def _prepare_query_inputs(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
-    ) -> int:
+    def _prepare_query_inputs(self, common, req: AscendDSAV41Metadata, **kwargs) -> int:
         window_size = self._window_size
         req.ori_sparse_indices = kwargs.get("ori_sparse_indices")
         req.ori_topk_length = None
@@ -1276,7 +1268,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             and req.positions is not None
         ):
             cache_key = f"a5-causal-swa:w{window_size}"
-            cached_window = batch_shared.get(cache_key)
+            cached_window = self.common_v41_batch_metadata.get(cache_key)
             if cached_window is None:
                 assert self._device_backend is not None
                 cached_window = self._device_backend.build_window_indices(
@@ -1285,7 +1277,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     indices_output=self._a5_causal_swa_indices[: req.num_input_tokens],
                     lengths_output=self._a5_causal_swa_lengths[: req.num_input_tokens],
                 )
-                batch_shared[cache_key] = cached_window
+                self.common_v41_batch_metadata[cache_key] = cached_window
             req.ori_sparse_indices, req.ori_topk_length = cached_window
         if req.ori_topk_length is None and req.ori_sparse_indices is not None and noncausal:
             req.ori_topk_length = (req.ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
@@ -1329,15 +1321,14 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
     """State cache: build C2 controls only for the cache-update owner."""
 
     def build_req_metadata(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
+        self, common, num_actual_reqs: int, *, build_query: bool = True, update_cache: bool = True, **kwargs
     ) -> AscendDSAV41Metadata:
-        if kwargs.get("update_cache", True):
-            self._build_compressor_cache(common, req, shared, batch_shared, **kwargs)
+        req = self._new_req_metadata(common, num_actual_reqs)
+        if update_cache:
+            self._build_compressor_cache(common, req, **kwargs)
         return req
 
-    def _build_compressor_cache(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
-    ) -> None:
+    def _build_compressor_cache(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
         req.c2_ring_metadata = None
         req.c2_complete_mask = None
         req.c2_source_positions = None
@@ -1433,7 +1424,7 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
                     )
 
             self._publish_task(
-                shared,
+                self.common_v41_metadata,
                 "c2:compressor",
                 self._c2_complete_mask,
                 DeviceMetadataStage.COMPRESSOR,
@@ -1456,32 +1447,27 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
     """
 
     def build_req_metadata(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
+        self, common, num_actual_reqs: int, *, build_query: bool = True, update_cache: bool = True, **kwargs
     ) -> AscendDSAV41Metadata:
-        self._prepare_cache_lengths(common, req, shared, batch_shared, **kwargs)
-        if self._build_query_metadata and kwargs.get("build_query", True):
-            self._build_attention_query(common, req, shared, batch_shared, **kwargs)
-        if kwargs.get("update_cache", True):
-            self._build_compressed_cache(common, req, shared, batch_shared, **kwargs)
+        req = self._new_req_metadata(common, num_actual_reqs)
+        self._prepare_cache_lengths(common, req, **kwargs)
+        if self._build_query_metadata and build_query:
+            self._build_attention_query(common, req, **kwargs)
+        if update_cache:
+            self._build_compressed_cache(common, req, **kwargs)
         return req
 
-    def _build_attention_query(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
-    ) -> None:
-        max_ori_seq_len = self._prepare_query_inputs(common, req, shared, batch_shared, **kwargs)
-        self._build_smla_metadata(common, req, shared, batch_shared, max_ori_seq_len=max_ori_seq_len, **kwargs)
+    def _build_attention_query(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
+        max_ori_seq_len = self._prepare_query_inputs(common, req, **kwargs)
+        self._build_smla_metadata(common, req, max_ori_seq_len=max_ori_seq_len, **kwargs)
 
-    def _build_compressed_cache(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
-    ) -> None:
-        self._build_cache_slots(common, req, shared, batch_shared, **kwargs)
+    def _build_compressed_cache(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
+        self._build_cache_slots(common, req, **kwargs)
 
     def _build_smla_metadata(
         self,
         common,
         req: AscendDSAV41Metadata,
-        shared: dict[str, Any],
-        batch_shared: dict[str, Any],
         max_ori_seq_len: int,
         **kwargs,
     ) -> None:
@@ -1526,7 +1512,7 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                 self._a5_smla_metadata.copy_(value)
 
             req.smla_metadata = self._publish_task(
-                batch_shared,
+                self.common_v41_batch_metadata,
                 "smla:a5",
                 self._a5_smla_metadata,
                 DeviceMetadataStage.ATTENTION,
@@ -1571,7 +1557,7 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                 self._smla_metadata.copy_(value)
 
             req.smla_metadata = self._publish_task(
-                batch_shared,
+                self.common_v41_batch_metadata,
                 f"smla:c{operator_ratio}",
                 self._smla_metadata,
                 DeviceMetadataStage.ATTENTION,
@@ -1583,46 +1569,42 @@ class AscendDSAV41SWAMetadataBuilder(AscendDSAV41AttentionMetadataBuilder):
     """SWA: local window queries and original-token cache writes."""
 
     def build_req_metadata(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
+        self, common, num_actual_reqs: int, *, build_query: bool = True, update_cache: bool = True, **kwargs
     ) -> AscendDSAV41Metadata:
-        build_query = self._build_query_metadata and bool(kwargs.get("build_query", True))
-        update_cache = bool(kwargs.get("update_cache", True))
+        req = self._new_req_metadata(common, num_actual_reqs)
+        build_query = self._build_query_metadata and bool(build_query)
+        update_cache = bool(update_cache)
         if build_query or update_cache:
-            self._prepare_rope(common, req, shared, batch_shared, **kwargs)
+            self._prepare_rope(common, req, **kwargs)
         if build_query:
-            self._build_attention_query(common, req, shared, batch_shared, **kwargs)
+            self._build_attention_query(common, req, **kwargs)
         if update_cache:
-            self._build_swa_cache(common, req, shared, batch_shared, **kwargs)
+            self._build_swa_cache(common, req, **kwargs)
         return req
 
-    def _build_swa_cache(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
-    ) -> None:
-        self._build_cache_slots(common, req, shared, batch_shared, **kwargs)
+    def _build_swa_cache(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
+        self._build_cache_slots(common, req, **kwargs)
 
 
 class AscendDSAV41IndexerMetadataBuilder(AscendDSAV41AttentionMetadataBuilder):
     """Indexer: QLI queries and compressed index-cache writes, without SMLA."""
 
     def build_req_metadata(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
+        self, common, num_actual_reqs: int, *, build_query: bool = True, update_cache: bool = True, **kwargs
     ) -> AscendDSAV41Metadata:
-        self._prepare_cache_lengths(common, req, shared, batch_shared, **kwargs)
-        if self._build_query_metadata and kwargs.get("build_query", True):
-            self._build_indexer_query(common, req, shared, batch_shared, **kwargs)
-        if kwargs.get("update_cache", True):
-            self._build_compressed_cache(common, req, shared, batch_shared, **kwargs)
+        req = self._new_req_metadata(common, num_actual_reqs)
+        self._prepare_cache_lengths(common, req, **kwargs)
+        if self._build_query_metadata and build_query:
+            self._build_indexer_query(common, req, **kwargs)
+        if update_cache:
+            self._build_compressed_cache(common, req, **kwargs)
         return req
 
-    def _build_indexer_query(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
-    ) -> None:
-        self._prepare_query_inputs(common, req, shared, batch_shared, **kwargs)
-        self._build_qli_metadata(common, req, shared, batch_shared, **kwargs)
+    def _build_indexer_query(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
+        self._prepare_query_inputs(common, req, **kwargs)
+        self._build_qli_metadata(common, req, **kwargs)
 
-    def _build_qli_metadata(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
-    ) -> None:
+    def _build_qli_metadata(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
         text_config = self.vllm_config.model_config.hf_text_config
         index_topk = int(_config_value(text_config, "index_topk"))
         if self._supports_device_ops and req.cache_kind == "index_k":
@@ -1688,7 +1670,7 @@ class AscendDSAV41IndexerMetadataBuilder(AscendDSAV41AttentionMetadataBuilder):
                     self._qli_metadata.copy_(value)
 
             req.qli_metadata = self._publish_task(
-                batch_shared,
+                self.common_v41_batch_metadata,
                 f"qli:c{req.compress_ratio}",
                 self._qli_metadata,
                 DeviceMetadataStage.INDEXER,
@@ -1700,8 +1682,9 @@ class AscendDSAV41FoldedIndexMetadataBuilder(AscendDSAV41MetadataBuilder):
     """The packed indexer accesses this resource without query or write metadata."""
 
     def build_req_metadata(
-        self, common, req: AscendDSAV41Metadata, shared: dict[str, Any], batch_shared: dict[str, Any], **kwargs
+        self, common, num_actual_reqs: int, *, build_query: bool = True, update_cache: bool = True, **kwargs
     ) -> AscendDSAV41Metadata:
+        req = self._new_req_metadata(common, num_actual_reqs)
         return req
 
 
