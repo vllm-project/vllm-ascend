@@ -261,14 +261,13 @@ def test_p_eagle_acceptance(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 @pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [7])
-@pytest.mark.skip(reason="vLLM #57934: Model Runner V1 rejects DFlash candidate-head, remove it after drop MRV1")
 def test_dflash2_acceptance(
     method: str,
     num_speculative_tokens: int,
 ):
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 
