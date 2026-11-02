@@ -601,7 +601,9 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         # fused result can contain NaNs in Q/K. The draft model has only one
         # QSA layer, so keep the target-model fusion and use the graph-safe
         # decomposition for MTP.
-        if getattr(get_forward_context(), "is_draft_model", False):
+        # ForwardContext has no draft-model flag. The layer name is fixed when
+        # the target or MTP model is built and remains stable during graph replay.
+        if self.layer_name.startswith("mtp."):
             return super()._project_qkv_gate(qkv, positions)
         if not self._main_fused_norm_rope_eligible(qkv, positions):
             raise ValueError("QSA main-attention fused norm+RoPE ABI is not satisfied")
