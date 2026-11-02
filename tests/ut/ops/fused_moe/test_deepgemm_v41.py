@@ -7,6 +7,7 @@ import sys
 import weakref
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,7 +20,8 @@ def context():
         "deepgemm_v41_backend",
         Path(__file__).resolve().parents[4] / "vllm_ascend/ops/fused_moe/deepgemm_v41.py",
     )
-    backend = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    backend: Any = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(backend)
     config = SimpleNamespace(
         additional_config={"deepgemm_mega_moe": True},

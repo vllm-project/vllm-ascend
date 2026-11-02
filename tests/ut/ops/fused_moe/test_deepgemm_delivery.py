@@ -29,6 +29,7 @@ def test_build_entrypoint_does_not_shadow_stdlib(tmp_path):
 
 def load_file(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
