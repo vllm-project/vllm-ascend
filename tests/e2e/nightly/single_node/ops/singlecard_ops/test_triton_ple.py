@@ -4,28 +4,33 @@
 
 from itertools import accumulate
 
+import pytest
 import torch
 import torch_npu  # noqa: F401
 from vllm.models.qwen4_exp.common.ops.ple import ple_conv as upstream_ple_conv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.models.qwen4_exp import ple as ple_adapter
 from vllm_ascend.models.qwen4_exp.ple import _ple_conv_ascend, patch_upstream_ple_short_conv
 
 
-def test_model_dispatch_uses_upstream_decode_and_spec(monkeypatch):
+@pytest.mark.parametrize("a5", [False, True])
+def test_model_dispatch_by_device(monkeypatch, a5):
     from vllm.models.qwen4_exp.amd import ple_layer
 
     patch_upstream_ple_short_conv()
     assert ple_layer.ple_conv is _ple_conv_ascend
     calls = []
-    monkeypatch.setattr(ple_adapter, "ple_conv_prefill", lambda *args, **kwargs: calls.append("prefill"))
+    monkeypatch.setattr(ple_adapter, "is_950", lambda: a5)
+    monkeypatch.setattr(ple_adapter, "ple_conv_prefill", lambda *args, **kwargs: calls.append("ascend_prefill"))
     monkeypatch.setattr(ple_adapter, "upstream_ple_conv", lambda *args, **kwargs: calls.append(kwargs["mode"]))
     for mode in ("prefill", "decode", "spec"):
         ple_layer.ple_conv(mode=mode)
-    assert calls == ["prefill", "decode", "spec"]
+    assert calls == (["ascend_prefill", "decode", "spec"] if a5 else ["prefill", "decode", "spec"])
 
 
+@pytest.mark.skipif(not is_950(), reason="The optimized prefill kernel requires A5 UB capacity")
 def test_modes_and_token_mapping():
     torch.manual_seed(29)
     for mode in ("decode", "spec", "prefill"):
@@ -78,17 +83,18 @@ def test_modes_and_token_mapping():
                 upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state)
                 _ple_conv_ascend(**kwargs, residual=actual, conv_state=actual_state)
                 torch.npu.synchronize()
-                exact = (expected == actual).float().mean().item()
+                exact = torch.equal(expected, actual)
                 max_abs = (expected.float() - actual.float()).abs().max().item()
                 state_exact = torch.equal(expected_state, actual_state)
                 print(
                     f"CASE mode={mode} dtype={dtype} outer={outer_enabled} "
-                    f"exact={exact:.6f} max_abs={max_abs:.6f} state_exact={state_exact}",
+                    f"exact={exact} max_abs={max_abs:.6f} state_exact={state_exact}",
                     flush=True,
                 )
-                assert exact == 1.0 and state_exact
+                assert exact and state_exact
 
 
+@pytest.mark.skipif(not is_950(), reason="The optimized prefill kernel requires A5 UB capacity")
 def test_prefill_one_request():
     torch.manual_seed(37)
     for dtype in (torch.bfloat16, torch.float16):
@@ -124,18 +130,19 @@ def test_prefill_one_request():
                         upstream_ple_conv(**kwargs, residual=expected_output, conv_state=expected_state)
                         _ple_conv_ascend(**kwargs, residual=actual_output, conv_state=actual_state)
                         torch.npu.synchronize()
-                        exact = (expected_output == actual_output).float().mean().item()
+                        exact = torch.equal(expected_output, actual_output)
                         max_abs = (expected_output.float() - actual_output.float()).abs().max().item()
                         state_exact = torch.equal(expected_state, actual_state)
                         print(
                             f"PREFILL dtype={dtype} T={tokens} initial={initialized} null={null_slot} "
-                            f"outer={outer_enabled} exact={exact:.6f} max_abs={max_abs:.6f} "
+                            f"outer={outer_enabled} exact={exact} max_abs={max_abs:.6f} "
                             f"state_exact={state_exact}",
                             flush=True,
                         )
-                        assert exact == 1.0 and state_exact
+                        assert exact and state_exact
 
 
+@pytest.mark.skipif(not is_950(), reason="The optimized prefill kernel requires A5 UB capacity")
 def test_prefill_multiple_requests_across_token_chunks():
     torch.manual_seed(41)
     tokens, channels = 1031, 256
