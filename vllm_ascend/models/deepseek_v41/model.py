@@ -789,6 +789,7 @@ class DeepseekV41DecoderLayer(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
+        self.prefill_context_parallel_size = parallel_config.prefill_context_parallel_size
 
         self.hidden_size = config.hidden_size
         max_position_embeddings = config.rope_parameters["original_max_position_embeddings"]
@@ -882,7 +883,10 @@ class DeepseekV41DecoderLayer(nn.Module):
 
     def write_kv(self, hidden_states, pre_mix, positions, input_ids=None):
         """Project the attention input and write this layer's cache only."""
-        assert not self.use_sequence_parallel and not self.enable_dsa_cp
+        assert (
+            not self.use_sequence_parallel
+            and self.prefill_context_parallel_size == 1
+        )
         del positions, input_ids
         x, _, _, _ = self.hc_pre(
             hidden_states,

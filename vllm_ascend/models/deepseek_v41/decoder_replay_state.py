@@ -414,7 +414,6 @@ class DecoderReplayState:
                         common_v41_batch_metadata={},
                         common_v41_metadata={},
                         rope_views=rope,
-                        **build_kwargs,
                     )
                     for task in first_builder.take_device_metadata_tasks():
                         task.run()

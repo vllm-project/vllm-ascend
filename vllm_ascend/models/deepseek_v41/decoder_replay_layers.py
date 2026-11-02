@@ -191,7 +191,6 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
             hasattr(model, "layers")
             and parallel.prefill_context_parallel_size == 1
             and not model.use_sequence_parallel
-            and not enable_dsa_cp()
             and cut not in getattr(model.config, "engram_layer_ids", ())
         )
         replay_start = cut if trim_cut_layer else cut + 1
