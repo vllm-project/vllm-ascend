@@ -4,33 +4,28 @@
 
 from itertools import accumulate
 
-import pytest
 import torch
 import torch_npu  # noqa: F401
 from vllm.models.qwen4_exp.common.ops.ple import ple_conv as upstream_ple_conv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
-from vllm_ascend.device.device_config import is_950
 from vllm_ascend.models.qwen4_exp import ple as ple_adapter
 from vllm_ascend.models.qwen4_exp.ple import _ple_conv_ascend, patch_upstream_ple_short_conv
 
 
-@pytest.mark.parametrize("a5", [False, True])
-def test_model_dispatch_by_device(monkeypatch, a5):
+def test_model_dispatch_uses_upstream_decode_and_spec(monkeypatch):
     from vllm.models.qwen4_exp.amd import ple_layer
 
     patch_upstream_ple_short_conv()
     assert ple_layer.ple_conv is _ple_conv_ascend
     calls = []
-    monkeypatch.setattr(ple_adapter, "is_950", lambda: a5)
     monkeypatch.setattr(ple_adapter, "ple_conv_prefill", lambda *args, **kwargs: calls.append("ascend_prefill"))
     monkeypatch.setattr(ple_adapter, "upstream_ple_conv", lambda *args, **kwargs: calls.append(kwargs["mode"]))
     for mode in ("prefill", "decode", "spec"):
         ple_layer.ple_conv(mode=mode)
-    assert calls == (["ascend_prefill", "decode", "spec"] if a5 else ["prefill", "decode", "spec"])
+    assert calls == ["ascend_prefill", "decode", "spec"]
 
 
-@pytest.mark.skipif(not is_950(), reason="The optimized prefill kernel requires A5 UB capacity")
 def test_modes_and_token_mapping():
     torch.manual_seed(29)
     for mode in ("decode", "spec", "prefill"):
@@ -94,7 +89,6 @@ def test_modes_and_token_mapping():
                 assert exact and state_exact
 
 
-@pytest.mark.skipif(not is_950(), reason="The optimized prefill kernel requires A5 UB capacity")
 def test_prefill_one_request():
     torch.manual_seed(37)
     for dtype in (torch.bfloat16, torch.float16):
@@ -142,7 +136,6 @@ def test_prefill_one_request():
                         assert exact and state_exact
 
 
-@pytest.mark.skipif(not is_950(), reason="The optimized prefill kernel requires A5 UB capacity")
 def test_prefill_multiple_requests_across_token_chunks():
     torch.manual_seed(41)
     tokens, channels = 1031, 256

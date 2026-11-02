@@ -28,13 +28,11 @@ from vllm.models.qwen4_exp.common.ops.ple import ple_conv as upstream_ple_conv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.attention.utils import wait_for_kv_layer_from_connector
-from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.triton_ple import ple_conv_prefill
 
 
 def _ple_conv_ascend(*args: Any, mode: Literal["decode", "spec", "prefill"], **kwargs: Any) -> None:
-    # The 2048-channel prefill tile exceeds A3 UB capacity.
-    if mode == "prefill" and is_950():
+    if mode == "prefill":
         ple_conv_prefill(*args, **kwargs)
     else:
         upstream_ple_conv(*args, mode=mode, **kwargs)

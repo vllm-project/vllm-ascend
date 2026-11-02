@@ -8,7 +8,10 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
+from vllm_ascend.device.device_config import is_950
+
 PLE_BLOCK_C = 2048
+PLE_BLOCK_C_SMALL = 512
 PLE_NUM_WARPS = 8
 
 
@@ -217,7 +220,8 @@ def ple_conv_prefill(
     """Update state and write activated convolution into residual.
     A non-None outer_residual enables both fused residual additions.
     """
-    BLOCK_C = PLE_BLOCK_C
+    # A3 has 192 KiB UB; the 2048-channel tile needs 384 KiB there.
+    BLOCK_C = PLE_BLOCK_C if is_950() else PLE_BLOCK_C_SMALL
     T, C = inputs.shape
     K = conv_weights.shape[1]
     state_len = (K - 1) * dilation
