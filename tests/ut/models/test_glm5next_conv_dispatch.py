@@ -27,15 +27,16 @@ def test_conv_dispatch_passes_contiguous_indices_and_stages_only_ds(monkeypatch,
     def copy_state(cache, staging, ids, query_starts, staging_ids, *, write_back):
         calls.append(write_back)
         if not write_back:
-            staging.copy_(cache[1:3])
+            assert staging.shape == (3, 3, 8)
+            staging[:2].copy_(cache[1:3])
             staging_ids.copy_(torch.tensor([0, 1], dtype=torch.int32))
         else:
-            cache[1:3].copy_(staging)
+            cache[1:3].copy_(staging[:2])
 
     def prefill(x, weight, bias, **kwargs):
         kernel_indices = kwargs["cache_indices"]
         assert kernel_indices.ndim == 1 and kernel_indices.stride() == (1,)
-        assert kwargs["null_block_id"] == (-1 if dim_first else 0)
+        assert kwargs["null_block_id"] == (2 if dim_first else 0)
         expected = torch.tensor([0, 1] if dim_first else [1, 2], dtype=torch.int32)
         torch.testing.assert_close(kernel_indices, expected)
         assert torch.all(kernel_indices != kwargs["null_block_id"])
@@ -48,6 +49,7 @@ def test_conv_dispatch_passes_contiguous_indices_and_stages_only_ds(monkeypatch,
     def decode(x, state, weight, **kwargs):
         kwargs["cache_indices"] = kwargs["conv_state_indices"]
         kwargs["conv_states"] = state
+        assert torch.count_nonzero(kwargs["out"]) == 0
         return prefill(x, weight, **kwargs)
 
     monkeypatch.setattr(conv_ops, "copy_conv_state", copy_state)

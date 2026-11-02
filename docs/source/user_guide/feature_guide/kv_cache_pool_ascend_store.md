@@ -35,14 +35,14 @@ KV Cache supports the following three external storage backends, choose the stor
 
     | Category | Constraints |
     | :--- | :--- |
-    | Software Dependencies | • Mooncake >= 0.3.11.post1 (non-default tenant requires >= 0.3.12).<br>• Mooncake wheel requires glibc >= 2.35. |
+    | Software Dependencies | • Mooncake >= 0.3.11.post1 (non-default tenant requires >= 0.3.12).<br>• Mooncake wheel requires glibc >= 2.35.<br>• Layerwise support requires Mooncake >= 0.3.14. |
     | Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios, Store/PD traffic separation applies to A3 and 950PR&950DT Products. |
 
 === "Memcache backend"
 
     | Category | Constraints |
     | :--- | :--- |
-    | Software Dependencies | • Requires `memfabric-hybrid` and `memcache-hybrid` (SSD Cache needs `memcache_hybrid >= 1.2.0`).<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5. |
+    | Software Dependencies | • Requires `memfabric-hybrid >= 1.3.0` and `memcache-hybrid >= 1.3.0`.<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5. |
     | Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios. [Separated deployment of MemCache and vLLM](#Memcache-and-vLLM-Separated-Deployment) is supported only on A3. |
 
 === "Yuanrong backend"
@@ -134,9 +134,24 @@ This bulk fast path uses physical-page-major object contents instead of the prev
     | `prefer_alloc_in_same_node` | bool | true | No | true / false | Whether to prefer allocating KV on the same node. |
     | `enable_ssd_offload` | bool | false | No | true / false | Whether to enable SSD offload. Environment variables are not supported. |
     | `ssd_offload_path` | str | No default | Required when SSD offload enabled | Absolute path | Absolute path for SSD offload data storage (for example, /nvme/mooncake_offload). The directory must exist and be writable by the vLLM process; create it before startup (`mkdir -p <path>`). Relative paths, symlinks, and paths containing `..` are rejected. |
+    | `enable_ssd_prefetch` | bool | false | No | true / false | Master switch for SSD-to-DRAM prefetch on exist queries. Implemented by [Mooncake PR 4272](https://github.com/kvcache-ai/Mooncake/pull/4272); the idea comes from [RFC 2213](https://github.com/kvcache-ai/Mooncake/issues/2213). When true, `batch_is_exist` passes `ExistOptions(prefetch_to_memory=True)` so Mooncake promotes SSD-only objects into DRAM during the cache probe. Requires `enable_ssd_offload=true` and a Mooncake build that exposes `ExistOptions`. If `ExistOptions` is missing, prefetch is disabled and a warning is logged. |
+    | `ssd_prefetch_cooldown_sec` | int | omitted | No | Integer seconds; 0 disables | DRAM-pressure backoff. After promotion fails with `NO_AVAILABLE_HANDLE`, prefetch pauses for this many seconds so eviction and offload can free DRAM. Mooncake's built-in default is 5 when this field is omitted. vLLM-Ascend forwards it only when `mooncake.json` sets it. |
+    | `ssd_prefetch_dedup_ttl_sec` | int | omitted | No | Integer seconds; 0 disables | Per-key trigger dedup TTL. The same key is prefetched at most once per this period, which suppresses duplicate probes across TP ranks. Mooncake's built-in default is 30 when this field is omitted. Forwarded only when set. |
     | `tenant_id` | str | default | No | String | Mooncake tenant namespace. Missing, `null`, empty, or whitespace-only values use `default`; surrounding whitespace is removed. All Prefill, Decode, scheduler, and replica instances that share KV entries must use the same tenant ID. |
 
     </details>
+
+    SSD offload and SSD prefetch are separate. After `enable_ssd_offload` is true, add the following fields to the same `mooncake.json` to prefetch SSD-only objects back into DRAM on exist. Semantics match [Mooncake SSD prefetch](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/store/ssd-prefetch.md) ([Mooncake PR 4272](https://github.com/kvcache-ai/Mooncake/pull/4272); concept from [RFC 2213](https://github.com/kvcache-ai/Mooncake/issues/2213)):
+
+    ```json
+    {
+        "enable_ssd_prefetch": true,
+        "ssd_prefetch_cooldown_sec": 5,
+        "ssd_prefetch_dedup_ttl_sec": 30
+    }
+    ```
+
+    `ssd_prefetch_cooldown_sec` and `ssd_prefetch_dedup_ttl_sec` are forwarded to `MooncakeDistributedStore.setup()` only when the field is present in `mooncake.json`. Omitting a field leaves Mooncake's default (5 seconds and 30 seconds). When `mooncake.json` sets any prefetch knob, the connector uses the config-dict form of `setup()`; that overload cannot take an engine, so the store creates its own TransferEngine instead of sharing the global one. On a Mooncake build without `ExistOptions`, the knobs are not passed and prefetch stays off.
 
 2. Start `mooncake_master` (only needs to run on one node):
 
@@ -624,18 +639,9 @@ done
 
 For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase before running actual performance benchmarks. Since HCCS one-sided communication connections are created lazily after instance launch, full-mesh connections incur a one-time overhead (4 MB device memory per connection). Warm-up recommendation: input sequence length 8k, output sequence length 1, total requests 2-3x number of devices.
 
-## Scenario 2: Memcache Backend
+## Scenario 2: Memcache Backend {: #scenario-2-memcache-backend }
 
 ### Configuration Examples
-
-<details markdown="1">
-<summary>MemCache DP Initialization Synchronization</summary>
-
-For the `memcache` backend, `memcache_dp_init_barrier` defaults to `true`. After successful store initialization, workers in a DP group synchronize through the CPU process group before continuing to NPU work such as graph capture. This keeps earlier workers from proceeding while peers are still initializing MemCache channels. DP size 1, metadata-only scheduler clients, and stores using lazy initialization skip this synchronization.
-
-Set the same value on every rank in the DP group. With `MultiConnector`, place this boolean in the `AscendStoreConnector` child's `kv_connector_extra_config`. To disable it, add `"memcache_dp_init_barrier": false` alongside `"backend": "memcache"`. No environment variable is needed. Lazy initialization can be triggered independently by requests on each DP rank, so it never enters the DP barrier. If a backend cannot honor a lazy initialization request and initializes eagerly instead, the startup barrier still applies.
-
-</details>
 
 #### Environment Preparation
 
@@ -729,9 +735,11 @@ Set the same value on every rank in the DP group. With `MultiConnector`, place t
 
 #### Step 2: Software Installation
 
+The MemCache backend requires both `memcache-hybrid >= 1.3.0` and `memfabric-hybrid >= 1.3.0`.
+
 ```shell
-pip install memfabric-hybrid
-pip install memcache-hybrid
+pip install "memfabric-hybrid>=1.3.0"
+pip install "memcache-hybrid>=1.3.0"
 ```
 
 #### Step 3: Configure Memcache Config File
@@ -761,10 +769,10 @@ ock.mmc.evict_threshold_low = 60
 
 | `Parameter` | Type | Default | Required | Value Range | Description |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `ock.mmc.meta_service_url` | str | tcp://127.0.0.1:5000 | No | tcp://<host>:<port>, port [1025, 65535] | MetaService address. P and D nodes must use the same endpoint. Host supports IP and domain. |
-| `ock.mmc.meta_service.config_store_url` | str | tcp://127.0.0.1:6000 | No | tcp://<host>:<port>, port [1025, 65535] | Config store URL. |
-| `ock.mmc.meta_service.metrics_url` | str | `http://127.0.0.1:8000` | No | http(s)://<host>:<port>, port [1025, 65535] | Metrics URL. |
-| `ock.mmc.log_level` | str | info | No | debug / info / warn / error | Log level; shared by MetaService and LocalService. |
+| `ock.mmc.meta_service_url` | str | tcp://127.0.0.1:5000 | Yes | tcp://<host>:<port>, port [1025, 65535] | MetaService address. P and D nodes must use the same endpoint. Host supports IP and domain. |
+| `ock.mmc.meta_service.config_store_url` | str | tcp://127.0.0.1:6000 | Yes | tcp://<host>:<port>, port [1025, 65535] | Config store URL. |
+| `ock.mmc.meta_service.metrics_url` | str | `http://127.0.0.1:8000` | Yes | http(s)://<host>:<port>, port [1025, 65535] | Metrics URL. |
+| `ock.mmc.log_level` | str | info | Yes | debug / info / warn / error | Log level; shared by MetaService and LocalService. |
 | `ock.mmc.evict_threshold_high` | int | 90 | No | [1, 99] (percentage) | High watermark of the secondary (L2) pool; eviction is triggered when this watermark is reached, and only when `usedSize * 100 > totalSize * threshold`. When SSD is enabled, 70 is recommended to improve SSD cache hit rate. |
 | `ock.mmc.evict_threshold_low` | int | 80 | No | [1, 98] (percentage) | Low watermark of the secondary (L2) pool; eviction stops at this watermark. When SSD is enabled, 60 is recommended. |
 
@@ -1547,7 +1555,7 @@ python3 -m vllm.entrypoints.openai.api_server \
 }'
 ```
 
-`lookup_rpc_port` is the RPC port used between the pooling scheduler process and the worker process. Each instance must use a unique port value.
+`lookup_rpc_port` identifies the local IPC endpoint used between the pooling scheduler process and the worker process. DP replicas within one vLLM service use separate IPC endpoints automatically. Independently launched services sharing the same RPC base directory must use different `lookup_rpc_port` values.
 
 **Note:** The Yuanrong backend normalizes KV keys before calling Datasystem. Supported ASCII keys up to 1024 bytes are preserved. Longer keys or keys containing unsupported characters are rewritten to a maximum of 1024 characters with a hash suffix, so do not rely on the raw key string when debugging backend storage. No extra buffer pre-registration step is required.
 
@@ -1574,12 +1582,12 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 
 ## Reference
 
-### kv-transfer-config Common Parameters
+### kv-transfer-config Common Parameters {: #kv-transfer-config-common-parameters }
 
 | `Parameter` | Type | Default | Required | Value Range | Description |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `kv_load_failure_policy` | str | fail | No | recompute / fail | Behavior when KV loading fails: `recompute` rolls back and recomputes (does not yet support hybrid attention models like DeepSeekV4, Qwen 3.5), `fail` terminates the request. When using MultiConnector, configure on the top-level `kv-transfer-config`. |
-| `lookup_rpc_port` | str | No default | Yes | Unique port number (e.g., "0", "1") | RPC port between pooling scheduler and worker processes. Each instance must use a unique port. The legacy name `mooncake_rpc_port` is deprecated; use `lookup_rpc_port`. |
+| `lookup_rpc_port` | str | No default | Yes | Distinct service identifier (e.g., "0", "1") | Local IPC identifier between pooling scheduler and worker processes. DP replicas within a service are isolated automatically; independently launched services sharing the RPC base directory need unique values. The legacy name `mooncake_rpc_port` is deprecated; use `lookup_rpc_port`. |
 | `load_async` | bool | false | No | true / false | Whether to enable asynchronous loading. |
 | `backend` | str | mooncake | No | mooncake / memcache / yuanrong | KV Pool storage backend. |
 | `consumer_is_to_put` | bool | false | No | true / false | Whether Decode node puts KV Cache into KV Pool. |
@@ -1589,6 +1597,8 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `prefill_pp_size` | int | 1 | Required when Prefill PP + consumer writes | Positive integer | Prefill PP size. |
 | `prefill_pp_layer_partition` | str | No default | No | Comma-separated layer numbers, e.g., "30,31" | Prefill PP layer partition. If not configured, layers are evenly divided by `prefill_pp_size`. |
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | KV Pool transfer QoS priority. |
+
+**NOTE:** When using `AscendStoreConnector` together with `MooncakeConnector` (V1) or `MooncakeConnectorV2`, the current TCP port allocations may still overlap ports reserved by other workers or components. This includes V1 worker handshake ports and V2 scheduler control ports. Distinct DP indices do not guarantee disjoint TCP port ranges; check these allocations against worker and component port reservations before deployment. `lookup_rpc_port` only identifies the local IPC endpoint and does not resolve these TCP port conflicts.
 
 ### ASCEND_GLOBAL_RESOURCE_CONFIG
 
@@ -1601,7 +1611,7 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `comm_resource_config.listen_port` | int | 16666 | No | Port number | One-sided communication listen port. Use a different port for standalone `mooncake_client` processes to avoid conflicts with embedded clients. |
 | `fabric_memory.max_capacity` | int | No default | Only when fabric mem budget is insufficient | Integer (GB per process) | Fabric memory quota. |
 
-### HDK and CANN Version Compatibility Reference
+### HDK and CANN Version Compatibility Reference {: #hdk-and-cann-version-compatibility-reference }
 
 | Hardware Series | HDK Requirement | CANN Requirement | Other Dependencies |
 | :--- | :--- | :--- | :--- |
@@ -1656,7 +1666,7 @@ Public FAQ references:
 
 **Resolution Steps:**
 
-1. Identify the error source. If Mooncake-reported `put` failure, ensure eviction policy remaining space (e.g., `1 - eviction_ratio`) can hold one batch put, or increase capacity, increase eviction headroom, or reduce batch size.
+1. Identify the error source. If Mooncake-reported `put` failure, ensure eviction policy remaining space (e.g., `--eviction_ratio`) can hold one batch put, or increase capacity, increase eviction headroom, or reduce batch size.
 2. If `get` failure, increase `mooncake_master` `--default_kv_lease_ttl` and keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
 3. If not Mooncake-reported, it is likely an HIXL (ascend_direct) transfer-layer issue. Collect plog files under `/root/ascend/log/debug/plog` for investigation.
 

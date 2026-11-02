@@ -19,7 +19,7 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
     get_num_sampled_and_rejected_cpu,
     probabilistic_rejection_sample_cpu,
 )
-from vllm_ascend.sample.rejection_sampler import (
+from vllm_ascend.worker.v2.sample.rejection_greedy import (
     rejection_greedy_sample_pytorch,
     rejection_greedy_sample_spec_len_1_pytorch,
 )

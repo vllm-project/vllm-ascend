@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM bounded-gate contracts for the AscendC KDA operators."""
 
-import torch
-
 from vllm_ascend.models.glm5next.ops.state_ops import gather_initial_states, scatter_states
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.triton.kda.output_writeback import write_recurrent_output
@@ -49,8 +47,7 @@ def recurrent_kda(
     if output_buffer is not None:
         write_recurrent_output(output, output_buffer, cu_seqlens)
         return output_buffer
-    valid = torch.arange(q.shape[1], device=q.device) < cu_seqlens[-1]
-    return output.masked_fill(~valid[None, :, None, None], 0)
+    return output
 
 
 def chunk_kda(

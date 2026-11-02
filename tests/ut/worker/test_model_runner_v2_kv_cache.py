@@ -10,7 +10,7 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 
-from vllm_ascend.patch.worker.patch_v2 import patch_model_runner  # noqa: F401
+from vllm_ascend.patch.worker import patch_model_runner  # noqa: F401
 
 
 @pytest.mark.parametrize("is_profiling", [False, True])
@@ -65,6 +65,43 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
         assert caches["attention"][2] is v
         assert caches["mamba"][1] is ssm
         assert caches["other"] is other
+
+
+def test_initialize_builds_aux_output_connector_when_enabled():
+    """The vendored initializer keeps upstream's AuxOutput connector wiring."""
+    caches = {"attention": torch.empty(3, 4)}
+    runner = MagicMock()
+    runner.device = torch.device("cpu")
+    runner.is_encoder_decoder = False
+    runner.speculator = None
+    runner.vocab_size = 16
+    runner.max_model_len = 128
+    runner.cache_config.kv_sharing_fast_prefill = False
+    # Mirror of the case above: exercise the AuxOutput branch only.
+    runner.vllm_config.aux_output_config.enabled = True
+    runner.jit_warmup_registry.activate.side_effect = nullcontext
+    config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[])
+
+    with (
+        patch.object(upstream, "init_attn_backend", return_value=([], MagicMock(), [])),
+        patch.object(upstream, "maybe_create_adaptive_verification_manager", return_value=None),
+        patch.object(upstream, "BlockTables"),
+        patch.object(upstream.pcp, "maybe_build_pcp_manager", return_value=None),
+        patch.object(upstream, "maybe_build_ubatch_runner", return_value=None),
+        patch.object(upstream, "initialize_mamba_ssu_backend"),
+        patch.object(upstream, "has_compiled_submodule", return_value=False),
+        patch.object(upstream, "ModelCudaGraphManager"),
+        patch.object(upstream, "check_attention_cp_compatibility"),
+        patch.object(upstream, "init_kv_cache", return_value=caches),
+        patch.object(upstream, "get_kv_connector"),
+        patch.object(upstream, "get_aux_output_connector", return_value="aux") as get_aux,
+    ):
+        upstream.GPUModelRunner.initialize_kv_cache(runner, config, is_profiling=False)
+
+    # The initializer deep-copies the config, so assert against the resolved one
+    # (identity shortcut) instead of comparing the original object by value.
+    get_aux.assert_called_once_with(runner.model, runner.vllm_config, runner.kv_cache_config)
+    assert runner.aux_output_connector == "aux"
 
 
 def test_mrv2_block_copy_preserves_segmented_mamba_storage():

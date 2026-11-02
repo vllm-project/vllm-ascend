@@ -5,6 +5,8 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.utils import enable_custom_op
 
 # enable internal format
@@ -56,6 +58,10 @@ _REPRO_CASES = [
 
 @torch.inference_mode()
 @pytest.mark.parametrize("x_shape,clamp_limit,desc", _REPRO_CASES, ids=[c[2] for c in _REPRO_CASES])
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="Custom dequant regression targets Ascend A2/A3",
+)
 def test_npu_dequant_swiglu_quant_with_limit(x_shape, clamp_limit, desc):
     # Use values with non-trivial abs() so reduce-max is meaningful
     x = torch.randint(-100, 100, x_shape, dtype=torch.int32)

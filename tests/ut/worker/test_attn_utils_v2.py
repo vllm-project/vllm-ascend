@@ -33,12 +33,12 @@ from vllm_ascend.attention.attention_v1 import (
     AscendC8AttentionBackendImpl,
 )
 from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
-from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC4StateBackend,
     AscendDSAC128Backend,
     AscendDSAC128StateBackend,
+    AscendDSAIndexerBackend,
     AscendDSAMetadataBuilder,
     AscendDSASWABackend,
 )
@@ -57,7 +57,6 @@ from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
@@ -362,6 +361,7 @@ def test_hybrid_attention_layout_preserves_padding(monkeypatch):
     )
     group = SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, backend=AscendAttentionBackend, layer_names=[name])
     vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
         cache_config=SimpleNamespace(cache_dtype="auto"),
     )
@@ -679,15 +679,15 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl.fa_quant_layer = False
 
-    attn_module.impl.pcp_enabled = True
+    attn_module.impl.use_pcp = True
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
-    attn_module.impl.pcp_enabled = False
+    attn_module.impl.use_pcp = False
 
     attn_module.impl.is_pcp_decode_sharded = True
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl.is_pcp_decode_sharded = False
 
-    attn_module.impl.dcp_enabled = True
+    attn_module.impl.use_dcp = True
     attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: False
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl._dcp_current_kv_buffers = (
@@ -702,7 +702,7 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: True
     attn_module.impl._dcp_current_kv_buffers = None
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
-    attn_module.impl.dcp_enabled = False
+    attn_module.impl.use_dcp = False
 
     attn_module.impl.enable_kv_nz = True
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
@@ -773,15 +773,12 @@ def test_v2_zeroer_constructs_component_zeroers(monkeypatch):
     assert all(call["kernel_block_sizes"] == [4] for call in RecordingZeroer.calls)
     for call in RecordingZeroer.calls:
         [component_group] = call["attn_groups"]
-        if vllm_version_is("0.31.0"):
-            assert component_group == group
-        else:
-            # vLLM main made AttentionGroup identity-comparable, so match on
-            # the fields the zeroer preserves.
-            assert component_group.backend is group.backend
-            assert component_group.layer_names == group.layer_names
-            assert component_group.kv_cache_spec == group.kv_cache_spec
-            assert component_group.kv_cache_group_id == group.kv_cache_group_id
+        # vLLM main made AttentionGroup identity-comparable, so match on
+        # the fields the zeroer preserves.
+        assert component_group.backend is group.backend
+        assert component_group.layer_names == group.layer_names
+        assert component_group.kv_cache_spec == group.kv_cache_spec
+        assert component_group.kv_cache_group_id == group.kv_cache_group_id
     for component_id, call in enumerate(RecordingZeroer.calls):
         assert call["static_forward_context"] == {
             "layer": SimpleNamespace(kv_cache=context["layer"].kv_cache[component_id])
@@ -837,6 +834,7 @@ def test_v2_model_runner_binds_tuple_aware_zeroer(monkeypatch):
         "static_forward_context": {},
         "num_blocks": 2,
         "cache_dtype": "auto",
+        "excluded_cache_components": set(),
     }
 
 
@@ -929,6 +927,12 @@ def test_v2_zeroer_skips_static_v_scale_for_mxfp8(monkeypatch):
             return launch
 
     monkeypatch.setattr("vllm.v1.worker.utils._zero_kv_blocks_kernel", _CpuZeroKernel())
+    # vLLM #60766 made async_tensor_h2d resolve pin memory lazily through
+    # is_pin_memory_available(). The NPU platform advertises pinned-memory
+    # support, so this CPU runner would allocate a PrivateUse1-pinned tensor
+    # and fail. The release lane captures PIN_MEMORY at import (False here),
+    # so only the main lane needs the resolver disabled.
+    monkeypatch.setattr("vllm.utils.torch_utils.is_pin_memory_available", lambda: False)
     zeroer.zero_block_ids([0])
 
     # Block 0 payload: k, k_scale and v are cleared, v_scale is preserved.
@@ -1125,6 +1129,54 @@ def test_gqa_pcp_dcp_cache_keeps_tp_local_kv_heads(monkeypatch, dcp_size):
     specs = attn_utils.get_kv_cache_spec(vllm_config)
 
     assert specs["model.layers.0.self_attn.attn"].num_kv_heads == 1
+
+
+@pytest.mark.parametrize("is_draft_layer", [True, False])
+def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_layer):
+    """Draft specs carry ``is_draft`` so EAGLE groups get flagged on main.
+
+    vLLM #42309 annotates ``is_eagle_group`` from ``spec.is_draft``; without the
+    tag no group is recognised as the draft model's and the coordinator
+    fallback flags every target group as an EAGLE group.
+    """
+    source_spec = FullAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    if not hasattr(source_spec, "is_draft"):
+        pytest.skip("vLLM release lane has no KVCacheSpec.is_draft")
+    layer = SimpleNamespace(
+        kv_sharing_target_layer_name=None,
+        align_kv_cache_with_mamba=True,
+        is_draft_layer=is_draft_layer,
+        get_kv_cache_spec=lambda _config: source_spec,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            use_mla=False,
+            dtype=torch.bfloat16,
+            get_total_num_kv_heads=lambda: 4,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        ),
+        attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
+        cache_config=SimpleNamespace(cache_dtype="auto", block_size=128),
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: {"model.layers.0.self_attn.attn": layer},
+    )
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
+
+    spec = attn_utils.get_kv_cache_spec(vllm_config)["model.layers.0.self_attn.attn"]
+
+    assert spec.is_draft is is_draft_layer
 
 
 @pytest.mark.parametrize(
@@ -1476,8 +1528,8 @@ class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
             "common_ratio_to_sas_metadata": self.common_ratio_to_sas_metadata,
             "for_cudagraph_capture": self.for_cudagraph_capture,
             "num_actual_reqs": kwargs["num_actual_reqs"],
-            "pcp_context": kwargs.get("pcp_context"),
-            "pcp_cache_group_idx": kwargs.get("pcp_cache_group_idx"),
+            "pcp_context": common_attn_metadata.pcp_context,
+            "pcp_cache_group_idx": common_attn_metadata.pcp_cache_group_idx,
             "formatted_slot_mapping": kwargs.get("formatted_slot_mapping"),
             "full_graph_mode": kwargs.get("full_graph_mode"),
         }
@@ -1485,20 +1537,6 @@ class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
         self.calls.append(call)
         call["common_ratio_to_sas_metadata"].setdefault("first_group", len(self.calls) == 1)
         return SimpleNamespace(common_attn_metadata=common_attn_metadata)
-
-
-class _RecordingDSACPMetadataBuilder(AscendDSACPMetadataBuilder):
-    def __init__(self, calls: list[dict[str, Any]], compressor_ratio: int):
-        self.calls = calls
-        self.for_cudagraph_capture = False
-        self.tq_group_block_sizes = None
-        self.compressor_ratio = compressor_ratio
-
-    build = _RecordingDSAMetadataBuilder.build
-
-    def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
-        self.for_cudagraph_capture = True
-        return self.build(common_prefix_len=0, common_attn_metadata=common_attn_metadata, **kwargs)
 
 
 def _make_dsa_metadata_groups(builder_cls=_RecordingDSAMetadataBuilder):
@@ -1623,7 +1661,7 @@ def test_v2_fused_offload_prepares_request_ownership_and_restores_tails(monkeypa
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=128),
     )
-    # vLLM 0.31 (#58149) exposes max_model_len as a read-only property backed by
+    # Since vLLM 0.31 (#58149), max_model_len is exposed as a read-only property backed by
     # model_config.
     state.model_config = SimpleNamespace(max_model_len=4096)
     state.pcp_manager = None
@@ -1864,13 +1902,9 @@ def test_prepare_ascend_kernel_block_sizes_splits_alias_layouts():
     # (`layer_stride == 0`) while the pages stay dense, so SFA still gets its
     # 128-token kernel blocks instead of the 256-token manager block.
     assert selected_kernel_block_sizes(layer_stride=0, block_stride=page_bytes) == [128]
-    if vllm_version_is("0.31.0"):
-        # The release lane has no packing heuristic and always splits.
-        assert selected_kernel_block_sizes(layer_stride=page_bytes, block_stride=2 * page_bytes) == [128]
-    else:
-        # Block-outermost packing interleaves the layers' pages between blocks,
-        # which no split can address, so #57169 keeps the manager block size.
-        assert selected_kernel_block_sizes(layer_stride=page_bytes, block_stride=2 * page_bytes) == [spec.block_size]
+    # Block-outermost packing interleaves the layers' pages between blocks,
+    # which no split can address, so #57169 keeps the manager block size.
+    assert selected_kernel_block_sizes(layer_stride=page_bytes, block_stride=2 * page_bytes) == [spec.block_size]
 
 
 @pytest.mark.parametrize(
@@ -1904,7 +1938,7 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
     swa_cache = cast(deepseek_v4_model.AscendDeepseekV4SWACache, SimpleNamespace())
     c4_state = cast(deepseek_v4_compressor.AscendCompressorStateCache, c4_cache)
     c128_state = cast(deepseek_v4_compressor.AscendCompressorStateCache, c128_cache)
-    assert deepseek_v4_indexer.AscendDeepseekV4IndexerCache.get_attn_backend(c4_indexer) is AscendDSAC4Backend
+    assert deepseek_v4_indexer.AscendDeepseekV4IndexerCache.get_attn_backend(c4_indexer) is AscendDSAIndexerBackend
     assert deepseek_v4_indexer.AscendDeepseekV4IndexerCache.get_attn_backend(c128_indexer) is AscendDSAC128Backend
     assert deepseek_v4_model.AscendDeepseekV4SWACache.get_attn_backend(swa_cache) is AscendDSASWABackend
     assert deepseek_v4_compressor.AscendCompressorStateCache.get_attn_backend(c4_state) is AscendDSAC4StateBackend
@@ -1927,7 +1961,7 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
         ("pcp_runtime", CUDAGraphMode.NONE, False, 2, 8),
     ],
 )
-@pytest.mark.parametrize("builder_cls", [_RecordingDSAMetadataBuilder, _RecordingDSACPMetadataBuilder])
+@pytest.mark.parametrize("builder_cls", [_RecordingDSAMetadataBuilder])
 def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     monkeypatch,
     caller,
@@ -1983,7 +2017,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     else:
         model_state = AscendModelState.__new__(AscendModelState)
         model_state.decoder_replay = None
-        # vLLM 0.31 (#58149) exposes max_model_len as a read-only property backed by
+        # Since vLLM 0.31 (#58149), max_model_len is exposed as a read-only property backed by
         # model_config.
         model_state.model_config = SimpleNamespace(max_model_len=8)
         model_state.vllm_config = SimpleNamespace(
@@ -2118,20 +2152,21 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
 
 
 class _PrefillStateBuilder:
-    consumes_pcp_context = False
-
     def __init__(self):
         self.extra_kwargs = None
+        self.common_attn_metadata = None
 
     def build(self, common_prefix_len, common_attn_metadata, **kwargs):
         assert common_prefix_len == 0
         self.extra_kwargs = kwargs
+        self.common_attn_metadata = common_attn_metadata
         return common_attn_metadata.is_prefilling
 
 
 class _CaptureStateBuilder(_PrefillStateBuilder):
     def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
         self.extra_kwargs = kwargs
+        self.common_attn_metadata = common_attn_metadata
         return common_attn_metadata.is_prefilling
 
 
@@ -2186,13 +2221,9 @@ def test_dsa_builder_receives_full_graph_mode(capture, full_graph):
         assert call["full_graph_mode"] is (capture or full_graph)
 
 
-@pytest.mark.parametrize("cache_only_backend", [False, True])
 @pytest.mark.parametrize("for_cudagraph_capture", [False, True])
-def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for_cudagraph_capture, cache_only_backend):
-    sfa_builder_cls = type("UnrelatedSFABuilder", (), {}) if cache_only_backend else _PrefillStateBuilder
-    monkeypatch.setattr(attn_utils, "AscendSFAMetadataBuilder", sfa_builder_cls)
+def test_build_attn_metadata_propagates_prefill_and_pcp_context(for_cudagraph_capture):
     builder = _CaptureStateBuilder() if for_cudagraph_capture else _PrefillStateBuilder()
-    builder.consumes_pcp_context = cache_only_backend
     attn_group = SimpleNamespace(
         layer_names=["layer.0"],
         get_metadata_builder=lambda _: builder,
@@ -2223,10 +2254,10 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for
     )
 
     assert metadata["layer.0"] is is_prefilling
-    assert builder.extra_kwargs == {
-        "pcp_context": pcp_context,
-        "pcp_cache_group_idx": 0,
-    }
+    assert builder.extra_kwargs == {}
+    assert builder.common_attn_metadata is not None
+    assert builder.common_attn_metadata.pcp_context is pcp_context
+    assert builder.common_attn_metadata.pcp_cache_group_idx == 0
 
 
 @pytest.mark.parametrize("packed", [False, True], ids=["mla", "sfa-c8"])
@@ -2235,7 +2266,7 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
 
     from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
     from vllm_ascend.core import kv_cache_placement
-    from vllm_ascend.patch.worker.patch_v2 import patch_attn_utils
+    from vllm_ascend.patch.worker import patch_attn_utils
     from vllm_ascend.worker import kvpp_cache
 
     config, specs, layers = make_attention_cache_case(packed)
@@ -2650,6 +2681,7 @@ def test_mrv2_binding_wraps_only_v41_slots():
     v41_layer = DeepseekV41CacheLayer(vllm_config, "model.layers.0.self_attn.attn", object())
     v41_indexer = DeepseekV41CacheLayer(vllm_config, "model.layers.2.self_attn.indexer.k_cache", object())
     other_layer = SimpleNamespace(kv_cache=None)
+    other_layer.bind_kv_cache = lambda cache: setattr(other_layer, "kv_cache", cache)
     kv_caches = {
         # V4.1 reshape output: one slot tensor per layer.
         "model.layers.0.self_attn.attn": torch.zeros(4, 2),
@@ -2726,6 +2758,7 @@ def test_tq_groups_without_a_dsa_builder_skip_the_formatted_mapping(for_capture,
 
 def _c8_mxfp_vllm_config(cache_dtype: str = "mxfp8") -> SimpleNamespace:
     return SimpleNamespace(
+        kv_transfer_config=None,
         cache_config=SimpleNamespace(cache_dtype=cache_dtype),
         attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),

@@ -11,7 +11,6 @@ from tests.e2e.conftest import HfRunner, VllmRunner
 pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 
 CROSS_ENCODER_MODELS = [
-    "dengcao/ms-marco-MiniLM-L6-v2",  # Bert
     "BAAI/bge-reranker-v2-m3",  # Roberta
 ]
 

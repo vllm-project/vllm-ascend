@@ -22,7 +22,7 @@ from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.utils import enable_sp, vllm_version_is
+from vllm_ascend.utils import enable_sp
 
 
 class GraphFusionPassManager:
@@ -72,13 +72,7 @@ class GraphFusionPassManager:
             from .passes.muls_add_pass import MulsAddFusionPass
 
             self.passes.append(MulsAddFusionPass(config))
-
-        # vLLM #60517 removed PassConfig.fuse_gemm_comms on main; there the MMRS
-        # fusion is gated on Ascend sequence parallelism instead.
-        if vllm_version_is("0.31.0"):
-            fuse_gemm_comms = config.compilation_config.pass_config.fuse_gemm_comms
-        else:
-            fuse_gemm_comms = enable_sp(config)
+        fuse_gemm_comms = enable_sp(config)
         if fuse_gemm_comms and profile.supports(HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION):
             from .passes.mm_reduce_scatter_fusion_pass import MatmulReduceScatterFusionPass
 

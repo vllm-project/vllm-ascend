@@ -8,6 +8,8 @@ import pytest
 import torch
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 VOCAB_SIZE = 4096
@@ -70,6 +72,10 @@ def _build_rejection_sample_inputs(
     )
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize(
     "num_speculative_steps,temperature,unconditional_rates",
     [
@@ -155,6 +161,10 @@ def test_synthetic_rejection_sample(
     torch.npu.empty_cache()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("has_draft_logits", [True, False])
 @pytest.mark.parametrize("use_block_verification", [False, True])
 @torch.inference_mode()
@@ -219,6 +229,10 @@ def test_draft_vocab_narrower_than_target_vocab(has_draft_logits: bool, use_bloc
     torch.npu.empty_cache()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("has_draft_logits", [True, False])
 @torch.inference_mode()
 def test_placeholder_draft_tokens_are_rejected(has_draft_logits: bool):
@@ -277,6 +291,10 @@ def test_placeholder_draft_tokens_are_rejected(has_draft_logits: bool):
     torch.npu.empty_cache()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("num_speculative_steps", [1, 3])
 @pytest.mark.parametrize("temperature", [0.6, 1.0])
 @pytest.mark.parametrize("has_draft_logits", [True, False])
@@ -309,6 +327,10 @@ def test_block_verification_preserves_target_distribution(num_speculative_steps,
         torch.testing.assert_close(observed, target.cpu(), rtol=0, atol=tolerance)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("placeholder_step", [0, 1])
 @pytest.mark.parametrize("method", ["standard", "synthetic", "block"])
 @pytest.mark.parametrize("has_draft_logits", [True, False])
@@ -343,6 +365,10 @@ def test_placeholder_recovers_from_target(placeholder_step, method, has_draft_lo
         torch.testing.assert_close(counts / counts.sum(), target.cpu(), rtol=0, atol=0.03)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_block_verification_extends_accepted_prefix():
     """Block verification must do more than silently run standard verification."""
@@ -357,6 +383,10 @@ def test_block_verification_extends_accepted_prefix():
     assert block_counts.float().mean().item() > standard_counts.float().mean().item() + 0.02
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("has_draft_logits", [True, False])
 @torch.inference_mode()
 def test_block_verification_ragged_requests_and_mapping(has_draft_logits):
@@ -390,6 +420,10 @@ def test_block_verification_ragged_requests_and_mapping(has_draft_logits):
         assert (sampled[row, :length] == expected_ids[row]).all()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("has_draft_logits", [True, False])
 @pytest.mark.parametrize("temperature", [0.0, 0.7])
 @torch.inference_mode()
@@ -410,6 +444,10 @@ def test_block_verification_single_bonus_only_request(has_draft_logits, temperat
     assert sampled[:, 0].cpu().tolist() == [1]
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("has_draft_logits", [True, False])
 @torch.inference_mode()
 def test_block_verification_keeps_greedy_results(has_draft_logits):

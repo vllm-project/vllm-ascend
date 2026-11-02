@@ -304,7 +304,7 @@ For items identified above, perform manual testing:
 
 - [ ] Model: Kimi K2.5 - Basic inference works
 - [ ] Model: GLM-5 - Multimodal features work
-- [ ] Feature: Expert parallel with 8 GPUs
+- [ ] Feature: Expert parallelism with 8 GPUs
 - [ ] Feedback: User reported slow startup (verify fixed)
 ```
 
