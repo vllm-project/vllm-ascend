@@ -1078,9 +1078,11 @@ class AscendConfig:
         # num_experts must divide evenly across the EP group (required by both
         # the A3 and A5 operators; MegaMoe assumes an equal per-rank expert
         # count for its symmetric-memory dispatch layout).
-        ep_world_size = (
-            vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+        parallel_config = (
+            getattr(getattr(vllm_config, "speculative_config", None), "target_parallel_config", None)
+            or vllm_config.parallel_config
         )
+        ep_world_size = parallel_config.world_size_across_dp // parallel_config.pipeline_parallel_size
         if ep_world_size < 2:
             return False
         if int(vllm_config.model_config.get_num_experts()) % ep_world_size != 0:

@@ -1,0 +1,4 @@
+pr: 20638
+entries:
+  - category: bugfix
+    text: Fixed MegaMoE EP detection when MTP uses replicated PCP draft configurations.
