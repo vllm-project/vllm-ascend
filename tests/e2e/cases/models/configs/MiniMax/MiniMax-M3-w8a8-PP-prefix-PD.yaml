@@ -260,7 +260,7 @@ benchmarks:
     max_out_len: 1
     batch_size: 11
     request_rate: 0
-    baseline: 0
+    baseline: 1.0699
     threshold: 0.97
 
   prefix_90_pd:
@@ -272,7 +272,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 31
     request_rate: 0
-    baseline: 0
+    baseline: 994.61182
     threshold: 0.97
 
   warm_up_prefix99:
@@ -296,6 +296,6 @@ benchmarks:
     max_out_len: 1024
     batch_size: 32
     request_rate: 0
-    baseline: 1747
+    baseline: 1096.57448
     threshold: 0.97
     tpot_threshold: 22
