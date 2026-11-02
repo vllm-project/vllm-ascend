@@ -292,9 +292,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             with self.subTest(rank=rank, dp_index=dp_index):
                 vllm_config.parallel_config.data_parallel_index = dp_index
                 offload_backend = SimpleNamespace(
-                    # store_url field must exist: the manager sets it only when
-                    # the field is present (older memfabric builds lack it).
-                    OffloadConfig=lambda: SimpleNamespace(store_url=None),
+                    OffloadConfig=lambda: SimpleNamespace(),
                     Scene=SimpleNamespace(SHARED="shared"),
                     initialize=MagicMock(return_value=0),
                 )

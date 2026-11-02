@@ -31,7 +31,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.utils import CpuGpuBuffer
 
-from vllm_ascend.ascend_config import DUMMY_POOL_ROW_COUNT, SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_pool_capacity
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
@@ -176,10 +176,7 @@ def allocate_kv_offload_topk_buffer_pair(
         # Graph padding uses a second, private arena of the same capacity.
         # Query-row metadata still needs max_num_seqs * decode_width, but
         # multiplying the large hot K/V allocation by that width wastes HBM.
-        # Inactive request slots share a small dummy-row ring
-        # (DUMMY_POOL_ROW_COUNT) instead of each consuming a dedicated hot
-        # row: one row per live request slot plus the ring.
-        request_rows = copy_sfa_pool_capacity(vllm_config.scheduler_config.max_num_seqs) + DUMMY_POOL_ROW_COUNT
+        request_rows = 2 * copy_sfa_pool_capacity(vllm_config.scheduler_config.max_num_seqs)
         max_num_topk_rows = request_rows
         topk_buffer_size += COPY_SFA_TAIL_BLOCKS * vllm_config.cache_config.block_size
     topk_buffer_k_size_bytes = max_num_topk_rows * topk_buffer_size * num_kv_heads * k_dim * torch.bfloat16.itemsize
@@ -643,11 +640,7 @@ class SparseKVOffloadManager:
         config.rank_id = self.tp_rank
         config.scene = offload.Scene.SHARED
         store_port = OFFLOAD_STORE_PORT_BASE + parallel_config.data_parallel_index
-        # Older pip-packaged memfabric_hybrid 1.2.0 builds have no
-        # OffloadConfig.store_url field and derive the store endpoint
-        # internally; only set it when the field exists.
-        if hasattr(config, "store_url"):
-            config.store_url = f"tcp://127.0.0.1:{store_port}"
+        config.store_url = f"tcp://127.0.0.1:{store_port}"
         assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
         self.tp_group.barrier()
 
@@ -1270,33 +1263,6 @@ class SparseKVOffloadManager:
             return
         device = self.topk_buffers_k[0].device
         requests = self.topk_buffers_k[0].shape[0]
-        # One decode-D2H staging set per LIM group, laid out
-        # [token, part(=k/v), member]: the live descriptors of a step are
-        # then exactly the flat prefix [0, tokens * 2 * members), so the
-        # group flush hands the engine contiguous views without any
-        # gather/reshape copies. Member i writes its strided slice; the
-        # group's last member issues a single sparse_copy for the whole
-        # group. Allocated for every offload_shared_indexer_only deployment
-        # (inline mode batches the decode D2H per group too); independent of
-        # the side stream.
-        self._group_d2h_buffers: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
-        for owner_name, member_names in owner_to_members.items():
-            if not member_names:
-                continue
-            # Layout [2, members, tokens]: per-member writes are contiguous
-            # rows (stride 1); the flush slices [.., :members, :tc] and
-            # reshapes (one gather per group, amortized across its members).
-            self._group_d2h_buffers[owner_name] = (
-                torch.zeros((2, len(member_names), self.max_num_tokens), dtype=torch.int64, device=device),
-                torch.zeros((2, len(member_names), self.max_num_tokens), dtype=torch.int64, device=device),
-                torch.zeros((2, len(member_names), self.max_num_tokens), dtype=torch.int32, device=device),
-            )
-        self._group_d2h_count = torch.zeros(1, dtype=torch.int32, device=device)
-        # Cache of the current step's D2H descriptor dict (see
-        # _group_d2h_step_state), keyed on the slot-mapping version.
-        self._group_d2h_step: dict[str, typing.Any] | None = None
-        # Keeps the members' KV allocations alive until the group flush.
-        self._group_d2h_refs: list[tuple[torch.Tensor, torch.Tensor]] = []
         if not self._lim_group_ksc_ready:
             # Documented fallback: without the npu_lim_copy_descriptors
             # binding, miss_onboard_mode=side_stream degrades to inline
@@ -1466,110 +1432,6 @@ class SparseKVOffloadManager:
         event = state.done_events.get(member_name)
         if event is not None:
             torch_npu.npu.current_stream().wait_event(event)
-
-    def stage_group_d2h(
-        self,
-        owner_name: str,
-        member_idx: int,
-        is_last: bool,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        k_cache_cpu: torch.Tensor | None,
-        v_cache_cpu: torch.Tensor | None,
-    ) -> None:
-        """Stage one shared member's decode D2H descriptors; flush per group.
-
-        Every member of a group writes its strided slice of the group's
-        descriptor buffers (source = the member's freshly computed KV rows,
-        destination = the member's CPU pool rows); the last member issues a
-        single ``offload.sparse_copy`` for the whole group. The buffers are
-        laid out [token, part, member], so the live descriptors are the flat
-        prefix [0, tokens * 2 * members) and the flush passes contiguous
-        views — no per-flush gather or reshape copies. The per-step geometry
-        (pool-slot validity/offsets, lengths, token-index source offsets) is
-        computed once per step, in-graph, by the first member. Pending KV
-        tensors are referenced until the flush so their addresses stay valid.
-        """
-        if self.tp_rank != 0:
-            return
-        if k_cache_cpu is None or v_cache_cpu is None:
-            raise RuntimeError("Sparse KV offload TP0 CPU cache is not registered")
-        buffers = self._group_d2h_buffers.get(owner_name)
-        if buffers is None:
-            raise RuntimeError(f"Sparse KV offload D2H staging was not configured for group {owner_name}")
-        src_buf, dst_buf, len_buf = buffers
-        k_rows = k.reshape(-1, self.token_size_bytes_k // k.element_size())
-        v_rows = v.reshape(-1, self.token_size_bytes_v // v.element_size())
-        token_count = k_rows.shape[0]
-        if token_count > self.max_num_tokens:
-            raise ValueError(f"Sparse KV offload decode rows {token_count} exceed D2H capacity {self.max_num_tokens}")
-        num_slots = k_cache_cpu.numel() * k_cache_cpu.element_size() // self.token_size_bytes_k
-        step = self._group_d2h_step_state(slot_mapping, token_count, num_slots, k.device)
-        base_k = int(k_cache_cpu.data_ptr())
-        base_v = int(v_cache_cpu.data_ptr())
-        src_buf[0, member_idx, :token_count].copy_(int(k_rows.data_ptr()) + step["src_off_k"])
-        src_buf[1, member_idx, :token_count].copy_(int(v_rows.data_ptr()) + step["src_off_v"])
-        dst_buf[0, member_idx, :token_count].copy_(base_k + step["dst_k"])
-        dst_buf[1, member_idx, :token_count].copy_(base_v + step["dst_v"])
-        len_buf[0, member_idx, :token_count].copy_(step["len_k"])
-        len_buf[1, member_idx, :token_count].copy_(step["len_v"])
-        # Keep the member's KV allocations alive until the group flush.
-        self._group_d2h_refs.append((k_rows, v_rows))
-        if not is_last:
-            return
-        members = member_idx + 1
-        self._group_d2h_count.fill_(2 * members * token_count)
-        result = offload.sparse_copy(
-            src_buf[:, :members, :token_count].reshape(-1),
-            dst_buf[:, :members, :token_count].reshape(-1),
-            len_buf[:, :members, :token_count].reshape(-1),
-            self._group_d2h_count,
-            k.device,
-        )
-        if result not in (None, 0):
-            raise RuntimeError(f"memfabric D2H sparse_copy failed with result={result}")
-        self._group_d2h_refs.clear()
-
-    def _group_d2h_step_state(
-        self,
-        slot_mapping: torch.Tensor,
-        token_count: int,
-        num_slots: int,
-        device: torch.device,
-    ) -> dict:
-        """Per-step decode D2H geometry shared by all staged members.
-
-        The cache holds a strong reference to the slot_mapping tensor itself
-        and validates identity (``is``), never ``data_ptr()``: a bare address
-        can be recycled by a later tensor after the original is freed, which
-        would silently reuse stale destination offsets.
-        """
-        state = self._group_d2h_step
-        if (
-            state is not None
-            and state["slot_mapping"] is slot_mapping
-            and state["version"] == slot_mapping._version
-            and state["token_count"] == token_count
-        ):
-            return state
-        slots = slot_mapping.reshape(-1).to(device=device, dtype=torch.int64)
-        valid = (slots >= 0) & (slots < num_slots)
-        safe_slots = slots.clamp(min=0, max=num_slots - 1)
-        token_indices = self.d2h_token_indices_npu[:token_count]
-        state = {
-            "slot_mapping": slot_mapping,
-            "version": slot_mapping._version,
-            "token_count": token_count,
-            "src_off_k": token_indices * self.token_size_bytes_k,
-            "src_off_v": token_indices * self.token_size_bytes_v,
-            "dst_k": safe_slots * self.token_size_bytes_k,
-            "dst_v": safe_slots * self.token_size_bytes_v,
-            "len_k": (valid * self.token_size_bytes_k).to(torch.int32),
-            "len_v": (valid * self.token_size_bytes_v).to(torch.int32),
-        }
-        self._group_d2h_step = state
-        return state
 
     def offload_new_kv(
         self,

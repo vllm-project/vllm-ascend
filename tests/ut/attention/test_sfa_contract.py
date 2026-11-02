@@ -79,23 +79,6 @@ def test_non_fused_config_does_not_require_fused_kernel_fields():
     _validate_fused_copy_sfa_config(SimpleNamespace(), SimpleNamespace(use_fused_copy_sfa=False))
 
 
-@pytest.mark.parametrize("max_num_seqs", [1, 4, 6, 256])
-def test_fused_config_accepts_small_concurrency(max_num_seqs):
-    """Small-capacity deployments must keep working: the dummy hot-row ring
-    no longer imposes a max_num_seqs minimum on the fused Copy-SFA path (the
-    LIM history arrays are sized to cover the whole ring). The validator is
-    path-agnostic: it runs at construction for both the original
-    full-offload path and offload_shared_indexer_only."""
-    runtime = SimpleNamespace(
-        speculative_config=None,
-        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
-    )
-    _validate_fused_copy_sfa_config(
-        runtime,
-        SimpleNamespace(use_fused_copy_sfa=True, topk=2048, topk_buffer_size=4096),
-    )
-
-
 def test_fused_config_rejects_topk_outside_kernel_contract():
     with pytest.raises(ValueError, match="TopK=2048"):
         _validate_fused_copy_sfa_config(

@@ -36,7 +36,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.utils import CpuGpuBuffer
 
-from vllm_ascend.ascend_config import DUMMY_POOL_ROW_COUNT, SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.indexer import (
@@ -114,10 +114,6 @@ class AscendSFAOffloadMetadata(AscendSFAMetadata):
     copy_sfa_prefill_pool_slots: torch.Tensor | None = None
     copy_sfa_hbm_block_table: torch.Tensor | None = None
     copy_sfa_source_block_table: torch.Tensor | None = None
-    # Per-part token byte sizes ([kv_lora_rank, qk_rope_head_dim] * 2), owned
-    # by the builder and shared across steps; the side-stream onboarding
-    # derives its H2D descriptor sizes from it.
-    copy_sfa_token_bytes: torch.Tensor | None = None
     copy_sfa_tail_src: torch.Tensor | None = None
     copy_sfa_tail_dst: torch.Tensor | None = None
     copy_sfa_tail_lengths: torch.Tensor | None = None
@@ -271,15 +267,8 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         }
         # Target and physical MTP-layer histories are independent.
         # Slot ownership is invalidated explicitly; lengths stay on device.
-        # The inactive-request dummy rows are pool indices
-        # capacity + [0, DUMMY_POOL_ROW_COUNT); size the histories so the
-        # whole ring stays in bounds for any max_num_seqs, including
-        # small-capacity deployments (the pool arena itself already
-        # allocates capacity + DUMMY_POOL_ROW_COUNT rows).
         banks = 1 + self.lim_mtp_layers
-        self.lim_last_prefix = torch.zeros(
-            (banks, 2 * requests + DUMMY_POOL_ROW_COUNT), dtype=torch.int32, device=device
-        )
+        self.lim_last_prefix = torch.zeros((banks, 2 * requests), dtype=torch.int32, device=device)
         self.lim_last_cache = torch.full_like(self.lim_last_prefix, -1)
         self.copy_sfa_hbm_block_table = torch.empty(
             (steps, requests, self.copy_sfa_stride_blocks), dtype=torch.int32, device=device
@@ -353,13 +342,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         ends_np, starts_np = query_loc[1:], query_loc[:-1]
         widths_np = ends_np - starts_np
         active_np = active_rows_np & (widths_np > 0)
-        # Inactive request slots share a small dummy-row ring instead of
-        # each consuming a dedicated hot row (DUMMY_POOL_ROW_COUNT).
-        pools_np = np.where(
-            active_np,
-            pools_np,
-            self.copy_sfa_pool_capacity + np.arange(count) % DUMMY_POOL_ROW_COUNT,
-        )
+        pools_np = np.where(active_np, pools_np, np.arange(count) + self.copy_sfa_pool_capacity)
         ends = upload("query_ends", ends_np)
         widths = upload("widths", widths_np)
         active = upload("active", active_np)
@@ -367,10 +350,6 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         metadata.copy_sfa_query_ends = ends
         metadata.copy_sfa_pool_entries = pools
         metadata.copy_sfa_prefill_pool_slots = pools
-        # The side-stream onboarding derives its H2D descriptors from the
-        # per-token byte sizes; expose the builder-owned tensor on the step
-        # metadata like the other fused-pipeline geometry.
-        metadata.copy_sfa_token_bytes = self.copy_sfa_token_bytes
         # Compute row geometry once; LIM state and attention consume the same
         # values. CPU seq_lens may still be optimistic after MTP rejection.
         seq_lens = torch.where(active, common_attn_metadata.seq_lens[:count], widths)
@@ -466,11 +445,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         token_invalid = upload("token_invalid", ~token_active_np)
         metadata.slot_mapping.masked_fill_(token_invalid[: metadata.slot_mapping.numel()], -1)
         logical_positions = seq_lens[token_rows] - widths[token_rows] + token_offsets
-        token_pools_np = np.where(
-            token_active_np,
-            pools_np[rows_np],
-            self.copy_sfa_pool_capacity + rows_np % DUMMY_POOL_ROW_COUNT,
-        )
+        token_pools_np = np.where(token_active_np, pools_np[rows_np], self.copy_sfa_pool_capacity + rows_np)
         row_base = upload("token_bases", token_pools_np * self.copy_sfa_stride_blocks * LIM_CACHE_BLOCK_SIZE)
         self.copy_sfa_device_slots[step, :tokens].copy_(
             row_base
@@ -635,6 +610,8 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             # per-step source/destination geometry is supplied by metadata.
             self.copy_sfa_copy_src = torch.empty(requests * 4, dtype=torch.int64, device=device)
             self.copy_sfa_copy_dst = torch.empty_like(self.copy_sfa_copy_src)
+            self.copy_sfa_host_bases = None
+            self.copy_sfa_device_bases = None
         self.lru_resident_capacity = offload_cfg.topk_buffer_size
         self.sfa_sparse_topk = offload_cfg.topk
 
@@ -829,14 +806,19 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         return self.lim_topk_src[:tokens]
 
     def bind_copy_sfa_kv_cache(self, manager, layer_name) -> None:
-        """Validate the layer's offload registration after cache setup.
-
-        The hot-row / CPU-pool base addresses consumed by the fused pipeline
-        live on the manager itself (``_bind_copy_sfa_bases``); this hook only
-        pins the layer -> offload-id mapping before graph capture so an
-        unregistered layer fails loudly here instead of mid-step.
-        """
-        manager._get_offload_layer_id(layer_name)
+        """Bind immutable layer addresses after cache registration, before capture."""
+        layer_id = manager._get_offload_layer_id(layer_name)
+        device = manager.topk_buffers_k[layer_id].device
+        self.copy_sfa_host_bases = torch.tensor(
+            [manager.k_caches_cpu[layer_id].data_ptr(), manager.v_caches_cpu[layer_id].data_ptr()],
+            dtype=torch.int64,
+            device=device,
+        ).view(2, 1)
+        self.copy_sfa_device_bases = torch.tensor(
+            [manager.topk_buffers_k[layer_id].data_ptr(), manager.topk_buffers_v[layer_id].data_ptr()],
+            dtype=torch.int64,
+            device=device,
+        ).view(2, 1)
 
     def compact_lim_topk_metadata(self, slot_ids: torch.Tensor) -> None:
         """Compact draft-step-0 LIM rows for direct reuse by later steps."""
@@ -976,26 +958,6 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 ):
                     rows = cache_tensor.view(-1, cache_tensor.shape[-1])
                     rows.index_copy_(0, device_slots[: value.shape[0]], value.reshape(value.shape[0], -1))
-                owner_members = getattr(self.lim_indexer_owner, "_lim_share_members", [])
-                if self.lim_shared_only and owner_members and self in owner_members:
-                    # One D2H sparse_copy per LIM group: each member stages
-                    # its slice, the group's last member flushes.
-                    owner = self.lim_indexer_owner
-                    owner_name = owner.layer_name
-                    if owner_name is None:
-                        raise RuntimeError("group D2H staging requires a bound owner layer name")
-                    member_idx = owner_members.index(self)
-                    manager.stage_group_d2h(
-                        owner_name,
-                        member_idx,
-                        member_idx == len(owner_members) - 1,
-                        k_nope,
-                        k_pe,
-                        slots,
-                        k_cache_cpu,
-                        v_cache_cpu,
-                    )
-                    return k_pe, k_nope
             manager.offload_new_kv(
                 layer_name=layer_name,
                 slot_mapping=slots,

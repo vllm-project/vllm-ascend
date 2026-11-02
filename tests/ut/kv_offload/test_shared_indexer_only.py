@@ -12,8 +12,8 @@ Covers the three pure pieces of the shared-indexer-only offload mode:
    exec_kv / resident-attention paths, and only owners with shared members
    install the LIM top-k selector.
 
-``offload.sparse_copy`` and NPU streams are monkeypatched so no memfabric or
-NPU runtime is needed.
+NPU streams and events are monkeypatched so no memfabric or NPU runtime is
+needed.
 """
 
 from contextlib import contextmanager
@@ -201,11 +201,9 @@ def _group_owner_and_members(hot=4096, k_dim=512, v_dim=64, miss_rows=2):
     host_v = torch.zeros(1000 * BLOCK, v_dim, dtype=torch.bfloat16)
     dev_k = torch.zeros(64 * (hot + 2 * BLOCK), k_dim, dtype=torch.bfloat16)
     dev_v = torch.zeros(64 * (hot + 2 * BLOCK), v_dim, dtype=torch.bfloat16)
-    token_bytes = torch.tensor([[k_dim * 2], [v_dim * 2]], dtype=torch.int64).view(2, 1, 1)
     metadata = SimpleNamespace(
         copy_sfa_pool_entries=torch.tensor([0, 1], dtype=torch.int32),
         copy_sfa_source_block_table=torch.tensor([[5, 7, -1], [1, 2, 3]], dtype=torch.int32),
-        copy_sfa_token_bytes=token_bytes,
     )
     manager = _make_manager()
     manager.head_dim_k = k_dim
@@ -436,85 +434,6 @@ def test_wait_lim_group_onboard_unknown_member_is_noop():
         assert len(waited) == 1
         manager.wait_lim_group_onboard(unknown_owner, known)
         assert len(waited) == 1
-
-
-def test_stage_group_d2h_prefix_flush_and_step_cache():
-    """The [part, member, token] staging layout keeps per-member writes
-    contiguous, flushes via a sliced reshape, and the per-step geometry
-    cache is keyed by slot_mapping tensor identity."""
-    manager = _make_manager()
-    manager.token_size_bytes_k = 1024
-    manager.token_size_bytes_v = 128
-    manager.d2h_token_indices_npu = torch.arange(manager.max_num_tokens, dtype=torch.int64)
-    # configure_lim_groups probes the device of a registered buffer; a plain
-    # CPU tensor keeps the CPU-runnable contract of this suite.
-    manager.topk_buffers_k = [torch.zeros(4)]
-    with _npu_stubs(), patch(f"{_MANAGER_MODULE}._LIM_DESC_OP", None):
-        # Inline mode (no op) still allocates the per-group staging buffers.
-        manager.configure_lim_groups({"owner.attn": ["m0.attn", "m1.attn"]})
-    src_buf, dst_buf, len_buf = manager._group_d2h_buffers["owner.attn"]
-    assert src_buf.shape == (2, 2, manager.max_num_tokens)
-
-    copies = []
-
-    def fake_sparse_copy(src, dst, lengths, count, device):
-        copies.append((src, dst, lengths, count))
-        return 0
-
-    k0 = torch.randn(3, 256, dtype=torch.float32)
-    v0 = torch.randn(3, 32, dtype=torch.float32)
-    k1 = torch.randn(3, 256, dtype=torch.float32)
-    v1 = torch.randn(3, 32, dtype=torch.float32)
-    slots = torch.tensor([4, 5, -1], dtype=torch.int64)
-    cpu_k = torch.zeros(16, 256, dtype=torch.float32)
-    cpu_v = torch.zeros(16, 32, dtype=torch.float32)
-
-    with patch(f"{_MANAGER_MODULE}.offload.sparse_copy", side_effect=fake_sparse_copy):
-        # Unknown groups fail loudly instead of staging into a wrong buffer.
-        with pytest.raises(RuntimeError, match="not configured"):
-            manager.stage_group_d2h("missing.attn", 0, True, k0, v0, slots, cpu_k, cpu_v)
-        # Member 0 only stages; the flush waits for the last member.
-        manager.stage_group_d2h("owner.attn", 0, False, k0, v0, slots, cpu_k, cpu_v)
-        assert copies == []
-        manager.stage_group_d2h("owner.attn", 1, True, k1, v1, slots, cpu_k, cpu_v)
-    assert len(copies) == 1
-    flushed_src, flushed_dst, flushed_len, count = copies[0]
-    # The flush passes contiguous views of the sliced group prefix.
-    assert flushed_src.is_contiguous()
-    assert flushed_dst.is_contiguous()
-    assert flushed_len.is_contiguous()
-    assert flushed_src.numel() == 12 and count.item() == 12
-    # Layout [part, member, token]: the flush carries every member's
-    # per-token source addresses; verify as a multiset (exact ordering
-    # is an implementation detail of the slice+reshape).
-    k0p, k1p, v0p, v1p = (int(t.data_ptr()) for t in (k0, k1, v0, v1))
-    expected_src = sorted(
-        [k0p, k0p + 1024, k0p + 2048]
-        + [k1p, k1p + 1024, k1p + 2048]
-        + [v0p, v0p + 128, v0p + 256]
-        + [v1p, v1p + 128, v1p + 256]
-    )
-    assert sorted(flushed_src.tolist()) == expected_src
-    base_k, base_v = int(cpu_k.data_ptr()), int(cpu_v.data_ptr())
-    # [2,m,t] layout: k_m0(t0,t1,t2), k_m1(t0,t1,t2), v_m0(...), v_m1(...)
-    _dst = flushed_dst.tolist()
-    assert _dst[0:3] == [base_k + 4 * 1024, base_k + 5 * 1024, base_k + 0]
-    assert _dst[3:6] == [base_k + 4 * 1024, base_k + 5 * 1024, base_k + 0]
-    assert _dst[6:9] == [base_v + 4 * 128, base_v + 5 * 128, base_v + 0]
-    assert _dst[9:12] == [base_v + 4 * 128, base_v + 5 * 128, base_v + 0]
-    # Slot -1 is invalid: zero length (its clamped destination is harmless).
-    _len = flushed_len.tolist()
-    assert _len[0:3] == [1024, 1024, 0]  # k_m0: slots 4,5 valid, -1 invalid
-    assert _len[3:6] == [1024, 1024, 0]  # k_m1
-    assert _len[6:9] == [128, 128, 0]  # v_m0
-    assert _len[9:12] == [128, 128, 0]  # v_m1
-
-    # Step cache: identity-keyed on the slot tensor, invalidated by writes.
-    state = manager._group_d2h_step
-    assert state["slot_mapping"] is slots
-    assert manager._group_d2h_step_state(slots, 3, 16, slots.device) is state
-    slots[0] = 6  # in-place write bumps the tensor version
-    assert manager._group_d2h_step_state(slots, 3, 16, slots.device) is not state
 
 
 # ---------------------------------------------------------------------------
@@ -997,6 +916,10 @@ def test_v2_register_sparse_kv_caches_wires_full_resident_and_groups():
     runner, layers = _make_v2_runner(sparse_cfg)
     runner._bind_sparse_offload_layer_groups()
     calls = []
+    # bind_copy_sfa_kv_cache reads the manager's hot-row and CPU-pool tensors;
+    # plain CPU tensors keep this suite CPU-runnable.
+    bind_dev = torch.zeros(2, 8, dtype=torch.bfloat16)
+    bind_host = torch.zeros(2, 8, dtype=torch.bfloat16)
     manager = SimpleNamespace(
         offload_layer_names=["model.layers.1.self_attn.attn", "model.layers.5.self_attn.attn"],
         register_kv_caches=lambda kv, full_resident_layer_names=None: calls.append(
@@ -1004,6 +927,10 @@ def test_v2_register_sparse_kv_caches_wires_full_resident_and_groups():
         ),
         configure_lim_groups=lambda groups: calls.append(("configure", groups)),
         _get_offload_layer_id=lambda name: 0,
+        topk_buffers_k=[bind_dev],
+        topk_buffers_v=[bind_dev],
+        k_caches_cpu=[bind_host],
+        v_caches_cpu=[bind_host],
     )
     runner.sparse_kv_offload_manager = manager
     runner._register_sparse_kv_caches({})

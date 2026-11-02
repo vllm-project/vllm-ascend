@@ -92,9 +92,8 @@ outright (see the validation in `vllm_ascend/ascend_config.py`).
     path.
     - Only owners with shared members install the LIM selection hook; after the
     LIM they launch the group's side-stream copy.
-    - Shared-layer attention waits on the group event. The decode D2H
-    descriptors of new KV are batched per group into one
-    `offload.sparse_copy` call per group.
+    - Shared-layer attention waits on the group event. The decode D2H of new
+    KV follows the standard per-layer `offload_new_kv` commit.
 - `vllm_ascend/distributed/kv_transfer/sparse_kv_offload/sparse_kv_offload_manager.py`:
     - Registers only the offloaded layers (shared + MTP) and publishes the full
     layers' HBM paged-cache base addresses for direct PD pull writes.
