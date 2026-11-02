@@ -1200,13 +1200,33 @@
 # ** 15. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3Model.precompute_and_store_context_kv`
+#   2. `vllm.model_executor.models.lilicorr.DFlash2Qwen3DecoderLayer`
+#   3. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3ForCausalLM._read_mask_embedding`
 #    Why:
 #       The function directly calls the ops.rms_norm and ops.rotary_imbedding operators,
 #       but NPU does not have a corresponding implementation.
+#       LiLiCorr's optional convolutional backbone otherwise resolves to the CUDA-oriented
+#       upstream DFlash2 layer rather than the Ascend implementation.
+#       Its constructor overwrites self.decoder_layer_cls with a module-level
+#       import, so a subclass factory alone cannot select the Ascend layer.
+#       ModelScope raises NotExistError when optional mask_embedding.pt is absent,
+#       instead of returning None as the upstream helper expects.
 #    How：
 #       Replace ops.* with the internal implementation of vllm-ascend.
+#       Consume returned RoPE keys for both in-place and out-of-place NPU backends,
+#       using a key-only call to avoid cloning the entire context buffer.
+#       When the paired vLLM revision provides LiLiCorr, bind its decoder factory to the
+#       Ascend DFlash2 layer while retaining the upstream LiLiCorr head and weight loader.
+#       This binding is applied once per worker before model construction;
+#       it adds no tensor operations or synchronization to inference.
+#       Treat only ModelScope's missing mask_embedding.pt error as an absent
+#       override; preserve errors for malformed data and other missing files.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/57934
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for ops.*.
+#       Remove the LiLiCorr binding when upstream exposes a platform decoder factory.
+#       Remove the mask file wrapper when vLLM handles ModelScope's absence error.
 #
 # ** 16. File: worker/patch_spec_decode_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
