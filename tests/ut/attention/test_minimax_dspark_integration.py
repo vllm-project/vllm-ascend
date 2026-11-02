@@ -34,6 +34,20 @@ def selector_runtime(monkeypatch):
     monkeypatch.setitem(sys.modules, "vllm.compilation", SimpleNamespace(backends=backends))
     monkeypatch.setitem(sys.modules, "vllm.config", config_module)
     monkeypatch.setitem(sys.modules, "vllm.v1.attention.backend", backend)
+    # The current selector checks the CANN backend's supported logical head
+    # sizes. Execute its real capability methods without importing NPU code.
+    fa_source = source.with_name("attention") / "fa_v1.py"
+    fa_tree = ast.parse(fa_source.read_text())
+    backend_node = next(
+        node for node in fa_tree.body if isinstance(node, ast.ClassDef) and node.name == "AscendFlashAttentionBackend"
+    )
+    fa_namespace = {"AscendAttentionBackend": object}
+    exec(compile(ast.Module(body=[backend_node], type_ignores=[]), str(fa_source), "exec"), fa_namespace)
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.attention.fa_v1",
+        SimpleNamespace(AscendFlashAttentionBackend=fa_namespace["AscendFlashAttentionBackend"]),
+    )
     namespace = {
         "torch": torch,
         "HardwareCapability": SimpleNamespace(DEVICE_LENGTH_FLASH_ATTN=object()),
@@ -61,6 +75,7 @@ def selector_runtime(monkeypatch):
     runtime.selector = SimpleNamespace(
         attn_type="decoder",
         dtype=torch.bfloat16,
+        head_size=128,
         kv_cache_dtype="bfloat16",
         use_pcp=False,
         use_dcp=False,
@@ -181,8 +196,18 @@ def test_flash_attn_plan_cache_separates_causal_masks(monkeypatch):
     tree = ast.parse(source.read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendFlashAttentionImpl")
     method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "forward_impl")
-    namespace = {"torch": torch, "attention_transfer_window": nullcontext}
-    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
+    pad_method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_pad_head")
+    pad_method.decorator_list = []
+    backend_node = next(
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AscendFlashAttentionBackend"
+    )
+    namespace = {
+        "torch": torch,
+        "F": torch.nn.functional,
+        "AscendAttentionBackend": object,
+        "attention_transfer_window": nullcontext,
+    }
+    exec(compile(ast.Module(body=[backend_node, pad_method, method], type_ignores=[]), str(source), "exec"), namespace)
     query = torch.zeros(2, 8, 128, dtype=torch.bfloat16)
     ops = SimpleNamespace(
         flash_attn_metadata=Mock(side_effect=[object(), object()]), flash_attn=Mock(return_value=(query, None))
@@ -197,6 +222,7 @@ def test_flash_attn_plan_cache_separates_causal_masks(monkeypatch):
         value_cache=None,
         sinks=None,
         scale=1.0,
+        _pad_head=namespace["_pad_head"],
     )
     metadata = SimpleNamespace(
         flash_attn_lengths=None,

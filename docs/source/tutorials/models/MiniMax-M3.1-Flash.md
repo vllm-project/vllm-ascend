@@ -67,7 +67,8 @@ requirements described above.
 
 On A2/A3, compatible ordinary MiniMax target attention and paired DSpark/EAGLE3
 draft attention can automatically select the optional ecosystem FA3 package
-(`flash_attn_npu_3`, scheduler API from `flash-attention-npu` 0.4.2.post2).
+(`flash_attn_npu_3`). Scheduler builds using either `has_softcap` or
+`softcap`/`softmax_scale` arguments are supported.
 Install a build compatible with the local CANN and hardware before serving.
 This is a separate package/API from the training-consistency `flash_attn_npu_v3`
 backend. Without the optional package, the existing backend remains selected.

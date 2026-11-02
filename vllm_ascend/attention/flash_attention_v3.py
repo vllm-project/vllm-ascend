@@ -5,6 +5,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
+from inspect import signature
 
 import torch
 from flash_attn_npu_3 import flash_attn_with_kvcache, get_scheduler_metadata  # type: ignore[import-not-found]
@@ -24,6 +25,8 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, notify_kv_cache_written
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+
+_SCHEDULER_USES_HAS_SOFTCAP = "has_softcap" in signature(get_scheduler_metadata).parameters
 
 
 def _get_window_size(sliding_window: int | None, causal: bool) -> tuple[int, int]:
@@ -104,6 +107,16 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
             speculative = vllm_config.speculative_config
             self.capture_query_len = 1 + (speculative.num_speculative_tokens if speculative else 0)
+            # Uniform decode descriptors round token buckets up to a multiple
+            # of their query width. Target verification and draft decode can
+            # use different widths (K+1 and K), so retain storage for every
+            # supported rounded width as well as the configured raw buckets.
+            raw_capture_sizes = tuple(self.capture_sizes)
+            self.capture_sizes.update(
+                ((size + query_len - 1) // query_len) * query_len
+                for query_len in range(1, self.capture_query_len + 1)
+                for size in raw_capture_sizes
+            )
         self.block_size = kv_cache_spec.block_size
         # Deduplicate layer parameters so identical layers share one tiling call.
         self.scheduler_specs = set()
@@ -146,9 +159,14 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         # The runner can append zero-length or dummy requests for graph padding.
         # Its CPU offsets identify the active prefix without a device sync.
         # Keep one empty request for dummy forwards: the operator requires B > 0.
+        # DFlash FULL can report its padded Q count as num_actual_tokens while
+        # CPU offsets still end at the real requests' Q count. Searching past
+        # that endpoint returns num_reqs+1, exceeding the device length arrays.
+        # Use the CPU-described prefix and retain one inert row for dummy runs.
+        active_tokens = min(common.num_actual_tokens, int(common.query_start_loc_cpu[num_reqs]))
         active_reqs = max(
             1,
-            int(torch.searchsorted(common.query_start_loc_cpu[: num_reqs + 1], common.num_actual_tokens)),
+            min(num_reqs, int(torch.searchsorted(common.query_start_loc_cpu[: num_reqs + 1], active_tokens))),
         )
         # The runner owns graph-stable buffers. Device tiling limits reads to
         # active_reqs, so padding rows need neither copying nor sanitizing.
@@ -181,6 +199,13 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             # Match the layer configuration used by forward. Causality is a
             # runtime property and is also part of the graph storage key.
             num_heads, num_kv_heads, head_size, dtype, scale, softcap, sliding_window = spec
+            # Ecosystem builds expose either a boolean tiling flag or the
+            # numerical forward parameters. Detect the API once at import.
+            softcap_kwargs = (
+                {"has_softcap": softcap > 0}
+                if _SCHEDULER_USES_HAS_SOFTCAP
+                else {"softcap": softcap, "softmax_scale": scale}
+            )
             # AICPU tiling runs once per layout, before entering the model graph.
             # The operator's auxiliary-stream events cannot themselves be
             # captured on all CANN releases. This still consumes device lengths
@@ -200,9 +225,8 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
                 page_size=self.block_size,
                 causal=common.causal,
                 window_size=_get_window_size(sliding_window, common.causal),
-                softcap=softcap,
-                softmax_scale=scale,
                 num_splits=0,
+                **softcap_kwargs,
             )
             if spec in scheduler_metadata:
                 buffer = scheduler_metadata[spec]
@@ -213,8 +237,10 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
                 # 950 metadata appends an int32 KV offset per request. Reserve
                 # that tail once so changing active batch size keeps the address.
                 reserve = self.max_num_reqs * common.seq_lens.element_size()
-                buffer = tiling.new_empty(tiling.numel() + reserve)
-                scheduler_metadata[spec] = buffer[: tiling.numel()].copy_(tiling)
+                original_shape = tiling.shape
+                tiling.resize_(tiling.numel() + reserve)
+                tiling.resize_(original_shape)
+                scheduler_metadata[spec] = tiling
             else:
                 scheduler_metadata[spec] = tiling
         return AscendFlashAttentionMetadata(

@@ -160,6 +160,9 @@ def test_unsupported_configurations_fall_back(selection, fault):
 @pytest.fixture
 def fa3():
     class Base:
+        def __init__(self, *args, **kwargs):
+            pass
+
         @classmethod
         def __class_getitem__(cls, _):
             return cls
@@ -175,8 +178,10 @@ def fa3():
         "AttentionMetadataBuilder": Base,
         "AttentionImpl": Base,
         "AttentionType": NS(DECODER="decoder"),
+        "CUDAGraphMode": NS(FULL_DECODE_ONLY="full_decode_only"),
         "logger": NS(info_once=lambda *args, **kwargs: None),
         "get_scheduler_metadata": Mock(),
+        "_SCHEDULER_USES_HAS_SOFTCAP": True,
         "flash_attn_with_kvcache": Mock(),
         "DeviceOperator": NS(reshape_and_cache=Mock()),
         "notify_kv_cache_written": Mock(),
@@ -308,7 +313,7 @@ def test_prefill_bounds_causal_storage_and_oversized_tiling(fa3):
         slot_mapping=torch.arange(16),
         causal=True,
     )
-    fa3.get_scheduler_metadata.return_value = torch.zeros(8, dtype=torch.uint8)
+    fa3.get_scheduler_metadata.side_effect = lambda **kwargs: torch.zeros(8, dtype=torch.uint8)
     metadata = builder.build(0, common)
     assert metadata.max_query_len == 16  # Same token bucket as decode, but a longer prefill.
     assert not builder.scheduler_buffers
@@ -321,7 +326,7 @@ def test_prefill_bounds_causal_storage_and_oversized_tiling(fa3):
     noncausal = builder.build(0, common)
     assert causal.scheduler_metadata[spec].data_ptr() != noncausal.scheduler_metadata[spec].data_ptr()
     address = noncausal.scheduler_metadata[spec].data_ptr()
-    fa3.get_scheduler_metadata.return_value = torch.zeros(1024, dtype=torch.uint8)
+    fa3.get_scheduler_metadata.side_effect = lambda **kwargs: torch.zeros(1024, dtype=torch.uint8)
     with pytest.raises(RuntimeError, match="graph-stable buffer"):
         builder.build(0, common)
     assert noncausal.scheduler_metadata[spec].data_ptr() == address
@@ -354,7 +359,7 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded):
         causal=causal,
     )
 
-    # Match the keyword-only subset of the v0.4.2.post2 public scheduler API.
+    # Match the scheduler API in the requested 17456db noncontiguous branch.
     def scheduler(
         *,
         batch_size,
@@ -369,12 +374,10 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded):
         page_size,
         causal,
         window_size,
-        softcap,
-        softmax_scale,
+        has_softcap,
         num_splits,
     ):
-        assert softcap == 0.0
-        assert softmax_scale == scale
+        assert has_softcap is False
         assert window_size == (4095, 0 if causal else 4095)
         assert cache_seqlens.numel() == batch_size
         assert cu_seqlens_q.numel() == batch_size + 1
@@ -411,9 +414,14 @@ def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3):
         causal=True,
     )
 
+    created = []
+
     def scheduler(**kwargs):
         # The 950 API appends an int32 cumulative-KV entry per request.
-        return torch.full((3584 + 4 * (kwargs["batch_size"] + 1),), kwargs["batch_size"], dtype=torch.uint8)
+        tensor = torch.full((3584 + 4 * (kwargs["batch_size"] + 1),), kwargs["batch_size"], dtype=torch.uint8)
+        tensor._fa_scheduler_params = {"causal": kwargs["causal"]}
+        created.append(tensor)
+        return tensor
 
     addresses = []
     with patch.object(fa3, "get_scheduler_metadata", side_effect=scheduler):
@@ -422,6 +430,8 @@ def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3):
             common.num_actual_tokens = batch_size * 8
             metadata = builder.build(0, common)
             tiling = metadata.scheduler_metadata[spec]
+            assert tiling is created[0]
+            assert tiling._fa_scheduler_params == {"causal": True}
             addresses.append(tiling.data_ptr())
             assert tiling.numel() == 3584 + 4 * (batch_size + 1)
             assert torch.all(tiling == batch_size)
@@ -430,3 +440,112 @@ def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3):
     assert len(set(addresses)) == 1
     assert len(builder.scheduler_buffers) == 2
     assert other_bucket.scheduler_metadata[spec].data_ptr() != addresses[0]
+
+
+@pytest.mark.parametrize("boolean_softcap_api", [False, True])
+def test_scheduler_preserves_each_softcap_api(fa3, boolean_softcap_api):
+    """Support the tested noncontiguous build and the existing numerical API."""
+    fa3._SCHEDULER_USES_HAS_SOFTCAP = boolean_softcap_api
+    builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
+    builder.device = torch.device("cpu")
+    builder.capture_sizes, builder.capture_query_len = set(), None
+    builder.max_num_reqs, builder.block_size = 128, 128
+    spec = (8, 2, 128, torch.bfloat16, 0.125, 2.5, 1024)
+    builder.scheduler_specs, builder.scheduler_buffers = {spec}, {}
+    offsets = torch.tensor([0, 1], dtype=torch.int32)
+    common = NS(
+        num_reqs=1,
+        num_actual_tokens=1,
+        num_input_tokens=1,
+        max_query_len=1,
+        query_start_loc=offsets,
+        query_start_loc_cpu=offsets,
+        seq_lens=torch.tensor([1024], dtype=torch.int32),
+        block_table_tensor=torch.zeros((1, 8), dtype=torch.int32),
+        slot_mapping=torch.zeros(1, dtype=torch.int64),
+        causal=True,
+    )
+
+    def scheduler(**kwargs):
+        if boolean_softcap_api:
+            assert kwargs["has_softcap"] is True
+            assert "softcap" not in kwargs and "softmax_scale" not in kwargs
+        else:
+            assert kwargs["softcap"] == 2.5 and kwargs["softmax_scale"] == 0.125
+            assert "has_softcap" not in kwargs
+        return torch.zeros(8, dtype=torch.uint8)
+
+    fa3.get_scheduler_metadata.side_effect = scheduler
+    builder.build(0, common)
+
+
+@pytest.mark.parametrize("k,query_len,tokens", [(8, 9, 36), (8, 8, 32), (3, 3, 6)])
+def test_rounded_decode_graph_retains_scheduler_storage(fa3, k, query_len, tokens):
+    """Real capture descriptors round raw token buckets to the query width."""
+    spec = (8, 2, 128, torch.bfloat16, 0.1, 0.0, 1024)
+    impl = NS(num_heads=8, num_kv_heads=2, head_size=128, scale=0.1, logits_soft_cap=0.0, sliding_window=1024)
+    config = NS(
+        scheduler_config=NS(max_num_seqs=128),
+        speculative_config=NS(num_speculative_tokens=k),
+        compilation_config=NS(
+            cudagraph_capture_sizes=[4, 8, 16, 24, 32, 40],
+            cudagraph_mode="full_decode_only",
+            static_forward_context={"draft": NS(impl=impl)},
+        ),
+    )
+    builder = fa3.AscendFlashAttentionMetadataBuilder(
+        NS(block_size=128, dtype=torch.bfloat16), ["draft"], config, torch.device("cpu")
+    )
+    n = tokens // query_len
+    offsets = torch.arange(n + 1, dtype=torch.int32) * query_len
+    common = NS(
+        num_reqs=n,
+        num_actual_tokens=tokens,
+        num_input_tokens=tokens,
+        max_query_len=query_len,
+        query_start_loc=offsets,
+        query_start_loc_cpu=offsets,
+        seq_lens=torch.full((n,), 1024, dtype=torch.int32),
+        block_table_tensor=torch.zeros((n, 32), dtype=torch.int32),
+        slot_mapping=torch.arange(tokens),
+        causal=query_len == k + 1,
+    )
+    fa3.get_scheduler_metadata.side_effect = lambda **kwargs: torch.zeros(64, dtype=torch.uint8)
+    first = builder.build(0, common).scheduler_metadata[spec]
+    common.seq_lens.fill_(4096)
+    second = builder.build(0, common).scheduler_metadata[spec]
+    assert first is second, "Rounded graph descriptor lost its captured metadata storage"
+    assert first.data_ptr() == second.data_ptr()
+
+
+@pytest.mark.parametrize("offsets", [[0, 8, 8], [0, 0, 0]])
+def test_full_draft_graph_padded_token_count_keeps_valid_scheduler_batch(fa3, offsets):
+    """DFlash FULL reports padded tokens while its CPU offsets stop at real Q."""
+    builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
+    builder.device = torch.device("cpu")
+    builder.capture_sizes, builder.capture_query_len = {16}, 9
+    builder.max_num_reqs, builder.block_size = 128, 128
+    spec = (8, 2, 128, torch.bfloat16, 0.1, 0.0, 1024)
+    builder.scheduler_specs, builder.scheduler_buffers = {spec}, {}
+    boundaries = torch.tensor(offsets, dtype=torch.int32)
+    common = NS(
+        num_reqs=2,
+        num_actual_tokens=16,
+        num_input_tokens=16,
+        max_query_len=8,
+        query_start_loc=boundaries,
+        query_start_loc_cpu=boundaries,
+        seq_lens=torch.tensor([1024, 0], dtype=torch.int32),
+        block_table_tensor=torch.zeros((2, 8), dtype=torch.int32),
+        slot_mapping=torch.full((16,), -1, dtype=torch.int64),
+        causal=False,
+    )
+
+    def scheduler(**kwargs):
+        assert kwargs["batch_size"] == 1
+        assert kwargs["cache_seqlens"].numel() == kwargs["batch_size"]
+        assert kwargs["cu_seqlens_q"].numel() == kwargs["batch_size"] + 1
+        return torch.zeros(64, dtype=torch.uint8)
+
+    fa3.get_scheduler_metadata.side_effect = scheduler
+    builder.build(0, common)
