@@ -5,7 +5,7 @@ default_install_hook_types:
 default_stages:
   - pre-commit # Run locally
   - manual # Run in CI
-exclude: '^(\.agents|\.claude|\.gemini)/.*|^benchmarks/hisparse/experimental/20261031/'
+exclude: '^(\.agents|\.claude|\.gemini)/.*'
 
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit

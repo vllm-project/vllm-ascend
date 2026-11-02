@@ -45,9 +45,7 @@
     "--additional-config",
     "{\"sparse_li_c8_layer_policy\": \"all\"}",
     "--per-request-spec-decode-metrics",
-    "detailed",
-    "--profiler-config",
-    "{\"profiler\": \"torch\", \"torch_profiler_dir\": \"/mnt/share/z00990549/hisparse_recovery_20261025/validation_suite_20261018/tpot_investigation_20261019/pd-validation311/sd23cpon_7bd6435a-D23-TP8-GLM52-MTP3-C8/consumer/profile8\", \"ignore_frontend\": true, \"max_iterations\": 8, \"delay_iterations\": 0, \"torch_profiler_with_stack\": false, \"torch_profiler_with_memory\": false, \"torch_profiler_record_shapes\": false, \"capture_torch_profiler\": false}"
+    "detailed"
   ],
   "off": [
     "--model",
@@ -92,8 +90,6 @@
     "--additional-config",
     "{\"sparse_li_c8_layer_policy\": \"all\"}",
     "--per-request-spec-decode-metrics",
-    "detailed",
-    "--profiler-config",
-    "{\"profiler\": \"torch\", \"torch_profiler_dir\": \"/mnt/share/z00990549/hisparse_recovery_20261025/validation_suite_20261018/tpot_investigation_20261019/pd-validation311/sd23cpoff_42df50fd-D23-TP8-GLM52-MTP3-C8/consumer/profile8\", \"ignore_frontend\": true, \"max_iterations\": 8, \"delay_iterations\": 0, \"torch_profiler_with_stack\": false, \"torch_profiler_with_memory\": false, \"torch_profiler_record_shapes\": false, \"capture_torch_profiler\": false}"
+    "detailed"
   ]
 }

@@ -91,3 +91,28 @@ native-boundary and wire-contract failures; they remain recorded for follow-up.
 The author requested publishing now and continuing validation on the new machines.
 No additional model evaluation or full CI pass is asserted for this submission.
 AI assistance was used; human review and merge acceptance remain required.
+
+## Review scope
+
+The historical full-source archive and superseded investigation documents have
+been removed from the review diff. Commit `a623a45b2392c6dd61c53405e08700307046deb8`
+retains them for source provenance. The archive was not imported by the installed
+package. Its removal does not change a kernel, model result or execution policy.
+The archive-only lint exclusion and a workstation-specific profiling destination
+were also removed. Reproduction launches do not enable profiling.
+
+The remaining implementation has these dependencies:
+
+| Area | Reason to retain |
+| --- | --- |
+| Backend, binding, stream and dtype integration | Connect common HiSparse storage and completion ownership to NPU resources. |
+| Resolver, gather, C8 layout and Indexer writes | Produce the existing Attention operator's input layout and move selected cache rows. They are not replacement Attention compute kernels. |
+| Host DMA and immutable descriptors | Preserve allocation lifetimes and transfer completion while reducing writeback preparation. |
+| Resident updates and invalidation | Keep reused/written slots consistent with the device residency tables. |
+| Lazy MTP, row preparation, staging and view reuse | Retain the explicit, source-scoped optimization profile; individual model benefit is not implied. |
+| P/D connector and composition | Preserve the requested P/D feature and safe cache-release ordering; final qualification is still pending. |
+| Focused tests and native build sources | Check retained behavior and build required libraries from source. |
+| Baseline versus paired optimized modules | Support different reviewed Core contracts. They cannot be collapsed by deleting one implementation before a current-main port is validated. |
+
+Latest-main model validation and pruning of superseded Core adapters are in
+progress. Historical paired-profile measurements do not qualify latest main.

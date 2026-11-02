@@ -1,4 +1,0 @@
-extend = "../../../../pyproject.toml"
-# Immutable historical sources are checked by their manifest, not reformatted.
-exclude = ["source", "candidates"]
-force-exclude = true
