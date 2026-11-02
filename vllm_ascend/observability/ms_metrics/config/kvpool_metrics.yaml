@@ -1,0 +1,14 @@
+# KV Pool. Per-key put results returned by the Ascend store backends.
+# Both backends use the same series shape; the backend label separates them.
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend:MemcacheBackend.put
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_put_failure_handler
+  metrics:
+    - name: kvpool:put_failure_keys_total
+      type: counter
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend:MooncakeBackend.put
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_put_failure_handler
+  metrics:
+    - name: kvpool:put_failure_keys_total
+      type: counter

@@ -11,3 +11,7 @@ entries:
     text: >
       Add the lifecycle:sleep:freed_gb histogram so each sleep level reports
       the memory released by NPUWorker.sleep.
+  - category: feature
+    text: >
+      Add the kvpool:put_failure_keys_total counter so the Ascend store
+      backends report how many keys failed to be written.
