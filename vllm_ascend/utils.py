@@ -301,6 +301,12 @@ def vllm_version_is(target_vllm_version: str):
     else:
         import vllm
         vllm_version = vllm.__version__
+    # v0.11.0 has several development/local builds (for example
+    # ``0.11.0-dev`` and ``0.11.0+local``) that expose the same API.  Treat
+    # those builds as the v0.11.0 compatibility family instead of sending
+    # them through the newer-version fallback branch.
+    if target_vllm_version == "0.11.0" and target_vllm_version in vllm_version:
+        return True
     try:
         return Version(vllm_version) == Version(target_vllm_version)
     except InvalidVersion:
