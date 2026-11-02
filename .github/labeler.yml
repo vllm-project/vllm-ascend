@@ -41,3 +41,15 @@ ci/build:
       - any-glob-to-any-file:
           - 'vllm_ascend/*.py'
 
+image-build:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Dockerfile'
+          - 'Dockerfile.*'
+          - '.github/workflows/dockerfiles/Dockerfile.buildwheel.*'
+
+nightly-image-build:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/dockerfiles/Dockerfile.nightly.*'
+
