@@ -44,7 +44,7 @@ from tests.e2e.pull_request.rlhf.weight_transfer.utils import (
     reference_serve_args,
     reference_signature,
 )
-from tests.ut.distributed.weight_transfer.weight_transfer_test_helpers import checkpoint_source, router_meta_model
+from tests.ut.e2e.rlhf.weight_transfer.weight_transfer_test_helpers import checkpoint_source, router_meta_model
 
 CASE = MODEL_CASES[0]
 PORT = 8123
@@ -61,7 +61,7 @@ def test_model_matrix_separates_model_and_transport_coverage(backend):
     if backend == "npu_ipc":
         expected |= {(case.id, False) for case in MODEL_CASES}
 
-    assert {(case.id, packed) for param in parameters for case, packed in [param.values]} == expected
+    assert {(parameter.values[0].id, parameter.values[1]) for parameter in parameters} == expected
     assert len(parameters) == len(expected)
     for parameter in parameters:
         case, packed = parameter.values
@@ -142,13 +142,6 @@ def test_reference_and_lane_differ_only_in_the_load_path(case, tensor_parallel_s
     # same allocation pool instead of a differently-allocated one; the reference
     # itself never sleeps.
     assert lane["--enable-sleep-mode"] is reference["--enable-sleep-mode"] is True
-
-
-@pytest.fixture
-def reference_cache():
-    """Give every test a private copy of the reference cache."""
-    with patch.object(utils, "_REFERENCE_SIGNATURES", {}):
-        yield utils._REFERENCE_SIGNATURES
 
 
 @pytest.mark.parametrize(
@@ -335,8 +328,9 @@ def test_server_visibility_rejects_invalid_selection(monkeypatch, visible, devic
         pytest.param({"env_dict": {"ASCEND_RT_VISIBLE_DEVICES": "4,5"}}, id="physical-visibility"),
     ],
 )
-def test_reference_cache_reuses_only_matching_conditions(reference_cache, changed_conditions):
+def test_reference_cache_reuses_only_matching_conditions(changed_conditions):
     with (
+        patch.object(utils, "_REFERENCE_SIGNATURES", {}),
         patch("tests.e2e.conftest.RemoteOpenAIServer") as server_factory,
         patch.object(utils, "fixed_startup_checkpoint", MagicMock()),
         patch.object(utils, "wait_for_free_device_memory") as wait,
