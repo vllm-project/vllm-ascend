@@ -46,7 +46,7 @@ class SplitQuantAttention(Qwen3Attention):
             rope_scaling=getattr(config, "rope_scaling", None),
             cache_config=cache_config, quant_config=None, prefix=prefix)
         del self.qkv_proj
-        del self.o_proj  # type: ignore[attr-defined]
+        del self.o_proj  # type: ignore[attr-defined,has-type]
         from vllm.config import get_current_vllm_config
         context = get_current_vllm_config().compilation_config.static_forward_context
         context.pop(f"{prefix}.qkv_proj", None)
@@ -341,7 +341,7 @@ class SplitQuantMoeAttention(Qwen3MoeAttention):
                          rms_norm_eps=config.rms_norm_eps, qkv_bias=False, head_dim=config.head_dim,
                          cache_config=cache_config, quant_config=None, prefix=prefix)
         del self.qkv_proj
-        del self.o_proj  # type: ignore[attr-defined]
+        del self.o_proj  # type: ignore[attr-defined,has-type]
         from vllm.config import get_current_vllm_config
         context = get_current_vllm_config().compilation_config.static_forward_context
         context.pop(f"{prefix}.qkv_proj", None)

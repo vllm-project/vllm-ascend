@@ -84,5 +84,7 @@ def install_qwen35(model):
 
 def install(model):
     for layer in model.model.layers:
-        layer.self_attn.forward = types.MethodType(attention_forward, layer.self_attn)
-        layer.mlp.forward = types.MethodType(mlp_forward, layer.mlp)
+        layer.self_attn.forward = types.MethodType(
+            attention_forward, layer.self_attn)  # type: ignore[method-assign]
+        layer.mlp.forward = types.MethodType(
+            mlp_forward, layer.mlp)  # type: ignore[method-assign]
