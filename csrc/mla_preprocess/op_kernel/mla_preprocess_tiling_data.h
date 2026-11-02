@@ -114,6 +114,10 @@ struct MlaTilingData {
     uint64_t kvCacheBlockSize{128};
     uint64_t kvCacheStride0{0};
     uint64_t kvCacheRopeStride0{0};
+    // Static mapped CPU pool identity; per-token writeback slots remain input.
+    uint64_t writebackKBase{0};
+    uint64_t writebackRopeBase{0};
+    uint64_t writebackCapacity{0};
 };
 
 #endif  // MLA_PREPROCESS_TILING_DATA_H

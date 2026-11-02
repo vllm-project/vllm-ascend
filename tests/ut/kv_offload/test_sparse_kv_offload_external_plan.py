@@ -133,6 +133,7 @@ def _make_plan_manager():
     manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
     manager.use_fused_overlap = True
     manager.tp_rank = 0
+    manager.tp_size = 1
     manager.topk = 4
     manager.topk_buffer_size = 8
     manager.max_model_len = 64
@@ -154,6 +155,7 @@ def _make_plan_manager():
     manager.fused_plan_status_npu = manager.fused_plan_metadata_npu[:1]
     manager.fused_plan_current_linear_slots_npu = manager.fused_plan_metadata_npu[1:]
     manager.current_kv_by_layer = {}
+    manager.producer_writeback_layers = set()
     manager.fused_overlap_membership_map = None
     manager.fused_overlap_membership_map_rows = 0
     manager.fused_overlap_plan_owner_layer_id = None
@@ -360,14 +362,32 @@ def test_eager_external_plan_copies_inputs_and_preserves_cpp_argument_order():
     manager.tp_group.broadcast.assert_called_once_with(manager.fused_plan_metadata_npu, src=0)
 
 
-def test_capture_external_plan_and_current_kv_use_separate_side_streams():
+@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize("producer_writeback", [False, True], ids=["native", "direct"])
+def test_capture_external_plan_and_current_kv_use_separate_side_streams(tp_size, producer_writeback):
     manager = _make_plan_manager()
+    manager.tp_size = tp_size
     sparse_kv_ops = _make_sparse_kv_ops()
     manager.current_kv_save_stream = MagicMock()
     manager.fused_plan_stream = MagicMock()
     current_stream = MagicMock()
-    input_event = object()
-    current_stream.record_event.return_value = input_event
+    writeback_ready, plan_ready = object(), object()
+    completion_order = []
+    ready_events = iter((writeback_ready, plan_ready))
+
+    def record_ready():
+        event = next(ready_events)
+        completion_order.append(("record", event))
+        return event
+
+    current_stream.record_event.side_effect = record_ready
+    manager.current_kv_save_stream.wait_event.side_effect = lambda event: completion_order.append(("save_wait", event))
+    manager.fused_plan_stream.wait_event.side_effect = lambda event: completion_order.append(("plan_wait", event))
+    current_stream.wait_stream.side_effect = lambda stream: completion_order.append(("join", stream))
+    sparse_kv_ops.sparse_kv_enqueue_lru_resident_compact_with_plan_stable_rows.side_effect = (
+        lambda *_args: completion_order.append(("planner", None))
+    )
+    manager.tp_group.broadcast.side_effect = lambda *_args, **_kwargs: completion_order.append(("broadcast", None))
     membership = torch.full(
         (4, FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT),
         -1,
@@ -377,7 +397,20 @@ def test_capture_external_plan_and_current_kv_use_separate_side_streams():
     req_ids = torch.tensor([101], dtype=torch.int64)
     stable_prefix_lens = torch.tensor([10], dtype=torch.int32)
     visible_seq_lens = torch.tensor([11], dtype=torch.int32)
-    manager._offload_new_kv_on_current_stream = MagicMock()
+    # Exercise Native's real descriptor-building method; only the MemFabric
+    # device-copy boundary is mocked. Direct must not submit that copy.
+    key, rope, k_pool, rope_pool = (torch.empty(1) for _ in range(4))
+    manager.max_num_tokens = 1
+    manager.token_size_bytes_k = manager.token_size_bytes_v = key.element_size()
+    manager.d2h_token_indices_npu = torch.arange(1, dtype=torch.int64)
+    manager.d2h_src_ptrs_npu = torch.empty(2, dtype=torch.int64)
+    manager.d2h_dst_ptrs_npu = torch.empty(2, dtype=torch.int64)
+    manager.d2h_lengths_npu = torch.empty(2, dtype=torch.int32)
+    manager.d2h_size_npu = torch.empty(1, dtype=torch.int32)
+
+    def sparse_copy(*_args):
+        completion_order.append(("copy", None))
+        return 0
 
     with (
         patch.object(manager_module.torch_npu.npu, "current_stream", return_value=current_stream),
@@ -387,17 +420,19 @@ def test_capture_external_plan_and_current_kv_use_separate_side_streams():
             side_effect=lambda _: nullcontext(),
         ),
         patch.object(manager_module, "_sparse_kv_ops", return_value=sparse_kv_ops),
+        patch.object(manager_module.offload, "sparse_copy", side_effect=sparse_copy) as copy,
     ):
         manager.offload_new_kv(
             layer_name="layer.0",
             slot_mapping=torch.tensor([0]),
-            k_cache_cpu=torch.empty(1),
-            v_cache_cpu=torch.empty(1),
+            k_cache_cpu=k_pool,
+            v_cache_cpu=rope_pool,
             k_cache_npu=None,
             v_cache_npu=None,
-            k=torch.empty(1),
-            v=torch.empty(1),
+            k=key,
+            v=rope,
             capturing=True,
+            writeback_in_producer=producer_writeback,
         )
         assert manager.prepare_fused_overlap_external_plan(
             layer_name="layer.0",
@@ -409,17 +444,125 @@ def test_capture_external_plan_and_current_kv_use_separate_side_streams():
             selection_membership_map=membership,
             capturing=True,
         )
-        manager.inject_current_kv_into_selection = MagicMock()
         manager.wait_for_current_kv_writeback(capturing=True)
 
     assert current_stream.record_event.call_count == 2
-    manager.current_kv_save_stream.wait_event.assert_called_once_with(input_event)
-    manager.fused_plan_stream.wait_event.assert_called_once_with(input_event)
+    manager.current_kv_save_stream.wait_event.assert_called_once_with(writeback_ready)
+    manager.fused_plan_stream.wait_event.assert_called_once_with(plan_ready)
     sparse_kv_ops.sparse_kv_enqueue_lru_resident_compact_with_plan_stable_rows.assert_called_once()
     manager.tp_group.broadcast.assert_called_once_with(manager.fused_plan_metadata_npu, src=0)
+    manager.fused_plan_stream.wait_stream.assert_not_called()
+    expected = [("record", writeback_ready), ("save_wait", writeback_ready)]
+    if not producer_writeback:
+        expected.append(("copy", None))
+        copy.assert_called_once()
+        assert manager.d2h_src_ptrs_npu.tolist() == [key.data_ptr(), rope.data_ptr()]
+        assert manager.d2h_dst_ptrs_npu.tolist() == [k_pool.data_ptr(), rope_pool.data_ptr()]
+        assert manager.d2h_lengths_npu.tolist() == [key.element_size(), rope.element_size()]
+        assert manager.d2h_size_npu.item() == 2
+    else:
+        copy.assert_not_called()
+    expected += [
+        ("record", plan_ready),
+        ("plan_wait", plan_ready),
+        ("planner", None),
+        ("broadcast", None),
+        ("join", manager.current_kv_save_stream),
+    ]
+    assert completion_order == expected
     current_stream.wait_stream.assert_called_once_with(manager.current_kv_save_stream)
     assert manager.current_kv_by_layer[0][0].numel() == 1
     assert manager.current_kv_by_layer[0][1].numel() == 1
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+@pytest.mark.parametrize("capturing", [False, True], ids=["eager", "capture"])
+@pytest.mark.parametrize("producer_writeback", [False, True], ids=["native", "direct"])
+def test_producer_writeback_publishes_completion_without_duplicate_copy(tp_rank, capturing, producer_writeback):
+    manager = _make_plan_manager()
+    manager.tp_rank = tp_rank
+    # A Native step must clear the preceding Direct step's publication state.
+    manager.producer_writeback_layers.add(0)
+    manager.current_kv_save_stream = MagicMock()
+    manager._offload_new_kv_on_current_stream = MagicMock()
+    current_stream = MagicMock()
+    ready = current_stream.record_event.return_value
+    key, rope = torch.empty(1), torch.empty(1)
+    with (
+        patch.object(manager_module.torch_npu.npu, "current_stream", return_value=current_stream),
+        patch.object(manager_module.torch_npu.npu, "stream", side_effect=lambda _: nullcontext()),
+    ):
+        manager.offload_new_kv(
+            layer_name="layer.0",
+            slot_mapping=torch.tensor([0]),
+            k_cache_cpu=torch.empty(1),
+            v_cache_cpu=torch.empty(1),
+            k_cache_npu=None,
+            v_cache_npu=None,
+            k=key,
+            v=rope,
+            capturing=capturing,
+            writeback_in_producer=producer_writeback,
+        )
+    assert manager.current_kv_by_layer[0] == (key, rope)
+    assert (0 in manager.producer_writeback_layers) is producer_writeback
+    assert manager._offload_new_kv_on_current_stream.call_count == int(not producer_writeback)
+    if tp_rank == 0 and capturing:
+        current_stream.record_event.assert_called_once_with()
+        manager.current_kv_save_stream.wait_event.assert_called_once_with(ready)
+    else:
+        current_stream.record_event.assert_not_called()
+        manager.current_kv_save_stream.wait_event.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "tp_rank, owner, capturing, producer_writeback",
+    [
+        (0, True, True, True),
+        (0, False, True, True),
+        (1, False, True, True),
+        (0, False, False, True),
+        (1, False, False, True),
+        (0, False, True, False),
+        (1, False, True, False),
+        (0, True, True, False),
+    ],
+)
+def test_current_kv_scatter_precedes_save_barrier_and_peer_notification(tp_rank, owner, capturing, producer_writeback):
+    manager = _make_plan_manager()
+    manager.tp_rank, manager.tp_size = tp_rank, 2
+    manager.fused_overlap_plan_owner_layer_id = 0 if owner else 1
+    if producer_writeback:
+        manager.producer_writeback_layers.add(0)
+    manager.current_kv_by_layer[0] = (torch.empty((1, 2)), torch.empty((1, 1)))
+    manager.current_kv_save_stream = object()
+    manager.fused_plan_stream = object()
+    events = []
+    current_stream = MagicMock()
+    current_stream.wait_stream.side_effect = lambda stream: events.append(
+        "wait_plan" if stream is manager.fused_plan_stream else "wait_save"
+    )
+    manager.tp_group.broadcast.side_effect = lambda *_args, **_kwargs: events.append("broadcast")
+    with (
+        patch.object(manager_module.torch_npu.npu, "current_stream", return_value=current_stream),
+        patch.object(
+            manager_module.torch_npu, "npu_scatter_nd_update_", side_effect=lambda *_args: events.append("scatter")
+        ),
+    ):
+        manager.inject_current_kv_into_selection(
+            "layer.0",
+            1,
+            torch.empty((8, 2)),
+            torch.empty((8, 1)),
+            capturing=capturing,
+        )
+        manager.wait_for_current_kv_writeback(capturing=capturing)
+    expected = (["wait_plan"] if capturing else []) + ["scatter", "scatter"]
+    if producer_writeback and not owner:
+        expected.append("broadcast")
+    if capturing and tp_rank == 0:
+        expected.append("wait_save")  # attention's final writeback join remains
+    assert events == expected
 
 
 def test_capture_without_fused_overlap_stays_on_current_stream():
@@ -455,13 +598,16 @@ def test_capture_without_fused_overlap_stays_on_current_stream():
     manager.fused_plan_stream.wait_event.assert_not_called()
 
 
-def test_current_kv_injection_uses_planner_linear_slots_and_sentinel():
+@pytest.mark.parametrize("native_layout", [False, True], ids=["direct_2d", "native_4d"])
+def test_current_kv_injection_uses_planner_linear_slots_and_sentinel(native_layout):
     manager = _make_plan_manager()
     manager.topk_buffer_size = 4
     manager.current_kv_by_layer[0] = (
         torch.tensor([[10.0, 11.0], [20.0, 21.0]]),
         torch.tensor([[30.0], [40.0]]),
     )
+    if native_layout:
+        manager.current_kv_by_layer[0] = tuple(value.view(2, 1, 1, -1) for value in manager.current_kv_by_layer[0])
     manager.fused_plan_current_linear_slots_npu[:2].copy_(torch.tensor([6, 3]))
     selection_kv = torch.arange(16, dtype=torch.float32).reshape(8, 2)
     selection_rope = torch.arange(8, dtype=torch.float32).reshape(8, 1)
