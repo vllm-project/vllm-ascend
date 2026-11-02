@@ -44,7 +44,7 @@ from tests.e2e.pull_request.rlhf.weight_transfer.utils import (
     reference_serve_args,
     reference_signature,
 )
-from tests.ut.e2e.rlhf.weight_transfer.weight_transfer_test_helpers import checkpoint_source, router_meta_model
+from tests.ut.distributed.weight_transfer.weight_transfer_test_helpers import checkpoint_source, router_meta_model
 
 CASE = MODEL_CASES[0]
 PORT = 8123

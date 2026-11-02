@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from tests.e2e.pull_request.rlhf.weight_transfer.models.minimax import MINIMAX_M3_CASE, minimax_m3_checkpoint_name
-from tests.ut.e2e.rlhf.weight_transfer.weight_transfer_test_helpers import checkpoint_source
+from tests.ut.distributed.weight_transfer.weight_transfer_test_helpers import checkpoint_source
 
 
 def test_minimax_checkpoint_source_splits_fused_projections():
