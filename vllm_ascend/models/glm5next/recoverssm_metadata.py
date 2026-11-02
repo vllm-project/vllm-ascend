@@ -37,6 +37,7 @@ def _disable_upstream_graph_staging(builder):
 
 class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+    recoverssm_context: KDARecoverSSMCommitContext | None
 
     def _get_recoverssm_context(self) -> KDARecoverSSMCommitContext:
         forward_context = self.vllm_config.compilation_config.static_forward_context
