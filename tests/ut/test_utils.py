@@ -191,6 +191,11 @@ class TestUtils(TestBase):
         with mock.patch("vllm.__version__", "2.0.0"):
             self.assertTrue(utils.vllm_version_is.__wrapped__("2.0.0"))
             self.assertFalse(utils.vllm_version_is.__wrapped__("1.0.0"))
+        for version in ("0.11.0-dev", "0.11.0.dev0", "0.11.0+local"):
+            with mock.patch.dict(os.environ, {"VLLM_VERSION": version}):
+                self.assertTrue(utils.vllm_version_is.__wrapped__("0.11.0"))
+        with mock.patch.dict(os.environ, {"VLLM_VERSION": "0.11.1-dev"}):
+            self.assertFalse(utils.vllm_version_is.__wrapped__("0.11.0"))
         # Test caching takes effect
         utils.vllm_version_is.cache_clear()
         utils.vllm_version_is("1.0.0")
