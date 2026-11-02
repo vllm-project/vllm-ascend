@@ -15,6 +15,7 @@
 #include <torch/library.h>
 
 #include "torch_npu/csrc/core/npu/NPUStream.h"
+#include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
 #include "torch_npu/csrc/framework/OpCommand.h"
 
 namespace ascend_kernel {
@@ -56,6 +57,27 @@ public:
 };
 }  // namespace ascend_kernel
 
+namespace ascend_kernel {
+
+inline void RecordStream(const at::Tensor& tensor, c10_npu::NPUStream stream)
+{
+    if (tensor.defined() && tensor.device().type() == DEVICE_TYPE) {
+        c10_npu::NPUCachingAllocator::recordStream(tensor.storage().data_ptr(), stream);
+    }
+}
+
+template <typename T>
+inline void RecordStream(const T&, c10_npu::NPUStream)
+{}
+
+template <typename... Ts>
+inline void RecordStreams(c10_npu::NPUStream stream, const Ts&... tensors)
+{
+    (RecordStream(tensors, stream), ...);
+}
+
+}  // namespace ascend_kernel
+
 /**
  * @brief Launch real kernel function on NPU
  *
@@ -65,6 +87,8 @@ public:
 #define EXEC_KERNEL_CMD(kernel_name, blockdim, ...)                                            \
     do {                                                                                       \
         auto acl_stream = c10_npu::getCurrentNPUStream().stream(false);                        \
+        auto record_stream = c10_npu::getCurrentNPUStream();                                   \
+        ascend_kernel::RecordStreams(record_stream, __VA_ARGS__);                              \
         auto converted_params = ascend_kernel::TorchNpuHelper::ConvertTypes(__VA_ARGS__); \
         auto acl_call = [acl_stream, blockdim, converted_params]() -> int {                    \
             std::apply(                                                                        \
