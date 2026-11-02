@@ -139,6 +139,31 @@ def test_shared_sfa_nope_metadata_pages_and_draft_buffers(monkeypatch, block_siz
         torch.testing.assert_close(draft.smla_valid_mask[:, 0], torch.tensor([True, True, True, False]))
 
 
+@pytest.mark.parametrize("pcp_size", [1, 8])
+@pytest.mark.parametrize("a5", [False, True])
+@pytest.mark.parametrize("graph", [False, True])
+def test_nope_metadata_preserves_all_pcp_request_chunks(monkeypatch, pcp_size, a5, graph):
+    builder = _builder(128, a5, monkeypatch, speculative=graph)
+    config = builder.vllm_config
+    config.scheduler_config.max_num_seqs = 8
+    config.scheduler_config.max_num_batched_tokens = 32
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    state = sparse_mla.SparseMLAMetadataState(SimpleNamespace(block_size=128), config, torch.device("cpu"))
+    address = state.block_table_buffer.data_ptr()
+    rows = 17 if pcp_size > 1 else 9
+    width = state.block_table_buffer.shape[1]
+    for num_rows in ([10] if pcp_size > 1 else []) + [rows, 3, rows]:
+        table = torch.arange(num_rows * width, dtype=torch.int32).reshape(num_rows, width)
+        metadata = SimpleNamespace(
+            block_table=table,
+            positions=torch.zeros(num_rows, dtype=torch.int64),
+            num_actual_tokens=num_rows - 1,
+        )
+        state.prepare(metadata)
+        torch.testing.assert_close(metadata.block_table, table)
+        assert metadata.block_table.data_ptr() == address
+
+
 def test_a3_sparse_mla_preserves_storage_addresses(monkeypatch):
     block_size = 2304
     builder = _builder(block_size, False, monkeypatch)

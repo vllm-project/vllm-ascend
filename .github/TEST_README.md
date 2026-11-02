@@ -14,6 +14,51 @@ This document describes the CI workflows for `vllm-ascend`, how to add tests, an
 | `schedule_nightly_test_a3.yaml` | Cron | Nightly E2E on A3 runners |
 | `schedule_weekly_test_a3.yaml` | Cron | Weekly E2E on A3 runners |
 
+## Repository-local Actions in Container Jobs
+
+On our container runners, calling `uses: ./.github/actions/<name>` directly can
+fail with:
+
+```text
+Can't find 'action.yml', 'action.yaml' or 'Dockerfile' under '.../.github/actions/<name>'.
+```
+
+The runner workspace (`/home/runner/_work/<repo>/<repo>`) and container workspace
+(`/__w/<repo>/<repo>`) are not synchronized when the runner loads the action.
+Copy `.github` to the shared temporary directory before calling it:
+
+```text
+/__w/
+├── <repo>/
+│   └── <repo>/                 # workspace; local uses paths start here
+│       └── .github/
+└── _temp/                     # $RUNNER_TEMP
+    └── ci-workflow/
+        └── .github/actions/...
+```
+
+With this layout, `./../../_temp` resolves to `$RUNNER_TEMP`. A layout change can
+break the action path; the staging script checks this layout before copying.
+Update the static `uses` path if needed.
+
+```yaml
+- name: Check layout and stage actions
+  shell: bash
+  run: bash .github/workflows/scripts/stage_ci_actions.sh
+
+- name: Restore incremental cache
+  uses: ./../../_temp/ci-workflow/.github/actions/csrc-l1-restore
+  with:
+    cache-dir: csrc/build_cache
+    architecture: ${{ runner.arch }}
+    soc-version: a2
+    source-root: .
+```
+
+Run staging after checkout and use the same `if` condition as the action call.
+For a subdirectory checkout, set staging `working-directory` to that directory
+and pass `.` to the script; adjust the action's `source-root` accordingly.
+
 ## Selective Testing System
 
 When a PR changes source files, the precision-testing pipeline
