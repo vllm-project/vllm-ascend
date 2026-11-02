@@ -808,14 +808,28 @@ class KVPoolScheduler:
                     self.touch_sending_mamba_blocks(req_meta)
                     meta.add_request(req_meta)
 
-        scheduled_request_ids = {req.req_id for req in scheduler_output.scheduled_new_reqs}
-        scheduled_request_ids.update(cached_reqs.req_ids)
-        for request_id, (request, block_ids) in self._unfinished_requests.items():
-            if request_id not in scheduled_request_ids:
-                req_meta = self._process_async_load_request(request_id, request, block_ids)
-                if req_meta is not None:
-                    self.touch_sending_mamba_blocks(req_meta)
-                    meta.add_request(req_meta)
+        if self._unfinished_requests:
+            # Index unfinished IDs instead of copying a potentially large decode
+            # batch. Keep the original dictionary order when processing them.
+            unscheduled_request_ids = set(self._unfinished_requests)
+            unscheduled_request_ids.difference_update(req.req_id for req in scheduler_output.scheduled_new_reqs)
+            if len(unscheduled_request_ids) == 1:
+                # A single membership check needs no index of cached IDs.
+                request_id = next(iter(unscheduled_request_ids))
+                if request_id in cached_reqs.req_ids:
+                    unscheduled_request_ids.clear()
+            elif unscheduled_request_ids:
+                if len(unscheduled_request_ids) >= len(cached_reqs.req_ids):
+                    unscheduled_request_ids.difference_update(cached_reqs.req_ids)
+                else:
+                    # Sparse lookups can finish once all unfinished IDs match.
+                    unscheduled_request_ids.difference_update(unscheduled_request_ids.intersection(cached_reqs.req_ids))
+            for request_id, (request, block_ids) in self._unfinished_requests.items():
+                if request_id in unscheduled_request_ids:
+                    req_meta = self._process_async_load_request(request_id, request, block_ids)
+                    if req_meta is not None:
+                        self.touch_sending_mamba_blocks(req_meta)
+                        meta.add_request(req_meta)
 
         return meta
 

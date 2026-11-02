@@ -74,10 +74,12 @@ class MockStore:
 
 
 class SchedulerCase:
-    def __init__(self, module: Any, count: int, all_cached: bool) -> None:
+    def __init__(self, module: Any, count: int, all_cached: bool, *, unfinished_ids: list[str] | None = None) -> None:
         self.ids = [f"request-{index}" for index in range(count)]
         cached_ids = self.ids if all_cached else self.ids[::2]
-        self.expected_pending = [] if all_cached else self.ids[1::2]
+        unfinished_ids = self.ids if unfinished_ids is None else unfinished_ids
+        cached_id_set = set(cached_ids)
+        self.expected_pending = [req_id for req_id in unfinished_ids if req_id not in cached_id_set]
         self.calls: list[str] = []
         self.scheduler = module.KVPoolScheduler.__new__(module.KVPoolScheduler)
         for name, value in {
@@ -85,7 +87,7 @@ class SchedulerCase:
             "consumer_is_to_put": False,
             "can_put": False,
             "_request_trackers": {},
-            "_unfinished_requests": {req_id: (None, []) for req_id in self.ids},
+            "_unfinished_requests": {req_id: (None, []) for req_id in unfinished_ids},
             "_preempted_req_ids": set(),
             "_loading_req_ids": set(),
         }.items():
@@ -271,6 +273,7 @@ def main() -> None:
             "loaded_scheduler": inspect.getsourcefile(scheduler_module.KVPoolScheduler),
             "loaded_worker": inspect.getsourcefile(worker_module.LayerwiseKVPoolWorker),
         }
+    cases: dict[str, Any]
     for count in (128, 512, 1024, 4096):
         for all_cached in (True, False):
             cases = {label: SchedulerCase(pair[0], count, all_cached) for label, pair in modules.items()}
@@ -282,6 +285,31 @@ def main() -> None:
                     **measure(cases, args.warmup, args.rounds, args.iterations),
                 }
             )
+    # Decoding can schedule many cached requests with no or very few unfinished
+    # connector requests. Include early/late matches as well as pending misses.
+    for count in (128, 4096):
+        for unfinished_count in (0, 1, 4):
+            placements = ("empty",) if unfinished_count == 0 else ("head", "tail", "pending")
+            for placement in placements:
+                if placement == "head":
+                    unfinished_ids = [f"request-{index}" for index in range(unfinished_count)]
+                elif placement == "tail":
+                    unfinished_ids = [f"request-{index}" for index in range(count - unfinished_count, count)]
+                else:
+                    unfinished_ids = [f"pending-{index}" for index in range(unfinished_count)]
+                cases = {
+                    label: SchedulerCase(pair[0], count, True, unfinished_ids=unfinished_ids)
+                    for label, pair in modules.items()
+                }
+                report["cases"].append(
+                    {
+                        "phase": "build_connector_meta_sparse",
+                        "scheduled_cached_requests": count,
+                        "unfinished_requests": unfinished_count,
+                        "unfinished_placement": placement,
+                        **measure(cases, args.warmup, args.rounds, args.iterations),
+                    }
+                )
     for count in (128, 512, 2048, 8192):
         cases = {label: LeaseCase(pair[1], count) for label, pair in modules.items()}
         report["cases"].append(

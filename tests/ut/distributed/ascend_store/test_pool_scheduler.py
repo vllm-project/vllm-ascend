@@ -1087,6 +1087,36 @@ def test_connector_metadata_preserves_unscheduled_request_order(unfinished_ids, 
     assert list(scheduler._unfinished_requests) == unfinished_ids
 
 
+@pytest.mark.parametrize("cleared_by", ["already-empty", "finished", "preempted", "scheduled-new"])
+def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cleared_by):
+    class UnusedCachedIds(list[str]):
+        def __iter__(self):
+            raise AssertionError("No cached-ID scan is needed without unfinished requests")
+
+    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.kv_role = "kv_both"
+    scheduler.consumer_is_to_put = scheduler.can_put = False
+    scheduler._request_trackers = {}
+    scheduler._unfinished_requests = {} if cleared_by == "already-empty" else {"retired": (None, [])}
+    scheduler._preempted_req_ids = set()
+    scheduler._loading_req_ids = set()
+    scheduler._process_new_request = MagicMock(return_value=None)
+    scheduler._process_async_load_request = MagicMock()
+    output = SimpleNamespace(
+        finished_req_ids={"retired"} if cleared_by == "finished" else set(),
+        preempted_req_ids={"retired"} if cleared_by == "preempted" else set(),
+        scheduled_new_reqs=[SimpleNamespace(req_id="retired")] if cleared_by == "scheduled-new" else [],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=UnusedCachedIds(f"cached-{index}" for index in range(512))),
+    )
+
+    metadata = scheduler.build_connector_meta(output)
+
+    assert metadata.requests == []
+    assert scheduler._unfinished_requests == ({"retired": (None, [])} if cleared_by == "scheduled-new" else {})
+    scheduler._process_async_load_request.assert_not_called()
+    assert metadata.released_req_ids == output.finished_req_ids | output.preempted_req_ids
+
+
 def test_connector_metadata_filter_has_linear_key_lookup_work():
     operations = {"eq": 0, "hash": 0}
 
