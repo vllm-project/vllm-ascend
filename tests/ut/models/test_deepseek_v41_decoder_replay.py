@@ -80,7 +80,7 @@ def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
 
 def test_cut_layer_trim_writes_full_batch_before_replay(monkeypatch):
     monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
-    events = []
+    events: list[str | tuple[str, object]] = []
 
     class Context:
         def __enter__(self):
