@@ -22,25 +22,17 @@ import importlib.util
 if importlib.util.find_spec("vllm.config.engram") is not None:
     from vllm.config.engram import EngramConfig, model_has_engram_layers
 
-    _QWEN4EXP_ARCHITECTURES = frozenset(
-        {"Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration"}
-    )
+    _QWEN4EXP_ARCHITECTURES = frozenset({"Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration"})
 
     def _is_qwen4exp(model_config) -> bool:
-        return (
-            model_config is not None
-            and getattr(model_config, "architecture", None) in _QWEN4EXP_ARCHITECTURES
-        )
+        return model_config is not None and getattr(model_config, "architecture", None) in _QWEN4EXP_ARCHITECTURES
 
     def _effective_model_config(self):
         """Mirror upstream's draft-to-target switch so the Qwen4Exp check sees
         the target architecture, not the draft's."""
         model_config = self.model_config
         speculative_config = getattr(self, "speculative_config", None)
-        if (
-            speculative_config is not None
-            and model_config is speculative_config.draft_model_config
-        ):
+        if speculative_config is not None and model_config is speculative_config.draft_model_config:
             model_config = speculative_config.target_model_config
         return model_config
 
