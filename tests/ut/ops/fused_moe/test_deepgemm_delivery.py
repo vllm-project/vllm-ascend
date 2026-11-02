@@ -150,3 +150,16 @@ def test_device_header_fix_is_explicit_and_version_scoped(tmp_path):
     assert "#include <utils/debug/asc_printf.h>" in comm.read_text()
     with pytest.raises(RuntimeError, match="no longer applies"):
         builder.fix_device_includes(tmp_path)
+
+
+def test_unrelated_tilelang_kernel_is_not_imported_at_package_load(tmp_path):
+    builder = load_file("test_builder", ROOT / "tools/deepgemm/build.py")
+    initializer = tmp_path / "__init__.py"
+    initializer.write_text("from .tilelang_ops import tf32_hc_prenorm_gemm\n")
+    hashes = builder.defer_tilelang_import(tmp_path)
+    # There is deliberately no tilelang_ops module in this test package.
+    package = load_file("optional_kernel_probe", initializer)
+    assert callable(package.tf32_hc_prenorm_gemm)
+    assert "__init__.py" in hashes
+    with pytest.raises(ModuleNotFoundError):
+        package.tf32_hc_prenorm_gemm()

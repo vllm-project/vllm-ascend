@@ -88,6 +88,10 @@ wheel build and bundle its NPU extension, Python modules, and JIT headers in
 The build requires GCC 13 or newer, the matching CANN SDK, and elfutils development
 headers. The official A5 image installs these build prerequisites. Runtime device
 JIT still requires the matching CANN compiler and linker, supplied by that image.
+The openEuler image uses its parallel GCC toolset without replacing the default
+compiler. Framework dependency versions are unchanged. TileLang is not required
+by MegaMoE: the packaged initializer defers the unrelated HC kernel's import
+until that kernel is explicitly called.
 
 The worker loader prefers a recognizable external NPU package, otherwise uses
 the bundled implementation. CUDA DeepGEMM is never a fallback. Native load
