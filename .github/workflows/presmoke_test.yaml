@@ -215,7 +215,7 @@ jobs:
       - name: Restore incremental cache
         id: fallback-l1
         if: ${{ matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
-        uses: $/.github/actions/csrc-l1-restore
+        uses: ./.github/actions/csrc-l1-restore
         with:
           cache-dir: csrc/build_cache
           architecture: ${{ steps.get_arch.outputs.arch }}
