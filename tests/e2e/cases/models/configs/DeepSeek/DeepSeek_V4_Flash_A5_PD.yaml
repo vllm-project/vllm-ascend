@@ -157,7 +157,7 @@ benchmarks:
     request_conf: vllm_api_general_chat
     dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
     max_out_len: 65536
-    batch_size: 200
+    batch_size: 64
     baseline: 87.4
     threshold: 5
     temperature: 1.0
