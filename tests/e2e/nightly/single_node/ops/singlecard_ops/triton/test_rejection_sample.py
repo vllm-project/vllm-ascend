@@ -5,7 +5,8 @@ import torch
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.reject_sample import (
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.ops.triton.v1.reject_sample import (
     cal_grid_and_block_size,
     expand_kernel,
     rejection_greedy_sample_spec_len_1_triton,
@@ -14,7 +15,6 @@ from vllm_ascend.ops.triton.reject_sample import (
     rejection_random_sample_kernel,
     sample_recovered_tokens_kernel,
 )
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.sample.rejection_sampler import (
     expand_pytorch,
     rejection_random_sample_block_verify_pytorch,

@@ -139,6 +139,31 @@ def test_shared_sfa_nope_metadata_pages_and_draft_buffers(monkeypatch, block_siz
         torch.testing.assert_close(draft.smla_valid_mask[:, 0], torch.tensor([True, True, True, False]))
 
 
+@pytest.mark.parametrize("pcp_size", [1, 8])
+@pytest.mark.parametrize("a5", [False, True])
+@pytest.mark.parametrize("graph", [False, True])
+def test_nope_metadata_preserves_all_pcp_request_chunks(monkeypatch, pcp_size, a5, graph):
+    builder = _builder(128, a5, monkeypatch, speculative=graph)
+    config = builder.vllm_config
+    config.scheduler_config.max_num_seqs = 8
+    config.scheduler_config.max_num_batched_tokens = 32
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    state = sparse_mla.SparseMLAMetadataState(SimpleNamespace(block_size=128), config, torch.device("cpu"))
+    address = state.block_table_buffer.data_ptr()
+    rows = 17 if pcp_size > 1 else 9
+    width = state.block_table_buffer.shape[1]
+    for num_rows in ([10] if pcp_size > 1 else []) + [rows, 3, rows]:
+        table = torch.arange(num_rows * width, dtype=torch.int32).reshape(num_rows, width)
+        metadata = SimpleNamespace(
+            block_table=table,
+            positions=torch.zeros(num_rows, dtype=torch.int64),
+            num_actual_tokens=num_rows - 1,
+        )
+        state.prepare(metadata)
+        torch.testing.assert_close(metadata.block_table, table)
+        assert metadata.block_table.data_ptr() == address
+
+
 def test_a3_sparse_mla_preserves_storage_addresses(monkeypatch):
     block_size = 2304
     builder = _builder(block_size, False, monkeypatch)
@@ -617,3 +642,19 @@ def test_sparse_mla_rejects_missing_sinks():
             _smla_metadata_stub(None),
             0.5,
         )
+
+
+def test_nope_c8_output_returns_kernel_buffer_without_python_mask(monkeypatch):
+    """NoPE c8 returns the operator output unmodified: the fork kernel defines its
+    own padding rows (TND tail zero-init), so no Python masked_fill remains."""
+    impl = object.__new__(sfa.AscendSFAImpl)
+    impl.qk_rope_head_dim = 0
+    impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
+    cache = torch.empty(8, 2, 1, 12, dtype=torch.int8)
+    metadata = SimpleNamespace(block_size=2)
+    with patch.object(sfa.DeviceOperator, "execute_sparse_flash_attention_process") as dispatch:
+        result = impl._execute_sparse_flash_attention_process(
+            torch.empty(4, 2, 8), None, (cache,), None, metadata, None, None
+        )
+    assert result is dispatch.return_value

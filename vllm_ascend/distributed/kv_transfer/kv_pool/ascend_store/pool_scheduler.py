@@ -25,12 +25,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
-    KeyMetadata,
     LoadSpec,
-    PoolKey,
     ReqMeta,
     RequestTracker,
-    get_group_cache_family,
     infer_cache_transfer_granularity,
     infer_cacheable_group_ids,
     infer_group_block_sizes,
@@ -216,86 +213,6 @@ class KVPoolScheduler:
             )
             self._request_trackers[req_id] = tracker
         return tracker
-
-    def _generate_store_query_keys(
-        self,
-        block_hashes,
-        include_layers: bool = False,
-        kv_cache_group_id: int = 0,
-    ) -> list[list[str]]:
-        head_or_tp_ranks = self.tp_size // self.put_step
-        cache_family = get_group_cache_family(self.kv_cache_group_families, kv_cache_group_id)
-        keys_by_block = []
-        for block_hash in block_hashes:
-            block_keys: list[str] = []
-            chunk_hash = block_hash if isinstance(block_hash, str) else block_hash.hex()
-            pp_ranks = [self.pp_rank] if include_layers else range(self.pp_size)
-            for dcp_rank in range(self.dcp_size):
-                for head_or_tp_rank in range(head_or_tp_ranks):
-                    for pp_rank in pp_ranks:
-                        pool_key = PoolKey(
-                            KeyMetadata(
-                                self.model_name,
-                                head_or_tp_rank,
-                                dcp_rank,
-                                pp_rank,
-                                kv_cache_group_id=kv_cache_group_id,
-                                cache_family=cache_family,
-                            ),
-                            chunk_hash,
-                        )
-                        if include_layers:
-                            block_keys.extend(
-                                layer_key.to_string()
-                                for layer_key in pool_key.split_layers(self.num_layers, self.pp_layer_offset)
-                            )
-                        else:
-                            block_keys.append(pool_key.to_string())
-            keys_by_block.append(block_keys)
-        return keys_by_block
-
-    def _get_store_lookup_hit_tokens(
-        self,
-        request: "Request",
-        token_len: int,
-        num_computed_tokens: int,
-        include_layers: bool = False,
-    ) -> int:
-        num_blocks = token_len // self._block_size
-        # In layerwise mode, always query from block 0 because the remote
-        # pool stores per-layer data that may not match local prefix cache.
-        query_start_block = 0 if self.use_layerwise else min(num_computed_tokens // self._block_size, num_blocks)
-        block_hashes_to_query = request.block_hashes[query_start_block:num_blocks]
-        if not block_hashes_to_query:
-            return 0
-
-        query_keys_by_block = self._generate_store_query_keys(
-            block_hashes_to_query,
-            include_layers=include_layers,
-        )
-        query_keys = [key for block_keys in query_keys_by_block for key in block_keys]
-        exists_states = self.store_scheduler.batch_is_exist(query_keys)
-        if len(exists_states) != len(query_keys):
-            raise RuntimeError(
-                "KV pool exists check returned unexpected number of "
-                f"states for request {request.request_id}: "
-                f"expected={len(query_keys)}, actual={len(exists_states)}"
-            )
-
-        num_queried_hit_blocks = 0
-        offset = 0
-        for block_keys in query_keys_by_block:
-            block_states = exists_states[offset : offset + len(block_keys)]
-            offset += len(block_keys)
-            if all(exists == 1 for exists in block_states):
-                num_queried_hit_blocks += 1
-                continue
-            if any(exists == 0 for exists in block_states):
-                break
-            raise RuntimeError(f"KV pool exists check failed for request {request.request_id}: states={exists_states}")
-
-        num_hit_blocks = query_start_block + num_queried_hit_blocks
-        return num_hit_blocks * self._block_size
 
     def _build_cache_coordinator(self) -> AscendStoreCoordinator | None:
         """Build the hybrid cache-hit/mask coordinator (mirrors the worker)."""
