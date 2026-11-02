@@ -1,0 +1,4 @@
+pr: 20678
+entries:
+  - category: bugfix
+    text: Fixed non-NeoX rotary embedding on the non-Triton path by passing the supported rotary mode to npu_mrope.
