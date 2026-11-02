@@ -45,6 +45,29 @@ def test_copy_kv_cache_blocks_deduplicates_shared_views():
     torch.testing.assert_close(cache[2], before[0])
 
 
+def test_copy_kv_cache_blocks_copies_overlaid_views_of_shared_storage():
+    """A narrowed slice and the full tensor share a data_ptr (issue #20157).
+
+    Deduping by data_ptr alone dropped the wider view, so only the narrow
+    portion of each page was copied and the destination tail stayed stale.
+    Both orderings of the two views must produce the full copy.
+    """
+    for order in ("narrow_first", "full_first"):
+        cache_full = torch.arange(32, dtype=torch.float32).view(4, 8)
+        cache_narrow = cache_full[:, :2]
+        assert cache_narrow.data_ptr() == cache_full.data_ptr()
+        before = cache_full.clone()
+
+        copy_kv_cache_blocks_inplace(
+            [cache_narrow, cache_full] if order == "narrow_first" else [cache_full, cache_narrow],
+            4,
+            [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)],
+        )
+
+        torch.testing.assert_close(cache_full[2], before[0])
+        torch.testing.assert_close(cache_full[:2], before[:2])
+
+
 def test_copy_kv_cache_blocks_skips_none_entries():
     cache = torch.arange(12, dtype=torch.float32).view(4, 3)
     before = cache.clone()
