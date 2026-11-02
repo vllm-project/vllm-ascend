@@ -18,6 +18,46 @@ def _decode_e8m0(scale):
 
 
 @triton.jit
+def _engram_gva_encode_ids_kernel(
+    ids_ptr,
+    owner_ranges_ptr,
+    encoded_ids_ptr,
+    count_ptr,
+    rows,
+    vocab_start,
+    vocab_end,
+    ids_stride_t,
+    ROWS_PER_SLOT: tl.constexpr,
+    BLOCK_OFFSET: tl.constexpr,
+    HEAD_START: tl.constexpr,
+    LOCAL_HEADS: tl.constexpr,
+    NUM_OWNERS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Map global Engram rows to the registered SHARED-pool row grid."""
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    if tl.program_id(0) == 0:
+        tl.store(count_ptr, rows.to(tl.int32))
+    token = offsets // LOCAL_HEADS
+    head_local = offsets % LOCAL_HEADS
+    in_bounds = offsets < rows
+    global_row = tl.load(ids_ptr + token * ids_stride_t + HEAD_START + head_local, mask=in_bounds, other=0).to(tl.int64)
+    valid = in_bounds & (global_row >= vocab_start) & (global_row < vocab_end)
+    local_row = tl.where(valid, global_row - vocab_start, 0)
+    owner_start = tl.full((BLOCK,), 0, tl.int64)
+    owner_slot = tl.full((BLOCK,), 0, tl.int64)
+    for owner_id in range(NUM_OWNERS):
+        start = tl.load(owner_ranges_ptr + owner_id * 3).to(tl.int64)
+        end = tl.load(owner_ranges_ptr + owner_id * 3 + 1).to(tl.int64)
+        slot = tl.load(owner_ranges_ptr + owner_id * 3 + 2).to(tl.int64)
+        owns_row = (local_row >= start) & (local_row < end)
+        owner_start = tl.where(owns_row, start, owner_start)
+        owner_slot = tl.where(owns_row, slot, owner_slot)
+    encoded = owner_slot * ROWS_PER_SLOT + BLOCK_OFFSET + local_row - owner_start
+    tl.store(encoded_ids_ptr + offsets, tl.where(valid, encoded, 0), mask=in_bounds)
+
+
+@triton.jit
 def _engram_int8_gather_dequant_kernel(
     weight_ptr,
     scale_ptr,
@@ -121,3 +161,40 @@ def _engram_host_uva_gather_dequant_kernel(
             output + (token * PAD_HEADS + head_local) * WIDTH + col,
             tl.where(owned, result, tl.zeros_like(result)),
         )
+
+
+@triton.jit
+def _engram_gva_staged_gather_dequant_kernel(
+    codes_ptr,
+    scales_ptr,
+    ids_ptr,
+    output_ptr,
+    rows,
+    vocab_start,
+    vocab_end,
+    ids_stride_t,
+    ROW_STRIDE: tl.constexpr,
+    WIDTH: tl.constexpr,
+    GROUP: tl.constexpr,
+    HEAD_START: tl.constexpr,
+    LOCAL_HEADS: tl.constexpr,
+    PAD_HEADS: tl.constexpr,
+):
+    row = tl.program_id(0)
+    if row >= rows:
+        return
+    token = row // LOCAL_HEADS
+    local = row % LOCAL_HEADS
+    source_row = tl.load(ids_ptr + token * ids_stride_t + HEAD_START + local).to(tl.int64)
+    owned = (source_row >= vocab_start) & (source_row < vocab_end)
+    offsets = tl.arange(0, WIDTH)
+    groups = tl.arange(0, WIDTH // GROUP)
+    codes = tl.load(codes_ptr + row * ROW_STRIDE + offsets).to(tl.float32)
+    scale = tl.load(scales_ptr + row * ROW_STRIDE + groups)
+    scale = _decode_e8m0(scale)
+    values = tl.reshape(codes, (WIDTH // GROUP, GROUP)) * scale[:, None]
+    values = tl.reshape(values, (WIDTH,)).to(tl.bfloat16)
+    tl.store(
+        output_ptr + (token * PAD_HEADS + local) * WIDTH + offsets,
+        tl.where(owned, values, tl.zeros_like(values)),
+    )

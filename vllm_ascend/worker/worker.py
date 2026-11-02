@@ -467,6 +467,18 @@ class NPUWorker(WorkerBase):
             weight_transfer_engine.shutdown()
 
         if model_runner := getattr(self, "model_runner", None):
+            get_model = getattr(model_runner, "get_model", None)
+            if callable(get_model):
+                try:
+                    model = get_model()
+                except ValueError:
+                    model = None
+            else:
+                model = getattr(model_runner, "model", None)
+            if model is not None:
+                from vllm_ascend.models.deepseek_v41.engram.gva import close_engram_gva_pools
+
+                close_engram_gva_pools(model)
             shutdown_fn = getattr(model_runner, "shutdown", None)
             if callable(shutdown_fn):
                 shutdown_fn()

@@ -12,6 +12,7 @@ storage and lookup; upstream rank selection and hash gathering are reused:
   chunked device pointer table.
 """
 
+import hashlib
 import json
 from pathlib import Path
 from typing import cast
@@ -32,9 +33,11 @@ from vllm.model_executor.utils import set_weight_attrs
 # Upstream #56741 normalized the V4.1 model package name.
 from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
 
+from .gva import EngramGvaPool
 from .npu import (
     HostUvaBuffer,
     SharedUvaBuffer,
+    gather_dequantize_engram_gva,
     gather_dequantize_engram_int8,
     gather_dequantize_host_uva,
     quantize_engram_rows,
@@ -61,12 +64,14 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         storage_dtype: torch.dtype = torch.int8,
+        gva_pool: EngramGvaPool | None = None,
     ) -> None:
         self.storage_dtype = storage_dtype
         if storage_dtype not in (torch.bfloat16, torch.int8, torch.float8_e4m3fn):
             raise ValueError(f"Unsupported Engram storage dtype: {storage_dtype}")
         self.scale_dtype = torch.uint8 if storage_dtype == torch.float8_e4m3fn else torch.float32
         self.cpu_offload = cpu_offload
+        self._gva_pool = gva_pool
         self.layer_hash_index = layer_hash_index
         self._shared_group = None
         if not all(in_the_same_node_as(get_tp_group().cpu_group)):
@@ -109,6 +114,15 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         self.vocab_start_idx = sum(head_sizes[: self.head_start])
         self.vocab_end_idx = sum(head_sizes[: self.head_start + self.part_n_hash_cols])
         self.part_num_embeddings = self.vocab_end_idx - self.vocab_start_idx
+        if self._gva_pool is not None and (
+            not cpu_offload or storage_dtype != torch.float8_e4m3fn or self._shared_group is None
+        ):
+            raise ValueError("A5 GVA requires native FP8 host offload with a node-local shared group")
+        if (
+            self._gva_pool is not None
+            and self._gva_pool.table(layer_hash_index).global_rows != self.part_num_embeddings
+        ):
+            raise ValueError("A5 GVA row layout does not match the local Engram head shard")
         weight, scales = self._allocate_weights()
         self.weight = nn.Parameter(weight, requires_grad=False)
         self.weight_scale_inv = nn.Parameter(scales, requires_grad=False) if scales is not None else None
@@ -121,16 +135,27 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             if self.weight_scale_inv is not None:
                 scale_one = 127 if self.scale_dtype == torch.uint8 else 1.0
                 set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": scale_one})
-            logger.info(
-                "Engram table offloaded to registered host memory: %d rows x %d, %.2f GiB per rank",
-                self.part_num_embeddings,
-                self.dim,
-                (
-                    weight.numel() * weight.element_size()
-                    + (scales.numel() * scales.element_size() if scales is not None else 0)
+            shard_gib = (
+                weight.numel() * weight.element_size()
+                + (scales.numel() * scales.element_size() if scales is not None else 0)
+            ) / 1024**3
+            if self._gva_pool is not None:
+                owner_start, owner_end = self._gva_pool.owner_range(self.layer_hash_index)
+                logger.info(
+                    "Engram GVA table owner rows [%d, %d) of %d x %d, %.2f GiB per rank",
+                    owner_start,
+                    owner_end,
+                    self._gva_pool.table(self.layer_hash_index).global_rows,
+                    self.dim,
+                    shard_gib,
                 )
-                / 1024**3,
-            )
+            else:
+                logger.info(
+                    "Engram table offloaded to registered host memory: %d rows x %d, %.2f GiB per rank",
+                    self.part_num_embeddings,
+                    self.dim,
+                    shard_gib,
+                )
 
     def _get_shard_info(self) -> tuple[int, int]:
         if self.dp_size == 1:
@@ -142,6 +167,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         scales_shape = (self.part_num_embeddings, self.dim // self.block_size)
         device = torch.device("npu", torch.npu.current_device())
         quantized = self.storage_dtype != torch.bfloat16
+        gva_pool = getattr(self, "_gva_pool", None)
+        if gva_pool is not None:
+            return gva_pool.weight(self.layer_hash_index, self.storage_dtype), gva_pool.scale(self.layer_hash_index)
         if not self.cpu_offload:
             return (
                 # Zeroed, not empty: the engine profiles the model (and runs the
@@ -218,6 +246,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         Shared head slices have one writer per DP x PCP group. The final CPU
         collective synchronizes writes and propagates loading failures.
         """
+        if getattr(self, "_gva_pool", None) is not None:
+            self._load_gva_into_storage(model_path, key, chunk_rows)
+            return
         if self._shared_group is None:
             self._load_into_storage(model_path, key, chunk_rows)
             return
@@ -232,6 +263,21 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         failures = "; ".join(f"rank {rank}: {failure}" for rank, failure in enumerate(errors) if failure is not None)
         if failures:
             raise RuntimeError(f"Engram shared load failed: {failures}")
+
+    def _load_gva_into_storage(self, model_path, key, chunk_rows) -> None:
+        """Load this rank's balanced owner rows into the shared A5 backing."""
+        gva_pool = self._gva_pool
+        assert gva_pool is not None
+        error = None
+        try:
+            self._load_into_storage(model_path, key, chunk_rows, owner_rows=True)
+        except Exception as exc:  # noqa: BLE001 - propagate the failure to every local owner
+            error = f"{type(exc).__name__}: {exc}"
+        errors: list[str | None] = [None] * gva_pool.world_size
+        dist.all_gather_object(errors, error, group=gva_pool.group.cpu_group)
+        failures = "; ".join(f"rank {rank}: {failure}" for rank, failure in enumerate(errors) if failure is not None)
+        if failures:
+            raise RuntimeError(f"Engram GVA owner-shard load failed: {failures}")
 
     # The Ascend table is streamed out of these indexed safetensors shards.
     _INDEX_FILES = (
@@ -263,11 +309,17 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             f"under {root} (found: {', '.join(named) or 'no index'})."
         )
 
-    def _load_into_storage(self, model_path, key, chunk_rows) -> None:
+    def _load_into_storage(self, model_path, key, chunk_rows, owner_rows: bool = False) -> None:
         root = Path(model_path)
         scale_key = key.removesuffix(".weight") + ".scale"
         index = self._checkpoint_index(root, key)
         start, end = (self.vocab_start_idx, self.vocab_end_idx)
+        if owner_rows:
+            gva_pool = self._gva_pool
+            assert gva_pool is not None
+            owner_start, owner_end = gva_pool.owner_range(self.layer_hash_index)
+            start = self.vocab_start_idx + owner_start
+            end = self.vocab_start_idx + owner_end
         with safe_open(root / index[key], framework="pt", device="cpu") as file:
             tensor = file.get_slice(key)
             source_dtype = tensor.get_dtype()
@@ -300,7 +352,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     scale = sf.get_slice(scale_key)
                     for chunk_start in range(start, end, chunk_rows):
                         stop = min(chunk_start + chunk_rows, end)
-                        offset = chunk_start - self.vocab_start_idx
+                        offset = chunk_start - start
                         target_end = offset + (stop - chunk_start)
                         self.weight.data[offset:target_end].copy_(tensor[chunk_start:stop])
                         self.weight_scale_inv.data[offset:target_end].copy_(scale[chunk_start:stop])
@@ -312,7 +364,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     scale = sf.get_slice(scale_key)
                     for chunk_start in range(start, end, chunk_rows):
                         stop = min(chunk_start + chunk_rows, end)
-                        offset = chunk_start - self.vocab_start_idx
+                        offset = chunk_start - start
                         target_end = offset + (stop - chunk_start)
                         values = tensor[chunk_start:stop].float()
                         group_scales = scale[chunk_start:stop].float()
@@ -323,7 +375,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             else:
                 for chunk_start in range(start, end, chunk_rows):
                     stop = min(chunk_start + chunk_rows, end)
-                    offset = chunk_start - self.vocab_start_idx
+                    offset = chunk_start - start
                     target_end = offset + (stop - chunk_start)
                     codes, scales = quantize_engram_rows(tensor[chunk_start:stop].to(torch.float32))
                     self.weight.data[offset:target_end].copy_(codes)
@@ -396,6 +448,14 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             codes_uva = cast(HostUvaBuffer, self._codes_uva)
             scales_uva = cast(HostUvaBuffer, self._scales_uva) if self._scales_uva is not None else None
             gather_dequantize_host_uva(codes_uva, scales_uva, indices, **launch)
+        elif getattr(self, "_gva_pool", None) is not None:
+            gather_dequantize_engram_gva(
+                self._gva_pool,
+                self.layer_hash_index,
+                indices,
+                self.dim,
+                **launch,
+            )
         elif self.weight.device.type != "cpu":
             gather_dequantize_engram_int8(self.weight, self.weight_scale_inv, indices, self.dim, **launch)
         else:
@@ -442,6 +502,33 @@ def engram_storage_dtype(root, layer_id: int) -> torch.dtype:
     if dtype in ("F8_E4M3", "F8_E4M3FN"):
         return torch.float8_e4m3fn
     raise ValueError(f"{key}: unsupported Engram checkpoint dtype {dtype}")
+
+
+def engram_checkpoint_identity(root, layer_ids: tuple[int, ...] | list[int]) -> str:
+    """Fingerprint the selected Engram index and tensor headers for pool identity."""
+    root = Path(root).resolve()
+    digest = hashlib.sha256(str(root).encode())
+    for filename in AscendParallelEngramEmbedding._INDEX_FILES:
+        index_path = root / filename
+        if index_path.is_file():
+            digest.update(filename.encode())
+            digest.update(index_path.read_bytes())
+    for layer_id in layer_ids:
+        weight_key = f"layers.{layer_id}.engram.embed.weight"
+        scale_key = weight_key.removesuffix(".weight") + ".scale"
+        index = AscendParallelEngramEmbedding._checkpoint_index(root, weight_key)
+        for key in (weight_key, scale_key):
+            if key not in index:
+                continue
+            shard_path = root / index[key]
+            stat = shard_path.stat()
+            with safe_open(shard_path, framework="pt", device="cpu") as file:
+                tensor = file.get_slice(key)
+                header = (tensor.get_dtype(), tuple(tensor.get_shape()))
+            digest.update(key.encode())
+            digest.update(str(index[key]).encode())
+            digest.update(f"{stat.st_size}:{header}".encode())
+    return digest.hexdigest()
 
 
 def preflight_engram_checkpoint(root, layer_ids, embed_cls=AscendParallelEngramEmbedding) -> None:
