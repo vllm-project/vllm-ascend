@@ -109,6 +109,15 @@ before combining them with the target's hidden states, so the draft head
 itself runs the stock full-token layout. Other speculative methods (EAGLE,
 DSpark, ...) and the V1 runner keep the SP-off layout.
 
+Multimodal-capable checkpoints of the dense Qwen3.5 family
+(`Qwen3_5ForConditionalGeneration`, a separate `text_config` in the HF config)
+also run dense SP under the V2 runner: the multimodal merge happens
+full-token side in the runner's `inputs_embeds` preparation, and the wrapper
+restores the full-token text embeddings around the merge before sharding the
+merged embeds to the rank-local token shard, so the vision feature scatter
+never touches the sequence-parallel region. Other multimodal families keep
+the SP-off layout (their model classes do not declare the wiring).
+
 Unsupported topologies keep the stock all-reduce layout: MoE checkpoints
 (upstream SP MoE owns their layout), MLA checkpoints, multimodal and
 speculative-decoding deployments, PCP/DCP topologies, pipeline parallelism,

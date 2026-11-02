@@ -1043,6 +1043,31 @@ def _building_draft_model() -> bool:
     return _current_model_tag == "eagle_head"
 
 
+def _mm_arch_supports_dense_sp(vllm_config) -> bool:
+    """Whether the registered model class opted into the dense-SP wiring.
+
+    The multimodal merge happens full-token side (the V2 runner's
+    prepare_inputs_embeds) before the model forward, so an mm-capable
+    checkpoint runs dense SP only when its registered model class wires the
+    boundary: restore the full-token text embeddings around the merge and
+    shard the merged embeds back before the decoder stack (e.g. the Ascend
+    Qwen3.5 wrapper declares ``supports_dense_sp`` for the patch that does
+    this).
+    """
+    model_config = getattr(vllm_config, "model_config", None)
+    architectures = getattr(model_config, "architectures", None) or []
+    for architecture in architectures:
+        try:
+            from vllm.model_executor.models.registry import ModelRegistry
+
+            model_cls, _ = ModelRegistry.resolve_model_cls((architecture,), model_config)
+        except Exception:
+            continue
+        if getattr(model_cls, "supports_dense_sp", False):
+            return True
+    return False
+
+
 def dense_sp_unavailable_reason(vllm_config) -> str | None:
     """Name the first structural gate that blocks dense sequence parallelism.
 
@@ -1080,7 +1105,15 @@ def dense_sp_unavailable_reason(vllm_config) -> str | None:
     if model_config is None:
         return "model_config is missing"
     if is_vl_model(vllm_config):
-        return "multimodal checkpoint (the vision feature scatter needs a full-token embedding)"
+        from vllm_ascend.mrv2_utils import use_v2_model_runner
+
+        if not use_v2_model_runner(vllm_config):
+            return "multimodal checkpoint on the V1 model runner (dense SP for mm-capable checkpoints is V2 only)"
+        if not _mm_arch_supports_dense_sp(vllm_config):
+            return (
+                "multimodal checkpoint without a dense-SP-wired model class "
+                "(the multimodal merge needs full-token rows before the model)"
+            )
     if getattr(model_config, "use_mla", False):
         return "MLA checkpoint (stacked projections break the gather-per-block invariant)"
     if getattr(model_config, "hf_text_config", None) is None:

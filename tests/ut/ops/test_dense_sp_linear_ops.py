@@ -163,6 +163,42 @@ class TestEnableDenseSpPredicate:
         )
         assert enable_dense_sp(config)
 
+    def test_mm_checkpoint_enabled_with_wired_model_class(self, monkeypatch):
+        # mm-capable Qwen3.5 checkpoints (separate vision sub-config) run
+        # dense SP when the registered model class declares the wiring: the
+        # multimodal merge happens full-token side in the runner's
+        # inputs_embeds preparation, and the wrapper's patch restores the
+        # text shard and shards the merged embeds back.
+        monkeypatch.setattr(utils_module, "_mm_arch_supports_dense_sp", lambda vllm_config: True)
+        vision_config = SimpleNamespace(to_dict=lambda: {"vision_config": {}})
+        text_config = SimpleNamespace(model_type="qwen3_5_text", to_dict=lambda: {"hidden_size": 8})
+        config = _make_vllm_config(
+            model_config=SimpleNamespace(
+                hf_config=vision_config,
+                hf_text_config=text_config,
+                use_mla=False,
+            ),
+        )
+        assert enable_dense_sp(config)
+
+    def test_mm_checkpoint_disabled_without_wired_model_class(self):
+        # The default test config doubles (no architectures) resolve to no
+        # wired model class: the VL override in the parametrized gates above
+        # covers this; assert the reason names the wiring, not the gate.
+        vision_config = SimpleNamespace(to_dict=lambda: {"vision_config": {}})
+        text_config = SimpleNamespace(model_type="qwen3_5_text", to_dict=lambda: {"hidden_size": 8})
+        config = _make_vllm_config(
+            model_config=SimpleNamespace(
+                hf_config=vision_config,
+                hf_text_config=text_config,
+                use_mla=False,
+            ),
+        )
+        assert not enable_dense_sp(config)
+        from vllm_ascend.utils import dense_sp_unavailable_reason
+
+        assert "dense-SP-wired model class" in dense_sp_unavailable_reason(config)
+
     def test_moe_model_excluded_even_with_switch(self):
         moe_config = SimpleNamespace(model_type="qwen3_moe", to_dict=lambda: {"num_experts": 8})
         config = _make_vllm_config(
@@ -662,13 +698,16 @@ class _FakeMtpLayer:
 
 
 class TestMtpDraftFullTokenLayout:
-    """The patched Qwen3.5 MTP forward restores full rows from the shared
-    embedding's token shard, so the draft runs the stock full-token layout
-    whatever its per-step token count is."""
+    """The patched Qwen3.5 MTP forward runs the drafter full-token: the
+    self-embedding path gathers the shared embedding's token shard back to
+    full rows, and speculator-precomputed embeds are already full."""
 
-    def _make_predictor(self, dense_sp_entry, layer):
+    def _make_predictor(self, dense_sp_entry, layer, embed_rows):
         return SimpleNamespace(
             embed_tokens=SimpleNamespace(dense_sp_entry=dense_sp_entry),
+            # The self-embedding path emits the rank-local token shard under
+            # dense SP (the shared target embedding's entry reduce-scatter).
+            embed_input_ids=lambda input_ids: torch.arange(embed_rows * 2, dtype=torch.float64).reshape(embed_rows, 2),
             pre_fc_norm_embedding=lambda x: x,
             pre_fc_norm_hidden=lambda x: x,
             fc=lambda x: x,
@@ -677,7 +716,7 @@ class TestMtpDraftFullTokenLayout:
             norm=lambda h, r: (h, r),
         )
 
-    def _run(self, monkeypatch, dense_sp_entry, num_embed_rows):
+    def _run(self, monkeypatch, dense_sp_entry, num_embed_rows, precomputed: bool):
         from vllm_ascend.patch.worker import patch_qwen3_5
 
         def fake_all_gather(x, dim):
@@ -688,12 +727,17 @@ class TestMtpDraftFullTokenLayout:
         monkeypatch.setattr(patch_qwen3_5, "tensor_model_parallel_all_gather", fake_all_gather)
         monkeypatch.setattr(patch_qwen3_5, "get_pp_group", lambda: SimpleNamespace(is_last_rank=True))
         layer = _FakeMtpLayer()
-        predictor = self._make_predictor(dense_sp_entry, layer)
+        predictor = self._make_predictor(dense_sp_entry, layer, num_embed_rows)
         # T=5 with tp=2: under dense SP the shared embedding emitted
         # ceil(5/2)=3 shard rows; without it the embedding is full (5 rows).
         # The target's hidden states are always full.
-        inputs_embeds = torch.arange(num_embed_rows * 2, dtype=torch.float64).reshape(num_embed_rows, 2)
         hidden_states = torch.arange(5 * 2, dtype=torch.float64).reshape(5, 2) + 10
+        inputs_embeds = None
+        if precomputed:
+            # The speculator's propose pre-compute (Qwen3_5MTP.embed_input_ids
+            # wrapped) already restores the full rows.
+            full_rows = 5 if dense_sp_entry else num_embed_rows
+            inputs_embeds = torch.arange(full_rows * 2, dtype=torch.float64).reshape(full_rows, 2)
         out = patch_qwen3_5.qwen3_5_mtp_forward(
             predictor,
             input_ids=torch.zeros(5, dtype=torch.int64),
@@ -704,14 +748,69 @@ class TestMtpDraftFullTokenLayout:
         )
         return out, layer
 
-    def test_dense_sp_mtp_forward_gathers_and_trims_the_embedding_shard(self, monkeypatch):
-        out, layer = self._run(monkeypatch, dense_sp_entry=True, num_embed_rows=3)
+    def test_self_embedded_shard_gathered_to_full_rows(self, monkeypatch):
+        out, layer = self._run(monkeypatch, dense_sp_entry=True, num_embed_rows=3, precomputed=False)
         # The draft layer ran on the full 5 rows, not the 3-row shard.
         assert layer.rows_seen == [5]
         assert out.shape[0] == 5
 
+    def test_precomputed_embeds_pass_through_ungathered(self, monkeypatch):
+        out, layer = self._run(monkeypatch, dense_sp_entry=True, num_embed_rows=3, precomputed=True)
+        # The speculator-side wrap already restored full rows; the forward
+        # must not gather them again (that would double the rows).
+        assert layer.rows_seen == [5]
+        assert out.shape[0] == 5
+
     def test_mtp_forward_stays_stock_without_dense_sp(self, monkeypatch):
-        out, layer = self._run(monkeypatch, dense_sp_entry=False, num_embed_rows=5)
+        out, layer = self._run(monkeypatch, dense_sp_entry=False, num_embed_rows=5, precomputed=False)
         # No gather: the full rows flow through unchanged.
         assert layer.rows_seen == [5]
         assert out.shape[0] == 5
+
+
+class TestQwen35ModelForwardWrap:
+    """The Qwen3_5Model.forward wrap shards the runner-precomputed
+    inputs_embeds (the multimodal merge happens full-token side before the
+    model) so the decoder stack's projections see the rank-local token
+    shard; the self-embedding path is already sharded by the embedding."""
+
+    def _run(self, monkeypatch, dense_sp_entry, inputs_embeds):
+        from vllm_ascend.patch.worker import patch_qwen3_5
+
+        rows_passed: list[int] = []
+
+        def fake_original(self, input_ids, positions, intermediate_tensors, inputs_embeds):
+            rows_passed.append(0 if inputs_embeds is None else inputs_embeds.shape[0])
+            return inputs_embeds
+
+        monkeypatch.setattr(patch_qwen3_5, "_QWEN3_5_MODEL_ORIGINAL_FORWARD", fake_original)
+
+        def fake_shard(x):
+            # TP=2: chunk the (aligned) full rows to the rank-local shard.
+            return x.chunk(2, dim=0)[0]
+
+        monkeypatch.setattr(patch_qwen3_5, "sp_shard", fake_shard)
+        model = SimpleNamespace(embed_tokens=SimpleNamespace(dense_sp_entry=dense_sp_entry))
+        out = patch_qwen3_5._qwen3_5_model_forward_with_dense_sp(
+            model,
+            input_ids=None,
+            positions=torch.zeros(8, dtype=torch.int64),
+            intermediate_tensors=None,
+            inputs_embeds=inputs_embeds,
+        )
+        return out, rows_passed
+
+    def test_precomputed_embeds_sharded_before_decoder(self, monkeypatch):
+        embeds = torch.zeros(8, 2, dtype=torch.float64)
+        out, rows = self._run(monkeypatch, dense_sp_entry=True, inputs_embeds=embeds)
+        assert rows == [4]
+        assert out.shape[0] == 4
+
+    def test_stock_layout_without_dense_sp(self, monkeypatch):
+        embeds = torch.zeros(8, 2, dtype=torch.float64)
+        out, rows = self._run(monkeypatch, dense_sp_entry=False, inputs_embeds=embeds)
+        assert rows == [8]
+
+    def test_self_embedding_path_untouched(self, monkeypatch):
+        out, rows = self._run(monkeypatch, dense_sp_entry=True, inputs_embeds=None)
+        assert rows == [0]

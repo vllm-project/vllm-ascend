@@ -23,17 +23,25 @@ import torch
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
-from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
+from vllm.model_executor.models.interfaces import _require_is_multimodal
+from vllm.model_executor.models.qwen3_5 import (
+    Qwen3_5DecoderLayer,
+    Qwen3_5ForConditionalGeneration,
+    Qwen3_5Model,
+)
+from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 
 try:
-    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
+    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MTP, Qwen3_5MultiTokenPredictor
     from vllm.sequence import IntermediateTensors
 except ImportError:
     Qwen3_5MultiTokenPredictor = None
+    Qwen3_5MTP = None
     IntermediateTensors = None
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.models.common.ops.sequence_parallel import sp_shard
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
 
 _GDN_PATCH_TARGET = _GDNBaseCls
@@ -162,15 +170,16 @@ if Qwen3_5MultiTokenPredictor is not None:
         # target hidden states instead of consuming PP intermediate tensors.
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
-        if getattr(self.embed_tokens, "dense_sp_entry", False):
-            # Dense sequence parallelism: the drafter shares the target's
-            # embedding, whose output arrives on the rank-local token shard
-            # (the reduce-scatter padding rows are zeros). The drafter itself
-            # runs the stock full-token layout — its per-step token counts
-            # are not runner-padded to the TP multiple — so restore the full
-            # rows here and trim the padding with the true position count.
-            inputs_embeds = tensor_model_parallel_all_gather(inputs_embeds, 0)
-            inputs_embeds = inputs_embeds[: positions.shape[-1]]
+            if getattr(self.embed_tokens, "dense_sp_entry", False):
+                # Self-embedded through the shared (sequence-parallel)
+                # embedding: the output arrived on the rank-local token shard
+                # (the reduce-scatter padding rows are zeros). The drafter
+                # runs the stock full-token layout, so restore the full rows
+                # and trim the padding with the true position count.
+                inputs_embeds = tensor_model_parallel_all_gather(inputs_embeds, 0)
+                inputs_embeds = inputs_embeds[: positions.shape[-1]]
+        # else: pre-computed by the speculator (the wrapped
+        # Qwen3_5MTP.embed_input_ids below already restores full rows).
         assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
         inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
         hidden_states = self.pre_fc_norm_hidden(hidden_states)
@@ -209,6 +218,99 @@ if Qwen3_5MultiTokenPredictor is not None:
         return hidden_states
 
     Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward
+
+    _QWEN3_5_MTP_WRAPPER_EMBED_ORIGINAL = Qwen3_5MTP.embed_input_ids
+
+    def _qwen3_5_mtp_embed_input_ids_full_token(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings=None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self._embed_text_input_ids(
+            input_ids,
+            self.model.embed_input_ids,
+            is_multimodal=is_multimodal,
+        )
+        if getattr(self.model.embed_tokens, "dense_sp_entry", False):
+            # Dense sequence parallelism: the drafter shares the target's
+            # embedding, whose text output arrived on the rank-local token
+            # shard (the reduce-scatter padding rows are zeros). The
+            # speculator's propose pre-compute and the multimodal merge below
+            # consume full-token rows, so restore them before merging; the
+            # drafter itself keeps the stock full-token layout.
+            inputs_embeds = tensor_model_parallel_all_gather(inputs_embeds, 0)
+            inputs_embeds = inputs_embeds[: input_ids.shape[0]]
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+        is_multimodal = _require_is_multimodal(is_multimodal)
+        return _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
+
+    Qwen3_5MTP.embed_input_ids = _qwen3_5_mtp_embed_input_ids_full_token
+
+
+def _qwen3_5_cg_embed_input_ids_full_token(
+    self,
+    input_ids: torch.Tensor,
+    multimodal_embeddings=None,
+    *,
+    is_multimodal: torch.Tensor | None = None,
+) -> torch.Tensor:
+    inputs_embeds = self._embed_text_input_ids(
+        input_ids,
+        self.language_model.embed_input_ids,
+        is_multimodal=is_multimodal,
+    )
+    if getattr(self.language_model.model.embed_tokens, "dense_sp_entry", False):
+        # Dense sequence parallelism: the language model's embedding arrived
+        # on the rank-local token shard, while the V2 runner's
+        # prepare_inputs_embeds (text embed + multimodal merge, done
+        # full-token side before the model) and the merge below consume
+        # full-token rows. Restore them here; the Qwen3_5Model.forward wrap
+        # below shards the merged embeds back to the token shard before the
+        # decoder stack.
+        inputs_embeds = tensor_model_parallel_all_gather(inputs_embeds, 0)
+        inputs_embeds = inputs_embeds[: input_ids.shape[0]]
+    if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+        return inputs_embeds
+    is_multimodal = _require_is_multimodal(is_multimodal)
+    return _merge_multimodal_embeddings(
+        inputs_embeds=inputs_embeds,
+        multimodal_embeddings=multimodal_embeddings,
+        is_multimodal=is_multimodal,
+    )
+
+
+Qwen3_5ForConditionalGeneration.embed_input_ids = _qwen3_5_cg_embed_input_ids_full_token
+
+_QWEN3_5_MODEL_ORIGINAL_FORWARD = Qwen3_5Model.forward
+
+
+def _qwen3_5_model_forward_with_dense_sp(
+    self,
+    input_ids: torch.Tensor | None,
+    positions: torch.Tensor,
+    intermediate_tensors: IntermediateTensors | None = None,
+    inputs_embeds: torch.Tensor | None = None,
+):
+    if inputs_embeds is not None and getattr(self.embed_tokens, "dense_sp_entry", False):
+        # Dense sequence parallelism: the V2 runner pre-computes inputs_embeds
+        # (the multimodal merge happens full-token side, before the model) and
+        # passes them full, while the decoder stack's projections expect the
+        # rank-local token shard. Mirror upstream's SP-MoE entry (the
+        # sequence_parallel_chunk at the top of Qwen3NextModel.forward) for
+        # the dense layout; the self-embedding path is already sharded by the
+        # embedding's dense_sp_entry gate.
+        inputs_embeds = sp_shard(inputs_embeds)
+    return _QWEN3_5_MODEL_ORIGINAL_FORWARD(self, input_ids, positions, intermediate_tensors, inputs_embeds)
+
+
+Qwen3_5Model.forward = _qwen3_5_model_forward_with_dense_sp
 
 
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
