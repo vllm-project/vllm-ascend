@@ -31,7 +31,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8LinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import AscendW8A8FP8DynamicLinearMethod
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ, vllm_version_is
 
 
 @pytest.mark.parametrize("num_tokens", [1, 3])
@@ -1949,7 +1949,7 @@ class TestAscendMLAImpl(TestBase):
         self.impl.fused_qkv_a_proj.output_sizes = [64, 32, 128]
         # Only vLLM main builds the three-shard QKV-A-gate projection; release
         # v0.33.0 keeps a separate gate and a two-shard projection.
-        gate_fused = True
+        gate_fused = not vllm_version_is("0.33.0")
 
         impl = self._rebuild_impl()
 
@@ -2807,13 +2807,8 @@ class TestAscendMLAImpl(TestBase):
     def test_process_weights_after_loading_rebinds_incompatible_value(self, mock_format_cast):
         """An incompatible reload must rebind instead of raising from ``copy_``.
 
-        ``replace_parameter(..., prefer_copy=True)`` reuses the stored storage
-        only while shape, dtype and device still match. The hand-rolled
-        ``copy_`` it replaced was unconditional, so a re-derived value that
-        stopped being compatible aborted the whole weight-update transaction
-        with a ``RuntimeError``. That failure mode is the only behaviour this
-        change alters, so it is the part of the contract the unit tests have to
-        pin down.
+        v0.33.0 rebinds an incompatible value; main can copy a smaller value
+        into the parameter's existing storage. Both must accept the new shape.
         """
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
@@ -2843,9 +2838,13 @@ class TestAscendMLAImpl(TestBase):
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        # Main copies a smaller value into the parameter's own storage, so
-        # the address captured by graphs is preserved.
-        self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        if vllm_version_is("0.33.0"):
+            # A re-derived value that no longer fits rebinds the parameter.
+            self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        else:
+            # Main copies a smaller value into the parameter's own storage, so
+            # the address captured by graphs is preserved.
+            self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
         self.assertEqual(
             self.impl.W_UV.shape,
             (self.impl.num_heads, self.impl.kv_lora_rank, self.impl.v_head_dim),
@@ -3692,7 +3691,7 @@ def test_split_fused_qkv_lora_plain_layout_has_no_gate():
 
 
 @pytest.mark.skipif(
-    False,
+    vllm_version_is("0.33.0"),
     reason="gate-fused QKV-A layout is vLLM main only",
 )
 def test_split_fused_qkv_lora_peels_kimi_output_gate():
