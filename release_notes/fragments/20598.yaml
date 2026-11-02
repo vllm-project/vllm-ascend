@@ -1,0 +1,4 @@
+pr: 20598
+entries:
+  - category: bugfix
+    text: KV cache initialization now aborts with a clear error when a Mooncake store buffer registration fails, instead of starting transfers over partially registered regions.
