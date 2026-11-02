@@ -321,14 +321,25 @@ def test_server_visibility_rejects_invalid_selection(monkeypatch, visible, devic
 
 
 @pytest.mark.parametrize(
-    "changed_conditions",
+    ("memory", "device", "visible"),
     [
-        pytest.param({"gpu_memory_utilization": 0.45}, id="memory-budget"),
-        pytest.param({"device_index": 1}, id="logical-device"),
-        pytest.param({"env_dict": {"ASCEND_RT_VISIBLE_DEVICES": "4,5"}}, id="physical-visibility"),
+        pytest.param(0.45, 0, "0,1", id="memory-budget"),
+        pytest.param(GPU_MEMORY_UTILIZATION, 1, "0,1", id="logical-device"),
+        pytest.param(GPU_MEMORY_UTILIZATION, 0, "4,5", id="physical-visibility"),
     ],
 )
-def test_reference_cache_reuses_only_matching_conditions(changed_conditions):
+def test_reference_cache_reuses_only_matching_conditions(memory: float, device: int, visible: str):
+    def measure(port: int, memory: float, device: int, env: dict[str, str]):
+        return reference_signature(
+            MagicMock(),
+            CASE,
+            port=port,
+            gpu_memory_utilization=memory,
+            tensor_parallel_size=2,
+            device_index=device,
+            env_dict=env,
+        )
+
     with (
         patch.object(utils, "_REFERENCE_SIGNATURES", {}),
         patch("tests.e2e.conftest.RemoteOpenAIServer") as server_factory,
@@ -336,26 +347,16 @@ def test_reference_cache_reuses_only_matching_conditions(changed_conditions):
         patch.object(utils, "wait_for_free_device_memory") as wait,
         patch.object(utils, "generation_signature", side_effect=[[("first", ())], [("second", ())]]) as generate,
     ):
-        kwargs = dict(
-            port=PORT,
-            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-            tensor_parallel_size=2,
-            device_index=0,
-            env_dict={"ASCEND_RT_VISIBLE_DEVICES": "0,1"},
-        )
-        first = reference_signature(MagicMock(), CASE, **kwargs)
+        env = {"ASCEND_RT_VISIBLE_DEVICES": "0,1"}
+        first = measure(PORT, GPU_MEMORY_UTILIZATION, 0, env)
         # Ports are incidental: the same measurement must reuse its reference.
-        kwargs["port"] = PORT + 1
-        assert reference_signature(MagicMock(), CASE, **kwargs) == first
-        kwargs.update(changed_conditions)
-        second = reference_signature(MagicMock(), CASE, **kwargs)
-        kwargs["env_dict"] = kwargs["env_dict"].copy()
-        assert reference_signature(MagicMock(), CASE, **kwargs) == second
+        assert measure(PORT + 1, GPU_MEMORY_UTILIZATION, 0, env) == first
+        env = {"ASCEND_RT_VISIBLE_DEVICES": visible}
+        second = measure(PORT, memory, device, env)
+        assert measure(PORT, memory, device, env.copy()) == second
     assert first != second
     assert generate.call_count == server_factory.call_count == 2
     # Cache hits do not wait; each startup gates every TP rank.
-    device = kwargs["device_index"]
-    memory = kwargs["gpu_memory_utilization"]
     assert wait.call_args_list == [call(0, GPU_MEMORY_UTILIZATION), call(1, GPU_MEMORY_UTILIZATION)] + [
         call(device + rank, memory) for rank in range(2)
     ]
