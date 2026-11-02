@@ -87,7 +87,8 @@ def test_facade_delegates_worker_methods_and_metadata() -> None:
     assert connector.get_transfer_results(set()) is results
     connector.connector_worker.get_transfer_results.assert_called_once_with()
     assert connector.get_block_ids_with_load_errors() == {10}
-    assert connector.get_handshake_metadata() is connector.connector_worker.xfer_handshake_metadata
+    assert connector.get_handshake_metadata() is connector.connector_worker.get_handshake_metadata.return_value
+    connector.connector_worker.get_handshake_metadata.assert_called_once_with()
     connector.connector_worker.start_load_kv.assert_called_once_with(connector._connector_metadata)
 
 

@@ -163,6 +163,10 @@ class MooncakeBaseConnectorWorker:
 
         logger.info("Initializing Mooncake worker %s", engine_id)
 
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        """Return the registered cache descriptor for either transfer mode."""
+        return self.xfer_handshake_metadata
+
     def _build_kv_cache_spec_mappings(self) -> None:
         """Flatten group specs and map each layer to its group and spec.
 

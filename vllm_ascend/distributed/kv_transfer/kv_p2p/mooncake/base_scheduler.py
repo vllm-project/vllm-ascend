@@ -231,8 +231,24 @@ class MooncakeBaseConnectorScheduler:
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         raise NotImplementedError
 
-    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int | None, bool]:
-        raise NotImplementedError
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
+        """Return prompt tokens that will be loaded from a remote producer."""
+        params = request.kv_transfer_params
+        logger.debug(
+            "MooncakeConnector get_num_new_matched_tokens: num_computed_tokens=%s, kv_transfer_params=%s",
+            num_computed_tokens,
+            params,
+        )
+
+        if params is not None and params.get("do_remote_prefill"):
+            token_ids = request.prompt_token_ids or []
+            actual = self._state_prefill_token_count(len(token_ids))
+            params["num_computed_tokens"] = num_computed_tokens
+            count = max(actual - num_computed_tokens, 0)
+            if count > 0:
+                return count, True
+
+        return 0, False
 
     def update_state_after_alloc(
         self,

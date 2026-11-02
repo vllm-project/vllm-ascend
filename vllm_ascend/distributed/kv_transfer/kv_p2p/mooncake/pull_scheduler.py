@@ -576,25 +576,6 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         if not self._sending_thread.is_alive():
             raise RuntimeError("Mooncake scheduler sending thread failed to start")
 
-    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
-        """Return prompt tokens that will be loaded from a remote producer."""
-        params = request.kv_transfer_params
-        logger.debug(
-            "MooncakeConnector get_num_new_matched_tokens: num_computed_tokens=%s, kv_transfer_params=%s",
-            num_computed_tokens,
-            params,
-        )
-
-        if params is not None and params.get("do_remote_prefill"):
-            token_ids = request.prompt_token_ids or []
-            actual = self._state_prefill_token_count(len(token_ids))
-            params["num_computed_tokens"] = num_computed_tokens
-            count = max(actual - num_computed_tokens, 0)
-            if count > 0:
-                return count, True
-
-        return 0, False
-
     def update_state_after_alloc(
         self,
         request: "Request",

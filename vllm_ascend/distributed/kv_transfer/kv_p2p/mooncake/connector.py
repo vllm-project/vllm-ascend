@@ -233,7 +233,7 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Return this worker's out-of-band transfer handshake metadata."""
         assert self.connector_worker is not None
-        return self.connector_worker.xfer_handshake_metadata
+        return self.connector_worker.get_handshake_metadata()
 
 
 class MooncakePullConnector(MooncakeBaseConnector):
@@ -256,7 +256,7 @@ class MooncakePullConnector(MooncakeBaseConnector):
 
 
 class MooncakePushConnector(MooncakeBaseConnector):
-    """Placeholder for the not-yet-implemented push-based connector."""
+    """Placeholder for the not-yet-implemented layerwise push connector."""
 
     def __init__(
         self,
