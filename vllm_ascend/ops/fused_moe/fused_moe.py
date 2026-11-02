@@ -24,8 +24,10 @@ from vllm.distributed import (
     get_tp_group,
     tensor_model_parallel_all_reduce,
 )
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import MoERunner
+from vllm.model_executor.layers.fused_moe.router.zero_expert_router import ZeroExpertRouter
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared, _unpack
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -40,7 +42,67 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertParallelMode,
     SubmittedSharedExpertGateUp,
 )
+from vllm_ascend.ops.triton.hc_post import can_fuse_hc_post_add, fused_hc_post_add
 from vllm_ascend.quantization.quant_type import QuantType
+
+
+def _ascend_moe_hc_post(
+    shared: torch.Tensor | None,
+    routed: torch.Tensor,
+    residual: torch.Tensor,
+    post: torch.Tensor,
+    comb: torch.Tensor,
+    layer_name: str,
+    trunc_size: int,
+) -> torch.Tensor:
+    """Keep the batch-dependent collective decision inside the opaque op.
+
+    In particular, an ALLGATHER tracing batch must not specialize a graph
+    subsequently replayed with MC2 (or vice versa). Pre-HcPost reductions,
+    scaling, transforms and shared-stream waits have already run on entry.
+    """
+    runner = get_forward_context().no_compile_layers[layer_name]
+    no_late_reduce = (
+        runner.moe_config.is_sequence_parallel
+        or runner._should_reduce_routed_before_combine()
+        or runner._fused_output_is_reduced
+        or (runner.moe_config.tp_size == 1 and runner.moe_config.ep_size == 1)
+    )
+    # A ZeroExpertRouter adds another contribution after the shared/routed
+    # combine. Keep its original arithmetic and ordering in the fallback.
+    # Do not probe the zero_expert_output property: reading it consumes it.
+    has_zero_expert = isinstance(runner.router, ZeroExpertRouter)
+    if (
+        no_late_reduce
+        and not has_zero_expert
+        and (trunc_size <= 0 or trunc_size == routed.shape[-1])
+        and can_fuse_hc_post_add(shared, routed, residual, post, comb)
+    ):
+        return fused_hc_post_add(shared, routed, residual, post, comb)
+    result = runner._finish_output(shared, routed, trunc_size if trunc_size > 0 else None)
+    return torch.ops._C_ascend.npu_hc_post(
+        result.unsqueeze(0), residual.unsqueeze(0), post.unsqueeze(0), comb.unsqueeze(0)
+    ).squeeze(0)
+
+
+def _ascend_moe_hc_post_fake(
+    shared: torch.Tensor | None,
+    routed: torch.Tensor,
+    residual: torch.Tensor,
+    post: torch.Tensor,
+    comb: torch.Tensor,
+    layer_name: str,
+    trunc_size: int,
+) -> torch.Tensor:
+    return torch.empty_like(residual, memory_format=torch.contiguous_format)
+
+
+direct_register_custom_op(
+    op_name="ascend_moe_hc_post",
+    op_func=_ascend_moe_hc_post,
+    fake_impl=_ascend_moe_hc_post_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
 
 
 def _ascend_moe_forward_shared_sp_fake(
@@ -83,6 +145,8 @@ direct_register_custom_op(
 
 
 class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
+    supports_hc_post_fusion = True
+
     def __init__(
         self,
         layer_name,
@@ -164,6 +228,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        hc_post_inputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Mirror of upstream ``MoERunner.forward`` (this class is instantiated
         through the OOT PluggableLayer dispatch of ``MoERunner``).
@@ -232,6 +297,26 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # Apply output transform (e.g. latent -> full dim)
         fused_output = self.apply_routed_output_transform(fused_output)
 
+        if hc_post_inputs is not None:
+            residual, post, comb = hc_post_inputs
+            return torch.ops.vllm.ascend_moe_hc_post(
+                shared_output,
+                fused_output,
+                residual,
+                post,
+                comb,
+                self.layer_name,
+                og_hidden_dim_post_xform if og_hidden_dim_post_xform is not None else 0,
+            )
+        return self._finish_output(shared_output, fused_output, og_hidden_dim_post_xform)
+
+    def _finish_output(
+        self,
+        shared_output: torch.Tensor | None,
+        fused_output: torch.Tensor,
+        trunc_size: int | None,
+    ) -> torch.Tensor:
+        """The unchanged combine/reduce/zero-expert path, also used on fallback."""
         if shared_output is not None:
             if getattr(self, "_release_shared_schedule", False):
                 result = shared_output + fused_output
@@ -240,7 +325,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         else:
             result = fused_output
 
-        result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform, fused_output_is_reduced)
+        result = self._maybe_reduce_final_output(result, trunc_size, self._fused_output_is_reduced)
 
         return self._maybe_add_zero_expert_output(result)
 
