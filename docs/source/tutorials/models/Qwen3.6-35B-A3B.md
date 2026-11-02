@@ -507,7 +507,7 @@ For accuracy-sensitive validation, submit one request per `generate()` call unti
 
 For common environment, installation, and general parameter issues, refer to [Public FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3.6-35B-A3B.
 
-### 10.1 Why does the service report OOM during startup or soon after accepting requests?
+### 11.1 Why does the service report OOM during startup or soon after accepting requests?
 
 **Phenomenon:** The service fails during profile run, or it starts successfully but reports OOM when real traffic arrives.
 
@@ -515,7 +515,7 @@ For common environment, installation, and general parameter issues, refer to [Pu
 
 **Solution:** Use the W8A8 model with `--quantization ascend` when possible, lower `--max-model-len`, lower `--max-num-seqs`, lower `--max-num-batched-tokens`, or reduce `--gpu-memory-utilization`. Keep `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`.
 
-### 10.2 Why does enabling prefix caching not improve performance?
+### 11.2 Why does enabling prefix caching not improve performance?
 
 **Phenomenon:** Prefix caching is enabled, but throughput or latency does not improve.
 
