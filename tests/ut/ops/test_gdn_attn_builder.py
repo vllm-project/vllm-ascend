@@ -880,6 +880,12 @@ def test_host_layout_cache_hit_keeps_conv_buffers_bound():
         common.is_prefilling.zero_()
         # Same layout, different physical blocks: step 1 is a cache hit.
         common.block_table_tensor = torch.arange(32, dtype=torch.int32).view(2, 16).flip(0) + step * 100
+        # Stale contents must be overwritten: poison both buffers first and
+        # check the values, not only the bindings.
+        builder._conv_output_buffer.fill_(7)
+        builder._spec_conv_indices.fill_(-1)
+        expected_blocks = common.block_table_tensor[:, 0].tolist()
+
         metadata = builder.build(0, common, accepted, drafts)
 
         assert metadata.spec_decode_metadata is not None
@@ -887,6 +893,11 @@ def test_host_layout_cache_hit_keeps_conv_buffers_bound():
         assert conv.output_buffer is builder._conv_output_buffer
         assert conv.cache_indices.ndim == 1
         assert conv.cache_indices.data_ptr() == builder._spec_conv_indices.data_ptr()
+        # Values, not just pointers: the dedicated index buffer holds the
+        # current physical blocks and the shared output buffer was cleared.
+        assert builder._spec_conv_indices[: len(expected_blocks)].tolist() == expected_blocks
+        assert conv.cache_indices[: len(expected_blocks)].tolist() == expected_blocks
+        assert torch.count_nonzero(builder._conv_output_buffer) == 0
 
 
 @pytest.mark.parametrize("use_v2", [False, True])
