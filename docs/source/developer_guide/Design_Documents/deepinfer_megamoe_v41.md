@@ -38,16 +38,29 @@ that the CUDA class can execute unchanged on NPU. No vLLM source patch is needed
 
 ## Dependencies and reproduction scope
 
-Hardware results used the NPU DeepGEMM source at
-`3a35326271b069b8b5bf1a754435acd6cc91575b`, CANN 9.2 and
-`torch_npu 2.10.0.post7`. Install a compatible NPU build of `deep_gemm` before
-enabling the backend; the CUDA package is not interchangeable.
+See [RFC #20620](https://github.com/vllm-project/vllm-ascend/issues/20620).
+950 builds compile the pinned official DeepGEMM-Ascend dependency with its own
+wheel build and bundle its NPU extension, Python modules, and JIT headers in
+`vllm_ascend.third_party.deep_gemm`. Other hardware builds do not build it.
+The build requires GCC 13 or newer, the matching CANN SDK, and elfutils development
+headers. The official A5 image installs these build prerequisites. Runtime device
+JIT still requires the matching CANN compiler and linker, supplied by that image.
 
-The tested CANN 9.2 Bisheng device frontend needed the included
-`ops/fused_moe/deepgemm_compat/utility` header shim for libstdc++ compatibility.
-For that toolchain, prepend its directory to `CPLUS_INCLUDE_PATH` in the launch
-environment. The shim changes device compilation headers, not Python package
-installation, and is not required or injected for other backends.
+The worker loader prefers a recognizable external NPU package, otherwise uses
+the bundled implementation. CUDA DeepGEMM is never a fallback. Native load
+failures are reported without initializing a second implementation. The default
+cache is managed under the vLLM cache root. Users do not need compiler exports,
+source overlays, or compatibility-header setup to select this backend.
+
+The build tool applies two version-scoped include corrections to the vendored
+device headers: use the required type-traits header in `common.hpp`, and include
+the communication diagnostics declarations explicitly. This removes the old
+standard-library shadow header and its global include-path requirement. The
+manifest records the corrected header hashes; remove these corrections when
+the pinned dependency incorporates them upstream.
+
+Packaging validation and branch-specific hardware acceptance are tracked in the
+PR; historical results below do not establish acceptance of a newly built wheel.
 
 ## MLA lifetime adjustment
 
