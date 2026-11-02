@@ -9,7 +9,7 @@ meta:
 variants:
   ascend_310p_fp16:
     label: "FP16 (Ascend 310P)"
-    precision: bf16
+    precision: fp16
     vram_minimum_gb: 8
     description: "FP16 on Ascend 310P (*-310p image). Measured PASS + gsm8k 80.06 on ~21GB 310P3 / v0.30.0rc1-310p (2026-10-29 Asia/Shanghai). Serve with --dtype float16 and qwen3_5_mtp."
     supported_hardware: [ascend_310p]
