@@ -195,11 +195,10 @@ class _WeightUpdateClient(HTTPVLLMWeightSyncClient):
 def _send_update(server, engine, client: _WeightUpdateClient, source, *, is_draft: bool = False):
     client.is_draft = is_draft
     engine.source = source
+
     _post(server, "pause")
-    try:
-        engine.send_weights()
-    finally:
-        _post(server, "resume")
+    engine.send_weights()
+    _post(server, "resume")
 
 
 class WeightUpdateTestWorkerExtension:
