@@ -106,10 +106,8 @@ class _Transfer:
         self.previous_broadcast = stream
         if self.receiving:
             stream.synchronize()
-            # Protect raw storage on both main and release; clones are tracked
-            # separately by owning_unpack, before invoking the model callback.
-            for reader in self.readers:
-                tensor.record_stream(reader)
+            # Raw storage is read only on this slot; only owning clones
+            # escape to callbacks and require cross-stream lifetime tracking.
 
     def load(self, weights):
         self.callback(weights)
