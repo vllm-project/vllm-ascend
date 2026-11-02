@@ -314,11 +314,27 @@ def test_hccl_send_uses_the_selected_source_and_factory_engine(is_draft):
     assert [call.args[1] for call in post.call_args_list] == ["pause", "resume"]
 
 
-def test_hccl_send_resumes_after_a_trainer_failure():
-    from tests.e2e.pull_request.two_card.rlhf.state_transitions import test_hccl_weight_transfer as hccl
+def test_hccl_send_does_not_resume_after_a_trainer_failure():
+    from tests.e2e.pull_request.two_card.rlhf.state_transitions import (
+        test_hccl_weight_transfer as hccl,
+    )
 
     server, engine = MagicMock(), MagicMock()
-    engine.send_weights.side_effect = RuntimeError("transfer failed")
-    with patch.object(hccl, "_post") as post, pytest.raises(RuntimeError, match="transfer failed"):
-        hccl._send_update(server, engine, hccl._WeightUpdateClient("http://unused"), object(), is_draft=True)
-    assert [call.args[1] for call in post.call_args_list] == ["pause", "resume"]
+    error = RuntimeError("transfer failed")
+    engine.send_weights.side_effect = error
+
+    with (
+        patch.object(hccl, "_post") as post,
+        pytest.raises(RuntimeError, match="transfer failed") as caught,
+    ):
+        hccl._send_update(
+            server,
+            engine,
+            hccl._WeightUpdateClient("http://unused"),
+            object(),
+            is_draft=True,
+        )
+
+    assert caught.value is error
+    engine.send_weights.assert_called_once_with()
+    post.assert_called_once_with(server, "pause")
