@@ -10,6 +10,8 @@ NumPy mask, and the sync copies one run per contiguous range. The cases are
 kept here so the behaviour #20541 pinned stays pinned.
 """
 
+import sys
+import types
 from unittest import mock
 
 import numpy as np
@@ -17,10 +19,14 @@ import pytest
 import torch
 
 from vllm_ascend.patch.worker import patch_uva
-from vllm_ascend.patch.worker.patch_uva import _DirtyRows
 
 
-def _make_buffer(shape: int | tuple[int, ...], dtype: torch.dtype = torch.int64) -> patch_uva.UvaBufferWrapper:
+def _make_buffer(
+    shape: int | tuple[int, ...],
+    dtype: torch.dtype = torch.int64,
+    *,
+    real_uva: bool = False,
+) -> patch_uva.UvaBufferWrapper:
     """Build a real wrapper on CPU: the UT has no NPU and no pinned allocator."""
     pinned_zeros = torch.zeros
 
@@ -29,7 +35,7 @@ def _make_buffer(shape: int | tuple[int, ...], dtype: torch.dtype = torch.int64)
         return pinned_zeros(*args, **kwargs)
 
     with (
-        mock.patch.object(patch_uva, "is_uva_available", lambda: False),
+        mock.patch.object(patch_uva, "is_uva_available", lambda: real_uva),
         mock.patch.object(patch_uva, "_zeros_on_npu", torch.zeros_like),
         mock.patch.object(torch, "zeros", _unpinned_zeros),
     ):
@@ -99,22 +105,20 @@ def test_uint64_prefix_preserves_high_bits():
     assert buffer.uva(2).tolist() == [2**63 + 3, 2**64 - 1]
 
 
-def test_real_uva_does_not_track():
-    # The real-UVA path hands out the raw host objects: the device already sees
-    # host writes through the mapping, so there is nothing to track. Built from
-    # __new__ because the mapped view needs the NPU kernel.
-    buffer = patch_uva.UvaBufferWrapper.__new__(patch_uva.UvaBufferWrapper)
-    buffer._cpu = torch.zeros(16, dtype=torch.int64)
-    buffer._np = buffer._cpu.numpy()
-    buffer._uva = buffer._cpu
-    buffer._use_real_uva = True
-    buffer._cpu_view = buffer._cpu
-    buffer._np_view = buffer._np
-    buffer._dirty = _DirtyRows(16)
+def test_real_uva_does_not_track(monkeypatch):
+    # With ``pinned_mem_register`` the pinned host buffer is mapped for the
+    # device, so ``uva()`` hands back that mapping and there is nothing to
+    # track: the mirrors are the raw objects.
+    monkeypatch.setitem(sys.modules, "vllm_ascend.vllm_ascend_C", types.ModuleType("vllm_ascend.vllm_ascend_C"))
+    monkeypatch.setattr(torch.ops._C_ascend, "get_npu_view_from_cpu_tensor", lambda cpu: cpu, raising=False)
 
-    buffer.np[:4] = 3
+    buffer = _make_buffer(16, real_uva=True)
+
+    assert buffer._use_real_uva is True
     assert buffer.np is buffer._np
     assert buffer.cpu is buffer._cpu
+
+    buffer.np[:4] = 3
     assert buffer.uva(4).tolist() == [3] * 4
     _assert_idle(buffer)
 

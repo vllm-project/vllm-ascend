@@ -446,8 +446,8 @@ def test_promote_mtp_spec_decoding_keeps_uniform_mtp_on_full_graph() -> None:
 
 
 def test_staged_write_publishes_rows_written_through_the_mirror(monkeypatch) -> None:
-    # post_update writes decoded tokens through ``all_token_ids.cpu``; the
-    # publish must not depend on stage_write() having been used.
+    # A write through the mirror must be published even when stage_write() was
+    # never used for that row; the 310P post_update path relies on that.
     monkeypatch.setattr(patch_uva_module, "is_uva_available", lambda: False)
     monkeypatch.setattr(patch_uva_module, "_zeros_on_npu", torch.zeros_like)
     pinned_zeros = torch.zeros
@@ -468,6 +468,56 @@ def test_staged_write_publishes_rows_written_through_the_mirror(monkeypatch) -> 
 
     torch.testing.assert_close(staged.gpu[1, 0:2], torch.tensor([10, 11], dtype=torch.int32))
     torch.testing.assert_close(staged.gpu[0], torch.zeros(8, dtype=torch.int32))
+
+
+def test_post_update_cpu_publishes_decoded_tokens_through_the_mirror(monkeypatch) -> None:
+    # ``_post_update_cpu`` appends the sampled tokens to ``all_token_ids.cpu``.
+    # On the emulated-UVA path that write must go through ``__setitem__``: a
+    # copy into the view returned by ``.cpu[row, start:stop]`` never reaches the
+    # dirty tracker, so ``apply_write()`` has nothing to publish and ``.gpu``
+    # keeps the prompt for the lifetime of the request.
+    monkeypatch.setattr(patch_uva_module, "is_uva_available", lambda: False)
+    monkeypatch.setattr(patch_uva_module, "_zeros_on_npu", torch.zeros_like)
+    pinned_zeros = torch.zeros
+    monkeypatch.setattr(
+        torch,
+        "zeros",
+        lambda *args, **kwargs: pinned_zeros(*args, **{**kwargs, "pin_memory": False}),
+    )
+    all_token_ids = Ascend310PStagedWriteTensor(
+        (2, 8),
+        dtype=torch.int32,
+        device=torch.device("cpu"),
+        uva_instead_of_gpu=True,
+    )
+    total_len = Ascend310PStagedWriteTensor(2, dtype=torch.int32, device=torch.device("cpu"))
+    # The prompt row was staged and published when the request was added.
+    all_token_ids.cpu[1, :2] = torch.tensor([7, 8], dtype=torch.int32)
+    all_token_ids.apply_write()
+    total_len.stage_write_elem(1, 2)
+    req_states = SimpleNamespace(
+        all_token_ids=all_token_ids,
+        last_sampled_tokens_cpu=torch.zeros((2, 1), dtype=torch.int64),
+        total_len=total_len,
+        num_computed_tokens_np=np.zeros(2, dtype=np.int32),
+        num_computed_tokens_cpu=torch.zeros(2, dtype=torch.int32),
+        num_computed_tokens=Ascend310PStagedWriteTensor(2, dtype=torch.int32, device=torch.device("cpu")),
+    )
+
+    model_runner_module._post_update_cpu(
+        np.array([1], dtype=np.int32),
+        np.array([0, 1], dtype=np.int32),
+        req_states,
+        torch.tensor([[10, 11]], dtype=torch.int32),
+        torch.tensor([2], dtype=torch.int32),
+        torch.tensor([0], dtype=torch.int32),
+    )
+    all_token_ids.apply_write()
+
+    torch.testing.assert_close(
+        all_token_ids.gpu[1, :4],
+        torch.tensor([7, 8, 10, 11], dtype=torch.int32),
+    )
 
 
 def test_post_update_cpu_matches_upstream_bookkeeping() -> None:

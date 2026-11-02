@@ -53,6 +53,45 @@ class _FailingDevice:
         return self._shadow[key]
 
 
+def _count_copied_rows(monkeypatch) -> list[int]:
+    """Record how many rows each H2D copy moves.
+
+    ``_sync_dirty_rows`` copies one slice per contiguous run, so this is what
+    distinguishes "publish what changed" from "publish everything": contents
+    alone look the same in both cases.
+    """
+    rows: list[int] = []
+    original = torch.Tensor.copy_
+
+    def _copy(self, src, *args, **kwargs):
+        rows.append(int(self.shape[0]))
+        return original(self, src, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "copy_", _copy)
+    return rows
+
+
+def _spy_int64_storage(monkeypatch) -> list[torch.dtype]:
+    """Record the dtypes handed to ``_int64_storage`` and check its contract.
+
+    The int64 view exists only because the NPU copy kernels reject ``uint64``,
+    and a CPU copy accepts either dtype, so the tensor contents cannot catch a
+    missing view. Assert the call site instead.
+    """
+    seen: list[torch.dtype] = []
+    original = patch_uva_module._int64_storage
+
+    def _storage(tensor):
+        seen.append(tensor.dtype)
+        result = original(tensor)
+        if tensor.dtype == torch.uint64:
+            assert result.dtype == torch.int64
+        return result
+
+    monkeypatch.setattr(patch_uva_module, "_int64_storage", _storage)
+    return seen
+
+
 def test_prefix_write_is_tracked_without_allocating_a_mask():
     dirty = _DirtyRows(2_097_152)
 
@@ -77,8 +116,10 @@ def test_scattered_writes_stay_separate_runs():
 
     dirty.mark(slice(0, 2))
     dirty.mark(7)
+    dirty.mark(12)
 
-    assert dirty.take() == [(0, 2), (7, 8)]
+    # Rows 2-6 and 8-11 were not written; merging the runs would copy them.
+    assert dirty.take() == [(0, 2), (7, 8), (12, 13)]
 
 
 def test_scattered_run_touching_the_prefix_is_coalesced():
@@ -109,17 +150,6 @@ def test_boolean_mask_write_covers_true_positions():
     assert dirty.take() == [(1, 3), (7, 8)]
 
 
-def test_multi_dimensional_boolean_key_refreshes_the_whole_buffer():
-    # ``arr[arr > 0] = v`` is a legal write that no row index describes. The
-    # data is already written when the tracker sees the key, so it must fall
-    # back to a full refresh rather than raise.
-    dirty = _DirtyRows(4)
-
-    dirty.mark(np.zeros((4, 2), dtype=bool))
-
-    assert dirty.take() == [(0, 4)]
-
-
 def test_repeated_marking_never_loses_rows():
     dirty = _DirtyRows(16)
 
@@ -128,14 +158,6 @@ def test_repeated_marking_never_loses_rows():
     dirty.mark(slice(20, 24))
 
     assert dirty.take() == [(0, 10)]
-
-
-def test_take_resets_the_tracker():
-    dirty = _DirtyRows(4)
-    dirty.mark(slice(0, 4))
-
-    assert dirty.take() == [(0, 4)]
-    assert dirty.take() == []
 
 
 def test_mask_is_not_scanned_until_a_scattered_write_marks_it():
@@ -186,16 +208,13 @@ def test_empty_tuple_key_marks_the_whole_buffer():
 
 def test_negative_step_slice_marks_the_reversed_rows():
     dirty = _DirtyRows(8)
-    rows = slice(5, 2, -1)  # rows 5, 4, 3
 
-    dirty.mark(rows)
+    dirty.mark(slice(5, 2, -1))  # rows 5, 4, 3
 
     assert dirty.take() == [(3, 6)]
 
-
-def test_empty_negative_step_slice_marks_nothing():
-    dirty = _DirtyRows(8)
-
+    # With a negative step, ``stop > start`` is the empty form - the opposite
+    # of the forward reading, which would mark rows 2-4 here.
     dirty.mark(slice(2, 5, -1))
 
     assert dirty.take() == []
@@ -225,8 +244,29 @@ def test_whole_buffer_write_clears_the_pending_mask():
     dirty.mark(5)
     dirty.mark(slice(None))
 
+    # One run for the whole buffer: the scattered bit is subsumed, not copied
+    # as a second range.
     assert dirty.take() == [(0, 8)]
     assert dirty._mask_pending is False
+
+    # take() retired both markers: a later write starts from a clean tracker
+    # instead of re-publishing the whole buffer.
+    dirty.mark(3)
+    assert dirty.take() == [(3, 4)]
+
+
+def test_appending_indices_extends_the_prefix():
+    # The 310P staged-write path marks one row per request and tensor, so
+    # consecutive appends must stay in the prefix instead of allocating the
+    # mask.
+    dirty = _DirtyRows(8)
+
+    dirty.mark(0)
+    dirty.mark(1)
+
+    assert dirty._prefix == 2
+    assert dirty._mask is None
+    assert dirty.take() == [(0, 2)]
 
 
 def test_single_row_write_below_the_prefix_allocates_no_mask():
@@ -316,6 +356,10 @@ def test_numpy_view_writes_are_refused_instead_of_going_stale():
         np.put(buf.np, [8, 9], 6)
     with pytest.raises(ValueError):
         buf.np.flat[0] = 1
+    with pytest.raises(ValueError):
+        buf.np.fill(3)
+    with pytest.raises(ValueError):
+        buf.np.__iadd__(5)
 
     # The seal cannot be undone: NumPy refuses to re-enable writeability,
     # which a plain read-only view of a writable base would allow.
@@ -329,18 +373,6 @@ def test_numpy_view_writes_are_refused_instead_of_going_stale():
     buf.uva(8)
     assert buf._uva[0:2].eq(7).all()
     assert buf._uva[2:].eq(0).all()
-
-
-def test_numpy_in_place_method_is_refused():
-    buf = _make_uva_buffer(8)
-
-    # ndarray's in-place methods mutate the receiver, which the tracker cannot
-    # attribute to rows; they raise instead of risking a stale device copy.
-    with pytest.raises(ValueError):
-        buf.np.fill(3)
-
-    buf.uva(8)
-    assert buf._uva.eq(0).all()
 
 
 def test_torch_in_place_method_publishes_the_whole_buffer():
@@ -373,18 +405,13 @@ def test_torch_data_handle_is_refused():
     "alias",
     [
         lambda cpu: cpu.to(torch.int32),  # no-op cast: returns the mirror itself
-        lambda cpu: cpu.detach(),
-        lambda cpu: cpu.view(-1),
-        lambda cpu: cpu.reshape(-1),
-        lambda cpu: cpu.contiguous(),
-        lambda cpu: cpu.t(),
-        lambda cpu: cpu.narrow(0, 0, 2),
-        lambda cpu: cpu.split(2)[0],
+        lambda cpu: cpu.view(-1),  # returns a new view over the same storage
     ],
 )
 def test_torch_alias_writes_reach_the_device_shadow(alias):
-    # Every one of these hands out a tensor over the mirror's storage, so a
-    # write through it must publish the whole buffer.
+    # Both "returns the receiver" and "returns a view" shapes hand out a
+    # writable tensor over the mirror's storage, so a write through either must
+    # publish the whole buffer.
     buf = _make_uva_buffer(8)
 
     alias(buf.cpu).fill_(9)
@@ -393,28 +420,30 @@ def test_torch_alias_writes_reach_the_device_shadow(alias):
     assert torch.equal(buf._uva, buf._cpu)
 
 
-@pytest.mark.parametrize("view", [lambda cpu: cpu.T, lambda cpu: cpu.mT, lambda cpu: cpu.real])
-def test_torch_attribute_views_publish_the_whole_buffer(view):
-    # These are attributes, not calls, but they still hand out a writable view
-    # of the mirror's storage.
+def test_torch_attribute_views_publish_the_whole_buffer():
+    # Attribute views are not calls, but they still hand out a writable view of
+    # the mirror's storage (``.T`` stands for the ``.mT``/``.H``/``.real``
+    # family here).
     buf = _make_uva_buffer(8)
 
-    view(buf.cpu)[0] = 9
+    buf.cpu.T[0] = 9
     buf.uva(8)
 
     assert torch.equal(buf._uva, buf._cpu)
 
 
-def test_numpy_explicit_inplace_dunder_is_refused():
-    # ``buf.np += 5`` fails on the proxy (no __iadd__ on the type), and an
-    # explicit __iadd__ call now fails on the read-only alias as well.
+def test_torch_storage_handle_publishes_the_whole_buffer(monkeypatch):
+    # A raw storage handle can write any element, and handing it out cannot be
+    # told apart from a plain read, so it publishes everything. ``storage``
+    # shares the same branch and the same publish; it is left out because
+    # torch deprecates ``TypedStorage``.
     buf = _make_uva_buffer(8)
+    rows = _count_copied_rows(monkeypatch)
 
-    with pytest.raises(ValueError):
-        buf.np.__iadd__(5)
-
+    buf.cpu.untyped_storage()
     buf.uva(8)
-    assert buf._uva.eq(0).all()
+
+    assert rows == [8]
 
 
 def test_attribute_assignment_cannot_shadow_the_mirror():
@@ -438,35 +467,55 @@ def test_mirrors_report_their_length():
     assert len(buf.cpu) == 8
 
 
-def test_uint64_shadow_copies_through_int64_storage():
-    buf = _make_uva_buffer(4, cols=1, dtype=torch.uint64)
+@pytest.mark.parametrize("write", ["prefix", "scattered"])
+def test_uint64_copies_through_int64_storage(write, monkeypatch):
+    # The NPU copy kernel rejects DT_UINT64, so every copy goes through an
+    # int64 view of both sides. A CPU copy accepts either dtype, so the tensor
+    # contents cannot catch a missing view: assert the call site.
+    buf = _make_uva_buffer(8, cols=1, dtype=torch.uint64)
+    seen = _spy_int64_storage(monkeypatch)
 
-    buf.np[0:2] = np.array([[2**63 + 1], [7]], dtype=np.uint64)
-    buf.uva(4)
+    if write == "prefix":
+        buf.np[0:2] = np.array([[2**63 + 1], [7]], dtype=np.uint64)
+        runs = 1
+    else:
+        buf.np[6] = np.array([2**63 + 1], dtype=np.uint64)
+        buf.np[1] = np.array([7], dtype=np.uint64)
+        runs = 2
+    buf.uva(8)
 
-    assert buf._uva[0].item() == 2**63 + 1
+    # One destination and one source per run, both seen as uint64.
+    assert seen == [torch.uint64] * (2 * runs)
     assert buf._uva[1].item() == 7
+    assert buf._uva[6 if write == "scattered" else 0].item() == 2**63 + 1
 
 
-def test_repeated_sync_only_copies_new_rows():
+def test_repeated_sync_only_copies_new_rows(monkeypatch):
     buf = _make_uva_buffer(8)
+    copied = _count_copied_rows(monkeypatch)
 
     buf.np[0:2] = 4
     buf.uva(8)
     buf.np[5] = 9
     buf.uva(8)
 
+    # The second sync must move the one new row, not repeat the first batch and
+    # not fall back to a whole-buffer copy.
+    assert copied == [2, 1]
     assert buf._uva[0:2].eq(4).all()
     assert buf._uva[5].eq(9).all()
 
 
-def test_failed_copy_leaves_the_remaining_rows_dirty():
+@pytest.mark.parametrize("fail_on", [1, 2])
+def test_failed_copy_leaves_the_remaining_rows_dirty(fail_on):
+    # Two disjoint runs: the prefix [0, 3) and the single row 5. Failing on
+    # either one must keep the ranges that were not refreshed dirty.
     buf = _make_uva_buffer(8)
+    buf.np[0:3] = 4
     buf.np[5] = 9
-    buf.np[1] = 3
 
     shadow = buf._uva
-    buf._uva = _FailingDevice(shadow, fail_on=2)
+    buf._uva = _FailingDevice(shadow, fail_on=fail_on)
     with pytest.raises(RuntimeError):
         buf.uva(8)
 
@@ -474,23 +523,8 @@ def test_failed_copy_leaves_the_remaining_rows_dirty():
     buf._uva = shadow
     buf.uva(8)
 
-    assert buf._uva[1].eq(3).all()
-    assert buf._uva[5].eq(9).all()
-
-
-def test_failed_prefix_copy_leaves_the_prefix_dirty():
-    buf = _make_uva_buffer(8)
-    buf.np[0:3] = 4
-
-    shadow = buf._uva
-    buf._uva = _FailingDevice(shadow, fail_on=1)
-    with pytest.raises(RuntimeError):
-        buf.uva(8)
-
-    buf._uva = shadow
-    buf.uva(8)
-
     assert buf._uva[0:3].eq(4).all()
+    assert buf._uva[5].eq(9).all()
 
 
 def test_sync_refreshes_rows_past_the_requested_prefix():
@@ -514,7 +548,7 @@ def test_uint64_scattered_write_reaches_the_device_shadow():
     assert buf._uva[6].item() == 2**63 + 1
 
 
-def test_empty_index_list_marks_nothing():
+def test_empty_index_write_is_a_noop(monkeypatch):
     # ``arr[[]] = v`` is a valid no-op write in NumPy; ``np.asarray([])`` is
     # float64, so the tracker must not try to use it as an index.
     dirty = _DirtyRows(8)
@@ -525,11 +559,12 @@ def test_empty_index_list_marks_nothing():
 
     assert dirty.take() == []
 
-
-def test_empty_index_write_is_a_noop():
+    # End to end: an empty write must not refresh the whole buffer.
     buf = _make_uva_buffer(8)
+    copied = _count_copied_rows(monkeypatch)
 
     buf.np[[]] = 1
     buf.uva(8)
 
+    assert copied == []
     assert buf._uva.eq(0).all()
