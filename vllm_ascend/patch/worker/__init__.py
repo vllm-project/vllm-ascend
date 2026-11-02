@@ -17,10 +17,10 @@
 
 import os
 
-from vllm.triton_utils import HAS_TRITON
-
-if HAS_TRITON:
-    import vllm_ascend.patch.worker.patch_triton
+# Ascend supplies torch/NPU implementations for the GDN convolution and
+# recurrent kernels.  They must be installed even when Triton has no active
+# driver (the usual vLLM-Ascend environment).
+import vllm_ascend.patch.worker.patch_triton
 
 # isort: off
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
