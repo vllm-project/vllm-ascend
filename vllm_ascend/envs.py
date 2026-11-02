@@ -29,6 +29,11 @@ from typing import Any
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Opt-in fused C2 ring metadata on non-A5 NPUs. Existing A5 dispatch
+    # remains unchanged. Set before worker/builder initialization.
+    "VLLM_ASCEND_ENABLE_C2_METADATA_FUSION": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_C2_METADATA_FUSION", "0"))
+    ),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.
