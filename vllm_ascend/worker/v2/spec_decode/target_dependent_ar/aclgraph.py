@@ -50,13 +50,18 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        varlen_decode: bool | None = None,
     ):
+        # Omit the new keyword for older Core callers and preserve values
+        # supplied by current Core's draft-prefill graph setup.
+        graph_kwargs = {} if varlen_decode is None else {"varlen_decode": varlen_decode}
         super().__init__(
             vllm_config,
             device,
             cudagraph_mode,
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
+            **graph_kwargs,
         )
 
         # Upstream constructs graph managers without a speculator reference.
