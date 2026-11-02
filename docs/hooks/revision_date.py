@@ -135,7 +135,7 @@ def _english_revision_timestamps(source_uris: set[str]) -> dict[str, int]:
 
 def on_files(files, config, **kwargs) -> None:
     """Resolve published pages and shared English dependencies in one query."""
-    if not config.extra.get("show_revision_date", True):
+    if not config.extra.get("show_revision_date", False):
         return
     documents = [file for file in files.documentation_pages() if not getattr(file, "generated_by", None)]
     if not documents:
@@ -157,7 +157,7 @@ def on_files(files, config, **kwargs) -> None:
 
 def on_page_context(context, page, config, **kwargs):
     """Render only the date used by Material's page footer."""
-    if not config.extra.get("show_revision_date", True):
+    if not config.extra.get("show_revision_date", False):
         return context
     timestamp = getattr(page.file, REVISION_DATE_ATTRIBUTE, None)
     if timestamp is not None:
