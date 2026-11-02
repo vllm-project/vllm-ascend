@@ -350,11 +350,13 @@ def test_dflash2_acceptance(
 @pytest.mark.parametrize("num_speculative_tokens", [7])
 @pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "compiled_full_decode"])
 def test_dflash2_v2_acceptance(
+    monkeypatch: pytest.MonkeyPatch,
     method: str,
     num_speculative_tokens: int,
     enforce_eager: bool,
 ):
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+    # Cover default runner selection for both eager and graph drafting.
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 
@@ -417,6 +419,7 @@ def test_dflash2_v2_acceptance(
         compilation_config=compilation_config,
         enable_prefix_caching=False,
     ) as llm:
+        assert llm.model.llm_engine.vllm_config.use_v2_model_runner
         outputs = llm.model.generate(prompts, sampling_params)
         metrics = llm.model.get_metrics()
 
