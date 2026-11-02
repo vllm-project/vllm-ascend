@@ -9,10 +9,10 @@ from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 
 import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
-from vllm_ascend.utils import model_uses_kpool_indexer
+from vllm_ascend.utils import enable_sfa, model_uses_kpool_indexer
 
 
-def use_dcp_q_replicate(vllm_config, config, layer_name: str | None = None) -> bool:
+def use_dcp_q_replicate(vllm_config) -> bool:
     """Resolve dense MLA Q replication before creating Q projections."""
     parallel = vllm_config.parallel_config
     requested = (
@@ -22,8 +22,7 @@ def use_dcp_q_replicate(vllm_config, config, layer_name: str | None = None) -> b
     )
     if not requested or parallel.decode_context_parallel_size <= 1 or parallel.prefill_context_parallel_size > 1:
         return False
-    # Match the sparse-model predicate used by the DeepSeek MLA constructor.
-    if hasattr(config, "index_topk"):
+    if enable_sfa(vllm_config):
         raise ValueError("Ascend dcp_q_replicate only supports dense MLA; SFA is not supported")
     # LoRA wrappers do not implement the replicated-Q projection layout.
     if vllm_config.lora_config is not None:

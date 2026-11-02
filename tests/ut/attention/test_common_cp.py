@@ -244,8 +244,9 @@ def test_fragment_gather_keeps_kv_on_the_dcp_token_axis():
 
 class TestDCPQReplicationConfig(unittest.TestCase):
     @staticmethod
-    def _make_dcp_q_replicate_config(requested=True):
+    def _make_dcp_q_replicate_config(requested=True, **hf_config):
         return SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(**hf_config)),
             parallel_config=SimpleNamespace(
                 dcp_q_replicate=requested,
                 decode_context_parallel_size=2,
@@ -267,7 +268,7 @@ class TestDCPQReplicationConfig(unittest.TestCase):
                 patch.object(common_cp.envs, "VLLM_DCP_Q_REPLICATE", legacy, create=True),
             ):
                 self.assertIs(
-                    use_dcp_q_replicate(self._make_dcp_q_replicate_config(requested), SimpleNamespace()),
+                    use_dcp_q_replicate(self._make_dcp_q_replicate_config(requested)),
                     expected,
                 )
 
@@ -276,7 +277,10 @@ class TestDCPQReplicationConfig(unittest.TestCase):
             patch.object(common_cp.envs, "is_set", return_value=False),
             self.assertRaisesRegex(ValueError, "only supports dense MLA; SFA is not supported"),
         ):
-            use_dcp_q_replicate(
-                self._make_dcp_q_replicate_config(),
-                SimpleNamespace(index_topk=2048),
+            use_dcp_q_replicate(self._make_dcp_q_replicate_config(index_topk=2048))
+
+    def test_compressed_attention_is_not_classified_as_sfa(self):
+        with patch.object(common_cp.envs, "is_set", return_value=False):
+            self.assertTrue(
+                use_dcp_q_replicate(self._make_dcp_q_replicate_config(index_topk=2048, compress_ratios=[1, 4]))
             )

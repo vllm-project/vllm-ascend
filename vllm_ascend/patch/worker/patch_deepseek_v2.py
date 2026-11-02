@@ -133,7 +133,7 @@ def _deepseek_v2_mla_attention_init(
             prefix=f"{prefix}.kv_a_proj_with_mqa",
         )
 
-    dcp_q_replicate_enabled = use_dcp_q_replicate(vllm_config, config)
+    dcp_q_replicate_enabled = use_dcp_q_replicate(vllm_config)
     q_proj_cls = AscendDCPGroupColumnParallelLinear if dcp_q_replicate_enabled else ColumnParallelLinear
     if self.q_lora_rank is not None:
         self.q_a_layernorm = RMSNorm(
