@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -139,15 +140,17 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
 
     def test_get_impl_cls(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
             self.assertEqual(AscendAttentionBackend.get_impl_cls(), AscendAttentionBackendImpl)
 
     def test_get_builder_cls(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
             self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
 
     def test_supports_pcp_only_for_main_implementation(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
+            self.assertTrue(AscendAttentionBackend.supports_pcp())
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
             self.assertTrue(AscendAttentionBackend.supports_pcp())
 
         class OtherAttentionBackend(AscendAttentionBackend):
@@ -158,14 +161,14 @@ class TestAscendAttentionBackend(TestBase):
         self.assertFalse(OtherAttentionBackend.supports_pcp())
 
     def test_get_impl_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=True):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
             self.assertIs(
                 AscendAttentionBackend.get_impl_cls(),
                 AscendAttentionDCPImpl,
             )
 
     def test_get_builder_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=True):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
             self.assertIs(
                 AscendAttentionBackend.get_builder_cls(),
                 AscendAttentionDCPMetadataBuilder,
@@ -222,13 +225,13 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.assertFalse(result)
 
     def test_pcp_mode_is_initialized_from_config(self):
-        self.assertFalse(self.builder.pcp_enabled)
+        self.assertFalse(self.builder.use_pcp)
         self.assertIs(self.builder.metadata_cls, AscendMetadata)
 
         self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 2
         pcp_builder = AscendAttentionMetadataBuilder(None, None, self.mock_vllm_config, self.mock_device)
 
-        self.assertTrue(pcp_builder.pcp_enabled)
+        self.assertTrue(pcp_builder.use_pcp)
         self.assertIs(pcp_builder.metadata_cls, AscendMetadata)
 
     def test_unpadded_preserves_internal_seq_lens_cpu(self):
@@ -297,13 +300,16 @@ def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
 
     builder._finalize_pcp_metadata(metadata, expanded_slot_mapping)
 
+    assert metadata.uses_pcp_sharded_layout
     assert metadata.slot_mapping is expanded_slot_mapping
     assert metadata.pcp_local_num_input_tokens == 4
     assert metadata.attn_state == AscendAttentionState.ChunkedPrefill
 
 
-def test_pcp_cache_write_uses_gathered_inputs() -> None:
+@pytest.mark.parametrize("cache_write_error", [False, True], ids=["success", "cache-write-error"])
+def test_pcp_cache_write_uses_gathered_inputs_and_restores_metadata(cache_write_error) -> None:
     impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    impl.is_pcp_decode_sharded = False
     impl.attn_type = attn_module.AttentionType.DECODER
     impl.key_cache = None
     impl.value_cache = None
@@ -339,14 +345,16 @@ def test_pcp_cache_write_uses_gathered_inputs() -> None:
         patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as reshape_and_cache,
         patch("vllm_ascend.attention.attention_v1.notify_kv_cache_written"),
     ):
-        result = impl._reshape_and_cache_pcp(
-            query,
-            key,
-            value,
-            (key_cache, value_cache),
-            metadata,
-            output,
-        )
+
+        def write_cache():
+            return impl._reshape_and_cache_pcp(query, key, value, (key_cache, value_cache), metadata, output)
+
+        if cache_write_error:
+            reshape_and_cache.side_effect = RuntimeError("cache write failed")
+            with pytest.raises(RuntimeError, match="cache write failed"):
+                write_cache()
+        else:
+            result = write_cache()
 
     local_inputs, actual_slots, num_decode_tokens = gather_inputs.call_args.args
     torch.testing.assert_close(local_inputs[0], key)
@@ -360,16 +368,18 @@ def test_pcp_cache_write_uses_gathered_inputs() -> None:
     torch.testing.assert_close(cache_args["slot_mapping"], gathered_slots)
     assert metadata.slot_mapping is slot_mapping
     assert metadata.num_actual_tokens == 3
-    assert result[0] is query
-    assert result[1] is key
-    assert result[2] is value
-    assert result[3] is output
+    reshape_and_cache.assert_called_once()
+    if not cache_write_error:
+        assert result[0] is query
+        assert result[1] is gathered_key
+        assert result[2] is gathered_value
+        assert result[3] is output
 
 
 def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
     builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
     builder.decode_threshold = 1
-    builder.pcp_enabled = True
+    builder.use_pcp = True
     common_metadata = SimpleNamespace(
         context_parallel_metadata=None,
         max_query_len=4,
@@ -380,6 +390,25 @@ def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
     )
 
     assert builder._split_decodes_and_prefills(common_metadata) == (0, 2, 0, 5)
+
+
+def test_pcp_replicated_draft_decode_writes_cache_locally() -> None:
+    impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    impl.use_pcp = True
+    impl.key_cache = object()
+    # A draft decode built without a PCP context has no PCP-local layout.
+    query, key, value, output = (torch.zeros(2, 1, 1) for _ in range(4))
+    metadata = AscendMetadata(model_runner_type="generate", slot_mapping=torch.tensor([3, 4]))
+    layer = SimpleNamespace(layer_name="layer", _k_scale_float=1.0, _v_scale_float=1.0)
+    written = (query, key, value, output)
+    with (
+        patch.object(impl, "_reshape_and_cache_pcp", return_value=written) as pcp_write,
+        patch.object(impl, "reshape_and_cache", return_value=written) as write,
+        patch.object(impl, "forward_impl", return_value=output),
+    ):
+        impl.forward(layer, query, key, value, (), metadata, output)
+    pcp_write.assert_not_called()
+    write.assert_called_once()
 
 
 class TestAscendAttentionBackendImpl(TestBase):
@@ -403,6 +432,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.attention_type.DECODER = "decoder"
         self.attention_type.ENCODER = "encoder"
         self.attn_metadata = MagicMock()
+        self.attn_metadata.uses_pcp_sharded_layout = False
         self.attn_metadata.return_value = "1"
         self.layer_no_quant = MagicMock(spec=["layer_name", "_k_scale_float", "_v_scale_float"])
         self.layer_no_quant.layer_name = "test_layer"
@@ -529,6 +559,45 @@ class TestAscendAttentionBackendImpl(TestBase):
             attn_type=self.attention_type.DECODER,
             kv_sharing_target_layer_name="producer_layer",
         )
+
+    def test_kv_cache_dtype_honors_layer_override(self):
+        self.mock_vllm_config.cache_config.cache_dtype = "fp8"
+        self.mock_vllm_config.model_config.dtype = torch.bfloat16
+        for recipe_c8 in (False, True):
+            self.mock_vllm_config.quant_config.enable_c8_quant = recipe_c8
+            for layer_dtype, expected in (("auto", torch.bfloat16), ("bfloat16", torch.bfloat16)):
+                with self.subTest(layer_dtype=layer_dtype, recipe_c8=recipe_c8):
+                    impl = AscendAttentionBackendImpl(
+                        num_heads=16,
+                        head_size=128,
+                        scale=128**-0.5,
+                        num_kv_heads=1,
+                        alibi_slopes=None,
+                        sliding_window=None,
+                        kv_cache_dtype=layer_dtype,
+                        logits_soft_cap=None,
+                        attn_type=self.attention_type.DECODER,
+                        kv_sharing_target_layer_name=None,
+                    )
+                    self.assertEqual(impl.kv_cache_dtype, expected)
+                    self.assertFalse(impl.enable_c8_quant)
+
+    def test_quantized_layer_still_requires_quantized_weights(self):
+        self.mock_vllm_config.cache_config.cache_dtype = "bfloat16"
+        self.mock_vllm_config.quant_config.enable_c8_quant = False
+        with self.assertRaisesRegex(ValueError, "corresponding quantized weights are required"):
+            AscendAttentionBackendImpl(
+                num_heads=16,
+                head_size=128,
+                scale=128**-0.5,
+                num_kv_heads=1,
+                alibi_slopes=None,
+                sliding_window=None,
+                kv_cache_dtype="fp8",
+                logits_soft_cap=None,
+                attn_type=self.attention_type.DECODER,
+                kv_sharing_target_layer_name=None,
+            )
 
     def test_hnd_layout_is_recorded_during_initialization(self):
         with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", "HND"):

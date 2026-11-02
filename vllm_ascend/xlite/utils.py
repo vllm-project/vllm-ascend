@@ -20,10 +20,11 @@ from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from logging import Logger
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, cast
 
 import torch
 import torch.nn as nn
+import torch_npu
 from vllm.logger import logger
 from xlite._C import Model, ModelConfig
 
@@ -51,6 +52,104 @@ def set_dummy_tensor(tensor: torch.Tensor) -> None:
     """
     global _DUMMY_TENSOR
     _DUMMY_TENSOR = tensor
+
+
+class _TensorRepr:
+    """
+    A simple class to provide a string representation of a tensor or an iterable of tensors.
+
+    Attributes:
+        value (Any): The tensor or iterable of tensors to represent, or any other object. If the value is not a tensor
+            or iterable of tensors, its standard representation is used.
+        max_it (int | None): The maximum number of items to show in the representation for iterables. If the iterable
+            has more items than `max_it`, an ellipsis ("...") is used as padding. If `max_it <= 0`, all items are shown.
+    """
+
+    def __init__(self, value: Any, /, *, max_it: int | None = 3) -> None:
+        self.value: Any = value
+        self.max_it: int = max_it if isinstance(max_it, int) else 0
+
+    def _prune_list_repr(self, repr_list: list[str], /) -> list[str]:
+        """Prune a list of string representations to a maximum number of items, adding an ellipsis if pruned."""
+        repr_set: set[str] = set()
+        pruned_repr_list: list[str] = []
+        last_item_is_ellipsis = False
+        for i, s in enumerate(repr_list):
+            if i >= self.max_it and self.max_it > 0:
+                if not last_item_is_ellipsis:
+                    last_item_is_ellipsis = True
+                    pruned_repr_list.append("...")
+                break
+            if s in repr_set:
+                if not last_item_is_ellipsis:
+                    last_item_is_ellipsis = True
+                    pruned_repr_list.append("...")
+                continue
+            last_item_is_ellipsis = False
+            pruned_repr_list.append(s)
+            repr_set.add(s)
+        return pruned_repr_list
+
+    def _single_tensor_repr(self, tensor: torch.Tensor, /) -> str:
+        tensor_info: list[str] = [f"shape={tuple(tensor.shape)}"]
+        if not tensor.is_contiguous():
+            tensor_info.append(f"stride={tensor.stride()}")
+        tensor_info.append(f"dtype={str(tensor.dtype).strip().lstrip('torch.')}")
+        if tensor.device.type == "npu" and (tensor_format := torch_npu.get_npu_format(tensor)) != torch_npu.Format.ND:
+            tensor_info.append(f"format={str(tensor_format)}")
+        return f"Tensor({', '.join(tensor_info)})"
+
+    def _iterable_tensor_repr(self, iterable: torch.Tensor | Sequence[torch.Tensor], /) -> str:
+        if isinstance(iterable, torch.Tensor):
+            return self._single_tensor_repr(iterable)
+        if len(iterable) == 0:
+            return "TensorList(len=0)"
+        tensor_repr_list = self._prune_list_repr([self._single_tensor_repr(t) for t in iterable])
+        return f"TensorList(len={len(iterable)}, items=[{', '.join(tensor_repr_list)}])"
+
+    def _iterable_tensor_2d_repr(
+        self, iterable: torch.Tensor | Sequence[torch.Tensor] | Sequence[Sequence[torch.Tensor]], /
+    ) -> str:
+        if isinstance(iterable, torch.Tensor):
+            return self._single_tensor_repr(iterable)
+        if all(isinstance(t, torch.Tensor) for t in iterable):
+            iterable = cast(Sequence[torch.Tensor], iterable)
+            return self._iterable_tensor_repr(iterable)
+        iterable = cast(Sequence[Sequence[torch.Tensor]], iterable)
+        if len(iterable) == 0:
+            return "TensorList2D(len=0)"
+        iterable_repr_list = self._prune_list_repr([self._iterable_tensor_repr(t) for t in iterable])
+        return f"TensorList2D(len={len(iterable)}, items=[{', '.join(iterable_repr_list)}])"
+
+    def __bool__(self) -> bool:
+        """False only when the value is a tensor or iterable of tensors and all tensors are empty (numel() == 0).
+        Otherwise, True. This is used to determine whether to include the attribute in the string representation.
+        """
+        value: Any = self.value
+        if isinstance(value, torch.Tensor):
+            return value.numel() > 0
+        if isinstance(value, Sequence) and all(isinstance(t, torch.Tensor) for t in value):
+            return any(t.numel() > 0 for t in cast(Sequence[torch.Tensor], value))
+        if isinstance(value, Sequence) and all(
+            isinstance(t, Sequence) and all(isinstance(tt, torch.Tensor) for tt in t) for t in value
+        ):
+            return any(any(tt.numel() > 0 for tt in t) for t in cast(Sequence[Sequence[torch.Tensor]], value))
+        return True
+
+    def __repr__(self) -> str:
+        value = self.value
+        if isinstance(value, torch.Tensor):
+            return self._single_tensor_repr(value)
+        if isinstance(value, Sequence) and all(isinstance(t, torch.Tensor) for t in value):
+            return self._iterable_tensor_repr(value)
+        if isinstance(value, Sequence) and all(
+            isinstance(t, Sequence) and all(isinstance(tt, torch.Tensor) for tt in t) for t in value
+        ):
+            return self._iterable_tensor_2d_repr(value)
+        return repr(value)
+
+    def __str__(self) -> str:
+        return self.__repr__()
 
 
 class AttributeSetterMixin:
@@ -91,6 +190,8 @@ class AttributeSetterMixin:
     """Behavior when attempting to set a missing attribute. If `warn`, a logger must be provided to log a warning."""
     _logger: Logger | None = logger
     """Optional logger for warning about missing attributes. If None, no warnings will be logged."""
+    _repr_item: int = 3
+    """Maximum number of items to show in the string representation of iterable attributes."""
 
     def __init_subclass__(cls) -> None:
         if cls.__mro__[1] is not AttributeSetterMixin:
@@ -146,6 +247,19 @@ class AttributeSetterMixin:
             yield self
         finally:
             local.match_conditions = previous  # always restore, even on exception
+
+    def __repr__(self) -> str:
+        repr_list = [
+            f"{attr}={val_repr!r}"
+            for attr in dir(self)
+            if not attr.startswith("_")
+            and not callable(value := getattr(self, attr))
+            and (val_repr := _TensorRepr(value, max_it=self._repr_item))
+        ]
+        return f"{type(self).__name__}({', '.join(repr_list)})"
+
+    def __str__(self) -> str:
+        return self.__repr__()
 
 
 class XModel(AttributeSetterMixin, Model):
@@ -355,6 +469,7 @@ class WeightGetterConfig(TypedDict, total=False):
     mask: Sequence[bool] | None
     secondary_flattening: str | slice | None
     post_processor: Callable[[torch.Tensor], torch.Tensor] | None
+    check_is_contiguous: bool
 
 
 def get_layer_weights(
@@ -364,6 +479,7 @@ def get_layer_weights(
     mask: Sequence[bool] | None = None,
     secondary_flattening: str | slice | None = None,
     post_processor: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    check_is_contiguous: bool = True,
     **kwargs: Any,
 ) -> list[torch.Tensor]:
     """Extract specified weights from a sequence of layers with optional secondary flattening and post-processing.
@@ -397,6 +513,8 @@ def get_layer_weights(
             Cannot be specified at the same time as `mask`.
         post_processor (Callable[[torch.Tensor], torch.Tensor] | None, optional): An optional function to apply to
             each retrieved tensor before returning the final list of weights.
+        check_is_contiguous (bool, optional): If True, checks that each retrieved tensor is contiguous in memory. If
+            any tensor is not contiguous, a ValueError is raised. Default is True.
         **kwargs: Additional keyword arguments for future extensions.
 
     Returns:
@@ -443,6 +561,8 @@ def get_layer_weights(
 
         if post_processor:
             weights = [post_processor(weight) for weight in weights]
+        if check_is_contiguous and not all(weight.is_contiguous() for weight in weights):
+            raise ValueError("xlite: Found non-contiguous tensor in the retrieved weights.")
 
         if weights:
             return weights

@@ -114,9 +114,10 @@ def _glm5_next_lightning_indexer_score_kernel(
                     )
                 elif INDEX32:
                     pages = pools // CACHE_BLOCK
+                    # Only visible pools need page-table lookups.
                     blocks = tl.load(
                         block_table + request * table_stride_r + pages * table_stride_p,
-                        pools < max_pool_seq_len,
+                        valid,
                         other=0,
                     )
                     blocks = tl.minimum(tl.maximum(blocks, 0), num_cache_blocks - 1)

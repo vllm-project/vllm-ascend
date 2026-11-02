@@ -33,6 +33,9 @@ class MambaConvCacheBinding:
 class PreemptOffloadWorker:
     """Worker-side handler for recompute CPU/NPU KV cache transfers."""
 
+    num_gpu_blocks: int
+    block_size_scale: dict[str, int]
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -104,32 +107,58 @@ class PreemptOffloadWorker:
         mamba_layers: dict[str, MambaSpec] = {}
         for group in self.kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
-                spec = group.kv_cache_spec
-                if isinstance(spec, UniformTypeKVCacheSpecs):
-                    spec = spec.kv_cache_specs[layer_name]
-                if isinstance(spec, MambaSpec):
-                    mamba_layers[layer_name] = spec
+                layer_spec = group.kv_cache_spec
+                if isinstance(layer_spec, UniformTypeKVCacheSpecs):
+                    layer_spec = layer_spec.kv_cache_specs[layer_name]
+                if isinstance(layer_spec, MambaSpec):
+                    mamba_layers[layer_name] = layer_spec
 
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         cache_name_by_ptr: dict[int, str] = {}
+        mamba_cache_name_by_view: dict[tuple[int, torch.Size, tuple[int, ...], torch.dtype, bool], str] = {}
+        cache_name_max_size: dict[int, int] = {}
         for layer_name, layer_tensor in kv_caches.items():
             states = list(enumerate(layer_tensor)) if isinstance(layer_tensor, (tuple, list)) else [(0, layer_tensor)]
             for state_idx, single_tensor in states:
                 logical_name = f"{layer_name}.{state_idx}" if isinstance(layer_tensor, (tuple, list)) else layer_name
+                if single_tensor.numel() == 0:
+                    continue
+                mamba_spec = mamba_layers.get(layer_name)
                 ptr = single_tensor.data_ptr()
-                cache_name = cache_name_by_ptr.get(ptr)
-                if cache_name is None:
-                    cache_name = logical_name
-                    cache_name_by_ptr[ptr] = cache_name
-                    unique_gpu_caches[cache_name] = single_tensor.view(single_tensor.shape[0], -1)
-                    self.block_size_scale[cache_name] = single_tensor.shape[0] // self.num_gpu_blocks
+                layer_tensor_scale = single_tensor.shape[0] // self.num_gpu_blocks
+                # One tensor row is a kernel block; scale counts rows per logical block.
+                layer_tensor_size = single_tensor.element_size() * single_tensor[0].numel() * layer_tensor_scale
+                if mamba_spec is not None:
+                    # Deduplicate identical Mamba states without merging them
+                    # with attention views or mixing Conv and recurrent states.
+                    view_key = (
+                        ptr,
+                        single_tensor.shape,
+                        single_tensor.stride(),
+                        single_tensor.dtype,
+                        self._is_conv_state(mamba_spec, state_idx),
+                    )
+                    cache_name = mamba_cache_name_by_view.get(view_key)
+                    if cache_name is None:
+                        cache_name = logical_name
+                        mamba_cache_name_by_view[view_key] = cache_name
+                        unique_gpu_caches[cache_name] = single_tensor.view(single_tensor.shape[0], -1)
+                        self.block_size_scale[cache_name] = layer_tensor_scale
+                else:
+                    cache_name = cache_name_by_ptr.get(ptr)
+                    if cache_name is None:
+                        cache_name = logical_name
+                        cache_name_by_ptr[ptr] = cache_name
+                    if ptr not in cache_name_max_size or layer_tensor_size > cache_name_max_size[ptr]:
+                        unique_gpu_caches[cache_name] = single_tensor.view(single_tensor.shape[0], -1)
+                        self.block_size_scale[cache_name] = layer_tensor_scale
+                        cache_name_max_size[ptr] = layer_tensor_size
 
-                spec = mamba_layers.get(layer_name)
-                if spec is None or not self._is_conv_state(spec, state_idx):
+                if mamba_spec is None or not self._is_conv_state(mamba_spec, state_idx):
                     continue
 
                 state_shape = tuple(single_tensor.shape[1:])
-                expected_shape = tuple(spec.shapes[state_idx])
+                expected_shape = tuple(mamba_spec.shapes[state_idx])
                 if len(state_shape) != 2 or state_shape != expected_shape:
                     raise RuntimeError(
                         "Unexpected Ascend Mamba Conv cache shape: "

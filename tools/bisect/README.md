@@ -16,7 +16,7 @@ trigger (case FAIL)
   -> verify endpoints (good must PASS, bad must FAIL)
   -> binary search:
        for each midpoint commit:
-         checkout  (+ pip install -e . ONLY if that commit touched native/cpp files)
+         checkout  (+ uv pip install -e . ONLY if that commit touched native/cpp files)
          run the WHOLE yaml (all test_cases) via the nightly entry
          verdict from pytest rc + benchmark_results/*.json
          print [PASS]/[FAIL]/[SKIP] <PR/commit>
@@ -126,7 +126,7 @@ auto-enter the worker loop:
 ```bash
 python -m tools.bisect.auto_bisect \
     --scene multi_node \
-    --config-yaml Qwen3-235B-W8A8.yaml \
+    --config-yaml Qwen3-VL-235B-disagg-pd.yaml \
     --soc a3 \
     --bad-commit "$VLLM_ASCEND_REF" \
     --num-nodes 2 \

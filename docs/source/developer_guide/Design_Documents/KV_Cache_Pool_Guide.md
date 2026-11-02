@@ -10,7 +10,7 @@ Hence, KV Cache Pool is proposed to utilize various types of storage including o
 
 vLLM Ascend currently supports [MooncakeStore](https://github.com/kvcache-ai/Mooncake), one of the most recognized KV Cache storage engines.
 
-While one can utilize MooncakeStore in vLLM V1 engine by setting it as a remote backend of LMCache with GPU (see [Tutorial](https://github.com/LMCache/LMCache/blob/dev/examples/kv_cache_reuse/remote_backends/mooncakestore/README.md)), we find it would be better to integrate a connector that directly supports MooncakeStore and can utilize the data transfer strategy that best fits Huawei NPU hardware.
+While one can utilize MooncakeStore in vLLM V1 engine by setting it as a remote backend of LMCache with GPU (see [Tutorial](https://github.com/LMCache/LMCache/blob/dev/examples/kv_cache_reuse/remote_backends/mooncakestore/README.md)), we find it would be better to integrate a connector that directly supports MooncakeStore and can utilize the data transfer strategy that best fits NPU hardware.
 
 Hence, we propose to integrate MooncakeStore with a brand new **MooncakeStoreConnectorV1**, which is indeed largely inspired by **LMCacheConnectorV1** (see the [How is MooncakeStoreConnectorV1 Implemented?](#how-is-mooncakestoreconnectorv1-implemented) section).
 
@@ -18,7 +18,7 @@ Hence, we propose to integrate MooncakeStore with a brand new **MooncakeStoreCon
 
 vLLM Ascend currently supports MooncakeStore for KV Cache Pool. To enable MooncakeStore, one needs to configure `kv-transfer-config` and choose `MooncakeStoreConnector` as the KV Connector.
 
-For step-by-step deployment and configuration, please refer to the [KV Pool User Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_pool.html).
+For step-by-step deployment and configuration, please refer to the [KV Pool User Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_pool_ascend_store.html).
 
 ## How it works?
 

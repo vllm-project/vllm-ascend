@@ -2,7 +2,7 @@
 
 ## 1 Introduction
 
-Gemma4 is a Gemma-family language model that includes dense and Mixture-of-Experts (MoE) variants, and is suitable for general text generation, reasoning, and instruction-following scenarios.
+Gemma4 is a Gemma-family multimodal model that includes dense and Mixture-of-Experts (MoE) variants, and is suitable for text generation, image understanding, reasoning, and instruction-following scenarios.
 
 This document describes the main validation steps for Gemma4 on Atlas A2, Atlas A3, and 950PR&950DT Products, including supported features, prerequisites, installation, single-node online deployment, functional verification, offline inference, accuracy and performance evaluation, performance tuning, and FAQs.
 
@@ -14,7 +14,7 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
-Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A3, and 950PR&950DT Products. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported.
+Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A3, and 950PR&950DT Products. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported. MXFP4 quantization is supported on 950PR&950DT Products.
 
 ## 3 Prerequisites
 
@@ -22,26 +22,36 @@ Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A
 
 Download the Gemma4 model weight to a local or shared directory, such as `/root/.cache/`. In the following examples, replace `/root/.cache/path/to/gemma4` with your actual model path.
 
-| Model type | Description | Recommended hardware |
-| ---------- | ----------- | -------------------- |
-| Gemma4 dense model | Dense Gemma4 weight. | A single Atlas A2, Atlas A3, or 950PR&950DT node. Adjust the number of visible NPUs according to model size. |
-| Gemma4 MoE model | Mixture-of-Experts Gemma4 weight. | A single Atlas A2, Atlas A3, or 950PR&950DT node. Use tensor parallelism or expert parallelism according to the model size and deployment plan. |
+| Weight version | Description | Recommended hardware | Download |
+| -------------- | ----------- | -------------------- | -------- |
+| `google/gemma-4-31B-it` | BF16 dense model. | Atlas A2, Atlas A3, or 950PR&950DT Products. Adjust the number of visible NPUs according to the available memory. | [ModelScope](https://www.modelscope.cn/models/google/gemma-4-31B-it) |
+| `Eco-Tech/gemma-4-31B-it-w4a4-mxfp4` | MXFP4 quantized dense model. | 1 950DT Products (96GB × 8) node. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/gemma-4-31B-it-w4a4-mxfp4) |
+| `google/gemma-4-26B-A4B-it` | BF16 MoE model with approximately 26 billion total and 4 billion active parameters. | Atlas A2, Atlas A3, or 950PR&950DT Products. Use tensor parallelism or expert parallelism according to the deployment plan. | [ModelScope](https://www.modelscope.cn/models/google/gemma-4-26B-A4B-it) |
+| `Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4` | MXFP4 quantized MoE model. | 1 950DT Products (96GB × 8) node. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4) |
 
-The examples below assume a single node with visible NPUs. The commands use 4 visible NPUs as an example. Adjust `ASCEND_RT_VISIBLE_DEVICES` and `--tensor-parallel-size` according to the model size and available devices.
+Both MXFP4 checkpoints contain a `quant_model_description.json` file and require `--quantization ascend` when served. For information about preparing quantized weights, refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md).
 
 ## 4 Installation
 
-### 4.1 Image Availability
+### 4.1 Docker Image Installation
 
-If you need a prebuilt image, contact Huawei engineers to obtain the appropriate image and software stack for your target hardware.
+You can use the official all-in-one vLLM Ascend Docker image. For 950DT Products, pull the A5 image that matches the current vLLM Ascend version:
 
-After the environment is prepared, verify that the NPU devices are visible:
+```shell
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+docker pull ${IMAGE}
+```
+
+For other supported hardware and operating systems, select the corresponding image by following [Using a prebuilt image](../../getting_started/installation.md#installation-prebuilt-image). Follow the hardware-specific `docker run` command in the installation guide and mount the directory containing the Gemma4 weights into the container. The prebuilt image includes the matching CANN user-space environment, PyTorch, TorchNPU, vLLM, and vLLM Ascend versions.
+
+After entering the container, verify the environment:
 
 ```shell
 npu-smi info
+python -m pip show vllm vllm-ascend
 ```
 
-Expected result: `npu-smi info` lists the expected Ascend devices.
+Expected result: `npu-smi info` lists the expected Ascend devices, and both Python packages are installed.
 
 ### 4.2 Source Code Installation
 
@@ -101,12 +111,53 @@ vllm serve ${MODEL_PATH} \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
+#### 950PR&950DT Products MXFP4 Quantized Models
+
+The following commands use TP4DP2 across all 8 NPUs on one 950DT Products node. The quantized checkpoints require `--quantization ascend`.
+
+=== "31B Dense"
+
+    ```shell
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export VLLM_USE_MODELSCOPE=True
+    export MODEL_PATH=Eco-Tech/gemma-4-31B-it-w4a4-mxfp4
+
+    vllm serve ${MODEL_PATH} \
+      --served-model-name gemma4 \
+      --trust-remote-code \
+      --tensor-parallel-size 4 \
+      --data-parallel-size 2 \
+      --quantization ascend \
+      --max-model-len 32768 \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    ```
+
+=== "26B A4B MoE"
+
+    ```shell
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export VLLM_USE_MODELSCOPE=True
+    export MODEL_PATH=Eco-Tech/gemma-4-26B-A4B-it-w4a4-mxfp4
+
+    vllm serve ${MODEL_PATH} \
+      --served-model-name gemma4 \
+      --trust-remote-code \
+      --tensor-parallel-size 4 \
+      --data-parallel-size 2 \
+      --enable-expert-parallel \
+      --quantization ascend \
+      --max-model-len 32768 \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    ```
+
 Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
 
 #### Key Parameters
 
 - `--tensor-parallel-size`: sets the tensor parallel size. Adjust it according to model size and available NPU devices.
+- `--data-parallel-size`: sets the number of data parallel ranks. The MXFP4 examples use DP2 together with TP4 to use all 8 NPUs.
 - `--enable-expert-parallel`: enables expert parallelism for MoE variants when the deployment plan uses EP.
+- `--quantization ascend`: enables Ascend quantization. It is required for the two MXFP4 checkpoints listed in Section 3.1 and must be omitted for BF16 weights.
 - `--max-model-len`: sets the maximum input plus output length for a single request. Increase it only when enough KV cache is available.
 - `--enforce-eager`: enables eager execution for baseline verification.
 - `--compilation-config`: configures graph execution. `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, and `PIECEWISE` is also supported.
@@ -167,7 +218,40 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 Expected result: the request returns HTTP 200, and the JSON response contains a `choices` field with generated text from the model.
 
-### 6.3 Offline Inference
+### 6.3 Multimodal Chat Completions API
+
+Send an image request to verify Gemma4 multimodal inference:
+
+```shell
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemma4",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/tiger.jpeg"
+            }
+          },
+          {
+            "type": "text",
+            "text": "Describe this image."
+          }
+        ]
+      }
+    ],
+    "max_tokens": 128,
+    "temperature": 0
+  }'
+```
+
+Expected result: the request returns HTTP 200, and the response describes the image in the `choices` field.
+
+### 6.4 Offline Inference
 
 ```python
 from vllm import LLM, SamplingParams
@@ -231,6 +315,7 @@ The following configurations are for reference only. The optimal configuration d
 | Generation serving | Single-node online serving | 4 | Dense or MoE | Use ACLGraph with `FULL_DECODE_ONLY` to reduce decode dispatch overhead. |
 | Long context | Single-node online serving | 4 | Dense or MoE | Increase `--max-model-len` only when enough KV cache is available; lower concurrency if OOM occurs. |
 | MoE serving | Single-node online serving | 4 | MoE | Use tensor parallelism or expert parallelism according to model size and deployment plan. |
+| Quantized serving on 950PR&950DT Products | Single-node online serving | 8 | Dense or MoE | Use TP4DP2 with the MXFP4 checkpoint and add `--quantization ascend`. |
 
 ### 9.2 Tuning Guidelines
 
@@ -256,6 +341,7 @@ Recommended tuning order:
 | Piecewise ACLGraph | `--compilation-config '{"cudagraph_mode": "PIECEWISE"}'` | Enables segmented graph execution. | Supported when piecewise graph execution is required. |
 | Tensor parallelism | `--tensor-parallel-size` | Splits model computation across multiple NPUs. | Adjust according to model size and available devices. |
 | Expert parallelism | `--enable-expert-parallel` | Distributes experts for MoE variants. | Enable only for MoE deployment plans that use EP. |
+| MXFP4 quantization | `--quantization ascend` | Reduces weight and activation memory and uses Ascend MXFP4 operators. | Required for the MXFP4 checkpoints; omit it for BF16 weights. |
 
 ## 10 FAQ
 

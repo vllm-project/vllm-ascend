@@ -15,10 +15,9 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-"""310P MTP e2e: MRv1 baseline + MRv2 eager smoke (1-card CI safe)."""
+"""310P MTP e2e under default Model Runner V2 (1-card CI safe)."""
 
 import os
-from unittest.mock import patch
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
@@ -31,28 +30,9 @@ def _quant_kw():
     return {"quantization": QWEN35_MTP_QUANTIZATION} if QWEN35_MTP_QUANTIZATION else {}
 
 
-def test_qwen3_5_mtp_tp1_eager():
-    """MRv1 baseline (no V2 runner env)."""
-    with VllmRunner(
-        QWEN35_MTP_MODEL,
-        tensor_parallel_size=1,
-        enforce_eager=True,
-        dtype="float16",
-        max_model_len=2048,
-        mamba_ssm_cache_dtype="float16",
-        speculative_config={
-            "method": "qwen3_5_mtp",
-            "num_speculative_tokens": 1,
-        },
-        **_quant_kw(),
-    ) as vllm_model:
-        vllm_model.generate_greedy(["Hello, my name is"], max_tokens=8)
-
-
 @wait_until_npu_memory_free()
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
-def test_qwen3_5_mtp_mrv2_tp1_eager():
-    """MRv2 MTP eager smoke.
+def test_qwen3_5_mtp_tp1_eager():
+    """Default 310P MRV2 MTP eager smoke.
 
     FULL_DECODE_ONLY is covered by local/nightly runs: 1-card PR CI OOMs during
     target+draft ACLGraph capture (Engine core init fails with empty Failed core

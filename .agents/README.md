@@ -14,12 +14,11 @@ Note: Please copy the skills directory `.agents/skills` to `.claude/skills` if y
     - [Quick start](#quick-start)
     - [Key constraints](#key-constraints)
     - [Two-stage validation](#two-stage-validation)
-  - [vLLM Ascend Release Note Writer Skill](#vllm-ascend-release-note-writer-skill)
-    - [What it does](#what-it-does-2)
+  - [vLLM Ascend Release Skill](#vllm-ascend-release-skill)
+    - [What it does](#what-it-does-1)
     - [File layout](#file-layout-1)
-    - [Quick start](#quick-start-2)
+    - [Getting started](#getting-started)
     - [Key guidelines](#key-guidelines)
-
 
 ## vLLM Ascend Model Adapter Skill
 
@@ -68,40 +67,46 @@ This skill guides an AI agent through a deterministic workflow to:
 Both stages require request-level verification (`/v1/models` + at least one chat request),
 not just startup success.
 
-## vLLM Ascend Release Note Writer Skill
+## vLLM Ascend Release Skill
 
-You just need to say: `Please help me write a 0.13.0 release note based on commits from v0.11.0 and releases/v0.13.0`
+Manage the complete release process for vLLM Ascend, from the release checklist issue to the
+post-release announcement.
 
 ### What it does
 
-This skill guides you through a structured workflow to:
+This skill guides an AI agent through the end-to-end release workflow:
 
-1. Fetch commits between two versions using the provided script.
-2. Analyze and categorize each commit in a CSV workspace.
-3. Draft highlights and write polished release notes.
-4. Generate release notes organized by category (Features, Hardware Support, Performance, Dependencies, etc.).
+1. Create the release feedback issue and the release checklist issue.
+2. Triage release-blocking bugs and identify must-merge PRs.
+3. Check test coverage for new features and models, and scan Nightly CI status.
+4. Assemble release notes from `release_notes/fragments/` and audit commits without fragments.
+5. Update version references across the documentation.
+6. Guide release execution and post-release steps, including the WeChat article.
 
 ### File layout
 
 | File | Purpose |
 | ---- | ------- |
-| `SKILL.md` | Skill definition, workflow, and writing guidelines |
-| `references/ref-past-release-notes-highlight.md` | Style and category reference for release notes |
-| `scripts/fetch_commits-optimize.py` | Script to fetch commits between versions |
+| `SKILL.md` | Phases, commands, and human decision points for the full release process |
+| `scripts/` | Release automation: checklist creation, bug/PR/test/nightly scans, commit fetch, release note aggregation, version updates, announcements |
+| `templates/` | Release checklist and feedback issue templates |
+| `references/version-files.yaml` | Files that need version updates and their update patterns |
+| `references/ref-past-release-notes-highlight.md` | Style and category reference for past release notes |
 
-### Quick start
+### Getting started
 
 1. Open a conversation with the AI agent.
-2. Invoke the skill (e.g. `/vllm-ascend-release-note-writer`).
-3. Follow the workflow steps:
-   - Fetch commits between versions
-   - Analyze commits in CSV format
-   - Draft and edit highlights
-4. Output files are saved to `vllm-ascend-release-note/output/$version`
+2. Invoke the skill (e.g. `/vllm-ascend-release`).
+3. Provide the release version, branch, target date, and release manager.
+4. Work through the phases in `SKILL.md`; the skill pauses for human review at the key
+   decision points (bug triage, functional testing, release execution).
 
 ### Key guidelines
 
-- Use one-level headings (###) for sections in a specific order: Highlights, Features, Hardware and Operator Support, Performance, Dependencies, Deprecation & Breaking Changes, Documentation, Others.
-- Focus on user-facing impact and include context for practical usage.
-- Verify details by checking linked PRs (use GitHub API for descriptions if needed).
-- Keep notes concise and avoid unnecessary technical details.
+- Release notes are assembled from `release_notes/fragments/`; the audit step lists commits
+  without fragments so nothing user-facing is missed. The fragment principles live in
+  `release_notes/README.md`.
+- Human oversight is required for bug prioritization, test results, and the final release
+  decision.
+- Scripts are idempotent and safe to re-run; checklist updates replace a section instead of
+  appending duplicates.

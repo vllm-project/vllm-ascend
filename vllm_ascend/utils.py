@@ -68,6 +68,7 @@ _CURRENT_STREAM = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
+_CP_DECODE_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
@@ -84,6 +85,15 @@ _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
 )
 _IS_ROT_WEIGHT_USED = None
+
+
+def is_gqa_pcp_dcp_config(model_config: Any, parallel_config: Any) -> bool:
+    """Whether a GQA/MQA model enables both PCP and DCP."""
+    return (
+        parallel_config.decode_context_parallel_size > 1
+        and parallel_config.prefill_context_parallel_size > 1
+        and not model_config.use_mla
+    )
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -228,8 +238,6 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
 
 
 def clear_enable_sp():
-    enable_dsa_cp.cache_clear()
-    enable_dsa_cp_full_o_proj.cache_clear()
     enable_pcp_o_proj_weight_sharding.cache_clear()
     enable_pcp_embedding_lmhead_weight_sharding.cache_clear()
     _libc_getenv.cache_clear()
@@ -656,6 +664,13 @@ def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
     return _CP_CHUNKEDPREFILL_COMM_STREAM
 
 
+def cp_decode_comm_stream() -> torch.npu.Stream:
+    global _CP_DECODE_COMM_STREAM
+    if _CP_DECODE_COMM_STREAM is None:
+        _CP_DECODE_COMM_STREAM = torch_npu.npu.Stream()
+    return _CP_DECODE_COMM_STREAM
+
+
 def attention_calculation_stream() -> torch.npu.Stream:
     global _ATNN_CALCULATION_STREAM
     if _ATNN_CALCULATION_STREAM is None:
@@ -820,7 +835,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
     from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
     from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
-    from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated, AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
+    from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
         AscendMergedColumnParallelLinear,
@@ -850,7 +865,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     REGISTERED_ASCEND_OPS = {
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
-        "SiluAndMulClamp": AscendSiluAndMulWithClamp,
+        "SiluAndMulWithClamp": AscendSiluAndMulWithClamp,
         "RotaryEmbedding": AscendRotaryEmbedding,
         "Gemma4RotaryEmbedding": AscendGemma4RotaryEmbedding,
         "MRotaryEmbedding": AscendMRotaryEmbedding,
@@ -870,7 +885,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
         "RMSNormGated": AscendRMSNormGated,
-        "FusedRMSNormGated": AscendFusedRMSNormGated,
         "Conv3dLayer": AscendConv3dLayer,
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
@@ -938,8 +952,24 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
 
 
+def register_ascend_fla_customop():
+    """Resolve the FLA subclass after selecting a device, before model loading.
+
+    Registration happens once inside the imported module, under Python's
+    module import lock. Repeated calls keep the same class and registry key.
+    """
+    # Separate this from general registration to avoid FLA initializing an NPU
+    # context during plugin discovery in the API process.
+    # TODO: Merge back into register_ascend_customop once supported vLLM FLA or
+    # Triton Ascend versions fix import-time NPU initialization.
+    from vllm_ascend.ops.fused_rms_norm_gated import AscendFusedRMSNormGated
+
+    REGISTERED_ASCEND_OPS["FusedRMSNormGated"] = AscendFusedRMSNormGated
+    return AscendFusedRMSNormGated
+
+
 def lmhead_tp_enable() -> bool:
-    return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
+    return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 1
 
 
 def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:
@@ -966,15 +996,15 @@ def lmhead_tp_pad_rows(rows: torch.Tensor, capacity: int, formula: str) -> torch
 
 
 def embedding_tp_enable() -> bool:
-    return get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size > 0
+    return get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size > 1
 
 
 def oproj_tp_enable() -> bool:
-    return get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 0
+    return get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 1
 
 
 def mlp_tp_enable() -> bool:
-    return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
+    return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 1
 
 
 def enable_sp(vllm_config=None) -> bool:
@@ -990,6 +1020,20 @@ def enable_sp(vllm_config=None) -> bool:
         return False
 
     return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
+
+
+def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
+    """Pad the token dim of ``hidden_states`` up to the TP size.
+
+    Always call pad(), even with zero padding, to avoid specializing the
+    padding branch during tracing.
+    """
+    from vllm.distributed import get_tensor_model_parallel_world_size
+
+    tp_size = get_tensor_model_parallel_world_size()
+    padding = (-hidden_states.shape[0]) % tp_size
+    pad = (0, 0) * (hidden_states.ndim - 1) + (0, padding)
+    return torch.nn.functional.pad(hidden_states, pad)
 
 
 # TODO remove it after vllm has this func
@@ -1361,7 +1405,10 @@ C8_MXFP_KV_CACHE_DTYPE = "mxfp8"
 
 
 def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
-    return vllm_config.cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+    # Tolerate partially constructed configs (e.g. SimpleNamespace in tests):
+    # a missing cache_config means the mxfp8 KV cache dtype is not enabled.
+    cache_config = getattr(vllm_config, "cache_config", None)
+    return cache_config is not None and cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
 
 
 def refresh_block_size(vllm_config):
@@ -1403,9 +1450,9 @@ def refresh_block_size(vllm_config):
         return
 
     if model_config.hf_config.model_type == "deepseek_v4":
-        if cache_config.block_size is None:
-            cache_config.block_size = 32
-        elif cache_config.block_size not in [32, 64, 128]:
+        # CacheConfig resolves an omitted --block-size on its own default above, so
+        # block_size cannot be None here.
+        if cache_config.block_size not in [32, 64, 128]:
             logger.warning(
                 "For deepseek_v4 model, block size should be 32, 64 or 128. "
                 "Setting block size to 32 for better performance."
@@ -1547,20 +1594,9 @@ def singleton(cls):
     return get_instance
 
 
-@lru_cache(maxsize=1)
-def enable_dsa_cp() -> bool:
-    # Read from the validated AscendConfig singleton instead of bypassing it
-    # via additional_config["enable_dsa_cp"]. This converges the bypass read
-    # (architecture debt #7) onto the canonical get_ascend_config() path, so
-    # the value benefits from @config type validation (bool lax coercion).
-    from vllm_ascend.ascend_config import get_ascend_config
-
-    return get_ascend_config().enable_dsa_cp
-
-
 def enable_sfa_dcp_force_tmajor_restore() -> bool:
     # Read from the validated AscendConfig singleton (additional-config key
-    # sfa_dcp_force_tmajor_restore), like enable_dsa_cp, so the value
+    # sfa_dcp_force_tmajor_restore), so the value
     # benefits from @config type validation (bool lax coercion).
     from vllm_ascend.ascend_config import get_ascend_config
 
@@ -1581,24 +1617,6 @@ def enable_pcp_embedding_lmhead_weight_sharding() -> bool:
     from vllm_ascend.ascend_config import get_ascend_config
 
     return get_ascend_config().enable_pcp_embedding_lmhead_weight_sharding
-
-
-@lru_cache(maxsize=1)
-def enable_dsa_cp_full_o_proj() -> bool:
-    """Whether this DSA-CP role uses the original full O-proj prefill path."""
-    if not enable_dsa_cp():
-        return False
-    from vllm.config import get_current_vllm_config
-
-    vllm_config = get_current_vllm_config()
-    kv_transfer_config = vllm_config.kv_transfer_config
-
-    # Use the gathered full o_proj weight when:
-    # 1) KV pooling is disabled, or
-    # 2) KV pooling is enabled on a prefill producer (including kv_both).
-    # DSA-CP prefill produces a full-head attention output, so the runtime
-    # asynchronously gathers a temporary full o_proj weight for the forward.
-    return kv_transfer_config is None or kv_transfer_config.is_kv_producer
 
 
 def check_gdn_layer(vllm_config) -> bool:
@@ -1817,13 +1835,12 @@ def is_rot_weight_used(vllm_config: VllmConfig = None):
 
 
 def enable_sfa(vllm_config) -> bool:
+    """Whether the model uses SFA for its main attention cache."""
     model_config = getattr(vllm_config, "model_config", None)
     if model_config is None:
         return False
     hf_text_config = getattr(model_config, "hf_text_config", None)
     if hf_text_config is None:
-        return False
-    if model_uses_kpool_indexer(model_config):
         return False
     return hasattr(hf_text_config, "index_topk") and not hasattr(hf_text_config, "compress_ratios")
 

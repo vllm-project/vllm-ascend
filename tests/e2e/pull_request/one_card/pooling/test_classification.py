@@ -1,4 +1,5 @@
 import huggingface_hub
+import pytest
 import torch
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 from transformers import AutoModelForSequenceClassification
@@ -9,6 +10,8 @@ from tests.e2e.conftest import (
     cleanup_dist_env_and_memory,
     wait_until_npu_memory_free,
 )
+
+pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 
 
 @wait_until_npu_memory_free(target_free_percentage=0.7)

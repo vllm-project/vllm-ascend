@@ -35,6 +35,7 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD, 
 from ..base import (
     AscendLinearScheme,
     AscendMoEScheme,
+    PreparedLinearInput,
     QuantType,
     WeightSwitchGatherSpec,
 )
@@ -105,30 +106,43 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
         params_dict["weight_scale"] = torch.empty(output_size, cdiv(input_size, self.group_size), dtype=torch.uint8)
         return params_dict
 
-    def apply(
+    def _quantize_input(self, layer: torch.nn.Module, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        prefix_padding, suffix_padding = vars(layer).get("mxfp4_tp_padding", (0, 0))
+        if prefix_padding or suffix_padding:
+            x = F.pad(x, (prefix_padding, suffix_padding), mode="constant", value=0)
+        return torch_npu.npu_dynamic_mx_quant(x, dst_type=torch_npu.float4_e2m1fn_x2, round_mode="round")
+
+    def prepare_input_for_overlap(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
+    ) -> PreparedLinearInput | None:
+        if x.dim() != 2:
+            return None
+        quantized_x, dynamic_scale = self._quantize_input(layer, x)
+        return PreparedLinearInput(quantized_x, dynamic_scale, x.dtype)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput,
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        # reshape x for Qwen VL models
-        original_shape = x.shape
-        if x.dim() > 2:
-            x = x.view(-1, x.shape[-1])
-        # Read only an explicitly installed value. MagicMock-based CPU tests
-        # synthesize missing attributes and cannot be unpacked as a pair.
-        prefix_padding, suffix_padding = vars(layer).get("mxfp4_tp_padding", (0, 0))
-        if prefix_padding or suffix_padding:
-            # Apply the same padding as the weight so activation and weight MX
-            # groups cover identical K ranges. The padded zeros contribute
-            # nothing to GEMM, while keeping both operands' K dimensions equal.
-            x = F.pad(x, (prefix_padding, suffix_padding), mode="constant", value=0)
-        quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
-            x, dst_type=torch_npu.float4_e2m1fn_x2, round_mode="round"
-        )
+        if isinstance(x, PreparedLinearInput):
+            quantized_x = x.quantized
+            assert x.scale is not None
+            dynamic_scale = x.scale
+            original_shape = quantized_x.shape
+            output_dtype = x.output_dtype
+        else:
+            # reshape x for Qwen VL models
+            original_shape = x.shape
+            if x.dim() > 2:
+                x = x.view(-1, x.shape[-1])
+            quantized_x, dynamic_scale = self._quantize_input(layer, x)
+            output_dtype = x.dtype
         pertoken_scale = dynamic_scale
-        output_dtype = x.dtype
         if bias is not None and bias.dtype != torch.float32:
             bias = bias.to(torch.float32)
 
@@ -340,11 +354,14 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 )
                 for weight in layer.w2_weight.data
             ]
+            # Checkpoint E8M0 scales are stored as bytes; CANN requires their semantic dtype.
             layer.cann_mega_moe_w13_weight_scale_list = [
-                w13_weight_scale.clone() for w13_weight_scale in layer.w13_weight_scale.data.unbind(dim=0)
+                w13_weight_scale.clone().view(torch.float8_e8m0fnu)
+                for w13_weight_scale in layer.w13_weight_scale.data.unbind(dim=0)
             ]
             layer.cann_mega_moe_w2_weight_scale_list = [
-                w2_weight_scale.clone() for w2_weight_scale in layer.w2_weight_scale.data.unbind(dim=0)
+                w2_weight_scale.clone().view(torch.float8_e8m0fnu)
+                for w2_weight_scale in layer.w2_weight_scale.data.unbind(dim=0)
             ]
             tensor_names = (
                 "w13_weight",

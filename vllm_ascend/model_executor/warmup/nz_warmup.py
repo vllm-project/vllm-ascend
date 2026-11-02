@@ -12,6 +12,7 @@ Enable with ``ascend_warmup_config.enable_early_nz_warmup``.
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any
 
 import torch
@@ -29,15 +30,16 @@ _NZ_THREAD: Any = None
 
 def warm_nz_format_cast(tag: str) -> None:
     """Pay the first NZ format-cast lazy init on a tiny scratch tensor."""
-    del tag
     global _NZ_WARMED
     if _NZ_WARMED:
         return
     _NZ_WARMED = True
+    start = time.perf_counter()
     try:
         scratch = maybe_trans_nz(torch.zeros((256, 256), dtype=torch.int8, device="npu"))
         torch.npu.synchronize()
         del scratch
+        logger.info("NZ format-cast %s warmup complete in %.3fs.", tag, time.perf_counter() - start)
     except Exception:
         logger.warning("NZ format-cast warmup skipped", exc_info=True)
 

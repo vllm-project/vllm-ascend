@@ -215,6 +215,28 @@ DSV3_2_SFA_PCP_CASE = InferenceCase(
     },
 )
 
+DSV3_2_SFA_PCP_CPP_CASE = InferenceCase(
+    model=DSV3_2_MODEL,
+    prompts=ACCURACY_PROMPTS,
+    max_tokens=5,
+    runner_kwargs={
+        **DSV3_2_SFA_PCP_CASE.runner_kwargs,
+        # ProfilingChunk requires PP > 1. Keep this in the four-card suite with
+        # TP1 x PP2 x PCP2 while preserving the baseline SFA/PCP graph setup.
+        "tensor_parallel_size": 1,
+        "pipeline_parallel_size": 2,
+        "additional_config": {
+            "scheduler_config": {
+                "profiling_chunk_config": {
+                    "enabled": True,
+                    "smooth_factor": 1.0,
+                    "min_chunk": 1024,
+                }
+            }
+        },
+    },
+)
+
 DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
     name="dsv3_2_sfa_pcp_dcp_mtp5_replicated_indexer_mrv2_tp2_pcp2_dcp4",
     model=DSV3_2_MODEL,
@@ -241,7 +263,6 @@ DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
             "cudagraph_capture_sizes": [6, 12, 18, 24],
         },
         "additional_config": {
-            "enable_dsa_cp": False,
             "enable_sparse_li_c8": False,
         },
         "speculative_config": {"method": "mtp", "num_speculative_tokens": 5},
@@ -300,6 +321,31 @@ DSV3_2_SFA_PCP_PP_MTP_CASE = InferenceCase(
 def test_dsv3_2_sfa_pcp_model_runner_v2_graph() -> None:
     """Guard MRV2 SFA PCP full-decode-only graph execution."""
     _run_inference_case(DSV3_2_SFA_PCP_CASE)
+
+
+@pytest.mark.e2e_model(DSV3_2_MODEL)
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="sfa_pcp,profiling",
+    parallel="EP,PCP,PP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="W8A8",
+    graph_mode="full_decode_only",
+)
+@patch.dict(
+    os.environ,
+    {
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "HCCL_BUFFSIZE": "768",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+    },
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_dsv3_2_sfa_pcp_cpp_model_runner_v2_graph() -> None:
+    """Guard MRV2 CPP startup profiling followed by SFA PCP inference."""
+    _run_inference_case(DSV3_2_SFA_PCP_CPP_CASE)
 
 
 @pytest.mark.e2e_model(DSV3_2_MODEL)
@@ -403,7 +449,7 @@ MTP_PCP_CASE = AccuracyCase(
 
 
 EAGLE3_PCP_CASE = AccuracyCase(
-    name="eagle3_gqa_pcp",
+    name="eagle3_gqa_pcp_dcp",
     model=EAGLE3_PCP_TARGET_MODEL,
     prompts=ACCURACY_PROMPTS,
     expected_outputs=EAGLE3_PCP_GOLDENS,
@@ -413,6 +459,7 @@ EAGLE3_PCP_CASE = AccuracyCase(
     runner_kwargs={
         "tensor_parallel_size": 2,
         "prefill_context_parallel_size": 2,
+        "decode_context_parallel_size": 2,
         "max_model_len": 2048,
         "max_num_seqs": 256,
         "distributed_executor_backend": "mp",
@@ -460,7 +507,7 @@ def test_mtp_mla_spec_decode_with_pcp() -> None:
 @pytest.mark.e2e_coverage(
     arch="dense",
     feature="eagle3,chunked_prefill",
-    parallel="TP,PCP",
+    parallel="TP,PCP,DCP",
     deploy="pd_mix",
     hardware="A3",
     quantization="BF16",
@@ -476,7 +523,7 @@ def test_mtp_mla_spec_decode_with_pcp() -> None:
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_eagle3_gqa_spec_decode_with_pcp() -> None:
-    """Verify MRV2 Eagle3 PCP output accuracy and acceptance in one generation."""
+    """Verify MRV2 Eagle3 PCP+DCP output accuracy and acceptance in one generation."""
     _run_accuracy_case(EAGLE3_PCP_CASE)
 
 

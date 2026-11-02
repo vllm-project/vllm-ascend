@@ -1,0 +1,188 @@
+name: Parse nightly profiling traces
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        required: true
+        type: string
+      prefix:
+        required: true
+        type: string
+      ref:
+        required: true
+        type: string
+      should_run:
+        required: true
+        type: boolean
+    secrets:
+      HW_OBS_PROFILE_AK:
+        required: true
+      HW_OBS_PROFILE_SK:
+        required: true
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+env:
+  PIP_INDEX_URL: https://repo.huaweicloud.com/repository/pypi/simple/
+  PROFILE_KEY_PREFIX: ${{ inputs.prefix }}
+
+jobs:
+  prepare:
+    name: Plan
+    if: ${{ inputs.should_run }}
+    runs-on: linux-aarch64-cpu-4
+    timeout-minutes: 30
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu-py3.12
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+    steps:
+      - name: Checkout profiling tools
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          path: profile-source
+
+      - name: Identify profiling artifacts
+        id: profile_id
+        working-directory: profile-source
+        run: python3 -m tools.profiling.artifacts identify --prefix "$PROFILE_KEY_PREFIX" --github-output "$GITHUB_OUTPUT"
+
+      - name: Download capture index
+        uses: actions/download-artifact@v8
+        with:
+          name: profile-capture-${{ steps.profile_id.outputs.artifact_key }}
+          path: /tmp/profile_input
+
+      - name: Plan profile parser shards
+        id: plan
+        working-directory: profile-source
+        run: |
+          python3 -m tools.profiling.parse plan \
+            --manifest /tmp/profile_input/profile_manifest.json \
+            --plan-output /tmp/profile_plan/matrix.json
+          echo "matrix=$(cat /tmp/profile_plan/matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "has_work=$(jq '.node_index | length > 0' /tmp/profile_plan/matrix.json)" >> "$GITHUB_OUTPUT"
+
+  parse:
+    name: Parse / node-${{ matrix.node_index }}
+    needs: [prepare]
+    if: needs.prepare.result == 'success' && needs.prepare.outputs.has_work == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: linux-arm64-cpu-16
+    timeout-minutes: 320
+    container:
+      image: ${{ inputs.image }}
+    steps:
+      - name: Checkout profiling tools
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          path: profile-source
+
+      - name: Identify profiling artifacts
+        id: profile_id
+        working-directory: profile-source
+        run: python3 -m tools.profiling.artifacts identify --prefix "$PROFILE_KEY_PREFIX" --github-output "$GITHUB_OUTPUT"
+
+      - name: Download capture index
+        uses: actions/download-artifact@v8
+        with:
+          name: profile-capture-${{ steps.profile_id.outputs.artifact_key }}
+          path: /tmp/profile_input
+
+      - name: Parse ranks with concurrent compression and upload
+        working-directory: profile-source
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_PROFILE_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_PROFILE_SK }}
+        run: |
+          echo "Node shard: ${{ matrix.node_index }}; CPU cores: $(nproc)"
+          free -h
+          df -h /tmp
+          python3 -m pip install --quiet boto3
+          python3 -m tools.profiling.parse parse \
+            --manifest /tmp/profile_input/profile_manifest.json \
+            --root /tmp/profile_parse/node-${{ matrix.node_index }} \
+            --node-index ${{ matrix.node_index }}
+
+      - name: Upload node result
+        if: ${{ always() && steps.profile_id.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: profile-shard-${{ steps.profile_id.outputs.artifact_key }}-node-${{ matrix.node_index }}
+          path: /tmp/profile_parse/node-${{ matrix.node_index }}/parsed/shards/node-${{ matrix.node_index }}.json
+          if-no-files-found: error
+          retention-days: 90
+
+  finalize:
+    name: Finalize
+    needs: [prepare, parse]
+    if: ${{ always() && inputs.should_run }}
+    runs-on: linux-aarch64-cpu-4
+    timeout-minutes: 30
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu-py3.12
+    steps:
+      - name: Checkout profiling tools
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          path: profile-source
+
+      - name: Identify profiling artifacts
+        id: profile_id
+        working-directory: profile-source
+        run: python3 -m tools.profiling.artifacts identify --prefix "$PROFILE_KEY_PREFIX" --github-output "$GITHUB_OUTPUT"
+
+      - name: Download capture index
+        id: capture
+        uses: actions/download-artifact@v8
+        with:
+          name: profile-capture-${{ steps.profile_id.outputs.artifact_key }}
+          path: /tmp/profile_artifact
+
+      - name: Download node results
+        if: ${{ needs.prepare.outputs.has_work == 'true' }}
+        uses: actions/download-artifact@v8
+        with:
+          pattern: profile-shard-${{ steps.profile_id.outputs.artifact_key }}-node-*
+          path: /tmp/profile_shards
+          merge-multiple: true
+
+      - name: Finalize profiling data
+        id: profile_bundle
+        if: ${{ always() && steps.capture.outcome == 'success' }}
+        working-directory: profile-source
+        run: |
+          parse_status=0
+          echo "::group::Merge profiling results"
+          python3 -m tools.profiling.parse finalize \
+            --root /tmp/profile_artifact --shard-root /tmp/profile_shards || parse_status=$?
+          echo "::endgroup::"
+          echo "::group::Prepare profiling index"
+          python3 -m tools.profiling.artifacts package \
+            --manifest /tmp/profile_artifact/profile_manifest.json --output /tmp/profile_artifact \
+            --prefix "$PROFILE_KEY_PREFIX" --github-output "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit "$parse_status"
+
+      - name: Upload profiling index
+        if: ${{ always() && steps.profile_bundle.outputs.artifact_key != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: profile-artifact-${{ steps.profile_id.outputs.artifact_key }}
+          path: /tmp/profile_artifact/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Profiling summary
+        if: ${{ always() && steps.profile_bundle.outputs.artifact_key != '' }}
+        working-directory: profile-source
+        run: python3 -m tools.profiling.artifacts summary --root /tmp/profile_artifact

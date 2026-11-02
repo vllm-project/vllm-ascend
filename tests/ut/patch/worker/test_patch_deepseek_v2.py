@@ -30,6 +30,33 @@ def _config(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+@pytest.mark.parametrize("non_causal", [None, False, True])
+def test_mla_constructor_preserves_decode_mask_flag(monkeypatch, non_causal):
+    for name in ("DeepSeekV2FusedQkvAProjLinear", "ColumnParallelLinear", "RowParallelLinear", "RMSNorm"):
+        monkeypatch.setattr(patch_deepseek_v2, name, lambda *args, **kwargs: torch.nn.Identity())
+    monkeypatch.setattr(patch_deepseek_v2, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(patch_deepseek_v2, "get_rope", lambda *args, **kwargs: torch.nn.Identity())
+    wrapper = Mock(return_value=torch.nn.Identity())
+    monkeypatch.setattr(patch_deepseek_v2, "MultiHeadLatentAttentionWrapper", wrapper)
+    options = {} if non_causal is None else {"non_causal_multi_token_decode": non_causal}
+    attention = torch.nn.Module()
+    patch_deepseek_v2._deepseek_v2_mla_attention_init(
+        attention,
+        vllm_config=SimpleNamespace(),
+        config=_config(rms_norm_eps=1e-5, rope_parameters={"rope_type": "default"}),
+        hidden_size=32,
+        num_heads=4,
+        qk_nope_head_dim=4,
+        qk_rope_head_dim=4,
+        v_head_dim=8,
+        q_lora_rank=16,
+        kv_lora_rank=8,
+        prefix="model.layers.0.self_attn",
+        **options,
+    )
+    assert wrapper.call_args.kwargs["non_causal_multi_token_decode"] is (non_causal is True)
+
+
 def test_glm51_skip_topk_keeps_per_layer_indexer():
     assert not _should_skip_indexer_init(
         _config(),
@@ -55,12 +82,57 @@ def test_mtp_layer_keeps_indexer():
     )
 
 
+@pytest.mark.parametrize("last_rank", [False, True])
 @pytest.mark.parametrize("native", [False, True])
-@pytest.mark.parametrize("boundaries", [(0, 78), (0, 42, 78), (0, 20, 40, 59, 78)])
-def test_aux_relay_matches_unpartitioned_forward(monkeypatch, native, boundaries):
+def test_forward_compilation_does_not_trigger_buffer_mutation_guard(monkeypatch, last_rank, native):
+    # CPU UTs mock the NPU backend, but Dynamo's stream tracking calls the
+    # real accelerator API. This test only compiles CPU tensor operations.
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
+    group = SimpleNamespace(is_first_rank=True, is_last_rank=last_rank)
+    monkeypatch.setattr(patch_deepseek_v2, "get_pp_group", lambda: group)
+    model = SimpleNamespace(
+        config=SimpleNamespace(llama_4_scaling=None),
+        layers=[lambda positions, hidden, residual, scaling: (hidden + 1, hidden)],
+        start_layer=0,
+        end_layer=1,
+        aux_hidden_state_layers=(0,),
+        _use_upstream_aux_relay=native,
+        send_pp_topk_indices=False,
+        embed_input_ids=lambda ids: ids.float().unsqueeze(-1),
+        norm=lambda hidden, residual: (hidden + residual, None),
+        pack_local_aux_hidden_states=lambda states: {"aux_hidden_states_0": states[0]},
+    )
+    ids = torch.arange(4)
+    compiled_codes = []
+
+    def capture_bytecode(old_code, new_code):
+        if old_code is _patched_forward.__code__:
+            compiled_codes.append(new_code)
+
+    torch._dynamo.reset()
+    handle = torch._dynamo.convert_frame.register_bytecode_hook(capture_bytecode)
+    try:
+        with torch.inference_mode():
+            expected = _patched_forward(model, ids, ids, None)
+            actual = torch.compile(_patched_forward, backend="eager", fullgraph=True)(model, ids, ids, None)
+        assert compiled_codes
+        # vLLM checks co_names, including names retained from traced-out branches.
+        assert all("update" not in code.co_names for code in compiled_codes)
+        if last_rank:
+            torch.testing.assert_close(actual, expected)
+        else:
+            torch.testing.assert_close(actual.tensors, expected.tensors)
+    finally:
+        handle.remove()
+        torch._dynamo.reset()
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("boundaries", [(0, 78), (0, 38, 78), (0, 42, 78), (0, 20, 40, 59, 78)])
+@pytest.mark.parametrize("aux_layers", [(0, 2, 20, 39, 58, 75, 78), (2, 22, 38, 58, 74)])
+def test_aux_relay_matches_unpartitioned_forward(monkeypatch, native, boundaries, aux_layers):
     if native and not hasattr(DeepseekV2Model, "pack_local_aux_hidden_states"):
         pytest.skip("The installed vLLM release has no native aux relay")
-    aux_layers = (0, 2, 20, 39, 58, 75, 78)
     ids = torch.zeros(4, dtype=torch.long)
 
     def layer(positions, hidden, residual, scaling):
@@ -91,6 +163,11 @@ def test_aux_relay_matches_unpartitioned_forward(monkeypatch, native, boundaries
                 monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: True)
                 monkeypatch.setattr(parallel_state, "get_pp_group", lambda group=group: group)
                 model._set_aux_hidden_state_layers(aux_layers)
+                # IDs are boundaries after a target layer. The state at a
+                # PP cut belongs to the upstream stage, including boundary38.
+                expected_incoming = 0 if first else sum(idx <= start for idx in aux_layers)
+                assert model._aux_slot_base_cached == expected_incoming
+                assert model._aux_upstream_total_cached == (expected_incoming if last else 0)
             output = patch_deepseek_v2._patched_forward(model, ids if first else None, ids, incoming)
             if not last:
                 if native:
@@ -117,17 +194,16 @@ def test_aux_relay_matches_unpartitioned_forward(monkeypatch, native, boundaries
         torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.parametrize("legacy,v2", [(True, True), (False, True), (False, False)])
-def test_aux_buffer_factory_uses_one_protocol(monkeypatch, legacy, v2):
+@pytest.mark.parametrize("v2", [False, True])
+def test_aux_buffer_factory_uses_one_protocol(monkeypatch, v2):
     factory = object()
     model = SimpleNamespace(layers=[], make_empty_intermediate_tensors=factory)
     monkeypatch.setattr(patch_deepseek_v2, "_original_deepseek_v2_model_init", lambda *args, **kwargs: None)
-    monkeypatch.setattr(patch_deepseek_v2.pp_transport, "use_legacy_spec_pp", lambda: legacy)
     wrapped = object()
     wrap_factory = Mock(return_value=wrapped)
     monkeypatch.setattr(patch_deepseek_v2.pp_transport, "make_empty_intermediate_tensors", wrap_factory)
     patch_deepseek_v2._patched_deepseek_v2_model_init(model, vllm_config=SimpleNamespace(use_v2_model_runner=v2))
-    assert model._use_upstream_aux_relay is (v2 and not legacy)
+    assert model._use_upstream_aux_relay is v2
     expected_data_types: tuple[PPTransportDataType, ...] = (PPTransportDataType.TOPK_INDICES,)
     if not model._use_upstream_aux_relay:
         expected_data_types = (PPTransportDataType.AUX_HIDDEN_STATES, *expected_data_types)
@@ -169,7 +245,6 @@ def test_model_init_adds_pp_topk_receive_buffer(monkeypatch):
         "_original_deepseek_v2_model_init",
         original_init,
     )
-    monkeypatch.setattr(patch_deepseek_v2.pp_transport, "use_legacy_spec_pp", lambda: False)
     model = SimpleNamespace()
 
     _patched_deepseek_v2_model_init(

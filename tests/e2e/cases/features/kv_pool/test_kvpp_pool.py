@@ -69,12 +69,14 @@ def test_kvpp_memcache_reload(tmp_path, pcp_size):
                 }
             ),
         ]
+        # KV pool is off the V2 blacklist, so this case defaults to V2 without
+        # an explicit runner env pin.
         with RemoteOpenAIServer(
             maybe_model_redirect(MODEL),
             args,
             server_port=port,
             auto_port=False,
-            env_dict={**pool.server_envs, "VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_SERVER_DEV_MODE": "1"},
+            env_dict={**pool.server_envs, "VLLM_SERVER_DEV_MODE": "1"},
         ) as server:
             # Use a prompt spanning cache blocks so the replay exercises pool loading.
             prompt = PROMPTS[1]

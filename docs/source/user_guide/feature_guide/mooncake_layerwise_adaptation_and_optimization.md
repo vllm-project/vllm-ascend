@@ -205,9 +205,11 @@ python -m vllm.entrypoints.openai.api_server \
 For the first hardware validation, start with TP=1, `layerwise_prefetch_layers=1`, and hybrid/CP/PP disabled. Then
 gradually increase the TP size, block count, and prefetch depth.
 
-During integration testing, temporarily set `VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1` to emit JSON audit logs for whole-key
-operations, per-layer ranges, and commits. Keep the default value of `0` during normal operation to avoid per-layer
-logging overhead.
+During integration testing, temporarily set `additional_config.kv_pool_range_debug` (bool, default `false`) to `true`
+by adding `--additional-config '{"kv_pool_range_debug": true}'` to the command above to emit JSON audit logs for
+whole-key operations, per-layer ranges, and commits. For offline use, pass `additional_config={"kv_pool_range_debug": True}`
+to `LLM`. Use this configuration instead of the legacy `VLLM_ASCEND_KVPOOL_RANGE_DEBUG` environment variable.
+Keep the default value of `false` during normal operation to avoid per-layer logging overhead.
 
 ## 6. Follow-up Optimization Recommendations
 
@@ -278,6 +280,8 @@ logging overhead.
 - `py_compile`: Passed for the core changed files.
 - Ruff lint and format checks: Passed.
 - Relevant CPU mock pytest suite: `285 passed, 106 subtests passed`.
-- Strict `0`/`1` validation for `VLLM_ASCEND_KVPOOL_RANGE_DEBUG`: Passed.
+- Historical strict `0`/`1` validation for `VLLM_ASCEND_KVPOOL_RANGE_DEBUG`: Passed before migration.
+- Migration to `additional_config.kv_pool_range_debug` (bool, default `false`): Not runtime-tested; the historical
+  results above do not validate the migrated configuration.
 - Not yet completed: Tests with real NPUs, a real Mooncake client and Master, multi-node networking, and performance
   benchmarks.

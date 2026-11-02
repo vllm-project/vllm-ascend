@@ -35,9 +35,12 @@ def test_released_config_loads_through_vllm_registry(tmp_path):
     )
 
     config = get_config(tmp_path, trust_remote_code=False)
+    config = normalize_deepseek_v41_config(config)
 
     assert isinstance(config, UpstreamDeepseekV41Config)
-    assert config.is_mm_prefix_lm
+    # vLLM main moved the mm-prefix decision to the model-arch config
+    # converter, so the flattened released config no longer carries it.
+    assert not hasattr(config, "is_mm_prefix_lm")
     # vLLM main (#56554) removed the compressor-alignment pad.
     assert not hasattr(config, "mm_prefix_span_leading_pad_modulus")
 
@@ -91,9 +94,9 @@ def test_released_config_names_are_available_to_runtime():
     ):
         assert not hasattr(config, name)
     assert config.engram_rotation_config == _rotation_config()
-    # The released CausalLM architecture still carries the complete vision path.
-    assert config.is_mm_prefix_lm
-    assert config.mm_prefix_clamp_sliding_window
+    # vLLM main moved the mm-prefix flags to the model-arch config converter.
+    assert not hasattr(config, "is_mm_prefix_lm")
+    assert not hasattr(config, "mm_prefix_clamp_sliding_window")
     # vLLM main (#56554) removed the compressor-alignment pad.
     assert not hasattr(config, "mm_prefix_span_leading_pad_modulus")
 

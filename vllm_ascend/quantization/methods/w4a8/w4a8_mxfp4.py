@@ -35,6 +35,7 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, FP8_METHOD, dispose_tensor
 from ..base import (
     AscendLinearScheme,
     AscendMoEScheme,
+    PreparedLinearInput,
     QuantType,
     WeightSwitchGatherSpec,
 )
@@ -74,14 +75,29 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         params_dict["weight_scale"] = torch.empty(output_size, input_size // self.group_size, dtype=torch.uint8)
         return params_dict
 
+    def prepare_input_for_overlap(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+    ) -> PreparedLinearInput | None:
+        if x.dim() != 2:
+            return None
+        quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
+        return PreparedLinearInput(quantized_x, dynamic_scale, x.dtype)
+
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        if isinstance(x, tuple):
+        if isinstance(x, PreparedLinearInput):
+            quantized_x = x.quantized
+            assert x.scale is not None
+            dynamic_scale = x.scale
+            output_dtype = x.output_dtype
+        elif isinstance(x, tuple):
             quantized_x, dynamic_scale = x
             output_dtype = torch.bfloat16
         else:
@@ -500,27 +516,3 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
             num_experts, hidden_sizes, intermediate_size_per_partition // self.group_size, dtype=torch.float8_e8m0fnu
         )
         return param_dict
-
-    def process_weights_after_loading(self, layer):
-        layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data.view(torch.uint8),
-            ACL_FORMAT_FRACTAL_NZ,
-            customize_dtype=torch.float8_e4m3fn,
-            input_dtype=torch_npu.float4_e2m1fn_x2,
-        )
-        layer.w2_weight.data = torch_npu.npu_format_cast(
-            layer.w2_weight.data.view(torch.uint8),
-            ACL_FORMAT_FRACTAL_NZ,
-            customize_dtype=torch.float8_e4m3fn,
-            input_dtype=torch_npu.float4_e2m1fn_x2,
-        )
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        g, n, k = layer.w13_weight_scale.shape
-        layer.w13_weight_scale.data = (
-            layer.w13_weight_scale.data.reshape(g, n, k // 2, 2).view(torch.uint8).transpose(-3, -2)
-        )
-        g, n, k = layer.w2_weight_scale.shape
-        layer.w2_weight_scale.data = (
-            layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).view(torch.uint8).transpose(-3, -2)
-        )

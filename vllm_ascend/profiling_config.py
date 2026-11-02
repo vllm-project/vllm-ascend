@@ -87,16 +87,16 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
   handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:execute_model
   name: modelExec
 
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner.execute_model
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.execute_model
   name: modelRunnerExec
   handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:execute_model_runner
   domain: Execute
 
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._update_states
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._update_states
   name: _update_states
   domain: Execute
 
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._prepare_inputs
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._prepare_inputs
   name: _prepare_inputs
   domain: Execute
 
@@ -114,7 +114,7 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
   handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:record_function_or_nullcontext
 
 # ===== MTP / NPUModelRunner =====
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner.propose_draft_token_ids
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.propose_draft_token_ids
   min_version: "0.9.1"
   handler: ms_service_profiler.patcher.vllm.handlers.v1.mtp_handlers:propose_draft_token_ids_npu
 
@@ -142,7 +142,7 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
   min_version: "0.9.1"
   handler: ms_service_profiler.patcher.vllm.handlers.v1.meta_handlers:init_data_parallel
 
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner.execute_model
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.execute_model
   min_version: "0.9.1"
   handler: ms_service_profiler.patcher.vllm.handlers.v1.meta_handlers:init_data_parallel_worker
 
@@ -208,23 +208,23 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
   handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:execute_model
   domain: Execute
   name: modelExec
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._calc_spec_decode_metadata
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._calc_spec_decode_metadata
   min_version: "0.9.1"
   domain: SpecDecode
   name: NPUModelRunner._calc_spec_decode_metadata
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._build_attn_state
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._build_attn_state
   min_version: "0.9.1"
   domain: SpecDecode
   name: NPUModelRunner._build_attn_state
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._determine_batch_execution_and_padding
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._determine_batch_execution_and_padding
   min_version: "0.9.1"
   domain: Execute
   name: NPUModelRunner._determine_batch_execution_and_padding
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._pad_for_sequence_parallelism
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._pad_for_sequence_parallelism
   min_version: "0.9.1"
   domain: Execute
   name: NPUModelRunner._pad_for_sequence_parallelism
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._sync_metadata_across_dp
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._sync_metadata_across_dp
   min_version: "0.9.1"
   domain: Execute
   name: NPUModelRunner._sync_metadata_across_dp
@@ -232,7 +232,7 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
   min_version: "0.9.1"
   domain: Execute
   name: CudagraphDispatcher.dispatch
-- symbol: vllm_ascend.worker.model_runner_v1:_post_process_cudagraph_mode
+- symbol: vllm_ascend.worker.v1.model_runner:_post_process_cudagraph_mode
   min_version: "0.9.1"
   domain: Execute
   name: _post_process_cudagraph_mode
@@ -240,27 +240,27 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
   min_version: "0.9.1"
   domain: Execute
   name: should_skip_allreduce_across_dp_group
-- symbol: vllm_ascend.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer._propose
+- symbol: vllm_ascend.worker.v1.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer._propose
   min_version: "0.9.1"
   domain: SpecDecode
   name: draft_propose
-- symbol: vllm_ascend.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer._run_merged_draft
+- symbol: vllm_ascend.worker.v1.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer._run_merged_draft
   min_version: "0.9.1"
   domain: SpecDecode
   name: draft_model_forward
-- symbol: vllm_ascend.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer.compute_draft_token_ids
+- symbol: vllm_ascend.worker.v1.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer.compute_draft_token_ids
   min_version: "0.9.1"
   domain: SpecDecode
   name: draft_compute_token_ids
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._build_attention_metadata
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._build_attention_metadata
   min_version: "0.9.1"
   domain: Execute
   name: NPUModelRunner._build_attention_metadata
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._sanitize_placeholder_input_ids_for_forward
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._sanitize_placeholder_input_ids_for_forward
   min_version: "0.9.1"
   domain: SpecDecode
   name: NPUModelRunner._sanitize_placeholder_input_ids_for_forward
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._preprocess
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._preprocess
   min_version: "0.9.1"
   domain: Execute
   name: NPUModelRunner._preprocess
@@ -268,7 +268,7 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
   min_version: "0.9.1"
   domain: Execute
   name: rotary.update_cos_sin
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._model_forward
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._model_forward
   min_version: "0.9.1"
   domain: ModelForward
   name: NPUModelRunner._model_forward
@@ -279,31 +279,31 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
     expr: this | attr dp_rank | str
   - name: npu_id
     expr: this | attr device | attr index | str
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._update_full_graph_params_if_needed
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._update_full_graph_params_if_needed
   min_version: "0.9.1"
   domain: ModelForward
   name: NPUModelRunner._update_full_graph_params_if_needed
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._all_gather_hidden_states_and_aux
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._all_gather_hidden_states_and_aux
   min_version: "0.9.1"
   domain: ModelForward
   name: NPUModelRunner._all_gather_hidden_states_and_aux
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._dummy_run
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._dummy_run
   min_version: "0.9.1"
   domain: Execute
   name: NPUModelRunner._dummy_run
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner.sample_tokens
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.sample_tokens
   min_version: "0.9.1"
   domain: Sample
   name: NPUModelRunner.sample_tokens
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._sample
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._sample
   min_version: "0.9.1"
   domain: Sample
   name: NPUModelRunner._sample
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._bookkeeping_sync
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._bookkeeping_sync
   min_version: "0.9.1"
   domain: Execute
   name: NPUModelRunner._bookkeeping_sync
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._poll_late_kv_connector_output
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._poll_late_kv_connector_output
   min_version: "0.9.1"
   domain: KVTransfer
   name: NPUModelRunner._poll_late_kv_connector_output
@@ -495,7 +495,7 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
     expr: this | attr finished_recving_kv_req_ids | str
   - name: scheduler_failed_recving
     expr: this | attr failed_recving_kv_req_ids | str
-- symbol: vllm.v1.core.sched.scheduler:Scheduler._try_promote_blocked_waiting_request
+- symbol: vllm.v1.core.sched.scheduler:Scheduler._handle_blocked_waiting_request
   min_version: "0.9.1"
   domain: Schedule
   name: Scheduler.tryPromoteBlockedWaiting

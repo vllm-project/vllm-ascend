@@ -646,3 +646,27 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         delta.mul_(scale)
         delta.masked_fill_(~active.unsqueeze(1), 0)
         y.add_(delta.to(y.dtype))
+
+    def apply_lora_full_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        weight_stacked: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> None:
+        """Apply request-routed full linear weights to selected rows.
+
+        Mirrors vLLM's CPU implementation (the stacked weight carries the full
+        linear weight, so rank == out_features). The Ascend BGMV shrink kernel
+        is intentionally avoided here: it requires half/bf16 inputs and
+        ``hidden_in > hidden_out``, neither of which holds for a classification
+        head, and it writes in the input dtype rather than fp32.
+        """
+        indices = self.sampler_indices
+        selected = weight_stacked[indices.clamp_min(0)]
+        if selected.dim() == 4:
+            selected = selected.squeeze(1)
+        adapter_y = torch.einsum("bi,boi->bo", x.to(torch.float32), selected.to(torch.float32))
+        result = self._select_full_linear_output(y, adapter_y, bias_stacked, module_enabled)
+        y.copy_(result)

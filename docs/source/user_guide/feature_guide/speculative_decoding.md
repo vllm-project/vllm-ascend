@@ -6,7 +6,7 @@ This guide shows how to use Speculative Decoding with vLLM Ascend. Speculative d
 
 vLLM Ascend implements speculative decoding through a **proposer-verifier** architecture:
 
-1. **Proposer** (`vllm_ascend/spec_decode/`): Generates draft (speculative) tokens using various methods — from simple n-gram matching to neural-network-based draft models.
+1. **Proposer** (`vllm_ascend/worker/v1/spec_decode/`): Generates draft (speculative) tokens using various methods — from simple n-gram matching to neural-network-based draft models.
 2. **Rejection Sampler** (`vllm_ascend/sample/`): Verifies draft tokens against the target model's output, accepting matches and rejecting mismatches, with optional optimizations including [Block Verify and Entropy Verify](#block-verify-and-entropy-verify).
 
 The following speculative decoding methods are supported:
@@ -60,8 +60,9 @@ vllm serve path/to/target/model \
   --speculative-config '{"method": "eagle3", "model": "path/to/draft/model", "num_speculative_tokens": 3}'
 ```
 
-> [!NOTE]
-> On Ascend NPUs, the `npu_fused_infer_attention_score` operator supports a maximum of 16 tokens per decode round. Therefore, `(num_speculative_tokens + 1)` must be ≤ 16.
+!!! note
+
+    On Ascend NPUs, the `npu_fused_infer_attention_score` operator supports a maximum of 16 tokens per decode round. Therefore, `(num_speculative_tokens + 1)` must be ≤ 16.
 
 ## Speculating by matching n-grams in the prompt
 
@@ -214,10 +215,11 @@ MTP (Multi-Token Prediction) boosts inference performance by parallelizing the p
     --speculative-config '{"num_speculative_tokens": 2, "method":"mtp", "disable_padded_drafter_batch": false}'
     ```
 
-> [!NOTE]
-> Due to the fact that only a single layer of weights is exposed in DeepSeek's MTP, accuracy and performance are not effectively guaranteed in scenarios where `num_speculative_tokens > 1` (especially ≥ 3).
->
-> In the fullgraph mode with `num_speculative_tokens > 1`, the capture size of each ACLGraph must be an integer multiple of `(num_speculative_tokens + 1)`.
+!!! note
+
+    Due to the fact that only a single layer of weights is exposed in DeepSeek's MTP, accuracy and performance are not effectively guaranteed in scenarios where `num_speculative_tokens > 1` (especially ≥ 3).
+
+    In the fullgraph mode with `num_speculative_tokens > 1`, the capture size of each ACLGraph must be an integer multiple of `(num_speculative_tokens + 1)`.
 
 ## Speculating using DFlash
 
@@ -382,9 +384,100 @@ A few important things to consider when using DFlash2 draft models:
 5. The selector parameters (`selector_top_k`, `selector_rank`, ...) come from
    the draft checkpoint's `dflash_config` and need no user configuration.
 
+## Speculating using LiLiCorr
+
+LiLiCorr is a DFlash variant that reranks the per-position top-k candidate
+lattice before target-model verification. It requires a dedicated
+`LiLiCorrDraftModel` checkpoint trained for the target model; a regular DFlash
+or DFlash2 checkpoint cannot be substituted. The configured
+`num_speculative_tokens` should equal the checkpoint's trained block size minus
+one (the example below assumes a block size of eight). Shorter lengths down to
+one token are supported, but may reduce acceptance; measure them with your
+checkpoint and workload. Longer lengths are unsupported.
+
+LiLiCorr currently uses Model Runner V2 and eager draft execution on Ascend.
+Set `VLLM_USE_V2_MODEL_RUNNER=1` and set the nested speculative
+`enforce_eager` option to `true`. The target model retains its independently
+configured execution mode.
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <target-model> \
+  --tensor-parallel-size 1 \
+  --max-model-len 4096 \
+  --no-enable-prefix-caching \
+  --speculative-config '{"method":"dflash","model":"<matching-lilicorr-checkpoint>","num_speculative_tokens":7,"enforce_eager":true}'
+```
+
+Both the plain and convolutional LiLiCorr checkpoint variants are supported.
+The real-weight CI test pairs `Qwen/Qwen3.8-27B` with the ModelScope draft
+`niannianxu/Qwen3.8-27B-LiLiCorr-block8-epoch0`, using TP=2 and seven
+speculative tokens. Both models are listed in the A2/A3 download catalog.
+After the CI model-download job has populated the cache, run:
+
+```shell
+VLLM_USE_MODELSCOPE=True VLLM_USE_V2_MODEL_RUNNER=1 pytest -v \
+  tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_8_lilicorr.py
+```
+
+The test compares greedy output token IDs with target-only decoding for both
+draft sampling modes, exercises nonzero-temperature probabilistic drafting,
+and checks draft/acceptance metric consistency. Acceptance length is recorded
+for calibration; no unmeasured throughput or acceptance-rate threshold is set.
+
+Standard tensor parallelism is supported. Fine-grained embedding/LM head TP
+and PCP vocabulary weight sharding are currently unsupported; the candidate
+path requires the standard TP vocabulary layout.
+Use the checkpoint's own `dflash_config` values for candidate top-k and
+convolution geometry; these values are part of the trained model and should
+not be tuned at serving time.
+
+Both `draft_sample_method: "greedy"` and `"probabilistic"` use the correlator's
+conditional scores. Probabilistic drafting supplies the realized proposal
+distribution to the rejection sampler and uses a separate random stream from
+target sampling. Compare acceptance length and throughput for both modes with
+your workload. Quantized draft projections require a quantization format
+supported by Ascend; NVIDIA ModelOpt NVFP4 exports are not portable merely
+because the upstream LiLiCorr loader accepts them.
+
+For a latency comparison on NPU, use real checkpoint weights and run the same
+batch and sequence lengths without speculative decoding, with greedy drafts,
+and with probabilistic drafts. For example:
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm bench latency --model <target-model> \
+  --batch-size 8 --input-len 1024 --output-len 128 \
+  --num-iters-warmup 5 --num-iters 30 --output-json lilicorr-latency.json \
+  --speculative-config '{"method":"dflash","model":"<matching-lilicorr-checkpoint>","num_speculative_tokens":7,"enforce_eager":true,"draft_sample_method":"probabilistic"}'
+```
+
+Repeat at the production batch sizes and context lengths, keeping TP size,
+target execution mode, and prefix caching settings fixed. Measure acceptance
+length and serving throughput alongside latency; synthetic prompts alone do
+not establish the production speedup.
+
 ## Speculating using DSpark
 
 The following code configures vLLM Ascend to use speculative decoding where proposals are generated by a DSpark semi-autoregressive block drafter with a sequential Markov logit-bias head.
+
+On 950DT Products with Model Runner V2, GLM (`GlmMoeDsaForCausalLM`) targets paired with
+`Qwen3DSparkModel` GQA drafts can use the device-length CANN FlashAttn backend.
+This requires FP16/BF16 queries and unquantized draft KV cache. MLA drafts keep
+their existing backend. When all draft layers use FlashAttn, the runner can skip
+the speculative CPU length synchronization; PP, PCP, DCP, KV transfer, sparse
+KV offload, and adaptive verification retain their existing synchronization path.
+
+For draft heads of size 192, the backend zero-pads Q/K/V to 256 for the CANN
+kernel, keeps the original attention scale, and trims the output back to 192.
+Model weights and logical head sizes are unchanged. These draft KV cache pages
+use one third more storage than unpadded 192-wide pages, and padding adds work;
+this backend does not guarantee higher speculative acceptance rates.
+
+!!! warning
+
+    DSpark adaptive verification with a confidence head is supported only with Model Runner V2.
+    When `enable_adaptive_verification` is enabled, vLLM Ascend does not support fully eager execution or pure `PIECEWISE` graph mode for the target model. The same restriction applies in vLLM.
+    In vLLM Ascend, adaptive verification cannot be combined with PP, PCP, DCP, LM head TP, or LoRA.
+    Commercial use is restricted.
 
 - Offline inference
 
@@ -446,6 +539,7 @@ Enable it in `speculative_config`:
 
 ```shell
 VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-8B \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --speculative-config '{
     "method": "dspark",
     "model": "deepseek-ai/dspark_qwen3_8b_block7",
@@ -455,6 +549,21 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-8B \
 ```
 
 Adaptive verification takes effect only with model runner V2.
+
+> **Performance note (Ascend):** The benefits of adaptive verification depend on
+> the workload.
+>
+> - **In low-latency scenarios**, enabling adaptive verification may degrade performance.
+>
+> - **In high-throughput scenarios (host)**, performance may degrade when the proxy or API server is the bottleneck.
+>
+> - **In high-throughput scenarios (device)**, workloads with very high draft token acceptance rates may see no
+>   additional benefit.
+>
+> **Performance troubleshooting (Ascend):**
+>
+> - **In high-throughput scenarios**, performance gains from adaptive verification may sometimes fall short of expectations.
+>   In such cases, start by investigating the cause at the actual serving concurrency.
 
 For more details, see the
 [vLLM community documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
@@ -533,12 +642,13 @@ Like n-gram, Suffix Decoding can generate draft tokens by pattern-matching using
 
 Suffix Decoding can achieve better performance for tasks with high repetition, such as code-editing, agentic loops (e.g. self-reflection, self-consistency), and RL rollouts.
 
-> [!NOTE]
-> Suffix Decoding requires Arctic Inference. You can install it with `pip install arctic-inference`.
+!!! note
+
+    Suffix Decoding requires Arctic Inference. You can install it with `pip install arctic-inference`.
 
 - Offline inference
 
-  ```python
+    ```python
     from vllm import LLM, SamplingParams
 
     prompts = [
@@ -577,8 +687,9 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
 
 The `extract_hidden_states` method is a special speculative decoding mode that does not perform actual speculation. Instead, it extracts hidden states from specified layers of the target model and saves them to disk. This is primarily used for collecting training data for EAGLE-style draft models. The dumps are then used to train EAGLE/EAGLE-3 drafts.
 
-> [!NOTE]
-> This method produces only 1 output token per request. The primary output is the hidden states saved to disk, not the generated text.
+!!! note
+
+    This method produces only 1 output token per request. The primary output is the hidden states saved to disk, not the generated text.
 
 Both Model Runner V1 and Model Runner V2 are supported on Ascend. Enable V2 with:
 
@@ -682,8 +793,9 @@ Dynamic Speculative Decoding adapts the number of draft tokens (K) at runtime, i
 
 This approach adapts how many drafted tokens are verified per request. It can reduce verify cost when the drafter is less confident about later tokens, while still allowing longer speculation when confidence is high.
 
-> [!NOTE]
-> This is an **exploratory** feature and currently targets **model runner v1** only. Supported dynamic methods are `"dspark"` (confidence head) and `"dflash"` (head-free). Among DSpark draft models, only the **Qwen** series is supported today; support for models such as GLM and DeepSeek is being added incrementally.
+!!! note
+
+    This is an **exploratory** feature and currently targets **model runner v1** only. Supported dynamic methods are `"dspark"` (confidence head) and `"dflash"` (head-free). Among DSpark draft models, only the **Qwen** series is supported today; support for models such as GLM and DeepSeek is being added incrementally.
 
 #### How it works
 
@@ -821,18 +933,55 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
   }'
 ```
 
+## Block Verification in Model Runner V2
+
+Model Runner V2 supports upstream vLLM's block verification for speculative decoding. It jointly verifies a block of draft tokens using cumulative target-to-draft probability ratios and samples a recovery token from the corresponding residual distribution. This can increase the accepted draft length while preserving the target sampling distribution. Performance gains depend on the draft model and workload.
+
+Model Runner V2 is enabled by default (`VLLM_USE_V2_MODEL_RUNNER=1`). To enable block verification, set `"rejection_sample_method": "block"` in `speculative_config`, alongside your existing proposer settings. The default remains `"standard"`; omit this field or set it to `"standard"` to disable block verification.
+
+**Offline inference**:
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM(
+    model="path/to/target/model",
+    speculative_config={
+        "method": "eagle3",
+        "model": "path/to/draft/model",
+        "num_speculative_tokens": 3,
+        "rejection_sample_method": "block",
+    },
+)
+outputs = llm.generate(["The future of AI is"], SamplingParams(temperature=0.8))
+```
+
+**Online serving**:
+
+```shell
+vllm serve path/to/target/model \
+  --speculative-config '{"method": "eagle3", "model": "path/to/draft/model", "num_speculative_tokens": 3, "rejection_sample_method": "block"}'
+```
+
+Block verification supports both greedy and probabilistic draft sampling. Target requests with `temperature=0` retain greedy verification behavior. It cannot be combined with synthetic rejection sampling; do not set `synthetic_acceptance_rates` or `synthetic_acceptance_length` when using `"block"`.
+
 ## Block Verify and Entropy Verify {: #block-verify-and-entropy-verify }
 
 vLLM Ascend provides two optional optimizations for the rejection sampler in speculative decoding: **Block Verify** and **Entropy Verify**. These features trade a small amount of output precision for improved inference throughput.
 
-> [!WARNING]
-> Both Block Verify and Entropy Verify modify the token acceptance criteria and may cause minor precision degradation (e.g., slightly different output tokens compared to the standard rejection sampler). Evaluate the quality impact on your specific workload before enabling them in production.
+!!! warning
+
+    Both Block Verify and Entropy Verify modify the token acceptance criteria and may cause minor precision degradation (e.g., slightly different output tokens compared to the standard rejection sampler). Evaluate the quality impact on your specific workload before enabling them in production.
 
 ### Block Verify
+
+Block Verify requires Model Runner V1 (`VLLM_USE_V2_MODEL_RUNNER=0`). For Model Runner V2, see [Block Verification in Model Runner V2](#block-verification-in-model-runner-v2).
 
 Block Verify evaluates all draft tokens as a block using cumulative probability products, rather than checking each token independently. This can improve the acceptance rate and reduce the overhead of rejection sampling, especially when `num_speculative_tokens >= 3`.
 
 ### Entropy Verify
+
+Entropy Verify supports both Model Runner V1 and V2. Model Runner V2 is enabled by default. Enable Entropy Verify with `additional_config.rejection_sampler_config.enable_entropy_verify=true`.
 
 Entropy Verify adjusts the acceptance threshold based on the entropy of the target distribution:
 
@@ -844,7 +993,11 @@ This entropy-aware threshold is controlled by two parameters:
 - **`posterior_threshold`** (default: `0.95`, range: `(0, 1]`): The upper bound of the modified threshold. Even when entropy is very low, the effective threshold will not exceed this value.
 - **`posterior_alpha`** (default: `0.4`, range: `>= 0`): Controls how strongly entropy influences the threshold. A higher alpha makes the threshold more sensitive to entropy changes, resulting in a higher acceptance rate for speculative tokens but also greater precision loss. You need to tune this value based on your specific model and dataset. When alpha is `0`, entropy has no effect and the threshold equals `posterior_threshold`.
 
+In Model Runner V2, entropy is computed from the target logits after sampling parameters (such as temperature, top-k/top-p and penalties) are applied, for both raw and processed logprobs modes. Each draft position uses its own threshold `min(exp(-entropy * posterior_alpha), posterior_threshold)`. Greedy requests retain their existing behavior, and synthetic rejection sampling uses its configured acceptance rates. Use Entropy Verify with `rejection_sample_method="standard"`; upstream `"block"` verification and Entropy Verify are mutually exclusive.
+
 ### Usage
+
+For Model Runner V1:
 
 - Online inference
 
@@ -871,7 +1024,56 @@ This entropy-aware threshold is controlled by two parameters:
     )
     ```
 
-Both features can be enabled independently or together. When used together, the cumulative acceptance from Block Verify is combined with the entropy-adjusted threshold from Entropy Verify.
+On Model Runner V1, both features can be enabled independently or together. When used together, the cumulative acceptance from Block Verify is combined with the entropy-adjusted threshold from Entropy Verify.
+
+For Entropy Verify on Model Runner V2, keep your proposer configuration and add:
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <model> \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 3, "rejection_sample_method": "standard"}' \
+    --additional-config '{"rejection_sampler_config": {"enable_entropy_verify": true, "posterior_threshold": 0.95, "posterior_alpha": 0.4}}'
+```
+
+Use a model with MTP support for this example, or retain your existing supported proposer settings. To disable Entropy Verify, set `enable_entropy_verify` to `false` (the default).
+
+## Experimental GLM KDA RecoverSSM
+
+GLM-5.3-Flash supports experimental KDA RecoverSSM on A3 and A5 with
+Model Runner V2. It reconstructs the accepted recurrent state after speculative
+decoding instead of keeping a recurrent checkpoint for every draft token.
+The default remains the native AscendC KDA path.
+
+Enable this path with upstream vLLM's `--use-replayssm` option, which defaults
+to disabled. See the [vLLM serving CLI reference](https://docs.vllm.ai/en/latest/cli/serve/)
+and [CacheConfig API reference](https://docs.vllm.ai/en/latest/api/vllm/config/cache/)
+for the upstream option. Upstream describes Mamba2 ReplaySSM under this flag;
+the GLM KDA behavior and requirements in this section are provided by the
+Ascend integration.
+
+Add the following options to your GLM serving command. Keep the parallelism,
+quantization, KV-cache dtype, and memory settings appropriate for your model
+and devices:
+
+```shell
+--use-replayssm \
+--speculative-config '{"method": "deepseek_mtp", "num_speculative_tokens": 5}' \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+```
+
+RecoverSSM requires speculative decoding and does not support pipeline
+parallelism (PP), prefill context parallelism (PCP), or decode context
+parallelism (DCP). Stochastic rounding must be disabled.
+
+For prefill/decode separation, use `MooncakeConnectorV2` or
+`MooncakePullConnector` with matching model weights, TP size, speculative window,
+and RecoverSSM settings on both sides.
+
+!!! warning
+
+    This feature is experimental. Floating-point differences can change generated
+    tokens; evaluate model accuracy and performance for your workload before use.
+
+Removing `--use-replayssm` selects the native KDA path.
 
 ## Synthetic Rejection Sampling
 
@@ -885,8 +1087,9 @@ Synthetic mode **decouples the verifier's acceptance logic from draft-model qual
 - **Kernel validation** — because acceptance reduces to `uniform < rate`, the result is fully determined by the inputs. The e2e test compares the Ascend Triton kernel (`SYNTHETIC_MODE=True`) against the PyTorch reference under identical inputs, so the two must agree bit-for-bit.
 - **Stress-testing** the high-acceptance regime of the speculative pipeline.
 
-> [!WARNING]
-> Synthetic mode accepts draft tokens regardless of whether they match the target distribution, so the generated output is **not semantically correct**. Use it for benchmarking and validation only, **never for production serving**.
+!!! warning
+
+    Synthetic mode accepts draft tokens regardless of whether they match the target distribution, so the generated output is **not semantically correct**. Use it for benchmarking and validation only, **never for production serving**.
 
 ### How to use
 

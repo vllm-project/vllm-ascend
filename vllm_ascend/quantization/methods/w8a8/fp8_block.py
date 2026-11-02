@@ -48,6 +48,7 @@ from vllm_ascend.utils import FP8_METHOD, is_950, maybe_trans_nz
 from ..base import (
     AscendLinearScheme,
     AscendMoEScheme,
+    PreparedLinearInput,
     QuantType,
     WeightSwitchConfig,
     WeightSwitchGatherSpec,
@@ -237,10 +238,19 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
         layer.weight_scale = torch.nn.Parameter(mx_scale, requires_grad=False)
         self.mxfp8_method.process_weights_after_loading(layer)
 
-    def apply(
+    def prepare_input_for_overlap(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
+    ) -> PreparedLinearInput | None:
+        if self.mxfp8_method is None:
+            return None
+        return self.mxfp8_method.prepare_input_for_overlap(layer, x)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput,
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:

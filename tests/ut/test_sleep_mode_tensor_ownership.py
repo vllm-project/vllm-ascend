@@ -67,15 +67,14 @@ def _make_vllm_indexer() -> MagicMock:
     return mock_indexer
 
 
-@patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=False)
 @patch("vllm_ascend.attention.indexer.get_current_vllm_config")
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 def _make_indexer(
     mock_get_ascend_config: MagicMock,
     mock_get_vllm_config: MagicMock,
-    _mock_enable_dsa_cp: MagicMock,
 ) -> AscendSFAIndexerBackend:
     mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = True
+    mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
     # Keep the config a ``MagicMock`` so nested lookups such as
     # ``model_config.hf_config.model_type`` and ``attention_config.indexer_kv_dtype``
     # resolve without every level having to be spelled out.

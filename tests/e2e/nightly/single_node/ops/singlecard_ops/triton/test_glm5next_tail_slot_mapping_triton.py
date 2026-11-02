@@ -8,10 +8,15 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.compute_slot_mapping import compute_slot_mapping_fused_groups
 from vllm_ascend.worker.block_table import BlockTable
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("lengths", [[3, 0, 5], [1025, 0, 1027], [1] * 64])
 @torch.inference_mode()
 def test_normal_and_mixed_fused_circular_mapping_and_graph(lengths):
@@ -98,6 +103,9 @@ def test_normal_and_mixed_fused_circular_mapping_and_graph(lengths):
     torch.testing.assert_close(outputs[1].cpu(), expected()[1], rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 def test_draft_helper_disables_generic_writes_for_circular_groups():
     obj = BlockTable.__new__(BlockTable)
     obj.dcp_world_size, obj.max_num_blocks_per_req, obj.blocks_per_phys_block = 1, 1, 1

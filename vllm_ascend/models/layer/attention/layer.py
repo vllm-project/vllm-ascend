@@ -38,9 +38,9 @@ def get_dsv4_block_sizes(use_a5_bf16_kv: bool = False):
         32: [[32, 32, 2, 8], [4160, 32768]],
     }
     _DSV4_COMPRESSED_BLOCK_SIZES = {
-        128: [[128, 128, 8, 16], [16896, 81920]],
-        64: [[64, 64, 4, 8], [8448, 40960]],
-        32: [[32, 32, 2, 4], [4224, 20480]],
+        128: [[128, 128, 8, 16], [16896, 77824]],
+        64: [[64, 64, 4, 8], [8448, 38912]],
+        32: [[32, 32, 2, 4], [4224, 19456]],
     }
     _DSV4_BLOCK_SIZES_A5_BF16 = {
         128: [[128, 128, 8, 16], [16896, 131072]],
@@ -131,6 +131,23 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         else:
             self.attn_backend = AscendDSASWABackend
 
+        # These layers assign their backend here instead of asking the platform
+        # selector, so they never reach ``get_attn_backend_cls``. Ask the backend the
+        # same question it answers there.
+        if not self.attn_backend.supports_kv_cache_dtype(kv_cache_dtype):
+            # List what this backend accepts *here*: the device narrows the declared
+            # set, and naming a dtype that was just refused would contradict it.
+            supported = sorted(
+                dtype
+                for dtype in self.attn_backend.supported_kv_cache_dtypes
+                if self.attn_backend.supports_kv_cache_dtype(dtype)
+            )
+            hint = f" Supported kv_cache_dtype values: {', '.join(supported)}." if supported else ""
+            raise ValueError(
+                f"KV cache dtype {kv_cache_dtype!r} is not supported by the attention "
+                f"backend {self.attn_backend.__name__}. Reasons: kv_cache_dtype not supported.{hint}"
+            )
+
         # NOTE(zxr): vllm_is_batch_invariant is delete during updating to v0.20.1
         if (
             cache_config is not None
@@ -197,7 +214,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         use_bf16_kv = is_a5_bf16_kv_enabled(vllm_config)
         has_compressed_cache = get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
 
-        cached_head_size = self.head_size + 128 if has_compressed_cache and not use_bf16_kv else self.head_size
+        cached_head_size = self.head_size + 96 if has_compressed_cache and not use_bf16_kv else self.head_size
         if is_turboquant(vllm_config) and self.compress_ratio == 4:
             cached_head_size = SLOT_BYTES
         storage_block_size = dsv4_block_sizes(vllm_config)[vllm_config.cache_config.block_size][0][0]
@@ -208,6 +225,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             # The scheduler operates in raw-token units. Ascend kernels keep
             # using the compressed page exposed by storage_block_size.
             block_size=storage_block_size * self.compress_ratio,
+            num_heads=self.n_local_heads,
             num_kv_heads=1,
             head_size=cached_head_size,
             dtype=kv_cache_dtype,

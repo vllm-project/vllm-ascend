@@ -20,9 +20,9 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-import vllm_ascend.spec_decode as spec_decode
+import vllm_ascend.worker.v1.spec_decode as spec_decode
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
+from vllm_ascend.worker.v1.spec_decode.gemma4_proposer import AscendGemma4Proposer
 
 
 def test_routes_gemma4_mtp_to_ascend_proposer():
@@ -55,7 +55,7 @@ def test_sync_kv_sharing_target_to_impl():
         kv_sharing_target_layer_name="target.attn",
     )
     with patch(
-        "vllm_ascend.spec_decode.gemma4_proposer.get_layers_from_vllm_config",
+        "vllm_ascend.worker.v1.spec_decode.gemma4_proposer.get_layers_from_vllm_config",
         return_value={"draft.attn": attn},
     ):
         proposer._sync_kv_sharing_target_to_impl()

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from collections.abc import Callable, Iterable
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Protocol, runtime_checkable
@@ -45,7 +46,10 @@ class DeviceMetadataTaskProvider(Protocol):
 class DeviceMetadataExecutor:
     """Submit device metadata tasks on a worker-owned NPU stream."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, capture_producers: bool = False) -> None:
+        # MRV1 keeps its graph-external producer protocol unchanged. MRV2
+        # captures both sides of the dependency and joins them in one graph.
+        self.capture_producers = capture_producers
         self.stream = torch.npu.Stream()
         self._inputs_ready = torch.npu.Event()
         self._stage_ready: dict[tuple[DeviceMetadataStage, int], torch.npu.Event] = {}
@@ -72,6 +76,8 @@ class DeviceMetadataExecutor:
         tasks: Iterable[DeviceMetadataTask],
         batch_descriptor: BatchDescriptor | None = None,
     ) -> None:
+        if self.capture_producers and batch_descriptor is not None:
+            raise ValueError("Graph-side producers must not use graph-external events")
         if self._submission_in_flight:
             raise RuntimeError("The previous device metadata submission has not been released")
         ordered_tasks = sorted(
@@ -106,7 +112,7 @@ class DeviceMetadataExecutor:
         self._inputs_ready.record(torch.npu.current_stream())
         with torch.npu.stream(self.stream):
             self.stream.wait_event(self._inputs_ready)
-            if self._has_reuse_fence:
+            if self._has_reuse_fence and not self.capture_producers:
                 self.stream.wait_event(self._buffer_reusable)
 
             task_index = 0
@@ -140,8 +146,11 @@ class DeviceMetadataExecutor:
     def release(self) -> None:
         if not self._submission_in_flight:
             raise RuntimeError("No device metadata submission is in flight")
-        self._buffer_reusable.record(torch.npu.current_stream())
-        self._has_reuse_fence = True
+        if not self.capture_producers:
+            self._buffer_reusable.record(torch.npu.current_stream())
+            self._has_reuse_fence = True
+        # Captured producers are joined before release. The next input-ready
+        # event follows all consumers on the main stream and fences reuse.
         self._submission_in_flight = False
         self._batch_descriptor = None
 
@@ -149,6 +158,95 @@ class DeviceMetadataExecutor:
 def wait_for_device_metadata(stage: DeviceMetadataStage, group_id: int) -> None:
     if not is_forward_context_available():
         return
-    executor = getattr(get_forward_context(), "device_metadata_executor", None)
+    context = get_forward_context()
+    executor = getattr(context, "device_metadata_executor", None)
+    if executor is None:
+        # MRV2 carries the producer with the attention metadata for this
+        # forward. Draft metadata cannot inherit a target execution scope.
+        metadata = getattr(context, "attn_metadata", None)
+        if isinstance(metadata, dict):
+            resource = next(iter(metadata.values()), None)
+            executor = getattr(resource, "device_metadata_executor", None)
     if executor is not None:
         executor.wait(stage, group_id)
+
+
+class TargetDeviceMetadata:
+    """Target-owned producer stream, isolated from DSpark's metadata builders.
+
+    FULL warmup/capture runs producers in ModelWithContext.forward; replay runs
+    those captured nodes, not Python builders. Inputs/outputs remain in the
+    builders' persistent padded buffers. Eager execution submits after prepare.
+    Every producer is joined before the next async step may reuse its inputs.
+    """
+
+    def __init__(self):
+        self.executor = DeviceMetadataExecutor(capture_producers=True)
+        self._tasks: tuple[DeviceMetadataTask, ...] = ()
+        self._failed = False
+
+    def run_build(self, build_fn, **kwargs):
+        full_graph = kwargs.get("full_graph_mode", False) or kwargs.get("for_cudagraph_capture", False)
+        with self.build(kwargs["attn_groups"], full_graph):
+            metadata = build_fn(**kwargs)
+            for resource in metadata.values():
+                resource.device_metadata_executor = self.executor
+            return metadata
+
+    @contextmanager
+    def build(self, attn_groups, full_graph: bool):
+        if self._failed:
+            raise RuntimeError("Metadata producer failed; recreate the target model state before retrying")
+        if self.executor.submission_in_flight or self._tasks:
+            raise RuntimeError("Target metadata was not retired before rebuilding inputs")
+        providers = {
+            id(builder): builder
+            for groups in attn_groups
+            for group in groups
+            for builder in (group.get_metadata_builder(0),)
+            if hasattr(builder, "defer_device_metadata")
+        }
+        with ExitStack() as stack:
+            for provider in providers.values():
+                stack.enter_context(provider.defer_device_metadata(in_graph=full_graph))
+            try:
+                yield
+            except BaseException:
+                for provider in providers.values():
+                    provider.take_device_metadata_tasks()
+                raise
+            self._tasks = tuple(
+                task for provider in providers.values() for task in provider.take_device_metadata_tasks()
+            )
+        if not full_graph:
+            self.begin_forward()
+
+    def begin_forward(self):
+        """Called inside target graph warmup/capture, or after eager prepare."""
+        if not self._tasks or self.executor.submission_in_flight:
+            return
+        try:
+            self.executor.submit(self._tasks)
+        except BaseException:
+            self._failed = True
+            if self.executor.submission_in_flight:
+                torch.npu.current_stream().wait_stream(self.executor.stream)
+                self.executor.release()
+            self._tasks = ()
+            raise
+
+    def finish(self):
+        if self.executor.submission_in_flight:
+            # Capture the join too, including any producer without a consumer
+            # in a dummy path. Never globally synchronize the device/host.
+            for task in self._tasks:
+                self.executor.wait(task.stage, task.group_id)
+            self.executor.release()
+        self._tasks = ()
+
+    def finish_replay(self):
+        # Producers, waits and joins are all graph nodes. Runtime preparation
+        # only refreshed their persistent inputs; do not re-submit on the host.
+        if self.executor.submission_in_flight:
+            raise RuntimeError("Graph-side metadata was unexpectedly submitted outside capture")
+        self._tasks = ()

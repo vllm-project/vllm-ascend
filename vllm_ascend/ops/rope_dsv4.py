@@ -47,6 +47,29 @@ class RopeDataProxy:
                 new_data[config_key][group_name] = (cos_t, sin_t)
         return RopeDataProxy(new_data, is_cos=(self.idx == 0))
 
+    def copy_to_buffers(
+        self,
+        buffers: dict[tuple[str, str], tuple[torch.Tensor, torch.Tensor]],
+        capacity: int,
+    ) -> tuple["RopeDataProxy", "RopeDataProxy"]:
+        """Copy cos/sin into caller-owned buffers and return proxies viewing them.
+
+        FULL graphs replay captured addresses, so RoPE data built into fresh
+        tensors must be staged in storage that outlives the step. Missing
+        buffers are allocated with room for ``capacity`` tokens.
+        """
+        new_data: dict = {}
+        for config_key, groups in self._data.items():
+            new_data[config_key] = {}
+            for group_name, rope in groups.items():
+                key = (config_key, group_name)
+                if key not in buffers:
+                    buffers[key] = tuple(t.new_empty((capacity, *t.shape[1:])) for t in rope)
+                new_data[config_key][group_name] = tuple(
+                    buffer[: t.shape[0]].copy_(t) for buffer, t in zip(buffers[key], rope, strict=True)
+                )
+        return RopeDataProxy(new_data, is_cos=True), RopeDataProxy(new_data, is_cos=False)
+
     def __getitem__(self, index):
         if not isinstance(index, str):
             new_map: dict = {}

@@ -222,7 +222,7 @@ def probabilistic_rejection_sample_cpu(
 
     ``target_logits`` must already include temperature / top-k / top-p processing.
     """
-    from vllm_ascend._310p.sample.sampler import _prepare_cpu_generators_310p
+    from vllm_ascend._310p.worker.v2.sample_utils import _prepare_cpu_generators_310p
 
     cu_np = cu_num_logits_np
     num_reqs = cu_np.shape[0] - 1
