@@ -176,15 +176,21 @@ def test_decode_sharding_does_not_add_a_parallel_config_field():
     assert is_pcp_decode_sharding_enabled(config) is True
 
 
+@pytest.mark.parametrize("bind_runner_state", [False, True])
 @pytest.mark.parametrize("speculative", [False, True])
 @pytest.mark.parametrize("upstream_decode_sharding", [False, True])
-def test_kpool_decode_keeps_replicated_pcp_state(speculative: bool, upstream_decode_sharding: bool):
+def test_kpool_decode_keeps_replicated_pcp_state(
+    speculative: bool, upstream_decode_sharding: bool, bind_runner_state: bool
+):
     config = _make_pcp_config(CUDAGraphMode.NONE)
     config.model_config.hf_text_config.index_kpool = 4
     config.speculative_config = SimpleNamespace(method="mtp") if speculative else None
     config.parallel_config = ParallelConfig(prefill_context_parallel_size=2, decode_context_parallel_size=1)
     manager = AscendPCPManager(2, 1, torch.device("cpu"), shard_decode_requests=upstream_decode_sharding)
-    manager.bind_config(config)
+    if bind_runner_state:
+        manager.set_runner_state(config, SimpleNamespace(), SimpleNamespace())
+    else:
+        manager.bind_config(config)
     assert manager.vllm_config is config
     assert not manager.shard_decode_requests
     assert config.parallel_config.pcp_shard_decode_requests is True

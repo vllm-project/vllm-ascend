@@ -75,9 +75,7 @@ class AscendSFAPCPImpl(AscendSFAImpl):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # MTP decode is replicated. Preserve its full O-proj quantization
-        # domain instead of changing draft proposals with PCP input shards.
-        self.enable_pcp_o_proj_weight_sharding = enable_pcp_o_proj_weight_sharding() and not self._is_mtp_layer
+        self.enable_pcp_o_proj_weight_sharding = enable_pcp_o_proj_weight_sharding()
         self._parallel_o_proj = ParallelOProjection(
             self.o_proj.input_size_per_partition,
             self.o_proj,
