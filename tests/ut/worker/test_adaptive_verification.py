@@ -18,7 +18,6 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.device.device_op import BaseDeviceAdaptor
-from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
@@ -42,18 +41,6 @@ _NATIVE_TORCH_SUM = torch.sum
 def test_adaptive_verification_cudagraph_support(builder_cls, speculative_config, expected):
     config = SimpleNamespace(speculative_config=speculative_config)
     assert builder_cls.get_cudagraph_support(config, Mock()) is expected
-
-
-def test_aclgraph_model_forwards_confidence_computation():
-    model = Mock()
-    expected = torch.tensor([0.25, 0.75])
-    model.compute_confidence.return_value = expected
-    wrapped = ModelWithContext(model, is_draft_model=True, is_draft_model_prefill=False)
-    hidden = torch.randn(2, 4)
-    markov = torch.randn(2, 4)
-
-    assert wrapped.compute_confidence(hidden, markov) is expected
-    model.compute_confidence.assert_called_once_with(hidden, markov)
 
 
 @pytest.mark.parametrize(

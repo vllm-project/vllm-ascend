@@ -497,7 +497,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
-                self.pcp_manager.vllm_config = self.vllm_config
+                self.pcp_manager.bind_config(self.vllm_config)
                 self.pcp_manager.kv_cache_config = kv_cache_config
                 self.pcp_manager.global_input_buffers = self.input_buffers
                 self.model_state.pcp_manager = self.pcp_manager
@@ -543,6 +543,10 @@ class NPUModelRunner(GPUModelRunner):
             and getattr(get_kv_transfer_group(), "requires_mamba_state_copy_after_load", False)
         ):
             self.kv_connector = MambaCopyKVConnector(self.kv_connector, copy_mamba_state)
+
+        initialize_cpu_lengths = getattr(self.model_state, "initialize_spec_cpu_length_sync", None)
+        if callable(initialize_cpu_lengths):
+            initialize_cpu_lengths(self)
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
@@ -1273,6 +1277,10 @@ class NPUModelRunner(GPUModelRunner):
             return False
 
         if is_deepseek_v41(self.model_config.hf_config):
+            return True
+
+        model_can_skip = getattr(getattr(self, "model_state", None), "can_skip_spec_cpu_length_sync", None)
+        if callable(model_can_skip) and model_can_skip() is True:
             return True
 
         spec = self.speculative_config

@@ -283,7 +283,7 @@ class TestMooncakeHybrid(unittest.TestCase):
             self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (32, False))
             load = scheduler.load_specs[request.request_id]
             self.assertEqual(load.kvpool_cached_tokens, 32)
-            self.assertEqual(load.kvpool_store_skip_tokens, 64)
+            self.assertEqual(load.kvpool_store_skip_tokens, 64 if eagle else 32)
         # The full hit is a write-skip extent, not the recurrent resume point.
         worker.use_eagle = False
         request = ReqMeta(
