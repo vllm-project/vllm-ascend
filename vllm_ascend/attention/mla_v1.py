@@ -1263,13 +1263,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         return ql_nope.transpose(0, 1), q_pe
 
     def _fused_preprocess_type(self) -> PreprocessType | None:
-        """Defer MXFP8 projection NZ conversion to the enabled FP8 prolog."""
-        if not self.support_fp8_attention or not (self.enable_mlapo or self.fa_quant_layer):
-            return None
+        """Keep combined projections in ND until fused preprocessing splits them."""
         if self.fused_qkv_a_proj is None or self.q_proj is None:
             return None
         quant_method = getattr(self.fused_qkv_a_proj.quant_method, "quant_method", None)
-        if isinstance(quant_method, AscendW8A8MXFP8DynamicLinearMethod):
+        if type(quant_method) in (AscendW8A8LinearMethod, AscendW8A8DynamicLinearMethod):
+            if self.supports_prolog_v3_writer():
+                return PreprocessType.PROLOG_V3
+        elif (
+            self.support_fp8_attention
+            and isinstance(quant_method, AscendW8A8MXFP8DynamicLinearMethod)
+            and (self.enable_mlapo or self.fa_quant_layer or self.supports_prolog_v3_writer())
+        ):
             return PreprocessType.PROLOG_V3
         return None
 
