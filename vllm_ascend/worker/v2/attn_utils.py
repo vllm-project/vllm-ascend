@@ -98,6 +98,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
+from vllm_ascend.kv_cache_dtype import native_c8_cache_dtype
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.models.qwen4_exp.cache_config import (
@@ -230,7 +231,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     )
     enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"]
     if enable_sparse_li_c8:
-        c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
+        c8_k_cache_dtype = native_c8_cache_dtype(
             vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config
         )
         if c8_k_cache_dtype == torch.float8_e4m3fn:
@@ -238,7 +239,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         elif c8_k_cache_dtype == torch.int8:
             c8_k_scale_cache_dtype = torch.float16
 
-    c8_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+    c8_cache_dtype = native_c8_cache_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
 
     for layer_name, attn_module in attn_layers.items():
         if getattr(attn_module, "kv_sharing_target_layer_name", None):

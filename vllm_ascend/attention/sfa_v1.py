@@ -1017,6 +1017,11 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _fused_preprocess_type(self) -> PreprocessType | None:
         """Return the enabled fused preprocess type, or None if it cannot run."""
+        # Both current fused weight-preparation paths explicitly produce NZ
+        # operands. Honor the existing ND-only policy instead of recasting
+        # weights behind the user's configuration.
+        if get_ascend_config().weight_nz_mode == 0:
+            return None
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         qt = type(quant_method) if quant_method is not None else None
 
