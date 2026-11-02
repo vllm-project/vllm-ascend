@@ -40,6 +40,7 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.ops.gdn_attn_builder import set_current_batch_req_ids
 from vllm_ascend.utils import model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -341,6 +342,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     ) -> dict[str, Any]:
         # Match the upstream Mamba contract without enabling DBO.
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
+        # The GDN attention metadata cache keys on the request identity. Batch
+        # mocks used by unit tests may not carry req_ids at all.
+        req_ids = getattr(input_batch, "req_ids", None)
+        if req_ids is not None:
+            set_current_batch_req_ids(req_ids[: input_batch.num_reqs])
         pcp_manager = getattr(self, "pcp_manager", None)
         pcp_context = None
         if pcp_manager is not None and model_uses_kpool_indexer(self.vllm_config.model_config):
