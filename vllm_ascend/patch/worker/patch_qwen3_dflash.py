@@ -21,6 +21,9 @@ if lilicorr_module is not None:
     # Remove when upstream exposes a platform-selectable convolution factory.
     lilicorr_module.DFlash2Qwen3DecoderLayer = DFlash2Qwen3DecoderLayer
 
+# Bound the extra live native norm outputs during small context updates.
+_MAX_STACKED_CONTEXT_NORM_BYTES = 4 * 1024 * 1024
+
 
 def _project_context_kv(
     self,
@@ -64,10 +67,16 @@ def precompute_and_store_context_kv(
     all_k, all_v = self._project_context_kv(context_states, num_ctx, L, nkv, hd)
 
     # --- Per-layer RMSNorm K (3D: [num_ctx, nkv, hd] per layer) ---
-    all_k_normed = torch.empty_like(all_k)
-    for i in range(L):
-        k_norm_layer = self.layers[i].self_attn.k_norm
-        all_k_normed[i] = k_norm_layer(all_k[i])
+    stacked_norm = all_k.numel() * all_k.element_size() <= _MAX_STACKED_CONTEXT_NORM_BYTES
+    if stacked_norm:
+        # Retain native norm arithmetic while replacing six small output copies
+        # with one stack. Large prefills retain bounded temporary storage.
+        all_k_normed = torch.stack([self.layers[i].self_attn.k_norm(all_k[i]) for i in range(L)])
+    else:
+        all_k_normed = torch.empty_like(all_k)
+        for i in range(L):
+            k_norm_layer = self.layers[i].self_attn.k_norm
+            all_k_normed[i] = k_norm_layer(all_k[i])
 
     # --- Fused RoPE across all layers ---
     # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
