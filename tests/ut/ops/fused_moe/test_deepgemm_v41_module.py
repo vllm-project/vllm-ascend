@@ -23,11 +23,13 @@ def module():
     ):
         name = "vllm_ascend.ops.fused_moe." + suffix
         spec = importlib.util.spec_from_file_location(name, root / file)
+        assert spec is not None and spec.loader is not None
         value = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(value)
         loaded[name] = value
     with patch.dict(sys.modules, loaded):
         spec = importlib.util.spec_from_file_location("mega_module_test", root / "deepgemm_v41_module.py")
+        assert spec is not None and spec.loader is not None
         value = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(value)
         yield value
