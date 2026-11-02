@@ -922,6 +922,8 @@ __aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>::CleanOutput(__gm__ uint
         }
         if (constInfo.needInit == 1 && !returnSoftmaxLse) {
             InitOutputSingleCore(constInfo);
+        } else {
+            InitOutputTail(constInfo);
         }
     }
 }
