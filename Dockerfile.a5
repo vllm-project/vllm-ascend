@@ -44,6 +44,14 @@ RUN apt-get update -y && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
+# Native DeepGEMM-Ascend follows DeepInfer's GCC >= 13 requirement.
+# Upgrade the system C++ runtime together with the compiler so Triton and the
+# operator extension share a compatible runtime without serving-time overrides.
+RUN apt-get update -y && apt-get install -y software-properties-common && \
+    add-apt-repository -y ppa:ubuntu-toolchain-r/test && apt-get update -y && \
+    apt-get install -y gcc-13 g++-13 libdw-dev libelf-dev && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
