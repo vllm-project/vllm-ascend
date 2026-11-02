@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -18,7 +19,49 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKVConnectorStats
 
-from .helpers import make_full_spec, make_kv_cache_tensor, make_sfa_indexer_spec, make_sliding_spec
+from .helpers import make_full_spec, make_kv_cache_tensor, make_mamba_spec, make_sfa_indexer_spec, make_sliding_spec
+from .test_kda_transfer import geometry
+from .test_kda_transfer import metadata as kda_metadata
+
+
+@pytest.mark.parametrize(("tp", "pcp"), [(1, 4), (2, 4), (4, 1)])
+@pytest.mark.parametrize("layout", ["DS", "SD"])
+@pytest.mark.parametrize("recover", [False, True])
+def test_glm_registration_publishes_actual_state_shards_and_dtypes(monkeypatch, tp, pcp, layout, recover):
+    name = "model.layers.0.linear_attn"
+    contract = kda_metadata(tp, pcp, layout=layout, recover=recover)
+    shapes, lengths, _ = geometry(contract)
+    dtypes = (torch.bfloat16, torch.float32, torch.float32, torch.bfloat16)[: len(shapes)]
+    caches = [torch.empty((2, *shape), dtype=dtype) for shape, dtype in zip(shapes, dtypes)]
+    spec = replace(make_mamba_spec(), shapes=tuple(shapes), dtypes=dtypes)
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm5_next")),
+        parallel_config=SimpleNamespace(tensor_parallel_size=tp, prefill_context_parallel_size=pcp),
+        cache_config=SimpleNamespace(use_replayssm=recover, mamba_cache_mode="none"),
+        speculative_config=SimpleNamespace(num_speculative_tokens=5),
+    )
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, tp
+    worker.kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            make_kv_cache_tensor(
+                size=sum(cache.nbytes for cache in caches),
+                layers=[name],
+                layer_stride=sum(cache.nbytes for cache in caches),
+                block_stride=sum(lengths),
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)],
+    )
+    worker.engine_id, worker.te_rpc_port = "producer", 9000
+    worker.block_size, worker.side_channel_host, worker.handshake_port = 16, "127.0.0.1", 5000
+    monkeypatch.setattr(base_worker, "global_te", MagicMock())
+    monkeypatch.setattr(base_worker, "is_conv_state_dim_first", lambda: layout == "DS")
+    worker.register_kv_caches({name: caches})
+    assert worker.xfer_handshake_metadata.kda_state_metadata == {name: contract}
+    assert worker.xfer_handshake_metadata.block_shapes == [shapes]
 
 
 @pytest.mark.parametrize(

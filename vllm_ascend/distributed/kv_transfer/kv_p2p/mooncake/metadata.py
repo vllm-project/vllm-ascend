@@ -3,7 +3,7 @@
 """Metadata types for Mooncake KV transfer connectors."""
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
@@ -11,6 +11,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
 )
+
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.kda_transfer import MooncakeKDAStateMetadata
 
 
 @dataclass(frozen=True)
@@ -35,9 +37,12 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     block_size_scales: list[list[int]]
     local_ip: str = ""
     handshake_port: int = 0
+    kda_state_metadata: dict[str, MooncakeKDAStateMetadata] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         num_layers = len(self.layer_names)
+        if self.kda_state_metadata.keys() - set(self.layer_names):
+            raise ValueError("Mooncake GLM KDA metadata names an unregistered layer")
         per_layer_fields: tuple[tuple[str, Sequence[object]], ...] = (
             ("layer_block_sizes", self.layer_block_sizes),
             ("group_indices", self.group_indices),
@@ -105,6 +110,7 @@ class MooncakePPTransferMetadata:
     block_shapes: list[list[tuple[int, ...]]]
     block_size_scales: list[list[int]]
     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
+    kda_state_metadata: dict[str, MooncakeKDAStateMetadata] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

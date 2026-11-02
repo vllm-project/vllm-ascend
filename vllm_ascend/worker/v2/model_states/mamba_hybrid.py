@@ -24,7 +24,7 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
@@ -51,6 +51,14 @@ if TYPE_CHECKING:
 # Copy block size used by the upstream fused mamba kernels.
 _COPY_BLOCK_SIZE = 1024
 _PREPROCESS_BLOCK_SIZE = 256
+
+
+def _is_mamba_attention_group(group: AttentionGroup) -> bool:
+    spec = group.kv_cache_spec
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        specs = tuple(spec.kv_cache_specs.values())
+        return bool(specs) and all(isinstance(layer_spec, MambaSpec) for layer_spec in specs)
+    return isinstance(spec, MambaSpec)
 
 
 @dataclass
@@ -349,11 +357,9 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             # PCP turns one prefill request into two rank-local segments. The
             # recurrent state must advance once in original request order.
             local_groups = [
-                [group for group in groups if not isinstance(group.kv_cache_spec, MambaSpec)] for groups in attn_groups
+                [group for group in groups if not _is_mamba_attention_group(group)] for groups in attn_groups
             ]
-            mamba_groups = [
-                [group for group in groups if isinstance(group.kv_cache_spec, MambaSpec)] for groups in attn_groups
-            ]
+            mamba_groups = [[group for group in groups if _is_mamba_attention_group(group)] for groups in attn_groups]
             local_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
                 self,
                 input_batch,

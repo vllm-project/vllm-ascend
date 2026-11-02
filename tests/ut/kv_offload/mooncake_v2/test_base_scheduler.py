@@ -266,6 +266,7 @@ def test_base_scheduler_abstract_contract_and_legacy_metadata_delegation() -> No
 def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_truncate, params):
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.need_truncate = need_truncate
+    scheduler._force_known_prompt_tail = False
     request = make_request(
         prompt_token_ids=[1, 2, 3],
         num_prompt_tokens=3,
@@ -282,3 +283,63 @@ def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_tru
     assert request._all_token_ids == request.prompt_token_ids
     assert request.num_prompt_tokens == (2 if truncated else 3)
     assert request.max_tokens == (1 if truncated else 8)
+
+
+@pytest.mark.parametrize(
+    ("model_type", "producer"),
+    [("glm5_next", True), ("glm5_next_text", True), ("qwen3_next", True), ("glm5_next", False)],
+)
+def test_joint_tp_pcp_mamba_scheduler_requires_glm_producer_contract(monkeypatch, model_type, producer):
+    monkeypatch.setattr(base_scheduler, "init_ascend_config", MagicMock())
+    monkeypatch.setattr(base_scheduler, "get_ascend_config", MagicMock())
+    monkeypatch.setattr(base_scheduler, "get_ip", lambda: "127.0.0.1")
+    config = make_scheduler_config(pcp_size=2, is_consumer=not producer, is_producer=producer)
+    config.model_config.hf_text_config = SimpleNamespace(model_type=model_type)
+    group = KVCacheGroupSpec(layer_names=["linear_attn"], kv_cache_spec=make_mamba_spec())
+    cache = SimpleNamespace(kv_cache_groups=[group])
+    if model_type == "qwen3_next" or not producer:
+        with pytest.raises(ValueError, match="PCP=1 or TP=1"):
+            MooncakeBaseConnectorScheduler(config, "joint", cache)
+    else:
+        scheduler = MooncakeBaseConnectorScheduler(config, "joint", cache)
+        assert scheduler.tp_size == 4 and scheduler.pcp_size == 2
+
+
+@pytest.mark.parametrize("tail", [3, 99])
+def test_glm_producer_mtp_uses_known_prompt_tail_instead_of_sampling(tail):
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.request import RequestStatus
+
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.need_truncate = scheduler._force_known_prompt_tail = True
+    original = SamplingParams(
+        max_tokens=8,
+        min_tokens=1,
+        stop_token_ids=[tail],
+        allowed_token_ids=[5],
+        logit_bias={tail: -100},
+        seed=17,
+    )
+    request = make_request(
+        prompt_token_ids=[1, 2, tail],
+        _all_token_ids=[1, 2, tail],
+        num_prompt_tokens=3,
+        max_tokens=8,
+        sampling_params=original,
+        kv_transfer_params={"do_remote_decode": True},
+        structured_output_request=object(),
+        status=RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR,
+    )
+    scheduler.on_new_request(request)
+    scheduler.on_new_request(request)
+    assert request.prompt_token_ids == [1, 2]
+    assert request.sampling_params.allowed_token_ids == [tail]
+    assert request.sampling_params.ignore_eos
+    assert request.sampling_params.min_tokens == 0
+    assert request.sampling_params.stop_token_ids == []
+    assert request.sampling_params.logit_bias is None
+    assert request.sampling_params.max_tokens == 1
+    assert request.sampling_params.seed == 17
+    assert request.structured_output_request is None
+    assert request.status == RequestStatus.WAITING
+    assert original.allowed_token_ids == [5] and original.stop_token_ids == [tail]

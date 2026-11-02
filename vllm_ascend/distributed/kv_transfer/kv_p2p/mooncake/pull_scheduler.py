@@ -232,6 +232,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                             worker_metadata.block_lens[local_layer_index],
                             worker_metadata.block_shapes[local_layer_index],
                             worker_metadata.block_size_scales[local_layer_index],
+                            worker_metadata.kda_state_metadata.get(layer_name),
                         )
                         previous_signature = layer_signature_by_name.get(layer_name)
                         if previous_signature is not None and previous_signature != layer_signature:
@@ -242,6 +243,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                                 "block_lens",
                                 "block_shapes",
                                 "block_size_scales",
+                                "kda_state_metadata",
                             )
                             mismatched_layer_fields = [
                                 field_name
@@ -307,6 +309,11 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 block_shapes=block_shapes,
                 block_size_scales=block_size_scales,
                 metadata_by_pcp_rank=metadata_by_pcp_rank,
+                kda_state_metadata={
+                    name: metadata.kda_state_metadata[name]
+                    for name, (metadata, _) in layer_source_by_name.items()
+                    if name in metadata.kda_state_metadata
+                },
             )
         return merged
 
@@ -531,6 +538,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         self._reqs_in_batch: set[str] = set()
         # D request -> (P scheduler host, port, P request id).
         self._reqs_recv_info: dict[str, tuple[str, int, str]] = {}
+        self._remote_prefill_bootstraps: dict[str, Request] = {}
         self._sending_thread: MooncakeSchedulerSendingThread | None = None
         self._recving_thread: MooncakeSchedulerRecvingThread | None = None
 
@@ -549,6 +557,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         self._reqs_need_send.clear()
         self._reqs_in_batch.clear()
         self._reqs_recv_info.clear()
+        self._remote_prefill_bootstraps.clear()
 
     def set_xfer_handshake_metadata_from_workers(
         self,
@@ -636,6 +645,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                         num_external_tokens,
                     )
                     self._reqs_recv_info[request.request_id] = remote
+                    self._remote_prefill_bootstraps[request.request_id] = request
                 else:
                     if self._recving_thread is None:
                         raise RuntimeError("Producer Mooncake scheduler cannot acknowledge a receive request")
@@ -648,7 +658,32 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         # Only trigger one transfer for a request.
         params["do_remote_prefill"] = False
 
+    def _prepare_remote_prefill_bootstraps(self, scheduler_output: SchedulerOutput) -> None:
+        # An async KV-load step can expose -1 draft placeholders before the
+        # first real forward on D. They have never been proposed by the draft
+        # model. Schedule the remaining prompt token without verifying them;
+        # otherwise they pollute the first MTP prefill and acceptance counters.
+        for request_id, request in list(self._remote_prefill_bootstraps.items()):
+            scheduled = scheduler_output.num_scheduled_tokens.get(request_id, 0)
+            if scheduled <= 0:
+                continue
+            drafts = scheduler_output.scheduled_spec_decode_tokens.get(request_id, [])
+            if (
+                request.num_output_tokens == 0
+                and request.num_output_placeholders == 0
+                and drafts
+                and all(token < 0 for token in drafts)
+            ):
+                if scheduled <= len(drafts):
+                    raise ValueError("Mooncake remote prefill bootstrap has no real prompt token")
+                scheduler_output.num_scheduled_tokens[request_id] -= len(drafts)
+                scheduler_output.total_num_scheduled_tokens -= len(drafts)
+                scheduler_output.scheduled_spec_decode_tokens.pop(request_id)
+                request.spec_token_ids = []
+            self._remote_prefill_bootstraps.pop(request_id)
+
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+        self._prepare_remote_prefill_bootstraps(scheduler_output)
         meta = MooncakeConnectorMetadata()
 
         for (
@@ -676,6 +711,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         block_ids: BlockIds,
     ) -> tuple[bool, dict[str, Any] | None]:
         """Expose completed producer blocks for a remote READ transfer."""
+        self._remote_prefill_bootstraps.pop(request.request_id, None)
         params = request.kv_transfer_params
         logger.debug(
             "MooncakeConnector request_finished: request_status=%s, kv_transfer_params=%s",
@@ -729,6 +765,8 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         # D side: this output has already aggregated completion from all
         # workers. Send one scheduler-to-scheduler ACK for the request.
         for req_id in connector_output.finished_recving or ():
+            if req_id in connector_output.failed_recving:
+                self._remote_prefill_bootstraps.pop(req_id, None)
             remote = self._reqs_recv_info.pop(req_id, None)
             if remote is not None:
                 if self._recving_thread is None:

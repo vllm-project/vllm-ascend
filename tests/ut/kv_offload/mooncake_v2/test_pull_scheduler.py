@@ -4,6 +4,7 @@ import threading
 import time
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, call
 
 import msgspec
@@ -37,6 +38,7 @@ from .helpers import (
     make_request,
     make_transfer_metadata,
 )
+from .test_kda_transfer import metadata as kda_metadata
 
 
 def make_sending_thread(
@@ -79,9 +81,24 @@ def make_pull_scheduler() -> MooncakePullConnectorScheduler:
     scheduler._reqs_need_send = {}
     scheduler._reqs_in_batch = set()
     scheduler._reqs_recv_info = {}
+    scheduler._remote_prefill_bootstraps = {}
     scheduler._sending_thread = None
     scheduler._recving_thread = None
     return scheduler
+
+
+def test_kda_contract_survives_scheduler_merge_and_wire_roundtrip() -> None:
+    name = "model.layers.0.self_attn"
+    contract = kda_metadata(1, 2)
+    workers: dict[int | tuple[int, ...], Any] = {
+        (0, pcp, 0): replace(make_transfer_metadata(), kda_state_metadata={name: contract}) for pcp in range(2)
+    }
+    thread = make_sending_thread(workers, pcp_size=2)
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+    assert decoded.metadata_by_pp_rank[0].kda_state_metadata == {name: contract}
+    workers[(0, 1, 0)] = replace(workers[(0, 1, 0)], kda_state_metadata={name: replace(contract, conv_layout="SD")})
+    with pytest.raises(ValueError, match="kda_state_metadata"):
+        make_sending_thread(workers, pcp_size=2)
 
 
 def test_sending_thread_merges_tp_private_and_pp_common_metadata() -> None:
@@ -450,7 +467,7 @@ def test_update_after_alloc_and_build_metadata() -> None:
     )
 
     scheduler.update_state_after_alloc(request, make_blocks(), num_external_tokens=16)
-    metadata = scheduler.build_connector_meta(MagicMock())
+    metadata = scheduler.build_connector_meta(SimpleNamespace(num_scheduled_tokens={}, scheduled_spec_decode_tokens={}))
 
     assert request.kv_transfer_params["do_remote_prefill"] is False
     assert metadata.reqs_in_batch == {"request-d"}
@@ -545,6 +562,7 @@ def test_base_scheduler_detects_state_and_compressed_prefill_truncation() -> Non
 def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.need_truncate = True
+    scheduler._force_known_prompt_tail = False
     request = make_request(
         prompt_token_ids=[1, 2, 3],
         num_prompt_tokens=3,
@@ -566,6 +584,7 @@ def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
 def test_truncate_request_for_prefill_supports_prompt_embeddings() -> None:
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.need_truncate = True
+    scheduler._force_known_prompt_tail = False
     prompt_embeds = torch.arange(12).reshape(3, 4)
     request = make_request(
         prompt_token_ids=None,
@@ -672,6 +691,7 @@ def prefix_connector():
     result = MooncakePullConnector.__new__(MooncakePullConnector)
     result.connector_scheduler = MooncakePullConnectorScheduler.__new__(MooncakePullConnectorScheduler)
     result.connector_scheduler.need_truncate = True
+    result.connector_scheduler._force_known_prompt_tail = False
     return result
 
 
@@ -850,3 +870,46 @@ def test_scheduler_shutdown_stops_threads_and_clears_request_state() -> None:
     assert not scheduler._reqs_need_send
     assert not scheduler._reqs_in_batch
     assert not scheduler._reqs_recv_info
+
+
+@pytest.mark.parametrize(
+    ("drafts", "outputs", "placeholders", "remaining"),
+    [([-1] * 5, 0, 0, 1), ([11, 12, 13, 14, 15], 0, 0, 6), ([-1] * 5, 1, 0, 6), ([-1] * 5, 0, 1, 6), ([], 0, 0, 6)],
+)
+def test_remote_prefill_bootstrap_only_removes_unproposed_drafts(drafts, outputs, placeholders, remaining):
+    scheduler = make_pull_scheduler()
+    request = SimpleNamespace(
+        num_output_tokens=outputs, num_output_placeholders=placeholders, spec_token_ids=list(drafts)
+    )
+    scheduler._remote_prefill_bootstraps = {"remote": request}
+    output = SimpleNamespace(
+        num_scheduled_tokens={"remote": 6, "other": 6},
+        total_num_scheduled_tokens=12,
+        scheduled_spec_decode_tokens={"remote": list(drafts), "other": [-1] * 5},
+    )
+    scheduler._prepare_remote_prefill_bootstraps(output)
+    assert output.num_scheduled_tokens == {"remote": remaining, "other": 6}
+    assert output.total_num_scheduled_tokens == remaining + 6
+    assert output.scheduled_spec_decode_tokens["other"] == [-1] * 5
+    assert ("remote" in output.scheduled_spec_decode_tokens) == (remaining == 6)
+    assert scheduler._remote_prefill_bootstraps == {}
+
+
+def test_remote_prefill_bootstrap_waits_for_load_and_only_changes_first_forward():
+    scheduler = make_pull_scheduler()
+    request = SimpleNamespace(num_output_tokens=0, num_output_placeholders=0, spec_token_ids=[-1] * 5)
+    scheduler._remote_prefill_bootstraps = {"remote": request}
+    loading = SimpleNamespace(num_scheduled_tokens={"remote": 0})
+    scheduler._prepare_remote_prefill_bootstraps(loading)
+    assert scheduler._remote_prefill_bootstraps == {"remote": request}
+    output = SimpleNamespace(
+        num_scheduled_tokens={"remote": 6},
+        total_num_scheduled_tokens=6,
+        scheduled_spec_decode_tokens={"remote": [-1] * 5},
+    )
+    scheduler._prepare_remote_prefill_bootstraps(output)
+    assert output.num_scheduled_tokens["remote"] == 1
+    output.num_scheduled_tokens["remote"] = output.total_num_scheduled_tokens = 6
+    output.scheduled_spec_decode_tokens["remote"] = [-1] * 5
+    scheduler._prepare_remote_prefill_bootstraps(output)
+    assert output.total_num_scheduled_tokens == 6

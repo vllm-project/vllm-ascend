@@ -490,7 +490,8 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     impl._q_proj_and_k_up_proj = MagicMock(return_value=(torch.zeros(4, 1, 2), None))
     impl._record_query_gather_context = MagicMock()
     impl._prepare_indexer_metadata = MagicMock()
-    impl.indexer = MagicMock(return_value=torch.zeros(4, 1, 1, dtype=torch.int32))
+    selected_indices = torch.zeros(actual_tokens, 1, 1, dtype=torch.int32)
+    impl.indexer = MagicMock(return_value=selected_indices)
     impl._execute_sparse_flash_attention_process = MagicMock(return_value=torch.ones(4, 2))
     impl._v_up_proj = lambda value: value
     impl._finalize_o_proj = MagicMock(side_effect=lambda value, output: output.copy_(value))
@@ -513,4 +514,10 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     assert impl._finalize_o_proj.call_args.args[0].shape[0] == 4
     assert impl.indexer.call_args.kwargs["compute_topk"] == (actual_tokens > 0)
     assert impl._execute_sparse_flash_attention_process.call_count == int(actual_tokens > 0)
+    if actual_tokens:
+        submitted_indices = impl._execute_sparse_flash_attention_process.call_args.args[3]
+        assert submitted_indices.shape == (4, 1, 1)
+        assert torch.equal(submitted_indices[:actual_tokens], selected_indices)
+        assert torch.all(submitted_indices[actual_tokens:] == -1)
+        assert selected_indices.shape == (actual_tokens, 1, 1)
     torch.testing.assert_close(output, torch.full_like(output, float(actual_tokens > 0)))

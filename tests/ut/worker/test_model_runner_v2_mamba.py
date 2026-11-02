@@ -585,7 +585,8 @@ def test_mamba_padding_is_independent_of_pcp_context(
     assert kwargs["pcp_context"] is context
 
 
-def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests():
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests(wrapped):
     local_batch = SimpleNamespace(is_dummy=False)
     global_batch = SimpleNamespace(num_reqs=1)
     pcp_context = SimpleNamespace(
@@ -599,6 +600,10 @@ def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests():
         vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
     )
     mamba_spec = _mamba_spec()
+    if wrapped:
+        mamba_spec = UniformTypeKVCacheSpecs(
+            block_size=mamba_spec.block_size, kv_cache_specs={"linear_attn": mamba_spec}
+        )
     attn_groups = [[SimpleNamespace(kv_cache_spec=object())], [_group(mamba_spec)]]
     local_metadata = {"sfa": object()}
     mamba_metadata = SimpleNamespace(pcp_context=pcp_context)
