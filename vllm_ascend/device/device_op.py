@@ -15,17 +15,14 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import hashlib
-import inspect
 import os
 from functools import lru_cache
-from importlib import import_module, metadata
+from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.logger import init_logger
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
@@ -1030,9 +1027,6 @@ class BaseDeviceAdaptor:
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
-    # Debug verification: log and synchronize only the first real NPU GDN call per worker.
-    _fla_gdn_trace_logged = False
-
     @staticmethod
     def _scatter_cache(var, indices, updates) -> bool:
         operation = getattr(torch_npu, "npu_scatter_pa_cache", None)
@@ -1942,36 +1936,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             raise ValueError("A5 chunk32 prefill requires prebuilt chunk32 metadata")
         use_exp2 = False
         disable_recompute = False
-        trace_call = not A5DeviceAdaptor._fla_gdn_trace_logged and q.device.type == "npu"
-        if trace_call:
-            trace_logger = init_logger(__name__)
-            opapi_path = os.environ.get("FLA_NPU_OP_API_LIB", "")
-            opapi_sha256 = "unavailable"
-            if os.path.isfile(opapi_path):
-                opapi_digest = hashlib.sha256()
-                with open(opapi_path, "rb") as stream:
-                    for block in iter(lambda: stream.read(1024 * 1024), b""):
-                        opapi_digest.update(block)
-                opapi_sha256 = opapi_digest.hexdigest()
-            trace_logger.info(
-                "[FLA_GDN_PR1018] CALL pid=%s version=%s function=%s.%s "
-                "source=%s chunk_size=%s use_exp2=%s disable_recompute=%s "
-                "layout=%s q_shape=%s v_shape=%s opapi=%s opapi_sha256=%s",
-                os.getpid(),
-                metadata.version("flash-linear-attention-npu-a5"),
-                fused_fwd.__module__,
-                fused_fwd.__qualname__,
-                inspect.getfile(fused_fwd),
-                chunk_size,
-                use_exp2,
-                disable_recompute,
-                layout,
-                tuple(q.shape),
-                tuple(v.shape),
-                opapi_path,
-                opapi_sha256,
-            )
-
         output, final_state, *_ = fused_fwd(
             q,
             k,
@@ -1992,17 +1956,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             disable_recompute=disable_recompute,
             state_v_first=True,
         )
-        if trace_call:
-            torch.npu.synchronize(q.device)
-            trace_logger.info(
-                "[FLA_GDN_PR1018] EXECUTED pid=%s chunk_size=%s "
-                "npu_synchronize=OK output_shape=%s final_state_shape=%s",
-                os.getpid(),
-                chunk_size,
-                tuple(output.shape),
-                tuple(final_state.shape),
-            )
-            A5DeviceAdaptor._fla_gdn_trace_logged = True
         if keep_meta is not None:
             full_final_state = initial_state.clone()
             full_final_state[keep_meta] = final_state
