@@ -17,6 +17,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.patch.torch_streams import patch_cuda_streams
 from vllm_ascend.utils import super_kernel_scope, weak_ref_tensor, weak_ref_tensors
 from vllm_ascend.worker.v2.attn_utils import ring_state_update_skipped
 
@@ -160,11 +161,9 @@ if TYPE_CHECKING:
 @contextmanager
 def torch_cuda_wrapper():
     try:
+        patch_cuda_streams()
         torch.cuda.Event = torch.npu.Event
-        torch.cuda.Stream = torch.npu.Stream
-        torch.cuda.stream = torch.npu.stream
         torch.cuda.default_stream = torch.npu.default_stream
-        torch.cuda.current_stream = torch.npu.current_stream
         torch.cuda.graph_pool_handle = torch.npu.graph_pool_handle
         torch.cuda.CUDAGraph = UpdatableGraph
         torch.cuda.graph = torch_npu_graph_wrapper

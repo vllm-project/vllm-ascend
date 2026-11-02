@@ -1,5 +1,9 @@
 import torch
 
+from vllm_ascend.patch.torch_streams import patch_cuda_streams
+
+patch_cuda_streams()
+
 
 def patch_empty_cache() -> None:
     torch.npu.empty_cache()

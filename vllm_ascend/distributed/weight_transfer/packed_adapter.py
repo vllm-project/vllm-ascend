@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NPU boundary adapters around the installed vLLM packed loops.
 
-Only the packed module's torch reference and two helper hooks are patched;
-the real torch.cuda namespace and producer/consumer functions stay unchanged.
-This is an NPU-process adaptation, not support for mixing CUDA and NPU weight
-transfer engines in one process. Remove the module proxy when vLLM exposes
-device-neutral stream operations and an owning-unpack extension point.
+The shared NPU-only CUDA stream patch handles device APIs. The installed vLLM
+producer/consumer functions and their torch module reference stay unchanged.
+Only stream capture, owning unpack and HCCL/callback boundaries are adapted.
+Remove the helper hooks when vLLM exposes equivalent extension points.
 """
 
 from contextvars import ContextVar
@@ -18,26 +17,12 @@ import torch
 from vllm.distributed.weight_transfer import packed_tensor as upstream
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import _drain_packed_streams
+from vllm_ascend.patch.torch_streams import patch_cuda_streams
 
 # Per-context state prevents callbacks in other threads from sharing a transfer.
 # vLLM caches streams per device; a per-device lock prevents simultaneous use.
 _ACTIVE: ContextVar[Any] = ContextVar("ascend_packed_transfer", default=None)
 _INSTALL_LOCK = Lock()
-
-
-class _NpuTorch:
-    """Module-local device routing, without mutating the torch module."""
-
-    @property
-    def cuda(self):
-        return torch.npu
-
-    @property
-    def Event(self):
-        return torch.npu.Event
-
-    def __getattr__(self, name):
-        return getattr(torch, name)
 
 
 @cache
@@ -47,7 +32,8 @@ def _device_lock(device: int) -> Any:
 
 def _install() -> None:
     with _INSTALL_LOCK:
-        if isinstance(upstream.torch, _NpuTorch):
+        patch_cuda_streams()
+        if getattr(upstream._get_streams, "_ascend_packed_hook", False):
             return
         get_streams = upstream._get_streams
         unpack = upstream.unpack_tensor
@@ -81,7 +67,7 @@ def _install() -> None:
                     tensor.record_stream(reader)
             return weights
 
-        upstream.torch = _NpuTorch()
+        streams_for_transfer._ascend_packed_hook = True
         upstream._get_streams = streams_for_transfer
         upstream.unpack_tensor = owning_unpack
 
