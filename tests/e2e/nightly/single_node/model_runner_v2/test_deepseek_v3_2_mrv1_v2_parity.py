@@ -29,7 +29,6 @@ runner, not equality across runners: MRV1 and MRV2 do not share an RNG stream.
 import json
 import os
 import platform
-import re
 import shlex
 import statistics
 import subprocess
@@ -41,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import regex as re
 import requests
 import torch
 from tests.e2e.conftest import RemoteOpenAIServer, cleanup_dist_env_and_memory, wait_until_npu_memory_free
