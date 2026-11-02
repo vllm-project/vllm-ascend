@@ -30,8 +30,10 @@ jobs:
       github.repository == 'vllm-project/vllm-ascend' &&
       vars.RECIPES_PREVIEW_ENABLED == 'true' &&
       ((github.event_name == 'pull_request_target' &&
-        ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
-         github.event.label.name == 'recipe')) ||
+        (github.event.label.name == 'recipe' ||
+         ((github.event.action != 'labeled' && github.event.action != 'unlabeled') &&
+          (github.event.action == 'closed' ||
+           contains(github.event.pull_request.labels.*.name, 'recipe'))))) ||
        (github.event_name == 'workflow_run' && github.ref == 'refs/heads/main' &&
         github.event.workflow_run.event == 'pull_request_target' &&
         github.event.workflow_run.path == '.github/workflows/bot_pr_create.yaml') ||

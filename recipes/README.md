@@ -129,6 +129,9 @@ The workflow also scans open PRs with the `recipe` label once
 per hour, at minute 23 (`23 * * * *`), to backfill or refresh comments. GitHub
 may delay scheduled runs, so this is not a guaranteed one-hour delivery time.
 Manually adding or removing the `recipe` label triggers a comment check.
+Other label changes are skipped. For ordinary PR events, the selector only
+runs when the PR has the `recipe` label in the event payload or is being closed;
+unlabeled `opened`, `synchronize`, `reopened`, and `edited` events are skipped.
 Labels changed by another workflow using `GITHUB_TOKEN` do not trigger
 `labeled` or `unlabeled` runs. A `workflow_run` trigger therefore refreshes the
 affected PR after `PR Create` completes, including when its labeler removes the
@@ -139,9 +142,12 @@ branch through the PR API; it never checks out PR code or reads run artifacts.
 
 Only eligible, labeled PRs get a new preview comment. An unlabeled PR with an
 existing bot comment can only have that comment deactivated. Targeted events
-still enter the per-PR queue without the label, so cleanup waits for any
-in-flight comment creation before checking the latest state. The hourly scan
-does not search historical comments on unlabeled or closed PRs; use a manual
+that pass the event gate, `PR Create` completions, and manual backfills still
+enter the per-PR queue even if the live label or comment is absent, so cleanup
+waits for any in-flight comment creation before checking the latest state.
+`PR Create` completions and PR closure can therefore still run no-op checks
+for unrelated PRs. The hourly scan does not search historical comments on
+unlabeled or closed PRs; use a manual
 backfill to repair a missed cleanup event, or a run whose source metadata is
 no longer available. Manual backfills can deactivate existing comments without
 the label, but cannot create new ones without it.
