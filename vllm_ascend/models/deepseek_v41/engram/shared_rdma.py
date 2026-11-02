@@ -15,6 +15,7 @@ import threading
 import uuid
 from contextlib import suppress
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import torch
@@ -233,6 +234,7 @@ class RemoteReader:
         if ready != {"ready": len(ids), "generation": self.generation}:
             raise RuntimeError(f"remote Engram lookup failed: {ready}")
         if len(ids):
+            assert self.engine is not None and self.buffer is not None
             self.engine.check(
                 self.engine.lib.engram_hixl_read(
                     self.engine.handle,
@@ -268,6 +270,7 @@ class RemoteReader:
 
         outputs = []
         offset = 0
+        assert self.buffer is not None
         for table, (_, spec, rows) in zip(tables, entries):
             output = torch.empty(
                 (gathered.shape[0], table.part_n_hash_cols, table.dim),
@@ -292,6 +295,7 @@ class RemoteReader:
         # collective work uses separate BF16 results and need not be drained.
         if self._last_use is not None:
             self._last_use.synchronize()
+        assert self.engine is not None
         self.engine.close()
         _send(self.wire, dict(op="close", generation=self.generation))
         if _receive(self.wire) != {"closed": True}:
@@ -419,7 +423,7 @@ class SharedOwner(socketserver.ThreadingTCPServer):
 
 class _OwnerConnection(socketserver.BaseRequestHandler):
     def handle(self):
-        owner = self.server
+        owner = cast(SharedOwner, self.server)
         wire = self.request
         _configure_socket(wire)
         stage = registration = None
