@@ -1,0 +1,4 @@
+pr: 20615
+entries:
+  - category: feature
+    text: GLM RecoverSSM verification records now use per-layer scratch buffers sized by request capacity instead of KV-cache pages. Only convolution and recurrent state remain in the KDA cache.
