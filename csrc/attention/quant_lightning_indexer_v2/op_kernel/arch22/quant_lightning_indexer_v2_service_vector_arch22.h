@@ -1294,7 +1294,8 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ReduceBlockTopkRow(uint32_t rowInBlo
     AscendC::DataCopyPadExtParams<float> candPadParams{true, 0, 0, 0};
     AscendC::DataCopyExtParams candParams;
     candParams.blockLen = candPairWidth * sizeof(float);
-    candParams.srcStride = 0;
+    // srcStride 单位是**字节**、语义是"块间空隙"：段起点间隔 s1Base×pairW，本次只搬 1 行 pairW
+    candParams.srcStride = (s1BaseSize_ * candPairWidth - candPairWidth) * sizeof(float);
     candParams.dstStride = 0;
     candParams.blockCount = 1;
 
@@ -1325,11 +1326,9 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ReduceBlockTopkRow(uint32_t rowInBlo
 
     for (uint32_t i = 0; i < ldProcessNum; i++) {
         uint64_t segBase = rowBase + static_cast<uint64_t>(i * (ldProcessLen - 1) + 1) * segGap;
+        candParams.blockCount = ldProcessLen - 1; // 3 段一次跨段搬完（与位置级同一写法）
         SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
-        for (uint32_t k = 0; k < ldProcessLen - 1U; k++) {
-            AscendC::DataCopyPad(curCand[nextOffset + k * candPairWidth], blockVec1ResGm_[segBase + k * segGap],
-                                 candParams, candPadParams);
-        }
+        AscendC::DataCopyPad(curCand[nextOffset], blockVec1ResGm_[segBase], candParams, candPadParams);
         SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
         AscendC::MrgSortSrcList<float> srcList;
         srcList.src1 = curCand[0];
@@ -1345,9 +1344,7 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ReduceBlockTopkRow(uint32_t rowInBlo
     if (ldTailLen != 0) {
         uint64_t tailBase = rowBase + static_cast<uint64_t>(ldProcessNum * (ldProcessLen - 1) + 1) * segGap;
         AscendC::DataCopyExtParams tailParams = candParams;
-        tailParams.blockCount = ldTailLen;
-        // srcStride 单位是**字节**，填"段间空隙"（段起点间隔 − 一段长度），与位置级同一修法
-        tailParams.srcStride = (s1BaseSize_ * candPairWidth - candPairWidth) * sizeof(float);
+        tailParams.blockCount = ldTailLen; // srcStride 复用入口设置的"段间空隙"
         SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
         AscendC::DataCopyPad(curCand[nextOffset], blockVec1ResGm_[tailBase], tailParams, candPadParams);
         SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
@@ -1399,9 +1396,13 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
     AscendC::DataCopyExtParams indexValueParams;
     // P3: 每列表搬运/间距按实际 topk 对宽 (vec1ResGm 内相邻列表间距 = 3 对宽)
     indexValueParams.blockLen = topkPairWidth_ * sizeof(int32_t); // bytes
-    // P10: 分段槽按核分布 (核 i 的区起点 = i*s1Base 槽), 跨 3 列表的间距 = s1Base 槽。
-    // DataCopyExtParams.srcStride 单位 = 32B 块: (s1Base*pairW*4B)/32
-    indexValueParams.srcStride = s1BaseSize_ * topkPairWidth_ * sizeof(int32_t) / 32U;
+    // P11: `DataCopyExtParams.srcStride` 的单位是**字节**，语义是"块与块之间的空隙"
+    // （不是起点间距，也不是 32B 块数 —— 原实现按 32B 块除以 32 是错的，
+    //  只跳了 512B 而不是一个槽位，段与段几乎重叠，见 P10 的 507015 记录）。
+    // LD 的每个 S2 段在 GM 里占 s1Base 行 × 每行 pairW 个 int32，而每次只搬其中 1 行 pairW，
+    // 故跨段搬运的空隙 = (s1Base × pairW − pairW) × 4B。归并（搬 3 段）与尾段（搬 ldTailLen 段）
+    // 共用同一空隙值，只需分别改 blockCount。
+    indexValueParams.srcStride = (s1BaseSize_ * topkPairWidth_ - topkPairWidth_) * sizeof(int32_t);
     indexValueParams.dstStride = 0;
 
     uint32_t ldProWorkspaceNum = ldInfo_.workspaceNum;
@@ -1426,15 +1427,14 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
                 static_cast<uint64_t>(ldInfo_.workspaceIdx) * s1BaseSize_ * topkPairWidth_ +
                 static_cast<uint64_t>(i * (ldProcessLen - 1) + 1) * s1BaseSize_ * topkPairWidth_ +
                 static_cast<uint64_t>(ldInfo_.mStart + j) * topkPairWidth_;
-            indexValueParams.blockCount = 1; // P10: 逐段拷贝 (见上)
-
+            // P11: 3 个分段槽一次跨段搬完（srcStride 已在函数入口按"段间空隙"设好）。
+            // 参考 qli v1（ops-transformer 的 experimental/attention/quant_lightning_indexer）
+            // 的写法：它用 `3 * SLOT` 作 srcStride —— 那正是 s1Base=4 时的空隙，本处换成通用式，
+            // 这样 s1Base=8 的变体也成立。逐段拷贝（每轮 3 次 DMA 下发）会白白多付 2 次下发。
+            indexValueParams.blockCount = ldProcessLen - 1;
             SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
-            // P10: 绕开 srcStride 语义不确定性 — 3 个分段槽逐个显式拷贝
-            for (uint32_t k = 0; k < ldProcessLen - 1U; k++) {
-                uint64_t segSlot = wsOffset + static_cast<uint64_t>(k) * s1BaseSize_ * topkPairWidth_;
-                AscendC::DataCopyPad(curValueIdxUb[valueOffset + k * topkPairWidth_],
-                                     vec1ResGm[segSlot], indexValueParams, indexValuePadParams);
-            }
+            AscendC::DataCopyPad(curValueIdxUb[valueOffset], vec1ResGm[wsOffset], indexValueParams,
+                                 indexValuePadParams);
             // merge参数 (P3: elementLengths 按实际 topk 宽度)
             AscendC::MrgSort4Info params;
             params.elementLengths[0] = topkWidth_;
@@ -1464,12 +1464,8 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
                 static_cast<uint64_t>(ldInfo_.workspaceIdx) * s1BaseSize_ * topkPairWidth_ +
                 static_cast<uint64_t>(ldProcessNum * (ldProcessLen - 1) + 1) * s1BaseSize_ * topkPairWidth_ +
                 static_cast<uint64_t>(ldInfo_.mStart + j) * topkPairWidth_;
-            // 尾段一次性跨段搬运（blockCount = ldTailLen）。原实现在这里崩 507015 的原因是
-            // srcStride 单位写错：DataCopyExtParams.srcStride 的单位是**字节**，而原代码按"32B 块"
-            // 除了 32（s1Base*pairW*4/32 = 512），实际只跳 512B 而不是一个槽位 16KB，
-            // 段与段几乎重叠；该路径只在"一行切成 ≥3 段"（ldTailLen≥2）时才走到，故 2 段用例从未暴露。
+            // 尾段一次性跨段搬运（blockCount = ldTailLen，srcStride 复用入口设置的段间空隙）
             indexValueParams.blockCount = ldTailLen;
-            indexValueParams.srcStride = (s1BaseSize_ * topkPairWidth_ - topkPairWidth_) * sizeof(int32_t);  // 字节：段间"空隙"
             SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
             AscendC::DataCopyPad(curValueIdxUb[valueOffset], vec1ResGm[wsOffsetTail], indexValueParams,
                                  indexValuePadParams);
