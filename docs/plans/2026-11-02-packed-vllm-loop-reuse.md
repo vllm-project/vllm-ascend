@@ -63,42 +63,43 @@ remove adapter readiness and clone tracking to confirm expected corruption.
 Model/graph E2E remains a separate acceptance step, not implied by CPU or transport
 passes. No performance improvement is claimed.
 
-## Historical module-proxy prototype results
+## Shared API patch results on 188
 
-The following evidence predates replacement of the module proxy and must not be
-used as acceptance evidence for the shared API patch.
+Runtime implementation tested at `54dd8952b` in an isolated worktree inside
+`lch-packed-fix`: Ascend 910C, torch 2.10.0+cpu, torch_npu 2.10.0.post4, physical
+8/9. Later commit `51d729e47` adds the fake Event.synchronize required by latest
+vLLM's slot_done tests and updates comments; it does not change production
+runtime behavior. Source revisions, imported paths, tracked cleanliness and
+transfer-file SHA256 are checked by the native harness.
 
-### Results on the existing 188 container
+| Test | v0.32.0 | Verified main 544f182d9 | Latest main 5c8ae7c7 |
+| --- | --- | --- | --- |
+| Weight-transfer + stream patch + V2 wrapper UT | 169 passed | 169 passed | Full collection blocked by unrelated model patches |
+| Isolated packed + stream patch UT | Included above | Included above | 110 passed |
+| Two-process HCCL, 16 chunks/update, 2/3 slots | 6/6 correct | 6/6 correct | 6/6 correct |
+| Delayed-clone NPU control | 10/10 correct | 10/10 correct | 10/10 correct |
+| Allocator-pressure NPU control | 10/10 correct | 10/10 correct | 10/10 correct |
+| Disable only adapter completion wait | 0/10 correct, expected | 0/10 correct, expected | 0/10 correct, expected |
+| Disable only clone tracking | 0/10 correct, expected | 0/10 correct, expected | 0/10 correct, expected |
 
-Transfer code at `07b0bc01a` was tested in an isolated worktree inside
-`lch-packed-fix`, using Ascend 910C, torch 2.10.0+cpu and torch_npu 2.10.0.post4.
-Source revisions, imported module paths, tracked cleanliness and the transfer
-files' SHA256 were checked before native runs. Installed vLLM stays v0.32.0;
-main tests select the fixed main source explicitly, without editing either
-vLLM checkout. Native tests use physical devices 8/9.
+All allocator positive controls report zero unsafe reuse. Mechanism controls use
+actual NPU work and a simulated collective through the worker engine; they are
+distinct from the two-process native HCCL tests. Runtime profiling confirms entry
+into the original vLLM consumer on every update, including latest slot_done logic.
 
-| Test | v0.32.0 | Paired main |
-| --- | --- | --- |
-| Weight-transfer unit tests | 167 passed | 167 passed |
-| Two-process native HCCL, 16 chunks/update, 2/3 slots | 6/6 correct | 6/6 correct |
-| Delayed-clone NPU control | 10/10 correct | 10/10 correct |
-| Allocator-pressure NPU control | 10/10 correct; zero unsafe reuse | 10/10 correct; zero unsafe reuse |
-| Disable only adapter completion wait | 0/10 correct, as expected | 0/10 correct, as expected |
-| Disable only clone storage tracking | 0/10 correct, as expected | 0/10 correct, as expected |
+Latest-main general UT collection fails because Ascend's existing Kimi patch
+imports removed get_rope_shape_decorate; an isolated V2 utility import also finds
+an absent Qwen4 qsa_cache module. Do not bypass or stub these and claim whole-stack
+compatibility. The 110-test run isolates only packed and stream API behavior;
+its copied test files include the updated Event fake and are saved with evidence.
 
-Mechanism controls use actual NPU operations and a simulated collective through
-the worker engine; they are distinct from the real two-process HCCL test.
-Runtime profiling counts entry into the original vLLM consumer on every update.
-Negative readiness controls retain main's original receive-event chain.
+Ruff/format, Markdown lint, spelling, forbidden-import, package-init and applicable
+Linux function/context checks pass. Full bash format.sh ci was attempted with
+Git Bash and pre-commit, but actionlint setup fails downloading Go dependencies.
+This is not a complete pre-commit pass. Full model/graph E2E, serving performance
+and long-run acceptance have not been rerun on the shared-patch implementation.
+No installed vLLM checkout was modified; source selection is explicit per run.
 
-Ruff check/format, Markdown lint, spelling, package-init, forbidden-import,
-long-function and boolean-context checks pass. Full `bash format.sh ci` could
-not complete: the container lacks pre-commit; the Windows pre-commit setup also
-fails downloading actionlint's Go dependencies. Do not interpret these as a
-complete pre-commit pass. The full model/graph E2E is retained for follow-up but
-has not been rerun on this branch; serving performance and long-run acceptance
-also remain unverified.
-
-Harness and logs: `/tmp/lch-packed-loop-reuse-20261102` on 188. A local copy of
-the evidence archive and provenance manifest is kept in
-`C:/lichenhan/packed-pr/packed-loop-reuse-research-20261102`.
+Harness/logs: `/tmp/lch-packed-unified-20261102` on 188. Local evidence copy:
+`C:/lichenhan/packed-pr/packed-unified-research-20261102`. The environment's editable
+vLLM remains v0.32.0; main tests import their isolated fixed checkouts explicitly.
