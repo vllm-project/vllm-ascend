@@ -1595,31 +1595,20 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         aux_hidden_states = []
         for layer in self.layers:
             if self.decoder_replay_layers is not None and layer.layer_idx == self.decoder_replay_start:
-                if torch.compiler.is_compiling():
-                    assert self.decoder_replay_layer_name is not None
-                    num_late_aux = sum(
-                        layer_idx + 1 in self.aux_hidden_state_layers
-                        for layer_idx in range(self.decoder_replay_start, self.end_layer)
-                    )
-                    replay_hidden_states = torch.empty_like(hidden_states)
-                    replay_pre_mix = torch.empty_like(pre_mix)
-                    replay_aux = hidden_states.new_empty((num_late_aux, positions.shape[0], self.config.hidden_size))
-                    torch.ops.vllm.dsv41_decoder_replay_forward(
-                        hidden_states,
-                        pre_mix,
-                        positions,
-                        input_ids,
-                        replay_hidden_states,
-                        replay_pre_mix,
-                        replay_aux,
-                        self.decoder_replay_layer_name,
-                    )
-                    hidden_states, pre_mix = replay_hidden_states, replay_pre_mix
-                    late_aux = list(replay_aux.unbind(0))
-                else:
-                    hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
-                        hidden_states, pre_mix, positions, input_ids
-                    )
+                assert self.decoder_replay_layer_name is not None
+                num_late_aux = sum(
+                    self.decoder_replay_start < layer_idx <= self.end_layer
+                    for layer_idx in self.aux_hidden_state_layers
+                )
+                replay_outputs = torch.ops.vllm.dsv41_decoder_replay_forward(
+                    hidden_states,
+                    pre_mix,
+                    positions,
+                    input_ids,
+                    num_late_aux,
+                    self.decoder_replay_layer_name,
+                )
+                hidden_states, pre_mix, *late_aux = replay_outputs
                 aux_hidden_states.extend(late_aux)
                 last_layer = self.layers[self.end_layer - 1]
                 break
