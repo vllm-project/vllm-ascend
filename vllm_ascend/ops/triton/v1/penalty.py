@@ -34,8 +34,8 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
-from vllm_ascend.ops.triton.bincount import get_token_bin_counts_and_mask_triton
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.ops.triton.v1.bincount import get_token_bin_counts_and_mask_triton
 
 
 @triton.jit(

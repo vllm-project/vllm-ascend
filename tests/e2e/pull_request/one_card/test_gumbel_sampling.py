@@ -11,7 +11,7 @@ import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
-from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
+from vllm_ascend.ops.triton.sample.categorical_sample import categorical_sample
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
@@ -650,6 +650,7 @@ class TestGumbelSampling:
             expanded_local_pos=torch.arange(num_steps + 1, dtype=torch.int32, device=DEVICE).repeat(num_reqs),
             seed=seed,
             num_speculative_steps=num_steps,
+            use_entropy_verify=False,
         )
         sampled, counts = rejection_sample(**inputs, draft_logits=cache, temperature=temperature)
         expected, expected_counts = rejection_sample(

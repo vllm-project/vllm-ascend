@@ -10,7 +10,7 @@ import torch_npu  # noqa: F401
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.compute_slot_mapping import compute_slot_mapping_fused_groups
+from vllm_ascend.ops.triton.v1.compute_slot_mapping import compute_slot_mapping_fused_groups
 from vllm_ascend.worker.block_table import BlockTable
 
 
