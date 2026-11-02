@@ -73,3 +73,38 @@ completion, clone tracking, event reuse and context cleanup. Reuse actual-NPU
 delayed-clone/allocator-pressure controls and the two-process HCCL harness.
 CPU tests alone are insufficient for native HCCL readiness and allocator safety.
 Record hardware results separately; no performance improvement is claimed.
+
+### Results on the existing 188 container
+
+Transfer code at `07b0bc01a` was tested in an isolated worktree inside
+`lch-packed-fix`, using Ascend 910C, torch 2.10.0+cpu and torch_npu 2.10.0.post4.
+Source revisions, imported module paths, tracked cleanliness and the transfer
+files' SHA256 were checked before native runs. Installed vLLM stays v0.32.0;
+main tests select the fixed main source explicitly, without editing either
+vLLM checkout. Native tests use physical devices 8/9.
+
+| Test | v0.32.0 | Paired main |
+| --- | --- | --- |
+| Weight-transfer unit tests | 167 passed | 167 passed |
+| Two-process native HCCL, 16 chunks/update, 2/3 slots | 6/6 correct | 6/6 correct |
+| Delayed-clone NPU control | 10/10 correct | 10/10 correct |
+| Allocator-pressure NPU control | 10/10 correct; zero unsafe reuse | 10/10 correct; zero unsafe reuse |
+| Disable only adapter completion wait | 0/10 correct, as expected | 0/10 correct, as expected |
+| Disable only clone storage tracking | 0/10 correct, as expected | 0/10 correct, as expected |
+
+Mechanism controls use actual NPU operations and a simulated collective through
+the worker engine; they are distinct from the real two-process HCCL test.
+Runtime profiling counts entry into the original vLLM consumer on every update.
+Negative readiness controls retain main's original receive-event chain.
+
+Ruff check/format, Markdown lint, spelling, package-init, forbidden-import,
+long-function and boolean-context checks pass. Full `bash format.sh ci` could
+not complete: the container lacks pre-commit; the Windows pre-commit setup also
+fails downloading actionlint's Go dependencies. Do not interpret these as a
+complete pre-commit pass. The full model/graph E2E is retained for follow-up but
+has not been rerun on this branch; serving performance and long-run acceptance
+also remain unverified.
+
+Harness and logs: `/tmp/lch-packed-loop-reuse-20261102` on 188. A local copy of
+the evidence archive and provenance manifest is kept in
+`C:/lichenhan/packed-pr/packed-loop-reuse-research-20261102`.
