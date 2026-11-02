@@ -1,0 +1,144 @@
+#: ../../source/tutorials/multi-node_dsv3.2.md:1
+msgid "Multi-Node (DeepSeek V3.2)"
+msgstr "多节点（DeepSeek V3.2）"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:4
+msgid ""
+"Only machines with AArch64 are supported currently. x86 will be supported"
+" soon. This guide takes A3 as the example."
+msgstr ""
+"目前仅支持 AArch64 架构的机器，x86 架构将在后续版本中支持。本指南以 A3 机型为示例。"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:7
+msgid "Verify Multi-Node Communication Environment"
+msgstr "验证多节点通信环境"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:9
+msgid "Physical Layer Requirements:"
+msgstr "物理层要求："
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:11
+msgid ""
+"The physical machines must be located on the same WLAN, with network "
+"connectivity."
+msgstr ""
+"物理机必须位于同一局域网内，且网络连通正常。"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:12
+msgid ""
+"All NPUs are connected with optical modules, and the connection status "
+"must be normal."
+msgstr ""
+"所有 NPU 之间需通过光模块互联，且连接状态必须正常。"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:14
+msgid "Verification Process:"
+msgstr "验证流程："
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:16
+msgid ""
+"Execute the following commands on each node in sequence. The results must"
+" all be `success` and the status must be `UP`:"
+msgstr ""
+"在每个节点上依次执行以下命令，结果必须全部为 `success`，且状态为 `UP`："
+
+#: ../../source/tutorials/multi-node_dsv3.2.md
+msgid "A2 series"
+msgstr "A2 系列"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md
+msgid "A3 series"
+msgstr "A3 系列"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:57
+msgid "NPU Interconnect Verification:"
+msgstr "NPU 互联验证："
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:58
+msgid "1. Get NPU IP Addresses"
+msgstr "1. 获取 NPU IP 地址"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:76
+msgid "2. Cross-Node PING Test"
+msgstr "2. 跨节点 PING 测试"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:83
+msgid "Deploy DeepSeek-V3.2-Exp with vLLM-Ascend"
+msgstr "使用 vLLM-Ascend 部署 DeepSeek-V3.2-Exp"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:85
+msgid ""
+"Currently, we provide a all-in-one image (include CANN 8.2RC1 + "
+"[SparseFlashAttention/LightningIndexer](https://gitcode.com/cann/cann-"
+"recipes-infer/tree/master/ops/ascendc) + [MLAPO](https://github.com/vllm-"
+"project/vllm-ascend/pull/3226)). You can also build your own image by "
+"referring to [link](https://github.com/vllm-project/vllm-"
+"ascend/issues/3278)."
+msgstr ""
+"目前我们提供一个一体化镜像（包含 CANN 8.2RC1 + "
+"[SparseFlashAttention/LightningIndexer](https://gitcode.com/cann/cann-recipes-infer/tree/master/ops/ascendc) "
+"+ [MLAPO](https://github.com/vllm-project/vllm-ascend/pull/3226)）。"
+"你也可以参考 [链接](https://github.com/vllm-project/vllm-ascend/issues/3278) 自行构建镜像。"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:87
+msgid ""
+"`DeepSeek-V3.2-Exp`: require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas "
+"800 A2 (64G × 8). [Model weight "
+"link](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)"
+msgstr ""
+"`DeepSeek-V3.2-Exp`：需要 2 台 Atlas 800 A3（64G × 16）节点，或 4 台 "
+"Atlas 800 A2（64G × 8）。[模型权重链接](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:88
+msgid ""
+"`DeepSeek-V3.2-Exp-w8a8`: require 1 Atlas 800 A3 (64G × 16) node or 2 "
+"Atlas 800 A2 (64G × 8). [Model weight "
+"link](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)"
+msgstr ""
+"`DeepSeek-V3.2-Exp-w8a8`：需要 1 台 Atlas 800 A3（64G × 16）节点，或 2 台 "
+"Atlas 800 A2（64G × 8）。[模型权重链接](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:90
+msgid ""
+"Run the following command to start the container in each node (You should"
+" download the weight to /root/.cache in advance):"
+msgstr ""
+"在每个节点上运行以下命令以启动容器（请提前将模型权重下载至 /root/.cache）："
+
+#: ../../source/tutorials/multi-node_dsv3.2.md
+msgid "DeepSeek-V3.2-Exp A3 series"
+msgstr "DeepSeek-V3.2-Exp A3 系列"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:184
+#: ../../source/tutorials/multi-node_dsv3.2.md:301
+msgid "Run the following scripts on two nodes respectively."
+msgstr "分别在两个节点上运行以下脚本。"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:187
+msgid ""
+"Before launching the inference server, ensure the following environment "
+"variables are set for multi-node communication."
+msgstr ""
+"在启动推理服务之前，请确保已为多节点通信正确设置以下环境变量。"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:190
+#: ../../source/tutorials/multi-node_dsv3.2.md:303
+msgid "**Node 0**"
+msgstr "**节点 0**"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:229
+#: ../../source/tutorials/multi-node_dsv3.2.md:344
+msgid "**Node 1**"
+msgstr "**节点 1**"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md
+msgid "DeepSeek-V3.2-Exp-W8A8 A3 series"
+msgstr "DeepSeek-V3.2-Exp-W8A8 A3 系列"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md
+msgid "DeepSeek-V3.2-Exp-W8A8 A2 series"
+msgstr "DeepSeek-V3.2-Exp-W8A8 A2 系列"
+
+#: ../../source/tutorials/multi-node_dsv3.2.md:392
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr "当服务启动后，你可以通过输入提示词来查询模型："

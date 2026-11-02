@@ -1,0 +1,85 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-12-17 12:01+0800\n"
+"PO-Revision-Date: 2025-04-15 19:00+0800\n"
+"Last-Translator: vllm-ascend team <>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/multi_node_qwen3vl.md:1
+msgid "Multi-Node-DP (Qwen3-VL-235B-A22B)"
+msgstr "多节点数据并行（Qwen3-VL-235B-A22B）"
+
+#: ../../source/tutorials/multi_node_qwen3vl.md:4
+msgid ""
+"Qwen3 VL relies on the newest version of `transformers` (>4.56.2). Please"
+" install it from source."
+msgstr "Qwen3 VL 依赖于最新版本的 `transformers` (大于4.56.2)。请从源码安装。"
+
+#: ../../source/tutorials/multi_node_qwen3vl.md:7
+msgid "Verify Multi-Node Communication Environment"
+msgstr "验证多节点通信环境"
+
+#: ../../source/tutorials/multi_node_qwen3vl.md:9
+msgid ""
+"Refer to [multi_node.md](https://vllm-"
+"ascend.readthedocs.io/en/latest/tutorials/multi_node.html#verification-"
+"process)."
+msgstr ""
+"请参考 [multi_node.md](https://vllm-"
+"ascend.readthedocs.io/en/latest/tutorials/multi_node.html#verification-"
+"process)。"
+
+#: ../../source/tutorials/multi_node_qwen3vl.md:11
+msgid "Run with Docker"
+msgstr "使用 Docker 运行"
+
+#: ../../source/tutorials/multi_node_qwen3vl.md:12
+msgid ""
+"Assume you have Atlas 800 A3 (64G*16) nodes (or 2 * A2), and want to "
+"deploy the `Qwen3-VL-235B-A22B-Instruct` model across multiple nodes."
+msgstr ""
+"假设您拥有 Atlas 800 A3 (64G*16) 节点（或 2 个 A2 节点），并希望跨多个节点部"
+"署 `Qwen3-VL-235B-A22B-Instruct` 模型。"
+
+#: ../../source/tutorials/multi_node_qwen3vl.md:52
+msgid "Run the following scripts on two nodes respectively."
+msgstr "请分别在两个节点上运行以下脚本。"
+
+#: ../../source/tutorials/multi_node_qwen3vl.md:55
+msgid ""
+"Before launching the inference server, ensure the following environment "
+"variables are set for multi-node communication."
+msgstr ""
+"在启动推理服务器之前，请确保已设置以下用于多节点通信的环境变量。"
+
+#: ../../source/tutorials/multi_node_qwen3vl.md:58
+msgid "Node 0"
+msgstr "节点 0"
+
+#: ../../source/tutorials/multi_node_qwen3vl.md:96
+msgid "Node 1"
+msgstr "节点 1"
+
+#: ../../source/tutorials/multi_node_qwen3vl.md:139
+msgid ""
+"If the service starts successfully, the following information will be "
+"displayed on node 0:"
+msgstr "如果服务启动成功，节点 0 上将显示以下信息："
+
+#: ../../source/tutorials/multi_node_qwen3vl.md:150
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr "服务器启动后，您可以通过输入提示词来查询模型："

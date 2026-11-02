@@ -1,0 +1,95 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-12-17 12:01+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md:1
+msgid "deepseek-ai/DeepSeek-V2-Lite"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md:3
+msgid ""
+"**vLLM Version**: vLLM: 0.10.1.1 ([1da94e6](https://github.com/vllm-"
+"project/vllm/commit/1da94e6)), **vLLM Ascend Version**: v0.10.1rc1 "
+"([7e16b4a](https://github.com/vllm-project/vllm-ascend/commit/7e16b4a))"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md:4
+msgid ""
+"**Software Environment**: **CANN**: 8.2.RC1, **PyTorch**: 2.7.1, **torch-"
+"npu**: 2.7.1.dev20250724"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md:5
+msgid "**Hardware Environment**: Atlas A2 Series"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md:6
+msgid "**Parallel mode**: TP2"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md:7
+msgid "**Execution mode**: ACLGraph"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md:9
+msgid "**Command**:"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md
+msgid "Task"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md
+msgid "Metric"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md
+msgid "Value"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md
+msgid "Stderr"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md
+msgid "gsm8k"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md
+msgid "exact_match,strict-match"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md
+msgid "✅0.3813"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md
+msgid "± 0.0134"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md
+msgid "exact_match,flexible-extract"
+msgstr ""
+
+#: ../../source/developer_guide/evaluation/accuracy_report/DeepSeek-V2-Lite.md
+msgid "✅0.3836"
+msgstr ""
+

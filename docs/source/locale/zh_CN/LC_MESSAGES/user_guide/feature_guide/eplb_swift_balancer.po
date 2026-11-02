@@ -1,0 +1,209 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-12-17 12:01+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:1
+msgid "Expert Load Balance (EPLB)"
+msgstr "专家负载均衡 (EPLB)"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:3
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:5
+msgid "Expert balancing for MoE models in LLM serving is essential for optimal performance. Dynamically changing experts during inference can negatively impact TTFT (Time To First Token) and TPOT (Time Per Output Token) due to stop-the-world operations. SwiftBalancer enables asynchronous expert load balancing with zero-overhead expert movement, ensuring seamless service continuity."
+msgstr "在 LLM 服务中，为 MoE 模型进行专家负载均衡对获得最佳性能至关重要。在推理过程中动态切换专家可能会因全局阻塞操作而对 TTFT（首个 Token 时间）和 TPOT（每输出 Token 时间）产生负面影响。SwiftBalancer 提供异步专家负载均衡，并实现零开销专家迁移，确保服务无缝连续。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:7
+msgid "EPLB Effects"
+msgstr "EPLB 效果"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:9
+msgid "Reduced Latency: Dynamically balances expert loads to minimize TTFT and TPOT by distributing workloads evenly across experts."
+msgstr "延迟降低：动态平衡专家负载，通过在专家间均匀分配工作量来最小化 TTFT 和 TPOT。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:10
+msgid "Enhanced Throughput: Optimizes GPU utilization, increasing token generation speed under high-concurrency scenarios."
+msgstr "吞吐量提升：优化 GPU 利用率，在高并发场景下提高生成 Token 的速度。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:11
+msgid "Zero-Overhead Movement: Expert redistribution occurs asynchronously without interrupting ongoing inference requests."
+msgstr "零开销迁移：专家重分配异步进行，不会中断正在进行的推理请求。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:12
+msgid "Adaptive Scaling: Automatically adjusts to workload fluctuations while maintaining stable performance."
+msgstr "自适应扩展：在保持性能稳定的同时自动适应负载波动。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:13
+msgid "Fault Tolerance: Redundant expert placement ensures system resilience during hardware failures."
+msgstr "容错能力：冗余专家配置确保在硬件故障期间系统的弹性。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:15
+msgid "Support Scenarios"
+msgstr "支持场景"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:17
+msgid "Models:"
+msgstr "支持模型："
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:18
+msgid "DeepseekV3/V3.1/R1、Qwen3-MOE"
+msgstr "DeepseekV3/V3.1/R1、Qwen3-MOE"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:19
+msgid "MOE QuantType:"
+msgstr "MOE 量化类型："
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:20
+msgid "W8A8-dynamic"
+msgstr "W8A8-dynamic"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:22
+msgid "How to Use EPLB"
+msgstr "EPLB 使用指南"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:24
+msgid "Dynamic EPLB"
+msgstr "动态 EPLB"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:26
+msgid "We need to add the environment variable `export PYTHONOPTIMIZE=1` to get context of the vllm process. Enable dynamic balancing with auto-tuned parameters. Adjust num_iterations_eplb_update and num_wait_worker_iterations based on workload patterns."
+msgstr "需要添加环境变量 `export PYTHONOPTIMIZE=1` 以获取 vLLM 进程上下文。使用自动调优参数启用动态负载均衡。根据负载模式调整 num_iterations_eplb_update 和 num_wait_worker_iterations。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:39
+msgid "Static EPLB"
+msgstr "静态 EPLB"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:40
+msgid "Initial Setup (Record Expert Map)"
+msgstr "初始化设置（记录专家映射）"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:42
+msgid "Generate the initial expert distribution map using expert_map_record_path. This creates a baseline configuration for future deployments."
+msgstr "使用 expert_map_record_path 生成初始专家分布图，为后续部署创建基线配置。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:56
+msgid "Subsequent Deployments (Use Recorded Map)"
+msgstr "后续部署（使用已记录映射）"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:57
+msgid "Load the pre-recorded expert map for consistent performance. This avoids recalculating distributions at runtime."
+msgstr "加载预先记录的专家映射以保证性能一致性，避免在运行时重新计算分布。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:68
+msgid "Critical Considerations"
+msgstr "关键注意事项"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:69
+msgid "Parameter Tuning:"
+msgstr "参数调优："
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:70
+msgid "num_iterations_eplb_update: Higher values (e.g., 400+) for stable workloads; lower values (e.g., 100-200) for fluctuating traffic."
+msgstr "num_iterations_eplb_update：稳定负载使用较高值（如 400+），波动负载使用较低值（如 100-200）。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:71
+msgid "num_wait_worker_iterations: Should be ≥ 30 to avoid premature balancing during startup."
+msgstr "num_wait_worker_iterations：应 ≥ 30，以避免启动期间过早触发负载均衡。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:72
+msgid "init_redundancy_expert: Must match tensor-parallel size (e.g., 16 for 16 GPUs) to ensure sufficient redundancy."
+msgstr "init_redundancy_expert：必须与张量并行大小匹配（如 16 个 GPU 对应 16），以确保有足够冗余。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:74
+msgid "Hardware Requirements:"
+msgstr "硬件要求："
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:75
+msgid "Ensure that all GPUs have identical memory capacity and compute capabilities."
+msgstr "确保所有 GPU 具有相同的显存容量和计算能力。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:76
+msgid "Network bandwidth must support expert redistribution traffic (≥ 10 Gbps recommended)."
+msgstr "网络带宽必须支持专家重分配流量（建议 ≥ 10 Gbps）。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:78
+msgid "Model Compatibility:"
+msgstr "模型兼容性："
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:79
+msgid "Only MoE models with explicit expert parallelism support (e.g., Qwen3-235B-A22) are compatible."
+msgstr "仅支持具有显式专家并行的 MoE 模型（例如 Qwen3-235B-A22）。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:80
+msgid "Verify model architecture supports dynamic expert routing through --enable-expert-parallel."
+msgstr "确认模型架构支持通过 --enable-expert-parallel 进行动态专家路由。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:82
+msgid "Gating Configuration:"
+msgstr "门控配置："
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:83
+msgid "When gate_eplb=true, validate that the gating mechanism can handle expert movement without routing errors."
+msgstr "当 gate_eplb=true 时，验证门控机制能够在专家迁移过程中正确路由，无错误。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:84
+msgid "Test with synthetic workloads before production deployment."
+msgstr "在生产部署前使用合成负载进行测试。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:86
+msgid "Monitoring & Validation:"
+msgstr "监控与验证："
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:87
+msgid "Track metrics: expert_load_balance_ratio, ttft_p99, tpot_avg, and gpu_utilization."
+msgstr "跟踪指标：expert_load_balance_ratio、ttft_p99、tpot_avg 和 gpu_utilization。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:88
+msgid "Use vllm monitor to detect imbalances during runtime."
+msgstr "使用 vllm monitor 在运行时检测不平衡。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:89
+msgid "Always verify expert map JSON structure before loading (validate with jq or similar tools)."
+msgstr "在加载前始终验证专家映射 JSON 结构（可使用 jq 或类似工具进行验证）。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:91
+msgid "Startup Behavior:"
+msgstr "启动行为："
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:92
+msgid "Initial requests may experience higher latency during the first balancing cycle (typically 1-2 minutes)."
+msgstr "首次平衡周期内，初始请求可能会经历更高的延迟（通常 1-2 分钟）。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:93
+msgid "Avoid sudden traffic spikes during the warm-up phase."
+msgstr "在预热阶段避免突然的流量峰值。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:95
+msgid "Common Pitfalls:"
+msgstr "常见陷阱："
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:96
+msgid "Incorrect tensor-parallel-size vs. actual GPU count → causes resource underutilization."
+msgstr "张量并行大小与实际 GPU 数量不匹配 → 导致资源未充分利用。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:97
+msgid "Using expert_map_path without generating the map first → runtime errors."
+msgstr "未先生成映射就使用 expert_map_path → 运行时错误。"
+
+#: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:98
+msgid "Setting init_redundancy_expert > available GPUs → system failure."
+msgstr "设置 init_redundancy_expert 大于可用 GPU 数量 → 系统故障。"

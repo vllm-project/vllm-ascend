@@ -1,0 +1,189 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-12-17 12:01+0800\n"
+"PO-Revision-Date: 2025-12-17 16:15+0800\n"
+"Last-Translator: Gemini <support@google.com>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:1
+msgid "Optimization and Tuning"
+msgstr "优化与调优"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:3
+msgid ""
+"This guide aims to help users to improve vllm-ascend performance on "
+"system level. It includes OS configuration, library optimization, "
+"deployment guide and so on. Any feedback is welcome."
+msgstr "本指南旨在帮助用户在系统层面提升 vllm-ascend 的性能。内容涵盖操作系统配置、库优化、部署指南等。欢迎任何反馈。"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:5
+msgid "Preparation"
+msgstr "准备工作"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:7
+msgid "Run the container:"
+msgstr "运行容器："
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:30
+msgid "Configure your environment:"
+msgstr "配置您的环境："
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:48
+msgid "Install vllm and vllm-ascend:"
+msgstr "安装 vllm 和 vllm-ascend："
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:60
+msgid ""
+"Please follow the [Installation Guide](https://vllm-"
+"ascend.readthedocs.io/en/latest/installation.html) to make sure vLLM, "
+"vllm-ascend, and MindIE Turbo are installed correctly."
+msgstr "请按照 [安装指南](https://vllm-ascend.readthedocs.io/en/latest/installation.html) 操作，确保 vLLM、vllm-ascend 和 MindIE Turbo 已正确安装。"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:63
+msgid ""
+"Make sure your vLLM and vllm-ascend are installed after your python "
+"configuration is completed, because these packages will build binary "
+"files using python in current environment. If you install vLLM, vllm-"
+"ascend, and MindIE Turbo before completing section 1.1, the binary files "
+"will not use the optimized python."
+msgstr "请确保在完成 Python 配置后再安装 vLLM 和 vllm-ascend，因为这些包会使用当前环境中的 Python 构建二进制文件。如果您在完成 1.1 节之前安装了 vLLM、vllm-ascend 和 MindIE Turbo，则生成的二进制文件将无法利用优化后的 Python。"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:66
+msgid "Optimizations"
+msgstr "优化项"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:68
+msgid "1. Compilation Optimization"
+msgstr "1. 编译优化"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:70
+msgid "1.1. Install optimized `python`"
+msgstr "1.1. 安装优化版 `python`"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:72
+msgid ""
+"Python supports **LTO** and **PGO** optimization starting from version "
+"`3.6` and above, which can be enabled at compile time. And we have "
+"offered optimized `python` packages directly to users for the sake of "
+"convenience. You can also reproduce the `python` built following this "
+"[tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html)"
+" according to your specific scenarios."
+msgstr "Python 从 `3.6` 及以上版本开始支持 **LTO** 和 **PGO** 优化，这些优化可以在编译时启用。为了方便起见，我们直接向用户提供优化后的 `python` 软件包。您也可以参考此 [教程](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html) 根据具体场景自行构建。"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:100
+msgid "2. OS Optimization"
+msgstr "2. 操作系统优化"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:102
+msgid "2.1. jemalloc"
+msgstr "2.1. jemalloc"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:104
+msgid ""
+"**jemalloc** is a memory allocator that improves performance for multi-"
+"thread scenarios and can reduce memory fragmentation. jemalloc uses local"
+" thread memory manager to allocate variables, which can avoid lock "
+"competition between threads and can hugely optimize performance."
+msgstr "**jemalloc** 是一种内存分配器，可提升多线程场景下的性能并减少内存碎片。jemalloc 使用线程本地内存管理来分配变量，从而避免线程间的锁竞争，能极大优化性能。"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:116
+msgid "2.2. Tcmalloc"
+msgstr "2.2. Tcmalloc"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:118
+msgid ""
+"**Tcmalloc (Thread Counting Malloc)** is a universal memory allocator "
+"that improves overall performance while ensuring low latency by "
+"introducing a multi-level cache structure, reducing mutex competition and"
+" optimizing large object processing flow. Find more details "
+"[here](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html)."
+msgstr "**Tcmalloc (Thread Counting Malloc)** 是一种通用内存分配器，它通过引入多级缓存结构、减少互斥锁竞争并优化大对象处理流程，在确保低延迟的同时提升整体性能。点击 [此处](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html) 了解更多细节。"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:139
+msgid "3. `torch_npu` Optimization"
+msgstr "3. `torch_npu` 优化"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:141
+msgid ""
+"Some performance tuning features in `torch_npu` are controlled by "
+"environment variables. Some features and their related environment "
+"variables are shown below."
+msgstr "`torch_npu` 中的某些性能调优特性受环境变量控制。部分特性及其相关的环境变量如下所示。"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:143
+msgid "Memory optimization:"
+msgstr "内存优化："
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:154
+msgid "Scheduling optimization:"
+msgstr "调度优化："
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:165
+msgid "4. CANN Optimization"
+msgstr "4. CANN 优化"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:167
+msgid "4.1. HCCL Optimization"
+msgstr "4.1. HCCL 优化"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:169
+msgid ""
+"There are some performance tuning features in HCCL, which are controlled "
+"by environment variables."
+msgstr "HCCL 中包含一些性能调优特性，这些特性通过环境变量进行控制。"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:171
+msgid ""
+"You can configure HCCL to use \"AIV\" mode to optimize performance by "
+"setting the environment variable shown below. In \"AIV\" mode, the "
+"communication is scheduled by AI vector core directly with RoCE, instead "
+"of being scheduled by AI CPU."
+msgstr "您可以通过设置下方的环境变量，配置 HCCL 使用 \"AIV\" 模式来优化性能。在 \"AIV\" 模式下，通信由 AI Vector Core 配合 RoCE 直接调度，不再由 AI CPU 调度。"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:178
+msgid ""
+"Plus, there are more features for performance optimization in specific "
+"scenarios, which are shown below."
+msgstr "此外，针对特定场景还有更多性能优化特性，如下所示。"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:180
+msgid ""
+"`HCCL_INTRA_ROCE_ENABLE`: Use RDMA link instead of SDMA link between two "
+"8Ps as the mesh interconnect link. Find more details "
+"[here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0044.html)."
+msgstr "`HCCL_INTRA_ROCE_ENABLE`: 在两台 8P 机器之间使用 RDMA 链路代替 SDMA 链路作为 Mesh 互联链路。点击 [此处](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0044.html) 了解更多细节。"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:181
+msgid ""
+"`HCCL_RDMA_TC`: Use this var to configure traffic class of RDMA NIC. Find"
+" more details "
+"[here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0045.html)."
+msgstr "`HCCL_RDMA_TC`: 使用该变量配置 RDMA 网卡的流量类别 (Traffic Class)。点击 [此处](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0045.html) 了解更多细节。"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:182
+msgid ""
+"`HCCL_RDMA_SL`: Use this var to configure service level of RDMA NIC. Find"
+" more details "
+"[here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0046.html)."
+msgstr "`HCCL_RDMA_SL`: 使用该变量配置 RDMA 网卡的服务级别 (Service Level)。点击 [此处](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0046.html) 了解更多细节。"
+
+#: ../../source/developer_guide/performance/optimization_and_tuning.md:183
+msgid ""
+"`HCCL_BUFFSIZE`: Use this var to control the cache size for sharing data "
+"between two NPUs. Find more details "
+"[here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0047.html)."
+msgstr "`HCCL_BUFFSIZE`: 使用该变量控制两个 NPU 之间共享数据的缓存大小。点击 [此处](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0047.html) 了解更多细节。"

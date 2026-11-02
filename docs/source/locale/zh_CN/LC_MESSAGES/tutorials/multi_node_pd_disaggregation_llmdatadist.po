@@ -1,0 +1,233 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-12-17 12:01+0800\n"
+"PO-Revision-Date: 2025-04-15 16:30+0800\n"
+"Last-Translator: vllm-ascend team <>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:1
+msgid "Prefill-Decode Disaggregation Llmdatadist Verification (Qwen)"
+msgstr "预填充-解码分离架构的 Llmdatadist 验证（Qwen）"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:3
+msgid "Getting Start"
+msgstr "开始之前"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:5
+msgid ""
+"vLLM-Ascend now supports prefill-decode (PD) disaggregation with Expert "
+"Parallel (EP) options. This guide takes one-by-one steps to verify these "
+"features with constrained resources."
+msgstr ""
+"vLLM-Ascend 现已支持预填充-解码分离架构，并包含专家并行的选项。本指南将引"
+"导您在受限的资源环境下，一步步验证这些功能。"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:7
+msgid ""
+"Using the Qwen3-30B-A3B model as an example, use vllm-ascend v0.10.1rc1 "
+"(with vLLM v0.10.1.1) on 3 Atlas 800T A2 servers to deploy the \"1P2D\" "
+"architecture. Assume the IP address of the prefiller server is 192.0.0.1,"
+" and the decoder servers are 192.0.0.2 (decoder 1) and 192.0.0.3 (decoder"
+" 2). On each server, use 2 NPUs to deploy one service instance."
+msgstr ""
+"以 Qwen3-30B-A3B 模型为例，在 3 台 Atlas 800T A2 服务器上使用 vllm-"
+"ascend v0.10.1rc1 (附带 vLLM v0.10.1.1) 来部署 \"1P2D\" 架构。假设预填充服"
+"务器的 IP 地址为 192.0.0.1，解码服务器分别为 192.0.0.2 (解码器 1) 和 "
+"192.0.0.3 (解码器 2)。每台服务器使用 2 个 NPU 来部署一个服务实例。"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:9
+msgid "Verify Multi-Node Communication Environment"
+msgstr "验证多节点通信环境"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:11
+msgid "Physical Layer Requirements"
+msgstr "物理层要求"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:13
+msgid ""
+"The physical machines must be located on the same WLAN, with network "
+"connectivity."
+msgstr "物理服务器必须位于同一局域网内，并确保网络互通。"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:14
+msgid ""
+"All NPUs must be interconnected. Intra-node connectivity is via HCCS, and"
+" inter-node connectivity is via RDMA."
+msgstr ""
+"所有 NPU 必须能够互联。节点内通过 HCCS 互联，节点间通过 RDMA 互联。"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:16
+msgid "Verification Process"
+msgstr "验证流程"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:18
+msgid "Single Node Verification:"
+msgstr "单节点验证："
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:20
+msgid ""
+"Execute the following commands on each node in sequence. The results must"
+" all be `success` and the status must be `UP`:"
+msgstr "请依次在每个节点上执行以下命令。所有结果必须为 `success`，状态必须为 `UP`："
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:37
+msgid "Get NPU IP Addresses"
+msgstr "获取 NPU IP 地址"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:43
+msgid "Cross-Node PING Test"
+msgstr "跨节点 PING 测试"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:50
+msgid "Generate Ranktable"
+msgstr "生成 Ranktable (排序表)"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:52
+msgid ""
+"The rank table is a JSON file that specifies the mapping of Ascend NPU "
+"ranks to nodes. For more details, please refer to the [vllm-ascend "
+"examples](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/README.md). Execute "
+"the following commands for reference."
+msgstr ""
+"Ranktable 是一个 JSON 文件，用于指定昇腾 NPU 的等级到节点的映射关系。更多"
+"详情，请参考 [vllm-ascend 示例](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/README.md)。请执行以下命"
+"令作为参考。"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:61
+msgid ""
+"Assume that we use devices 0 and 1 on the prefiller server node and "
+"devices 6 and 7 on both of the decoder server nodes. The following "
+"commands are for reference.  (`--local-device-ids` is necessary if you "
+"specify certain NPU devices on the local server.)"
+msgstr ""
+"假设我们在预填充服务器节点上使用设备 0 和 1，在两个解码服务器节点上均使用设"
+"备 6 和 7。以下命令仅供参考。(如果您需要在本地服务器上指定特定的 NPU 设备，"
+"则 `--local-device-ids` 参数是必需的。)"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:80
+msgid ""
+"The rank table will be generated at /vllm-workspace/vllm-"
+"ascend/examples/disaggregate_prefill_v1/ranktable.json"
+msgstr "Ranktable 将生成在 /vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json 路径下"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:85
+msgid "Parameter"
+msgstr "参数"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:86
+msgid "Meaning"
+msgstr "含义"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:87
+msgid "--ips"
+msgstr "--ips"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:88
+msgid ""
+"Each node's local IP address (prefiller nodes should be in front of "
+"decoder nodes)"
+msgstr "每个节点的本地 IP 地址（预填充节点应排在解码节点之前）"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:89
+msgid "--npus-per-node"
+msgstr "--npus-per-node"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:90
+msgid "Each node's NPU clips"
+msgstr "每个节点的 NPU 数量"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:91
+msgid "--network-card-name"
+msgstr "--network-card-name"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:92
+msgid "The physical machines' NIC"
+msgstr "物理服务器的网卡名称"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:93
+msgid "--prefill-device-cnt"
+msgstr "--prefill-device-cnt"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:94
+msgid "NPU clips used for prefill"
+msgstr "用于预填充的 NPU 数量"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:95
+msgid "--decode-device-cnt"
+msgstr "--decode-device-cnt"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:96
+msgid "NPU clips used for decode"
+msgstr "用于解码的 NPU 数量"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:97
+msgid "--local-device-ids"
+msgstr "--local-device-ids"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:98
+msgid "Optional. No need if using all devices on the local node."
+msgstr "可选。如果使用本地节点的所有设备，则无需指定。"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:100
+msgid "Prefiller/Decoder Deployment"
+msgstr "预填充器/解码器部署"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:102
+msgid ""
+"We can run the following scripts to launch a server on the "
+"prefiller/decoder node, respectively."
+msgstr "我们可以分别运行以下脚本来在预填充器/解码器节点上启动服务器。"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:105
+msgid "Prefiller node"
+msgstr "预填充器节点"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:128
+msgid "Decoder node 1"
+msgstr "解码器节点 1"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:153
+msgid "Decoder node 2"
+msgstr "解码器节点 2"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:217
+msgid "Example Proxy for Deployment"
+msgstr "用于部署的示例代理"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:219
+msgid ""
+"Run a proxy server on the same node with the prefiller service instance. "
+"You can get the proxy program in the repository's examples: "
+"[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+msgstr ""
+"在与预填充服务实例相同的节点上运行一个代理服务器。您可以在代码库的示例中获取"
+"该代理程序：[load_balance_proxy_server_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:231
+msgid "Verification"
+msgstr "验证"
+
+#: ../../source/tutorials/multi_node_pd_disaggregation_llmdatadist.md:233
+msgid "Check service health using the proxy server endpoint."
+msgstr "使用代理服务器的端点来检查服务健康状态。"

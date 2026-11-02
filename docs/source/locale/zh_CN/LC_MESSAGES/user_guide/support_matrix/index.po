@@ -3,12 +3,11 @@
 # This file is distributed under the same license as the PROJECT project.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
 #
-#, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"POT-Creation-Date: 2025-12-17 12:01+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -17,14 +16,15 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.17.0\n"
 
-#: ../../user_guide/support_matrix/index.md:5
+#: ../../source/user_guide/support_matrix/index.md:5
 msgid "Support Matrix"
 msgstr "支持矩阵"
 
-#: ../../user_guide/support_matrix/index.md:1
-msgid "Features and models"
+#: ../../source/user_guide/support_matrix/index.md:1
+msgid "Features and Models"
 msgstr "特性与模型"
 
-#: ../../user_guide/support_matrix/index.md:3
-msgid "This section provides a detailed supported matrix by vLLM Ascend."
+#: ../../source/user_guide/support_matrix/index.md:3
+msgid "This section provides a detailed matrix supported by vLLM Ascend."
 msgstr "本节提供了 vLLM Ascend 的详细支持矩阵。"
+

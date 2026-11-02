@@ -11,4 +11,5 @@ sleep_mode
 structured_output
 lora
 eplb_swift_balancer
+kv_pool_mooncake
 :::

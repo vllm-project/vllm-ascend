@@ -7,104 +7,133 @@
 #, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend\n"
+"Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"POT-Creation-Date: 2025-12-17 12:01+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language-Team: zh_CN <LL@li.org>\n"
 "Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.17.0\n"
 
-#: ../../tutorials/single_node_300i.md:1
-msgid "Single Node (Atlas 300I series)"
+#: ../../source/tutorials/single_node_300i.md:1
+msgid "Single Node (Atlas 300I Series)"
 msgstr "单节点（Atlas 300I 系列）"
 
-#: ../../tutorials/single_node_300i.md:4
+#: ../../source/tutorials/single_node_300i.md:4
 msgid ""
-"This Atlas 300I series is currently experimental. In future versions, there "
-"may be behavioral changes around model coverage, performance improvement."
-msgstr "Atlas 300I 系列目前处于实验阶段。在未来的版本中，模型覆盖范围和性能提升方面可能会有行为上的变化。"
+"This Atlas 300I series is currently experimental. In future versions, "
+"there may be behavioral changes related to model coverage and performance "
+"improvement."
+msgstr ""
+"Atlas 300I 系列目前处于实验阶段。在未来的版本中，模型覆盖范围和性能提升方面可能会有行为上的变化。"
 
-#: ../../tutorials/single_node_300i.md:7
-msgid "Run vLLM on Altlas 300I series"
-msgstr "在 Altlas 300I 系列上运行 vLLM"
+#: ../../source/tutorials/single_node_300i.md:5
+msgid ""
+"Currently, the 310I series only supports eager mode and the float16 data "
+"type."
+msgstr ""
+"目前，310I 系列仅支持 eager 模式以及 float16 数据类型。"
 
-#: ../../tutorials/single_node_300i.md:9
+#: ../../source/tutorials/single_node_300i.md:6
+msgid ""
+"There are some known issues for running vLLM on 310p series, you can "
+"refer to vllm-ascend [<u>#3316</u>](https://github.com/vllm-project/vllm-"
+"ascend/issues/3316) and  [<u>#2795</u>](https://github.com/vllm-project/"
+"vllm-ascend/issues/2795). You can use v0.10.0rc1 version first."
+msgstr ""
+"在 310P 系列上运行 vLLM 目前存在一些已知问题，可参考 vllm-ascend "
+"[<u>#3316</u>](https://github.com/vllm-project/vllm-ascend/issues/3316) "
+"和 [<u>#2795</u>](https://github.com/vllm-project/vllm-ascend/issues/2795)。"
+"建议优先使用 v0.10.0rc1 版本。"
+
+#: ../../source/tutorials/single_node_300i.md:10
+msgid "Run vLLM on Atlas 300I Series"
+msgstr "在 Atlas 300I 系列上运行 vLLM"
+
+#: ../../source/tutorials/single_node_300i.md:12
 msgid "Run docker container:"
-msgstr "运行 docker 容器："
+msgstr "运行 Docker 容器："
 
-#: ../../tutorials/single_node_300i.md:38
-msgid "Setup environment variables:"
+#: ../../source/tutorials/single_node_300i.md:41
+msgid "Set up environment variables:"
 msgstr "设置环境变量："
 
-#: ../../tutorials/single_node_300i.md:48
+#: ../../source/tutorials/single_node_300i.md:51
 msgid "Online Inference on NPU"
-msgstr "在NPU上进行在线推理"
+msgstr "在 NPU 上进行在线推理"
 
-#: ../../tutorials/single_node_300i.md:50
+#: ../../source/tutorials/single_node_300i.md:53
 msgid ""
-"Run the following script to start the vLLM server on NPU(Qwen3-0.6B:1 card, "
-"Qwen2.5-7B-Instruct:2 cards, Pangu-Pro-MoE-72B: 8 cards):"
+"Run the following script to start the vLLM server on NPU (Qwen3-0.6B:1 "
+"card, Qwen2.5-7B-Instruct:2 cards, Pangu-Pro-MoE-72B: 8 cards):"
 msgstr ""
-"运行以下脚本，在 NPU 上启动 vLLM 服务器（Qwen3-0.6B：1 张卡，Qwen2.5-7B-Instruct：2 张卡，Pangu-"
-"Pro-MoE-72B：8 张卡）："
+"运行以下脚本，在 NPU 上启动 vLLM 服务器（Qwen3-0.6B：1 张卡，"
+"Qwen2.5-7B-Instruct：2 张卡，Pangu-Pro-MoE-72B：8 张卡）："
 
-#: ../../tutorials/single_node_300i.md
+#: ../../source/tutorials/single_node_300i.md
 msgid "Qwen3-0.6B"
 msgstr "Qwen3-0.6B"
 
-#: ../../tutorials/single_node_300i.md:59
-#: ../../tutorials/single_node_300i.md:89
-#: ../../tutorials/single_node_300i.md:126
+#: ../../source/tutorials/single_node_300i.md:63
+#: ../../source/tutorials/single_node_300i.md:93
+#: ../../source/tutorials/single_node_300i.md:123
+#: ../../source/tutorials/single_node_300i.md:160
 msgid "Run the following command to start the vLLM server:"
 msgstr "运行以下命令以启动 vLLM 服务器："
 
-#: ../../tutorials/single_node_300i.md:70
-#: ../../tutorials/single_node_300i.md:100
-#: ../../tutorials/single_node_300i.md:140
-msgid ""
-"Once your server is started, you can query the model with input prompts"
+#: ../../source/tutorials/single_node_300i.md:74
+#: ../../source/tutorials/single_node_300i.md:104
+#: ../../source/tutorials/single_node_300i.md:134
+msgid "Once your server is started, you can query the model with input prompts"
 msgstr "一旦服务器启动，就可以通过输入提示词来查询模型。"
 
-#: ../../tutorials/single_node_300i.md
-msgid "Qwen/Qwen2.5-7B-Instruct"
-msgstr "Qwen/Qwen2.5-7B-Instruct"
-
-#: ../../tutorials/single_node_300i.md
-msgid "Pangu-Pro-MoE-72B"
-msgstr "Pangu-Pro-MoE-72B"
-
-#: ../../tutorials/single_node_300i.md:119
-#: ../../tutorials/single_node_300i.md:257
-msgid "Download the model:"
-msgstr "下载该模型："
-
-#: ../../tutorials/single_node_300i.md:157
-msgid "If you run this script successfully, you can see the results."
-msgstr "如果你成功运行此脚本，你就可以看到结果。"
-
-#: ../../tutorials/single_node_300i.md:159
-msgid "Offline Inference"
-msgstr "离线推理"
-
-#: ../../tutorials/single_node_300i.md:161
-msgid ""
-"Run the following script (`example.py`) to execute offline inference on NPU:"
-msgstr "运行以下脚本（`example.py`）以在 NPU 上执行离线推理："
-
-#: ../../tutorials/single_node_300i.md
+#: ../../source/tutorials/single_node_300i.md
 msgid "Qwen2.5-7B-Instruct"
 msgstr "Qwen2.5-7B-指令版"
 
-#: ../../tutorials/single_node_300i.md:320
+#: ../../source/tutorials/single_node_300i.md
+msgid "Qwen2.5-VL-3B-Instruct"
+msgstr "Qwen2.5-VL-3B-指令版"
+
+#: ../../source/tutorials/single_node_300i.md
+msgid "Pangu-Pro-MoE-72B"
+msgstr "Pangu-Pro-MoE-72B"
+
+#: ../../source/tutorials/single_node_300i.md:153
+#: ../../source/tutorials/single_node_300i.md:334
+msgid "Download the model:"
+msgstr "下载模型："
+
+#: ../../source/tutorials/single_node_300i.md:174
+msgid "Once your server is started, you can query the model with input prompts."
+msgstr "一旦服务器启动，就可以通过输入提示词来查询模型。"
+
+#: ../../source/tutorials/single_node_300i.md:191
+msgid "If you run this script successfully, you can see the results."
+msgstr "如果你成功运行此脚本，你就可以看到结果。"
+
+#: ../../source/tutorials/single_node_300i.md:193
+msgid "Offline Inference"
+msgstr "离线推理"
+
+#: ../../source/tutorials/single_node_300i.md:195
+msgid ""
+"Run the following script (`example.py`) to execute offline inference on "
+"NPU:"
+msgstr "运行以下脚本（`example.py`）以在 NPU 上执行离线推理："
+
+#: ../../source/tutorials/single_node_300i.md:397
 msgid "Run script:"
 msgstr "运行脚本："
 
-#: ../../tutorials/single_node_300i.md:325
+#: ../../source/tutorials/single_node_300i.md:403
 msgid "If you run this script successfully, you can see the info shown below:"
 msgstr "如果你成功运行此脚本，你可以看到如下所示的信息："
+
+#~ msgid "Qwen/Qwen2.5-7B-Instruct"
+#~ msgstr "Qwen/Qwen2.5-7B-Instruct"
