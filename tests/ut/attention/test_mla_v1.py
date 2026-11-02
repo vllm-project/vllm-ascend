@@ -31,7 +31,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8LinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import AscendW8A8FP8DynamicLinearMethod
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ, vllm_version_is
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 
 @pytest.mark.parametrize("num_tokens", [1, 3])
@@ -1948,8 +1948,8 @@ class TestAscendMLAImpl(TestBase):
         mock_get_current_vllm_config.return_value = self.impl.vllm_config
         self.impl.fused_qkv_a_proj.output_sizes = [64, 32, 128]
         # Only vLLM main builds the three-shard QKV-A-gate projection; release
-        # v0.32.0 keeps a separate gate and a two-shard projection.
-        gate_fused = not vllm_version_is("0.32.0")
+        # v0.33.0 keeps a separate gate and a two-shard projection.
+        gate_fused = True
 
         impl = self._rebuild_impl()
 
@@ -2843,13 +2843,9 @@ class TestAscendMLAImpl(TestBase):
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        if vllm_version_is("0.32.0"):
-            # A re-derived value that no longer fits rebinds the parameter.
-            self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
-        else:
-            # Main copies a smaller value into the parameter's own storage, so
-            # the address captured by graphs is preserved.
-            self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        # Main copies a smaller value into the parameter's own storage, so
+        # the address captured by graphs is preserved.
+        self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
         self.assertEqual(
             self.impl.W_UV.shape,
             (self.impl.num_heads, self.impl.kv_lora_rank, self.impl.v_head_dim),
@@ -3696,7 +3692,7 @@ def test_split_fused_qkv_lora_plain_layout_has_no_gate():
 
 
 @pytest.mark.skipif(
-    vllm_version_is("0.32.0"),
+    False,
     reason="gate-fused QKV-A layout is vLLM main only",
 )
 def test_split_fused_qkv_lora_peels_kimi_output_gate():

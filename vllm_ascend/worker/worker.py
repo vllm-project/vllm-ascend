@@ -56,6 +56,12 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+
+# KV-cache planning lives in kv_cache_planning on both supported versions.
+from vllm.v1.core.kv_cache_planning import (
+    get_kv_cache_groups,
+    unify_hybrid_kv_cache_specs,
+)
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -114,22 +120,7 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
-    vllm_version_is,
 )
-
-# vLLM #61183 moved the planning helpers on main; v0.32.0 keeps them
-# in kv_cache_utils, so importing the main-only module breaks worker startup.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import (
-        get_kv_cache_groups,
-        unify_hybrid_kv_cache_specs,
-    )
-else:
-    from vllm.v1.core.kv_cache_planning import (
-        get_kv_cache_groups,
-        unify_hybrid_kv_cache_specs,
-    )
-
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -1193,22 +1184,16 @@ class NPUWorker(WorkerBase):
         return {(pp_rank, tp_rank): metadata}
 
     def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
-        if vllm_version_is("0.32.0"):
-            # v0.32.0's engine core never issues this RPC, and the upstream
-            # `._find_simple_cpu_offload_connector` / `get_aligned_num_cpu_blocks`
-            # helpers do not exist on that lane.
-            return None
-        else:
-            from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
-                _find_simple_cpu_offload_connector,
-            )
+        from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
+            _find_simple_cpu_offload_connector,
+        )
 
-            if not has_kv_transfer_group():
-                return None
-            connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
-            if connector is None:
-                return None
-            return connector.get_aligned_num_cpu_blocks()
+        if not has_kv_transfer_group():
+            return None
+        connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
+        if connector is None:
+            return None
+        return connector.get_aligned_num_cpu_blocks()
 
     def _get_layerwise_kv_cache_memory_info(
         self,
@@ -1390,10 +1375,9 @@ class NPUWorker(WorkerBase):
                 logger.debug("Starting torch profiler with trace name: %s", trace_name)
             # Else: profiler already initialized. Restart profiling but keep the
             # original trace name from the first initialization.
-            if not vllm_version_is("0.32.0"):
-                # vLLM main supports per-session profiler kwargs; the release
-                # wrapper has no slot for them.
-                self.profiler.set_profiler_kwargs(profiler_kwargs)
+            # vLLM main supports per-session profiler kwargs; the release
+            # wrapper has no slot for them.
+            self.profiler.set_profiler_kwargs(profiler_kwargs)
             self.profiler.start(delay_iterations=delay_iterations, max_iterations=max_iterations)
         else:
             if self.profiler is None:

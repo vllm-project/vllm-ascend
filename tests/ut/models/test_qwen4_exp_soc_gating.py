@@ -90,7 +90,7 @@ def test_impl_always_uses_cann_gbsa(monkeypatch) -> None:
 
     monkeypatch.setattr(ascend_qsa, "qsa_gbsa_attention", gbsa)
     impl: Any = _make_impl()
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
         result = impl.forward_qsa(
             layer=layer,
             query=torch.zeros(1, 2, 2),

@@ -205,7 +205,6 @@ from vllm_ascend.utils import (
     model_uses_kpool_indexer,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
-    vllm_version_is,
     weak_ref_tensor,
     weak_ref_tensors,
 )
@@ -262,15 +261,6 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
 
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
-
-# vLLM #61701 removed Medusa/MLP speculator support on main; the v0.32.0 lane
-# still ships `AscendMedusaProposer`. Keep the name for the drafter type union
-# on both lanes, but on main never resolve it at runtime: the dispatch below
-# short-circuits on the version first, and the config rejects `method="medusa"`
-# before a proposer could be constructed.
-if vllm_version_is("0.32.0"):
-    from vllm_ascend.worker.v1.spec_decode.medusa_proposer import AscendMedusaProposer  # type: ignore[import-not-found]
-
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -761,7 +751,6 @@ class NPUModelRunner(GPUModelRunner):
             | AscendDSparkProposer
             | AscendGemma4Proposer
             | AscendSuffixDecodingProposer
-            | AscendMedusaProposer
             | AscendExtractHiddenStatesProposer
             | None
         ) = None
@@ -2081,16 +2070,6 @@ class NPUModelRunner(GPUModelRunner):
                 self._num_valid_draft_tokens_event,
                 self._num_valid_draft_tokens,
                 batch_size,
-            )
-        elif vllm_version_is("0.32.0") and isinstance(self.drafter, AscendMedusaProposer):
-            draft_token_ids = self.drafter.propose(
-                # Dynamic SD: forward the scheduled K (equals the configured
-                # maximum when the feature is disabled).
-                scheduler_output.num_spec_tokens_to_schedule,
-                valid_sampled_token_ids,
-                sampling_metadata,
-                spec_decode_metadata,
-                sample_hidden_states,
             )
         elif self.speculative_config.uses_extract_hidden_states():
             # Handle extract_hidden_states method

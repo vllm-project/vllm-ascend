@@ -39,7 +39,6 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
@@ -117,7 +116,7 @@ class AscendPCPManager(PCPManager):
             dcp_world_size=dcp_world_size,
             dcp_rank=dcp_rank,
             cp_interleave=cp_interleave,
-            **({} if vllm_version_is("0.32.0") else {"moe_gathers_tokens": moe_gathers_tokens}),
+            moe_gathers_tokens=moe_gathers_tokens,
         )
         # PCP supplies its own output buffers to compute_slot_mappings, so their
         # dtype must match Ascend block-table slots for cache-write operators.
@@ -370,45 +369,24 @@ class AscendPCPManager(PCPManager):
     # vLLM main renamed ``PCPManager.prepare_inputs_to_capture`` to
     # ``prepare_inputs_for_capture_or_profile`` so the capture path also expands
     # ``is_padding`` to the rows the MoE routes.
-    if vllm_version_is("0.32.0"):
 
-        def prepare_inputs_to_capture(
-            self,
-            input_batch: AscendInputBatch,
-        ) -> AscendInputBatch:
-            """Stage ordinary dummies, but partition CPP's global prefill dummy."""
-            if not getattr(input_batch, "is_cpp_profile", False):
-                staged = super().prepare_inputs_to_capture(input_batch)
-                assert isinstance(staged, AscendInputBatch)
-                return staged
+    def prepare_inputs_for_capture_or_profile(  # type: ignore[misc]
+        self,
+        input_batch: AscendInputBatch,
+    ) -> AscendInputBatch:
+        """Stage ordinary dummies, but partition CPP's global prefill dummy."""
+        if not getattr(input_batch, "is_cpp_profile", False):
+            staged = super().prepare_inputs_for_capture_or_profile(input_batch)
+            assert isinstance(staged, AscendInputBatch)
+            return staged
 
-            # The parent implementation only copies a dummy into PCP-local buffers.
-            # CPP instead supplies a global prompt, so use the real prefill splitter
-            # before those buffers are overwritten with the rank-local layout.
-            return self.partition_batch(
-                input_batch,
-                BatchExecutionDescriptor(CUDAGraphMode.NONE, input_batch.num_tokens, None),
-            )
-
-    else:
-
-        def prepare_inputs_for_capture_or_profile(  # type: ignore[misc]
-            self,
-            input_batch: AscendInputBatch,
-        ) -> AscendInputBatch:
-            """Stage ordinary dummies, but partition CPP's global prefill dummy."""
-            if not getattr(input_batch, "is_cpp_profile", False):
-                staged = super().prepare_inputs_for_capture_or_profile(input_batch)
-                assert isinstance(staged, AscendInputBatch)
-                return staged
-
-            # The parent implementation only copies a dummy into PCP-local buffers.
-            # CPP instead supplies a global prompt, so use the real prefill splitter
-            # before those buffers are overwritten with the rank-local layout.
-            return self.partition_batch(
-                input_batch,
-                BatchExecutionDescriptor(CUDAGraphMode.NONE, input_batch.num_tokens, None),
-            )
+        # The parent implementation only copies a dummy into PCP-local buffers.
+        # CPP instead supplies a global prompt, so use the real prefill splitter
+        # before those buffers are overwritten with the rank-local layout.
+        return self.partition_batch(
+            input_batch,
+            BatchExecutionDescriptor(CUDAGraphMode.NONE, input_batch.num_tokens, None),
+        )
 
     def _pad_hidden_restore_idx(self, global_batch: AscendInputBatch) -> None:
         """Extend restore indices to the global padded extent.
