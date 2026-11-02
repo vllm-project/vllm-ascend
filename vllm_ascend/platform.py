@@ -1673,16 +1673,17 @@ def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str) -> b
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
         )
     if spec.method == "dspark":
+        supported_target_architectures = _MINIMAX_M3_ARCHITECTURES | {"GlmMoeDsaForCausalLM"}
         return (
             model_tag == "dspark_head"
-            and not _MINIMAX_M3_ARCHITECTURES.isdisjoint(target.hf_config.architectures or ())
+            and not supported_target_architectures.isdisjoint(target.hf_config.architectures or ())
             and "Qwen3DSparkModel" in (spec.draft_model_config.architectures or ())
         )
     return False
 
 
 def _validate_flash_attn_backend(backend_key, selector) -> bool:
-    """Select CANN FlashAttn for A5 GLM DFlash2 and MiniMax-M3 DSpark drafts."""
+    """Select CANN FlashAttn for A5 GLM DFlash2 and GLM/MiniMax DSpark drafts."""
     # backend_key is (use_mla, use_sparse, use_compress).
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.DEVICE_LENGTH_FLASH_ATTN
@@ -1697,9 +1698,12 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
     if spec is None or not _is_supported_flash_attn_draft(spec, backends.model_tag):
         return False
 
+    from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
+
     return (
+        selector.head_size in AscendFlashAttentionBackend.get_supported_head_sizes()
         # CANN FlashAttn requires FP16/BF16 Q and unquantized KV.
-        selector.dtype in (torch.float16, torch.bfloat16)
+        and selector.dtype in (torch.float16, torch.bfloat16)
         and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
         # These features require additional metadata or batch-invariance guarantees.
         and not (
