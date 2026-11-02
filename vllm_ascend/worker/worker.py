@@ -447,10 +447,6 @@ class NPUWorker(WorkerBase):
         if (draft_model := self.get_draft_model()) is not None:
             restore_quantized_lm_heads(draft_model, refresh=refresh)
 
-    def restore_share_lm_head(self, refresh: bool = True) -> None:
-        """Undo the temporary source-head sharing for a draft update."""
-        self.restore_source_lm_head(refresh=refresh)
-
     def _start_weight_update(self, is_draft: bool = False) -> None:
         """Begin a target or draft update; prepare the selected model for reload."""
         self._check_weight_transfer_engine()
@@ -476,7 +472,7 @@ class NPUWorker(WorkerBase):
         except BaseException:
             self.weight_transfer_engine.reset_weight_update_target()
             if draft_model is not None:
-                self.restore_share_lm_head(refresh=False)
+                self.restore_source_lm_head(refresh=False)
             raise
         self._weight_update_active = True
         self._weight_update_is_draft = is_draft
@@ -497,7 +493,7 @@ class NPUWorker(WorkerBase):
                 self._weight_update_active = False
                 self.weight_transfer_engine.reset_weight_update_target()
                 if self._weight_update_is_draft:
-                    self.restore_share_lm_head(refresh=False)
+                    self.restore_source_lm_head(refresh=False)
                 self._weight_update_is_draft = False
                 raise
 
@@ -515,11 +511,11 @@ class NPUWorker(WorkerBase):
                 self.weight_transfer_engine.finish_weight_update()
             except BaseException:
                 if is_draft:
-                    self.restore_share_lm_head(refresh=False)
+                    self.restore_source_lm_head(refresh=False)
                 raise
             else:
                 if is_draft:
-                    self.restore_share_lm_head()
+                    self.restore_source_lm_head()
                 else:
                     self.model_runner.reset_lora_state()
             finally:
