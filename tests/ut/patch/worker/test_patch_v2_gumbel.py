@@ -38,6 +38,12 @@ def test_gumbel_patch_rebinds_preimported_consumers(monkeypatch, consumer):
     stale_gumbel.assert_not_called()
 
 
+def test_dspark_sample_logits_is_not_patched():
+    # The upstream sampler must stay untouched: tests build a DraftLogitsCache
+    # instead of relying on an Ascend compatibility shim for raw tensors.
+    assert dspark_speculator.DSparkSpeculator._sample_logits.__globals__ is vars(dspark_speculator)
+
+
 @pytest.mark.parametrize("probabilistic", [False, True])
 def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
     speculator = dspark_speculator.DSparkSpeculator.__new__(dspark_speculator.DSparkSpeculator)
