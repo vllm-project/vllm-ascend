@@ -1,9 +1,18 @@
-# 统一算子回归入口
+# SplitQuant operator regression
 
 Build and install vLLM-Ascend with custom kernels enabled on an Atlas A2 host,
-then run the equivalence test from the repository root. The test expects the
-bundled `vllm_ascend/lib/libvllm_ascend_splitquant_dense.so` operator library.
+then run the equivalence test from the repository root. The test loads the
+installed `vllm_ascend/lib/libvllm_ascend_splitquant_dense.so` library.
 
-运行run_equivalence.py --profile generic（14B/27B）或30b --out <新结果目录>；可添加--reference <原对照outputs.pt>进行逐元素零容差比较。原对照数据保留在实验目录operator/{generic,30b}/original，旧比较库已删除。
+```bash
+python csrc/splitquant_dense_fused/test/run_equivalence.py \
+  --profile generic --out /tmp/splitquant-equivalence
+```
 
-性能使用--profiler-per-case --perf-cases <本目录/splitquant_dense_fused_perf_cases.jsonl>，固定warmup5/active5、ProfilerLevel1。完整模型已验证结果见../../../../../SPLITQUANT_STATUS.md及实验REPORT.md，测试脚本均针对当前统一库。
+Use `--profile 30b` for the MoE-sized cases. Add `--reference <outputs.pt>` to
+perform an elementwise comparison against a saved reference. Profiling uses
+`--profiler-per-case --perf-cases <cases.jsonl>` and the fixed five warmup and
+five active iterations implemented by the test.
+
+The test requires an NPU, CANN, torch-npu, and a completed vLLM-Ascend build;
+it is not a CPU-only unit test.
