@@ -79,6 +79,49 @@ def test_same_nic_reader_uses_another_owner_device(rdma, monkeypatch):
     assert created == [("10.0.0.1:29502", 1)]
 
 
+@pytest.mark.parametrize("abrupt", [False, True])
+def test_owner_retains_unacknowledged_stage(rdma, monkeypatch, abrupt):
+    """A control EOF does not establish completion of a remote HIXL read."""
+    owner = object.__new__(rdma.SharedOwner)
+    owner.metadata = {"tables": {"1": {"row_bytes": 264}}}
+    owner.generation = "test-generation"
+    owner.sessions, owner.retained, owner.lock = {}, [], threading.Lock()
+    stage, handle, deregistered = SimpleNamespace(data_ptr=lambda: 123), object(), []
+    engine = SimpleNamespace(
+        device=0,
+        register=lambda tensor: handle,
+        deregister=lambda value: deregistered.append(value),
+    )
+    owner.engine_for_reader = lambda address, device: (engine, "owner:29501")
+    monkeypatch.setattr(rdma, "_configure_socket", lambda wire: None)
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(set_device=lambda device: None), raising=False)
+    monkeypatch.setattr(torch, "empty", lambda *args, **kwargs: stage)
+    client, server = socket.socketpair()
+    worker = threading.Thread(target=rdma._OwnerConnection, args=(server, ("127.0.0.1", 1), owner))
+    worker.start()
+    try:
+        rdma._send(client, {"op": "attach", "metadata": owner.metadata, "capacity": 1, "device": 0})
+        ready = rdma._receive(client)
+        assert ready["generation"] == owner.generation
+        if not abrupt:
+            rdma._send(client, {"op": "close", "generation": owner.generation})
+            assert rdma._receive(client) == {"closed": True}
+    finally:
+        client.close()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert not owner.sessions
+    if abrupt:
+        assert len(owner.retained) == 1
+        assert stage in owner.retained[0] and handle in owner.retained[0]
+        assert not deregistered
+        with pytest.raises(RuntimeError, match="retained Engram leases"):
+            owner.server_close()
+    else:
+        assert owner.retained == []
+        assert deregistered == [handle]
+
+
 def test_both_layers_keep_token_and_head_order_in_one_copy(rdma):
     hashes = torch.tensor(
         [[[0, 10, -1, 13], [20, 21, 22, 23]], [[30, 31, 32, 33], [40, -1, 42, 43]]], dtype=torch.int32
