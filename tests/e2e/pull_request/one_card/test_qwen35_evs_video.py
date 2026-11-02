@@ -48,6 +48,7 @@ def test_qwen35_evs_reduces_video_prompt_tokens():
             mm_processor_kwargs={"fps": 1},
             video_pruning_rate=pruning_rate,
             enforce_eager=True,
+            gpu_memory_utilization=0.75,
         ) as runner:
             # RequestOutput exposes prompt_token_ids separately from generated
             # tokens, so the assertion measures pruning independently of EOS.
