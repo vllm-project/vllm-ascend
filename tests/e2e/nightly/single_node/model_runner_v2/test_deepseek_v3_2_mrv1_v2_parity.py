@@ -43,8 +43,9 @@ import pytest
 import regex as re
 import requests
 import torch
-from tests.e2e.conftest import RemoteOpenAIServer, cleanup_dist_env_and_memory, wait_until_npu_memory_free
 from vllm.utils.network_utils import get_open_port
+
+from tests.e2e.conftest import RemoteOpenAIServer, cleanup_dist_env_and_memory, wait_until_npu_memory_free
 
 MODEL = os.getenv("DSV32_MODEL", "vllm-ascend/DeepSeek-V3.2-W8A8")
 MODEL_REVISION = os.getenv("DSV32_MODEL_REVISION")
