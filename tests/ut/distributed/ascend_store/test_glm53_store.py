@@ -210,9 +210,7 @@ class TestGLM53Store(unittest.TestCase):
                     self.fill_caches(plan, caches, source, target, rank)
                     metadata = self.make_metadata(source, hashes)
                     worker.wait_for_save(metadata)
-                    # Drain this batch under the per-request fence (the
-                    # whole-batch wait_for_previous_save is gone).
-                    worker.kv_send_thread.wait_for_requests_saved({req.req_id for req in metadata.requests})
+                    worker.wait_for_previous_save()
                     workers.append((worker, caches))
                     self.doCleanups()
 
