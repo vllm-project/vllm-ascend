@@ -175,3 +175,12 @@ the older paired Core API. Twelve focused CPU forwarding checks passed.
 These compatibility fixes do not qualify full-model outputs: the preceding
 model returned an empty first response and then failed in the old sampling
 ABI. Its clean exit status is not counted as a successful model test.
+
+The current Core routers also consume a per-token MoE padding mask. Ascend
+now refreshes real and padded rows after dummy/profile runs, matching Core's
+per-batch contract. Three CPU cases and four NPU mask/post-routing cases passed;
+the latter mocked the raw TopK operation and checked the production mask path.
+This correction did **not** remove the premature EOS in the new-main OFF model.
+It is not established as that output problem's root cause or a performance gain.
+Device input/logit-row diagnosis remains in progress. No new-main performance
+or maximum-concurrency claim is made while natural outputs are invalid.

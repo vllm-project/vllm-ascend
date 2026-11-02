@@ -25,6 +25,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from vllm import envs as vllm_envs
 from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -849,6 +850,12 @@ class NPUModelRunner(GPUModelRunner):
             graph_num_reqs = global_graph_num_reqs
             num_tokens_after_padding = global_graph_num_reqs * batch_desc.uniform_token_count
         assert num_tokens > 0
+        # Dummy/profile runs leave their captured rows marked as padding.
+        # Match Core's real-request contract before MoE routing consumes it.
+        is_padding = self.input_buffers.is_padding[:num_tokens_after_padding]
+        if getattr(vllm_envs, "VLLM_MOE_SKIP_PADDING", False):
+            is_padding[:num_tokens].fill_(False)
+            is_padding[num_tokens:].fill_(True)
 
         req_ids = batch_req_state.req_ids
 
@@ -1065,7 +1072,7 @@ class NPUModelRunner(GPUModelRunner):
             **pp_kwargs,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
-            is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
+            is_padding=is_padding,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
