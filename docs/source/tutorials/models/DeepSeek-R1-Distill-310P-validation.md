@@ -206,3 +206,45 @@ See the [performance guide](../../developer_guide/performance_and_debug/performa
 for the serving benchmark workflow. Report request failures, generated token
 counts, TTFT and TPOT percentiles, throughput, and post-warmup memory trends.
 Short smoke tests do not establish leak freedom or general model quality.
+
+### Measured release-stack serving results
+
+The following independent 310P3 device-0 / TP1 measurements used the release
+stack listed above with the Qwen numerical fix and verified Llama tokenizer.
+The fixed workload had 128 input and 128 output tokens, concurrency 1/4,
+20 measured requests per round, three rounds, and four explicit warmups per
+round. All 480 measured requests completed successfully. Values are medians
+of three per-round statistics, including the per-round p95 TTFT; they are not
+percentiles pooled across all requests. Original JSON and logs were retained.
+
+| Model | Mode | Concurrency | Output tokens/s | p50 TTFT (ms) | p95 TTFT (ms) | p50 TPOT (ms) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Qwen-1.5B | eager | 1 | 26.07 | 87.91 | 93.29 | 37.29 |
+| Qwen-1.5B | eager | 4 | 99.28 | 138.22 | 141.08 | 39.54 |
+| Qwen-1.5B | graph | 1 | 48.15 | 66.67 | 69.34 | 20.40 |
+| Qwen-1.5B | graph | 4 | 184.32 | 118.57 | 133.26 | 20.91 |
+| Llama-8B | eager | 1 | 10.95 | 134.13 | 135.41 | 90.97 |
+| Llama-8B | eager | 4 | 42.24 | 292.69 | 305.74 | 93.14 |
+| Llama-8B | graph | 1 | 11.16 | 138.80 | 140.17 | 89.23 |
+| Llama-8B | graph | 4 | 43.23 | 298.24 | 312.78 | 90.89 |
+
+These figures compare corrected eager and corrected graph execution.
+Uncorrected Qwen throughput is kept separate because its generation failed
+the correctness checks. Timing alone does not establish usable acceleration.
+
+A separate serial same-machine timing control temporarily removed the Qwen
+fix, measured the same workload, then restored the patch. The uncorrected
+control is excluded from correctness acceptance. Observed throughput differences
+(fixed relative to unfixed) were:
+
+| Mode | Concurrency | Unfixed tokens/s | Fixed tokens/s | Difference |
+| --- | ---: | ---: | ---: | ---: |
+| eager | 1 | 28.41 | 26.07 | -8.24% |
+| eager | 4 | 104.70 | 99.28 | -5.17% |
+| graph | 1 | 47.96 | 48.15 | +0.40% |
+| graph | 4 | 184.21 | 184.32 | +0.06% |
+
+The control ran after the corrected measurements, without randomized ordering
+or confidence intervals. Treat these as observed overhead checks for this
+workload, rather than an isolated causal estimate. Both control modes completed
+all 120 measured requests and the original numerical fix was restored.
