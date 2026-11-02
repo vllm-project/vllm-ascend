@@ -197,9 +197,14 @@ class TestAdmission(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("resize", self.events)
 
     async def test_management_authentication(self):
-        self.gate.authentication = SimpleNamespace(
-            verify_token=lambda headers: headers.get("Authorization") == "Bearer test"
-        )
+        class ApiKeyAuth:
+            def __init__(self, app):
+                self.app = app
+
+            def verify_token(self, headers):
+                return headers.get("Authorization") == "Bearer test"
+
+        self.gate = FastEEPMiddleware(ApiKeyAuth(self.gate.app))
         self.scope["headers"] = []
         result = await self.request("/fasteep_scale_ep", {"new_data_parallel_size": 2})
         self.assertEqual(result[0]["status"], 401)

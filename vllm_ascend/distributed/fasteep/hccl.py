@@ -4,6 +4,7 @@
 
 import ctypes
 import socket
+from importlib import import_module
 
 import torch
 import torch.distributed as dist
@@ -145,7 +146,7 @@ class RetainedCommunicators:
         if size in self.children:
             return self.children[size]
         # Lazy import keeps normal serving usable with prebuilt older extensions.
-        from vllm_ascend.vllm_ascend_C import python_hccl_subcomm
+        python_hccl_subcomm = import_module("vllm_ascend.vllm_ascend_C").python_hccl_subcomm
 
         function = self.library.lib.HcclCreateSubCommConfig
         self.sequence += 1

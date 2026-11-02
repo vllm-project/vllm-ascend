@@ -16,6 +16,7 @@ from vllm_ascend.distributed.fasteep.policy import replica_donors, validate_conf
 from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, _moe_config_key, _MoECommMethods
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
+from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithAllGather
 
 
 class FastEEPRuntime:
@@ -73,11 +74,13 @@ class FastEEPRuntime:
         runner.input_batch.prev_sampled_token_ids = None
 
     def _refill(self, target):
+        comms = self.comms
+        assert comms is not None
         donors = replica_donors(self.maps, self.active)
         joining = range(self.active, target)
         if self.rank in joining:
             self.memory.map()
-        manifests = self.comms.gather_objects(self.memory.metadata())
+        manifests = comms.gather_objects(self.memory.metadata())
         for rank in joining:
             donor = donors[rank]
             if manifests[rank] != manifests[donor]:
@@ -86,7 +89,7 @@ class FastEEPRuntime:
             donor = donors[rank]
             if self.rank in (rank, donor):
                 for storage in self.memory.storages():
-                    self.comms.transfer(
+                    comms.transfer(
                         storage["pointer"],
                         storage["bytes"],
                         rank if self.rank == donor else donor,
@@ -95,7 +98,7 @@ class FastEEPRuntime:
         torch.npu.synchronize()
         if self.rank in joining:
             self.memory.finish()
-        self.comms.barrier()
+        comms.barrier()
 
     def _activate(self, target, group):
         if self.rank >= target:
@@ -107,9 +110,9 @@ class FastEEPRuntime:
         self.worker.model_runner.dp_size = target
         for layer, full in zip(self.layers, self.full_maps):
             layer.global_expert_map = full[:target].clone()
-            layer.log2phy.copy_(
-                generate_log2phy_map(layer.global_expert_map, self.rank, tp_size=1).to(layer.log2phy.device)
-            )
+            log2phy = layer.log2phy
+            assert log2phy is not None
+            log2phy.copy_(generate_log2phy_map(layer.global_expert_map, self.rank, tp_size=1).to(log2phy.device))
             moe = layer.moe_config
             local = moe.num_local_experts
             physical = local * target
@@ -126,7 +129,10 @@ class FastEEPRuntime:
                 comm = AllGatherCommImpl(moe)
             # Routing maps logical IDs to physical IDs before dispatch. Only
             # the local physical interval may contribute to the output sum.
-            comm.token_dispatcher.fasteep_physical_routing = True
+            dispatcher = comm.token_dispatcher
+            if not isinstance(dispatcher, TokenDispatcherWithAllGather):
+                raise RuntimeError("FastEEP requires the AllGather token dispatcher.")
+            dispatcher.fasteep_physical_routing = True
             _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe)] = comm
 
     def resize(self, target):
