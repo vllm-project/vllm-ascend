@@ -2,7 +2,7 @@
 
 ## Description
 
-- **Location**: `vllm_ascend/ops/triton/mamba/postprocess.py` — `postprocess_mamba_fused_kernel`
+- **Location**: `vllm_ascend/ops/triton/v1/mamba/postprocess.py` — `postprocess_mamba_fused_kernel`
 - **Function**: Fused device-side post-processing for Mamba speculative decoding. For each request it recomputes the accepted-token decision (which Mamba cache block holds the running state and whether a state copy is needed) and performs the conv/temporal state block-to-block copy, entirely on device — removing the CPU-GPU synchronization of the Python reference implementation. It replaces vllm's upstream CUDA kernel globally via `vllm_ascend/patch/worker/patch_mamba_utils.py`; the production entry is vllm's `MambaSpecDecodeGPUContext.run_fused_postprocess()`.
 - **Formula** (per request `i`; mirrors the `postprocess_mamba` Python reference):
     - `num_tokens_running_state = num_computed + num_scheduled - num_draft` (or `new_num_computed - num_accepted + 1` when `PRECOMPUTED_NEW_COMPUTED`)

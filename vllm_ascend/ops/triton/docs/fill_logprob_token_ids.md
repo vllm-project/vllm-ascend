@@ -125,7 +125,7 @@
 import torch
 import triton
 
-from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import (
+from vllm_ascend.ops.triton.sample.fill_logprob_token_idx import (
     _fill_logprob_token_ids_kernel,
 )
 
