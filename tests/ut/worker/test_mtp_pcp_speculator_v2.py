@@ -5,6 +5,7 @@
 import json
 from contextlib import nullcontext
 from dataclasses import replace as dataclass_replace
+from importlib.util import find_spec as real_find_spec
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -21,6 +22,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
     replace,
+    set_current_vllm_config,
 )
 from vllm.config.parallel import EPLBConfig
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -34,6 +36,11 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
     TargetDependentARSpeculator,
 )
 
+from tests.ut.quantization.conftest_quantization import create_mxfp_moe_layer
+from vllm_ascend import ascend_config, ascend_forward_context
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.quantization.methods.w8a8 import w8a8_mxfp8
 from vllm_ascend.worker.v2 import pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.eagle import (
@@ -372,6 +379,65 @@ def test_replicated_pcp_draft_eplb_policy(eplb_worker_config, tp_size, pcp_size,
     assert config.parallel_config.prefill_context_parallel_size == pcp_size
     assert config.parallel_config.enable_eplb == enabled
     assert config.parallel_config.eplb_config.num_redundant_experts == redundant
+
+
+@pytest.mark.parametrize(("tp_size", "pcp_size"), [(1, 8), (8, 1)])
+def test_mtp_config_preserves_megamoe_weight_preparation(eplb_worker_config, tp_size, pcp_size):
+    def find_spec(name, *args, **kwargs):
+        return object() if name == "cann_ops_transformer" else real_find_spec(name, *args, **kwargs)
+
+    profile = get_hardware_profile(AscendDeviceType.A5)
+    ep_group = SimpleNamespace(world_size=8)
+    with (
+        patch.object(ascend_config, "_ASCEND_CONFIG", None),
+        patch.object(ascend_config, "_INIT_VLLM_CONFIG", None),
+        patch.object(ascend_config, "_MEGA_MOE_SUPPORTED", None),
+        patch.object(ascend_config, "get_current_hardware_profile", return_value=profile),
+        patch.object(ascend_config.importlib.util, "find_spec", side_effect=find_spec),
+        patch.object(ascend_forward_context, "get_current_hardware_profile", return_value=profile),
+        patch.object(ascend_forward_context, "get_ep_group", return_value=ep_group),
+        patch("vllm.distributed.get_ep_group", return_value=ep_group),
+        patch("vllm_ascend.utils._IS_MOE_MODEL", None),
+        # Retain config derivation at the platform hook without accelerator setup.
+        patch(
+            "vllm.platforms.current_platform.check_and_update_config",
+            side_effect=ascend_config.init_ascend_config,
+        ),
+    ):
+        target = replace(
+            eplb_worker_config,
+            parallel_config=replace(
+                eplb_worker_config.parallel_config,
+                tensor_parallel_size=tp_size,
+                prefill_context_parallel_size=pcp_size,
+                enable_eplb=False,
+            ),
+            additional_config={"enable_fused_mc2": 2},
+        )
+        assert ascend_forward_context.use_cann_megamoe(target)
+        draft, replicated = prepare_replicated_pcp_config(target)
+        assert replicated == (pcp_size > 1)
+        assert draft.parallel_config.world_size_across_dp == tp_size
+        assert target.parallel_config.prefill_context_parallel_size == pcp_size
+        assert ascend_config.get_ascend_config().enable_fused_mc2 == 1
+        assert ascend_forward_context.use_cann_megamoe(target)
+        assert ascend_forward_context.use_cann_megamoe(draft)
+
+        with set_current_vllm_config(target):
+            scheme = w8a8_mxfp8.AscendW8A8MXFP8DynamicFusedMoEMethod()
+            layer = create_mxfp_moe_layer(num_experts=2, hidden_size=128, intermediate_size=256)
+            scheme.process_weights_after_loading(layer)
+        ascend_config.init_ascend_config(target)
+        with patch.object(w8a8_mxfp8, "_EXTRA_CTX") as context:
+            context.use_mega_moe = ascend_forward_context.use_cann_megamoe(target)
+            assert context.use_mega_moe
+            weights = scheme.get_fused_mc2_weights(layer)
+        for payload in (weights.w1, weights.w2, weights.w1_scale, weights.w2_scale):
+            assert len(payload) == 2
+        assert weights.w1[0].shape == (512, 128)
+        assert weights.w2[0].shape == (128, 256)
+        assert weights.w1_scale[0].dtype == torch.float8_e8m0fnu
+        assert weights.w2_scale[0].dtype == torch.float8_e8m0fnu
 
 
 def test_pcp_only_eplb_draft_reaches_inherited_loader(eplb_worker_config):

@@ -1564,6 +1564,28 @@ class TestUpstreamConfigCompatibility(TestBase):
                 with self.subTest(field="hidden_size", value=3584), patch.object(text_config, "hidden_size", 3584):
                     self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
 
+    def test_megamoe_uses_target_ep_for_replicated_pcp_draft(self):
+        target_parallel = SimpleNamespace(world_size_across_dp=16, pipeline_parallel_size=2)
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(hidden_size=4096, moe_intermediate_size=1536),
+                get_num_experts=lambda: 128,
+            ),
+            parallel_config=SimpleNamespace(world_size_across_dp=1, pipeline_parallel_size=1),
+            speculative_config=SimpleNamespace(target_parallel_config=target_parallel),
+        )
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(config))
+        with patch.object(target_parallel, "world_size_across_dp", 6):
+            self.assertFalse(AscendConfig._is_megamoe_supported_by_config(config))
+        for speculative_config in (None, SimpleNamespace(), SimpleNamespace(target_parallel_config=None)):
+            with self.subTest(speculative_config=speculative_config):
+                config.speculative_config = speculative_config
+                self.assertFalse(AscendConfig._is_megamoe_supported_by_config(config))
+        del config.speculative_config
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(config))
+        config.parallel_config.world_size_across_dp = 8
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(config))
+
     def test_megamoe_model_config_constraints(self):
         supported = SimpleNamespace(
             model_config=SimpleNamespace(
