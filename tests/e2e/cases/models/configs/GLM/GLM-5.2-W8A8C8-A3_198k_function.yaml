@@ -1,11 +1,6 @@
 #198k长序列只验证功能
-<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.2-W8A8C8-A3_198k_function.yaml
 test_name: "multi-node-GLM-5.2-W8A8C8-MTP-A3_198k_function"
 model: "Eco-Tech/GLM-5.2-w8a8c8"
-=======
-test_name: "multi-node-GLM-5.1-W8A8C8-MTP-A3_198k_function"
-model: "Eco-Tech/GLM-5.1-w8a8c8"
->>>>>>> 58c891e36 (update glm weekly cases):tests/e2e/weekly/multi_node/internal_dp/config/GLM-5.1-W8A8C8-A3_198k_function.yaml
 num_nodes: 2
 npu_per_node: 16
 dp_load_balancing: internal
@@ -24,11 +19,7 @@ deployment:
   - envs:
       <<: *env_common
     server_cmd: >
-<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.2-W8A8C8-A3_198k_function.yaml
       vllm serve Eco-Tech/GLM-5.2-w8a8c8
-=======
-      vllm serve Eco-Tech/GLM-5.1-w8a8c8
->>>>>>> 58c891e36 (update glm weekly cases):tests/e2e/weekly/multi_node/internal_dp/config/GLM-5.1-W8A8C8-A3_198k_function.yaml
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 8
@@ -61,11 +52,7 @@ deployment:
     envs:
       <<: *env_common
     server_cmd: >
-<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.2-W8A8C8-A3_198k_function.yaml
       vllm serve Eco-Tech/GLM-5.2-w8a8c8
-=======
-      vllm serve Eco-Tech/GLM-5.1-w8a8c8
->>>>>>> 58c891e36 (update glm weekly cases):tests/e2e/weekly/multi_node/internal_dp/config/GLM-5.1-W8A8C8-A3_198k_function.yaml
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 8

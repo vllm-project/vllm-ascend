@@ -1,8 +1,4 @@
-<<<<<<< HEAD:tests/e2e/cases/models/configs/GLM/GLM-5.1-W8A8C8-3.5k-1.5k-0-20-PD.yaml
 test_name: "GLM-5.1-744B-3.5k-1.5k-0-20"
-=======
-test_name: "GLM-5.1-744B-128k-1k-90-50-PD"
->>>>>>> 58c891e36 (update glm weekly cases):tests/e2e/weekly/multi_node/external_dp/config/GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
 model: "Eco-Tech/GLM-5.1-w8a8c8"
 num_nodes: 4
 npu_per_node: 16
