@@ -9,7 +9,7 @@
 #define ASCENDC_CUBE_ONLY
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"
-#include "adv_api/kernel_tiling.h"
+#include "kernel_tiling.h"
 
 namespace SplitQuantDenseA2 {
 using namespace AscendC;
