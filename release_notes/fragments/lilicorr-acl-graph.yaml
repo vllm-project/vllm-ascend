@@ -1,0 +1,4 @@
+pr: null
+entries:
+  - category: feature
+    text: Added full decode ACL graph execution for LiLiCorr drafts on Model Runner V2, with independent eager draft control and automatic fallback for unsupported draft attention.

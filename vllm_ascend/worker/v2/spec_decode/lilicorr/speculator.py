@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
 import torch
-from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import (
     LiLiCorrSpeculator,
 )
@@ -14,14 +13,12 @@ from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
 
 
 class AscendLiLiCorrSpeculator(LiLiCorrSpeculator, AscendDFlash2Speculator):
-    """Keep upstream LiLiCorr scoring and reuse Ascend DFlash2 runtime guards."""
+    """Keep upstream LiLiCorr scoring and inherit Ascend's DFlash ACL graphs.
 
-    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        # DFlash2 supports ACL graphs, but LiLiCorr's scoring path still
-        # requires eager execution. Keep this restriction local to LiLiCorr.
-        if not self.speculative_config.enforce_eager:
-            raise NotImplementedError("LiLiCorr does not currently support graph mode; please enable enforce_eager.")
-        super().init_cudagraph_manager(CUDAGraphMode.NONE)
+    The shared graph captures context-anchor refresh, KV storage, candidate
+    scoring and sampling. Eager control and attention capability fallback are
+    inherited from AscendDFlashSpeculator through AscendDFlash2Speculator.
+    """
 
     def load_draft_model(
         self,

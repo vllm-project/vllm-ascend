@@ -249,3 +249,54 @@ def test_probabilistic_candidate_walk_caches_realized_conditional_distribution(t
         observed = torch.bincount(returned, minlength=4).float() / returned.numel()
         tolerance = 5.0 * (0.25 / returned.numel()) ** 0.5
         torch.testing.assert_close(observed, target.cpu(), atol=tolerance, rtol=0.0)
+
+
+@pytest.mark.parametrize("probabilistic,temperature", [(False, 0.0), (True, 0.0), (True, 0.8)])
+def test_candidate_graph_replay_matches_eager_after_slot_reuse(probabilistic, temperature):
+    """Capture the shared LiLiCorr walk/cache kernels with persistent inputs."""
+    max_reqs, rows, steps, topk, vocab = 4, 3, 2, 4, 128
+    device = torch.device("npu")
+    captured = CandidateSampler(max_reqs, steps, topk, device)
+    eager = CandidateSampler(max_reqs, steps, topk, device)
+    candidates = torch.arange(rows * steps * topk, dtype=torch.int64, device=device).view(rows, steps, topk)
+    scores = torch.zeros(rows, steps, topk, topk, device=device)
+    positions = torch.full((rows * steps,), 10, dtype=torch.int64, device=device)
+    mapping = torch.tensor([2, -1, 0], dtype=torch.int32, device=device).repeat_interleave(steps)
+    temperatures = torch.full((max_reqs,), temperature, device=device)
+    seeds = torch.arange(max_reqs, dtype=torch.int64, device=device)
+    graph_tokens = torch.full((rows * steps,), -123, dtype=torch.int64, device=device)
+    eager_tokens = torch.empty_like(graph_tokens)
+    graph_logits = torch.full((max_reqs, steps, vocab), -float("inf"), device=device) if probabilistic else None
+    eager_logits = torch.full_like(graph_logits, -float("inf")) if probabilistic else None
+
+    def sample(sampler, tokens, logits):
+        sampler.sample(
+            candidates, scores, rows, positions, mapping, temperatures, seeds, tokens, logits, use_fp64=False
+        )
+
+    # Compile kernels before capture; use the same operations in eager and graph.
+    for _ in range(3):
+        sample(captured, graph_tokens, graph_logits)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        sample(captured, graph_tokens, graph_logits)
+
+    for revision, states in enumerate(([2, -1, 0], [1, 0, -1], [-1, 2, 1])):
+        candidates.add_(topk)
+        scores.copy_(torch.randn_like(scores))
+        positions.add_(7)
+        seeds.add_(101)
+        mapping.copy_(torch.tensor(states, dtype=torch.int32, device=device).repeat_interleave(steps))
+        for tokens in (graph_tokens, eager_tokens):
+            tokens.fill_(-123)
+        for sampler in (captured, eager):
+            sampler.scores.fill_(-777)
+        graph.replay()
+        sample(eager, eager_tokens, eager_logits)
+        torch.npu.synchronize()
+        torch.testing.assert_close(graph_tokens, eager_tokens, rtol=0, atol=0, msg=f"replay {revision}")
+        torch.testing.assert_close(captured.scores, eager.scores, rtol=0, atol=0)
+        if probabilistic:
+            torch.testing.assert_close(graph_logits, eager_logits, rtol=0, atol=0)
+            torch.testing.assert_close(captured.cached_candidate_ids, eager.cached_candidate_ids, rtol=0, atol=0)
