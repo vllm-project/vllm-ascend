@@ -78,8 +78,7 @@ def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
         assert buffer[:2].tolist() == [offset + 4, offset + 5]
 
 
-def test_cut_layer_trim_writes_full_batch_before_replay(monkeypatch):
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
+def test_cut_layer_trim_writes_full_batch_before_replay():
     events: list[str | tuple[str, object]] = []
 
     class Context:
@@ -106,8 +105,7 @@ def test_cut_layer_trim_writes_full_batch_before_replay(monkeypatch):
     assert events == [("write_kv", [0, 1, 2, 3]), "replay_context", ("replay", [2, 3])]
 
 
-def test_factory_trims_cut_source_outputs_that_replay_regenerates(monkeypatch):
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
+def test_factory_trims_cut_source_outputs_that_replay_regenerates():
     cut_writer = lambda *states: None
     first_swa_prefix = "model.layers.1.self_attn.swa_cache"
     buffers = [torch.empty(8, 2) for _ in range(4)]
