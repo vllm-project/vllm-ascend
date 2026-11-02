@@ -20,6 +20,7 @@ from vllm.config import (
     VllmConfig,
     replace,
 )
+from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
 from vllm_ascend.worker.v2.spec_decode.eagle import (
@@ -216,18 +217,39 @@ def test_mtp_draft_config_keeps_target_pcp_topology(eplb_worker_config):
     assert draft_config.parallel_config.enable_eplb
 
 
-def test_propose_passes_target_dp_sync_unchanged() -> None:
+@pytest.mark.parametrize("pcp_enabled", [False, True])
+@pytest.mark.parametrize("mismatch", ["tokens", "uniform"])
+@pytest.mark.parametrize("dummy_run", [False, True])
+def test_propose_renegotiates_pcp_draft_dp_sync(pcp_enabled, mismatch, dummy_run) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
+    speculator.pcp_manager = object() if pcp_enabled else None
     input_batch = object()
-    dp_sync = object()
+    dp_sync = DPSyncState(num_tokens_across_dp=torch.tensor([64, 64]), uniform_token_count=4, eager=True, num_reqs=16)
+
+    def parent_propose(*args, **kwargs):
+        sync = args[11]
+        if sync is not None:
+            # Exercise the upstream contract that failed on PCP8+DP2 hardware.
+            dispatch_cg_and_sync_dp(
+                None,
+                16,
+                128 if pcp_enabled and mismatch == "tokens" else 64,
+                None if pcp_enabled and mismatch == "uniform" else 4,
+                dp_size=2,
+                dp_rank=0,
+                need_eager=True,
+                dp_sync_state=sync,
+            )
+        return torch.empty(16, 3, dtype=torch.int64)
+
     with (
         patch.object(speculator_module, "build_attn_metadata_wrapper", return_value=nullcontext()),
         patch.object(speculator_module, "torch_gather_wrapper", return_value=nullcontext()),
-        patch.object(MTPSpeculator, "propose") as parent,
+        patch.object(MTPSpeculator, "propose", side_effect=parent_propose) as parent,
     ):
-        speculator.propose(input_batch, *[MagicMock() for _ in range(10)], dp_sync)
+        speculator.propose(input_batch, *[MagicMock() for _ in range(10)], dp_sync, dummy_run=dummy_run)
     assert parent.call_args.args[0] is input_batch
-    assert parent.call_args.args[11] is dp_sync
+    assert parent.call_args.args[11] is (None if pcp_enabled else dp_sync)
     assert speculator.input_batch is input_batch
 
 

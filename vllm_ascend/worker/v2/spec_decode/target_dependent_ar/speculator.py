@@ -269,6 +269,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         """
         self.input_batch = input_batch
         self._eplb_dummy_run = dummy_run
+        # PCP can change the draft prefill token layout and uniform decode
+        # shape. Negotiate its DP agreement instead of reusing the target's.
+        sync_state = None if self.pcp_manager is not None else dp_sync_state
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with (
@@ -287,7 +290,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 next_prefill_tokens,
                 temperature,
                 seeds,
-                dp_sync_state,
+                sync_state,
                 dummy_run,
                 skip_attn_for_dummy_run,
                 mm_inputs,
