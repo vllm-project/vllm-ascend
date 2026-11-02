@@ -40,11 +40,9 @@ if [[ -n "${GITHUB_BASE_REF}" ]]; then
         --config="${CONFIG_FILE}" \
         --staged
     # Scan passed: restore the PR head so later steps see the PR worktree.
-    if [[ -n "${GITHUB_HEAD_REF}" ]]; then
-        git checkout --quiet "${GITHUB_HEAD_REF}"
-    else
-        git checkout --quiet "${PR_SHA}"
-    fi
+    # Use the SHA captured above: the PR branch name is not a local ref in
+    # the fork-PR checkout, so checking it out by name fails.
+    git checkout --quiet "${PR_SHA}"
     git reset --quiet --hard
 else
     echo "==== Local pre-commit Mode: scan staged changes ===="
