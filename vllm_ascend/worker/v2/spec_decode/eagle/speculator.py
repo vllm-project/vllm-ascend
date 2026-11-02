@@ -16,10 +16,8 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import torch
 from vllm.config import VllmConfig, replace
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
-from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     AscendTargetDependentARSpeculator,
@@ -42,15 +40,3 @@ class AscendEagleSpeculator(AscendTargetDependentARSpeculator, EagleSpeculator):
             enable_eplb=False,
         )
         return draft_vllm_config
-
-    def load_draft_model(
-        self,
-        target_model: torch.nn.Module,
-        target_attn_layer_names: set[str],
-    ) -> torch.nn.Module:
-        # The upstream loader keeps the supplied config as the construction
-        # context. Passing the target config makes draft MLA see runner=generate
-        # and initialize target-only MLAPO, even with a BF16 draft KV override.
-        draft_model = load_eagle_model(target_model, self.draft_vllm_config)
-        self._maybe_remove_d2t(draft_model)
-        return draft_model
