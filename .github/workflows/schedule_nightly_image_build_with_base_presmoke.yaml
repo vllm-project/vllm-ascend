@@ -107,14 +107,6 @@ on:
         required: false
 
 jobs:
-  trigger-presmoke-build:
-      if: ${{ github.event.label.name == 'presmoke' }}
-      uses: ./.github/workflows/schedule_nightly_image_build_with_base_presmoke.yaml
-      with:
-        vllm_ascend_branch: ${{ github.event.pull_request.head.sha }}
-        should_push: true
-        run_presmoke: true
-      secrets: inherit
   build-base:
     name: Build base image (${{ inputs.suffix || 'a2' }}-${{ inputs.os }})
     if: ${{ !inputs.skip_base && github.repository == 'vllm-project/vllm-ascend' }}
