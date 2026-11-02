@@ -13,12 +13,14 @@ from vllm_ascend.worker.v2 import utils as v2_utils
 def test_v2_utils_context_managers_switch_and_restore():
     fake_cuda = MagicMock()
     fake_npu = MagicMock()
+    fake_torch = SimpleNamespace(cuda=fake_cuda, npu=fake_npu)
     fake_npu.graph.return_value = nullcontext()
     original_comm = cuda_comm_mod.CudaCommunicator
     npu_cls = object()
 
     with (
-        patch.object(v2_utils, "torch", SimpleNamespace(cuda=fake_cuda, npu=fake_npu)),
+        patch.object(v2_utils, "torch", fake_torch),
+        patch("vllm_ascend.patch.torch_streams.torch", fake_torch),
         patch.object(v2_utils, "breakable_cudagraph", MagicMock()),
         patch.object(v2_utils, "weak_ref_workspaces") as weak_ref,
         patch.object(v2_utils, "get_graph_params", return_value="graph"),
@@ -36,6 +38,9 @@ def test_v2_utils_context_managers_switch_and_restore():
         ),
     ):
         with v2_utils.torch_cuda_wrapper():
+            assert fake_cuda.Stream is fake_npu.Stream
+            assert fake_cuda.stream is fake_npu.stream
+            assert fake_cuda.current_stream is fake_npu.current_stream
             assert fake_cuda.Event is fake_npu.Event
             assert fake_cuda.graph is v2_utils.torch_npu_graph_wrapper
             assert fake_cuda.is_current_stream_capturing is fake_npu.is_current_stream_capturing

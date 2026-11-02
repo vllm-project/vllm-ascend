@@ -1,78 +1,72 @@
-# Reuse installed vLLM packed loops on Ascend
+# Reuse installed vLLM packed loops with a shared NPU stream patch
 
-## Scope
+## Scope and pairing
 
-Keep PR #19127 independent. This branch starts at Ascend main `c567dde89`
-and calls the producer/consumer functions from the installed vLLM directly.
-The paired main remains `544f182d9`; release compatibility targets v0.32.0.
-IPC is unchanged. No vLLM source checkout is modified by this adapter.
+PR #19127 stays independent. This branch directly executes vLLM's installed
+packed producer and consumer; no copied loop and no FunctionType/private globals
+clone. The latest checked Ascend main `426a26bc1` still declares vLLM
+`544f182d9` as its verified main pairing. Also validate release v0.32.0 and
+latest vLLM main `5c8ae7c7`, without silently changing the repository's official
+pairing or either installed vLLM checkout.
 
-## Existing precedents
+## One minimal API patch
 
-- `patch/platform/patch_torch_accelerator.py` redirects accelerator memory APIs
-  to NPU; it does not make CUDA stream contexts usable on NPU.
-- `worker/v2/utils.py::torch_cuda_wrapper` redirects CUDA stream, event and graph
-  APIs globally. It demonstrates the necessary device routing but is wider than
-  needed by a standalone weight-transfer trainer.
+`patch/torch_streams.py::patch_cuda_streams` installs exactly three NPU aliases:
 
-## Alternatives and decision
+- `torch.cuda.Stream = torch.npu.Stream`
+- `torch.cuda.stream = torch.npu.stream`
+- `torch.cuda.current_stream = torch.npu.current_stream`
 
-1. Retain local loops: least change, but every loop bug fix requires review and
-   potentially a manual port. This is the existing correctness branch.
-2. Redirect all of `torch.cuda`: allows direct calls, but changes unrelated
-   modules and relies on initialization order. Do not add another global patch.
-3. Redirect the packed module's torch reference and narrowly adapt helper and
-   communicator boundaries. This experimental branch chooses this option.
+Platform startup (`patch_torch_accelerator.py`), standalone packed trainers and
+V2's existing CUDA wrapper share this function. It is reapplied before use so a
+standalone trainer does not depend on platform/worker initialization order.
+Remove the former packed-module torch proxy. Do not patch allocations, CUDA IPC,
+graph APIs or generic `torch.Event` here. Generic events were checked against
+actual NPU streams on the 188 environment and can record/synchronize directly.
 
-`upstream.packed_nccl_broadcast_producer/consumer` are never replaced, copied,
-compiled or cloned with `FunctionType`. Their installed code runs unchanged.
-Future changes inside those loops are therefore executed directly, although
-changes to helper interfaces/semantics still need compatibility validation.
-This does not promise zero future maintenance.
+This is deliberately process-wide compatibility for NPU-only processes, like the
+existing V2 wrapper. Mixed CUDA/NPU engines are unsupported. Patching earlier
+cannot update CUDA aliases another module has already saved; call the patch at
+platform startup before consumers create streams. Other legacy wrapper APIs are
+outside this change.
 
-## Adapter boundaries
+## Boundaries that remain separate
 
-- A module-local proxy routes `torch.cuda` and generic `torch.Event` to NPU,
-  forwarding all other attributes to real torch. Real `torch.cuda` is unchanged.
-- Wrap `_get_streams` rather than duplicating its implementation; retain vLLM's
-  cache, join caller work, and capture the actual slots for cleanup.
-- Override `unpack_tensor` only during active HCCL transfers to clone bytes before
-  interpreting dtype/shape. This preserves independent ownership and unaligned
-  dtype handling. Outside a transfer, defer to the original helper.
-- A communicator adapter establishes native HCCL packing/receive boundaries and
-  producer collective order, forwarding the actual NPU stream explicitly.
-- A callback adapter records completion after model loading. Before unpack,
-  wait for the preceding callback completion and track clones on supported
-  readers. This supplements both the release loop without events and the main
-  loop whose receive event precedes clone/callback work.
-- Always drain captured slots in `finally`, including failures in upstream's
-  own normal drain. Retain the existing failed-buffer protection and termination
-  exception priority.
+`packed_adapter.py` now contains HCCL/correctness adapters only: capture vLLM's
+cached slots and join caller work; preserve owning byte clones and reader stream
+tracking; order unpack after previous callback completion; keep native HCCL
+packing/receive and collective-order boundaries; drain slots on all exits.
 
-## State and concurrency
+A ContextVar holds each transfer's state and per-device locks prevent concurrent
+reuse of vLLM's cached slots. Nested transfers are rejected. The remaining
+_get_streams and unpack helper hooks are temporary until vLLM exposes suitable
+extension points. API replacement alone cannot remove these correctness duties.
 
-An import/install lock protects one-time module adaptation. Transfer state lives
-in a ContextVar, reset on every exit. Since vLLM caches streams, a cached lock per
-device serializes transfers using those slots. Nested transfers are rejected.
-This adapter is for NPU processes; mixed CUDA/NPU weight-transfer engines in the
-same process are not supported. Caller writers on other streams must join before
-entry; callbacks must join relevant additional-stream work onto their slot.
+## Latest vLLM differences and removal plan
 
-## Removal plan
+vLLM #63457 moved caller-stream lookup to torch.accelerator, but latest checked
+main still creates CUDA Streams and enters CUDA stream contexts. The current
+stream alias remains for older supported pairings. Latest main also uses
+slot_done events for slot reuse; validate that behavior rather than assuming
+all future versions drain a whole slot stream before reuse.
 
-Contribute device-neutral stream/context/event access and an owning-unpack or
-callback-completion hook to vLLM. Once both supported pairings expose suitable
-hooks, remove the torch proxy and private-helper wrapping. Do not port the whole
-consumer merely to adjust a boundary.
+As supported vLLM versions become device-neutral, remove unused aliases after
+NPU validation. When owning-unpack and callback-completion hooks are available,
+remove private helper wrapping too. Future loop fixes run directly, but changes
+to helper signatures/semantics still require review; this is not zero maintenance.
 
 ## Validation
 
-Run existing packed and engine tests against both fixed pairings. Add tests for
-unchanged upstream loop identities, no global CUDA mutation, callback-after-load
-completion, clone tracking, event reuse and context cleanup. Reuse actual-NPU
-delayed-clone/allocator-pressure controls and the two-process HCCL harness.
-CPU tests alone are insufficient for native HCCL readiness and allocator safety.
-Record hardware results separately; no performance improvement is claimed.
+Run weight-transfer UT, minimal-patch invariants, the V2 wrapper tests and actual
+NPU two-process HCCL, delayed-clone and allocator-pressure controls. Independently
+remove adapter readiness and clone tracking to confirm expected corruption.
+Model/graph E2E remains a separate acceptance step, not implied by CPU or transport
+passes. No performance improvement is claimed.
+
+## Historical module-proxy prototype results
+
+The following evidence predates replacement of the module proxy and must not be
+used as acceptance evidence for the shared API patch.
 
 ### Results on the existing 188 container
 

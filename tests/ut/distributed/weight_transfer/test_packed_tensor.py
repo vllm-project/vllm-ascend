@@ -129,6 +129,11 @@ def _stub_torch_npu():
         patch.object(torch, "npu", fake_npu, create=True),
         patch.object(torch, "empty", _fake_empty),
         patch.object(torch.accelerator, "current_device_index", return_value=0),
+        patch.object(torch.accelerator, "current_stream", side_effect=lambda *args, **kwargs: active),
+        patch.object(torch, "Event", MagicMock()),
+        patch.object(torch.cuda, "Stream", torch.cuda.Stream),
+        patch.object(torch.cuda, "stream", torch.cuda.stream),
+        patch.object(torch.cuda, "current_stream", torch.cuda.current_stream),
         patch.object(torch.Tensor, "record_stream", return_value=None),
     ):
         yield
@@ -1389,12 +1394,12 @@ def test_packed_roundtrip_odd_bf16_followed_by_unaligned_int64(backend):
     assert _assert_packed_roundtrip(backend, tensors, 32) == 1
 
 
-def test_packed_reuse_keeps_vllm_loops_and_global_cuda_unchanged():
+def test_packed_reuse_keeps_vllm_loops_and_uses_shared_stream_patch():
     from vllm.distributed.weight_transfer import packed_tensor as upstream
 
     from vllm_ascend.distributed.weight_transfer import packed_adapter
 
-    cuda_stream = torch.cuda.stream
+    event = torch.Event
     producer = upstream.packed_nccl_broadcast_producer
     consumer = upstream.packed_nccl_broadcast_consumer
     with patch.object(upstream, "packed_nccl_broadcast_producer", wraps=producer) as called:
@@ -1402,7 +1407,11 @@ def test_packed_reuse_keeps_vllm_loops_and_global_cuda_unchanged():
         called.assert_called_once()
     assert upstream.packed_nccl_broadcast_producer is producer
     assert upstream.packed_nccl_broadcast_consumer is consumer
-    assert torch.cuda.stream is cuda_stream
+    assert upstream.torch is torch
+    assert torch.cuda.Stream is torch.npu.Stream
+    assert torch.cuda.stream is torch.npu.stream
+    assert torch.cuda.current_stream is torch.npu.current_stream
+    assert torch.Event is event
     assert packed_adapter._ACTIVE.get() is None
 
 
@@ -1440,6 +1449,7 @@ def test_packed_reuse_orders_callback_completion_and_tracks_owning_clones(num_bu
     chunks = 3 * num_buffers + 1
     with (
         patch.object(torch.npu, "Event", Event),
+        patch.object(torch, "Event", Event),
         patch.object(_FakeNpuStream, "wait_event", wait),
         patch.object(torch.Tensor, "record_stream", return_value=None) as tracking,
     ):
