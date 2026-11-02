@@ -1,6 +1,7 @@
 import contextlib
 import ctypes
 import importlib.util
+import math
 import os
 import sys
 import threading
@@ -66,6 +67,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector imp
     SendReqInfo,
     SendTask,
     UniformTypeKVCacheSpecs,
+    _requires_component_transfer,
     ensure_zmq_recv,
     ensure_zmq_send,
     group_concurrent_contiguous,
@@ -93,9 +95,19 @@ def _make_layer_metadata(**overrides):
     return LayerMetadata(**defaults)
 
 
+def _plain_spec(block_size=16):
+    return MagicMock(block_size=block_size, is_circular=False, indexes_kv_by_block_stride=False)
+
+
+def _packed_tensor_mock():
+    tensor = MagicMock()
+    tensor.numel.side_effect = lambda: math.prod(tensor.shape)
+    tensor.stride.side_effect = lambda axis: math.prod(tensor.shape[axis + 1 :])
+    return tensor
+
+
 def _make_mock_kv_cache_config(block_size=16):
-    kv_cache_spec = MagicMock()
-    kv_cache_spec.block_size = block_size
+    kv_cache_spec = _plain_spec(block_size)
     group_spec = MagicMock()
     group_spec.kv_cache_spec = kv_cache_spec
     group_spec.layer_names = ["layer0"]
@@ -195,6 +207,106 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
             remote_dcp_size=1,
             chunk_finish=False,
         )
+
+    def test_component_compression_skips_prefix_and_preserves_padding(self):
+        # A logical block holds 8 original tokens = two kernel blocks of
+        # two compressed rows each. The last pool (tokens 12..15) is incomplete.
+        local = _make_layer_metadata(
+            kv_caches_base_addr=[1000],
+            block_len=[8],
+            block_stride_bytes=[16],
+            block_shapes=[[2, 1]],
+            block_dtypes=["float32"],
+            block_size_scale=[2],
+            logical_block_size=8,
+            compression_ratio=2,
+            cache_kind="attention",
+        )
+        remote = _make_layer_metadata(
+            tensor_group_idx=[1],
+            kv_caches_base_addr=[4000],
+            block_len=[8],
+            block_stride_bytes=[24],
+            block_shapes=[[2, 1]],
+            block_dtypes=["float32"],
+            block_size_scale=[2],
+            logical_block_size=8,
+            compression_ratio=2,
+            cache_kind="attention",
+        )
+        req = self.req_meta_base
+        req.local_block_ids = [[3, 5]]
+        req.remote_block_ids = [[99], [7, 9]]
+        req.remote_cache_tokens = 4
+        req.local_computed_tokens = 13
+        req.chunk_finish = True
+        self.assertEqual(
+            self.thread._get_component_transfer_meta(req, local, remote, 0),
+            ([1000 + 7 * 16, 1000 + 10 * 16], [4000 + 15 * 24, 4000 + 18 * 24], [8, 8]),
+        )
+        req.chunk_finish = False
+        self.assertEqual(self.thread._get_component_transfer_meta(req, local, remote, 0), ([], [], []))
+
+    def test_component_tail_copies_fixed_page_despite_prefix_hit(self):
+        local = _make_layer_metadata(
+            kv_caches_base_addr=[1000],
+            block_len=[24],
+            block_stride_bytes=[64],
+            block_shapes=[[3, 2]],
+            block_dtypes=["float32"],
+            cache_kind="circular",
+        )
+        remote = _make_layer_metadata(
+            tensor_group_idx=[1],
+            kv_caches_base_addr=[4000],
+            block_len=[24],
+            block_stride_bytes=[128],
+            block_shapes=[[3, 2]],
+            block_dtypes=["float32"],
+            cache_kind="circular",
+        )
+        req = self.req_meta_base
+        req.local_block_ids = [[5]]
+        req.remote_block_ids = [[99], [7]]
+        req.remote_cache_tokens = 128
+        req.local_computed_tokens = 149
+        req.chunk_finish = True
+        self.assertEqual(self.thread._get_component_transfer_meta(req, local, remote, 0), ([1320], [4896], [24]))
+        req.remote_block_ids[1] = []
+        with self.assertRaisesRegex(ValueError, "one matching state page"):
+            self.thread._get_component_transfer_meta(req, local, remote, 0)
+
+    def test_component_kda_selects_handoff_not_mtp_scratch_and_merges_heads(self):
+        local = _make_layer_metadata(
+            kv_caches_base_addr=[1000, 2000],
+            block_len=[24, 8],
+            block_size_scale=[1, 1],
+            block_stride_bytes=[64, 32],
+            block_shapes=[[1, 6], [2, 1, 1]],
+            logical_block_size=16,
+            state_cache_mode="align",
+            state_head_start=2,
+            state_total_heads=4,
+        )
+        remote = _make_layer_metadata(
+            kv_caches_base_addr=[4000, 8000],
+            block_len=[48, 16],
+            block_size_scale=[1, 1],
+            block_stride_bytes=[128, 64],
+            block_shapes=[[1, 12], [4, 1, 1]],
+            logical_block_size=16,
+            state_cache_mode="align",
+            state_total_heads=4,
+        )
+        req = self.req_meta_base
+        req.local_computed_tokens = 17
+        # Valid state is index 1; P and D have different speculative tails.
+        for scratch in ([90], [90, 91, 92, 93, 94]):
+            with self.subTest(scratch=scratch):
+                self.assertEqual(
+                    self.thread._get_state_transfer_meta(req, local, remote, [2, 3, 80, 81], [6, 7] + scratch),
+                    ([2096, 1192, 1200, 1208], [8456, 4904, 4920, 4936], [8, 8, 8, 8]),
+                )
 
     def test_final_layer_transfer_error_completes_reuse_gate_and_request(self):
         req_meta = self.req_meta_base
@@ -806,6 +918,8 @@ class MockVllmConfig:
         self.speculative_config = None
         self.quant_config = None
         self.model_config.use_mla = True
+        self.parallel_config.pipeline_parallel_size = 1
+        self.parallel_config.cp_kv_cache_interleave_size = 16
         self.parallel_config.tensor_parallel_size = 2
         self.parallel_config.data_parallel_rank_local = 0
         self.parallel_config.data_parallel_size_local = 1
@@ -834,8 +948,7 @@ class MockVllmConfig:
 
 class MockKVCacheConfig:
     def __init__(self, block_size=16):
-        kv_cache_spec = MagicMock()
-        kv_cache_spec.block_size = block_size
+        kv_cache_spec = _plain_spec(block_size)
         group_spec = MagicMock()
         group_spec.kv_cache_spec = kv_cache_spec
         group_spec.layer_names = ["encoder.layer.0"]
@@ -927,6 +1040,28 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(request.max_tokens, 1)
         self.assertTrue(request.kv_transfer_params["_p_side_truncated"])
 
+    def test_prefix_hit_survives_stale_request_and_allocation_retry(self):
+        self.scheduler.need_truncate = True
+        self.scheduler.executor.submit = MagicMock()
+        request = MockRequest("hit", list(range(65)), {"do_remote_prefill": True})
+        self.assertEqual(request.num_computed_tokens, 0)
+        self.scheduler.get_num_new_matched_tokens(request, 16)
+        # Re-query after an allocation retry must replace the earlier hit.
+        self.assertEqual(self.scheduler.get_num_new_matched_tokens(request, 32), (32, True))
+        blocks = _MockBlocks([], ([4, 5, 6, 7, 8],))
+        self.scheduler.update_state_after_alloc(request, blocks, 32)
+        message = self.scheduler.executor.submit.call_args.kwargs["message"]
+        self.assertEqual(message["remote_cached_tokens"], 32)
+        self.assertEqual(message["remote_block_ids"], ([4, 5, 6, 7],))
+        self.assertNotIn("hit", self.scheduler._local_prefix_cache_tokens)
+
+    def test_prefix_hit_cleanup_on_cancel_before_allocation(self):
+        for finish in (self.scheduler.request_finished, self.scheduler.request_finished_all_groups):
+            request = MockRequest("cancel", list(range(65)), {"do_remote_prefill": True})
+            self.scheduler.get_num_new_matched_tokens(request, 16)
+            finish(request, [])
+            self.assertNotIn("cancel", self.scheduler._local_prefix_cache_tokens)
+
     def test_build_connector_meta(self):
         self.scheduler.vllm_config.kv_transfer_config.is_kv_consumer = True
         request = MockRequest("req1")
@@ -957,6 +1092,7 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
         blocks = _MockBlocks(unhashed=[], block_ids_tuple=([4, 5],))
         self.scheduler.executor.submit = MagicMock()
 
+        self.scheduler.get_num_new_matched_tokens(request, 0)
         self.scheduler.update_state_after_alloc(request, blocks, num_external_tokens=16)
 
         _, kwargs = self.scheduler.executor.submit.call_args
@@ -1014,6 +1150,8 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
         req.num_computed_tokens = 0
         blocks = _MockBlocks(unhashed=[4, 5, 6], block_ids_tuple=([[4, 5, 6]],))
 
+        self.scheduler.executor.submit = MagicMock()
+        self.scheduler.get_num_new_matched_tokens(req, 16)
         self.scheduler.update_state_after_alloc(req, blocks, num_external_tokens=8)
         self.assertIn("req_u1", self.scheduler._reqs_need_recv)
         record = self.scheduler._reqs_need_recv["req_u1"]
@@ -1130,6 +1268,32 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
 
 
 class TestHelperFunctions(unittest.TestCase):
+    def test_component_selection_uses_cache_capabilities(self):
+        plain = AscendMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+        stride = AscendMLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float32,
+            indexes_kv_by_block_stride=True,
+        )
+        compressed = AscendMLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float32,
+            tokens_per_state=4,
+        )
+        for spec, expected in (
+            (plain, False),
+            (stride, True),
+            (compressed, True),
+            (SimpleNamespace(is_circular=True), True),
+        ):
+            with self.subTest(spec=spec):
+                config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=["layer0"])])
+                self.assertEqual(_requires_component_transfer(config), expected)
+
     def test_group_concurrent_contiguous(self):
         src: list[int] = [1, 2, 3, 5, 6]
         dst: list[int] = [10, 11, 12, 14, 15]
@@ -1294,6 +1458,7 @@ class TestMooncakeLayerwiseConnector(unittest.TestCase):
 
 def test_layerwise_reuse_state_tracks_shared_physical_slots():
     worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+    worker.use_component_transfer = False
     worker.index_to_name = {1: ["layer1"], 4: ["layer4"]}
     worker.layer_metadata = {
         "layer1": _make_layer_metadata(kv_caches_base_addr=[1000, 2000]),
@@ -1315,6 +1480,7 @@ def test_layerwise_reuse_state_tracks_shared_physical_slots():
 
 def test_layerwise_reuse_wait_propagates_mooncake_error():
     worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+    worker.use_component_transfer = False
     worker.index_to_name = {1: ["layer1"], 4: ["layer4"]}
     worker.layer_metadata = {
         "layer1": _make_layer_metadata(kv_caches_base_addr=[1000, 2000]),
@@ -1335,6 +1501,7 @@ def test_layerwise_reuse_wait_propagates_mooncake_error():
 
 def _make_worker_for_cache_write_event_test():
     worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+    worker.use_component_transfer = False
     worker.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_producer=True, is_kv_consumer=False),
     )
@@ -1551,7 +1718,6 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
             patch("torch.Tensor.size", return_value=(10, 16, 8, 16)),
             patch("torch.Tensor.element_size", return_value=4),
             patch("torch.Tensor.data_ptr", return_value=0x1000),
-            patch("math.prod", return_value=128),
             patch("random.Random"),
             patch(
                 "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.get_tensor_model_parallel_rank",
@@ -1607,11 +1773,11 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
 
         self.vllm_config = MockVllmConfig()
         self.engine_id = "test_engine"
-        mock_k = MagicMock()
+        mock_k = _packed_tensor_mock()
         mock_k.shape = (10, 16, 8, 16)
         mock_k.data_ptr.return_value = 0x1000
         mock_k.element_size.return_value = 4
-        mock_v = MagicMock()
+        mock_v = _packed_tensor_mock()
         mock_v.shape = (10, 16, 8, 16)
         mock_v.data_ptr.return_value = 0x2000
         mock_v.element_size.return_value = 4
@@ -1627,6 +1793,15 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
     def tearDown(self):
         for p in self.patches:
             p.stop()  # type: ignore
+
+    def test_cp_alone_does_not_select_component_transfer(self):
+        for pcp, dcp in ((4, 1), (4, 4), (1, 2)):
+            with self.subTest(pcp=pcp, dcp=dcp):
+                self.vllm_config.parallel_config.prefill_context_parallel_size = pcp
+                self.vllm_config.parallel_config.decode_context_parallel_size = dcp
+                worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, self.kv_cache_config, self.engine_id)
+                worker.register_kv_caches(self.kv_caches)
+                self.assertFalse(worker.use_component_transfer)
 
     def test_register_kv_caches_producer(self):
         self.vllm_config.kv_transfer_config.is_kv_producer = True
@@ -1647,12 +1822,12 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         self.assertIsNotNone(worker.kv_recv_layer_thread)
 
     def test_register_kv_caches_mla_case(self):
-        mla_cache1 = MagicMock()
+        mla_cache1 = _packed_tensor_mock()
         mla_cache1.size.return_value = (10, 16, 1, 16)
         mla_cache1.shape = (10, 16, 1, 16)
         mla_cache1.data_ptr.return_value = 0x1000
         mla_cache1.element_size.return_value = 4
-        mla_cache2 = MagicMock()
+        mla_cache2 = _packed_tensor_mock()
         mla_cache2.size.return_value = (10, 16, 1, 8)
         mla_cache2.shape = (10, 16, 1, 8)
         mla_cache2.data_ptr.return_value = 0x2000
@@ -1697,13 +1872,13 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
                 indexer_name = "model.layers.0.self_attn.indexer.k_cache"
                 group = worker.kv_cache_config.kv_cache_groups[0]
                 group.layer_names.append(indexer_name)
-                group.kv_cache_spec.kv_cache_specs[indexer_name] = MagicMock()
+                group.kv_cache_spec.kv_cache_specs[indexer_name] = _plain_spec()
                 caches: dict[str, tuple[MagicMock, ...]] = {}
                 # Register indexer first to check it never selects quant staging.
                 for name, count in ((indexer_name, 2), (layer_name, 1)):
                     tensors: list[MagicMock] = []
                     for _ in range(count):
-                        cache = MagicMock()
+                        cache = _packed_tensor_mock()
                         cache.shape = (10, 16, 1, 128)
                         cache.element_size.return_value = 1
                         cache.data_ptr.return_value = 0x1000 * (len(caches) * 2 + len(tensors) + 1)
@@ -1726,7 +1901,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         for split in (False, True):
             with self.subTest(split=split):
                 worker, layer_name = self._make_packed_sfa_worker()
-                cache = MagicMock()
+                cache = _packed_tensor_mock()
                 cache.is_contiguous.return_value = False
                 caches = (cache, cache) if split else (cache,)
                 with self.assertRaisesRegex(NotImplementedError, "one contiguous packed cache tensor"):
@@ -1741,7 +1916,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         spec = C8Spec(block_size=16, num_kv_heads=1, head_size=656, dtype=torch.float8_e4m3fn)
         self.assertFalse(hasattr(spec, "uses_packed_sfa_main_cache"))
         worker.kv_cache_specs[0].kv_cache_specs[layer_name] = spec
-        cache = MagicMock()
+        cache = _packed_tensor_mock()
         cache.shape = (10, 16, 1, 656)
         cache.data_ptr.return_value = 0x1000
         cache.element_size.return_value = 1
@@ -1764,7 +1939,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         indexer_0 = "model.layers.0.self_attn.indexer.k_cache"
         main_1 = "model.layers.1.self_attn.attn"
         group = MagicMock()
-        group.kv_cache_spec = MagicMock(block_size=16)
+        group.kv_cache_spec = _plain_spec()
         group.layer_names = [main_0, indexer_0, main_1]
         kv_cache_config = MagicMock()
         kv_cache_config.kv_cache_groups = [group]
@@ -1774,7 +1949,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         def make_cache(addr, tensor_count=2):
             caches = []
             for offset in range(tensor_count):
-                cache = MagicMock()
+                cache = _packed_tensor_mock()
                 cache.shape = (10, 16, 1, 16)
                 cache.data_ptr.return_value = addr + offset * 0x1000
                 cache.element_size.return_value = 4
@@ -1798,18 +1973,18 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         main_name = "model.layers.0.self_attn.attn"
         indexer_name = "model.layers.0.self_attn.indexer.k_cache"
         group = MagicMock()
-        group.kv_cache_spec = MagicMock(block_size=16)
+        group.kv_cache_spec = _plain_spec()
         group.layer_names = [main_name, indexer_name]
         kv_cache_config = MagicMock()
         kv_cache_config.kv_cache_groups = [group]
         kv_cache_config.kv_cache_tensors = []
         kv_cache_config.num_blocks = 10
 
-        main_cache = MagicMock()
+        main_cache = _packed_tensor_mock()
         main_cache.shape = (10, 16, 1, 16)
         main_cache.data_ptr.return_value = 0x10000
         main_cache.element_size.return_value = 4
-        indexer_cache = MagicMock()
+        indexer_cache = _packed_tensor_mock()
         indexer_cache.shape = (20, 16, 1, 16)
         indexer_cache.data_ptr.return_value = 0x20000
         indexer_cache.element_size.return_value = 4
@@ -1830,59 +2005,40 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
 
         register_buffer.assert_not_called()
 
-    def test_register_kv_caches_rejects_components_in_different_groups(self):
+    def test_register_kv_caches_accepts_components_in_different_groups(self):
         main_name = "model.layers.0.self_attn.attn"
         indexer_name = "model.layers.0.self_attn.indexer.k_cache"
-        main_group = MagicMock()
-        main_group.kv_cache_spec = MagicMock(block_size=16)
-        main_group.layer_names = [main_name]
-        indexer_group = MagicMock()
-        indexer_group.kv_cache_spec = MagicMock(block_size=16)
-        indexer_group.layer_names = [indexer_name]
-        kv_cache_config = MagicMock()
-        kv_cache_config.kv_cache_groups = [main_group, indexer_group]
-        kv_cache_config.kv_cache_tensors = []
-        kv_cache_config.num_blocks = 10
-
-        def make_cache(addr, tensor_count):
-            caches = []
-            for offset in range(tensor_count):
-                cache = MagicMock()
-                cache.shape = (10, 16, 1, 16)
-                cache.data_ptr.return_value = addr + offset * 0x1000
-                cache.element_size.return_value = 4
-                caches.append(cache)
-            return tuple(caches)
-
-        kv_caches = {
-            main_name: make_cache(0x10000, 2),
-            indexer_name: make_cache(0x20000, 1),
-        }
-        worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, kv_cache_config, self.engine_id)
-
-        with self.assertRaisesRegex(AssertionError, "must share one KV cache group"):
-            worker.register_kv_caches(kv_caches)
+        spec = AscendMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float32)
+        groups = [SimpleNamespace(kv_cache_spec=spec, layer_names=[name]) for name in (main_name, indexer_name)]
+        config = SimpleNamespace(kv_cache_groups=groups, kv_cache_tensors=[], num_blocks=10)
+        caches = {name: (torch.zeros(10, 16, 1, 16),) for name in (main_name, indexer_name)}
+        worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, config, self.engine_id)
+        worker.register_kv_caches(caches)
+        self.assertTrue(worker.use_component_transfer)
+        self.assertEqual(worker.layer_metadata[main_name].tensor_group_idx, [0])
+        self.assertEqual(worker.layer_metadata[indexer_name].tensor_group_idx, [1])
+        self.assertEqual(worker.index_to_name[0], [main_name, indexer_name])
 
     def test_register_kv_caches_uses_main_cache_for_quant_staging_buffer(self):
         main_name = "model.layers.0.self_attn.attn"
         indexer_name = "model.layers.0.self_attn.indexer.k_cache"
         group = MagicMock()
-        group.kv_cache_spec = MagicMock(block_size=16)
+        group.kv_cache_spec = _plain_spec()
         group.layer_names = [indexer_name, main_name]
         kv_cache_config = MagicMock()
         kv_cache_config.kv_cache_groups = [group]
         kv_cache_config.kv_cache_tensors = []
         kv_cache_config.num_blocks = 10
 
-        indexer_cache = MagicMock()
+        indexer_cache = _packed_tensor_mock()
         indexer_cache.shape = (10, 16, 1, 16)
         indexer_cache.data_ptr.return_value = 0x10000
         indexer_cache.element_size.return_value = 4
-        main_k_cache = MagicMock()
+        main_k_cache = _packed_tensor_mock()
         main_k_cache.shape = (10, 16, 1, 16)
         main_k_cache.data_ptr.return_value = 0x20000
         main_k_cache.element_size.return_value = 4
-        main_v_cache = MagicMock()
+        main_v_cache = _packed_tensor_mock()
         main_v_cache.shape = (10, 16, 1, 16)
         main_v_cache.data_ptr.return_value = 0x30000
         main_v_cache.element_size.return_value = 4
