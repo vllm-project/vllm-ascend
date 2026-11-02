@@ -88,8 +88,10 @@ def _widen_cache_dtype_literal_for_worker() -> None:
     missing = tuple(d for d in ("int8", "mxfp8") if d not in existing_args)
     if missing:
         # Derive from the current upstream Literal and append the Ascend-only
-        # dtypes so no upstream member is dropped.
-        widened = typing.Literal[*existing_args + missing]  # type: ignore[valid-type]
+        # dtypes so no upstream member is dropped. Plain-tuple subscript: the
+        # same __getitem__ call as star-unpacking it, and it parses on Python
+        # 3.10 (PEP 646 starred subscripts are 3.11+).
+        widened = typing.Literal[existing_args + missing]  # type: ignore[valid-type]
 
         _cache_mod.CacheDType = widened
         CacheConfig.__annotations__["cache_dtype"] = widened
@@ -139,7 +141,9 @@ def _widen_indexer_kv_dtype_literal_for_worker() -> None:
     if "int8" in existing_args:
         return
 
-    widened = typing.Literal[*existing_args + ("int8",)]  # type: ignore[valid-type]
+    # Plain-tuple subscript: same __getitem__ call as star-unpacking it and
+    # parses on Python 3.10 (PEP 646 starred subscripts are 3.11+).
+    widened = typing.Literal[existing_args + ("int8",)]  # type: ignore[valid-type]
 
     _attention_mod.IndexerKVDType = widened
     AttentionConfig.__annotations__["indexer_kv_dtype"] = widened
