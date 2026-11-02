@@ -22,6 +22,7 @@ _MLP_TP: GroupCoordinator | None = None
 _OTP: GroupCoordinator | None = None
 _LMTP: GroupCoordinator | None = None
 _EMBED_TP: GroupCoordinator | None = None
+_KDA_TP: GroupCoordinator | None = None
 
 _P_TP: GroupCoordinator | None = None
 
@@ -198,11 +199,12 @@ def init_ascend_model_parallel(
             group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
         )
 
-    # Initialize fine-grained TP process groups on Ascend for four components:
+    # Initialize fine-grained TP process groups on Ascend for five components:
     # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
     # 2. O Proj: attention output projection (`oproj_tensor_parallel_size`)
     # 3. Embedding: The token embedding table at the input of the model (`embedding_tensor_parallel_size`)
     # 4. MLP: feed-forward network in transformer blocks (`mlp_tensor_parallel_size`)
+    # 5. KDA projections: request-local recurrent state (`kda_tensor_parallel_size`)
     _group_cache = {}
 
     def _create_or_get_group(group_size: int, group_name: str) -> GroupCoordinator:
@@ -227,8 +229,9 @@ def init_ascend_model_parallel(
     lmhead_tp_size = get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size
     embedding_tp_size = get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size
     mlp_tp_size = get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size
+    kda_tp_size = get_ascend_config().finegrained_tp_config.kda_tensor_parallel_size
 
-    global _OTP, _LMTP, _EMBED_TP, _MLP_TP
+    global _OTP, _LMTP, _EMBED_TP, _MLP_TP, _KDA_TP
 
     if otp_size > 1:
         _OTP = _create_or_get_group(otp_size, "otp")
@@ -238,6 +241,8 @@ def init_ascend_model_parallel(
         _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
     if mlp_tp_size > 1:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
+    if kda_tp_size > 1:
+        _KDA_TP = _create_or_get_group(kda_tp_size, "kdatp")
 
 
 def model_parallel_initialized():
@@ -269,6 +274,11 @@ def get_embed_tp_group() -> GroupCoordinator:
     return _EMBED_TP
 
 
+def get_kda_tp_group() -> GroupCoordinator:
+    assert _KDA_TP is not None, "KDA projection tensor parallel group is not initialized"
+    return _KDA_TP
+
+
 def get_replicated_group() -> ReplicatedGroup:
     return _REPLICATED
 
@@ -289,6 +299,11 @@ def get_kvpp_group() -> GroupCoordinator:
 
 
 def destroy_ascend_model_parallel():
+    global _KDA_TP
+    if _KDA_TP:
+        _KDA_TP.destroy()
+    _KDA_TP = None
+
     global _KVPP
     if _KVPP:
         _KVPP.destroy()

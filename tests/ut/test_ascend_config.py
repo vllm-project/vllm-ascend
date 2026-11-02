@@ -1322,8 +1322,9 @@ class TestSubconfigPydanticTypeValidation(TestBase):
                 config.lmhead_tensor_parallel_size,
                 config.embedding_tensor_parallel_size,
                 config.mlp_tensor_parallel_size,
+                config.kda_tensor_parallel_size,
             ),
-            (1, 1, 1, 1),
+            (1, 1, 1, 1, 1),
         )
 
     def _oproj_tp_vllm_config(
@@ -1362,6 +1363,39 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         # single check covers both spellings of "no graph mode".
         with self.assertRaisesRegex(AssertionError, "only supported in graph mode"):
             config._validate_preconditions(self._oproj_tp_vllm_config(cudagraph_mode=CUDAGraphMode.NONE))
+
+    def test_kda_projection_tp_preconditions(self):
+        def deployment():
+            vc = self._oproj_tp_vllm_config()
+            vc.parallel_config.pipeline_parallel_size = 1
+            vc.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next_text", linear_num_heads=64)
+            return vc
+
+        for size in (2, 4, 8):
+            config = FinegrainedTPConfig(kda_tensor_parallel_size=size)
+            config._validate_preconditions(deployment())
+            self.assertEqual(config.kda_tensor_parallel_size, size)
+        for field in ("tensor_parallel_size", "prefill_context_parallel_size", "pipeline_parallel_size"):
+            vc = deployment()
+            setattr(vc.parallel_config, field, 2)
+            with self.assertRaisesRegex(ValueError, "TP=1, PCP=1 and PP=1"):
+                FinegrainedTPConfig(kda_tensor_parallel_size=2)._validate_preconditions(vc)
+        vc = deployment()
+        vc.kv_transfer_config.is_kv_consumer = False
+        with self.assertRaisesRegex(ValueError, "PD decode node"):
+            FinegrainedTPConfig(kda_tensor_parallel_size=2)._validate_preconditions(vc)
+        vc = deployment()
+        vc.model_config.hf_text_config.model_type = "other"
+        with self.assertRaisesRegex(ValueError, "GLM-5.3-Flash only"):
+            FinegrainedTPConfig(kda_tensor_parallel_size=2)._validate_preconditions(vc)
+        with self.assertRaisesRegex(ValueError, "divide the KDA head count"):
+            FinegrainedTPConfig(kda_tensor_parallel_size=3)._validate_preconditions(deployment())
+        vc = deployment()
+        vc.parallel_config.data_parallel_size = 6
+        with self.assertRaisesRegex(AssertionError, "divide by data_parallel_size"):
+            FinegrainedTPConfig(kda_tensor_parallel_size=4)._validate_preconditions(vc)
+        with self.assertRaisesRegex(ValueError, "kda_tensor_parallel_size must be non-negative"):
+            FinegrainedTPConfig(kda_tensor_parallel_size=-1)
 
     def test_oproj_tp_rejects_pcp(self):
         config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)

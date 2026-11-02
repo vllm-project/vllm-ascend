@@ -2,13 +2,13 @@
 
 ## Feature Introduction
 
-Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism with **independent tensor-parallel sizes for different model components** — embedding, LM head, attention output projection (o_proj), and MLP blocks — configured via the `finegrained_tp_config` parameter. Instead of a single global `tensor_parallel_size`, each component is sharded along the data-parallel (DP) axis with its own size, reducing per-device weight memory. The feature supports MoE models only.
+Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism with **independent tensor-parallel sizes for different model components** — embedding, LM head, attention output projection (o_proj), MLP blocks, and GLM-5.3-Flash KDA projections — configured via the `finegrained_tp_config` parameter. Instead of a single global `tensor_parallel_size`, each component is sharded along the data-parallel (DP) axis with its own size, reducing per-device weight memory. The feature supports MoE models only.
 
 In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved **9.72 GB per card** with a net TPOT improvement (see [Experimental Results](#experimental-results)). In decode-heavy workloads, where GEMMs are memory-bound, the smaller per-device weights also reduce the weight-read volume per step for the sharded GEMM modules (LM head, o_proj, and MLP).
 
 ### Working Principle
 
-All four knobs shard weights over a process group built along the DP axis, and every rank of that group joins the exchange on every engine step. The four components fall into two families with different exchange contracts, and the family a knob belongs to determines where it can run:
+All knobs shard weights over a process group built along the DP axis, and every rank of that group joins the exchange on every engine step. Embedding, LM head, o_proj and MLP have the following exchange contracts; KDA projections use the separate path described below:
 
 - **embedding / LM head (fixed-capacity exchanges)**: the exchange always runs at a fixed, deployment-wide capacity regardless of the real per-step token count, and the padding tail is trimmed afterwards. For embedding, the op pads token IDs to `max(potential_max_tokens, max_num_batched_tokens)` before an `all_gather`, looks up its vocabulary shard, and `reduce_scatter`s the embeddings back to the original owners — prefill-sized steps included. For the LM head, the runner pads the sampled hidden-state rows to `max_num_reqs * decode_query_len` before `all_gather → vocab-sharded GEMM → all_to_all`, and idle DP ranks join through a dummy `compute_logits` at the same capacity. Because the collective shapes never depend on the step, these knobs work in eager and graph mode, in both prefill and decode.
 - **o_proj / MLP (per-step exchanges that require decode-shaped steps)**: the exchange is sized by the actual step. MLP runs plain `all_gather` (gate_up) / `reduce_scatter` (down) whose shapes follow the real token count, so every rank in the group must forward the same number of tokens on every step. o_proj pads to a static capacity — `potential_max_tokens`, the deployment-wide step bound (the largest cudagraph capture size, and at least the largest decode-shaped step) — and fails explicitly beyond it. These knobs are supported only in graph-dispatched P/D decode deployments, where steps stay decode-shaped and aligned across the DP group — see the [preconditions](#preconditions-for-o_proj--mlp-tp) and the runtime guard against eagerly dispatched steps.
@@ -35,6 +35,22 @@ Fine-grained TP is designed for the **decode instance** of PD separation, where 
 - o_proj / MLP TP cannot be combined with standard TP and require `tensor_parallel_size == 1`; embedding / LM head TP can — see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement).
 - LM head TP can be combined with speculative decoding (EAGLE, DFlash, and DSpark draft models); see [LM Head TP and Speculative Decoding](#lm-head-tp-and-speculative-decoding).
 ```
+
+### KDA Projection TP
+
+For GLM-5.3-Flash, set `finegrained_tp_config.kda_tensor_parallel_size` to shard the merged Q/K/V/beta/low-rank input projection. The forget/gate up-projections remain on each request's DP owner. The output projection is controlled independently by `oproj_tensor_parallel_size`. SFA and the recurrent KDA core retain the normal deployment layout. Convolution weights, recurrent state, cache indices, prefix-cache state and speculative rollback remain local to the request's DP owner.
+
+The projection strategy executes inside the existing KDA custom-op boundary and rejoins the common recurrent core, normalization and output-projection path. The KDA path gathers hidden states, computes sharded input projections, and exchanges QKV/beta to restore each owner's full heads. The asynchronous AllToAll overlaps with the owner's forget/gate up-projections, whose full-head outputs need no exchange. The local KDA core runs after both operations finish. The owner's full-head result then enters the ordinary output projection. KDA TP adds no output AllToAll or ReduceScatter; any output sharding and communication belong to the independent o-projection TP path. This is not persistent head-sharded recurrent-state execution.
+
+The size defaults to `1` and must divide both `data_parallel_size` and the KDA head count. The initial scope is a GLM-5.3-Flash P/D decode node with TP=1, PCP=1 and PP=1. The normal DP token metadata supplies the common padded exchange size, including idle ranks. This path retains DP step coordination even when MC2 could otherwise skip it. No cache format or P-node setting changes are required.
+
+For example, use D TP1/DP8/EP8 with:
+
+```bash
+--additional-config '{"finegrained_tp_config":{"kda_tensor_parallel_size":8,"oproj_tensor_parallel_size":1}}'
+```
+
+Compare size `1` against `2`, `4` and `8` with identical workload, cache precision, MTP and graph settings. Validate complete answers and effective worker settings before interpreting throughput results. The DeepSeek measurements below do not measure this KDA path.
 
 ### Constraints and Limitations
 
@@ -221,6 +237,7 @@ All knobs live under `finegrained_tp_config` inside `--additional-config`. The d
 | `mlp_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
 | `lmhead_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the LM head. |
 | `embedding_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the token embedding table. |
+| `kda_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` and the KDA head count | GLM-5.3-Flash [KDA projection TP](#kda-projection-tp) on a PD decode node with TP=1, PCP=1 and PP=1. |
 
 ## Experimental Results
 

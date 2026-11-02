@@ -25,9 +25,10 @@ import torch
 import torch_npu
 
 from tests.ut.base import TestBase
-from vllm_ascend import utils
+from vllm_ascend import ascend_forward_context, utils
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
 
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
@@ -928,3 +929,26 @@ def test_finegrained_tp_enable_requires_weight_sharding(knob, enable_fn, size, e
     config = SimpleNamespace(finegrained_tp_config=SimpleNamespace(**{knob: size}))
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=config):
         assert getattr(utils, enable_fn)() is enabled
+
+
+@pytest.mark.parametrize("kda_size", [1, 2, 4])
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_kda_projection_tp_keeps_dp_coordination(monkeypatch, kda_size, is_draft):
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=128),
+        compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(separate_routine=lambda: False)),
+    )
+    ascend = SimpleNamespace(
+        get_mc2_comm_alg=lambda: "fullmesh",
+        scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
+        finegrained_tp_config=SimpleNamespace(kda_tensor_parallel_size=kda_size),
+    )
+    monkeypatch.setattr(utils, "get_ascend_config", lambda: ascend)
+    monkeypatch.setattr(utils, "is_mega_moe_supported", lambda: False)
+    monkeypatch.setattr(utils, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(utils, "is_drafter_moe_model", lambda _: True)
+    monkeypatch.setattr(utils, "get_potential_max_tokens", lambda: 128)
+    monkeypatch.setattr(ascend_forward_context, "use_cann_megamoe", lambda _: False)
+    monkeypatch.setattr(ascend_forward_context, "select_moe_comm_method", lambda *_: MoECommType.MC2)
+    assert utils.should_skip_allreduce_across_dp_group(config, is_draft_model=is_draft) is (kda_size == 1)
