@@ -65,7 +65,7 @@ The owner runs as a separate process and needs an NPU for HIXL even though its p
 
 Readers compare checkpoint metadata and sampled boundary weights before attaching. Each owner has a generation; mismatched generations and invalid lookup shapes fail explicitly. Sampling is a compatibility check, not a full checkpoint checksum or a model-quality evaluation.
 
-On normal shutdown, the reader synchronizes NPU use, disconnects/deregisters its local transport, and asks the owner to retire its leased stage. Normal attach/lookup/close and reattach have been exercised. An unexpected socket EOF does not prove outstanding RDMA has retired, so the owner retains that stage conservatively. Automatic reclamation after consumer crashes and transparent owner failover are not implemented. Owner shutdown drains normal leases; a retained failed lease can keep it draining.
+On normal shutdown, the reader synchronizes NPU use, disconnects/deregisters its local transport, and asks the owner to retire its leased stage. Set a positive `--shutdown-timeout` on every consumer so its worker processes have time to run this cleanup; the default immediate shutdown can force-kill workers and leave retained leases. An unexpected socket EOF does not prove outstanding RDMA has retired, so the owner retains that stage conservatively. Automatic reclamation after consumer crashes and transparent owner failover are not implemented. Owner shutdown drains normal leases; a retained failed lease can keep it draining.
 
 ## Validation and performance claims
 
