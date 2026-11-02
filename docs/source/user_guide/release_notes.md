@@ -2,7 +2,7 @@
 
 ## v0.32.0rc1 - 2026.11.02
 
-This is the first release candidate of vLLM Ascend v0.32.0, aligned with upstream vLLM v0.32.0. This model-focused release expands Qwen3.8-Flash-Next with pipeline and sequence parallelism on A3, and adds experimental, container-based deployment support for MiniMax-M3.1-Flash on A2/A3 and 950DT products. It also advances DeepSeek V4.1, Kimi K3, GLM, and MiniMax-M3, with improvements to Model Runner V2, context parallelism, speculative decoding, and KV Cache management. Support varies by model and hardware; consult the [versioned documentation](https://docs.vllm.ai/projects/ascend/en/v0.32.0rc1/) for validated combinations and deployment guidance. Configurations outside the documented scope are not part of the v0.32.0rc1 release claim. See the [release feedback issue](https://github.com/vllm-project/vllm-ascend/issues/19888) for updates.
+This is the first release candidate of vLLM Ascend v0.32.0, aligned with upstream vLLM v0.32.0. This model-focused release expands **Qwen3.8-Flash-Next** with pipeline and sequence parallelism on A3, and adds experimental, container-based deployment support for **MiniMax-M3.1-Flash** on A2/A3 and 950DT products. It also advances **DeepSeek V4.1**, **Kimi K3**, **GLM**, and **MiniMax-M3**, with improvements to Model Runner V2, context parallelism, speculative decoding, and KV Cache management. Support varies by model and hardware; consult the [versioned documentation](https://docs.vllm.ai/projects/ascend/en/v0.32.0rc1/) for validated combinations and deployment guidance. Configurations outside the documented scope are not part of the v0.32.0rc1 release claim. See the [release feedback issue](https://github.com/vllm-project/vllm-ascend/issues/19888) for updates.
 
 ### Highlights
 
