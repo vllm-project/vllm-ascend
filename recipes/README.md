@@ -102,12 +102,13 @@ Once enabled, the `Recipes Preview` workflow sends events to
 - PRs targeting `main`: opening, pushing, or reopening sends `preview-pr`
   with `source: vllm-ascend` and the PR number. Closing sends the same event
   so the renderer can delete the preview branch.
-- Pushes to `main` changing `recipes/**`: `recipes-updated` requests a
+- Pushes to `main` changing `recipes/**/*.yaml`: `recipes-updated` requests a
   production source-lock update with `source: vllm-ascend`.
 
-Both triggers exclude `recipes/README.md`: changes to this file alone do not
-dispatch preview or production updates. Changes that also include other files
-under `recipes/` still trigger the workflow.
+Both triggers only match `.yaml` files under `recipes/`, including
+`recipes/manifest.yaml` and nested overlays. Documentation-only changes do not
+dispatch preview or production updates. Changes that also include matching
+recipe YAML files still trigger the workflow.
 
 The workflow's `recipes-preview` environment provides a **View deployment**
 link to
@@ -120,14 +121,17 @@ Push runs link to [recipes.vllm.ai](https://recipes.vllm.ai); close events do
 not advertise a preview URL.
 
 When enabled, the `Recipes Preview Comment` workflow posts one
-preview-link comment on open PRs targeting `main` that have the `recipe` label and change
-`recipes/**`, including fork PRs. It reuses the fixed preview URL above and the
+preview-link comment on open PRs, including fork PRs, that target `main`, have
+the `recipe` label, and change files matching `recipes/**/*.yaml`.
+It reuses the fixed preview URL above and the
 existing GitHub Actions bot, updates the same comment with the current PR
 commit after a push, and skips unchanged comments on reruns. Removing the label,
-closing or merging a PR, removing all recipe changes, or changing its
+closing or merging a PR, removing all eligible recipe changes, or changing its
 base away from `main` updates an existing comment to an inactive status;
 reopening or restoring eligible changes restores the link. The comment does
 not confirm deployment success, cleanup, or publication.
+PRs that only change `recipes/README.md` do not receive a new preview comment;
+any existing comment is deactivated.
 
 The workflow also scans open PRs with the `recipe` label once
 per hour, at minute 23 (`23 * * * *`), to backfill or refresh comments. GitHub
