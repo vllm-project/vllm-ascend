@@ -70,22 +70,41 @@ def resolve_block_scales(
     block_n: int,
     block_k: int,
     out_dtype: torch.dtype,
+    row_offset: int = 0,
+    col_offset: int = 0,
 ) -> torch.Tensor:
     """Expand a block-wise FP8 matrix into a dense ``out_dtype`` matrix.
 
     ``weight`` is ``[out_features, in_features]`` and ``scale_inv`` carries one
     scale per ``block_n x block_k`` tile. The scales stay in float32 during the
     multiply so a block's shared scale is not itself rounded to bfloat16.
+
+    ``row_offset``/``col_offset`` count how many rows/columns into the tile
+    that ``scale_inv[0, 0]`` covers ``weight[0, 0]`` actually starts. They are
+    nonzero exactly when ``weight``/``scale_inv`` is a TP shard whose boundary
+    does not land on a global ``block_n``/``block_k`` multiple -- the whole
+    tensor (or any shard that happens to start on a block boundary) is the
+    default, zero-offset case. Passing the wrong offset for such a shard is a
+    silent correctness bug: the shapes still match (one scale row still covers
+    each local ``block_n`` rows), only the *values* are wrong, for whichever
+    rows/columns actually belong to a different global tile than the local,
+    offset-unaware grouping assumes.
     """
     if weight.dim() != 2:
         raise ValueError(f"Expected a 2D block-quantized weight, got shape {tuple(weight.shape)}.")
+    if not 0 <= row_offset < block_n:
+        raise ValueError(f"row_offset must satisfy 0 <= row_offset < block_n ({block_n}), got {row_offset}.")
+    if not 0 <= col_offset < block_k:
+        raise ValueError(f"col_offset must satisfy 0 <= col_offset < block_k ({block_k}), got {col_offset}.")
 
     out_features, in_features = weight.shape
-    expected_scale_shape = (cdiv(out_features, block_n), cdiv(in_features, block_k))
+    expected_scale_shape = (cdiv(out_features + row_offset, block_n), cdiv(in_features + col_offset, block_k))
     if tuple(scale_inv.shape) != expected_scale_shape:
         raise ValueError(
             f"Block-wise FP8 weight of shape {tuple(weight.shape)} with block size "
-            f"({block_n}, {block_k}) needs a scale of shape {expected_scale_shape}, but the "
+            f"({block_n}, {block_k})"
+            + (f" and offset ({row_offset}, {col_offset})" if row_offset or col_offset else "")
+            + f" needs a scale of shape {expected_scale_shape}, but the "
             f"checkpoint provided {tuple(scale_inv.shape)}. The weight and its "
             "`weight_scale_inv` are mismatched or unpaired."
         )
@@ -94,13 +113,17 @@ def resolve_block_scales(
     rows_per_step = max(block_n, _ROWS_PER_DEQUANT_STEP // block_n * block_n)
     for row_start in range(0, out_features, rows_per_step):
         row_end = min(row_start + rows_per_step, out_features)
+        global_row_start, global_row_end = row_start + row_offset, row_end + row_offset
         # Keep dtype conversion on the weight device so a CPU-resident scale
         # cannot multiply an NPU weight. Same-device `.to()` is a no-op.
-        row_scales = scale_inv[row_start // block_n : cdiv(row_end, block_n)].to(
+        row_scales = scale_inv[global_row_start // block_n : cdiv(global_row_end, block_n)].to(
             device=weight.device, dtype=torch.float32
         )
-        row_scales = row_scales.repeat_interleave(block_n, dim=0)[: row_end - row_start]
-        row_scales = row_scales.repeat_interleave(block_k, dim=1)[:, :in_features]
+        row_start_in_tile = global_row_start % block_n
+        row_scales = row_scales.repeat_interleave(block_n, dim=0)[
+            row_start_in_tile : row_start_in_tile + (row_end - row_start)
+        ]
+        row_scales = row_scales.repeat_interleave(block_k, dim=1)[:, col_offset : col_offset + in_features]
         resolved[row_start:row_end] = weight[row_start:row_end].to(torch.float32) * row_scales
     return resolved
 
