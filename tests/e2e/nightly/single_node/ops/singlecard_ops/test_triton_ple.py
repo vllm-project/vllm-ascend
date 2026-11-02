@@ -127,7 +127,13 @@ def test_prefill_one_request():
             channels = 10240
             x = torch.randn(tokens, channels, device="npu", dtype=dtype)
             weights = torch.randn(channels, 4, device="npu", dtype=dtype)
-            original_state = torch.randn(2, channels, 12, device="npu", dtype=dtype)
+            # Long prefill uses the model's channel-contiguous state view;
+            # the short case also covers a contiguous [slot, channel, window].
+            if tokens == 8192:
+                original_state = torch.randn(2, 12, channels, device="npu", dtype=dtype).transpose(1, 2)
+                assert original_state.stride(1) == 1
+            else:
+                original_state = torch.randn(2, channels, 12, device="npu", dtype=dtype)
             original_output = torch.randn_like(x)
             for initialized in (True, False):
                 for null_slot in (False, True):
