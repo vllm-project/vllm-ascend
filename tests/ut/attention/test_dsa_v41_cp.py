@@ -603,7 +603,7 @@ class TestPCPMetadata:
         assert builder.take_device_metadata_tasks() == ()
 
     @pytest.mark.parametrize("rank", [0, 1])
-    def test_a5_attention_metadata_is_deferred_to_real_layer_lengths(self, builders, rank):
+    def test_a5_attention_metadata_has_one_local_owner_across_capture_and_prefill(self, builders, rank):
         owners = builders(rank=rank)
         swa_builder = owners["swa"]
         calls = []
@@ -624,9 +624,12 @@ class TestPCPMetadata:
                 result = _build_planes(owners, batch)[PREFIXES["swa"]]
             tasks = swa_builder.take_device_metadata_tasks()
             assert not swa_builder._global_builder.take_device_metadata_tasks()
-            assert tasks == ()
-            assert result.smla_metadata is None
-            assert calls == []
+            assert len(tasks) == int(bool(batch.local_ids))
+            for task in tasks:
+                assert task.stage == dsa_v41.DeviceMetadataStage.ATTENTION
+                assert task.group_id == id(swa_builder._a5_smla_metadata)
+                task.run()
+                torch.testing.assert_close(calls[-1], result.query_start_loc)
             assert swa_builder._a5_smla_metadata.data_ptr() == address
             assert torch.count_nonzero(swa_builder._global_builder._a5_smla_metadata) == 0
 
@@ -1256,3 +1259,82 @@ class TestProjectionLayout:
         expected = torch.zeros_like(output)
         expected[:live] = values.flatten(1)
         torch.testing.assert_close(output, expected)
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_a5_async_plans_use_real_lengths_and_first_consumption_order(builders, rank):
+    owners = builders(rank=rank)
+    builder = owners["swa"]
+    builder.vllm_config.model_config.hf_text_config.compress_ratios = [0, 0, 2, 2, 1, 1]
+    builder._uses_a5_packed_cache = True
+    builder._global_builder._uses_a5_packed_cache = True
+    builder._a5_smla_metadata = torch.empty(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    builder._a5_smla_length_rows = torch.empty(64, 1, dtype=torch.int32)
+    calls = []
+
+    def plan(ori, cmp, **kwargs):
+        calls.append((ori.clone(), cmp.clone(), kwargs))
+        return torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+
+    builder._device_backend = SimpleNamespace(mixed_quant_sparse_flash_mla_metadata=plan)
+    addresses = None
+    for scenario in ["prefill", "decode", "mixed", "prefill"]:
+        batch = _batch(2, rank, scenario)
+        with builder.defer_device_metadata(in_graph=batch.graph):
+            result = _build_planes(owners, batch)[PREFIXES["swa"]]
+        tasks = builder.take_device_metadata_tasks()
+        assert len(tasks) == 3
+        assert list(result.a5_smla_plans) == [0, 2, 1]
+        before = len(calls)
+        # Planning is deferred until the executor runs on its own stream.
+        for ratio, task in zip([0, 2, 1], tasks):
+            assert task.group_id == id(result.a5_smla_plans[ratio])
+            task.run()
+            ori, cmp, kw = calls[-1]
+            rows = ori.shape[0]
+            torch.testing.assert_close(ori[:, 0], (result.positions[:rows] + 1).clamp(0, 4).int())
+            expected = torch.zeros(rows, dtype=torch.int32)
+            if ratio:
+                for req in range(result.num_reqs):
+                    lo, hi = result.query_start_loc[req : req + 2].tolist()
+                    for row in range(lo, min(hi, rows)):
+                        visible = max(0, min(int(result.positions[row]) + 1, int(result.seq_lens[req])))
+                        expected[row] = min(3, visible // ratio)
+            torch.testing.assert_close(cmp[:, 0], expected.int())
+            assert kw["has_cmp_kv"] == bool(ratio)
+        assert len(calls) == before + 3
+        current = [result.a5_smla_plans[r].data_ptr() for r in [0, 2, 1]]
+        if addresses is not None:
+            assert current == addresses
+        addresses = current
+
+
+def test_a5_noncausal_draft_plan_keeps_actual_window_lengths(builders, monkeypatch):
+    builder = builders()["swa"]
+    builder._uses_a5_packed_cache = True
+    builder._a5_smla_metadata = torch.empty(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    builder._a5_smla_length_rows = torch.empty(64, 1, dtype=torch.int32)
+    builder.vllm_config.model_config.hf_text_config.compress_ratios = [0, 0, 2, 1]
+    calls = []
+
+    def make_indices(*args, **kwargs):
+        n = args[6]
+        return torch.zeros((n, 1, 8), dtype=torch.int32), torch.full((n, 1), 6, dtype=torch.int32)
+
+    monkeypatch.setattr(dsa_v41, "build_dspark_swa_indices", make_indices)
+
+    def plan(ori, cmp, **kwargs):
+        calls.append((ori.clone(), cmp.clone(), kwargs))
+        return torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+
+    builder._device_backend = SimpleNamespace(mixed_quant_sparse_flash_mla_metadata=plan)
+    common = _batch(2, 0, "decode").local.replace(causal=False, pcp_context=None)
+    with dsa_v41.AscendDSAV41MetadataBuilder.defer_device_metadata(builder):
+        result = dsa_v41.AscendDSAV41MetadataBuilder.build(builder, 0, common)
+    tasks = builder.take_device_metadata_tasks()
+    assert len(tasks) == 1 and list(result.a5_smla_plans) == [0]
+    assert not calls
+    tasks[0].run()
+    ori, cmp, kw = calls[0]
+    assert torch.all(ori == 6) and torch.count_nonzero(cmp) == 0
+    assert not kw["has_cmp_kv"]
