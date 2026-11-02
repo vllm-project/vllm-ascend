@@ -1,0 +1,5 @@
+pr: 20658
+entries:
+  - category: bugfix
+    text: Fixed static-kernel tiling metadata access in the A5 quantized sparse flash attention dispatcher.
+    hardware: [A5]
