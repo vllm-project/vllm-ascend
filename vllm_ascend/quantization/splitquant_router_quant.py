@@ -55,4 +55,4 @@ def install():
             setattr(self.experts, name, getattr(self.experts, name, 0) + 1)
         return out.reshape(shape)
 
-    SplitQuantMoeBlock.forward = forward
+    SplitQuantMoeBlock.forward = forward  # type: ignore[method-assign]

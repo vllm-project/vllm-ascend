@@ -58,7 +58,7 @@ class SplitQuantAttention(Qwen3Attention):
                 config.hidden_size, size,
                 bias=getattr(config, "attention_bias", False),
                 quant_config=quant_config, prefix=f"{prefix}.{name}"))
-        self.o_proj = RowParallelLinear(
+        self.o_proj = RowParallelLinear(  # type: ignore[has-type]
             self.total_num_heads * self.head_dim, config.hidden_size,
             bias=False, quant_config=quant_config, prefix=f"{prefix}.o_proj")
 
@@ -108,7 +108,7 @@ class SplitQuantDecoderLayer(Qwen3DecoderLayer):
 
 
 class SplitQuantQwen3ForCausalLM(Qwen3ForCausalLM):
-    packed_modules_mapping = {}
+    packed_modules_mapping: dict[str, list[str]] = {}
 
     def __init__(self, *, vllm_config, prefix=""):
         nn.Module.__init__(self)
@@ -134,7 +134,7 @@ class SplitQuantQwen3ForCausalLM(Qwen3ForCausalLM):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params = dict(self.named_parameters())
-        loaded = set()
+        loaded: set[str] = set()
         helper_markers = (".ln_trans.", ".o_trans.", ".vcache_trans.",
                           ".up_gate_trans.", ".down_trans.")
         aliases = ((".self_attn._parent_input_layernorm.weight", ".input_layernorm.weight"),
@@ -347,7 +347,7 @@ class SplitQuantMoeAttention(Qwen3MoeAttention):
         context.pop(f"{prefix}.o_proj", None)
         for n,s in (("q_proj",self.q_size),("k_proj",self.kv_size),("v_proj",self.kv_size)):
             setattr(self,n,ColumnParallelLinear(config.hidden_size,s,bias=False,quant_config=quant_config,prefix=f"{prefix}.{n}"))
-        self.o_proj = RowParallelLinear(self.total_num_heads*self.head_dim, config.hidden_size,bias=False,quant_config=quant_config,prefix=f"{prefix}.o_proj")
+        self.o_proj = RowParallelLinear(self.total_num_heads*self.head_dim, config.hidden_size,bias=False,quant_config=quant_config,prefix=f"{prefix}.o_proj")  # type: ignore[has-type]
     def forward(self, positions, hidden_states):
         q,_=self.q_proj(hidden_states); k,_=self.k_proj(hidden_states); v,_=self.v_proj(hidden_states)
         q=self.q_norm(q.reshape(-1,self.num_heads,self.head_dim)).reshape(q.shape); k=self.k_norm(k.reshape(-1,self.num_kv_heads,self.head_dim)).reshape(k.shape)
@@ -380,7 +380,7 @@ class SplitQuantQwen3MoeModel(nn.Module):
 
 
 class SplitQuantQwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExperts):
-    packed_modules_mapping={}; fall_back_to_pt_during_load=False
+    packed_modules_mapping: dict[str, list[str]] = {}; fall_back_to_pt_during_load=False
     def __init__(self, *, vllm_config, prefix=""):
         super().__init__(); c=vllm_config.model_config.hf_text_config; self.config=c; self.quant_config=vllm_config.quant_config
         self.model=SplitQuantQwen3MoeModel(vllm_config,maybe_prefix(prefix,"model")); self.lm_head=ParallelLMHead(c.vocab_size,c.hidden_size,quant_config=None,prefix=maybe_prefix(prefix,"lm_head")); self.logits_processor=LogitsProcessor(c.vocab_size); self.make_empty_intermediate_tensors=self.model.make_empty_intermediate_tensors

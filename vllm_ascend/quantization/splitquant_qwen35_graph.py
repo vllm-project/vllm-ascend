@@ -40,7 +40,8 @@ def install_graph_audit():
   result=original(self,*args,**kwargs)
   if active:GRAPH_COUNTS['replay' if replay else 'capture']+=1
   return result
- ACLGraphWrapper.__call__=audited;ACLGraphWrapper._qwen35_audited=True
+ ACLGraphWrapper.__call__=audited  # type: ignore[method-assign]
+ ACLGraphWrapper._qwen35_audited=True  # type: ignore[attr-defined]
 
 def _gather(cache,indices,use_state):
  if use_state:

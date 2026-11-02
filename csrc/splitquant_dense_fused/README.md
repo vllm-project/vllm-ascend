@@ -9,6 +9,7 @@ the SplitQuant Qwen3 integration. The Python loader opens this bundled library
 in each vLLM worker.
 
 ## 调用签名
+
 ```python
 torch.ops.npu.splitquant_dense_fused(x, packed_weight, weight_scale, weight_offset, activation_clip_max, activation_clip_min, bias=None, group_size=128, group_trans=None, right_trans=None, left_trans=None)
 torch.ops.npu.splitquant_dense_fused_multi(x, packed_weight, weight_scale, weight_offset, clip_max, clip_min, rotation_transposed, splits)

@@ -59,9 +59,9 @@ class SplitQuantQwen3_5ForConditionalGeneration(CustomQwen3NextForCausalLM,
             install_state(self)
 
     def load_weights(self, weights):
-        mapped = []
-        qkvz = {}
-        ba = {}
+        mapped: list[tuple[str, torch.Tensor]] = []
+        qkvz: dict[str, dict[str, torch.Tensor]] = {}
+        ba: dict[str, dict[str, torch.Tensor]] = {}
         for name, value in weights:
             if name.startswith(("model.visual.", "mtp.")):
                 continue

@@ -78,7 +78,7 @@ def install_qwen35(model):
     from vllm_ascend.models.qwen3_next import SplitQuantQwen3NextMLP
     for module in model.modules():
         if isinstance(module, SplitQuantQwen3NextMLP):
-            module.forward = types.MethodType(qwen35_mlp_forward, module)
+            module.forward = types.MethodType(qwen35_mlp_forward, module)  # type: ignore[method-assign]
 
 
 def install(model):
