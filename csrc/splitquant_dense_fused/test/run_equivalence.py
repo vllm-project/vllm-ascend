@@ -1,7 +1,13 @@
+import argparse
+import json
 from pathlib import Path
-import argparse,json,os,torch,torch_npu
-p=argparse.ArgumentParser();p.add_argument('--profile',choices=['generic','30b'],required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--reference',type=Path);p.add_argument('--profiler',action='store_true');p.add_argument('--profiler-per-case',action='store_true');p.add_argument('--perf-cases',type=Path);a=p.parse_args()
+
+import torch
+import torch_npu
+
 from vllm_ascend.quantization.w4a4_splitquant import load_splitquant_operator
+
+p=argparse.ArgumentParser();p.add_argument('--profile',choices=['generic','30b'],required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--reference',type=Path);p.add_argument('--profiler',action='store_true');p.add_argument('--profiler-per-case',action='store_true');p.add_argument('--perf-cases',type=Path);a=p.parse_args()
 load_splitquant_operator()
 out={};metrics=[];calls=[]
 def pack(w):return ((w[:,::2].short()&15)|((w[:,1::2].short()&15)<<4)).to(torch.int8)

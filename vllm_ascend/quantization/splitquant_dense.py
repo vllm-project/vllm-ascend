@@ -16,15 +16,16 @@ def prepare(layers):
         raise ValueError('Dense  shared rotation does not support extra right/left transforms')
     splits = [layer.weight.shape[0] for layer in layers]
     g = layers[0].weight.shape[1] // 64
-    nd = lambda t: torch_npu.npu_format_cast(t.contiguous(), 2)
+    def cast_nz(t):
+        return torch_npu.npu_format_cast(t.contiguous(), 2)
     w = torch.cat([layer.weight for layer in layers], dim=0)
     return dict(
-        weight=nd(w.reshape(sum(splits), g, 64).permute(1, 0, 2)),
-        scale=nd(torch.cat([layer.weight_scale.float() for layer in layers], dim=0).t()),
-        offset=nd(torch.cat([layer.weight_offset.to(torch.int32).float() for layer in layers], dim=0).t()),
-        clip_max=nd(torch.stack([layer.activation_clip_max.float().reshape(g) for layer in layers])),
-        clip_min=nd(torch.stack([layer.activation_clip_min.float().reshape(g) for layer in layers])),
-        rotation=nd(rotations[0].transpose(1, 2)), splits=splits)
+        weight=cast_nz(w.reshape(sum(splits), g, 64).permute(1, 0, 2)),
+        scale=cast_nz(torch.cat([layer.weight_scale.float() for layer in layers], dim=0).t()),
+        offset=cast_nz(torch.cat([layer.weight_offset.to(torch.int32).float() for layer in layers], dim=0).t()),
+        clip_max=cast_nz(torch.stack([layer.activation_clip_max.float().reshape(g) for layer in layers])),
+        clip_min=cast_nz(torch.stack([layer.activation_clip_min.float().reshape(g) for layer in layers])),
+        rotation=cast_nz(rotations[0].transpose(1, 2)), splits=splits)
 
 
 def apply(owner, layers, x):
@@ -40,9 +41,9 @@ def apply(owner, layers, x):
         d['clip_min'], d['rotation'], d['splits'])
     owner.dense__bundle_calls += 1
     for layer in layers:
-        method = layer.quant_method.quant_method
-        method.fused_calls = getattr(method, 'fused_calls', 0) + 1
-        method.fused_operator_name = 'splitquant_dense_fused_multi'
+        method = layer.quant_method.quant_method  # type: ignore[attr-defined]
+        method.fused_calls = getattr(method, 'fused_calls', 0) + 1  # type: ignore[attr-defined]
+        method.fused_operator_name = 'splitquant_dense_fused_multi'  # type: ignore[attr-defined]
     return y
 
 

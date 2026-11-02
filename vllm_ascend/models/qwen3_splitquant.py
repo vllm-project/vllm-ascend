@@ -46,7 +46,7 @@ class SplitQuantAttention(Qwen3Attention):
             rope_scaling=getattr(config, "rope_scaling", None),
             cache_config=cache_config, quant_config=None, prefix=prefix)
         del self.qkv_proj
-        del self.o_proj
+        del self.o_proj  # type: ignore[attr-defined]
         from vllm.config import get_current_vllm_config
         context = get_current_vllm_config().compilation_config.static_forward_context
         context.pop(f"{prefix}.qkv_proj", None)
@@ -340,7 +340,8 @@ class SplitQuantMoeAttention(Qwen3MoeAttention):
                          rope_scaling=config.rope_scaling, max_position_embeddings=config.max_position_embeddings,
                          rms_norm_eps=config.rms_norm_eps, qkv_bias=False, head_dim=config.head_dim,
                          cache_config=cache_config, quant_config=None, prefix=prefix)
-        del self.qkv_proj; del self.o_proj
+        del self.qkv_proj
+        del self.o_proj  # type: ignore[attr-defined]
         from vllm.config import get_current_vllm_config
         context = get_current_vllm_config().compilation_config.static_forward_context
         context.pop(f"{prefix}.qkv_proj", None)
@@ -375,7 +376,8 @@ class SplitQuantQwen3MoeModel(nn.Module):
     def get_input_embeddings(self, ids): return self.embed_tokens(ids)
     def forward(self,input_ids,positions,intermediate_tensors=None,inputs_embeds=None):
         h=inputs_embeds if inputs_embeds is not None else self.embed_tokens(input_ids); r=None
-        for l in self.layers: h,r=l(positions,h,r)
+        for layer in self.layers:
+            h, r = layer(positions, h, r)
         return self.norm(h,r)[0]
 
 

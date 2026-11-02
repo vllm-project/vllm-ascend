@@ -55,7 +55,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.model_executor.models.qwen3_next import (  # isort: skip
     Qwen3NextAttention, Qwen3NextDecoderLayer, Qwen3NextForCausalLM,
     Qwen3NextGatedDeltaNet, Qwen3NextModel, Qwen3NextSparseMoeBlock,
-    fused_gdn_gating)
+)
 
 
 def fused_gdn_gating(A_log, a, dt_bias, beta=1.0, threshold=20.0):

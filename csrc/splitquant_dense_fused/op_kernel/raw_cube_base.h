@@ -13,8 +13,8 @@ public:
   pipe->InitBuffer(al,16384);pipe->InitBuffer(bl,65536);pipe->InitBuffer(cl,4096);
  }
  __aicore__ inline void LoadA(const GlobalTensor<uint8_t>& a,uint64_t offset){
-  Nd2NzParams nd{};nd.ndNum=1;nd.nValue=16;nd.dValue=1024;nd.srcDValue=1024;nd.dstNzC0Stride=16;nd.dstNzNStride=1;
-  DataCopy(ab.Get<uint8_t>(),a[offset],nd);
+  Nd2NzParams params{};params.ndNum=1;params.nValue=16;params.dValue=1024;params.srcDValue=1024;params.dstNzC0Stride=16;params.dstNzNStride=1;
+  DataCopy(ab.Get<uint8_t>(),a[offset],params);
   SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0);
   LoadData2DParams la{};la.repeatTimes=32;la.srcStride=1;
   LoadData(al.Get<int4b_t>(),ab.Get<int4b_t>(),la);
