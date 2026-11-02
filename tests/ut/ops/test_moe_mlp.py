@@ -191,6 +191,22 @@ class TestW8A8FusedMoEMethod(unittest.TestCase):
         self.assertIs(mock_gmm2.call_args.kwargs["weight"][0], layer.w2_weight)
         self.assertEqual(mock_gmm2.call_args.kwargs["output_dtype"], torch.float32)
 
+    def test_gmm_uses_fp32_scales_and_preserves_fp16_output(self):
+        method = self._make_method()
+        layer = _w8a8_layer()
+        layer.w13_weight_scale_fp32 = layer.w13_weight_scale_fp32.half()
+        layer.w2_weight_scale = layer.w2_weight_scale.half()
+        with (
+            patch("torch_npu.npu_dynamic_quant", return_value=("qx", "pscale"), create=True),
+            patch("torch_npu.npu_grouped_matmul", side_effect=[["gmm1_out"], ["gmm2_out"]], create=True) as mock_gmm,
+        ):
+            method.apply_gmm1(_mlp_compute_input(layer=layer))
+            method.apply_gmm2(_mlp_compute_input(layer=layer), "quant_out", "act_scale")
+
+        for call in mock_gmm.call_args_list:
+            self.assertTrue(all(scale.dtype == torch.float32 for scale in call.kwargs["scale"]))
+            self.assertEqual(call.kwargs["output_dtype"], torch.float16)
+
     def test_get_fused_mc2_weights_single_tensor_form(self):
         method = self._make_method()
         layer = _w8a8_layer()
