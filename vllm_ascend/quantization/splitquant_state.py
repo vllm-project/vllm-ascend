@@ -84,6 +84,7 @@ def install(model):
         if hasattr(layer, 'fix_query_key_value_ordering'):
             layer._splitquant_state_ops = True
             count += 1
-    if count != 48:
-        raise RuntimeError(f'Expected48 GDN layers, found{count}')
+    num_layers = model.config.num_hidden_layers
+    if count != num_layers:
+        raise RuntimeError(f'Expected {num_layers} GDN layers, found {count}')
     model.splitquant_state_layers = count
