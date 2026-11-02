@@ -20,15 +20,13 @@ from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.cases import We
 
 
 def expand_fused_expert_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
-    """Map HF fused routed-expert tensors onto checkpoint-facing per-expert names.
+    """Expand fused routed experts by name pattern, independently of model family.
 
-    ``GlmMoeDsaForCausalLM`` keeps routed experts fused as
-    ``mlp.experts.gate_up_proj`` ``[E, 2I, H]`` and ``mlp.experts.down_proj``
-    ``[E, H, I]``, while the published checkpoint - and therefore vLLM's
-    ``expert_params_mapping`` - stores one tensor per expert
-    (``mlp.experts.{e}.gate_proj.weight`` etc.).  Without this expansion the
-    fused names reach ``load_weights`` unmatched and raise
-    ``KeyError: 'layers.N.mlp.experts.gate_up_proj'``.
+    Match ``mlp.experts.gate_up_proj`` ``[E, 2I, H]`` and
+    ``mlp.experts.down_proj`` ``[E, H, I]``; emit checkpoint-facing per-expert
+    gate/up/down projections for loaders such as GLM's and MiniMax's.
+    Names that do not match retain their original shapes. Model-specific
+    renaming is applied separately after expansion.
     """
     for suffix, kind in ((".mlp.experts.gate_up_proj", "gate_up"), (".mlp.experts.down_proj", "down")):
         if not name.endswith(suffix):

@@ -249,7 +249,13 @@ def weight_transfer_servers(
 def assert_weight_update_matches_reference(
     dummy_signature, reference_signature, updated_signatures, case: WeightUpdateModelCase
 ) -> None:
-    """Every update must reproduce independent startup loading of the same payload."""
+    """Compare every live update against independent startup loading.
+
+    Dummy output must differ to prove the payload is observable. The first
+    update proves that transfer takes effect; repeated reload checks that
+    layerwise reload and graph-captured storage preserve the same behavior.
+    Comparing updates only to each other could hide consistently wrong loads.
+    """
     assert dummy_signature != reference_signature, (
         f"{case.id}: a dummy-loaded model already matches a normally loaded one; "
         "the reference cannot observe the payload"
@@ -258,6 +264,7 @@ def assert_weight_update_matches_reference(
         f"{case.id}: expected {UPDATE_ROUNDS} updates, got {len(updated_signatures)}"
     )
     for update_round, signature in enumerate(updated_signatures, start=1):
+        phase = "first live weight update" if update_round == 1 else "repeated live reload"
         assert signature == reference_signature, (
-            f"{case.id}: live weight update {update_round} does not match normal startup loading of the same weights"
+            f"{case.id}: {phase} (round {update_round}) does not match normal startup loading of the same weights"
         )
