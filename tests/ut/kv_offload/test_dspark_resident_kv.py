@@ -14,6 +14,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSF
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_dummy_ring_width
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     SparseKVOffloadManager,
     allocate_kv_offload_topk_buffer_pair,
@@ -440,7 +441,10 @@ def test_hot_cache_rows_follow_request_slots_not_query_width(monkeypatch, width,
     monkeypatch.setattr(torch, "empty", cpu_empty)
     k, v = allocate_kv_offload_topk_buffer_pair(runtime, config)
     query_rows = min(64, 4 * width)
-    request_rows = 2 * (4 + 2)
+    # One hot row per live request slot plus the shared dummy-row ring for
+    # inactive/padded slots; the ring width is capped by the slot capacity,
+    # so the arena never exceeds the dedicated-per-slot 2 * (4 + 2) layout.
+    request_rows = 4 + 2 + copy_sfa_dummy_ring_width(4)
     # Mixed debug batches attend the retained device KV, so Copy-SFA hot
     # buffers need only request-slot rows even with keep_device_kv_cache.
     expected_rows = request_rows if fused else query_rows

@@ -53,6 +53,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     split_decodes_and_prefills,
 )
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_dummy_ring_width
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT,
     FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT,
@@ -217,6 +218,10 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         requests = vllm_config.scheduler_config.max_num_seqs + 2
         tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.copy_sfa_pool_capacity = requests
+        # Shared dummy-row ring for inactive/padded slots; capped by the
+        # capacity so pool indices never pass the histories' 2 * requests
+        # bound (see copy_sfa_dummy_ring_width).
+        self.copy_sfa_dummy_ring = copy_sfa_dummy_ring_width(vllm_config.scheduler_config.max_num_seqs)
         spec = vllm_config.speculative_config
         self.copy_sfa_metadata_steps = 1 + (spec.num_speculative_tokens if spec else 0)
         draft_config = getattr(spec, "draft_model_config", None)
@@ -266,6 +271,9 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         }
         # Target and physical MTP-layer histories are independent.
         # Slot ownership is invalidated explicitly; lengths stay on device.
+        # Pool rows span [0, capacity) for live request slots plus the
+        # dummy ring [capacity, capacity + ring); the ring width never
+        # exceeds the capacity, so every pool index stays in bounds.
         banks = 1 + self.lim_mtp_layers
         self.lim_last_prefix = torch.zeros((banks, 2 * requests), dtype=torch.int32, device=device)
         self.lim_last_cache = torch.full_like(self.lim_last_prefix, -1)
@@ -341,7 +349,13 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         ends_np, starts_np = query_loc[1:], query_loc[:-1]
         widths_np = ends_np - starts_np
         active_np = active_rows_np & (widths_np > 0)
-        pools_np = np.where(active_np, pools_np, np.arange(count) + self.copy_sfa_pool_capacity)
+        # Inactive request slots share a small dummy-row ring instead of
+        # each consuming a dedicated hot row.
+        pools_np = np.where(
+            active_np,
+            pools_np,
+            self.copy_sfa_pool_capacity + np.arange(count) % self.copy_sfa_dummy_ring,
+        )
         ends = upload("query_ends", ends_np)
         widths = upload("widths", widths_np)
         active = upload("active", active_np)
@@ -444,7 +458,11 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         token_invalid = upload("token_invalid", ~token_active_np)
         metadata.slot_mapping.masked_fill_(token_invalid[: metadata.slot_mapping.numel()], -1)
         logical_positions = seq_lens[token_rows] - widths[token_rows] + token_offsets
-        token_pools_np = np.where(token_active_np, pools_np[rows_np], self.copy_sfa_pool_capacity + rows_np)
+        token_pools_np = np.where(
+            token_active_np,
+            pools_np[rows_np],
+            self.copy_sfa_pool_capacity + rows_np % self.copy_sfa_dummy_ring,
+        )
         row_base = upload("token_bases", token_pools_np * self.copy_sfa_stride_blocks * LIM_CACHE_BLOCK_SIZE)
         self.copy_sfa_device_slots[step, :tokens].copy_(
             row_base

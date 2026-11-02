@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from vllm_ascend.ascend_config import DUMMY_POOL_ROW_COUNT
+
 if TYPE_CHECKING:
     from torch import Tensor
 
@@ -18,6 +20,17 @@ COPY_SFA_POOL_PADDING_ROWS = 2
 def copy_sfa_pool_capacity(max_num_seqs: int) -> int:
     """Match the runner-owned fused_copy_sfa row arena: one row per request plus padding."""
     return max_num_seqs + COPY_SFA_POOL_PADDING_ROWS
+
+
+def copy_sfa_dummy_ring_width(max_num_seqs: int) -> int:
+    """Width of the shared dummy-row ring appended to the fused_copy_sfa arena.
+
+    Capped by the pool capacity so the ring never widens the arena beyond the
+    dedicated-per-slot layout: capacity + ring_width <= 2 * capacity, and the
+    highest dummy pool index capacity + ring_width - 1 stays below 2 * capacity
+    for every consumer indexed by pool rows.
+    """
+    return min(DUMMY_POOL_ROW_COUNT, copy_sfa_pool_capacity(max_num_seqs))
 
 
 def copy_sfa_tail_geometry(kv_tokens: int, block_size: int) -> tuple[int, int]:
