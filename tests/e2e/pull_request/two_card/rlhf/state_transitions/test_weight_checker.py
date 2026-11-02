@@ -10,8 +10,7 @@ request validation, digest stability, key coverage, the reset ->
 checkpoint-reload recovery, the NPU IPC transfer round trip, TP2/DP2 rank
 coverage with missing-rank detection, and the cross-NPU HCCL round trip.
 
-The Weight Checker (upstream vLLM PR #51350, requires a paired vLLM that
-includes merge commit 42d9f8ccdb) exposes three dev-mode actions over
+The Weight Checker exposes three dev-mode actions over
 POST /weight_checker — checksum, reset and compare — so an RL stack can
 prove that a weight update landed on every rank. The transaction machinery
 (layer-reduced model, fixed-random payload, sleep/wake brackets) is shared
@@ -46,13 +45,6 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     register_engines_once,
     wait_for_free_device_memory,
     weight_checker,
-)
-
-# The server endpoint ships with the paired vLLM (PR #51350); skip the whole
-# module while the CI-pinned vLLM predates it.
-pytest.importorskip(
-    "vllm.model_executor.model_loader.weight_checksum",
-    reason="Weight Checker requires a paired vLLM with PR #51350 (>= v0.31.1rc0).",
 )
 
 # Matches the validated acceptance setup; leaves HBM headroom for the

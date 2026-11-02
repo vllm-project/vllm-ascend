@@ -232,14 +232,6 @@ digests, reset the weights, transfer them back, and confirm they match. See
 the upstream [Weight Checker](https://docs.vllm.ai/en/latest/training/weight_checker/)
 guide for the full API.
 
-The feature was introduced in vLLM merge commit `42d9f8ccdb`, and the first
-release tag containing it is `v0.31.1rc0`, which is newer than `v0.31.0`,
-the version currently pinned by vLLM-Ascend. Therefore, this feature is
-unavailable with the default vLLM/vLLM-Ascend version pairing — with an
-older vLLM the endpoint does not exist and `POST /weight_checker` returns
-404. Users must manually switch to a newer version of vLLM main to enable
-it.
-
 The checker's standard use is validating the *weight-sync path itself*
 during development and bring-up: hash the weights currently deployed, reset
 them, transfer the *same* weights again, and expect an exact match. It does

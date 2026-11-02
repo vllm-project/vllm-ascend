@@ -20,7 +20,6 @@
 import copy
 import gc
 import logging
-from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from fnmatch import filter as fnmatch_filter
 from types import NoneType
@@ -51,6 +50,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandsha
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.model_loader.weight_checksum import compute_tensor_digests, zero_weights
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -78,15 +78,6 @@ from vllm.v1.worker.startup_plan import (
 )
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
-
-try:
-    from vllm.model_executor.model_loader.weight_checksum import (  # type: ignore[import-not-found]
-        compute_tensor_digests,
-        zero_weights,
-    )
-except ImportError:  # The paired vLLM does not include PR #51350.
-    compute_tensor_digests = None
-    zero_weights = None
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
@@ -152,22 +143,6 @@ torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_grap
 torch.npu.config.allow_internal_format = True
 
 
-def _weight_checksum_utils() -> tuple[
-    Callable[[nn.Module], dict[str, str]],
-    Callable[[nn.Module], None],
-]:
-    """Return the upstream weight-checksum helpers.
-
-    The helpers ship with the paired vLLM (PR #51350). Raise a clear error
-    when an older vLLM is paired instead of failing at module import time.
-    """
-    if compute_tensor_digests is None or zero_weights is None:
-        raise RuntimeError(
-            "Weight Checker requires a paired vLLM that includes PR #51350 "
-            "(merge commit 42d9f8ccdb, released in v0.31.1rc0). "
-            "Upgrade the paired vLLM or disable this feature."
-        )
-    return compute_tensor_digests, zero_weights
 
 
 class NPUWorker(WorkerBase):
@@ -1137,19 +1112,17 @@ class NPUWorker(WorkerBase):
         return f"dp{dp_rank}:pp{pp_rank}:pcp{pcp_rank}:tp{tp_rank}:"
 
     def compute_weight_checksums(self) -> dict[str, str]:
-        digests_fn, _ = _weight_checksum_utils()
         prefix = self._weight_checksum_prefix()
-        digests = digests_fn(self._weight_checksum_model())
+        digests = compute_tensor_digests(self._weight_checksum_model())
         return {prefix + name: digest for name, digest in digests.items()}
 
     def reset_weights(self) -> None:
-        _, zero_fn = _weight_checksum_utils()
         if get_ascend_config().weight_nz_mode:
             logger.warning(
                 "weight_nz_mode is enabled: weight transfer update is unavailable, "
                 "reset weights can only be restored via checkpoint reload (reload_weights)."
             )
-        zero_fn(self._weight_checksum_model())
+        zero_weights(self._weight_checksum_model())
 
     @torch.inference_mode()
     def profile_prefill_latency(self, num_tokens: int) -> float:
