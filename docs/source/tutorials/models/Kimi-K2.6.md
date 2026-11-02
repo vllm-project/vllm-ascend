@@ -6,7 +6,7 @@ Kimi K2.6 is an open-source, native multimodal agentic model built through conti
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-This document is validated and written based on **vLLM-Ascend v0.23.0**. Kimi-K2.6 was first supported in vLLM-Ascend v0.20.0rc1.
+This document is validated and written based on **vLLM-Ascend |vllm_ascend_version|**. Kimi-K2.6 was first supported in vLLM-Ascend v0.20.0rc1.
 
 ## 2 Supported Features
 
@@ -128,8 +128,6 @@ If you don't want to use the docker image as above, you can also build all from 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
-
-For vLLM-Ascend v0.20.0 and earlier versions, transformers must be version 4.57.6 or lower to use the tool_calls feature.
 
 ## 5 Online Service Deployment
 
