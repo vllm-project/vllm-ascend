@@ -15,6 +15,7 @@ from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
 from vllm.v1.worker.gpu.sample.logit_bias import apply_logit_bias
 from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 
+from vllm_ascend._310p.worker.v2.sample import dispatch as dispatch_module
 from vllm_ascend._310p.worker.v2.sample.dispatch import (
     _kernel_owner_vars,
     bias_kernel,
@@ -28,6 +29,43 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import NPUPlatform
 
 pytestmark = pytest.mark.usefixtures("sampling_kernel_overrides")
+
+
+def test_no_triton_registration_replaces_incompatible_existing_host_helper():
+    placeholder = SimpleNamespace(constexpr=lambda value: value)
+
+    def incompatible_next_power(value):
+        # Match the common worker patch when tl.constexpr is a placeholder function.
+        return isinstance(value, placeholder.constexpr)
+
+    with pytest.raises(TypeError):
+        incompatible_next_power(3)
+    with (
+        patch.object(dispatch_module, "HAS_TRITON", False),
+        patch.object(dispatch_module.triton, "next_power_of_2", incompatible_next_power, create=True),
+        patch.object(dispatch_module, "register_kernels"),
+    ):
+        # Bypass only the once-per-worker cache; retain the fixture's real
+        # registered kernels and exercise the upstream bias entry point.
+        register_sampling_kernel_overrides.__wrapped__()
+        assert dispatch_module.triton.next_power_of_2(3) == 4
+        logits = torch.tensor([[1.0, 2.0, 3.0]])
+        state = LogitBiasState310(1, torch.device("cpu"))
+        state.apply(logits, torch.tensor([0]), {0: [0, 2]}, {0: {0: 5.0}})
+        torch.testing.assert_close(logits, torch.tensor([[6.0, -torch.inf, 3.0]]))
+
+
+def test_real_triton_registration_preserves_existing_host_helper():
+    def existing_next_power(value):
+        return value
+
+    with (
+        patch.object(dispatch_module, "HAS_TRITON", True),
+        patch.object(dispatch_module.triton, "next_power_of_2", existing_next_power, create=True),
+        patch.object(dispatch_module, "register_kernels"),
+    ):
+        register_sampling_kernel_overrides.__wrapped__()
+        assert dispatch_module.triton.next_power_of_2 is existing_next_power
 
 
 def test_dispatcher_skips_lazy_non_mapping_dict_and_rebinds_real_owners(monkeypatch):

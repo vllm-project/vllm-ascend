@@ -21,6 +21,7 @@ def sampling_kernel_overrides():
     registry = dispatcher._registry.copy()
     previous_vars = dispatcher.__dict__.get("vars")
     had_next_power = hasattr(triton, "next_power_of_2")
+    previous_next_power = getattr(triton, "next_power_of_2", None)
     register_sampling_kernel_overrides.cache_clear()
     register_sampling_kernel_overrides()
     try:
@@ -35,6 +36,8 @@ def sampling_kernel_overrides():
             del dispatcher.vars
         else:
             dispatcher.vars = previous_vars
-        if not had_next_power:
+        if had_next_power:
+            triton.next_power_of_2 = previous_next_power
+        else:
             del triton.next_power_of_2
         register_sampling_kernel_overrides.cache_clear()

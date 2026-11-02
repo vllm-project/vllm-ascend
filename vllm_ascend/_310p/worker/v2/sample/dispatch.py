@@ -7,7 +7,7 @@ from functools import cache
 from typing import Any
 
 import torch
-from vllm.triton_utils import dispatcher, triton
+from vllm.triton_utils import HAS_TRITON, dispatcher, triton
 from vllm.triton_utils.dispatcher import register_kernels
 from vllm.utils.math_utils import next_power_of_2
 
@@ -98,8 +98,10 @@ def register_sampling_kernel_overrides() -> None:
     # Remove once supported vLLM versions guard owner namespace reads upstream.
     dispatcher.vars = _kernel_owner_vars
     # The upstream bias wrapper calculates its launch block size on the host.
-    # TritonPlaceholder has cdiv but omits this equally device-independent helper.
-    if not hasattr(triton, "next_power_of_2"):
+    # An existing worker patch may assume tl.constexpr is a real type, while
+    # TritonPlaceholder supplies a function. Use the host helper on 310P's
+    # no-Triton path even when that incompatible patch is already installed.
+    if not HAS_TRITON or not hasattr(triton, "next_power_of_2"):
         triton.next_power_of_2 = next_power_of_2
     register_kernels(
         {
