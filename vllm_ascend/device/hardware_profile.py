@@ -89,6 +89,9 @@ class HardwareCapability(Enum):
     DSV41_PACKED_CACHE = auto()
     # Triton RMS/dot/gate/residual fusion for unrotated Engram inputs.
     ENGRAM_UNROTATED_GATE = auto()
+    # BF16 Add/HcPost fusion matching the A3 d-split kernel's separate Mul/Add
+    # order. The arch35 FMA path has a different numerical contract.
+    HC_POST_ADD_SEPARATE_ROUNDING = auto()
     # Decode native FP8 codes and E8M0 group scales in Engram table lookups.
     ENGRAM_MXFP8 = auto()
     # Enable dynamic-MX norm fusion and the associated ``wo_a`` weight-layout contract.
@@ -321,6 +324,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             | {
                 HardwareCapability.CANN_MEGAMOE,
                 HardwareCapability.MINIMAX_ECOSYSTEM_FA3,
+                HardwareCapability.HC_POST_ADD_SEPARATE_ROUNDING,
                 HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                 HardwareCapability.POOL_KEY_INDEXER_INT8,
             },
