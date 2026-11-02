@@ -172,9 +172,10 @@ class AscendW4A4SplitQuantLinearMethod:
         layer.weight_offset.data = layer.weight_offset.data.float().contiguous()
         layer.activation_clip_max.data = layer.activation_clip_max.data.float().contiguous()
         layer.activation_clip_min.data = layer.activation_clip_min.data.float().contiguous()
-        for name in ("activation_clip_max", "activation_clip_min"):
-            if not torch.isfinite(getattr(layer, name)).all():
-                raise ValueError(f"Non-finite SplitQuant parameter {name} at {self.prefix}")
+        for name in ('activation_clip_max', 'activation_clip_min'):
+            param = getattr(layer, name, None)
+            if param is not None and not torch.isfinite(param).all():
+                raise ValueError(f'Non-finite SplitQuant parameter {name} at {self.prefix}')
         if hasattr(layer, "group_trans"):
             if layer.group_trans.shape != (logical_k // self.group_size,
                                            self.group_size, self.group_size):
