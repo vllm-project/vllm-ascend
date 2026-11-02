@@ -32,6 +32,21 @@ After excluding ten warmup rounds, 90 device-wide memory samples ranged from
 21140 to 21141 MB, with the first and last both 21141 MB. This fixed-workload
 observation does not establish leak freedom or general model accuracy.
 
+## Independent numerical reference checks
+
+The Qwen FP16 fix also passed a range check on six rendered GSM8K prompts
+(the first four and two longest in the measured 32-sample run). Across all
+168 attention layers, the maximum unmasked raw QK magnitude was 322143.90625;
+none exceeded the FP16 limit after the 1/8 query pre-scale. This is observed
+coverage of those inputs, not a universal bound for arbitrary prompts.
+
+For Llama, three of four 32-token probes matched independent CPU FP32 tokens
+exactly. The Chinese probe first diverged at generated token seven. At the
+same prompt and shared token prefix, CPU FP16 selected the NPU token, whereas
+CPU FP32 selected the alternative with a logit margin of approximately 0.0034.
+This reproduces that first divergence through precision alone; it does not
+establish exact agreement for the remainder of the Chinese sequence.
+
 ## Deployment
 
 ### Check tokenizer compatibility

@@ -110,3 +110,12 @@ the verified tokenizer directory. The release runtime reported approximately
 two seconds for capture and 0.16 GiB of graph memory. Preserve the original
 tokenizer failure as a negative control; do not describe the unmodified local
 checkpoint path as passing on Transformers 5.5.4.
+
+## Interpret reference divergence at the same prefix
+
+Compare logits at the first differing token using the identical prompt and
+shared generated prefix. For the Llama Chinese probe, CPU FP16 chose the NPU
+token while FP32 preferred the alternative by about 0.0034 logits. That is
+evidence for a precision-sensitive first branch, not permission to assert
+whole-sequence FP32 parity. Keep the 3/4 exact result and the remaining mismatch
+explicit. A tokenizer fix alone does not guarantee numerical reference equality.
