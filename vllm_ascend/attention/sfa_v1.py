@@ -1095,13 +1095,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         if qt is None:
             self.fused_qkv_a_proj.weight.data = self.fused_qkv_a_proj.weight.data.T
 
-        fused_weight = self.fused_qkv_a_proj.weight.data
+        # PTA cannot clone a slice of NZ storage on A5. Split dense logical
+        # weights before the existing casts to Prolog V3's NZ input format.
+        fused_weight = torch_npu.npu_format_cast(self.fused_qkv_a_proj.weight.data, ACL_FORMAT_FRACTAL_ND)
         weight_dq = fused_weight[..., : self.q_lora_rank].contiguous()
         weight_dkv_kr = fused_weight[..., self.q_lora_rank :].contiguous()
         if qt is not None:
-            weight_uq_qr = self.q_proj.weight.data.contiguous()
+            weight_uq_qr = torch_npu.npu_format_cast(self.q_proj.weight.data, ACL_FORMAT_FRACTAL_ND).contiguous()
         else:
-            weight_uq_qr = self.q_proj.weight.data.T.contiguous()
+            weight_uq_qr = torch_npu.npu_format_cast(self.q_proj.weight.data, ACL_FORMAT_FRACTAL_ND).T.contiguous()
 
         self.weight_dq = torch_npu.npu_format_cast(weight_dq, ACL_FORMAT_FRACTAL_NZ)
         self.weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, ACL_FORMAT_FRACTAL_NZ)

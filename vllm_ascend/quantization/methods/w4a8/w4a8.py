@@ -33,12 +33,16 @@ from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
+    AscendDeviceType,
     dispose_tensor,
+    get_ascend_device_type,
     maybe_trans_nz,
 )
 
 from ..base import AscendMoEScheme, QuantType
 from ..registry import register_scheme
+
+_A5_W4A8_GROUP_SIZE = 256
 
 
 @register_scheme("W4A8_DYNAMIC", "moe")
@@ -129,6 +133,9 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         # Only per-channel W4A8 is supported, this parameter will be removed soon.
         self.is_per_channel_weight = True
         self.quant_method = vllm_config.quant_config.get_name()
+        self.use_a5_split_gmm = get_ascend_device_type() == AscendDeviceType.A5
+        if self.use_a5_split_gmm and self.quant_method != ASCEND_QUANTIZATION_METHOD:
+            raise ValueError("Ascend A5 INT4 W4A8 currently requires msModelSlim weights.")
         self.tp_size = (
             1 if vllm_config.parallel_config.enable_expert_parallel else get_tensor_model_parallel_world_size()
         )
@@ -136,6 +143,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.use_expert_weight_list = self.dynamic_eplb or (
             vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
         )
+        if self.use_a5_split_gmm and self.use_expert_weight_list:
+            raise ValueError("Ascend A5 INT4 W4A8 does not yet support EPLB expert weight lists.")
         if self.quant_method == ASCEND_QUANTIZATION_METHOD and self.tp_size > 16:
             raise ValueError("The current weight does not support moe part tp>16.")
 
@@ -301,8 +310,21 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             self.process_weights_after_loading_compressed_tensors(layer)
         else:
             self.process_weights_after_loading_modelslim(layer)
-        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        if self.use_a5_split_gmm:
+            # A5 S8S4 GMM accepts packed ND weights and scales grouped over
+            # 256 K elements. Repeating each channel's existing scale preserves
+            # the checkpoint's quantization; no weight is requantized. The
+            # A2/A3 packed-INT8 NZ conversion has a different INT4 tile layout.
+            for name in ("w13", "w2"):
+                weight = getattr(layer, f"{name}_weight")
+                k = weight.shape[-2]
+                if k % _A5_W4A8_GROUP_SIZE:
+                    raise ValueError(f"Ascend A5 INT4 W4A8 requires K divisible by {_A5_W4A8_GROUP_SIZE}, got {k}.")
+                scale = getattr(layer, f"{name}_weight_scale")
+                scale.data = scale.data.reshape(weight.shape[0], 1, -1).repeat(1, k // _A5_W4A8_GROUP_SIZE, 1)
+        else:
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
         tensor_names = (
             "w13_weight",
             "w2_weight",
@@ -505,6 +527,11 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         )
         dispose_tensor(mlp_compute_input.hidden_states)
         return hidden_states, swiglu_out_scale
+
+    def supports_fused_activation(self, activation) -> bool:
+        # A5's fused per-token operator does not implement the INT4 + packed
+        # INT64 scale + compensation ABI. Its standalone S8S4 GMM does.
+        return not self.use_a5_split_gmm and super().supports_fused_activation(activation)
 
     def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
         hidden_states = mlp_compute_input.hidden_states
