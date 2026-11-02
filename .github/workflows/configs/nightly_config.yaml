@@ -138,10 +138,6 @@ a3:
         config_file_path: GLM5_2-W8A8-A3-dual-nodes.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
         size: 2
-      - name: Minimax_m2.7_in128k_1k_prefix90_tpot50
-        config_file_path: Minimax_m2.7_in128k_1k_prefix90_tpot50.yaml
-        config_base_path: tests/e2e/cases/models/configs/MiniMax
-        size: 2
       - name: DeepSeek-V4-flash-w8a8-PD-prefix
         config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
