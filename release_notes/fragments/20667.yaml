@@ -1,0 +1,5 @@
+pr: 20667
+entries:
+  - category: bugfix
+    text: Fixed --kv-cache-dtype mxfp8 (C8-MXFP) and int8 failing at startup with "Invalid kv_cache_dtype"; the Ascend kv-cache-dtype patches now also widen the KV_CACHE_DTYPES mirror list that current vLLM main validates CacheConfig.cache_dtype against.
+    hardware: [A3, A5]
