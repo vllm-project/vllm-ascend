@@ -388,22 +388,6 @@ A few important things to consider when using DFlash2 draft models:
    execution. The compressed mask is a band-mode template, not a causal
    restriction on draft tokens.
 
-   The focused NPU test covers draft lengths 4, 5, and 6, window boundaries,
-   and replay with changed KV lengths and block tables. It compares against
-   eager execution and an independent dense reference:
-
-   ```shell
-   pytest -sv tests/e2e/pull_request/one_card/aclgraph/test_dflash_fia.py
-   ```
-
-   The QK/RoPE fusion pass skips target/draft dimension combinations that
-   cannot form a valid fusion pattern; the unfused operations still compile
-   and execute. The paired-Q/K RoPE compilation and graph replay test is:
-
-   ```shell
-   pytest -sv tests/e2e/pull_request/one_card/aclgraph/test_dflash2_rope.py
-   ```
-
    The model-level acceptance test exercises both eager drafting and
    `VLLM_COMPILE` with `FULL_DECODE_ONLY` on two NPUs:
 
