@@ -5,7 +5,15 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import bootstrap_custom_op_env, enable_custom_op
+
+# The A5 hardware profile does not enable RUNTIME_CUSTOM_OPS, so enable_custom_op()
+# is a no-op there. Bootstrap the custom-op environment and import the extension
+# explicitly (same pattern as test_scatter_nd_update_sk.py and
+# test_add_rms_norm_bias.py) so running this file standalone also registers
+# torch.ops._C_ascend on every SOC that schedules this directory.
+bootstrap_custom_op_env()
+import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, E402
 
 torch_npu.npu.config.allow_internal_format = True
 enable_custom_op()
@@ -229,6 +237,11 @@ def test_npu_hc_pre_v3_uses_external_pre_mix():
 # ---------------------------------------------------------------------------
 # Row-position invariance (issue #19357 regression)
 # ---------------------------------------------------------------------------
+#
+# These invariance cases run on every SOC that schedules this directory (A2/A3
+# and A5). The epsilon defect fixed above lives in the non-arch35 kernel; on
+# A5 the same row-invariance contract is checked against the separate arch35
+# implementation, which registers the same operators.
 #
 # The Sinkhorn column normalization of npu_hc_pre_v3/v2 added hc_eps to the
 # column denominators over hc_mult elements while the column sums live in an
