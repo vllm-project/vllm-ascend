@@ -358,7 +358,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
             # 2.2: Process the remaining part
             if attn_metadata.num_prefills > 0:
                 initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
-                initial_state[~has_initial_state, ...] = 0
+                initial_state.masked_fill_(~has_initial_state.view(-1, 1, 1, 1), 0)
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
@@ -375,8 +375,12 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     use_qk_l2norm_in_kernel=True,
                 )
 
-                # Init cache
-                ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(ssm_state.dtype)
+                state_rows = ssm_state.view(ssm_state.shape[0], -1)
+                state_rows.index_copy_(
+                    0,
+                    non_spec_state_indices_tensor,
+                    last_recurrent_state.to(ssm_state.dtype).view(-1, state_rows.shape[1]),
+                )
             elif attn_metadata.num_decodes > 0:
                 num_decodes = attn_metadata.num_decodes
                 core_attn_out_non_spec = npu_recurrent_gated_delta_rule_310(

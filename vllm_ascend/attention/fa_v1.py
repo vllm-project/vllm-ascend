@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
-"""Device-length CANN FlashAttn for A5 V2 DFlash2 eager drafts."""
+"""Device-length CANN FlashAttn for A5 V2 drafts."""
 
 from dataclasses import dataclass, field
 

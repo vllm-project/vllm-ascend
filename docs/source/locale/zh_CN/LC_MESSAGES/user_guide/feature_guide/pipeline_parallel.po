@@ -326,8 +326,8 @@ msgstr "移动过多层可能只是将瓶颈转移到另一个阶段，因此不
 msgid "## Advanced Scenarios"
 msgstr "## 高级场景"
 
-msgid "### PP with Speculative Decoding"
-msgstr "### 带投机解码的 PP"
+msgid "### PP with Speculative Decoding {: #pp-with-speculative-decoding}"
+msgstr "### 带投机解码的 PP {: #pp-with-speculative-decoding}"
 
 msgid ""
 "- Its target-model hidden layers.\n"

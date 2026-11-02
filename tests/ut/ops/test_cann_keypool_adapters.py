@@ -17,8 +17,8 @@ def mock_triton_launch_config(monkeypatch):
     monkeypatch.setattr(adapters, "triton", triton)
 
 
-@pytest.mark.parametrize("retained_width,cp_start", [(0, None), (3, 2)])
-def test_metadata_launches_use_preallocated_request_and_tail_buffers(monkeypatch, retained_width, cp_start):
+@pytest.mark.parametrize("retained_width", [0, 3])
+def test_metadata_launches_use_preallocated_request_and_tail_buffers(monkeypatch, retained_width):
     launch = MagicMock()
     monkeypatch.setattr(adapters, "_build_keypool_metadata_kernel", launch)
     common = SimpleNamespace(
@@ -43,17 +43,7 @@ def test_metadata_launches_use_preallocated_request_and_tail_buffers(monkeypatch
     buffers = SimpleNamespace(
         **{name: torch.empty(5, dtype=torch.int64) for name in (*fields, "start_offsets", "pooled_slot_mapping")}
     )
-    query = (
-        None
-        if cp_start is None
-        else SimpleNamespace(
-            positions=buffers.positions[cp_start:4],
-            **{name: torch.empty(2, dtype=torch.int64) for name in ("cum_query_lens", "seq_lens", "pool_tail")},
-        )
-    )
-    result = adapters.build_keypool_metadata(
-        common, buffers, 4, 3, 128, 4, query_metadata=query, local_start=cp_start or 0
-    )
+    result = adapters.build_keypool_metadata(common, buffers, 4, 3, 128, 4)
     for view, name, size in zip(result, fields, (4, 4, 2, 2, 3, 2, 2, 2)):
         assert view.data_ptr() == getattr(buffers, name).data_ptr()
         assert view.shape == (size,)
@@ -63,14 +53,6 @@ def test_metadata_launches_use_preallocated_request_and_tail_buffers(monkeypatch
     assert args[1] is common.seq_lens
     assert args[2] is common.positions
     assert args[3] is common.slot_mapping
-    if query is None:
-        assert args[-6:] == (None, None, None, 0, 0, False)
-    else:
-        assert args[-6] is query.cum_query_lens
-        assert args[-5] is query.seq_lens
-        assert args[-4] is query.pool_tail
-        assert args[-3:] == (cp_start, 4, True)
-
     tail_buffers = {name: torch.empty(2, 7, dtype=torch.int64) for name in ("history", "writes", "state", "retained")}
     tail_buffers["history"] = torch.empty(2, 4, dtype=torch.int64)
     tail = adapters.build_tail_inputs(common, 4, 7, 80, retained_width, tail_buffers)

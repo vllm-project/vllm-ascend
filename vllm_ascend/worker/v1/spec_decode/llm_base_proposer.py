@@ -42,7 +42,6 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from vllm_ascend import utils as ascend_utils
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -58,11 +57,13 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
-from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
+from vllm_ascend.ops.triton.spec_decode.utils import (
+    _PREPARE_INPUTS_PADDED_KERNEL,
+    PREPARE_INPUTS_BLOCK_SIZE,
+)
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import _is_glm_model, check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
-from vllm_ascend.worker.spec_decode_utils import PREPARE_INPUTS_BLOCK_SIZE
 from vllm_ascend.worker.v1.spec_decode.utils import (
     SlidingWindowAdapter,
     _maybe_eager_context,
@@ -1497,8 +1498,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 compact_mtp_topk_indices(
                     draft_model,
                     token_indices_to_sample,
-                    num_input_tokens,
-                    tp_group=get_tp_group() if ascend_utils.enable_dsa_cp() else None,
                     lim_topk_compactors=self._lim_topk_compactors,
                 )
 
@@ -2401,16 +2400,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_blocks_needed = triton.cdiv(num_reqs, PREPARE_INPUTS_BLOCK_SIZE)
             num_vector_core = get_vectorcore_num()
             grid_size = min(num_blocks_needed, num_vector_core)
-            grid = (grid_size,)
 
-            prepare_inputs_padded_kernel[grid](
+            _PREPARE_INPUTS_PADDED_KERNEL(
                 spec_decode_metadata.cu_num_draft_tokens,
                 valid_sampled_tokens_count,
                 common_attn_metadata.query_start_loc,
                 token_indices_to_sample,
                 num_rejected_tokens_gpu,
-                num_reqs,
-                BLOCK_SIZE=PREPARE_INPUTS_BLOCK_SIZE,
+                num_reqs=num_reqs,
+                grid_size=grid_size,
             )
         else:
             num_draft_tokens_gpu = torch.cat(

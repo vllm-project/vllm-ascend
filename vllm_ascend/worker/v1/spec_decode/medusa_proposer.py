@@ -1,7 +1,7 @@
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.medusa import MedusaProposer
+from vllm.v1.spec_decode.medusa import MedusaProposer  # type: ignore[import-not-found]
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context

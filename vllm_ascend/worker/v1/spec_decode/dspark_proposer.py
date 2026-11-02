@@ -14,7 +14,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.utils import enable_pcp
+from vllm_ascend.attention.utils import is_pcp_enabled
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
 from vllm_ascend.worker.v1.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
 from vllm_ascend.worker.v1.spec_decode.utils import DynamicSpecScheduler
@@ -181,7 +181,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         if (
             getattr(self.runner, "device_metadata_executor", None) is not None
             and self.dcp_size == 1
-            and not enable_pcp()
+            and not is_pcp_enabled()
         ):
             for attn_group in self.draft_attn_groups:
                 builder = attn_group.get_metadata_builder()

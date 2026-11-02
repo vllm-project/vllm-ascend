@@ -54,7 +54,7 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers, vllm_version_is
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
@@ -820,9 +820,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             use_v2_model_runner=True,
             kv_cache_config=kv_cache_config,
             max_num_reqs=self.max_num_reqs,
-            **(
-                {"tensor_parallel_size": self.parallel_config.tensor_parallel_size} if vllm_version_is("0.31.0") else {}
-            ),
+            **{},
         )
         self.cudagraph_manager = ModelAclGraphManager310(
             self.vllm_config,

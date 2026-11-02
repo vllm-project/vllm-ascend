@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +13,8 @@ from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
 
 @pytest.mark.parametrize(("pcp_size", "prefix_caching"), [(1, True), (2, True), (2, False)])
-def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_caching):
+@pytest.mark.parametrize("dp_size", [1, 2])
+def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_caching, dp_size):
     model = SimpleNamespace(
         config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=2, engram_layer_ids=[]),
         end_layer=3,
@@ -30,7 +31,7 @@ def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=1,
             prefill_context_parallel_size=pcp_size,
-            data_parallel_size=1,
+            data_parallel_size=dp_size,
             decode_context_parallel_size=1,
             use_ubatching=False,
         ),
@@ -72,14 +73,12 @@ def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
     replay.rows = torch.tensor([4, 5])
     replay.num_actual_rows = 2
     replay.context_factory = nullcontext
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
     replay(torch.arange(6), None, torch.arange(6))
     for buffer, offset in zip(buffers, (0, 10, 20, 30)):
         assert buffer[:2].tolist() == [offset + 4, offset + 5]
 
 
 def test_replay_scatter_preserves_row_zero_with_padding(monkeypatch):
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
     buffer = torch.arange(6).reshape(6, 1)
     hidden = torch.arange(6, dtype=torch.float32).reshape(6, 1)
     replay = replay_mod.AscendDecoderReplayLayers(
@@ -96,7 +95,6 @@ def test_replay_scatter_preserves_row_zero_with_padding(monkeypatch):
 
 
 def test_pcp_replay_empty_owner_runs_padded_rows_without_scattering(monkeypatch):
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
     buffer = torch.arange(4).reshape(4, 1)
 
     def run_layers(hidden, mix, positions):
@@ -123,8 +121,31 @@ def test_replay_without_rows_keeps_inputs():
     assert replay(hidden, None) == (hidden, None)
 
 
+def test_untrimmed_replica_enters_decoder_context_without_gathering():
+    entered = []
+
+    @contextmanager
+    def decoder_context():
+        entered.append(True)
+        yield
+        entered.append(False)
+
+    hidden = torch.arange(6)
+
+    def run_layers(*states):
+        assert entered == [True]
+        assert states[0] is hidden
+        return states
+
+    buffer = torch.arange(6)
+    replay = replay_mod.AscendDecoderReplayLayers(2, run_layers, [buffer])
+    replay.context_factory = decoder_context
+    assert replay(hidden, None) == (hidden, None)
+    assert entered == [True, False]
+    assert torch.equal(buffer, torch.arange(6))
+
+
 def test_model_replays_only_layers_after_kv_sources(monkeypatch):
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
     seen = []
 
     class Layer:

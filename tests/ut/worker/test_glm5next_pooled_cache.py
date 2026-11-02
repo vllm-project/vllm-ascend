@@ -12,12 +12,15 @@ import torch
 from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     requires_padded_page_layout,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    apply_layerwise_kv_cache_plan,
 )
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
@@ -246,6 +249,93 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     assert mamba_payload_size < descriptors[MAMBA].size
 
 
+@pytest.fixture(params=[True, False], ids=["glm-marker", "layout-capability"])
+def v2_glm_cache_plan(request, monkeypatch):
+    config, _, plan = _make_plan()
+    if not request.param:
+        for group in plan.kv_cache_groups:
+            spec = group.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                group.kv_cache_spec = replace(
+                    spec,
+                    kv_cache_specs={
+                        name: replace(layer_spec, model_version=None)
+                        for name, layer_spec in spec.kv_cache_specs.items()
+                    },
+                )
+    config.model_config.get_num_layers = lambda _: 2
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
+    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
+    return config, plan
+
+
+@pytest.mark.parametrize(
+    ("use_layerwise", "independent_layers"),
+    [(None, None), (False, None), (True, None), (True, "all")],
+    ids=["no-transfer", "non-layerwise", "layerwise", "independent"],
+)
+def test_v2_glm_shared_slots_preserve_backings(monkeypatch, v2_glm_cache_plan, use_layerwise, independent_layers):
+    config, plan = v2_glm_cache_plan
+    if use_layerwise is not None:
+        extra_config = {"backend": "memcache", "use_layerwise": use_layerwise}
+        if independent_layers is not None:
+            extra_config["layerwise_independent_layers"] = independent_layers
+        config.kv_transfer_config = SimpleNamespace(
+            kv_connector="AscendStoreConnector", kv_connector_extra_config=extra_config
+        )
+    apply_layerwise_kv_cache_plan(plan, config)
+    allocated_sizes = []
+    allocate = attn_utils._allocate_int8_cache_tensor
+
+    def allocate_slot(size, alignment, device):
+        allocated_sizes.append(size)
+        return allocate(size, alignment, device)
+
+    monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", allocate_slot)
+
+    raw_caches = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
+
+    assert set(raw_caches) == {MAIN, INDEXER, STATE, MAMBA}
+    assert raw_caches[MAIN] is raw_caches[MAMBA]
+    assert raw_caches[INDEXER] is raw_caches[STATE]
+    assert raw_caches[MAIN] is not raw_caches[INDEXER]
+    assert allocated_sizes == [descriptor.size for descriptor in plan.kv_cache_tensors]
+    for descriptor in plan.kv_cache_tensors:
+        backing = raw_caches[descriptor.layers[0]]
+        assert backing.numel() == descriptor.size
+        if use_layerwise is not None:
+            assert backing.data_ptr() % (2 * 1024 * 1024) == 0
+
+
+@pytest.mark.parametrize(
+    "descriptor_changes",
+    [
+        {"offset": 1},
+        {"layer_stride": 1},
+        {"block_stride": 0},
+        {"size": 1},
+        {"layers": []},
+        {"block_stride": 1, "size": 3},
+    ],
+)
+def test_v2_glm_shared_slots_reject_invalid_geometry(v2_glm_cache_plan, descriptor_changes):
+    _, plan = v2_glm_cache_plan
+    plan.kv_cache_tensors[0] = replace(plan.kv_cache_tensors[0], **descriptor_changes)
+
+    with pytest.raises(ValueError, match="Invalid padded shared-slot KV cache descriptor geometry"):
+        attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
+
+
+def test_v2_glm_shared_slots_reject_missing_layers(v2_glm_cache_plan):
+    _, plan = v2_glm_cache_plan
+    plan.kv_cache_tensors.pop()
+
+    with pytest.raises(ValueError, match="Padded shared-slot KV cache descriptors must cover every cache spec"):
+        attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
+
+
 def test_glm5_next_runner_splits_main_mla_components_within_each_page():
     config, _, plan = _make_plan(main_head_size=6)
     runner = _make_runner(config, main_cache_dims=(4, 2))
@@ -337,9 +427,8 @@ def test_padded_page_layout_detected_for_shared_state_pages():
     assert requires_padded_page_layout(layer_specs.values())
 
 
-def test_padded_page_layout_rejected_without_tail_caches():
-    # A standalone MTP runner has the same attention specs but no recurrent
-    # state caches, so no state view needs the padded page stride.
+def test_padded_page_layout_rejected_without_mamba_states():
+    # Attention-only plans have no recurrent state pages to pad.
     specs = {name: spec for name, spec in _make_specs().items() if not isinstance(spec, MambaSpec)}
     assert not requires_padded_page_layout(specs.values())
 

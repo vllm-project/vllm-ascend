@@ -85,6 +85,7 @@ class TestNPUWorker(TestBase):
             delattr(self.hf_config_mock, "index_topk")
 
         self.model_config_mock.hf_config = self.hf_config_mock
+        self.model_config_mock.hf_text_config = self.hf_config_mock
 
         self.parallel_config_mock = MagicMock(spec=ParallelConfig)
 
@@ -1786,13 +1787,11 @@ class TestNPUWorker(TestBase):
 
             with (
                 patch("vllm_ascend.model_executor.warmup.nz_warmup.join_nz_warm_thread") as join_nz,
-                patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.join_early_kernel_warmup") as join_early,
             ):
                 worker.load_model()
 
             worker.model_runner.load_model.assert_called_once()
             join_nz.assert_not_called()
-            join_early.assert_not_called()
 
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     def test_load_model_sleep_mode_assertion_error(self, mock_allocator_class):
@@ -2473,7 +2472,7 @@ class TestKVPPWorkerBudget(TestBase):
         worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
         worker.vllm_config = make_kvpp_config()
         worker.model_runner = SimpleNamespace(
-            get_kv_cache_spec=lambda: specs, drafter=SimpleNamespace(_draft_attn_layer_names={layer_name(17)})
+            get_kv_cache_spec=lambda: specs, speculator=SimpleNamespace(draft_attn_layer_names={layer_name(17)})
         )
         worker._kvpp_cache_allocation_plan = None
         ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
@@ -2503,7 +2502,7 @@ class TestKVPPWorkerBudget(TestBase):
         worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
         worker.vllm_config = make_kvpp_config(tp=2, pcp=2)
         worker.model_runner = SimpleNamespace(
-            get_kv_cache_spec=lambda: specs, drafter=SimpleNamespace(_draft_attn_layer_names={layer_name(17)})
+            get_kv_cache_spec=lambda: specs, speculator=SimpleNamespace(draft_attn_layer_names={layer_name(17)})
         )
         worker._kvpp_cache_allocation_plan = None
         ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))

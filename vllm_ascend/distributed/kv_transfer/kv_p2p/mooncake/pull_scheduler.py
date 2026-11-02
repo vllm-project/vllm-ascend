@@ -601,6 +601,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
     ) -> None:
+        self._log_mamba_request_allocation(request.request_id, blocks)
         params = request.kv_transfer_params
         logger.debug(
             "MooncakeConnector update_state_after_alloc: num_external_tokens=%s, kv_transfer_params=%s",

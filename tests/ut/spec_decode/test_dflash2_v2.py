@@ -260,7 +260,7 @@ def test_dflash_loader_temporarily_disables_profiling_chunk(monkeypatch, fail):
 def test_patch_swaps_upstream_selector_walk_kernel():
     import vllm.v1.worker.gpu.spec_decode.dflash2.speculator as upstream
 
-    import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa: F401
+    import vllm_ascend.patch.worker.patch_dflash_speculator  # noqa: F401
 
     assert upstream._selector_walk_kernel is _selector_walk_kernel_ascend
 
@@ -404,7 +404,7 @@ def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run
     monkeypatch.setattr(DFlashSpeculator, "propose", propose)
     monkeypatch.setattr(dflash_module, "build_attn_metadata_wrapper", nullcontext)
     # vLLM #60754 renamed `dp_sync` -> `dp_sync_state` on main.
-    dp_sync_kwarg = "dp_sync" if vllm_version_is("0.31.0") else "dp_sync_state"
+    dp_sync_kwarg = "dp_sync_state"
     assert (
         speculator.propose(
             batch, *[None] * 10, **{dp_sync_kwarg: sync_state}, dummy_run=dummy_run, skip_attn_for_dummy_run=skip_attn
@@ -449,7 +449,20 @@ def test_dflash_input_preparation_keeps_physical_and_kernel_block_sizes_separate
 
     dflash_module.prepare_dflash_inputs_factory(128)(*inputs)
 
-    kernel.assert_called_once_with(*inputs, kv_cache_block_size=128)
+    kernel.assert_called_once_with(*inputs, num_reqs_override=None, kv_cache_block_size=128)
+
+
+@pytest.mark.skipif(vllm_version_is("0.32.0"), reason="main-only num_reqs_override")
+def test_dflash_input_preparation_forwards_num_reqs_override(monkeypatch):
+    """vLLM main (#58984) forwards the DP-synced request count positionally."""
+    kernel = MagicMock()
+    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
+    inputs = [object() for _ in range(28)]
+    inputs[-1] = True  # sample_from_anchor
+
+    dflash_module.prepare_dflash_inputs_factory(128)(*inputs, 5)
+
+    kernel.assert_called_once_with(*inputs, num_reqs_override=5, kv_cache_block_size=128)
 
 
 def test_dflash_input_preparation_restores_kernel_block_size_on_main(monkeypatch):
@@ -466,22 +479,13 @@ def test_dflash_input_preparation_restores_kernel_block_size_on_main(monkeypatch
     inputs[16] = block_table
     inputs[17] = 384  # Physical KV block size forwarded by the DFlash caller.
     inputs[-1] = True  # sample_from_anchor
-
-    if vllm_version_is("0.31.0"):
-        dflash_module.prepare_dflash_inputs_factory(384)(*inputs)
-    else:
-        dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*inputs)
+    dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*inputs)
 
     restored = kernel.call_args.args[17]
-    if vllm_version_is("0.31.0"):
-        # The release lane already forwards the kernel block size.
-        assert restored == 384
-    else:
-        assert restored == 128
+    assert restored == 128
     assert kernel.call_args.kwargs["kv_cache_block_size"] == 384
 
 
-@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only kernel block size restore")
 def test_dflash_input_preparation_rejects_unknown_block_table(monkeypatch):
     kernel = MagicMock()
     monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)

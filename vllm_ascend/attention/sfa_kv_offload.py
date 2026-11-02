@@ -58,7 +58,6 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT,
     get_sparse_kv_offload_manager,
 )
-from vllm_ascend.utils import enable_dsa_cp
 
 # LIM bounds mirror both BF16 and quantized kernel constants headers;
 # source-checkout tests enforce parity, independently of the draft checkpoint.
@@ -525,8 +524,6 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             kv_sharing_target_layer_name,
             **kwargs,
         )
-        if enable_dsa_cp():
-            raise NotImplementedError("Sparse KV offload currently requires TP without context parallelism")
         if self.uses_packed_sfa_main_cache:
             raise NotImplementedError(
                 "Sparse KV offload does not support packed SFA main caches "

@@ -101,37 +101,22 @@ def _run_cache(
     normalize_paths: list[Path] | None = None,
     set_env_values: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    is_custom = domain == "custom_operator"
     actual_output = output_dir
-    if domain == "custom_operator":
+    if is_custom:
         safe_action = re.sub(r"[^A-Za-z0-9_.-]", "_", action)
         stage_dir = stage_dir or (output_dir.parent / "private-stages" / safe_action)
         publish_state_dir = publish_state_dir or (output_dir.parent / "publish-state")
         actual_output = stage_dir
-
-    custom_soc: str | None = None
-    custom_operator: str | None = None
-    custom_action: str | None = None
-    custom_operator_source: Path | None = None
-    custom_publish_dir: Path | None = None
-    custom_publish_state_dir: Path | None = None
-    if domain == "custom_operator":
         if operator_source is None:
             operator_source = prepared_inputs[0]
-        assert stage_dir is not None
-        assert publish_state_dir is not None
-        custom_soc = "ascend910b"
-        custom_operator = "test_operator"
-        custom_action = action
-        custom_operator_source = operator_source
-        custom_publish_dir = output_dir
-        custom_publish_state_dir = publish_state_dir
 
     command = build_cache_command(
         cache_root=cache_root,
         domain=domain,
         unit="test_unit",
         output_dir=actual_output,
-        environment_profile="ascendc" if domain == "custom_operator" else "host-cxx",
+        environment_profile="ascendc" if is_custom else "host-cxx",
         prepared_inputs=prepared_inputs,
         recipe_values=recipe_values or ["recipe=stable"],
         environment_values=environment_values or ["abi=test"],
@@ -147,12 +132,12 @@ def _run_cache(
             builder_mode,
             artifact_name,
         ],
-        soc=custom_soc,
-        operator=custom_operator,
-        action=custom_action,
-        operator_source=custom_operator_source,
-        publish_dir=custom_publish_dir,
-        publish_state_dir=custom_publish_state_dir,
+        soc="ascend910b" if is_custom else None,
+        operator="test_operator" if is_custom else None,
+        action=action if is_custom else None,
+        operator_source=operator_source if is_custom else None,
+        publish_dir=output_dir if is_custom else None,
+        publish_state_dir=publish_state_dir if is_custom else None,
     )
     return run_command(command)
 
@@ -244,6 +229,9 @@ def test_custom_operator_miss_then_hit_and_restore(tmp_path: Path):
     assert "[build-cache] MISS" in first.stdout
     assert "[build-cache] SAVED" in first.stdout
     assert counter.read_text() == "1"
+    marker = cache_root / ".updated"
+    assert marker.is_file()
+    marker.unlink()
 
     _fresh_dir(output)
 
@@ -258,6 +246,7 @@ def test_custom_operator_miss_then_hit_and_restore(tmp_path: Path):
     _assert_success(second)
     assert "[build-cache] HIT" in second.stdout
     assert counter.read_text() == "1"
+    assert not marker.exists()
     assert (output / "kernel.o").read_text(encoding="utf-8") == "artifact-1"
 
 
@@ -705,7 +694,8 @@ def test_recipe_normalizes_ephemeral_cmake_path_without_hiding_semantic_changes(
     assert changed_recipe_hash != stable_hash_a
 
 
-def test_recipe_change_invalidates_cache(tmp_path: Path):
+@pytest.mark.parametrize("changed_field", ["recipe_values", "environment_values"])
+def test_semantic_configuration_change_invalidates_cache(tmp_path: Path, changed_field: str):
     source, prepared = _make_operator_inputs(tmp_path)
     output = tmp_path / "output"
     output.mkdir()
@@ -720,7 +710,8 @@ def test_recipe_change_invalidates_cache(tmp_path: Path):
         output_dir=output,
         builder=builder,
         counter=counter,
-        recipe_values=["optimization=-O2"],
+        recipe_values=["setting=before"] if changed_field == "recipe_values" else None,
+        environment_values=["setting=before"] if changed_field == "environment_values" else None,
     )
     _assert_success(first)
     key_a = _extract_key(first)
@@ -734,44 +725,8 @@ def test_recipe_change_invalidates_cache(tmp_path: Path):
         output_dir=output,
         builder=builder,
         counter=counter,
-        recipe_values=["optimization=-O0"],
-    )
-    _assert_success(second)
-    assert "[build-cache] MISS" in second.stdout
-    assert _extract_key(second) != key_a
-    assert counter.read_text() == "2"
-
-
-def test_compiler_environment_change_invalidates_cache(tmp_path: Path):
-    source, prepared = _make_operator_inputs(tmp_path)
-    output = tmp_path / "output"
-    output.mkdir()
-    cache_root = tmp_path / "cache"
-    counter = tmp_path / "counter"
-    builder = _write_builder(tmp_path)
-
-    first = _run_cache(
-        cache_root=cache_root,
-        prepared_inputs=[prepared],
-        operator_source=source,
-        output_dir=output,
-        builder=builder,
-        counter=counter,
-        environment_values=["toolkit=9.1.0"],
-    )
-    _assert_success(first)
-    key_a = _extract_key(first)
-
-    _fresh_dir(output)
-
-    second = _run_cache(
-        cache_root=cache_root,
-        prepared_inputs=[prepared],
-        operator_source=source,
-        output_dir=output,
-        builder=builder,
-        counter=counter,
-        environment_values=["toolkit=9.2.0"],
+        recipe_values=["setting=after"] if changed_field == "recipe_values" else None,
+        environment_values=["setting=after"] if changed_field == "environment_values" else None,
     )
     _assert_success(second)
     assert "[build-cache] MISS" in second.stdout
@@ -1922,39 +1877,143 @@ def test_restore_action_skips_l1_when_snapshot_key_fails():
     assert "snapshot-key" not in action
 
 
-def test_update_marker_only_records_successful_entry_save(tmp_path: Path):
+@pytest.mark.parametrize("trigger", ["HIT", "SAVED"])
+def test_operator_version_limit_prunes_whole_hashes(tmp_path: Path, trigger: str):
+    engine = _load_engine("build_cache_version_limit_test")
     source, prepared = _make_operator_inputs(tmp_path)
-    output = tmp_path / "output"
-    output.mkdir()
     cache_root = tmp_path / "cache"
     counter = tmp_path / "counter"
     builder = _write_builder(tmp_path)
 
-    cold = _run_cache(
-        cache_root=cache_root,
-        prepared_inputs=[prepared],
-        operator_source=source,
-        output_dir=output,
-        builder=builder,
-        counter=counter,
-    )
-    _assert_success(cold)
-    marker = cache_root / ".updated"
-    assert marker.is_file()
+    def run_action(action: str) -> subprocess.CompletedProcess[str]:
+        return _run_cache(
+            cache_root=cache_root,
+            prepared_inputs=[prepared],
+            operator_source=source,
+            output_dir=tmp_path / "output",
+            builder=builder,
+            counter=counter,
+            action=action,
+            artifact_name=f"{action}.o",
+        )
 
-    marker.unlink()
-    _fresh_dir(output)
-    warm = _run_cache(
-        cache_root=cache_root,
-        prepared_inputs=[prepared],
-        operator_source=source,
-        output_dir=output,
-        builder=builder,
-        counter=counter,
-    )
+    versions = []
+    # Start with two versions, or an oversized restored snapshot on the HIT path.
+    version_count = 3 if trigger == "HIT" else 2
+    for index in range(version_count):
+        (source / "kernel.cpp").write_text(f"int source = {index};\n", encoding="utf-8")
+        for action in ("a", "b"):
+            proc = run_action(action)
+            _assert_success(proc)
+        operator_hash, _ = engine._hash_operator_text(source, None)
+        version = cache_root / "custom_operator" / "ascend910b" / "test_operator" / operator_hash
+        versions.append(version)
+        os.utime(version, (index + 1, index + 1))
+
+    marker = cache_root / ".updated"
+    # Either reuse the oldest version or build a third source version.
+    index = 0 if trigger == "HIT" else 2
+    (source / "kernel.cpp").write_text(f"int source = {index};\n", encoding="utf-8")
+    warm = run_action("a")
     _assert_success(warm)
-    assert "[build-cache] HIT" in warm.stdout
-    assert not marker.exists()
+    assert f"[build-cache] {trigger}" in warm.stdout
+    assert "[build-cache] PRUNED" not in warm.stdout
+    assert all(version.is_dir() for version in versions)
+    assert len(list(versions[0].parent.glob("[0-9a-f]" * 64))) == 3
+    marker.unlink()
+    engine.prune(cache_root)
+    assert counter.read_text() == ("6" if trigger == "HIT" else "5")
+    assert versions[0].exists() == (trigger == "HIT")
+    assert versions[-1].is_dir()
+    assert not versions[1 if trigger == "HIT" else 0].exists()
+    current_hash, _ = engine._hash_operator_text(source, None)
+    current = versions[-1].parent / current_hash
+    assert len(list(current.rglob("manifest.json"))) == (2 if trigger == "HIT" else 1)
+    assert len(list(versions[-1].rglob("manifest.json"))) == 2
+    assert marker.is_file()
+    assert (tmp_path / "output" / "a.o").is_file()
+    assert (tmp_path / "output" / "b.o").is_file()
+    assert all(_manifest(path.parent)["schema"] == 4 for path in cache_root.rglob("manifest.json"))
+
+
+def _seed_operator_versions(operator_root: Path, count: int = 3) -> list[Path]:
+    versions = [operator_root / (str(index) * 64) for index in range(count)]
+    for index, version in enumerate(versions):
+        version.mkdir(parents=True)
+        (version / "artifact.o").write_text("cached", encoding="utf-8")
+        os.utime(version, (index + 1, index + 1))
+    return versions
+
+
+@pytest.mark.parametrize("fault", ["delete_error", "symlink"])
+def test_operator_version_cleanup_isolated_and_fail_open(tmp_path: Path, monkeypatch, fault: str):
+    engine = _load_engine("build_cache_version_cleanup_test")
+    cache_root = tmp_path / "cache"
+    operator_root = cache_root / "custom_operator" / "a3" / "test_op"
+    versions = _seed_operator_versions(operator_root)
+    other_operator = operator_root.parent / "other_op" / ("a" * 64)
+    other_operator.mkdir(parents=True)
+
+    if fault == "delete_error":
+
+        def refuse_delete(path):
+            raise PermissionError("injected cleanup failure")
+
+        monkeypatch.setattr(engine.shutil, "rmtree", refuse_delete)
+    elif fault == "symlink":
+        # A hash-shaped symlink must not make cleanup delete outside the root.
+        shutil.rmtree(versions[0])
+        versions[0].symlink_to(other_operator, target_is_directory=True)
+
+    assert engine.main(["prune", "--cache-root", str(cache_root)]) == 0
+    assert all(version.is_dir() for version in versions)
+    assert other_operator.is_dir()
+
+
+@pytest.mark.parametrize(
+    ("build_status", "limit", "retained"),
+    [
+        (0, "2", 2),
+        (7, "2", 3),
+        (0, "0", 3),
+        (0, "1", 1),
+        (0, "3", 3),
+        (0, "invalid", 3),
+    ],
+)
+def test_csrc_build_cleanup_runs_only_after_success(tmp_path: Path, build_status, limit, retained):
+    cache_root = tmp_path / "custom-cache"
+    versions = _seed_operator_versions(cache_root / "custom_operator" / "a3" / "op")
+    build_script = (REPO_ROOT / "csrc" / "build.sh").read_text(encoding="utf-8")
+    cleanup = build_script[
+        build_script.index(
+            "# Prune only after all foreground csrc build commands have succeeded."
+        ) : build_script.rindex("} | awk")
+    ]
+    script = (
+        """
+CURRENT_DIR=$1
+BUILD_CACHE_DIR=$2
+BUILD_CACHE_MAX_OPERATOR_VERSIONS=$3
+(
+    test "$(find "$BUILD_CACHE_DIR/custom_operator" -mindepth 3 -maxdepth 3 -type d | wc -l)" -eq 3
+    (test "$(find "$BUILD_CACHE_DIR/custom_operator" -mindepth 3 -maxdepth 3 -type d | wc -l)" -eq 3) &
+    first=$!
+    (test "$(find "$BUILD_CACHE_DIR/custom_operator" -mindepth 3 -maxdepth 3 -type d | wc -l)" -eq 3) &
+    second=$!
+    wait "$first"
+    wait "$second"
+    exit "$4"
+)
+"""
+        + cleanup
+    )
+    result = run_command(
+        ["bash", "-e", "-c", script, "cleanup-test", str(REPO_ROOT / "csrc"), str(cache_root), limit, str(build_status)]
+    )
+    assert result.returncode == build_status, result.stdout + result.stderr
+    assert sum(version.is_dir() for version in versions) == retained
+    assert versions[-1].is_dir()
 
 
 def test_cmake_adapter_preserves_arguments_with_spaces(tmp_path: Path):

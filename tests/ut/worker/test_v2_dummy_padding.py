@@ -1,4 +1,6 @@
+from contextlib import AbstractContextManager, nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -135,8 +137,11 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
     target = _make_graph_manager(buffers, CUDAGraphMode.PIECEWISE, uniform, capture_size)
     draft = _make_graph_manager(buffers, draft_mode, uniform, capture_size)
 
+    cpu_group = object()
+
     def other_rank_votes(votes, group):
-        assert group is cpu_group
+        # v0.32.0 passes ``group=cpu_group``; main's ``cpu_all_reduce_`` does not.
+        assert group is None or group is cpu_group
         # The other ranks decode real requests with the same query width.
         votes[0, 1:] = torch.tensor([2 * uniform, 3 * uniform, uniform])
         votes[1, 1:] = CUDAGraphMode.PIECEWISE.value
@@ -155,7 +160,7 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         actual_uniform = get_uniform_decode_token_count(
             batch.num_reqs, batch.num_tokens, int(batch.num_scheduled_tokens.max()), batch.decode_graph_eligible
         )
-        dp_sync_kwarg = "dp_sync" if vllm_version_is("0.31.0") else "dp_sync_state"
+        dp_sync_kwarg = "dp_sync_state"
         draft_desc, reused_sync = dispatch_cg_and_sync_dp(
             draft, batch.num_reqs, batch.num_tokens_after_padding, actual_uniform, 4, 0, **{dp_sync_kwarg: sync}
         )
@@ -165,13 +170,24 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         assert reused_sync is sync
         return None, None
 
-    cpu_group = object()
+    extra_collective_patch: AbstractContextManager[Any]
+    if vllm_version_is("0.32.0"):
+        # v0.32.0 collects through ``dist.all_reduce(votes, group=cpu_group)``.
+        dp_group = SimpleNamespace(cpu_group=cpu_group)
+        collective = Mock(side_effect=other_rank_votes)
+        extra_collective_patch = patch("vllm.v1.worker.gpu.dp_utils.dist.all_reduce", collective)
+    else:
+        # vLLM main collects through ``get_dp_group().cpu_all_reduce_(votes)``.
+        collective = Mock(side_effect=lambda votes: other_rank_votes(votes, None))
+        dp_group = SimpleNamespace(cpu_all_reduce_=collective)
+        extra_collective_patch = nullcontext()
+
     with (
         patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy),
         patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=False),
         patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
-        patch("vllm.v1.worker.gpu.dp_utils.get_dp_group", return_value=SimpleNamespace(cpu_group=cpu_group)),
-        patch("vllm.v1.worker.gpu.dp_utils.dist.all_reduce", side_effect=other_rank_votes) as collective,
+        patch("vllm.v1.worker.gpu.dp_utils.get_dp_group", return_value=dp_group),
+        extra_collective_patch,
     ):
         runner._dummy_run(uniform, uniform_decode=True)
     assert collective.call_count == 1
@@ -319,7 +335,7 @@ def test_context_dummy_keeps_capture_and_tail_layouts(buffers, runner, num_token
         assert batch.num_tokens == batch.num_tokens_after_padding == num_tokens
         blocks = SimpleNamespace(
             input_block_tables=[torch.zeros((num_reqs, 8), dtype=torch.int32)],
-            # vLLM main reads block_sizes; v0.31.0 reads kernel_block_sizes.
+            # Upstream reads block_sizes; Ascend also tracks kernel block sizes.
             block_sizes=[16],
             kernel_block_sizes=[16],
             blocks_per_kv_block=[1],
@@ -372,10 +388,11 @@ def test_attention_keeps_actual_queries_and_padded_dummy_inputs(
     batch.is_dummy = is_dummy
     state = state_type.__new__(state_type)
     state.decoder_replay = None
+    state.recoverssm = None
     state.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1), num_speculative_tokens=0
     )
-    # vLLM 0.31 (#58149) exposes max_model_len as a read-only property backed by
+    # Since vLLM 0.31 (#58149), max_model_len is exposed as a read-only property backed by
     # model_config.
     state.model_config = SimpleNamespace(max_model_len=128)
     state.pcp_manager = None

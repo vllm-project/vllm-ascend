@@ -24,7 +24,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
-from vllm_ascend.utils import enable_dsa_cp, should_skip_allreduce_across_dp_group
+from vllm_ascend.utils import should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 from .decoder_replay_layers import AscendDecoderReplayLayers
@@ -43,6 +43,20 @@ class DecoderReplayInputs:
     pcp_context: "AscendPCPAttentionContext | None" = None
 
 
+@dataclass(frozen=True)
+class _DecoderReplayPlan:
+    # Retained query token counts for each request on this rank.
+    kept_lens: np.ndarray
+    # PCP replay may replace encoder_replay_start.
+    replay_inputs: DecoderReplayInputs
+    # Execution length, including padding rather than only valid tokens.
+    num_tokens: int
+    # PCP ranks may need a compact layout even when they retain no valid tokens.
+    requires_compaction: bool
+    # Whether PCP replay is active, not merely whether a PCP context exists.
+    uses_pcp_replay: bool
+
+
 class DecoderReplayState:
     def __init__(self, config: VllmConfig, layers: AscendDecoderReplayLayers, device: torch.device) -> None:
         self.config = config
@@ -53,6 +67,7 @@ class DecoderReplayState:
         self.keeps_rows = np.zeros(num_reqs, dtype=np.bool_)
         self.rows = torch.zeros(capacity, dtype=torch.int64, device=device)
         self.positions = torch.zeros_like(self.rows)
+        self.padding = torch.ones(capacity, dtype=torch.bool, device=device)
         self.offsets = torch.zeros(local_reqs + 1, dtype=torch.int32, device=device)
         self.dropped_before = CpuGpuBuffer(local_reqs + 1, dtype=torch.int32, device=device, pin_memory=False)
         self.replay_start = torch.zeros(local_reqs, dtype=torch.int32, device=device)
@@ -67,7 +82,7 @@ class DecoderReplayState:
 
     def _pcp_kept_lengths(self, inputs: DecoderReplayInputs) -> tuple[np.ndarray, int, torch.Tensor] | None:
         context = inputs.pcp_context
-        if context is None:
+        if context is None or inputs.batch.is_dummy:
             return None
         batch = inputs.batch
         global_batch = context.global_batch
@@ -196,67 +211,135 @@ class DecoderReplayState:
         )
 
     def prepare(self, inputs: DecoderReplayInputs, mode: CUDAGraphMode, *, for_capture: bool = False) -> None:
+        # Default to the original batch so no replay state leaks across steps.
         self.layers.rows = None
         self.layers.context_factory = None
         self.layers.num_padded_rows = None
         self.replay_pcp_context = None
+        self.dp_tokens = None
+        self.metadata = {}
+
+        # Initialize before early exits: capture and profile may also need warmup.
         if self.slots is None:
             self._initialize(inputs)
         if for_capture or mode != CUDAGraphMode.NONE or get_mrv2_in_profile_run():
             return
+
+        # Compaction requires coordinated execution lengths across DP replicas.
         parallel = self.config.parallel_config
-        if parallel.data_parallel_size > 1 and should_skip_allreduce_across_dp_group(self.config):
+        if parallel.data_parallel_size > 1 and (
+            should_skip_allreduce_across_dp_group(self.config) or should_skip_dp_coordination()
+        ):
             return
+
+        plan = self._build_replay_plan(inputs)
+        self.num_actual_tokens = int(plan.kept_lens.sum())
+        self.num_tokens = plan.num_tokens
+
+        # Dummy batches have no valid tokens but may still need collective padding.
+        if inputs.batch.is_dummy:
+            self.num_actual_tokens = 0
+
+        # No replica needs compaction; keep the original execution context.
+        any_replica_compacts = self._coordinate_replay_across_dp(plan)
+        if not any_replica_compacts:
+            return
+
+        # A peer compacted its batch; only update the cross-DP token counts locally.
+        # Keep rows unset to reuse attention metadata, including dummy PCP contexts
+        # that need not provide token ownership indices.
+        if not plan.requires_compaction:
+            self.layers.context_factory = self.forward_context
+            return
+
+        # This rank needs a compact batch and matching attention metadata.
+        self._prepare_compact_replay(inputs, plan)
+
+    def _build_replay_plan(self, inputs: DecoderReplayInputs) -> _DecoderReplayPlan:
         batch = inputs.batch
         num_reqs = batch.num_reqs
         query_lens = np.diff(batch.query_start_loc_np[: num_reqs + 1])
         pcp_replay = self._pcp_kept_lengths(inputs)
-        if pcp_replay is None:
-            trim_requests = batch.is_prefilling_np[:num_reqs] & ~self.keeps_rows[batch.idx_mapping_np[:num_reqs]]
-            if batch.is_dummy or inputs.pcp_context is not None:
-                trim_requests = np.zeros(num_reqs, dtype=np.bool_)
-            kept_lens = np.where(trim_requests, np.minimum(query_lens, self.layers.window), query_lens)
-            trims = bool((kept_lens < query_lens).any())
-            replay_inputs = inputs
-        else:
-            kept_lens, num_padded, replay_start = pcp_replay
-            trims = True
-            replay_inputs = replace(inputs, encoder_replay_start=replay_start)
-        self.num_actual_tokens = int(kept_lens.sum())
-        self.num_tokens = self.num_actual_tokens
         if pcp_replay is not None:
-            self.num_tokens = num_padded
-        elif enable_dsa_cp():
-            self.num_tokens = round_up(self.num_tokens, parallel.tensor_parallel_size)
-        self.dp_tokens = None
-        if parallel.data_parallel_size > 1:
-            agreed = torch.zeros((2, parallel.data_parallel_size), dtype=torch.int32)
-            agreed[:, get_dp_group().rank_in_group] = torch.tensor([trims, self.num_tokens])
-            if not should_skip_dp_coordination():
-                dist.all_reduce(agreed, group=get_dp_group().cpu_group)
-            trims = bool(agreed[0].any())
-            self.dp_tokens = agreed[1]
-        if not trims:
-            return
+            kept_lens, num_padded, replay_start = pcp_replay
+            # PCP retains owners of the global tail window; empty ranks still participate.
+            return _DecoderReplayPlan(
+                kept_lens=kept_lens,
+                replay_inputs=replace(inputs, encoder_replay_start=replay_start),
+                num_tokens=num_padded,
+                requires_compaction=True,
+                uses_pcp_replay=True,
+            )
+
+        # Trim only prefills that do not need full outputs. Map batch indices to request slots.
+        request_indices = batch.idx_mapping_np[:num_reqs]
+        trim_requests = batch.is_prefilling_np[:num_reqs] & ~self.keeps_rows[request_indices]
+        if batch.is_dummy or inputs.pcp_context is not None:
+            # Without a PCP replay plan, do not independently trim each rank's local tail.
+            trim_requests = np.zeros(num_reqs, dtype=np.bool_)
+        kept_lens = np.where(trim_requests, np.minimum(query_lens, self.layers.window), query_lens)
+        requires_compaction = bool((kept_lens < query_lens).any())
+
+        if not requires_compaction:
+            # Preserve collective width, including padding on empty PCP ranks and idle DP replicas.
+            num_tokens = batch.num_tokens_after_padding
+        else:
+            num_tokens = int(kept_lens.sum())
+
+        return _DecoderReplayPlan(
+            kept_lens=kept_lens,
+            replay_inputs=inputs,
+            num_tokens=num_tokens,
+            requires_compaction=requires_compaction,
+            uses_pcp_replay=False,
+        )
+
+    def _coordinate_replay_across_dp(self, plan: _DecoderReplayPlan) -> bool:
+        dp_size = self.config.parallel_config.data_parallel_size
+        if dp_size == 1:
+            return plan.requires_compaction
+
+        dp_group = get_dp_group()
+        # Each rank writes its own column; reduction shares all replicas' values.
+        # Row 0 records compaction flags; row 1 records padded execution lengths.
+        replica_info = torch.zeros((2, dp_size), dtype=torch.int32)
+        replica_info[:, dp_group.rank_in_group] = torch.tensor(
+            [plan.requires_compaction, plan.num_tokens], dtype=torch.int32
+        )
+        dist.all_reduce(replica_info, group=dp_group.cpu_group)
+        self.dp_tokens = replica_info[1]
+        return bool(replica_info[0].any())
+
+    def _prepare_compact_replay(self, inputs: DecoderReplayInputs, plan: _DecoderReplayPlan) -> None:
+        batch = inputs.batch
+        num_reqs = batch.num_reqs
+        # Convert retained lengths to query boundaries: [1, 6, 2] becomes [0, 1, 7, 9].
         offsets = np.zeros(num_reqs + 1, dtype=np.int32)
-        np.cumsum(kept_lens, out=offsets[1:])
+        np.cumsum(plan.kept_lens, out=offsets[1:])
+        # Cumulative dropped rows at each request boundary describe the new layout to the kernel.
         dropped = batch.query_start_loc_np[: num_reqs + 1] - offsets
         self.dropped_before.np[: num_reqs + 1] = dropped
         self.dropped_before.copy_to_gpu(num_reqs + 1)
-        self._gather(replay_inputs)
-        if pcp_replay is not None:
+
+        # Prepare row indices, positions, slot mappings, and replay starts.
+        # The layer adapter gathers hidden states and executes the decoder later.
+        self._gather(plan.replay_inputs)
+        if plan.uses_pcp_replay:
             assert inputs.pcp_context is not None
             global_batch = inputs.pcp_context.global_batch
-            global_lens = np.diff(global_batch.query_start_loc_np[: global_batch.num_reqs + 1])
-            global_trim = (
-                global_batch.is_prefilling_np[: global_batch.num_reqs]
-                & ~self.keeps_rows[global_batch.idx_mapping_np[: global_batch.num_reqs]]
-            )
+            num_global_reqs = global_batch.num_reqs
+            global_lens = np.diff(global_batch.query_start_loc_np[: num_global_reqs + 1])
+            global_request_indices = global_batch.idx_mapping_np[:num_global_reqs]
+            global_trim = global_batch.is_prefilling_np[:num_global_reqs] & ~self.keeps_rows[global_request_indices]
             global_kept = np.where(global_trim, np.minimum(global_lens, self.layers.window), global_lens)
+            # Update PCP's global batch and cross-rank restore indices to match the compact layout.
             self.replay_pcp_context = self._build_replay_pcp_context(inputs, global_kept)
-            self.layers.num_padded_rows = self.num_tokens
-        self.metadata = self._build_metadata(replay_inputs, offsets)
-        self.layers.rows = self.rows[: self.num_actual_tokens if pcp_replay is not None else self.num_tokens]
+            self.layers.num_padded_rows = plan.num_tokens
+
+        self.metadata = self._build_metadata(plan.replay_inputs, offsets)
+        # PCP selects valid rows and pads downstream; other paths may include padding row indices.
+        num_selected_rows = self.num_actual_tokens if plan.uses_pcp_replay else plan.num_tokens
+        self.layers.rows = self.rows[:num_selected_rows]
         self.layers.num_actual_rows = self.num_actual_tokens
         self.layers.context_factory = self.forward_context
 
@@ -289,10 +372,9 @@ class DecoderReplayState:
                 attn_state=batch.attn_state,
                 is_prefilling=torch.from_numpy(batch.is_prefilling_np[:num_reqs]),
                 replay_start=self.replay_start[:num_reqs],
+                pcp_context=self.replay_pcp_context,
+                pcp_cache_group_idx=group_id if self.replay_pcp_context is not None else None,
             )
-            build_kwargs = {}
-            if self.replay_pcp_context is not None:
-                build_kwargs = {"pcp_context": self.replay_pcp_context, "pcp_cache_group_idx": group_id}
             value = builder.build(
                 0,
                 common,
@@ -300,7 +382,6 @@ class DecoderReplayState:
                 common_v41_batch_metadata=batch_shared,
                 common_v41_metadata=group_shared.setdefault(group_id, {}),
                 rope_views=rope,
-                **build_kwargs,
             )
             for task in builder.take_device_metadata_tasks():
                 task.run()
@@ -311,15 +392,36 @@ class DecoderReplayState:
     @contextmanager
     def forward_context(self) -> Iterator[None]:
         outer = get_forward_context()
+        compact = self.layers.rows is not None
+        padding = outer.is_padding
+        full_padding = padding
+        if compact or padding is None:
+            if padding is not None and self.layers.sequence_parallel:
+                padding = tensor_model_parallel_all_gather(padding, dim=0)
+            replay_padding = self.padding[: self.num_tokens]
+            replay_padding.fill_(True)
+            if padding is None:
+                replay_padding[: self.num_actual_tokens].fill_(False)
+            else:
+                replay_padding[: self.num_actual_tokens].copy_(
+                    padding.index_select(0, self.rows[: self.num_actual_tokens])
+                )
+            padding = replay_padding
+            full_padding = replay_padding
+            if self.layers.sequence_parallel:
+                tp = get_tp_group()
+                padding = padding.chunk(tp.world_size)[tp.rank_in_group]
         mask = get_mc2_mask()
         saved_mask = mask.clone() if mask is not None else None
         try:
             with set_forward_context(
-                self.metadata,
+                self.metadata if compact else outer.attn_metadata,
                 self.config,
                 num_tokens=self.num_tokens,
                 num_tokens_across_dp=self.dp_tokens,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                slot_mapping=None if compact else outer.slot_mapping,
+                is_padding=padding,
             ):
                 context = get_forward_context()
                 context.additional_kwargs["eplb_heat_collection_status"] = outer.additional_kwargs.get(
@@ -328,15 +430,12 @@ class DecoderReplayState:
                 replay_mask = context.additional_kwargs.get("mc2_mask")
                 if replay_mask is not None:
                     replay_mask[self.num_actual_tokens :].fill_(False)
-                if outer.is_padding is not None:
-                    padding = outer.is_padding
-                    if self.layers.sequence_parallel:
-                        padding = tensor_model_parallel_all_gather(padding, dim=0)
-                    context.is_padding = padding.index_select(0, self.rows[: self.num_tokens])
-                    context.is_padding[self.num_actual_tokens :].fill_(True)
-                    if self.layers.sequence_parallel:
-                        tp = get_tp_group()
-                        context.is_padding = context.is_padding.chunk(tp.world_size)[tp.rank_in_group]
+                    # Preserve masked rows in untrimmed batches as well as the
+                    # new suffix padding. MC2 masks use the pre-SP layout.
+                    if self.layers.sequence_parallel and not compact and outer.is_padding is not None:
+                        full_padding = tensor_model_parallel_all_gather(padding, dim=0)
+                    assert full_padding is not None
+                    replay_mask[: self.num_tokens].logical_and_(~full_padding)
                 yield
         finally:
             if saved_mask is not None:

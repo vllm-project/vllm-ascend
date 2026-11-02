@@ -46,7 +46,16 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
 )
-from vllm_ascend.utils import get_ascend_config, vllm_version_is
+from vllm_ascend.utils import get_ascend_config
+
+
+def _normalize_encoder_schedule_result(
+    result: tuple[list[int], int, int, list[int]] | tuple[list[int], int, int, list[int], list[int]],
+) -> tuple[list[int], int, int, list[int], list[int]]:
+    """Retain duplicate references on main; the release API has none."""
+    if len(result) == 4:
+        return (*result, [])
+    return result
 
 
 @dataclass
@@ -92,6 +101,17 @@ class RecomputeScheduler(Scheduler):
     """
 
     prefill_capacity_bound: bool
+
+    def _allocate_encoder_inputs(self, request: Request, input_ids: list[int], duplicate_input_ids: list[int]) -> None:
+        allocate = getattr(super(), "_allocate_encoder_inputs", None)
+        if allocate is not None:
+            allocate(request, input_ids, duplicate_input_ids)
+            return
+        # vLLM 0.31.0 has no native helper or duplicate-input return value.
+        for input_id in input_ids:
+            self.encoder_cache_manager.allocate(request, input_id)
+            if self.ec_connector is not None:
+                self.ec_connector.update_state_after_alloc(request, input_id)
 
     def _apply_load_balance_modifications(self) -> None:
         """Hook for DyntraLB to apply cross-rank scheduling decisions."""
@@ -296,6 +316,7 @@ class RecomputeScheduler(Scheduler):
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
             external_load_encoder_input: list[int] = []
+            duplicate_encoder_inputs: list[int] = []
             new_encoder_compute_budget = encoder_compute_budget
             if request.has_encoder_inputs:
                 (
@@ -303,12 +324,15 @@ class RecomputeScheduler(Scheduler):
                     num_new_tokens,
                     new_encoder_compute_budget,
                     external_load_encoder_input,
-                ) = self._try_schedule_encoder_inputs(
-                    request,
-                    request.num_computed_tokens,
-                    num_new_tokens,
-                    encoder_compute_budget,
-                    shift_computed_tokens=self.num_prefill_lookahead,
+                    duplicate_encoder_inputs,
+                ) = _normalize_encoder_schedule_result(
+                    self._try_schedule_encoder_inputs(
+                        request,
+                        request.num_computed_tokens,
+                        num_new_tokens,
+                        encoder_compute_budget,
+                        shift_computed_tokens=self.num_prefill_lookahead,
+                    )
                 )
 
             # Multi-module MTP: avoid ending a prefill chunk within
@@ -439,17 +463,13 @@ class RecomputeScheduler(Scheduler):
             # Encoder-related.
             if encoder_inputs_to_schedule:
                 scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
-                # Allocate the encoder cache.
-                for i in encoder_inputs_to_schedule:
-                    self.encoder_cache_manager.allocate(request, i)
-                    if self.ec_connector is not None:
-                        self.ec_connector.update_state_after_alloc(request, i)
                 encoder_compute_budget = new_encoder_compute_budget
-            if external_load_encoder_input:
-                for i in external_load_encoder_input:
-                    self.encoder_cache_manager.allocate(request, i)
-                    if self.ec_connector is not None:
-                        self.ec_connector.update_state_after_alloc(request, i)
+            if encoder_inputs_to_schedule or external_load_encoder_input:
+                self._allocate_encoder_inputs(
+                    request,
+                    (encoder_inputs_to_schedule or []) + external_load_encoder_input,
+                    duplicate_encoder_inputs,
+                )
 
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
@@ -614,6 +634,7 @@ class RecomputeScheduler(Scheduler):
 
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
+                duplicate_encoder_inputs = []
                 new_encoder_compute_budget = encoder_compute_budget
                 pad_spec_decode = False
 
@@ -665,7 +686,7 @@ class RecomputeScheduler(Scheduler):
                     if (
                         not self.scheduler_config.enable_chunked_prefill
                         and num_new_tokens > request_token_budget
-                        and (vllm_version_is("0.31.0") or not self.is_mm_encoder_only)
+                        and not self.is_mm_encoder_only
                     ):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
@@ -701,12 +722,15 @@ class RecomputeScheduler(Scheduler):
                             num_new_tokens,
                             new_encoder_compute_budget,
                             external_load_encoder_input,
-                        ) = self._try_schedule_encoder_inputs(
-                            request,
-                            num_computed_tokens,
-                            num_new_tokens,
-                            encoder_compute_budget,
-                            shift_computed_tokens=self.num_prefill_lookahead,
+                            duplicate_encoder_inputs,
+                        ) = _normalize_encoder_schedule_result(
+                            self._try_schedule_encoder_inputs(
+                                request,
+                                num_computed_tokens,
+                                num_new_tokens,
+                                encoder_compute_budget,
+                                shift_computed_tokens=self.num_prefill_lookahead,
+                            )
                         )
 
                     # Multi-module MTP: avoid ending a prefill chunk within
@@ -744,6 +768,11 @@ class RecomputeScheduler(Scheduler):
                     num_lookahead_tokens=effective_lookahead_tokens,
                     num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
+                    skip_zeroing_group_ids=(
+                        self.connector.get_loaded_kv_cache_group_ids(request)
+                        if load_kv_async and self.connector is not None
+                        else ()
+                    ),
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
@@ -799,16 +828,6 @@ class RecomputeScheduler(Scheduler):
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
                     self._inflight_prefills.add(request)
-                    if self.needs_kv_cache_zeroing:
-                        # Skip zeroing of the blocks the async load will
-                        # overwrite; the zeroing could race the write.
-                        self._skip_zero_block_ids.update(
-                            self.kv_cache_manager.get_zeroing_block_ids_in_range(
-                                request.request_id,
-                                num_new_local_computed_tokens,
-                                num_computed_tokens,
-                            )
-                        )
                     skip_request(request_queue)
                     continue
 
@@ -844,18 +863,13 @@ class RecomputeScheduler(Scheduler):
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
-                    # Allocate the encoder cache.
-                    for i in encoder_inputs_to_schedule:
-                        self.encoder_cache_manager.allocate(request, i)
-                        if self.ec_connector is not None:
-                            self.ec_connector.update_state_after_alloc(request, i)
                     encoder_compute_budget = new_encoder_compute_budget
-                # Allocate for external load encoder cache
-                if external_load_encoder_input:
-                    for i in external_load_encoder_input:
-                        self.encoder_cache_manager.allocate(request, i)
-                        if self.ec_connector is not None:
-                            self.ec_connector.update_state_after_alloc(request, i)
+                if encoder_inputs_to_schedule or external_load_encoder_input:
+                    self._allocate_encoder_inputs(
+                        request,
+                        (encoder_inputs_to_schedule or []) + external_load_encoder_input,
+                        duplicate_encoder_inputs,
+                    )
 
             # re-queue requests skipped in this pass ahead of older skipped items.
             if step_skipped_kv_holding:

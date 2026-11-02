@@ -5,6 +5,8 @@ import pytest
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.mamba.postprocess import (
     _copy_temporal_state,
     postprocess_mamba_fused_kernel,
@@ -18,6 +20,10 @@ def _copy_temporal_test_kernel(src, dst, size, TILES: tl.constexpr):
     _copy_temporal_state(src.to(tl.int64), dst.to(tl.int64), size, tl.program_id(0), 1024, TILES)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("size", [0, 7, 1027, 786432, 786435, 786443])
 @pytest.mark.parametrize("offsets", [(0, 0), (1, 1), (1, 3), (0, 8)])
 @pytest.mark.parametrize("tiles", [1, 4])
@@ -31,6 +37,10 @@ def test_temporal_copy_preserves_bytes_and_guards(size, offsets, tiles):
     assert torch.equal(destination.cpu(), expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize(
     "state_shape,dtype",
     [
@@ -53,6 +63,10 @@ def test_temporal_copy_config_derived_sizes(state_shape, dtype, tiles):
     assert torch.equal(destination.cpu(), expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("precomputed", [False, True])
 @pytest.mark.parametrize("graph_mode", [False, True])
 @pytest.mark.parametrize(
@@ -184,6 +198,10 @@ def test_mixed_postprocess_replay_uses_updated_metadata(
         assert torch.equal(accepted_out.cpu(), expected_out)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("tp", [pytest.param(8, id="tp8"), pytest.param(16, id="tp16")])
 def test_kimi_k3_full_recurrent_layer_grid(tp):
     """Exercise the 69 KDA layers / 138 state programs of the full K3 layout."""

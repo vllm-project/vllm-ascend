@@ -544,7 +544,7 @@ class DeepseekV3XliteModel(Glm4MoeXliteModel):
     from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 
     _attn_metadata_type = AscendMLAMetadata  # type: ignore[assignment]
-    _supported_architectures = ["DeepseekV3ForCausalLM"]
+    _supported_architectures = ["DeepseekV3ForCausalLM", "Glm4MoeLiteForCausalLM"]
 
     def _build_model_config(self) -> None:
         super()._build_model_config()
@@ -738,10 +738,12 @@ class XliteWrapper:
         """
         self.npu_runner: XliteModelRunner = npu_runner
         self.npu_runnable: nn.Module = npu_runner.fallback_model
+        self.npu_update_stream: torch.npu.Stream | None = getattr(npu_runner, "update_stream", None)
         self.device = device
         # `full_mode` only sizes the token budget (see the comment in `StandardXliteModel._build_config`).
         self.full_mode: bool = get_ascend_config().xlite_graph_config.full_mode
         self.data_parallel_size = vllm_config.parallel_config.data_parallel_size
+        self.speculative: bool = vllm_config.speculative_config is not None
 
         set_dummy_tensor(torch.empty(1, device=device, dtype=vllm_config.model_config.dtype))
         self.adapter_xlite_model = get_adapter_xlite_model(npu_runner, vllm_config)  # python adapter instance
@@ -844,12 +846,25 @@ class XliteWrapper:
                 )
             return self.npu_runnable(input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs)
 
+        # sync the device streams to avoid stale D2H copies in metadata preparation
+        curr_stream = torch.npu.current_stream()
+        if self.npu_update_stream is not None and self.npu_update_stream != curr_stream:
+            curr_stream.wait_stream(self.npu_update_stream)
+
         attn_metadata_router = AttnMetadataRouter(attn_metadata=attn_metadata, device="cpu")
         num_actual_tokens = attn_metadata_router.num_actual_tokens
         seq_lens = attn_metadata_router.seq_lens
         cum_query_lens = attn_metadata_router.cu_query_lens[-seq_lens.size(0) :]
         query_lens = torch.diff(cum_query_lens, prepend=seq_lens.new_zeros(1))
-        cached_lens = torch.clamp(seq_lens - query_lens, min=0)
+        if self.speculative:
+            # host-side `seq_lens` may be optimistic, rejected draft tokens still counted as cached,
+            # cf.gpu_model_runner._prepare_inputs; each request's first position is its true cached length, so cap by it
+            _pos = torch.atleast_2d(positions)[0, :num_actual_tokens].to(device=seq_lens.device)
+            req_starts = torch.cat([cum_query_lens.new_zeros(1), cum_query_lens[:-1]]).clamp(max=_pos.numel() - 1)
+            cached_lens = _pos[req_starts].to(dtype=seq_lens.dtype)
+        else:
+            cached_lens = torch.clamp(seq_lens - query_lens, min=0)
+
         block_tables = attn_metadata_router.block_tables
         num_reqs = max(1, (block_tables[:, 0] != 0).sum().item())  # number of non-empty requests
 
@@ -862,7 +877,6 @@ class XliteWrapper:
 
         # under DP, `num_tokens` is the max number of tokens across all DP ranks for data alignment
         h = self.hidden_states[:num_tokens]
-        stream = torch.npu.current_stream().npu_stream
         input_ids = cast(torch.Tensor, input_ids)
         if inputs_embeds is None or inputs_embeds.size(0) == 0:
             self.xlite_model.forward(
@@ -872,7 +886,7 @@ class XliteWrapper:
                 kv_cache=self.kv_caches,
                 freqs_cis=self.freq_cis,
                 output=h,
-                curr_stream=stream,
+                curr_stream=curr_stream.npu_stream,
             )
         else:
             inputs_embeds = inputs_embeds[:num_actual_tokens]
@@ -887,7 +901,7 @@ class XliteWrapper:
                 kv_cache=self.kv_caches,
                 freqs_cis=self.freq_cis,
                 output=h,
-                curr_stream=stream,
+                curr_stream=curr_stream.npu_stream,
                 deepstack_input=xlite_deepstack_input_embeds,
             )
             if deepstack_input_embeds and callable(

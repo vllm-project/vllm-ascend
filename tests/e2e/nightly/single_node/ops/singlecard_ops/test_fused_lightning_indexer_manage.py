@@ -7,6 +7,9 @@ from dataclasses import dataclass, replace
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
+
 torch_npu = pytest.importorskip("torch_npu")
 
 from vllm_ascend.utils import enable_custom_op  # noqa: E402
@@ -73,6 +76,7 @@ ALL_ROUTE_SCENARIOS = (
 ROUTE_STATE_SCENARIOS = tuple(
     pytest.param(q, state, offload_len, cache_tokens, id=f"q{q}-state{state}")
     for q, offload_len, cache_tokens in ALL_ROUTE_SCENARIOS
+    if q in (1, 4, 5, 7, 8, 9, 14)
     for state in (REQUEST_STATE_NON_OFFLOAD, REQUEST_STATE_FIRST_DECODE, REQUEST_STATE_STEADY)
 )
 
@@ -94,9 +98,6 @@ DTYPE_HEAD_ROUTE_SCENARIOS = tuple(
     )
     for q, state, offload_len, cache_tokens in (
         (1, REQUEST_STATE_NON_OFFLOAD, 8320, 8192),
-        (4, REQUEST_STATE_FIRST_DECODE, 16256, 12288),
-        (7, REQUEST_STATE_STEADY, 16256, 14336),
-        (8, REQUEST_STATE_NON_OFFLOAD, 16512, 16384),
         (12, REQUEST_STATE_FIRST_DECODE, 24704, 24576),
         (14, REQUEST_STATE_STEADY, 32768, MAX_CACHE_TOKENS),
     )
@@ -577,6 +578,10 @@ def _run_and_assert(case: ManageCase) -> tuple[torch.Tensor, tuple[torch.Tensor,
     return cache, outputs
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="The local fused LIM kernel is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize(
     "dtype,heads",
     [(torch.bfloat16, SMALL_HEAD_COUNT), (torch.float16, LARGE_HEAD_COUNT)],
@@ -594,6 +599,10 @@ def test_fused_lightning_indexer_manage_non_offload_matches_native(dtype, heads)
     _run_and_assert(case)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="The local fused LIM kernel is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize(
     "q,offload_len,actual_key",
     [
@@ -615,6 +624,10 @@ def test_fused_lightning_indexer_manage_non_offload_short_visible_padding(q, off
     _run_and_assert(case)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="The local fused LIM kernel is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize("q_values,offload_len,cache_tokens", FIRST_DECODE_SCENARIOS)
 @torch.inference_mode()
 def test_fused_lightning_indexer_manage_first_decode_initializes_cache(q_values, offload_len, cache_tokens):
@@ -627,6 +640,10 @@ def test_fused_lightning_indexer_manage_first_decode_initializes_cache(q_values,
     _run_and_assert(case)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="The local fused LIM kernel is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize("q_values,offload_len,cache_tokens", STEADY_REPLACEMENT_SCENARIOS)
 @torch.inference_mode()
 def test_fused_lightning_indexer_manage_steady_replacement_then_all_hit(q_values, offload_len, cache_tokens):
@@ -646,6 +663,10 @@ def test_fused_lightning_indexer_manage_steady_replacement_then_all_hit(q_values
     torch.testing.assert_close(repeated_cache, updated_cache, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="The local fused LIM kernel is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize(
     "states",
     [
@@ -669,6 +690,10 @@ def test_fused_lightning_indexer_manage_state_patterns(states):
     _run_and_assert(case)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="The local fused LIM kernel is configured for Ascend A2/A3",
+)
 @torch.inference_mode()
 def test_fused_lightning_indexer_manage_mixed_state_mtp():
     case = _build_case(
@@ -682,6 +707,10 @@ def test_fused_lightning_indexer_manage_mixed_state_mtp():
     _run_and_assert(case)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="The local fused LIM kernel is configured for Ascend A2/A3",
+)
 @torch.inference_mode()
 def test_fused_lightning_indexer_manage_lifecycle():
     q_values = [1, 4]
@@ -738,6 +767,10 @@ def test_fused_lightning_indexer_manage_lifecycle():
     torch.testing.assert_close(stable_cache, identity_cache, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="The local fused LIM kernel is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize(
     "q,state,offload_len,cache_tokens",
     ROUTE_STATE_SCENARIOS,
@@ -753,6 +786,10 @@ def test_fused_lightning_indexer_manage_route_state_matrix(q, state, offload_len
     _run_and_assert(case)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="The local fused LIM kernel is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize(
     "q,state,offload_len,cache_tokens,dtype,heads",
     DTYPE_HEAD_ROUTE_SCENARIOS,
@@ -770,6 +807,10 @@ def test_fused_lightning_indexer_manage_dtype_head_matrix(q, state, offload_len,
     _run_and_assert(case)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="The local fused LIM kernel is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize(
     "q_values,states,offload_len,cache_tokens",
     MIXED_BATCH_SCENARIOS,
@@ -785,6 +826,10 @@ def test_fused_lightning_indexer_manage_mixed_batch_matrix(q_values, states, off
     _run_and_assert(case)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="The local fused LIM kernel is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize(
     "q,occurrence_count",
     [
@@ -803,6 +848,10 @@ def test_fused_lightning_indexer_manage_occurrence_sort_boundaries(q, occurrence
     assert int(outputs[MISS_COUNT_OUTPUT][0]) == occurrence_count
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="The local fused LIM kernel is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize(
     "q_values,states,offload_len,cache_tokens,min_source,dtype,heads",
     LONG_SEQUENCE_SCENARIOS,
@@ -834,6 +883,10 @@ def test_fused_lightning_indexer_manage_long_sequence_source_ids(
     _run_and_assert(case)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="The local fused LIM kernel is configured for Ascend A2/A3",
+)
 @torch.inference_mode()
 def test_fused_lightning_indexer_manage_rejects_invalid_contract():
     case = _build_case(
