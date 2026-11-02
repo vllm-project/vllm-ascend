@@ -38,6 +38,11 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         self.layerwise_data_plane = (
             self.layerwise_backend.layerwise_data_plane if self.layerwise_backend is not None else None
         )
+        if use_layerwise and self.layerwise_data_plane not in ("block_key", "gva"):
+            raise ValueError(
+                f"Backend {backend_name!r} does not support layerwise KV pooling: "
+                f"unsupported layerwise_data_plane={self.layerwise_data_plane!r}"
+            )
         self.use_block_key_layerwise = use_layerwise and self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = use_layerwise and self.layerwise_data_plane == "gva"
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
@@ -113,17 +118,7 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         if self.use_layerwise_transfer:
             return self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens)
 
-        if len(self.cacheable_group_ids) != len(self.original_block_size):
-            token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
-        else:
-            token_len = (
-                self._floor_to_cache_transfer_granularity(prompt_token_len)
-                if self._discard_partial_chunks
-                else prompt_token_len
-            )
-        if token_len < self.cache_transfer_granularity:
-            return None
-        return self._get_store_lookup_hit_tokens(request, token_len, num_computed_tokens, include_layers=True)
+        raise RuntimeError(f"Unsupported layerwise data plane: {self.layerwise_data_plane!r}")
 
     def _get_layerwise_hit_tokens(
         self,
