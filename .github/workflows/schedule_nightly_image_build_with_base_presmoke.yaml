@@ -1,29 +1,9 @@
-#
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
-
-# Composes the runtime image build and presmoke smoke test into
-# a single reusable pipeline for one (chip, OS) pair:
-#   build-base -> build-nightly -> run-presmoke-tests
-# Only run presmoke smoke test here. Full nightly selected tests are triggered by other workflow.
-name: 'Nightly image build with base + Presmoke Only'
-
+# 👇 删除这一段！！
+# on:
+#   pull_request_target:
+#       types: [labeled]
+# 保留 workflow_call 这一段，其他jobs逻辑完全不动
 on:
-  pull_request_target:
-      types: [labeled]
   workflow_call:
     inputs:
       target:
@@ -105,86 +85,3 @@ on:
         required: false
       OBS_SECRET_ACCESS_KEY_PRECISION:
         required: false
-
-jobs:
-  build-base:
-    name: Build base image (${{ inputs.suffix || 'a2' }}-${{ inputs.os }})
-    if: ${{ !inputs.skip_base && github.repository == 'vllm-project/vllm-ascend' }}
-    uses: ./.github/workflows/_schedule_image_build.yaml
-    with:
-      dockerfile: ${{ inputs.dockerfile }}
-      suffix: ${{ inputs.suffix }}
-      soc: ${{ inputs.soc }}
-      should_push: ${{ inputs.should_push }}
-      schedule_tag_pattern: 'main'
-      branch_ref: ${{ inputs.vllm_ascend_branch || 'main' }}
-      swr_registry: ${{ inputs.swr_registry }}
-    secrets:
-      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
-      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
-      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
-
-  build-nightly:
-    name: Build nightly-${{ inputs.target }} (${{ inputs.os }})
-    needs: build-base
-    if: ${{ always() && (needs.build-base.result == 'success' || needs.build-base.result == 'skipped') }}
-    uses: ./.github/workflows/_nightly_image_build.yaml
-    with:
-      target: ${{ inputs.target }}
-      os_filter: ${{ inputs.os }}
-      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
-      base_image_branch: ${{ inputs.base_image_branch || inputs.vllm_ascend_branch }}
-      build_type: ${{ inputs.build_type }}
-      should_push: ${{ inputs.should_push }}
-      soc: ${{ inputs.soc }}
-    secrets:
-      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
-      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
-      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
-
-  # ========== 生成presmoke分组，调用 _presmoke_tests.yaml 冒烟 ==========
-  gen-presmoke-groups:
-    name: Generate presmoke test groups for ${{ inputs.target }}
-    needs: build-nightly
-    if: ${{ inputs.run_presmoke && needs.build-nightly.result == 'success' }}
-    runs-on: ubuntu-latest
-    outputs:
-      presmoke_groups_json: ${{ steps.gen_groups.outputs.presmoke_groups_json }}
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.vllm_ascend_branch }}
-          fetch-depth: 0
-      - name: Setup python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install deps for select_tests
-        run: |
-          pip install pyyaml
-      - name: Run select_tests.py to generate presmoke groups
-        id: gen_groups
-        run: |
-          python3 .github/workflows/scripts/select_tests.py \
-            --mode presmoke \
-            --chip ${{ inputs.target }} \
-            --output presmoke_groups.json
-          TEST_GROUPS=$(cat presmoke_groups.json)
-          echo "presmoke_groups_json=${TEST_GROUPS}" >> "$GITHUB_OUTPUT"
-
-  run-presmoke-tests:
-    name: Run Presmoke Smoke Tests ${{ inputs.target }}-${{ inputs.os }}
-    needs: gen-presmoke-groups
-    if: ${{ inputs.run_presmoke && needs.gen-presmoke-groups.result == 'success' }}
-    uses: ./.github/workflows/presmoke_tests.yaml
-    with:
-      vllm: ${{ inputs.vllm_ref_for_test }}
-      test_groups: ${{ needs.gen-presmoke-groups.outputs.presmoke_groups_json }}
-      ref: ${{ inputs.vllm_ascend_branch }}
-      base_ref: ${{ inputs.vllm_ascend_branch }}
-      continue_on_error: false
-      timeout-minutes: 60
-    secrets:
-      OBS_ACCESS_KEY_PRECISION: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
-      OBS_SECRET_ACCESS_KEY_PRECISION: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
