@@ -9,6 +9,8 @@
 # do not trigger the full CI suite.
 
 estimated_times:
+  # Conservative estimate from the 11.63s A3 regression run; refine with CI timing.
+  tests/e2e/pull_request/one_card/test_mla_prolog_head_padding.py: 30
   tests/e2e/pull_request/one_card/model_runner_v2/test_uva_prefix.py: 30
   tests/e2e/pull_request/one_card/test_kv_pool_accuracy.py: 410
   tests/e2e/pull_request/one_card/test_flash_attn_precision.py: 30
