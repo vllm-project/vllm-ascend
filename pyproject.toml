@@ -20,7 +20,7 @@ requires = [
     "transformers==5.19.0",
     "torch-npu==2.10.0.post7",
     "torch==2.10.0",
-    "torchvision==0.29.2+cpu",
+    "torchvision==0.25.0",
     "wheel",
     "msgpack",
     "quart",
