@@ -55,6 +55,13 @@ def _register_with_class_name_alias(name: str, module_path: str, class_name: str
 
 
 def register_connector():
+    _register_with_class_name_alias(
+        "DecodeBenchConnector",
+        "vllm_ascend.distributed.kv_transfer.decode_bench_connector",
+        "AscendDecodeBenchConnector",
+        override=True,
+    )
+
     # Override vLLM KV offloading specs with Ascend NPU handlers. The
     # scheduler-side managers stay upstream; only worker-side transfers use
     # torch.npu streams and the Ascend batched memcpy op.
