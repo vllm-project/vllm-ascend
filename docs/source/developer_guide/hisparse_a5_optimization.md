@@ -157,3 +157,21 @@ are absent from this PR's older base, so its complete source is not identical
 to the PR head. Full-model serving, generation, performance, final P/D and A3
 qualification remain separate. Full lint again stalled installing the
 actionlint environment; finite Ruff and diff checks passed.
+
+Current-main generation also changed private rejection-sampling interfaces:
+draft logits can carry a logical-request-to-local-row mapping, and logits
+statistics take the total logit extent. The Ascend adapter now checks actual
+kernel parameter declarations rather than inferring this ABI from the package
+version string. It forwards the mapping to common statistics and Ascend
+verification/resampling without changing sampling probabilities. Tensor-only
+and one-hot drafts retain their original paths. Sixteen CPU dispatch checks
+passed, and eleven actual A5 checks passed on runtime commit
+`50c9c8d46d86ddb6315156f28d6f4e6e1bcfafeb`: six greedy CPU-oracle cases,
+two mapped-versus-logical random-cache cases and three changing graph replays.
+
+The coordinator also forwards an explicitly supplied hash-lookahead window
+through all factory routes to the owning block pool. Omitted arguments retain
+the older paired Core API. Twelve focused CPU forwarding checks passed.
+These compatibility fixes do not qualify full-model outputs: the preceding
+model returned an empty first response and then failed in the old sampling
+ABI. Its clean exit status is not counted as a successful model test.

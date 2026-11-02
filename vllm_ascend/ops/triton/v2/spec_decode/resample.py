@@ -12,6 +12,17 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_
 _RESAMPLE_BLOCK_SIZE = 1024
 
 
+@triton.jit
+def _draft_logits_row(req_state_idx, row_mapping_ptr):
+    # Match Core's logical-request -> local draft-cache row contract. A stale
+    # draft is rejected by its token placeholder; clamp its unused row as Core
+    # does so speculative loads remain inside the allocation.
+    row = req_state_idx
+    if row_mapping_ptr is not None:
+        row = tl.load(row_mapping_ptr + req_state_idx, mask=req_state_idx >= 0, other=-1)
+    return tl.maximum(row, 0).to(tl.int64)
+
+
 def _get_vectorcore_num() -> int:
     try:
         return int(get_vectorcore_num())
@@ -45,6 +56,7 @@ def _resample_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_row_mapping_ptr,
     draft_rejected_logsumexp_ptr,
     rejected_step_ptr,
     cu_num_logits_ptr,
@@ -117,7 +129,7 @@ def _resample_kernel(
                 if HAS_DRAFT_LOGITS:
                     draft_block_logits = tl.load(
                         draft_logits_ptr
-                        + req_state_idx * draft_logits_stride_0
+                        + _draft_logits_row(req_state_idx, draft_logits_row_mapping_ptr) * draft_logits_stride_0
                         + resample_idx * draft_logits_stride_1
                         + vocab_offsets,
                         mask=vocab_mask,
@@ -172,6 +184,7 @@ def _categorical_finalize_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_row_mapping_ptr,
     draft_rejected_logsumexp_ptr,
     rejected_step_ptr,
     cu_num_logits_ptr,
@@ -307,7 +320,10 @@ def _categorical_finalize_kernel(
 
     if HAS_DRAFT_LOGITS:
         draft_block_logits = tl.load(
-            draft_logits_ptr + req_state_idx * draft_logits_stride_0 + resample_idx * draft_logits_stride_1 + token_ids,
+            draft_logits_ptr
+            + _draft_logits_row(req_state_idx, draft_logits_row_mapping_ptr) * draft_logits_stride_0
+            + resample_idx * draft_logits_stride_1
+            + token_ids,
             mask=valid_token_mask & is_random_residual & has_total_mass,
             other=float("-inf"),
         ).to(tl.float32)
@@ -361,6 +377,7 @@ def resample(
     has_draft_logits: bool | None = None,
     cumulative_log_p: torch.Tensor | None = None,
     use_block_verification: bool = False,
+    draft_logits_row_mapping: torch.Tensor | None = None,
 ) -> None:
     """Resample the first rejected token or the bonus token in place.
 
@@ -430,6 +447,7 @@ def resample(
         draft_logits,
         draft_logits.stride(0),
         draft_logits.stride(1),
+        draft_logits_row_mapping,
         draft_rejected_logsumexp,
         num_sampled,
         cu_num_logits,
@@ -462,6 +480,7 @@ def resample(
         draft_logits,
         draft_logits.stride(0),
         draft_logits.stride(1),
+        draft_logits_row_mapping,
         draft_rejected_logsumexp,
         num_sampled,
         cu_num_logits,

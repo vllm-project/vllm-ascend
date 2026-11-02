@@ -17,6 +17,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
@@ -31,8 +35,15 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_local_logits_stats_kernel as _compute_block_stats_kernel,
 )
 
-from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.ops.triton.v2.spec_decode.resample import _draft_logits_row, resample
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
+
+# Core main and a release can share a version string but different private
+# kernel ABIs. Resolve their actual declarations once, before serving starts.
+_CORE_DRAFT_ROW_MAPPING = "draft_logits_row_mapping_ptr" in _compute_block_stats_kernel.arg_names
+_CORE_STATS_USES_NUM_LOGITS = "num_logits" in _compute_block_stats_kernel.arg_names
 
 
 @triton.jit
@@ -64,6 +75,7 @@ def _probabilistic_rejection_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_row_mapping_ptr,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
     draft_local_max_stride,
@@ -216,7 +228,7 @@ def _probabilistic_rejection_kernel(
                 if HAS_DRAFT_LOGITS:
                     draft_logit = tl.load(
                         draft_logits_ptr
-                        + req_state_idx * draft_logits_stride_0
+                        + _draft_logits_row(req_state_idx, draft_logits_row_mapping_ptr) * draft_logits_stride_0
                         + i * draft_logits_stride_1
                         + draft_sampled
                     ).to(tl.float32)
@@ -280,7 +292,7 @@ def rejection_sample(
     # [num_logits, V]
     target_logits: torch.Tensor,
     # [max_num_reqs, num_speculative_steps, V]
-    draft_logits: torch.Tensor | None,
+    draft_logits: torch.Tensor | DraftLogitsCache | None,
     # [num_logits]
     draft_sampled: torch.Tensor,
     # [num_reqs + 1]
@@ -331,6 +343,14 @@ def rejection_sample(
             "Block verification is incompatible with synthetic acceptance rates."
         )
 
+    draft_logits_row_mapping = None
+    if draft_logits is not None and not isinstance(draft_logits, torch.Tensor):
+        draft_logits_row_mapping = draft_logits.row_mapping
+        draft_logits = draft_logits.values
+    if draft_logits_row_mapping is not None and not _CORE_DRAFT_ROW_MAPPING:
+        raise ValueError("The paired Core logits kernels do not support mapped draft-cache rows.")
+    core_draft_row_args = (draft_logits_row_mapping,) if _CORE_DRAFT_ROW_MAPPING else ()
+
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
     has_draft_logits = draft_logits is not None
@@ -341,8 +361,9 @@ def rejection_sample(
     # count. Passing `num_speculative_steps` there makes the kernels treat every
     # logit after the first one as a bonus token and return early, leaving the
     # `new_empty` block-statistics buffers uninitialized. v0.32.0 still expects
-    # `num_speculative_steps`.
-    stats_num_logits = num_speculative_steps if vllm_version_is("0.32.0") else num_logits
+    # `num_speculative_steps`. Use the actual declaration for development
+    # builds that still report the release's version number.
+    stats_num_logits = num_logits if _CORE_STATS_USES_NUM_LOGITS else num_speculative_steps
 
     if draft_logits is None:
         # When draft_logits is None, create a dummy tensor so that Triton
@@ -381,6 +402,7 @@ def rejection_sample(
         draft_logits,
         draft_logits.stride(0),
         draft_logits.stride(1),
+        *core_draft_row_args,
         expanded_idx_mapping,
         expanded_local_pos,
         temperature,
@@ -407,6 +429,7 @@ def rejection_sample(
             draft_logits,
             draft_logits.stride(0),
             draft_logits.stride(1),
+            *core_draft_row_args,
             draft_local_max,
             draft_local_max.stride(0),
             draft_local_sumexp,
@@ -435,6 +458,7 @@ def rejection_sample(
                     draft_logits,
                     draft_logits.stride(0),
                     draft_logits.stride(1),
+                    *core_draft_row_args,
                     draft_local_max,
                     draft_local_max.stride(0),
                     draft_local_sumexp,
@@ -479,6 +503,7 @@ def rejection_sample(
         draft_logits,
         draft_logits.stride(0),
         draft_logits.stride(1),
+        draft_logits_row_mapping,
         draft_local_max,
         draft_local_max.stride(0),
         draft_local_sumexp,
@@ -517,5 +542,6 @@ def rejection_sample(
         has_draft_logits=has_draft_logits,
         cumulative_log_p=cumulative_log_p,
         use_block_verification=use_block_verification,
+        draft_logits_row_mapping=draft_logits_row_mapping,
     )
     return sampled, num_sampled
