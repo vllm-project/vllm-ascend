@@ -327,15 +327,23 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<QSFAT>::InitOutputSing
             qsfaTotalOutputSize = constInfo.batchSize * constInfo.qHeadNum * constInfo.qSeqSize *
                 constInfo.headDim;
         }
-        if (!qsfaNeedOutputInit) {
-            qsfaTotalOutputSize = 0;
-        }
-        // 2 means c:v = 1:2
-        uint64_t qsfaSingleCoreSize = (qsfaTotalOutputSize + (2 * qsfaCoreNum) - 1) / (2 * qsfaCoreNum);
-        uint64_t qsfaTailSize = qsfaTotalOutputSize - tmpBlockIdx * qsfaSingleCoreSize;
-        uint64_t qsfaSingleInitOutputSize = qsfaTailSize < qsfaSingleCoreSize ? qsfaTailSize : qsfaSingleCoreSize;
-        if (tmpBlockIdx * qsfaSingleCoreSize < qsfaTotalOutputSize && qsfaSingleInitOutputSize > 0) {
-            matmul::InitOutput<OUT_T>(attentionOutGm[tmpBlockIdx * qsfaSingleCoreSize], qsfaSingleInitOutputSize, 0);
+        if (qsfaNeedOutputInit) {
+            // 2 means c:v = 1:2
+            uint64_t qsfaSingleCoreSize = (qsfaTotalOutputSize + (2 * qsfaCoreNum) - 1) / (2 * qsfaCoreNum);
+            if constexpr (LAYOUT_T == QSFA_LAYOUT::TND) {
+                // Keep adjacent AIV partitions on separate 32-byte GM blocks.
+                constexpr uint64_t qsfaAlignElements = 32 / sizeof(OUT_T);
+                qsfaSingleCoreSize =
+                    (qsfaSingleCoreSize + qsfaAlignElements - 1) / qsfaAlignElements * qsfaAlignElements;
+            }
+            uint64_t qsfaCoreOffset = tmpBlockIdx * qsfaSingleCoreSize;
+            if (qsfaCoreOffset < qsfaTotalOutputSize) {
+                uint64_t qsfaTailSize = qsfaTotalOutputSize - qsfaCoreOffset;
+                uint64_t qsfaSingleInitOutputSize =
+                    qsfaTailSize < qsfaSingleCoreSize ? qsfaTailSize : qsfaSingleCoreSize;
+                matmul::InitOutput<OUT_T>(attentionOutGm[qsfaOutputStart + qsfaCoreOffset],
+                                          qsfaSingleInitOutputSize, 0);
+            }
         }
         if (constInfo.returnSoftmaxLse) {
             uint64_t totalReturnSoftmaxSize = constInfo.batchSize * constInfo.kvHeadNum * constInfo.qSeqSize * constInfo.gSize;
