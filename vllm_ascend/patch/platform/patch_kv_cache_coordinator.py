@@ -543,6 +543,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 alignment_tokens=self._cache_hit_alignment_tokens,
                 dcp_world_size=self.dcp_world_size,
                 pcp_world_size=1,
+                **self._retention_call_kwargs(manager_cls),
             )
             for gid, blks in zip(group_ids, blocks):
                 hit_blocks[gid] = blks

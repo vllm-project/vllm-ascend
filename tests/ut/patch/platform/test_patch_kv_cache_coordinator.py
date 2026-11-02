@@ -415,6 +415,21 @@ def test_lookup_forwards_retention_interval_to_managers():
     assert _RecordingMamba.calls[-1]["retention_interval"] == 4096
 
 
+def test_per_group_lookup_forwards_retention_interval():
+    """The per-group entry point needs the same forwarding as the flat one.
+
+    ``BalanceScheduler`` and ``DyntraLBScheduler`` reach the managers through
+    ``find_longest_cache_hit_per_group``, so leaving it out would silently drop
+    the setting on exactly the schedulers Ascend runs.
+    """
+    coordinator = _make_lookup_coordinator(producer=True)
+    coordinator.retention_interval = 4096
+    coordinator._retention_forwarding_managers = frozenset({_RecordingFA, _RecordingMamba})
+    coordinator.find_longest_cache_hit_per_group([], 2048)
+    assert _RecordingFA.calls[-1]["retention_interval"] == 4096
+    assert _RecordingMamba.calls[-1]["retention_interval"] == 4096
+
+
 def test_lookup_omits_retention_for_managers_without_the_keyword():
     """A lane whose manager predates vLLM #43447 keeps the previous call shape."""
     coordinator = _make_lookup_coordinator(producer=True)
