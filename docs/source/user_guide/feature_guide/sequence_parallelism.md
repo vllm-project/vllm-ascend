@@ -5,12 +5,19 @@
 Sequence Parallelism (SP) shards the token dimension across tensor-parallel
 ranks around the communication boundaries of transformer layers.
 
-On vLLM Ascend, SP currently covers the MoE path (SP MoE). The attention
-`o_proj` ends with a TP all-reduce, so its inputs are replicated on every TP
-rank. Feeding those replicated tokens directly into the experts duplicates
-compute and communication under expert parallelism. SP MoE keeps the expert
-inputs sharded by sequence and restores the expected layout at the MoE output
-boundary instead.
+On vLLM Ascend, SP covers two paths:
+
+- **SP MoE** (MoE checkpoints): the attention `o_proj` ends with a TP
+  all-reduce, so its inputs are replicated on every TP rank. Feeding those
+  replicated tokens directly into the experts duplicates compute and
+  communication under expert parallelism. SP MoE keeps the expert inputs
+  sharded by sequence and restores the expected layout at the MoE output
+  boundary instead.
+- **Dense SP** (all dense checkpoints): the decoder stack keeps hidden
+  states and the residual on the rank-local token shard between the layer
+  projections. Elementwise work (norms, activations, residual adds) and
+  between-layer activations shrink to the shard; communication volume is
+  unchanged (the row-parallel all-reduce becomes a reduce-scatter).
 
 ## Principle
 
@@ -31,6 +38,30 @@ Sequence-parallel input sharding
   -> Moe
 ```
 
+Dense SP applies the same layout through the generic layer primitives every
+dense family shares, so no per-model wiring is needed:
+
+```text
+embedding lookup
+  -> TP reduce-scatter           (entry: hidden states become token-sharded)
+  -> per decoder layer:
+       RMSNorm (rank-local shard)
+       -> column projection      (qkv / gate_up / GDN in-projections:
+                                  TP all-gather before the GEMM)
+       -> attention / GDN core  (full tokens, as without SP)
+       -> row projection         (o_proj / down_proj / out_proj:
+                                  TP reduce-scatter instead of all-reduce)
+       -> RMSNorm + residual     (rank-local shard)
+  -> final norm (rank-local shard)
+  -> TP all-gather                (exit: full token rows before logits)
+```
+
+Numerics are equivalent to the all-reduce layout; gains come from elementwise
+work and between-layer activations shrinking to the rank-local shard. The
+magnitude is hardware-dependent (measurable on high-HCCS-bandwidth hardware
+such as 950PR/A5; may be negligible on 800I A3). Decode-heavy workloads may
+regress — the switch is opt-in per deployment.
+
 Different DP ranks may have different numbers of valid tokens. Therefore, the
 buffer after all-gather cannot be treated as a contiguous sequence of valid
 tokens; it must be unpadded and zero-padded according to each rank's local
@@ -42,11 +73,42 @@ reduces duplicate computation and unnecessary communication.
 Steps to follow to enable SP currently:
 
 - `tensor_parallel_size > 1`.
-- `enable_expert_parallel` is set (MoE models only).
+- MoE checkpoints: `enable_expert_parallel` is set.
 - `--additional-config '{"enable_flashcomm1": true}'` set `flashcomm1`
 
 > [!NOTE]
 > **Difference from upstream.** Upstream vLLM enables MoE sequence parallelism only when `data_parallel_size > 1`, together with a supported all2all backend, expert parallelism, and `tensor_parallel_size > 1`. On vLLM Ascend, `data_parallel_size > 1` is not part of the enablement condition. Ascend FlashComm also supports the TP/EP topology with `data_parallel_size = 1`, so SP MoE can be enabled when DP is 1 as long as the conditions above are met. `data_parallel_size > 1` remains supported.
+
+### Dense sequence parallelism (all dense families)
+
+With the same FlashComm switch, any dense checkpoint following the standard
+decoder skeleton is covered — Llama, Qwen2/Qwen3 dense, GLM dense, the dense
+Qwen3.5 family (including its GDN linear-attention layers), and others —
+without per-model switches. Requirements:
+
+- `tensor_parallel_size > 1` and `pipeline_parallel_size == 1`.
+- `--additional-config '{"enable_flashcomm1": true}'` (or the
+  `VLLM_ASCEND_ENABLE_FLASHCOMM1` env var).
+
+```bash
+vllm serve <dense-model> \
+  --tensor-parallel-size 2 \
+  --additional-config '{"enable_flashcomm1": true}'
+```
+
+The runner pads every step's executed token count up to the TP multiple
+(V2 rounds the batch token counts in `_prepare_inputs_impl`, V1 keeps its
+existing `_pad_for_sequence_parallelism`), so the padding rows ride along
+exactly like graph-bucket padding rows (PAD_SLOT_ID cache slots,
+`is_padding` mask) and are dropped before logits.
+
+Unsupported topologies keep the stock all-reduce layout: MoE checkpoints
+(upstream SP MoE owns their layout), MLA checkpoints, multimodal and
+speculative-decoding deployments, PCP/DCP topologies, pipeline parallelism,
+LoRA, and the finegrained TP groups. A checkpoint whose residual-stream
+projection is not recognized fails loudly (shape check in the row wrapper)
+rather than computing on a wrong token layout; report the projection name to
+extend the coverage list.
 
 ### Matmul reduce-scatter fusion
 

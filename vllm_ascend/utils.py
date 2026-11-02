@@ -241,6 +241,11 @@ def clear_enable_sp():
     enable_pcp_o_proj_weight_sharding.cache_clear()
     enable_pcp_embedding_lmhead_weight_sharding.cache_clear()
     _libc_getenv.cache_clear()
+    # The cached MoE verdict is config-scoped: a config re-init must
+    # invalidate it, or the next is_moe_model reader sees the stale verdict
+    # of the previous config.
+    global _IS_MOE_MODEL
+    _IS_MOE_MODEL = None
 
 
 _IS_RC_DEVICE: bool | None = None
@@ -1007,6 +1012,107 @@ def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 1
 
 
+def _flashcomm_switch_enabled(vllm_config) -> bool:
+    """Whether the user explicitly turned on the FlashComm switch.
+
+    Mirrors the ``enable_flashcomm1`` resolution in
+    ``AscendConfig.derive_and_validate`` (additional_config first, then the
+    ``VLLM_ASCEND_ENABLE_FLASHCOMM1`` env var) so this predicate and the
+    config-time resolution can never diverge.
+    """
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    switch = additional_config.get("enable_flashcomm1", False) if isinstance(additional_config, dict) else False
+    if isinstance(switch, str):
+        switch = switch.strip().lower() in ("1", "true")
+    else:
+        switch = bool(switch)
+    return switch or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
+
+
+def enable_dense_sp(vllm_config=None) -> bool:
+    """Dense-model sequence parallelism driven by the FlashComm switch.
+
+    Upstream vLLM gates sequence parallelism on ``use_sequence_parallel_moe``,
+    which requires an MoE checkpoint with expert parallelism. On Ascend the
+    FlashComm switch additionally covers dense checkpoints through the generic
+    layer-primitive path: the embedding reduce-scatters its output to the
+    rank-local token shard, the decoder-stack projections all-gather before
+    their column-parallel GEMMs and reduce-scatter after their row-parallel
+    GEMMs, and the model runner / sample-time exit all-gathers the final
+    hidden states before any caller indexes them with full-sequence
+    coordinates.
+
+    Structural gates replace a per-family model_type whitelist: any dense
+    checkpoint following the standard ``norm -> (column projection ->
+    core -> row projection) -> norm`` decoder skeleton is covered, regardless
+    of family. Excluded, because their layout is owned elsewhere:
+
+    - MoE checkpoints: the upstream SP-MoE contract (or the in-tree Ascend
+      model implementations) already owns gather/scatter placement.
+    - MLA checkpoints: stacked projections (q_a/q_b/kv_a/kv_b) break the
+      one-gather-per-block invariant.
+    - Multimodal and speculative deployments: entry/exit handoffs
+      (vision feature scatter, draft hidden-state exchange) need per-model
+      wiring that the generic path does not provide.
+    - PCP/DCP topologies, pipeline parallelism, LoRA, finegrained TP groups,
+      DBO microbatching: untested or owning the same projections.
+
+    Both model runners are supported: the V1 runner pads every step's token
+    count to the TP multiple in ``_pad_for_sequence_parallelism``; the V2
+    runner rounds ``num_tokens_after_padding`` in ``_prepare_inputs_impl``
+    (and the dummy-run token count) the same way, so the embedding entry,
+    the projection gather/scatter ops and the sample-time exit all stay
+    aligned to the rank-local token shard.
+    """
+    if vllm_config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            vllm_config = None
+
+    if vllm_config is None:
+        return False
+
+    # getattr with "off" defaults throughout: the predicate also serves
+    # unit-test config doubles (SimpleNamespace) that only carry a subset of
+    # the parallel-config fields.
+    parallel_config = vllm_config.parallel_config
+    if getattr(parallel_config, "tensor_parallel_size", 1) <= 1 or (
+        getattr(parallel_config, "pipeline_parallel_size", 1) != 1
+    ):
+        return False
+    if getattr(parallel_config, "use_sequence_parallel_moe", False):
+        return False
+    if (
+        getattr(parallel_config, "prefill_context_parallel_size", 1) > 1
+        or getattr(parallel_config, "decode_context_parallel_size", 1) > 1
+    ):
+        return False
+    # DBO splits the batch into microbatches inside the compiled graph, so
+    # the projections see per-ubatch token counts that the row wrapper's
+    # full-step shape check cannot validate.
+    if getattr(parallel_config, "enable_dbo", False):
+        return False
+    if getattr(vllm_config, "speculative_config", None) is not None:
+        return False
+    if getattr(vllm_config, "lora_config", None) is not None:
+        return False
+
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return False
+    if getattr(model_config, "is_multimodal", False) or getattr(model_config, "use_mla", False):
+        return False
+    if getattr(model_config, "hf_text_config", None) is None:
+        return False
+    if is_moe_model(vllm_config):
+        return False
+
+    return _flashcomm_switch_enabled(vllm_config)
+
+
 def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         try:
@@ -1019,7 +1125,7 @@ def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         return False
 
-    return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
+    return bool(vllm_config.parallel_config.use_sequence_parallel_moe) or enable_dense_sp(vllm_config)
 
 
 def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:

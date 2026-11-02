@@ -41,7 +41,11 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
-from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
+from vllm_ascend.ops.linear_op import (
+    SequenceRowParallelOp,
+    get_parallel_op,
+    get_replicated_op,
+)
 from vllm_ascend.utils import maybe_trans_nz, vllm_version_is
 from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
@@ -383,6 +387,11 @@ class AscendRowParallelLinear(RowParallelLinear):
 
         if self.custom_op is not None:
             self.custom_op.update_attrs()
+        # A layer that opts out of result reduction hands completion to its
+        # caller; the sequence-parallel scatter contract cannot hold there,
+        # so keep the stock forward for such layers.
+        if isinstance(self.custom_op, SequenceRowParallelOp) and not self.reduce_results:
+            self.custom_op = None
 
     def forward(
         self,

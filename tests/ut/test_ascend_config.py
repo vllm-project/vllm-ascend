@@ -789,6 +789,12 @@ class TestAscendConfig(TestBase):
                 clear_ascend_config()
                 clear_enable_sp()
                 test_vllm_config = VllmConfig()
+                # Shared-expert DP is a MoE feature: pin a MoE text config so
+                # the dense-SP predicate (which now also drives enable_sp via
+                # the FlashComm switch) stays out of this independence check.
+                test_vllm_config.model_config.hf_text_config = SimpleNamespace(
+                    model_type="qwen3_moe", to_dict=lambda: {"num_experts": 8}
+                )
                 test_vllm_config.parallel_config.tensor_parallel_size = 2
                 test_vllm_config.parallel_config.data_parallel_size = 2
                 test_vllm_config.parallel_config.enable_expert_parallel = True

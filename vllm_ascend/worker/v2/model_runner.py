@@ -31,6 +31,7 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -93,6 +94,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_offload_topk_profile_buffers,
     init_sparse_kv_offload_manager,
 )
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -101,6 +103,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    enable_dense_sp,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_enable,
@@ -697,6 +700,22 @@ class NPUModelRunner(GPUModelRunner):
                 finish_execution = getattr(self.model_state, "finish_execution", None)
                 if finish_execution is not None:
                     finish_execution(failed=forward_failed)
+        if (
+            # Zero-token steps return before publishing a fresh state; the
+            # stale one is already gathered and never consumed this step.
+            scheduler_output.total_num_scheduled_tokens > 0
+            and enable_dense_sp(self.vllm_config)
+            and self.execute_model_state is not None
+            and self.execute_model_state.hidden_states is not None
+        ):
+            # Exit of the dense sequence-parallel region: the decoder stack
+            # returned the rank-local token shard. Restore the full token rows
+            # on the published state before any consumer indexes them with
+            # full-sequence coordinates — upstream _dummy_run's logits row
+            # selection runs right after dummy forwards, and sample_tokens
+            # feeds sample() from this same state.
+            state = self.execute_model_state
+            self.execute_model_state = state._replace(hidden_states=sp_all_gather(state.hidden_states))
         if not dummy_run and not is_profile:
             self._maybe_send_draft_kv(scheduler_output)
         self.model_state.kvpp_is_dummy_run = False
@@ -842,6 +861,22 @@ class NPUModelRunner(GPUModelRunner):
             graph_num_reqs = global_graph_num_reqs
             num_tokens_after_padding = global_graph_num_reqs * batch_desc.uniform_token_count
         assert num_tokens > 0
+        if enable_dense_sp(self.vllm_config):
+            # Dense sequence parallelism keeps hidden states token-sharded
+            # between the decoder projections; every TP rank must hold the
+            # same shard size, so round the token counts up to the TP
+            # multiple. Rounding num_tokens itself (not just the executed
+            # count) keeps the query_start_loc tail aligned, so every
+            # qsl[-1]-derived num_actual_tokens — including the GDN wrapper's
+            # unconditional truncation in ops/gdn.py — stays a no-op, exactly
+            # as under V1's _pad_for_sequence_parallelism. Graph buckets are
+            # pre-filtered to TP multiples at config time; this covers eager
+            # and piecewise batches. The extra rows ride along as padding
+            # (PAD_SLOT_ID slots, is_padding mask) exactly like graph-bucket
+            # padding rows already do.
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            num_tokens = round_up(num_tokens, tp_size)
+            num_tokens_after_padding = round_up(num_tokens_after_padding, tp_size)
 
         req_ids = batch_req_state.req_ids
 
@@ -1116,6 +1151,9 @@ class NPUModelRunner(GPUModelRunner):
         """Override GPUModelRunner.sample for lmhead TP: every rank must feed
         compute_logits the same row count — pad up to ``_lmhead_tp_max_num_logits()``
         and trim back; prompt_logprobs stays unsupported (same as V1)."""
+        # Dense sequence parallelism restores full token rows in execute_model
+        # (execute_model_state._replace), covering sample() and the dummy-run
+        # logits row selection with one gather.
         if not lmhead_tp_enable():
             return super().sample(hidden_states, input_batch, grammar_output)
 
@@ -1242,6 +1280,14 @@ class NPUModelRunner(GPUModelRunner):
                 "the profile-run marker, which makes XLite bypass its graph path."
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
+        if enable_dense_sp(self.vllm_config):
+            # Dummy/profile/warmup forwards skip _prepare_inputs_impl, so they
+            # miss its dense-SP TP rounding. Round here instead: the dummy
+            # batch then carries the same TP-aligned token count the real
+            # path uses, keeping the projection collectives symmetric across
+            # ranks (graph capture sizes are already TP-filtered at config
+            # time, so this is a no-op there).
+            num_tokens = round_up(num_tokens, self.vllm_config.parallel_config.tensor_parallel_size)
         with (
             # Disable the CPP drafter before entering contexts that inspect it.
             self._cpp_profile_dummy(profile_cpp),

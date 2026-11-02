@@ -175,6 +175,7 @@ from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoa
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather
 from vllm_ascend.models.deepseek_v41.cache_config import (
     is_deepseek_v41_cache,
 )
@@ -190,6 +191,7 @@ from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
+    enable_dense_sp,
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
@@ -3573,6 +3575,11 @@ class NPUModelRunner(GPUModelRunner):
             if executor is not None and executor.submission_in_flight:
                 executor.release()
 
+        if enable_dense_sp(self.vllm_config):
+            # Exit of the dense sequence-parallel region: restore the full
+            # token rows before any caller indexes them with full-sequence
+            # coordinates (logits row selection, hidden-state extraction).
+            hidden_states = sp_all_gather(hidden_states)
         return hidden_states
 
     def _prepare_device_metadata_for_forward(

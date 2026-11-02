@@ -20,9 +20,11 @@ Current class inheritance structure:
 CustomLinearOp
 ├── CustomColumnParallelOp
 │   ├── MLPColumnParallelOp
+│   └── SequenceColumnParallelOp
 └── CustomRowParallelOp
-│   ├── MLPRowParallelOp
-│   ├── OProjRowParallelOp
+    ├── MLPRowParallelOp
+    ├── OProjRowParallelOp
+    └── SequenceRowParallelOp
 └── CustomReplicatedOp
 How to extend a new linear op? Taking column parallel op as an example:
 1. Inherit from CustomColumnParallelOp and create a new class MyColumnParallelOp
@@ -49,11 +51,19 @@ from vllm.logger import logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tp_group,
     get_otp_group,
 )
+from vllm_ascend.models.common.ops.sequence_parallel import (
+    sp_all_gather as dense_sp_all_gather,
+)
+from vllm_ascend.models.common.ops.sequence_parallel import (
+    sp_reduce_scatter as dense_sp_reduce_scatter,
+)
 from vllm_ascend.utils import (
+    enable_dense_sp,
     mlp_tp_enable,
     oproj_tp_enable,
     shared_expert_dp_enabled,
@@ -280,6 +290,72 @@ class MLPColumnParallelOp(CustomColumnParallelOp):
         return output, output_bias
 
 
+class SequenceColumnParallelOp(CustomColumnParallelOp):
+    """Dense sequence-parallel column projection.
+
+    Under dense sequence parallelism the decoder stack keeps hidden states
+    and the residual on the rank-local token shard. A column-parallel GEMM
+    needs every token row, so the shard is all-gathered before
+    ``quant_method.apply``. The paired row projection reduce-scatters back;
+    everything between the two (attention core, activations) runs on the
+    gathered full sequence, i.e. exactly the non-SP layout.
+    """
+
+    def apply_impl(
+        self,
+        input_: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        bias = self.bias if not self.skip_bias_add else None
+        assert self.quant_method is not None
+        input_parallel = dense_sp_all_gather(input_)
+        output_parallel = self.quant_method.apply(self.layer, input_parallel, bias)
+
+        if self.gather_output:
+            output = self.comm_group.all_gather(output_parallel)
+        else:
+            output = output_parallel
+
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+
+
+class SequenceRowParallelOp(CustomRowParallelOp):
+    """Dense sequence-parallel row projection.
+
+    Replaces the row-parallel all-reduce with a reduce-scatter: the partial
+    sums stay token-sharded, completing the sum the paired column projection
+    started. Bias must land exactly once per token row, so only rank 0 adds
+    it before the scatter; the scattered shards then hold complete rows.
+    """
+
+    def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        input_parallel = self.get_input_parallel(input_)
+        assert self.quant_method is not None
+        if is_forward_context_available():
+            # _EXTRA_CTX.num_tokens carries the padded token count under both
+            # runners: V1's set_ascend_forward_context sets it directly, V2's
+            # platform hook publishes num_tokens_after_padding into the
+            # context's additional_kwargs. Unset known extras read as None.
+            num_tokens = _EXTRA_CTX.num_tokens
+            if isinstance(num_tokens, int) and num_tokens > 0:
+                # A row projection fed fewer rows than the scheduled token
+                # count means an upstream projection on the residual stream
+                # stayed unwrapped (its name is missing from
+                # _DENSE_SP_COLUMN_PROJECTIONS), so the token layout broke.
+                assert input_parallel.shape[0] == num_tokens, (
+                    f"Sequence-parallel row projection '{self.prefix}' received "
+                    f"{input_parallel.shape[0]} rows but the step schedules {num_tokens} "
+                    "tokens: an upstream residual-stream projection is not running its "
+                    "sequence-parallel wrapper, see enable_dense_sp()."
+                )
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        output_parallel = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
+        output = dense_sp_reduce_scatter(output_parallel)
+
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+
+
 class MLPRowParallelOp(CustomRowParallelOp):
     def __init__(self, layer):
         super().__init__(layer)
@@ -386,21 +462,67 @@ def _is_shared_expert_layer(prefix: str) -> bool:
     return "shared_experts" in prefix or "shared_expert" in prefix or "share_expert" in prefix
 
 
-def _get_column_parallel_op(prefix, layer) -> MLPColumnParallelOp | DSV4OProjColumnParallelOp | None:
+# Residual-stream projection names across dense decoder families: the merged
+# qkv/gate-up layouts (Llama, Qwen, GLM, ...), the split q/k/v and gate/up
+# layouts, and the GDN in-projections (Qwen3.5 linear-attention layers).
+# GDN's conv1d is deliberately absent: it runs on already-gathered full
+# tokens inside the mixer core.
+_DENSE_SP_COLUMN_PROJECTIONS = frozenset(
+    {
+        "qkv_proj",
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "gate_up_proj",
+        "gate_proj",
+        "up_proj",
+        "in_proj_qkvz",
+        "in_proj_qkv",
+        "in_proj_z",
+        "in_proj_ba",
+    }
+)
+_DENSE_SP_ROW_PROJECTIONS = frozenset({"o_proj", "down_proj", "out_proj"})
+
+
+def _is_dense_sp_decoder_projection(prefix: str, projections: frozenset) -> bool:
+    """Whether ``prefix`` names a decoder-stack projection in ``projections``.
+
+    Matching only the final prefix component keeps substring names out (a
+    vision ``mlp.gate_up_proj`` never matches ``gate_up_proj`` by itself),
+    and requiring the ``.layers.`` path restricts the sequence-parallel
+    layout to the repeated decoder stack. A family whose residual-stream
+    projection carries an unlisted name fails loudly in the row wrapper's
+    shape check instead of silently computing on a wrong token layout.
+    """
+    if ".layers." not in prefix:
+        return False
+    return prefix.rsplit(".", 1)[-1] in projections
+
+
+def _get_column_parallel_op(
+    prefix, layer
+) -> MLPColumnParallelOp | DSV4OProjColumnParallelOp | SequenceColumnParallelOp | None:
     if "wo_a" in prefix and oproj_tp_enable():
         return DSV4OProjColumnParallelOp(layer)
     if "gate_up_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPColumnParallelOp(layer)
+    if enable_dense_sp() and _is_dense_sp_decoder_projection(prefix, _DENSE_SP_COLUMN_PROJECTIONS):
+        return SequenceColumnParallelOp(layer)
     return None
 
 
-def _get_row_parallel_op(prefix, layer) -> MLPRowParallelOp | OProjRowParallelOp | DSV4OProjRowParallelOp | None:
+def _get_row_parallel_op(
+    prefix, layer
+) -> MLPRowParallelOp | OProjRowParallelOp | DSV4OProjRowParallelOp | SequenceRowParallelOp | None:
     if "wo_b" in prefix and oproj_tp_enable():
         return DSV4OProjRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():
         return OProjRowParallelOp(layer)
+    if enable_dense_sp() and _is_dense_sp_decoder_projection(prefix, _DENSE_SP_ROW_PROJECTIONS):
+        return SequenceRowParallelOp(layer)
     return None
 
 
@@ -417,9 +539,11 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
     custom_op: (
         MLPColumnParallelOp
         | DSV4OProjColumnParallelOp
+        | SequenceColumnParallelOp
         | MLPRowParallelOp
         | OProjRowParallelOp
         | DSV4OProjRowParallelOp
+        | SequenceRowParallelOp
         | None
     ) = None
     if direct == "row":

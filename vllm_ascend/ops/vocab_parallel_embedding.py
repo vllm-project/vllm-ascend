@@ -47,8 +47,10 @@ from vllm_ascend.distributed.parallel_state import (
     get_embed_tp_group,
     get_lmhead_tp_group,
 )
+from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm_ascend.utils import (
     embedding_tp_enable,
+    enable_dense_sp,
     enable_pcp_embedding_lmhead_weight_sharding,
     get_potential_max_tokens,
     lmhead_tp_enable,
@@ -194,6 +196,11 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # layout spans two real communication groups rather than one TP group.
         self.tp_rank = plan.shard_rank
         self.tp_size = plan.shard_world_size
+        # Entry gate of the dense sequence-parallel region, captured at
+        # construction: the V2 runner does not pin the current vllm config
+        # during forwards, so a forward-time enable_dense_sp() probe would
+        # silently miss, and the config cannot change after model load.
+        self.dense_sp_entry = enable_dense_sp()
 
         if self.token_exchange_group is not None:
             self.embedding_tp_capacity = max(
@@ -411,6 +418,13 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         reduce_group = self.output_reduce_group
         if reduce_group is None or reduce_group.world_size == 1:
             return output_parallel
+        if self.dense_sp_entry:
+            # Entry of the dense sequence-parallel region: reduce-scatter the
+            # vocabulary-shard contributions so each rank keeps only its token
+            # shard. The decoder-stack projections all-gather around their
+            # GEMMs, and the model runner / sample-time exit all-gathers the
+            # final hidden states before logits row selection.
+            return sp_reduce_scatter(output_parallel)
         # Standard vocabulary parallelism keeps identical token rows on every
         # rank. Sum the vocabulary-shard contributions without scattering the
         # token dimension; the first decoder layer expects the complete sequence.
