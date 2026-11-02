@@ -43,14 +43,14 @@ variants:
         install:
           pip: false
 
-notes:
-  - title: "Ascend 310P measured lane (2B)"
-    when: { hardware: [ascend_310p] }
+hardware_notes:
+  ascend_310p:
+    title: Ascend 310P measured lane (2B)
     body: |
       Image: `quay.io/ascend/vllm-ascend:v0.30.0rc1-310p` (also passed `v0.23.0-310p`).
       Community recipe: https://github.com/vllm-ascend/vllm-ascend-recipes/pull/131
       Replace `your_model_path` with local weights or Hub/ModelScope id.
-
+      
       ```bash
       export VLLM_USE_MODELSCOPE=True
       export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -65,6 +65,6 @@ notes:
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[2,16]}' \
         --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":false}}'
       ```
-
+      
       AISBench gsm8k (2026-10-29 Asia/Shanghai): **80.06** (FAIL=0; tutorial ref 77.71).
       textvqa / perf not measured — do not invent numbers. Keep `enable_npugraph_ex: false`.

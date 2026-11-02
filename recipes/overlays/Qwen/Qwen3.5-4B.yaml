@@ -41,13 +41,13 @@ variants:
         install:
           pip: false
 
-notes:
-  - title: "Ascend 310P measured lane (4B)"
-    when: { hardware: [ascend_310p] }
+hardware_notes:
+  ascend_310p:
+    title: Ascend 310P measured lane (4B)
     body: |
       Image: `quay.io/ascend/vllm-ascend:v0.30.0rc1-310p`.
       Community recipe: https://github.com/vllm-ascend/vllm-ascend-recipes/pull/131
-
+      
       ```bash
       export VLLM_USE_MODELSCOPE=True
       export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -62,6 +62,6 @@ notes:
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[2,16]}' \
         --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":false}}'
       ```
-
+      
       AISBench gsm8k (2026-10-29 Asia/Shanghai): **93.56** (FAIL=0; tutorial ref 93.18).
       On v0.30 keep 8192/16 — 16384/32 OOM on this SKU. textvqa / perf not measured.
