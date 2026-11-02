@@ -5507,6 +5507,15 @@ def test_stash_pending_reformat_merges_batches_arriving_separately():
     assert applied == [[indexer_group, mla_group, gqa_group], [gqa_group]]
     assert "req-split" not in receiver.pending_reformat
 
+    # A group index repeated within one batch is stashed once (first arrival wins).
+    receiver._stash_pending_reformat("req-dup", 0, [gqa_group, gqa_group])
+    assert receiver.pending_reformat["req-dup"][0] == [gqa_group]
+
+    # A later arrival carrying a different block layout for an already-stashed
+    # group is ignored, so the consumer applies that group exactly once.
+    receiver._stash_pending_reformat("req-dup", 0, [(2, [[99, 100]], 8, [2, 3, 4])])
+    assert receiver.pending_reformat["req-dup"][0] == [gqa_group]
+
 
 if __name__ == "__main__":
     unittest.main()

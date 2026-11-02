@@ -1103,9 +1103,17 @@ class KVCacheRecvingThread(threading.Thread):
             # reformatted exactly once.
             stashed = self.pending_reformat[request_id].setdefault(shard_idx, [])
             stashed_group_ids = {entry[0] for entry in stashed}
-            stashed.extend(
-                entry for entry in ready_attention_group_reformat_block_ids if entry[0] not in stashed_group_ids
-            )
+            # Walk the batch one entry at a time so a group index repeated
+            # within the same call is deduplicated too; the previous
+            # set-comprehension snapshot only covered groups stashed by
+            # earlier calls. A group arriving again with a different block
+            # layout keeps its first layout, so the consumer applies each
+            # group exactly once.
+            for entry in ready_attention_group_reformat_block_ids:
+                if entry[0] in stashed_group_ids:
+                    continue
+                stashed_group_ids.add(entry[0])
+                stashed.append(entry)
 
     def _reformat_pending_kv_caches(self, request_id: str) -> None:
         with self.pending_reformat_lock:
