@@ -33,11 +33,11 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 )
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.triton.v2.spec_decode.entropy_verify import (
+from vllm_ascend.ops.triton.spec_decode.entropy_verify import (
     _entropy_partials_kernel,
     _entropy_verify,
 )
-from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
+from vllm_ascend.ops.triton.spec_decode.resample import resample
 from vllm_ascend.utils import vllm_version_is
 
 _ENTROPY_EPSILON = 1e-10

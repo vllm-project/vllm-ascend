@@ -38,7 +38,7 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_final_chunk_indices,
     prepare_update_chunk_offsets,
 )
-from vllm_ascend.ops.triton.v2.mamba.gdn_prepare import prepare_gdn
+from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
 from vllm_ascend.utils import vllm_version_is
 
 _GDN_CHUNK_SIZE = 64
