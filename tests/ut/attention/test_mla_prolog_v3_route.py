@@ -18,12 +18,13 @@ from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
 import vllm_ascend.attention.mla_v1 as mla_v1
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
-from vllm_ascend.attention.utils import supports_strided_mla_cache
+from vllm_ascend.attention.utils import mark_fused_preprocess_weights, supports_strided_mla_cache
 from vllm_ascend.model_executor.offloader.prefetch import AscendPrefetchOffloader
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8FP8DynamicLinearMethod,
     AscendW8A8LinearMethod,
+    AscendW8A8MXFP8DynamicLinearMethod,
 )
 
 NOPE_DIM = 512
@@ -72,6 +73,68 @@ def _make_impl() -> AscendMLAImpl:
         "num_heads": 8,
     }
     return impl
+
+
+@pytest.mark.parametrize("use_mla_rope", [False, True])
+@pytest.mark.parametrize("scheme_type", [None, AscendW8A8DynamicLinearMethod, AscendW8A8MXFP8DynamicLinearMethod])
+def test_prolog_writer_projection_nz_ownership(use_mla_rope, scheme_type):
+    impl = _make_impl()
+    impl.enable_mlapo = False
+    impl.support_fp8_attention = True
+    impl.use_mla_rope = use_mla_rope
+    scheme = scheme_type.__new__(scheme_type) if scheme_type is not None else None
+    for layer in (impl.fused_qkv_a_proj, impl.q_proj):
+        layer.quant_method = SimpleNamespace(quant_method=scheme)
+
+    mark_fused_preprocess_weights(impl)
+
+    assert impl.supports_prolog_v3_writer() is use_mla_rope
+    managed = use_mla_rope and scheme_type is AscendW8A8MXFP8DynamicLinearMethod
+    assert impl.fused_qkv_a_proj._fused_preprocess_managed is managed
+    assert impl.q_proj._fused_preprocess_managed is managed
+
+
+def test_mxfp8_draft_splits_prolog_weights_before_nz_conversion():
+    impl = _make_impl()
+    impl.is_draft_model = True
+    impl.enable_mlapo = False
+    impl.support_fp8_attention = True
+    impl._prolog_v3_weights = None
+    fused_input_size = impl.fused_qkv_a_proj.input_size
+    scheme = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
+    scheme.group_size = 32
+    projections = []
+    for output_size in (impl.q_lora_rank + FUSED_DIM, impl.num_heads * impl.qk_head_dim):
+        layer = nn.Module()
+        layer.quant_method = SimpleNamespace(quant_method=scheme)
+        layer.weight = nn.Parameter(torch.randn(output_size, impl.q_lora_rank).to(torch.float8_e4m3fn), False)
+        layer.weight_scale = nn.Parameter(
+            torch.ones(output_size, impl.q_lora_rank // scheme.group_size, dtype=torch.uint8), False
+        )
+        projections.append(layer)
+    impl.fused_qkv_a_proj, impl.q_proj = projections
+    impl.fused_qkv_a_proj.input_size = fused_input_size
+    mark_fused_preprocess_weights(impl)
+
+    with (
+        patch("vllm_ascend.utils._should_trans_nz", return_value=True),
+        patch.object(torch_npu, "npu_format_cast", side_effect=lambda tensor, fmt, **kwargs: tensor) as cast,
+    ):
+        for layer in projections:
+            scheme.process_weights_after_loading(layer)
+        cast.assert_not_called()
+        prepared = impl._prepare_prolog_v3_weights()
+
+    assert not impl.enable_mlapo
+    assert cast.call_count == 3
+    fused_weight = impl.fused_qkv_a_proj.weight.data
+    torch.testing.assert_close(
+        prepared["weight_dq"].float(), fused_weight[:, : impl.q_lora_rank].float(), rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        prepared["weight_dkv_kr"].float(), fused_weight[:, impl.q_lora_rank :].float(), rtol=0, atol=0
+    )
+    torch.testing.assert_close(prepared["weight_uq_qr"].float(), impl.q_proj.weight.float(), rtol=0, atol=0)
 
 
 def _construct_impl(pcp_size: int, dcp_size: int) -> AscendMLAImpl:

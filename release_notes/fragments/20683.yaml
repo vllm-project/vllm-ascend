@@ -1,0 +1,4 @@
+pr: 20683
+entries:
+  - category: bugfix
+    text: Fixed premature MXFP8 NZ conversion when MLA Prolog V3 writers prepare projection weights, including MTP drafts with MLAPO disabled.
