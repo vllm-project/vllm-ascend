@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-import torch
-import torch.nn as nn
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as ar_speculator
 
 from vllm_ascend._310p.worker.v2.spec_utils import (
@@ -15,7 +13,6 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
     prepare_prefill_inputs_cpu,
     update_draft_inputs_cpu,
 )
-from vllm_ascend.worker.v2 import aclgraph_utils as aclgraph_utils_mod
 from vllm_ascend.worker.v2 import spec_decode as ascend_spec_decode
 
 ar_speculator.prepare_prefill_inputs = prepare_prefill_inputs_cpu
@@ -24,14 +21,6 @@ ar_speculator.update_draft_inputs = update_draft_inputs_cpu
 # Draft ACLGraph manager override is applied in patch/worker/__init__.py
 # *after* patch_eagle_speculator (which would otherwise win).
 
-
-def _embed_input_ids(self: nn.Module, input_ids: torch.Tensor, **kwargs):
-    return self.original_model.embed_input_ids(input_ids, **kwargs)  # type: ignore[operator]
-
-
-# Draft ModelWithContext must forward embed_input_ids for Qwen MTP.
-if not hasattr(aclgraph_utils_mod.ModelWithContext, "embed_input_ids"):
-    aclgraph_utils_mod.ModelWithContext.embed_input_ids = _embed_input_ids  # type: ignore[attr-defined]
 
 _orig_init_speculator = ascend_spec_decode.init_speculator
 

@@ -36,9 +36,15 @@ from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     get_dtype_size,
 )
+from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from vllm_ascend.attention.utils import (
+    maybe_save_kv_layer_to_connector,
+    wait_for_kv_layer_from_connector,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_fused,
@@ -47,6 +53,7 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_fused,
 )
 
+from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
 from .lightning_indexer import qsa_select_paged_tokens_lightning
 
@@ -412,7 +419,6 @@ class AscendQSAImpl:
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del key, value
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("QSA output quantization is not supported on Ascend")
         num_tokens = attn_metadata.num_actual_tokens
@@ -425,9 +431,23 @@ class AscendQSAImpl:
         value_cache = canonicalize_singleton_dim_strides(value_cache)
         packed_width = layer.indexer.token_topk // layer.indexer.compress_ratio + layer.indexer.compress_ratio - 1
         compact_indices = selected_indices[:, :packed_width]
-        logger.info_once("QSA attention is using the CANN GBSA backend.")
-        return qsa_gbsa_attention(
+        request_plan = getattr(attn_metadata, "qsa_request_plan", None)
+        if request_plan is None:
+            return qsa_gbsa_attention(
+                query[:num_tokens],
+                key_cache,
+                value_cache,
+                compact_indices,
+                attn_metadata.block_table,
+                token_to_req[:num_tokens],
+                logical_positions[:num_tokens],
+                seq_lens,
+                output[:num_tokens],
+            )
+        return dispatch_qsa_attention(
             query[:num_tokens],
+            key[:num_tokens],
+            value[:num_tokens],
             key_cache,
             value_cache,
             compact_indices,
@@ -436,6 +456,7 @@ class AscendQSAImpl:
             logical_positions[:num_tokens],
             seq_lens,
             output[:num_tokens],
+            request_plan,
         )
 
     @staticmethod
@@ -448,6 +469,37 @@ class AscendQSAImpl:
         draft_attn_metadatas=None,
     ):
         """QSA replay parameters live in persistent buffers; nothing to rebind."""
+
+
+class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
+    # FULL_DECODE_ONLY captures a fixed GBSA path. Unlike sequence thresholds,
+    # decode phase cannot cross into FIA when a request grows during replay.
+    _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+
+    def build(self, common_prefix_len: int, common_attn_metadata: CommonAttentionMetadata, fast_build: bool = False):
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        phases = common_attn_metadata.is_prefilling
+        if phases is None or phases.device.type != "cpu":
+            raise ValueError("QSA phase dispatch requires scheduler CPU is_prefilling metadata")
+        metadata.qsa_request_plan = None
+        if any(phases.tolist()):
+            lengths = common_attn_metadata.seq_lens_cpu_upper_bound
+            if lengths is None:
+                raise ValueError("QSA prefill dispatch requires scheduler CPU KV lengths")
+            metadata.qsa_request_plan = build_qsa_request_plan(
+                common_attn_metadata.query_start_loc_cpu,
+                lengths,
+                common_attn_metadata.num_actual_tokens,
+                phases,
+            )
+        return metadata
+
+    def build_for_cudagraph_capture(self, common_attn_metadata: CommonAttentionMetadata):
+        # Capture dummy metadata need not carry live phase flags. Explicitly
+        # bypass the prefill planner for the decode-only graph contract.
+        metadata = super().build(0, common_attn_metadata, fast_build=True)
+        metadata.qsa_request_plan = None
+        return metadata
 
 
 class AscendQSABackend(upstream_qsa.Qwen4ExpQSAFlashAttentionBackend):
@@ -468,6 +520,10 @@ class AscendQSABackend(upstream_qsa.Qwen4ExpQSAFlashAttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[AscendQSAImpl]:
         return AscendQSAImpl
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendQSAMetadataBuilder]:
+        return AscendQSAMetadataBuilder
 
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
@@ -537,6 +593,8 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         if not _qsa_cache_is_bound(self.kv_cache):
             raise RuntimeError("QSA main K/V cache is not bound")
         num_tokens = main_metadata.num_actual_tokens
+        # Restore main KV and indexer groups before either cache is updated.
+        wait_for_kv_layer_from_connector(self.layer_name)
         side_metadata = metadata[self.indexer.raw_key_cache.prefix]
         if side_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
@@ -571,18 +629,20 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             self.kv_cache,
             main_metadata.slot_mapping,
         )
-        self.impl.forward_qsa(
-            self,
-            query,
-            key,
-            value,
-            self.kv_cache,
-            main_metadata,
-            output,
-            token_to_req=side_metadata.token_to_req,
-            logical_positions=side_metadata.logical_positions,
-            seq_lens=side_metadata.seq_lens,
-        )
+        with attention_transfer_window():
+            self.impl.forward_qsa(
+                self,
+                query,
+                key,
+                value,
+                self.kv_cache,
+                main_metadata,
+                output,
+                token_to_req=side_metadata.token_to_req,
+                logical_positions=side_metadata.logical_positions,
+                seq_lens=side_metadata.seq_lens,
+            )
+        maybe_save_kv_layer_to_connector(self.layer_name, list(self.kv_cache))
 
 
 __all__ = ["AscendQSAIndexer", "AscendQwen4ExpQSAAttention"]
