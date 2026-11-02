@@ -13,13 +13,11 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, closed]
     paths:
-      - 'recipes/**'
-      - '!recipes/README.md'
+      - 'recipes/**/*.yaml'
   push:
     branches: [main]
     paths:
-      - 'recipes/**'
-      - '!recipes/README.md'
+      - 'recipes/**/*.yaml'
 
 permissions:
   contents: read

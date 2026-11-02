@@ -171,8 +171,10 @@ jobs:
               const files = await github.paginate(github.rest.pulls.listFiles, {
                 ...repo, pull_number: issue_number, per_page: 100,
               });
+              const isRecipePath = name =>
+                typeof name === 'string' && name.startsWith('recipes/') && name.endsWith('.yaml');
               const hasRecipes = files.some(file =>
-                file.filename.startsWith('recipes/') || file.previous_filename?.startsWith('recipes/')
+                isRecipePath(file.filename) || isRecipePath(file.previous_filename)
               );
               if (!hasRecipes && pr.changed_files > files.length) {
                 throw new Error('Incomplete PR file list; leaving the preview comment unchanged.');
@@ -181,7 +183,7 @@ jobs:
               active = hasRecipes;
               status = hasRecipes
                 ? 'The preview builds asynchronously and may not be ready or may still show an earlier commit. Check the preview banner for the rendered revision; this comment does not report deployment success.'
-                : 'This PR no longer changes `recipes/**`, so this preview link is no longer applicable.';
+                : 'This PR no longer changes recipe files eligible for a preview, so this preview link is no longer applicable.';
             }
             const url = `https://vllm-recipes-git-preview-vllm-ascend-pr-${issue_number}-inferact-inc.vercel.app`;
             const body = [
