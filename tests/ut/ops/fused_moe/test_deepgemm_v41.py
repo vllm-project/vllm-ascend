@@ -50,7 +50,7 @@ def context():
         )
 
     dependency.SymmBuffer.side_effect = buffer
-    with patch.dict(sys.modules, {"deep_gemm": dependency}):
+    with patch("vllm_ascend.ops.fused_moe.deepgemm_loader.load_deepgemm", return_value=dependency):
         yield backend, config, group, ascend, dependency
 
 

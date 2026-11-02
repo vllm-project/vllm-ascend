@@ -238,3 +238,6 @@ csrc/third_party/
 
 # local build cache
 .vllm_ascend/
+
+# Generated native DeepGEMM package for editable 950 builds
+vllm_ascend/third_party/deep_gemm/
