@@ -1655,6 +1655,14 @@
 #       or falls back to an independent NPU tensor with explicit dirty-row
 #       copying. It exposes `.cpu` / `.np` / `.uva()` to mimic the upstream
 #       `UvaBuffer` interface.
+#       Bind the pool to an Ascend subclass for `copy_chunks_to_uva`: NumPy's
+#       `out=` writes bypass the monitored slice setter, so bulk writes must
+#       explicitly mark their dirty prefix before returning the device view.
+#       Preserve Core's pool rotation, growth and buffer retirement contract.
+#    Test:
+#       `test_patch_uva_bulk_copy_cpu.py`; actual A5 staged-write, Prefill,
+#       changing graph replay and opaque uint64 checks are recorded in the
+#       HiSparse current-main validation guide.
 #    Future Plan:
 #       Remove this patch when NPU supports UVA natively.
 #

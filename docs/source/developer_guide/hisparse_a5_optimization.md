@@ -184,3 +184,28 @@ This correction did **not** remove the premature EOS in the new-main OFF model.
 It is not established as that output problem's root cause or a performance gain.
 Device input/logit-row diagnosis remains in progress. No new-main performance
 or maximum-concurrency claim is made while natural outputs are invalid.
+
+Actual eight-rank input observation subsequently found all 20 Prefill IDs were
+zero, while positions, request row31, sequence length20 and logit index19 were
+consistent. Core's new `UvaBufferPool.copy_chunks_to_uva` writes through
+`np.concatenate(..., out=buf.np[:n])`. That ndarray view bypasses Ascend's
+monitored setter, so the emulated UVA buffer was not marked dirty and its NPU
+payload stayed zero. This happens with HiSparse OFF too.
+
+The formal fix supplies an Ascend pool implementation for bulk writes: retain
+the same pinned destination and pool lifecycle, mark the written prefix in
+constant-size bookkeeping, then perform the existing asynchronous fallback
+copy before device consumption. It preserves real UVA and Core's explicit-copy
+fallback. It does not disable UVA, alter generation parameters, or change an
+Attention compute kernel. Five portable CPU checks passed. Twelve actual A5
+cases passed for each of the PR-base and current-main candidate variants,
+including reproducing the old zero-token write, changed/noncontiguous request
+rows, real Core Prefill, changing graph replays, uint64 bit patterns, pool
+growth/reuse and mixed bulk/sparse writes. These component runs shared only
+our own diagnostic service and were not timed model benchmarks.
+
+The current-main candidate retains that main revision's existing prefix-write
+callbacks; the older PR base uses the equivalent explicit prefix tracking.
+Full-model output and performance qualification after activation are still
+required. Both variants' failed preparation attempts and raw evidence remain
+recorded; no failed attempt is counted as a pass.

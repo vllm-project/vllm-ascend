@@ -23,7 +23,10 @@ from importlib.metadata import version
 import numpy as np
 import torch
 import vllm.v1.worker.gpu.buffer_utils
+from numpy.typing import ArrayLike
 from vllm.logger import logger
+
+_ORIGINAL_UVA_BUFFER_POOL = vllm.v1.worker.gpu.buffer_utils.UvaBufferPool
 
 
 def check_triton_ascend_version_valid() -> bool:
@@ -151,6 +154,7 @@ class UvaBufferWrapper:
         self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self._np: np.ndarray = self._cpu.numpy()
         self._modified_indices: set[int] = set()
+        self._modified_prefix_end = 0
         requested_real_uva = is_uva_available()
         if requested_real_uva:
             import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
@@ -173,17 +177,20 @@ class UvaBufferWrapper:
         return self._np if self._use_real_uva else MonitoredNumPyArray(self._np, self._mark_cpu_modified)
 
     def _sync_dirty_rows(self) -> None:
-        if not self._use_real_uva and self._modified_indices:
-            dirty_rows = sorted(self._modified_indices)
+        if not self._use_real_uva and (self._modified_indices or self._modified_prefix_end):
+            prefix_end = self._modified_prefix_end
+            if prefix_end:
+                _int64_storage(self._uva[:prefix_end]).copy_(_int64_storage(self._cpu[:prefix_end]), non_blocking=True)
+            dirty_rows = sorted(row for row in self._modified_indices if row >= prefix_end)
             n_dirty = len(dirty_rows)
-            if dirty_rows[0] == 0 and dirty_rows[-1] == n_dirty - 1:
+            if n_dirty and dirty_rows[0] == 0 and dirty_rows[-1] == n_dirty - 1:
                 # Common path: dirty rows are a contiguous prefix [0..n-1].
                 # This is always the case when copy_to_uva writes via
                 # dst[:n] = x.  Contiguous slice copy_ keeps the CPU source
                 # pinned and enables true async DMA without an intermediate
                 # tensor or stream sync.
                 _int64_storage(self._uva[:n_dirty]).copy_(_int64_storage(self._cpu[:n_dirty]), non_blocking=True)
-            else:
+            elif n_dirty:
                 # Sparse modification pattern — fall back to indexed copy.
                 # Explicitly re-pin the CPU source so that non_blocking is
                 # not silently degraded. uint64 is copied through its int64
@@ -195,6 +202,19 @@ class UvaBufferWrapper:
                 else:
                     self._uva[dirty_rows] = src.to(device="npu", non_blocking=True)
             self._modified_indices.clear()
+            self._modified_prefix_end = 0
+
+    def copy_chunks_to_uva(self, chunks: Sequence[ArrayLike], n: int) -> torch.Tensor:
+        """Commit a bulk NumPy write without losing fallback H2D visibility.
+
+        NumPy's ``out=`` writes through a sliced ndarray, bypassing the monitored
+        wrapper's ``__setitem__``. Track the contiguous prefix explicitly, without
+        allocating a Python dirty-row entry per token or another CPU payload.
+        """
+        np.concatenate(chunks, out=self._np[:n], casting="unsafe")
+        if not self._use_real_uva:
+            self._modified_prefix_end = max(self._modified_prefix_end, n)
+        return self.uva(n)
 
     def uva(self, n: int | None = None) -> torch.Tensor:
         """Get the device data of the buffer.
@@ -206,4 +226,15 @@ class UvaBufferWrapper:
         return self._uva if n is None else self._uva[:n]
 
 
+class UvaBufferPoolWrapper(_ORIGINAL_UVA_BUFFER_POOL):
+    def copy_chunks_to_uva(self, chunks, n: int) -> torch.Tensor:
+        buf = self._next_buf(n)
+        if isinstance(buf, UvaBufferWrapper):
+            return buf.copy_chunks_to_uva(chunks, n)
+        # Core's NonUvaBuffer explicitly uploads on every uva(n) call.
+        np.concatenate(chunks, out=buf.np[:n], casting="unsafe")
+        return buf.uva(n)
+
+
 vllm.v1.worker.gpu.buffer_utils.UvaBuffer = UvaBufferWrapper
+vllm.v1.worker.gpu.buffer_utils.UvaBufferPool = UvaBufferPoolWrapper
