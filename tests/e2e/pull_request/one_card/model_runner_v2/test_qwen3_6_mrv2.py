@@ -142,15 +142,20 @@ def _compare(mrv1: list[dict], mrv2: list[dict]) -> dict:
     for index, (left, right) in enumerate(zip(mrv1, mrv2, strict=True)):
         left_ids = left["token_ids"]
         right_ids = right["token_ids"]
+        first = min(len(left_ids), len(right_ids))
         if left_ids != right_ids:
             first = next(
                 (i for i, (a, b) in enumerate(zip(left_ids, right_ids)) if a != b),
-                min(len(left_ids), len(right_ids)),
+                first,
             )
             stats["token_mismatch"].append({"prompt_index": index, "first_divergence": first})
-        for step, token_id in enumerate(left_ids):
-            left_value = left["logprobs"][step].get(str(token_id)) if step < len(left["logprobs"]) else None
-            right_value = right["logprobs"][step].get(str(token_id)) if step < len(right["logprobs"]) else None
+        # Compare logprobs only up to the first divergence: after that the two runs are
+        # conditioned on different prefixes, so their logprobs are not comparable.
+        compare_limit = min(first, len(left["logprobs"]), len(right["logprobs"]))
+        for step in range(compare_limit):
+            token_id = left_ids[step]
+            left_value = left["logprobs"][step].get(str(token_id))
+            right_value = right["logprobs"][step].get(str(token_id))
             if left_value is None or right_value is None:
                 continue
             delta = abs(left_value - right_value)
