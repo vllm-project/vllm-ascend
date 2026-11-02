@@ -182,14 +182,8 @@ def test_flash_attn_plan_cache_separates_causal_masks(monkeypatch):
     tree = ast.parse(source.read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendFlashAttentionImpl")
     method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "forward_impl")
-    pad = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_pad_head")
-    backend_cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendFlashAttentionBackend")
-    padded_size = next(
-        n for n in backend_cls.body if isinstance(n, ast.FunctionDef) and n.name == "get_padded_head_size"
-    )
-    namespace = {"torch": torch, "F": torch.nn.functional, "attention_transfer_window": nullcontext}
-    exec(compile(ast.Module(body=[method, pad, padded_size], type_ignores=[]), str(source), "exec"), namespace)
-    namespace["AscendFlashAttentionBackend"] = SimpleNamespace(get_padded_head_size=namespace["get_padded_head_size"])
+    namespace = {"torch": torch, "attention_transfer_window": nullcontext}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
     query = torch.zeros(2, 8, 128, dtype=torch.bfloat16)
     ops = SimpleNamespace(
         flash_attn_metadata=Mock(side_effect=[object(), object()]), flash_attn=Mock(return_value=(query, None))
@@ -204,7 +198,6 @@ def test_flash_attn_plan_cache_separates_causal_masks(monkeypatch):
         value_cache=None,
         sinks=None,
         scale=1.0,
-        _pad_head=namespace["_pad_head"],
     )
     metadata = SimpleNamespace(
         flash_attn_lengths=None,
