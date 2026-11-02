@@ -273,8 +273,16 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             # Ascend may retain an indexer only for cache writes while reusing
             # another layer's top-k. The physical pool must follow the actual
             # runtime group, not merely the presence of an indexer module.
+            source_layout = {}
+            if getattr(attn_module.impl, "enable_sparse_sfa_c8", False):
+                # Native C8 stores 512 FP8 NoPE bytes, 16 scale bytes and
+                # 128 BF16 RoPE bytes. Declare this before Core sizes Host
+                # pages; its generic FP8 MLA spec describes only 576 bytes.
+                source_layout.update(head_size=656, dtype=attn_module.impl.c8_cache_dtype)
             kv_cache_spec[layer_name] = replace(
-                spec, is_index_group_leader=attn_module.hisparse_cache.runtime.is_group_leader
+                spec,
+                is_index_group_leader=attn_module.hisparse_cache.runtime.is_group_leader,
+                **source_layout,
             )
             continue
         if isinstance(attn_module, MLAAttention):

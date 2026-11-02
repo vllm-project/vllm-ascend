@@ -270,3 +270,16 @@ Resident graph replays, and the existing mapped resolver/gather/scatter oracle
 with graph replay. Its native sources were rebuilt in the matching new image.
 The earlier certificate-guard failure is retained. Full ON model, matched
 ON/OFF performance and maximum active concurrency are still pending.
+
+Current Core's generic FP8 MLA source spec also describes a 576-byte row in
+UInt8 storage. The Ascend spec builder now declares the native C8 Host source
+as 656 one-byte elements in E4M3FN before Core plans or allocates pages: 512
+NoPE bytes, 16 FP32 scale bytes and 128 BF16 RoPE bytes. The strict cache-bind
+geometry check remains unchanged. This corrects the storage declaration; it
+does not resize an allocation after planning or convert cached KV contents.
+Four production-branch CPU cases passed. Runtime
+`f422eac15ee3eb6231670779215f9494b9685dac` then passed eleven actual component
+cases, adding two real Core Host-view layouts and reproduction of the rejected
+576-byte source spec to the preceding eight cases. Same allocation addresses
+and all byte patterns were preserved. Full ON-model qualification remains
+pending.
