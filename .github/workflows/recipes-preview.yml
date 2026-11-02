@@ -14,10 +14,12 @@ on:
     types: [opened, synchronize, reopened, closed]
     paths:
       - 'recipes/**'
+      - '!recipes/README.md'
   push:
     branches: [main]
     paths:
       - 'recipes/**'
+      - '!recipes/README.md'
 
 permissions:
   contents: read

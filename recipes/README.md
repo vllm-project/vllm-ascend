@@ -105,6 +105,10 @@ Once enabled, the `Recipes Preview` workflow sends events to
 - Pushes to `main` changing `recipes/**`: `recipes-updated` requests a
   production source-lock update with `source: vllm-ascend`.
 
+Both triggers exclude `recipes/README.md`: changes to this file alone do not
+dispatch preview or production updates. Changes that also include other files
+under `recipes/` still trigger the workflow.
+
 The workflow's `recipes-preview` environment provides a **View deployment**
 link to
 `https://vllm-recipes-git-preview-vllm-ascend-pr-<PR number>-inferact-inc.vercel.app`.
