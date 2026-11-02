@@ -1,0 +1,4 @@
+pr: 20594
+entries:
+  - category: bugfix
+    text: Explicit --kv-cache-memory now applies the same multi-group KV planner scaling as the profiled path, so block counts match the requested physical budget.
