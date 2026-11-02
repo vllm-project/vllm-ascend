@@ -124,7 +124,7 @@ templates:
       - --safetensors-load-strategy
       - "prefetch"
       - --max-num-seqs
-      - "32"
+      - "16"
       - --max-model-len
       - "1048576"
       - --max-num-batched-tokens
