@@ -19,9 +19,12 @@ from safetensors.torch import save_file
 
 @pytest.fixture
 def rdma():
-    package = Path(importlib.util.find_spec("vllm_ascend").origin).parent
+    package_spec = importlib.util.find_spec("vllm_ascend")
+    assert package_spec is not None and package_spec.origin is not None
+    package = Path(package_spec.origin).parent
     source = Path(os.getenv("ENGRAM_TEST_SOURCE", package / "models/deepseek_v41/engram/shared_rdma.py"))
     spec = importlib.util.spec_from_file_location("engram_shared_rdma_test", source)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
