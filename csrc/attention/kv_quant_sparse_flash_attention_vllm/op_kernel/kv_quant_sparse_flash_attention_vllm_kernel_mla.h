@@ -302,8 +302,34 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<QSFAT>::InitOutputSing
 {
     uint32_t qsfaCoreNum = GetBlockNum();
     if (qsfaCoreNum != 0) {
-        uint64_t qsfaTotalOutputSize = constInfo.batchSize * constInfo.qHeadNum * constInfo.qSeqSize *
-            constInfo.headDim;
+        uint64_t qsfaTotalOutputSize;
+        uint64_t qsfaOutputStart = 0;
+        bool qsfaNeedOutputInit = true;
+        if constexpr (LAYOUT_T == QSFA_LAYOUT::TND) {
+            // TND lengths are cumulative: the last entry is the number of valid
+            // rows. Only initialize [actual, T); valid rows are written by the
+            // compute path. The early-skip is kept as a flag (instead of return)
+            // so the softmax-LSE init below still runs.
+            if (constInfo.batchSize == 0 || constInfo.actualLenDimsQ == 0) {
+                qsfaNeedOutputInit = false;
+            } else {
+                uint32_t qsfaActualRows = actualSeqLengthsQGm.GetValue(constInfo.batchSize - 1);
+                if (qsfaActualRows >= constInfo.qSeqSize) {
+                    qsfaNeedOutputInit = false;
+                } else {
+                    uint64_t qsfaOutputRowSize =
+                        static_cast<uint64_t>(constInfo.kvHeadNum) * constInfo.gSize * constInfo.headDim;
+                    qsfaOutputStart = static_cast<uint64_t>(qsfaActualRows) * qsfaOutputRowSize;
+                    qsfaTotalOutputSize = (constInfo.qSeqSize - qsfaActualRows) * qsfaOutputRowSize;
+                }
+            }
+        } else {
+            qsfaTotalOutputSize = constInfo.batchSize * constInfo.qHeadNum * constInfo.qSeqSize *
+                constInfo.headDim;
+        }
+        if (!qsfaNeedOutputInit) {
+            qsfaTotalOutputSize = 0;
+        }
         // 2 means c:v = 1:2
         uint64_t qsfaSingleCoreSize = (qsfaTotalOutputSize + (2 * qsfaCoreNum) - 1) / (2 * qsfaCoreNum);
         uint64_t qsfaTailSize = qsfaTotalOutputSize - tmpBlockIdx * qsfaSingleCoreSize;
