@@ -2121,6 +2121,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.input_batch,
                     self.discard_request_indices.gpu,
                     self.num_discarded_requests,
+                    scheduler_output.num_scheduled_tokens,
                 )
             )
             self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
@@ -2154,6 +2155,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.input_batch,
                     self.discard_request_indices.gpu,
                     self.num_discarded_requests,
+                    scheduler_output.num_scheduled_tokens,
                 )
                 self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
 
@@ -2846,6 +2848,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.input_batch,
                     self.discard_request_indices.gpu,
                     self.num_discarded_requests,
+                    scheduler_output.num_scheduled_tokens,
                 )
             )
             self._copy_valid_sampled_token_count(

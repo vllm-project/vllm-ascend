@@ -21,12 +21,13 @@ with Ascend-specific additions for ACL graph differences.
 
 from __future__ import annotations
 
-from unittest.mock import call, create_autospec, patch
+from unittest.mock import MagicMock, call, create_autospec, patch
 
 import numpy as np
 import pytest
 import torch
 from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.v1.worker.gpu_input_batch import CachedRequestState
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.worker.v1.model_runner import NPUModelRunner
@@ -48,17 +49,20 @@ def _no_pin_memory():
         yield
 
 
-class MockCachedRequestState:
-    """Mock CachedRequestState for testing (same pattern as vllm)."""
+class MockCachedRequestState(CachedRequestState):
+    """Use native token lookup and length with explicit pre-step progress."""
 
-    def __init__(self, req_id: str, token_ids: list[int]):
-        self.req_id = req_id
-        self.token_ids = token_ids
-
-    def get_token_id(self, position: int) -> int:
-        if 0 <= position < len(self.token_ids):
-            return self.token_ids[position]
-        return 0
+    def __init__(self, req_id, token_ids, num_computed_tokens, output_token_ids=None):
+        super().__init__(
+            req_id=req_id,
+            prompt_token_ids=token_ids,
+            mm_features=[],
+            sampling_params=None,
+            generator=None,
+            block_ids=([],),
+            num_computed_tokens=num_computed_tokens,
+            output_token_ids=[] if output_token_ids is None else output_token_ids,
+        )
 
 
 class MockInputBatch:
@@ -255,11 +259,11 @@ def test_prepare_next_token_ids_padded():
         )
 
         requests = {}
-        for req_id in req_ids:
-            idx = int(req_id.split("_")[1])
-            # Different token sequences for each request
-            mock_request = MockCachedRequestState(req_id, list(range(15 + idx * 5)))
-            requests[req_id] = mock_request
+        for req_id, num_tokens in zip(req_ids, gpu_input_batch.num_tokens_no_spec.tolist()):
+            # C=N-2, Q=1: one known prompt token remains after this chunk.
+            requests[req_id] = MockCachedRequestState(
+                req_id, list(range(num_tokens)), num_computed_tokens=num_tokens - 2
+            )
 
         # sampled_token_ids shape: [batch_size, 1]
         sampled_token_ids = torch.tensor(
@@ -283,6 +287,7 @@ def test_prepare_next_token_ids_padded():
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={req_id: 1 for req_id in requests},
         )
 
         # Verify results
@@ -293,8 +298,8 @@ def test_prepare_next_token_ids_padded():
         # next_token_ids: use sampled if valid and not discarded, else backup
         # Request 1: valid (1), use 1
         # Request 2: valid (4), use 4
-        # Request 3: invalid (-1), use backup (seq_len=10, token at pos 10 = 10)
-        # Request 4: discarded, use backup (seq_len=15, token at pos 15 = 15)
+        # Request 3: invalid (-1), use backup at C+Q=20 (N=21)
+        # Request 4: discarded, use backup at C+Q=25 (N=26)
         assert next_token_ids[0].item() == 1
         assert next_token_ids[1].item() == 4
         assert next_token_ids[2].item() == 20  # backup from request state
@@ -303,6 +308,35 @@ def test_prepare_next_token_ids_padded():
         # Verify return dtypes
         assert next_token_ids.dtype == torch.int32
         assert valid_sampled_tokens_count.dtype == torch.int32
+
+
+def test_partial_prefill_uses_next_prompt_token():
+    vllm_config = _create_vllm_config()
+    runner = MagicMock()
+    runner.pin_memory = False
+    runner.dcp_size = 1
+
+    with set_current_vllm_config(vllm_config):
+        proposer = AscendExtractHiddenStatesProposer(vllm_config=vllm_config, device=torch.device("cpu"), runner=runner)
+        requests = {
+            "P": MockCachedRequestState("P", [11, 13, 17, 19, 23, 29, 31], num_computed_tokens=2),
+            "D": MockCachedRequestState("D", [41, 43], num_computed_tokens=2, output_token_ids=[47]),
+        }
+        gpu_input_batch = MockInputBatch(num_reqs=2, req_ids=["P", "D"], vocab_size=100, num_tokens_no_spec=[7, 3])
+        # This helper consumes one sample per request; D's valid sample is 67.
+        next_token_ids, valid_counts = proposer.prepare_next_token_ids_padded(
+            sampled_token_ids=torch.tensor([[89], [67]], dtype=torch.int64),
+            requests=requests,
+            gpu_input_batch=gpu_input_batch,
+            discard_request_indices=torch.tensor([0], dtype=torch.int64),
+            num_discarded_requests=1,
+            num_scheduled_tokens={"P": 2, "D": 1},
+        )
+
+        # P ends this chunk at 4/7: use prompt[4], not the final prompt token 31.
+        assert next_token_ids.tolist() == [23, 67]
+        # Unlike Eagle, this helper counts validity before applying discard.
+        assert valid_counts.tolist() == [1, 1]
 
 
 def _make_batch_desc(num_tokens: int):

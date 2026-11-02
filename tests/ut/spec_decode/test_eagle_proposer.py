@@ -24,6 +24,7 @@ from vllm.model_executor.models.deepseek_mtp import DeepSeekMultiTokenPredictor
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
+from vllm.v1.worker.gpu_input_batch import CachedRequestState
 
 import vllm_ascend.ascend_forward_context as ascend_forward_context
 import vllm_ascend.worker.v1.spec_decode.llm_base_proposer as llm_base_proposer
@@ -1765,17 +1766,20 @@ class MockCpuGpuBuffer:
         self.gpu[:size].copy_(self.cpu[:size])
 
 
-class MockCachedRequestState:
-    """Mock CachedRequestState for testing"""
+class MockCachedRequestState(CachedRequestState):
+    """Use native token lookup and length with explicit pre-step progress."""
 
-    def __init__(self, req_id, token_ids):
-        self.req_id = req_id
-        self.token_ids = token_ids
-
-    def get_token_id(self, position):
-        if position < len(self.token_ids):
-            return self.token_ids[position]
-        return 0
+    def __init__(self, req_id, token_ids, num_computed_tokens, output_token_ids=None):
+        super().__init__(
+            req_id=req_id,
+            prompt_token_ids=token_ids,
+            mm_features=[],
+            sampling_params=None,
+            generator=None,
+            block_ids=([],),
+            num_computed_tokens=num_computed_tokens,
+            output_token_ids=[] if output_token_ids is None else output_token_ids,
+        )
 
 
 class MockInputBatch:
@@ -1794,7 +1798,11 @@ class MockInputBatch:
 
 
 class TestPrepareNextTokenIdsPadded(TestBase):
-    """Test prepare_next_token_ids_padded method with precision validation"""
+    """Test prepare_next_token_ids_padded method with precision validation.
+
+    Legacy fixtures use C=N-2 and schedule one token, leaving one known
+    prompt token after the chunk. Valid samples still take precedence.
+    """
 
     def setUp(self):
         self.vllm_config = MagicMock(spec=VllmConfig)
@@ -1845,6 +1853,28 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         self.mock_supports_multimodal_inputs.stop()
         set_current_vllm_config(None)
 
+    def test_partial_prefill_uses_next_prompt_token(self):
+        requests = {
+            "P": MockCachedRequestState("P", [11, 13, 17, 19, 23, 29, 31], num_computed_tokens=2),
+            "D": MockCachedRequestState("D", [41, 43], num_computed_tokens=2, output_token_ids=[47]),
+        }
+        gpu_input_batch = MockInputBatch(num_reqs=2, req_ids=["P", "D"], vocab_size=100, num_tokens_no_spec=[7, 3])
+        # D accepts draft 53 and replaces rejected draft 59 with 67.
+        sampled_token_ids = torch.tensor([[89, -1, -1], [53, 67, -1]], dtype=torch.int64)
+
+        next_token_ids, valid_counts = self.proposer.prepare_next_token_ids_padded(
+            sampled_token_ids=sampled_token_ids,
+            requests=requests,
+            gpu_input_batch=gpu_input_batch,
+            discard_request_indices=torch.tensor([0], dtype=torch.int64),
+            num_discarded_requests=1,
+            num_scheduled_tokens={"P": 2, "D": 3},
+        )
+
+        # P ends this chunk at 4/7: use prompt[4], not the final prompt token 31.
+        self.assertEqual(next_token_ids.tolist(), [23, 67])
+        self.assertEqual(valid_counts.tolist(), [0, 2])
+
     def test_all_valid_tokens(self):
         """Test case where all requests have valid sampled tokens"""
         num_reqs = 3
@@ -1860,9 +1890,9 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         )
 
         requests = {
-            "req_0": MockCachedRequestState("req_0", list(range(10))),
-            "req_1": MockCachedRequestState("req_1", list(range(15))),
-            "req_2": MockCachedRequestState("req_2", list(range(20))),
+            "req_0": MockCachedRequestState("req_0", list(range(11)), num_computed_tokens=9),
+            "req_1": MockCachedRequestState("req_1", list(range(16)), num_computed_tokens=14),
+            "req_2": MockCachedRequestState("req_2", list(range(21)), num_computed_tokens=19),
         }
 
         gpu_input_batch = MockInputBatch(
@@ -1881,6 +1911,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={req_id: 1 for req_id in requests},
         )
 
         self.assertEqual(next_token_ids.shape[0], num_reqs)
@@ -1907,9 +1938,9 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         )
 
         requests = {
-            "req_0": MockCachedRequestState("req_0", list(range(10))),
-            "req_1": MockCachedRequestState("req_1", list(range(15))),
-            "req_2": MockCachedRequestState("req_2", list(range(20))),
+            "req_0": MockCachedRequestState("req_0", list(range(11)), num_computed_tokens=9),
+            "req_1": MockCachedRequestState("req_1", list(range(16)), num_computed_tokens=14),
+            "req_2": MockCachedRequestState("req_2", list(range(21)), num_computed_tokens=19),
         }
 
         gpu_input_batch = MockInputBatch(
@@ -1928,6 +1959,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={req_id: 1 for req_id in requests},
         )
 
         expected_valid_counts = torch.tensor([2, 4, 5], dtype=torch.int64)
@@ -1951,9 +1983,9 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         )
 
         requests = {
-            "req_0": MockCachedRequestState("req_0", list(range(15))),
-            "req_1": MockCachedRequestState("req_1", list(range(20))),
-            "req_2": MockCachedRequestState("req_2", list(range(25))),
+            "req_0": MockCachedRequestState("req_0", list(range(11)), num_computed_tokens=9),
+            "req_1": MockCachedRequestState("req_1", list(range(16)), num_computed_tokens=14),
+            "req_2": MockCachedRequestState("req_2", list(range(26)), num_computed_tokens=24),
         }
 
         gpu_input_batch = MockInputBatch(
@@ -1972,6 +2004,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={req_id: 1 for req_id in requests},
         )
 
         expected_valid_counts = torch.tensor([0, 0, 5], dtype=torch.int64)
@@ -1997,9 +2030,9 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         )
 
         requests = {
-            "req_0": MockCachedRequestState("req_0", list(range(15))),
-            "req_1": MockCachedRequestState("req_1", list(range(20))),
-            "req_2": MockCachedRequestState("req_2", list(range(25))),
+            "req_0": MockCachedRequestState("req_0", list(range(11)), num_computed_tokens=9),
+            "req_1": MockCachedRequestState("req_1", list(range(21)), num_computed_tokens=19),
+            "req_2": MockCachedRequestState("req_2", list(range(21)), num_computed_tokens=19),
         }
 
         gpu_input_batch = MockInputBatch(
@@ -2018,6 +2051,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={req_id: 1 for req_id in requests},
         )
 
         expected_valid_counts = torch.tensor([0, 5, 0], dtype=torch.int64)
@@ -2044,10 +2078,10 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         )
 
         requests = {
-            "req_0": MockCachedRequestState("req_0", list(range(15))),
-            "req_1": MockCachedRequestState("req_1", list(range(20))),
-            "req_2": MockCachedRequestState("req_2", list(range(25))),
-            "req_3": MockCachedRequestState("req_3", list(range(30))),
+            "req_0": MockCachedRequestState("req_0", list(range(11)), num_computed_tokens=9),
+            "req_1": MockCachedRequestState("req_1", list(range(16)), num_computed_tokens=14),
+            "req_2": MockCachedRequestState("req_2", list(range(26)), num_computed_tokens=24),
+            "req_3": MockCachedRequestState("req_3", list(range(31)), num_computed_tokens=29),
         }
 
         gpu_input_batch = MockInputBatch(
@@ -2066,6 +2100,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={req_id: 1 for req_id in requests},
         )
 
         expected_valid_counts = torch.tensor([2, 0, 5, 3], dtype=torch.int64)
@@ -2083,7 +2118,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         sampled_token_ids = torch.tensor([[100, 101, 102, 103, 104]], dtype=torch.int64)
 
         requests = {
-            "req_0": MockCachedRequestState("req_0", list(range(15))),
+            "req_0": MockCachedRequestState("req_0", list(range(16)), num_computed_tokens=14),
         }
 
         gpu_input_batch = MockInputBatch(
@@ -2102,6 +2137,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={req_id: 1 for req_id in requests},
         )
 
         expected_valid_counts = torch.tensor([5], dtype=torch.int64)
@@ -2124,8 +2160,8 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         )
 
         requests = {
-            "req_0": MockCachedRequestState("req_0", list(range(15))),
-            "req_1": MockCachedRequestState("req_1", list(range(20))),
+            "req_0": MockCachedRequestState("req_0", list(range(16)), num_computed_tokens=14),
+            "req_1": MockCachedRequestState("req_1", list(range(21)), num_computed_tokens=19),
         }
 
         gpu_input_batch = MockInputBatch(
@@ -2144,6 +2180,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={req_id: 1 for req_id in requests},
         )
 
         # Token 100 and 101 are >= vocab_size (100), so they are invalid
@@ -2170,8 +2207,8 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         )
 
         requests = {
-            "req_0": MockCachedRequestState("req_0", list(range(15))),
-            "req_1": MockCachedRequestState("req_1", list(range(20))),
+            "req_0": MockCachedRequestState("req_0", list(range(11)), num_computed_tokens=9),
+            "req_1": MockCachedRequestState("req_1", list(range(16)), num_computed_tokens=14),
         }
 
         gpu_input_batch = MockInputBatch(
@@ -2190,6 +2227,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={req_id: 1 for req_id in requests},
         )
 
         # Verify return values

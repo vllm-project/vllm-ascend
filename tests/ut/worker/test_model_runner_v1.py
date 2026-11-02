@@ -940,7 +940,7 @@ class TestDrafterMaxModelLen(unittest.TestCase):
         )
         runner._copy_valid_sampled_token_count = MagicMock()
 
-        scheduler_output = SimpleNamespace()
+        scheduler_output = SimpleNamespace(num_scheduled_tokens={"req-0": 1, "req-1": 2})
         runner._skip_drafting(scheduler_output, sampled_token_ids)
 
         runner.drafter.prepare_next_token_ids_padded.assert_called_once_with(
@@ -949,6 +949,7 @@ class TestDrafterMaxModelLen(unittest.TestCase):
             runner.input_batch,
             discard_request_indices,
             1,
+            scheduler_output.num_scheduled_tokens,
         )
         runner._copy_valid_sampled_token_count.assert_called_once_with(next_token_ids, valid_sampled_tokens_count)
         runner.drafter.dummy_run.assert_called_once_with(num_tokens=1)
