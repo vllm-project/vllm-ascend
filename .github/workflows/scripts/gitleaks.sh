@@ -23,8 +23,29 @@ if [ ! -f "${CONFIG_FILE}" ]; then
 fi
 
 if [[ -n "${GITHUB_BASE_REF}" ]]; then
-    echo "==== CI Mode: skip incremental changed file scan (disabled) ===="
-    echo "Secret scan moved to local pre-commit only"
+    # CI mode (pull_request runs): scan exactly what the PR changes relative
+    # to the base branch. The gitleaks binary only supports `protect --staged`
+    # (index vs HEAD), so point HEAD at the base branch and the index at the
+    # PR head, scan, then restore the PR head for the steps that follow.
+    echo "==== CI Mode: scan PR changes against ${GITHUB_BASE_REF} ===="
+    PR_SHA="$(git rev-parse HEAD)"
+    git fetch --quiet origin "${GITHUB_BASE_REF}"
+    git checkout --quiet "origin/${GITHUB_BASE_REF}"
+    git read-tree --reset "${PR_SHA}"
+    # A leak exits non-zero here and aborts the job before the restore below,
+    # which is the desired behavior (the PR must not pass the secret scan).
+    ${BIN_CMD} protect \
+        --verbose \
+        --redact \
+        --config="${CONFIG_FILE}" \
+        --staged
+    # Scan passed: restore the PR head so later steps see the PR worktree.
+    if [[ -n "${GITHUB_HEAD_REF}" ]]; then
+        git checkout --quiet "${GITHUB_HEAD_REF}"
+    else
+        git checkout --quiet "${PR_SHA}"
+    fi
+    git reset --quiet --hard
 else
     echo "==== Local pre-commit Mode: scan staged changes ===="
     ${BIN_CMD} protect \
