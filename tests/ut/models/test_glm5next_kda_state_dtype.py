@@ -11,12 +11,13 @@ from vllm_ascend.models.glm5next.kda import Glm5NextLinearAttention
 from vllm_ascend.models.glm5next.model import Glm5NextForCausalLM, Glm5NextForConditionalGeneration
 
 
-def make_layer_and_config(ssm_dtype, conv_dtype="auto"):
+def make_layer_and_config(ssm_dtype, conv_dtype="auto", recover=False):
     cache_config = CacheConfig(
         mamba_cache_dtype=conv_dtype,
         mamba_ssm_cache_dtype=ssm_dtype,
         mamba_block_size=512,
         mamba_cache_mode="align",
+        use_replayssm=recover,
     )
     config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(model_type="glm5_next")),
@@ -26,7 +27,7 @@ def make_layer_and_config(ssm_dtype, conv_dtype="auto"):
     )
     layer = Glm5NextLinearAttention.__new__(Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
-    layer.use_recoverssm = False
+    layer.use_recoverssm = recover
     layer.model_config, layer.cache_config = config.model_config, cache_config
     layer.tp_size, layer.num_heads, layer.head_dim, layer.conv_size, layer.num_spec = 1, 64, 128, 4, 5
     return layer, config
@@ -41,8 +42,9 @@ def make_layer_and_config(ssm_dtype, conv_dtype="auto"):
         ("bfloat16", "float32", torch.float32, torch.bfloat16),
     ],
 )
-def test_kda_state_dtype_matches_model_and_cache_spec(ssm_dtype, conv_dtype, expected_conv, expected):
-    layer, config = make_layer_and_config(ssm_dtype, conv_dtype)
+@pytest.mark.parametrize("recover", [False, True])
+def test_kda_state_dtype_matches_model_and_cache_spec(ssm_dtype, conv_dtype, expected_conv, expected, recover):
+    layer, config = make_layer_and_config(ssm_dtype, conv_dtype, recover)
     want = (expected_conv, expected)
     assert layer.get_state_dtype() == want
     assert Glm5NextForCausalLM.get_mamba_state_dtype_from_config(config) == want

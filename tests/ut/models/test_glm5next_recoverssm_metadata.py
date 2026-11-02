@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import runpy
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -10,8 +8,9 @@ import torch
 from vllm.models.kimi_k3.nvidia.kda_metadata import KDARecoverSSMCommitMetadata, KimiK3KDAMetadataBuilder
 from vllm.v1.kv_cache_interface import MambaSpec
 
+import vllm_ascend.ops.triton.kda.recoverssm as recoverssm
 from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
-from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMCommitContext
+from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMRecords
 
 
 @pytest.mark.parametrize("graph_mode", [False, True])
@@ -56,48 +55,57 @@ def test_align_indices_follow_sequence_position_and_refresh_each_step(monkeypatc
         torch.testing.assert_close(table, original, atol=0, rtol=0)
 
 
-def test_upstream_context_creation_uses_ascend_patch_and_caches(monkeypatch):
-    from vllm.models.kimi_k3.nvidia.ops import recoverssm
-
-    monkeypatch.setattr(recoverssm, "KDARecoverSSMCommitContext", None)
-    patch = runpy.run_path(str(Path(__file__).parents[3] / "vllm_ascend/patch/worker/patch_kda_recoverssm.py"))
+@pytest.mark.parametrize("dim_first", [False, True])
+def test_context_reuses_records_and_rebinds_replaced_cache(monkeypatch, dim_first):
+    monkeypatch.setattr(recoverssm, "init_device_properties_triton", lambda: None)
+    monkeypatch.setattr(recoverssm, "is_conv_state_dim_first", lambda: dim_first)
+    layers = []
+    for _ in range(2):
+        conv = torch.zeros((8, 24, 8) if dim_first else (8, 8, 24), dtype=torch.bfloat16)
+        layers.append(
+            SimpleNamespace(
+                kv_cache=(conv, torch.zeros(8, 2, 4, 4)),
+                recoverssm_records=KDARecoverSSMRecords.allocate(3, 2, 6, 4, torch.bfloat16, torch.device("cpu")),
+                A_log=torch.zeros(2),
+                dt_bias=torch.zeros(8),
+                gate_lower_bound=-5.0,
+                local_num_heads=2,
+                head_dim=4,
+            )
+        )
     builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
     builder.recoverssm_context = None
     builder.layer_names = ["layer0", "layer1"]
-    layers = [object(), object()]
     builder.vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm5_next")),
-        cache_config=SimpleNamespace(use_replayssm=True),
         compilation_config=SimpleNamespace(static_forward_context=dict(zip(builder.layer_names, layers))),
-        scheduler_config=SimpleNamespace(max_num_seqs=12),
+        scheduler_config=SimpleNamespace(max_num_seqs=3),
         num_speculative_tokens=5,
     )
-    patch["patch_kda_recoverssm"](builder.vllm_config)
-    assert recoverssm.KDARecoverSSMCommitContext is KDARecoverSSMCommitContext
-    context = object()
-    create = Mock(return_value=context)
-    monkeypatch.setattr(KDARecoverSSMCommitContext, "create", create)
+    context = builder._get_recoverssm_context()
     assert builder._get_recoverssm_context() is context
-    assert builder._get_recoverssm_context() is context
-    create.assert_called_once_with(layers, spec_query_len=6, max_num_reqs=12)
-
-
-@pytest.mark.parametrize("model_type", ["glm5_next", "glm5_next_text", "kimi_k3", None])
-@pytest.mark.parametrize("enabled", [False, True])
-def test_context_patch_is_limited_to_enabled_glm(monkeypatch, model_type, enabled):
-    from vllm.models.kimi_k3.nvidia.ops import recoverssm
-
-    original = object()
-    monkeypatch.setattr(recoverssm, "KDARecoverSSMCommitContext", original)
-    patch = runpy.run_path(str(Path(__file__).parents[3] / "vllm_ascend/patch/worker/patch_kda_recoverssm.py"))
-    assert recoverssm.KDARecoverSSMCommitContext is original
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)) if model_type else None,
-        cache_config=SimpleNamespace(use_replayssm=enabled),
-    )
-    patch["patch_kda_recoverssm"](config)
-    expected = KDARecoverSSMCommitContext if enabled and model_type in ("glm5_next", "glm5_next_text") else original
-    assert recoverssm.KDARecoverSSMCommitContext is expected
+    assert context.is_bound_to(layers)
+    assert context.correction_caches[0] is layers[0].recoverssm_records.correction
+    assert context.correction_caches[0].shape == (3, 2, 6, 4)
+    assert context.kg_caches[0].shape == (3, 2, 6, 8)
+    assert context.checkpoints[0].shape[0] == 8
+    assert context.conv_states[0].shape == (8, 24, 8)
+    assert context.conv_states[0].data_ptr() == layers[0].kv_cache[0].data_ptr()
+    records = layers[0].recoverssm_records
+    for state_index in (0, 1):
+        caches = list(layers[0].kv_cache)
+        caches[state_index] = caches[state_index].clone()
+        layers[0].kv_cache = tuple(caches)
+        assert not context.is_bound_to(layers)
+        updated = builder._get_recoverssm_context()
+        assert updated is not context and updated.is_bound_to(layers)
+        assert layers[0].recoverssm_records is records
+        assert updated.correction_caches[0].data_ptr() == records.correction.data_ptr()
+        assert builder._get_recoverssm_context() is updated
+        context = updated
+    records.key_gate = records.key_gate.clone()
+    assert not context.is_bound_to(layers)
+    updated = builder._get_recoverssm_context()
+    assert updated is not context and updated.is_bound_to(layers)
 
 
 def test_graph_padding_is_excluded_from_sampler_commit_rows(monkeypatch):
