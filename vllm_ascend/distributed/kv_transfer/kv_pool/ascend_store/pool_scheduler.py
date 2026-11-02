@@ -109,8 +109,14 @@ class KVPoolScheduler:
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = bool(kv_event_config and kv_event_config.enable_kv_cache_events)
-        retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
-        self.retention_interval = retention_interval if isinstance(retention_interval, int) else None
+        from vllm_ascend.patch.platform.patch_kv_cache_coordinator import _is_deepseek_v4_kv_cache_config
+
+        # Match the HBM coordinator's model gate and preserve zero unchanged.
+        self.retention_interval = (
+            vllm_config.cache_config.prefix_cache_retention_interval
+            if kv_cache_config is not None and _is_deepseek_v4_kv_cache_config(kv_cache_config)
+            else None
+        )
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )

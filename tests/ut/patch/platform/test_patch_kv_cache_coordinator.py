@@ -93,6 +93,16 @@ def _fake_manager_factory(**kwargs):
     return _FakeFAManager()
 
 
+@pytest.mark.parametrize("model_version", ["deepseek_v4", "deepseek_v41", "glm5_next", None])
+@pytest.mark.parametrize("nested", [False, True])
+def test_retention_model_gate(model_version, nested):
+    spec = SimpleNamespace(model_version=model_version)
+    if nested:
+        spec = SimpleNamespace(kv_cache_specs={"layer": spec})
+    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)])
+    assert mod._is_deepseek_v4_kv_cache_config(config) == (model_version in {"deepseek_v4", "deepseek_v41"})
+
+
 def _hybrid_config(*, mamba_eagle: bool = False) -> KVCacheConfig:
     groups = [
         KVCacheGroupSpec(["fa-layer"], FA_SPEC, False),
@@ -107,10 +117,12 @@ def _make_coordinator(
     use_eagle: bool,
     kv_transfer_config=None,
     mamba_eagle: bool = False,
+    retention_interval: int | None = None,
 ):
     monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
     monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
     kv_cache_config = _hybrid_config(mamba_eagle=mamba_eagle)
+    kv_cache_config.prefix_cache_retention_interval = retention_interval
     # The kv-transfer config is attached by the
     # get_kv_cache_config_from_groups builder in real engine startup.
     kv_cache_config.kv_transfer_config = kv_transfer_config
@@ -123,6 +135,7 @@ def _make_coordinator(
         dcp_world_size=1,
         pcp_world_size=1,
         hash_block_size=HASH_BLOCK_SIZE,
+        scheduler_block_size=HASH_BLOCK_SIZE,
     )
 
 
@@ -151,6 +164,14 @@ def test_explicit_eagle_group_marker_takes_precedence(monkeypatch):
     # even when it is the mamba group (fallback must not overwrite it).
     coordinator = _make_coordinator(monkeypatch, use_eagle=True, mamba_eagle=True)
     assert coordinator.eagle_group_ids == {1}
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0, 4096])
+@pytest.mark.parametrize("is_deepseek_v4", [False, True])
+def test_retention_uses_resolved_config_only_for_deepseek_v4(monkeypatch, retention_interval, is_deepseek_v4):
+    monkeypatch.setattr(mod, "_is_deepseek_v4_kv_cache_config", lambda config: is_deepseek_v4)
+    coordinator = _make_coordinator(monkeypatch, use_eagle=False, retention_interval=retention_interval)
+    assert coordinator.retention_interval == (retention_interval if is_deepseek_v4 else None)
 
 
 # ---------------------------------------------------------------------------
