@@ -4,9 +4,9 @@
 
 import ast
 import builtins
-import sys
+from dataclasses import dataclass, replace
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
@@ -65,10 +65,7 @@ def test_known_backend_with_qsa_unavailable(classifier, monkeypatch, backend, ex
 
 @pytest.mark.parametrize("expected", ["QSA", "GQA", "unsupported"])
 def test_optional_backend_keeps_classification_and_rejection(classifier, monkeypatch, expected):
-    qsa = type("AscendQSABackend", (classifier["AscendAttentionBackend"],), {})
-    module = ModuleType("vllm_ascend.models.qwen4_exp.qsa")
-    module.AscendQSABackend = qsa
-    monkeypatch.setitem(sys.modules, module.__name__, module)
+    qsa = type("AscendQSABackend", (classifier["AscendAttentionBackend"],), {"draft_attention_architecture": "QSA"})
     backend = {"QSA": qsa, "GQA": classifier["AscendAttentionBackend"], "unsupported": type("Unsupported", (), {})}[
         expected
     ]
@@ -81,33 +78,47 @@ def test_optional_backend_keeps_classification_and_rejection(classifier, monkeyp
         assert instance.attn_architecture == expected
 
 
-@pytest.mark.parametrize("missing", [None, "vllm.models.qwen4_exp.common.qsa_cache", "unrelated_dependency"])
-def test_optional_qsa_metadata_only_suppresses_its_own_absence(monkeypatch, missing):
+@pytest.mark.parametrize("requires_live_rows,padded", [(False, True), (True, True), (True, False)])
+def test_backend_owns_live_query_boundary_contract(requires_live_rows, padded):
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/attn_utils.py"
     node = next(
         n
-        for n in ast.parse(source.read_text()).body
-        if isinstance(n, ast.Try)
-        and isinstance(n.body[0], ast.ImportFrom)
-        and n.body[0].module == "vllm.models.qwen4_exp.common.qsa_cache"
+        for n in ast.walk(ast.parse(source.read_text()))
+        if isinstance(n, ast.If) and "requires_unpadded_cpu_query_lens" in ast.unparse(n.test)
     )
-    original = builtins.__import__
-    marker = type("QSAMetadataBuilder", (), {})
 
-    def optional_import(name, *args, **kwargs):
-        if name == "vllm.models.qwen4_exp.common.qsa_cache":
-            if missing is not None:
-                raise ModuleNotFoundError("missing dependency", name=missing)
-            return SimpleNamespace(QSAMetadataBuilder=marker)
-        return original(name, *args, **kwargs)
+    @dataclass
+    class Metadata:
+        query_start_loc_cpu: object
+        seq_lens: object
 
-    monkeypatch.setattr(builtins, "__import__", optional_import)
-    namespace = {}
+    queries = list(range(5))
+    lengths = object()
+    original = Metadata(queries, lengths)
+    namespace = dict(
+        attn_group=SimpleNamespace(backend=SimpleNamespace(requires_unpadded_cpu_query_lens=requires_live_rows)),
+        num_reqs=4,
+        num_actual_reqs=2 if padded else 4,
+        common_attn_metadata=original,
+        replace=replace,
+    )
     code = compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), str(source), "exec")
-    if missing == "unrelated_dependency":
-        with pytest.raises(ModuleNotFoundError) as error:
-            exec(code, namespace)
-        assert error.value.name == missing
-    else:
-        exec(code, namespace)
-        assert namespace["QSAMetadataBuilder"] == (() if missing else marker)
+    exec(code, namespace)
+    result = namespace["common_attn_metadata"]
+    assert result.query_start_loc_cpu == (queries[:3] if requires_live_rows and padded else queries)
+    assert result.seq_lens is lengths
+    assert original.query_start_loc_cpu is queries
+
+
+def test_qsa_backend_declares_its_worker_contracts():
+    source = Path(__file__).resolve().parents[3] / "vllm_ascend/models/qwen4_exp/qsa.py"
+    owner = next(
+        n for n in ast.parse(source.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "AscendQSABackend"
+    )
+    values = {
+        n.targets[0].id: ast.literal_eval(n.value)
+        for n in owner.body
+        if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Constant)
+    }
+    assert values["draft_attention_architecture"] == "QSA"
+    assert values["requires_unpadded_cpu_query_lens"] is True

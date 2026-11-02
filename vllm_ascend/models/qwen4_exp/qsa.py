@@ -456,6 +456,12 @@ class AscendQSAImpl:
 
 
 class AscendQSABackend(upstream_qsa.Qwen4ExpQSAFlashAttentionBackend):
+    # Backend-owned contracts keep common worker setup independent of this
+    # optional model module. FULL graph padding must retain only live host
+    # query boundaries for this builder's mapped-token count.
+    draft_attention_architecture = "QSA"
+    requires_unpadded_cpu_query_lens = True
+
     # QSA pages are represented by descriptor-backed views. Consecutive
     # logical blocks may be separated by other cache owners in the common
     # vLLM pool, while each individual page remains dense.

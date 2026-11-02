@@ -10,3 +10,9 @@ entries:
       Installed the A5 Host-writeback, descriptor, Resident-update, lazy-MTP,
       invalidation, metadata-view and group-prefetch implementation. Selection
       preserves the baseline by default and requires the reviewed Core sources.
+  - category: bugfix
+    text: >-
+      Preserved external KV byte-allocation ownership and alignment, resolved
+      native A5 FP8 operand types separately from byte storage, and isolated
+      optional QSA requirements through backend capabilities. Prolog weight
+      preparation retains its source Parameters and final NZ operands.

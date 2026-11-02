@@ -12,7 +12,6 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -56,6 +55,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_KV_CACHE_TUPLE_LEN,
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
+from vllm_ascend.kv_cache_dtype import native_c8_cache_dtype
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
@@ -882,7 +882,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_sparse_sfa_turboquant = ascend_config.enable_sparse_sfa_turboquant
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
         if self.enable_sparse_sfa_c8:
-            self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
+            self.c8_cache_dtype = native_c8_cache_dtype(
                 self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
             )
 
@@ -1092,12 +1092,11 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         qt = self._quant_type
 
-        if qt is None:
-            self.fused_qkv_a_proj.weight.data = self.fused_qkv_a_proj.weight.data.T
-
         # PTA cannot clone a slice of NZ storage on A5. Split dense logical
         # weights before the existing casts to Prolog V3's NZ input format.
         fused_weight = torch_npu.npu_format_cast(self.fused_qkv_a_proj.weight.data, ACL_FORMAT_FRACTAL_ND)
+        if qt is None:
+            fused_weight = fused_weight.T
         weight_dq = fused_weight[..., : self.q_lora_rank].contiguous()
         weight_dkv_kr = fused_weight[..., self.q_lora_rank :].contiguous()
         if qt is not None:

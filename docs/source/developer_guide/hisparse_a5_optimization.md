@@ -116,3 +116,44 @@ The remaining implementation has these dependencies:
 
 Latest-main model validation and pruning of superseded Core adapters are in
 progress. Historical paired-profile measurements do not qualify latest main.
+
+## Current-main allocation and native operand compatibility
+
+The native A5 C8 operators require E4M3FN operands even when common Core
+represents packed FP8 storage as UInt8. The SFA and Indexer wrappers use
+`native_c8_cache_dtype` for their native operands and typed cache views. This
+does not convert the backing bytes or modify Attention compute kernels.
+
+Prolog V3 weight preparation casts the source to dense ND before transposing
+or splitting, then retains the original final NZ operands. It does not modify
+the original source Parameter in place. BF16, INT8 and FP8 source tensors in
+both ND and NZ storage passed the complete production preparation method on
+A5, including exact values and source-Parameter preservation.
+
+The optional Core byte-allocation callback is forwarded through every raw
+cache allocation, including aligned transfer buffers, shared Indexer K/scale
+backing and KVPP bundles. The callback receives the physical byte count and
+retains allocation ownership. Invalid dtype, size, contiguity or device is
+rejected rather than repaired with a hidden replacement allocation. Default
+allocation retains the existing zeroing and alignment policy.
+
+QSA declares its draft architecture and live CPU query-boundary requirement
+on its Ascend backend. Common worker setup no longer imports an optional
+model module to classify unrelated attention backends. This replaces the
+temporary empty-type import fallback; custom allocation callbacks are now
+implemented rather than rejected.
+
+For this follow-up, 39 isolated CPU checks passed. Twelve actual A5 NPU checks
+passed against runtime commit `069de6b02b089b583203c00c3a5b293607a840a0`:
+one real Indexer constructor/weight-lifecycle test with three changing-input
+graph replays, six full Prolog weight-preparation cases, three aligned callback
+storage/lifetime cases, and two shared Indexer K/scale allocation cases.
+The Indexer quantization relative error against a CPU Hadamard/dequantization
+reference was about 2.5%. Earlier fixture conversion failures are retained;
+they are not counted as production-method passes.
+
+These are component checks. The runtime port retains newer-main changes that
+are absent from this PR's older base, so its complete source is not identical
+to the PR head. Full-model serving, generation, performance, final P/D and A3
+qualification remain separate. Full lint again stalled installing the
+actionlint environment; finite Ruff and diff checks passed.

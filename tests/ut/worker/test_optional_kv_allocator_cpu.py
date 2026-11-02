@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Preserve the native allocation path and reject unsupported custom ownership."""
+"""Preserve native views while forwarding external allocation ownership."""
 
 import ast
 from pathlib import Path
@@ -27,8 +27,8 @@ def allocator():
         "get_current_vllm_config": lambda: SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="fp8")),
         "get_layers_from_vllm_config": lambda *args: {},
         "AttentionLayerBase": object,
-        "_allocate_kv_cache": lambda *args, **kwargs: calls.append("allocate") or {},
-        "_reshape_kv_cache_v2": lambda **kwargs: calls.append("reshape") or result,
+        "_allocate_kv_cache": lambda *args, **kwargs: calls.append(("allocate", kwargs)) or {},
+        "_reshape_kv_cache_v2": lambda **kwargs: calls.append(("reshape", kwargs)) or result,
     }
     module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
     exec(compile(module, str(source), "exec"), namespace)
@@ -39,14 +39,16 @@ def allocator():
 def test_default_callback_retains_native_allocate_and_reshape(allocator, kwargs):
     function, calls, result = allocator
     assert function(SimpleNamespace(kv_cache_groups=[]), "npu", None, [], **kwargs) is result
-    assert calls == ["allocate", "reshape"]
+    assert [name for name, _ in calls] == ["allocate", "reshape"]
+    assert calls[0][1]["allocate"] is None
 
 
-def test_custom_callback_is_not_silently_ignored(allocator):
-    function, calls, _ = allocator
-    with pytest.raises(NotImplementedError, match="external allocation callback"):
-        function(SimpleNamespace(kv_cache_groups=[]), "npu", None, [], allocate=lambda size: None)
-    assert not calls
+def test_custom_callback_reaches_raw_allocator(allocator):
+    function, calls, result = allocator
+    callback = lambda size: torch.empty(size, dtype=torch.uint8)
+    assert function(SimpleNamespace(kv_cache_groups=[]), "npu", None, [], allocate=callback) is result
+    assert calls[0][1]["allocate"] is callback
+    assert [name for name, _ in calls] == ["allocate", "reshape"]
 
 
 @pytest.mark.parametrize("cache_dtype,expected", [("fp8", torch.float8_e4m3fn), ("turboquant_4bit_nc", torch.int8)])

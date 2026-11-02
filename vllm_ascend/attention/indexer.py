@@ -9,7 +9,6 @@ from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -36,6 +35,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 )
 from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.kv_cache_dtype import native_c8_cache_dtype
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
@@ -196,7 +196,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         self.enable_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(self.k_cache.prefix)
         if self.enable_sparse_li_c8:
-            self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
+            self.c8_k_cache_dtype = native_c8_cache_dtype(
                 get_current_vllm_config().attention_config.indexer_kv_dtype,
                 get_current_vllm_config().model_config,
             )

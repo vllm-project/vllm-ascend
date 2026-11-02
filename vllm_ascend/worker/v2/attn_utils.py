@@ -124,19 +124,12 @@ from vllm_ascend.utils import (
     kv_cache_spec_uses_packed_sfa_main_cache,
     vllm_version_is,
 )
+from vllm_ascend.worker.kv_cache_allocator import ByteAllocator, allocate_zeroed_byte_tensor
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.utils import (
     get_single_raw_mla_backing,
     make_page_strided_cache_view,
 )
-
-try:
-    from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
-except ModuleNotFoundError as error:
-    if error.name != "vllm.models.qwen4_exp.common.qsa_cache":
-        raise
-    # Other attention builders do not depend on this optional model module.
-    QSAMetadataBuilder = ()
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -645,7 +638,7 @@ def build_attn_metadata(
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_v41_builder = isinstance(attn_metadata_builder, AscendDSAV41MetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
-            if isinstance(attn_metadata_builder, QSAMetadataBuilder) and num_reqs > num_actual_reqs:
+            if getattr(attn_group.backend, "requires_unpadded_cpu_query_lens", False) and num_reqs > num_actual_reqs:
                 # FULL graph padding appends dummy request boundaries to the
                 # shared query_start_loc, while QSA reads the CPU tail as its
                 # mapped-token count. Expose only the live request boundaries.
@@ -968,6 +961,8 @@ def _allocate_int8_cache_tensor(
     numel: int,
     alignment: int,
     device: torch.device,
+    *,
+    allocate: ByteAllocator | None = None,
 ) -> torch.Tensor:
     """Allocate an int8 raw cache tensor.
 
@@ -978,15 +973,8 @@ def _allocate_int8_cache_tensor(
         raise ValueError(f"Invalid cache tensor size: {numel}")
 
     vllm_config = get_current_vllm_config()
-    if vllm_config.kv_transfer_config is None:
-        return torch.zeros(numel, dtype=torch.int8, device=device)
-
-    raw_tensor = torch.zeros(
-        numel + alignment,
-        dtype=torch.int8,
-        device=device,
-    )
-    return _align_memory(raw_tensor, alignment)[:numel]
+    actual_alignment = alignment if vllm_config.kv_transfer_config is not None else 1
+    return allocate_zeroed_byte_tensor(numel, device, alignment=actual_alignment, allocate=allocate)
 
 
 def _allocate_sparse_c8_indexer_tensors(
@@ -995,6 +983,8 @@ def _allocate_sparse_c8_indexer_tensors(
     alignment: int,
     scale_dtype: torch.dtype,
     device: torch.device,
+    *,
+    allocate: ByteAllocator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Allocate dsa_k and dsa_k_scale from one aligned int8 raw allocation.
 
@@ -1023,11 +1013,7 @@ def _allocate_sparse_c8_indexer_tensors(
     scale_offset = _align_up(dsa_k_tensor_size, scale_dtype_size)
     total_raw_size = scale_offset + dsa_k_scale_tensor_size
 
-    sparse_c8_raw_tensor = _allocate_int8_cache_tensor(
-        total_raw_size,
-        alignment,
-        device,
-    )
+    sparse_c8_raw_tensor = _allocate_int8_cache_tensor(total_raw_size, alignment, device, allocate=allocate)
 
     dsa_k_tensor = sparse_c8_raw_tensor[:dsa_k_tensor_size]
     dsa_k_scale_tensor = sparse_c8_raw_tensor[scale_offset : scale_offset + dsa_k_scale_tensor_size]
@@ -1162,6 +1148,8 @@ def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
     device: torch.device,
+    *,
+    allocate: ByteAllocator | None = None,
 ) -> dict[str, torch.Tensor | tuple[torch.Tensor, ...]]:
     """
     Initialize the KV cache buffer with the correct size. The buffer needs to be
@@ -1179,7 +1167,7 @@ def _allocate_kv_cache(
     """
     vllm_config = get_current_vllm_config()
     if KVPPConfig.from_vllm_config(vllm_config).size > 1:
-        caches = allocate_kvpp_cache(vllm_config, kv_cache_config, device)
+        caches = allocate_kvpp_cache(vllm_config, kv_cache_config, device, allocate=allocate)
         specs = _get_layer_kv_cache_specs(kv_cache_config)
         # Indexer reshape expects a tuple even without a quantization scale.
         # Single-component main MLA caches still use a raw Tensor.
@@ -1199,11 +1187,11 @@ def _allocate_kv_cache(
     if not enable_sfa(vllm_config) and can_share_full_and_sliding_kv_cache(vllm_config, layer_kv_cache_spec.values()):
         return allocate_shared_attention_kv_cache(
             kv_cache_config,
-            lambda size: _allocate_int8_cache_tensor(size, alignment, device),
+            lambda size: _allocate_int8_cache_tensor(size, alignment, device, allocate=allocate),
         )
     if is_deepseek_v41_cache(layer_kv_cache_spec):
         for allocation in kv_cache_config.kv_cache_tensors:
-            backing = _allocate_int8_cache_tensor(allocation.size, alignment, device)
+            backing = _allocate_int8_cache_tensor(allocation.size, alignment, device, allocate=allocate)
             for name in get_kv_cache_tensor_layers(allocation):
                 kv_cache_raw_tensors[name] = backing
         return kv_cache_raw_tensors
@@ -1233,7 +1221,7 @@ def _allocate_kv_cache(
             raise ValueError("Padded shared-slot KV cache descriptors must cover every cache spec.")
 
         for descriptor in kv_cache_config.kv_cache_tensors:
-            backing = _allocate_int8_cache_tensor(descriptor.size, alignment, device)
+            backing = _allocate_int8_cache_tensor(descriptor.size, alignment, device, allocate=allocate)
             for name in get_kv_cache_tensor_layers(descriptor):
                 kv_cache_raw_tensors[name] = backing
         return kv_cache_raw_tensors
@@ -1256,9 +1244,7 @@ def _allocate_kv_cache(
     )
     if qwen4_cache_layout is not None:
         backing = _allocate_int8_cache_tensor(
-            qwen4_cache_layout.slot_count * qwen4_cache_layout.slot_backing_size,
-            alignment,
-            device,
+            qwen4_cache_layout.slot_count * qwen4_cache_layout.slot_backing_size, alignment, device, allocate=allocate
         )
         for cache_owner in qwen4_cache_layout.owners:
             if cache_owner.role in (PLE, HIDDEN):
@@ -1270,7 +1256,7 @@ def _allocate_kv_cache(
                     else cache_owner.spec.page_size_bytes
                 )
                 kv_cache_raw_tensors[cache_owner.layer_name] = _allocate_int8_cache_tensor(
-                    kv_cache_config.num_blocks * size, alignment, device
+                    kv_cache_config.num_blocks * size, alignment, device, allocate=allocate
                 )
             else:
                 kv_cache_raw_tensors[cache_owner.layer_name] = backing
@@ -1310,11 +1296,7 @@ def _allocate_kv_cache(
 
         if not dsv4_regions:
             raise ValueError("DeepSeek-V4 KV cache config has no materializable layers.")
-        dsv4_backing = _allocate_int8_cache_tensor(
-            backing_size,
-            alignment,
-            device,
-        )
+        dsv4_backing = _allocate_int8_cache_tensor(backing_size, alignment, device, allocate=allocate)
         for layer_name, start, layer_size in dsv4_regions:
             kv_cache_raw_tensors[layer_name] = dsv4_backing[start : start + layer_size]
 
@@ -1330,15 +1312,7 @@ def _allocate_kv_cache(
         if len(tensor_sizes) != 1:
             raise ValueError("Hybrid KV cache tensors must share one backing allocation.")
         tensor_size = tensor_sizes.pop()
-        if vllm_config.kv_transfer_config is None:
-            hybrid_backing = torch.zeros(tensor_size, dtype=torch.int8, device=device)
-        else:
-            hybrid_backing = torch.zeros(
-                tensor_size + alignment,
-                dtype=torch.int8,
-                device=device,
-            )
-            hybrid_backing = _align_memory(hybrid_backing, alignment)[:tensor_size]
+        hybrid_backing = _allocate_int8_cache_tensor(tensor_size, alignment, device, allocate=allocate)
 
     layerwise_reuse = get_layerwise_reuse_config(vllm_config.kv_transfer_config) is not None
     layerwise_aliases: dict[str, str] = {}
@@ -1360,7 +1334,7 @@ def _allocate_kv_cache(
                     allocate_shared_indexer_cache(
                         indexer_specs,
                         kv_cache_config.num_blocks,
-                        lambda size: _allocate_int8_cache_tensor(size, alignment, device),
+                        lambda size: _allocate_int8_cache_tensor(size, alignment, device, allocate=allocate),
                     )
                 )
                 continue
@@ -1376,22 +1350,14 @@ def _allocate_kv_cache(
         if any(isinstance(layer_kv_cache_spec[name], AscendIndexerKPoolTailSpec) for name in shared_names):
             # The compressed indexer and request-private tail share a physical
             # small-page slot. Both need the same single backing allocation.
-            raw_tensor = _allocate_int8_cache_tensor(kv_cache_tensor.size, alignment, device)
+            raw_tensor = _allocate_int8_cache_tensor(kv_cache_tensor.size, alignment, device, allocate=allocate)
             for layer_name in shared_names:
                 kv_cache_raw_tensors[layer_name] = raw_tensor
             continue
 
         if is_dsv4_model:
             # DSA reshapes it with its own page-strided layout below.
-            if vllm_config.kv_transfer_config is None:
-                raw_tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
-            else:
-                raw_tensor = torch.zeros(
-                    kv_cache_tensor.size + alignment,
-                    dtype=torch.int8,
-                    device=device,
-                )
-                raw_tensor = _align_memory(raw_tensor, alignment)[: kv_cache_tensor.size]
+            raw_tensor = _allocate_int8_cache_tensor(kv_cache_tensor.size, alignment, device, allocate=allocate)
             for layer_name in shared_names:
                 kv_cache_raw_tensors[layer_name] = raw_tensor
             continue
@@ -1408,9 +1374,7 @@ def _allocate_kv_cache(
                 layer_spec = layer_kv_cache_spec[layer_name]
                 if is_hidden_state_cache_spec(layer_spec) or hybrid_backing is None:
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(
-                        kv_cache_config.num_blocks * layer_spec.page_size_bytes,
-                        alignment,
-                        device,
+                        kv_cache_config.num_blocks * layer_spec.page_size_bytes, alignment, device, allocate=allocate
                     )
                     continue
                 layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
@@ -1431,7 +1395,7 @@ def _allocate_kv_cache(
                 tensor_sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
                 if len(tensor_sizes) != 1:
                     raise ValueError("Step KV cache tensors must share one backing allocation.")
-                step_backing = _allocate_int8_cache_tensor(tensor_sizes.pop(), alignment, device)
+                step_backing = _allocate_int8_cache_tensor(tensor_sizes.pop(), alignment, device, allocate=allocate)
             for layer_idx, layer_name in enumerate(shared_names):
                 layer_spec = layer_kv_cache_spec[layer_name]
                 layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
@@ -1475,15 +1439,7 @@ def _allocate_kv_cache(
         contains_mamba = any(isinstance(layer_kv_cache_spec[layer_name], MambaSpec) for layer_name in shared_names)
         if contains_mamba or use_hybrid_layout:
             tensor_size = kv_cache_tensor.size
-            if vllm_config.kv_transfer_config is None:
-                tensor = torch.zeros(tensor_size, dtype=torch.int8, device=device)
-            else:
-                tensor = torch.zeros(
-                    tensor_size + alignment,
-                    dtype=torch.int8,
-                    device=device,
-                )
-                tensor = _align_memory(tensor, alignment)[:tensor_size]
+            tensor = _allocate_int8_cache_tensor(tensor_size, alignment, device, allocate=allocate)
             for layer_name in shared_names:
                 kv_cache_raw_tensors[layer_name] = tensor
             continue
@@ -1523,10 +1479,11 @@ def _allocate_kv_cache(
                         alignment=alignment,
                         scale_dtype=example_spec.scale_dtype,
                         device=device,
+                        allocate=allocate,
                     )
                 else:
                     kv_cache_raw_tensors[layer_name_inner] = (
-                        _allocate_int8_cache_tensor(k_tensor_size, alignment, device),
+                        _allocate_int8_cache_tensor(k_tensor_size, alignment, device, allocate=allocate),
                     )
 
             continue
@@ -1537,7 +1494,9 @@ def _allocate_kv_cache(
         ):
             for layer_name in shared_names:
                 raw_size = kv_cache_config.num_blocks * layer_kv_cache_spec[layer_name].page_size_bytes
-                kv_cache_raw_tensors[layer_name] = (_allocate_int8_cache_tensor(raw_size, alignment, device),)
+                kv_cache_raw_tensors[layer_name] = (
+                    _allocate_int8_cache_tensor(raw_size, alignment, device, allocate=allocate),
+                )
             continue
 
         # vLLM #51718 packs all group layers into one tensor on main; the
@@ -1559,22 +1518,28 @@ def _allocate_kv_cache(
                     alignment,
                     get_tensor_model_parallel_rank(),
                     get_ascend_config().sparse_kv_offload_config.keep_device_kv_cache,
-                    lambda size, align: _allocate_int8_cache_tensor(size, align, device),
+                    lambda size, align: _allocate_int8_cache_tensor(size, align, device, allocate=allocate),
                 )
         elif enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(example_spec):
             k_size = kv_cache_tensor_size
             for layer_name in shared_names:
-                kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(k_size, alignment, device)
+                kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(
+                    k_size, alignment, device, allocate=allocate
+                )
         elif type(example_spec) is FullAttentionSpec and not enable_sfa(vllm_config):
             for layer_name in shared_names:
                 layer_spec = layer_kv_cache_spec[layer_name]
                 layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
                 if type(layer_spec) is not FullAttentionSpec:
-                    kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
+                    kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(
+                        layer_size, alignment, device, allocate=allocate
+                    )
                     continue
                 if is_c8_mxfp_kv_quant(vllm_config):
                     # One packet-backed allocation holds K, V and both scales.
-                    kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
+                    kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(
+                        layer_size, alignment, device, allocate=allocate
+                    )
                     continue
                 if attn_layers is None:
                     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
@@ -1588,7 +1553,9 @@ def _allocate_kv_cache(
                     and not use_dcp
                     and not requires_contiguous_pa_kv_cache(layer, vllm_config, layer_spec)
                 ):
-                    kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
+                    kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(
+                        layer_size, alignment, device, allocate=allocate
+                    )
                     continue
                 if layer_spec.page_size_bytes != layer_spec.real_page_size_bytes:
                     raise ValueError(
@@ -1602,8 +1569,8 @@ def _allocate_kv_cache(
                     k_factor, v_factor = calc_split_factor([k_dim, v_dim])
                 k_size = int(layer_size // k_factor)
                 v_size = int(layer_size // v_factor)
-                k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
-                v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
+                k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device, allocate=allocate)
+                v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device, allocate=allocate)
                 kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
         else:
             k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_spec)
@@ -1616,8 +1583,8 @@ def _allocate_kv_cache(
             k_size = int(kv_cache_tensor_size // k_factor)
             v_size = int(kv_cache_tensor_size // v_factor)
             for layer_name in shared_names:
-                k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
-                v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
+                k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device, allocate=allocate)
+                v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device, allocate=allocate)
                 kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
 
     for layer_name, owner_name in layerwise_aliases.items():
@@ -1636,7 +1603,7 @@ def allocate_kv_cache_main(
     layout: Any,
     kernel_block_sizes: list[int],
     *,
-    allocate: Any = None,
+    allocate: ByteAllocator | None = None,
 ) -> dict[str, Any]:
     """Allocate Ascend KV cache through vLLM main's #51718 entry point.
 
@@ -1645,8 +1612,6 @@ def allocate_kv_cache_main(
     still consumes separate K/V (and backend-specific state) tensors, so keep
     the Ascend allocation/reshape contract behind the new entry point.
     """
-    if allocate is not None:
-        raise NotImplementedError("Ascend KV allocation does not yet support an external allocation callback.")
     del layout
     vllm_config = get_current_vllm_config()
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
@@ -1660,6 +1625,7 @@ def allocate_kv_cache_main(
         kv_cache_config,
         shared_layers=shared_layers,
         device=device,
+        allocate=allocate,
     )
 
     attn_groups: list[AttentionGroup] = []

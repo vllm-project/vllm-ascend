@@ -416,16 +416,12 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             self.attn_architecture = "MLA"
         elif issubclass(self.attn_backend, (AscendSFABackend, AscendSFAIndexerBackend)):
             self.attn_architecture = "SFA"
+        elif getattr(self.attn_backend, "draft_attention_architecture", None) == "QSA":
+            self.attn_architecture = "QSA"
+        elif issubclass(self.attn_backend, AscendAttentionBackend):
+            self.attn_architecture = "GQA"
         else:
-            # Known MLA/SFA/DSA backends do not require the optional QSA model.
-            from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend
-
-            if issubclass(self.attn_backend, AscendQSABackend):
-                self.attn_architecture = "QSA"
-            elif issubclass(self.attn_backend, AscendAttentionBackend):
-                self.attn_architecture = "GQA"
-            else:
-                raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
+            raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
 
     def capture(self) -> None:
         self._eplb_dummy_run = True
