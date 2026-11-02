@@ -4,17 +4,8 @@
 import pytest
 import torch
 
-from vllm_ascend.device.device_config import get_ascend_device_type
-from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.models.deepseek_v41.engram.npu import HostUvaBuffer
 from vllm_ascend.ops.triton.qwen4_exp.ple_lookup import lookup
-
-pytestmark = [
-    pytest.mark.skipif(
-        get_ascend_device_type() == AscendDeviceType.A5,
-        reason="A5 host-UVA lookup not yet validated",
-    ),
-]
 
 
 @pytest.mark.parametrize("graph", [False, True])
