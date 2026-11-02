@@ -959,11 +959,19 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             self.assertEqual(b.store.register_buffer.call_count, 2)
             mock_te.register_buffer.assert_not_called()
 
-    def test_register_buffer_skips_fabric_mem(self):
+    def test_register_buffer_via_store_raises_on_error(self):
         b = self._make_backend()
-        b._use_fabric_mem = True
-        b.register_buffer([100], [200])
-        b.store.register_buffer.assert_not_called()
+        b._use_store_independent_te = True
+        b.store.register_buffer.return_value = -600
+        with self.assertRaisesRegex(RuntimeError, "Failed to register buffer via store"):
+            b.register_buffer([100], [200])
+
+    def test_register_buffer_with_dict_setup_raises_on_error(self):
+        b = self._make_backend()
+        b._prefetch_conf = SsdPrefetchConf(enabled=True, options=None, knobs={}, use_dict_setup=True)
+        b.store.register_buffer.return_value = -600
+        with self.assertRaisesRegex(RuntimeError, "Failed to register buffer via store"):
+            b.register_buffer([100], [200])
 
     def test_setup_store_with_store_independent_te(self):
         b = self._make_backend()
