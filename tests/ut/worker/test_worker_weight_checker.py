@@ -5,8 +5,7 @@
 The checksum/reset behavior comes from the paired vLLM's
 ``vllm.model_executor.model_loader.weight_checksum`` (PR #51350); these tests
 only cover the NPUWorker wiring: method presence, rank-key prefixes, model
-access for both runner shapes, the weight_nz_mode warning, and the clear
-error for an outdated vLLM.
+access for both runner shapes, and the weight_nz_mode warning.
 """
 
 from types import SimpleNamespace
@@ -21,8 +20,6 @@ from vllm.config import ParallelConfig
 from vllm_ascend._310p.worker_310p import NPUWorker310
 from vllm_ascend.worker import worker as npu_worker_module
 from vllm_ascend.worker.worker import NPUWorker
-
-UPSTREAM_CHECKSUM_MODULE = "vllm.model_executor.model_loader.weight_checksum"
 
 
 class _TinyModel(nn.Module):
@@ -70,7 +67,6 @@ def test_dense_dp_replicas_get_distinct_key_prefixes(mock_parallel_groups):
 
 
 def test_compute_weight_checksums_prefixes_keys(mock_parallel_groups):
-    pytest.importorskip(UPSTREAM_CHECKSUM_MODULE)
     worker = _make_worker(dp_rank=0)
     worker.model_runner = cast(Any, SimpleNamespace(get_model=lambda: _TinyModel()))
 
@@ -82,7 +78,6 @@ def test_compute_weight_checksums_prefixes_keys(mock_parallel_groups):
 
 
 def test_reset_weights_zeroes_params_not_buffers(mock_parallel_groups, mock_ascend_config):
-    pytest.importorskip(UPSTREAM_CHECKSUM_MODULE)
     model = _TinyModel()
     worker = _make_worker(dp_rank=0)
     worker.model_runner = cast(Any, SimpleNamespace(get_model=lambda: model))
@@ -95,7 +90,6 @@ def test_reset_weights_zeroes_params_not_buffers(mock_parallel_groups, mock_asce
 
 def test_reset_weights_warns_under_nz_mode(mock_parallel_groups, monkeypatch):
     """weight_nz_mode=1: reset still zeroes params and logs the NZ warning."""
-    pytest.importorskip(UPSTREAM_CHECKSUM_MODULE)
     monkeypatch.setattr(
         npu_worker_module,
         "get_ascend_config",
@@ -115,7 +109,6 @@ def test_reset_weights_warns_under_nz_mode(mock_parallel_groups, monkeypatch):
 
 
 def test_methods_work_with_v2_runner_shape(mock_parallel_groups, mock_ascend_config):
-    pytest.importorskip(UPSTREAM_CHECKSUM_MODULE)
     model = _TinyModel()
     # The v2 model runner only exposes the model attribute, no get_model().
     worker = _make_worker(dp_rank=0)
@@ -126,14 +119,3 @@ def test_methods_work_with_v2_runner_shape(mock_parallel_groups, mock_ascend_con
 
     worker.reset_weights()
     assert torch.all(model.linear.weight == 0)
-
-
-def test_missing_utils_raise_clear_error(monkeypatch):
-    monkeypatch.setattr(npu_worker_module, "compute_tensor_digests", None)
-    monkeypatch.setattr(npu_worker_module, "zero_weights", None)
-    worker = object.__new__(NPUWorker)
-
-    with pytest.raises(RuntimeError, match="42d9f8ccdb"):
-        worker.compute_weight_checksums()
-    with pytest.raises(RuntimeError, match="42d9f8ccdb"):
-        worker.reset_weights()
