@@ -265,7 +265,7 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
             id="deepseek-v4-integer-table",
         ),
         pytest.param(
-            "ZhipuAI/GLM-5.1",
+            "zai-org/GLM-5.1",
             3,
             "model.layers.3.mlp.gate",
             (("e_score_correction_bias", (8,), torch.float32, True),),

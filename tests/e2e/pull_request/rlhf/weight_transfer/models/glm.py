@@ -6,7 +6,7 @@ from tests.e2e.pull_request.rlhf.weight_transfer.models.base import WeightUpdate
 
 GLM51_CASE = WeightUpdateModelCase(
     id="glm-5.1-sfa-derived-kv",
-    model="ZhipuAI/GLM-5.1",
+    model="zai-org/GLM-5.1",
     hf_overrides={
         "num_hidden_layers": 4,
         # Keep the trainer payload and TP workers within the test memory budget.
