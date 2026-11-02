@@ -1,60 +1,68 @@
-import os
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
 
-import numpy as np
+import huggingface_hub
+from huggingface_hub import snapshot_download as hf_snapshot_download
 from vllm import SamplingParams
+from vllm.assets.video import VideoAsset
 
-from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
-
-MODEL = os.environ.get("QWEN35_EVS_MODEL", "/workspace/shared_assets/models/Qwen/Qwen3.5-2B")
-PROMPT = (
-    "<|im_start|>user\n<|vision_start|><|video_pad|><|vision_end|>"
-    "Describe this video in one sentence.<|im_end|>\n<|im_start|>assistant\n"
-)
-COMMON = dict(
-    dtype="bfloat16", max_model_len=4096, max_num_batched_tokens=4096,
-    limit_mm_per_prompt={"video": 1}, mm_processor_kwargs={"fps": 1},
-    enforce_eager=True, gpu_memory_utilization=0.75,
-)
-
-
-def _video():
-    frames = []
-    for i in range(8):
-        frame = np.zeros((64, 64, 3), dtype=np.uint8)
-        frame[:, :, 0] = i * 24
-        frame[:, :, 1] = 255 - i * 24
-        frame[i * 4 : i * 4 + 16] = 255
-        frames.append(frame)
-    video = np.stack(frames)
-    return video, {"fps": 1.0, "duration": 8.0, "total_num_frames": 8,
-                   "frames_indices": list(range(8)), "video_backend": "opencv",
-                   "do_sample_frames": False}
-
-
-def _run(rate):
-    with VllmRunner(MODEL, video_pruning_rate=rate, **COMMON) as runner:
-        result = runner.model.generate(
-            runner.get_inputs([PROMPT], videos=[_video()]),
-            sampling_params=SamplingParams(max_tokens=32, temperature=0.0),
-        )[0]
-    return len(result.prompt_token_ids), result.outputs[0].text
+from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
 
 
 @wait_until_npu_memory_free()
-def test_qwen35_evs_baseline_is_stable():
-    _, text = _run(0.0)
-    assert text
+def test_qwen35_evs_reduces_video_prompt_tokens():
+    """Verify video generation succeeds and EVS reduces prompt tokens."""
+    video = VideoAsset("baby_reading", num_frames=8)
+    videos = [(video.np_ndarrays, video.metadata)]
+    prompts = [
+        prompt.replace("<|image_pad|>", "<|video_pad|>")
+        for prompt in qwen_prompt(["Describe this video in one sentence."])
+    ]
+    model_path = hf_snapshot_download(
+        "Qwen/Qwen3.5-0.8B",
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+    )
+    prompt_token_counts = []
+    for pruning_rate in (0.0, 0.75):
+        with VllmRunner(
+            model_path,
+            dtype="bfloat16",
+            max_model_len=4096,
+            max_num_batched_tokens=4096,
+            limit_mm_per_prompt={"video": 1},
+            mm_processor_kwargs={"fps": 1},
+            video_pruning_rate=pruning_rate,
+            enforce_eager=True,
+        ) as runner:
+            # RequestOutput exposes prompt_token_ids separately from generated
+            # tokens, so the assertion measures pruning independently of EOS.
+            outputs = runner.model.generate(
+                runner.get_inputs(prompts, videos=videos),
+                sampling_params=SamplingParams(max_tokens=32, temperature=0.0),
+            )
 
+            assert len(outputs) == len(prompts)
+            for output in outputs:
+                assert output.outputs, "Generation should return a completion."
+                assert output.outputs[0].text.strip(), "Generated output should not be empty."
+                assert output.prompt_token_ids, "Video prompt should not be empty."
+            prompt_token_counts.append(len(outputs[0].prompt_token_ids))
 
-@wait_until_npu_memory_free()
-def test_qwen35_evs_pruning_is_stable():
-    _, text = _run(0.75)
-    assert text
-
-
-@wait_until_npu_memory_free()
-def test_qwen35_evs_reduces_prompt_tokens():
-    baseline_tokens, baseline_text = _run(0.0)
-    pruned_tokens, pruned_text = _run(0.75)
-    assert baseline_text and pruned_text
-    assert pruned_tokens < baseline_tokens
+    assert prompt_token_counts[1] < prompt_token_counts[0], (
+        f"EVS should reduce prompt tokens: baseline={prompt_token_counts[0]}, pruned={prompt_token_counts[1]}"
+    )
