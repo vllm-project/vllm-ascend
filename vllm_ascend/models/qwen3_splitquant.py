@@ -315,7 +315,11 @@ class SplitQuantMoeBlock(nn.Module):
         transform = self.experts.input_group_trans.to(x)
         x = torch.einsum('mgk,gkl->mgl', x.reshape(-1, x.shape[-1]//128, 128), transform).reshape_as(x)
         logits, _ = self.gate(x)
-        router_enabled = os.getenv("SPLITQUANT_DENSE") == "1" and os.getenv("SPLITQUANT_MOE") == "1" and os.getenv("SPLITQUANT_FUSED_ROUTER") == "1"
+        # The fused router is the validated default for the SplitQuant MoE
+        # path.  Keep an explicit ``=0`` escape hatch for diagnostics.
+        router_enabled = (os.getenv("SPLITQUANT_DENSE") == "1"
+                          and os.getenv("SPLITQUANT_MOE") == "1"
+                          and os.getenv("SPLITQUANT_FUSED_ROUTER", "1") == "1")
         if router_enabled and x.dtype == torch.bfloat16 and logits.shape[1] == 128 and self.top_k == 8 and 1 <= x.shape[0] <= 32:
             from vllm_ascend.quantization.splitquant_router import route
             weights, indices = route(logits, self.top_k, self.norm_topk_prob)

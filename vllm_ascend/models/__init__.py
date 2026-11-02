@@ -1,4 +1,7 @@
-from vllm import ModelRegistry
+# Import from the defining module instead of vllm's lazy top-level export.
+# The model registry runs in a subprocess where ``vllm`` may still be
+# partially initialized while general plugins are loaded.
+from vllm.model_executor.models import ModelRegistry
 
 import vllm_ascend.envs as envs_ascend
 
