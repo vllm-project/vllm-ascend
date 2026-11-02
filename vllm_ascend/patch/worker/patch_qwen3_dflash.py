@@ -27,6 +27,22 @@ if lilicorr_module is not None:
 # Bound the extra live native norm outputs during small context updates.
 _MAX_STACKED_CONTEXT_NORM_BYTES = 4 * 1024 * 1024
 
+_orig_build_fused_kv_buffers = DFlashQwen3Model._build_fused_kv_buffers
+
+
+def _context_rope_is_k_only(model) -> bool:
+    """True when the Ascend native RoPE path can take K alone as context."""
+    return (
+        HAS_TRITON
+        and get_current_vllm_config().use_v2_model_runner
+        and type(model.layers[0].self_attn.rotary_emb) is AscendRotaryEmbedding
+    )
+
+
+def _build_fused_kv_buffers(self):
+    _orig_build_fused_kv_buffers(self)
+    self._use_q_only_context_rope = _context_rope_is_k_only(self)
+
 
 def _project_context_kv(
     self,
@@ -71,11 +87,7 @@ def precompute_and_store_context_kv(
 
     if not hasattr(self, "_use_q_only_context_rope"):
         # Native Ascend RoPE works on K only; cache the decision once per model.
-        self._use_q_only_context_rope = (
-            HAS_TRITON
-            and get_current_vllm_config().use_v2_model_runner
-            and type(self.layers[0].self_attn.rotary_emb) is AscendRotaryEmbedding
-        )
+        self._use_q_only_context_rope = _context_rope_is_k_only(self)
 
     # --- Per-layer RMSNorm K (3D: [num_ctx, nkv, hd] per layer) ---
     stacked_norm = (
@@ -97,7 +109,12 @@ def precompute_and_store_context_kv(
     # Consume its result rather than relying on an in-place update.
     all_k_flat = all_k_normed.view(L * num_ctx, kv)
     positions_repeated = context_positions.repeat(L)
-    all_k_flat, _ = self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, None)
+    if self._use_q_only_context_rope:
+        # Context has only K. The cloned second RoPE input was discarded.
+        all_k_flat, _ = self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, None)
+    else:
+        tmpv = all_k_flat.clone()
+        self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, tmpv)
 
     if context_slot_mapping is None:
         return
@@ -125,6 +142,7 @@ def precompute_and_store_context_kv(
 
 
 DFlashQwen3Model._project_context_kv = _project_context_kv
+DFlashQwen3Model._build_fused_kv_buffers = _build_fused_kv_buffers
 DFlashQwen3Model.precompute_and_store_context_kv = precompute_and_store_context_kv
 
 _orig_read_mask_embedding = DFlashQwen3ForCausalLM._read_mask_embedding
