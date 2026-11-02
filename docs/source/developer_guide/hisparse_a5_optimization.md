@@ -206,6 +206,29 @@ our own diagnostic service and were not timed model benchmarks.
 
 The current-main candidate retains that main revision's existing prefix-write
 callbacks; the older PR base uses the equivalent explicit prefix tracking.
-Full-model output and performance qualification after activation are still
-required. Both variants' failed preparation attempts and raw evidence remain
-recorded; no failed attempt is counted as a pass.
+After activation on current-main runtime commit
+`587d0a18641899a0cb8b0919531ec16541d42c81`, all eight ranks received the exact
+request Prefill IDs. Three bounded natural controls returned the reviewed
+answers (`2`, `323`, and counting from 1 to 10). The task-only input/logit
+observers were restored to the original methods on all eight ranks before
+performance timing. An unscored 16,384-input/8,192-output primer completed,
+with all 8,192 output token IDs retained. These checks establish this bounded
+OFF-model result, not dataset accuracy or ON-model qualification.
+
+The current-main OFF baseline subsequently completed two formal rounds per
+shape (C4, output 8,192):
+
+| Input tokens | Mean TPOT, two rounds | Pooled steady decode throughput | Successes / output IDs |
+| --- | ---: | ---: | ---: |
+| 16,384 | 11.420669 ms | 365.7324 tok/s | 8/8 / 65,536 |
+| 32,768 | 12.118077 ms | 354.7869 tok/s | 8/8 / 65,536 |
+
+The steady windows require sampled running4/waiting0 and a flat prompt-token
+counter (162.95 and 160.93 seconds pooled across the two rounds). Each shape
+had identical generated token IDs and MTP counts between its OFF rounds, with
+zero reported preemptions. These are single-D, current-main baseline results;
+the source-pinned historical optimization profile was not enabled. ON and
+capacity sweeps are still pending. No current-main ON/OFF regression or
+maximum-concurrency result is claimed yet. Both variants' failed preparation
+attempts and raw evidence remain recorded; no failed attempt is counted as a
+pass.
