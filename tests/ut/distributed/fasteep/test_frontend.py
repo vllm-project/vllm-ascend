@@ -5,6 +5,7 @@ import json
 import unittest
 from collections import Counter
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 from vllm_ascend.distributed.fasteep.frontend import FastEEPMiddleware
@@ -14,7 +15,7 @@ class TestAdmission(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
-        self.events = []
+        self.events: list[str] = []
 
         async def app(scope, receive, send):
             self.events.append("inference")
@@ -43,7 +44,7 @@ class TestAdmission(unittest.IsolatedAsyncioTestCase):
         self.mutation_entered = asyncio.Event()
         self.mutation_release = asyncio.Event()
         self.mutation_release.set()
-        self.fail = False
+        self.fail_resize = False
 
     async def rpc(self, operation, method, timeout, args, kwargs):
         if method == "fasteep_validate":
@@ -52,7 +53,7 @@ class TestAdmission(unittest.IsolatedAsyncioTestCase):
             self.mutation_entered.set()
             await self.mutation_release.wait()
             self.events.append("resize")
-            if self.fail:
+            if self.fail_resize:
                 raise RuntimeError("native failure")
             self.target = kwargs["target"]
         return [
@@ -62,7 +63,7 @@ class TestAdmission(unittest.IsolatedAsyncioTestCase):
 
     async def request(self, path, payload=None):
         scope = dict(self.scope, path=path)
-        sent = []
+        sent: list[dict[str, Any]] = []
         receive = AsyncMock(return_value={"type": "http.request", "body": json.dumps(payload).encode()})
         await self.gate(scope, receive, AsyncMock(side_effect=sent.append))
         return sent
@@ -87,13 +88,14 @@ class TestAdmission(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.gate.inflight, 0)
 
     async def test_invalid_requests_do_not_mutate(self):
-        for payload in (
+        invalid_payloads: list[object] = [
             {},
             [],
             {"new_data_parallel_size": True},
             {"new_data_parallel_size": 4},
             {"new_data_parallel_size": 2, "drain_timeout": 0},
-        ):
+        ]
+        for payload in invalid_payloads:
             result = await self.request("/fasteep_scale_ep", payload)
             self.assertEqual(result[0]["status"], 400)
         self.assertNotIn("resize", self.events)
@@ -137,7 +139,7 @@ class TestAdmission(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.events, ["resize", "inference"])
 
     async def test_failure_stays_closed(self):
-        self.fail = True
+        self.fail_resize = True
         response = await self.request("/fasteep_scale_ep", {"new_data_parallel_size": 2})
         self.assertEqual(response[0]["status"], 500)
         response = await self.request("/v1/completions")

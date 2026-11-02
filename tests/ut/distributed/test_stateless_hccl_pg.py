@@ -72,7 +72,7 @@ def _find_free_ports(num_ports: int, base_port: int = 29600) -> list[int]:
     them. Small TOCTOU window is acceptable for a dedicated test machine.
     """
     ports: list[int] = []
-    candidates = []
+    candidates: list[int] = []
     port = base_port
     while len(candidates) < num_ports:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
