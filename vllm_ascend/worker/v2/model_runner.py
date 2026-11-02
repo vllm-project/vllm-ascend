@@ -707,6 +707,12 @@ class NPUModelRunner(GPUModelRunner):
             and enable_dense_sp(self.vllm_config)
             and self.execute_model_state is not None
             and self.execute_model_state.hidden_states is not None
+            # FULL-graph replays restore full rows inside the captured graph
+            # (the ModelWithContext wrapper gathers during capture), so only
+            # the eager/piecewise outputs — the rank-local token shard, at
+            # padded/TP rows — need the exit gather here.
+            and self.execute_model_state.hidden_states.shape[0]
+            != self.execute_model_state.input_batch.num_tokens_after_padding
         ):
             # Exit of the dense sequence-parallel region: the decoder stack
             # returned the rank-local token shard. Restore the full token rows

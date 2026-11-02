@@ -814,3 +814,67 @@ class TestQwen35ModelForwardWrap:
     def test_self_embedding_path_untouched(self, monkeypatch):
         out, rows = self._run(monkeypatch, dense_sp_entry=True, inputs_embeds=None)
         assert rows == [0]
+
+
+class TestCaptureWrapperGather:
+    """The FULL-graph capture path calls the model through ModelWithContext,
+    bypassing execute_model's exit gather, so the wrapper restores the
+    sharded output to full rows (capture sizes are TP-aligned)."""
+
+    def _make_wrapper(self, dense_sp, is_draft_model=False):
+        from vllm.config.compilation import CUDAGraphMode
+
+        from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
+
+        original = SimpleNamespace(forward=lambda *a, **k: torch.arange(3 * 2, dtype=torch.float64).reshape(3, 2))
+        wrapper = ModelWithContext.__new__(ModelWithContext)
+        wrapper.original_model = original
+        wrapper.is_draft_model = is_draft_model
+        wrapper.is_draft_model_prefill = False
+        wrapper.device_metadata = None
+        wrapper.dense_sp = dense_sp
+        return wrapper, CUDAGraphMode
+
+    def _run(self, monkeypatch, dense_sp, mode, is_draft_model=False):
+        from vllm_ascend.worker.v2 import aclgraph_utils
+
+        def fake_gather(x):
+            # TP=2: duplicate the 3-row shard -> 6 full rows.
+            return torch.cat([x, x], dim=0)
+
+        monkeypatch.setattr(aclgraph_utils, "sp_all_gather", fake_gather)
+        monkeypatch.setattr(aclgraph_utils, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=mode))
+        wrapper, CUDAGraphMode = self._make_wrapper(dense_sp, is_draft_model)
+        monkeypatch.setattr(aclgraph_utils, "_EXTRA_CTX", SimpleNamespace(capturing=None))
+        out = wrapper.forward()
+        return out
+
+    def test_full_capture_gathers_the_shard(self, monkeypatch):
+        from vllm.config.compilation import CUDAGraphMode
+
+        out = self._run(monkeypatch, dense_sp=True, mode=CUDAGraphMode.FULL)
+        assert out.shape[0] == 6
+
+    def test_warmup_mode_gathers_the_shard(self, monkeypatch):
+        from vllm.config.compilation import CUDAGraphMode
+
+        out = self._run(monkeypatch, dense_sp=True, mode=CUDAGraphMode.NONE)
+        assert out.shape[0] == 6
+
+    def test_piecewise_capture_stays_sharded(self, monkeypatch):
+        from vllm.config.compilation import CUDAGraphMode
+
+        out = self._run(monkeypatch, dense_sp=True, mode=CUDAGraphMode.PIECEWISE)
+        assert out.shape[0] == 3
+
+    def test_draft_wrapper_stays_full_token(self, monkeypatch):
+        from vllm.config.compilation import CUDAGraphMode
+
+        out = self._run(monkeypatch, dense_sp=True, mode=CUDAGraphMode.FULL, is_draft_model=True)
+        assert out.shape[0] == 3
+
+    def test_stock_layout_without_dense_sp(self, monkeypatch):
+        from vllm.config.compilation import CUDAGraphMode
+
+        out = self._run(monkeypatch, dense_sp=False, mode=CUDAGraphMode.FULL)
+        assert out.shape[0] == 3

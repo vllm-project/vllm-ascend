@@ -46,7 +46,8 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather
+from vllm_ascend.utils import enable_dense_sp, use_updatable_graph
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -216,7 +217,14 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         metadata = getattr(model_state, "device_metadata", None)
-        model = ModelWithContext(model, device_metadata=metadata)
+        model = ModelWithContext(
+            model,
+            device_metadata=metadata,
+            # The FULL-graph capture path bypasses execute_model, so the
+            # sequence-parallel model's sharded output is gathered inside the
+            # wrapper; capture sizes are TP-aligned under enable_sp.
+            dense_sp=enable_dense_sp(self.vllm_config),
+        )
         try:
             with communicator_switch():
                 return super().capture(
@@ -244,12 +252,20 @@ class ModelWithContext(nn.Module):
     so we can inherit vllm's CudaGraphManager._capture_full_graph.
     """
 
-    def __init__(self, original_model, is_draft_model=False, is_draft_model_prefill=False, device_metadata=None):
+    def __init__(
+        self,
+        original_model,
+        is_draft_model=False,
+        is_draft_model_prefill=False,
+        device_metadata=None,
+        dense_sp=False,
+    ):
         super().__init__()
         self.original_model = original_model
         self.is_draft_model = is_draft_model
         self.is_draft_model_prefill = is_draft_model_prefill
         self.device_metadata = device_metadata
+        self.dense_sp = dense_sp
 
     def forward(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -267,7 +283,24 @@ class ModelWithContext(nn.Module):
         try:
             if self.device_metadata is not None:
                 self.device_metadata.begin_forward()
-            return self.original_model(*args, **kwargs)
+            output = self.original_model(*args, **kwargs)
+            if (
+                self.dense_sp
+                and not self.is_draft_model
+                and forward_context.cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE
+                and isinstance(output, torch.Tensor)
+            ):
+                # Dense sequence parallelism: the FULL-graph capture path
+                # calls the model directly, bypassing execute_model's exit
+                # gather, so the model's sharded output must be restored to
+                # full rows here for the graph's hidden_states buffer (and
+                # the gather is captured into the graph for replay). Capture
+                # sizes are TP-aligned under enable_sp, so the gather
+                # restores the exact row count. Piecewise graphs and the
+                # draft heads keep the stock path: their exits run through
+                # execute_model, which gathers conditionally.
+                output = sp_all_gather(output)
+            return output
         finally:
             # Warmup and actual capture receive separate prepare_attn calls.
             # Retire each submission, including unused producers, after its
