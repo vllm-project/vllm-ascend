@@ -409,6 +409,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 assert shared_experts is not None
                 prepared_input = shared_experts.prepare_input_async(hidden_states)
+        assert prepared_input is not None
         routed_input, shared_input = super().apply_routed_input_transform(hidden_states)
         if prepared_input.ready_event is not None:
             # Keep TP AG completion before any routed EP communication. The
