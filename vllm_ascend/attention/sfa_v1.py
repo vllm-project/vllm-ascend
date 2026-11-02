@@ -1433,7 +1433,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.qk_rope_head_dim == 0:
             assert attn_metadata is not None
             kv_cache_nope = _view_cache_as_operator_pages(kv_cache_nope, attn_metadata.block_size)
-            rope_cos_ = rope_sin_ = self.sfa_qsfa_kr_cache_dummy
+            rope_cos_ = rope_sin_ = hidden_states[:, :0]
         else:
             assert cos is not None and sin is not None
             rope_cos_ = cos.view(cos.shape[0], cos.shape[-1])

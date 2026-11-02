@@ -202,7 +202,10 @@ def test_prolog_preserves_cache_storage_slots_and_indexer_scales(state, storage_
         assert kwargs["ckvkr_repo_mode"] == kwargs["quant_scale_repo_mode"] == 1
         assert kwargs["tile_size"] == 128
         if rope_dim == 0:
-            assert kwargs["rope_sin"] is kwargs["rope_cos"] is impl.sfa_qsfa_kr_cache_dummy
+            assert kwargs["rope_sin"] is kwargs["rope_cos"]
+            assert kwargs["rope_sin"].shape == (hidden.shape[0], 0)
+            assert kwargs["rope_sin"].dtype == hidden.dtype
+            assert kwargs["rope_sin"].device == hidden.device
             for row, slot in enumerate(kwargs["cache_index"].tolist()):
                 if slot >= 0:
                     written_cache.view(-1, written_cache.shape[-1])[slot].fill_(row)
