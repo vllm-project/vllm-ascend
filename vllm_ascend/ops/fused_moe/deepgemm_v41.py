@@ -25,7 +25,9 @@ class DeepGemmV41Experts:
 
     def __init__(self, layer):
         # Import in workers only; the dependency owns native NPU state.
-        import deep_gemm
+        from vllm_ascend.ops.fused_moe.deepgemm_loader import load_deepgemm
+
+        deep_gemm = load_deepgemm()
 
         config = get_current_vllm_config()
         text = config.model_config.hf_text_config
