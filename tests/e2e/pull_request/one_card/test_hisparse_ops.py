@@ -81,7 +81,8 @@ def reference(topk, requests, states, source, resident, hot_table, dgi, lru, blo
     return out, counts, sh, sd, sc, dgi, lru, stats
 
 
-def test_resolver_strides_padding_graph():
+@pytest.mark.parametrize("device_row_count", [False, True])
+def test_resolver_strides_padding_graph(device_row_count):
     torch.npu.set_device(0)
     raw = torch.empty(8192, dtype=torch.uint8)
     offset = (-raw.data_ptr()) % 4096
@@ -122,6 +123,11 @@ def test_resolver_strides_padding_graph():
     sh, sd = torch.full_like(out, -9), torch.full_like(out, -9)
     sc = torch.empty_like(counts)
     stats = torch.zeros(2, dtype=torch.int64, device="npu")
+    valid_rows = torch.tensor(3, dtype=torch.int32, device="npu") if device_row_count else None
+    if device_row_count:
+        # Stale graph padding looks like another valid request row. Only the
+        # device scalar separates it from current query rows.
+        requests_n[-1] = 1
 
     def forward():
         ops.hisparse_resolve_residency(
@@ -150,6 +156,7 @@ def test_resolver_strides_padding_graph():
             resident_n,
             4,
             0,
+            valid_rows,
         )
         ops.hisparse_gather_compact(host, hot, sh, sd, sc)
 
@@ -223,6 +230,21 @@ def test_resolver_strides_padding_graph():
     torch.testing.assert_close(dgi_n.cpu(), expected[5])
     torch.testing.assert_close(lru_n.cpu(), expected[6])
     print(json.dumps({"repeated_graph_replay": "PASS", "iterations": 100}), flush=True)
+    if device_row_count:
+        for active_rows in [0, 1, 2, 3]:
+            valid_rows.fill_(active_rows)
+            dgi_n.copy_(dgi.npu())
+            lru_n.copy_(lru.npu())
+            stats.zero_()
+            sh.fill_(-9)
+            sd.fill_(-9)
+            oracle_requests = requests.clone()
+            oracle_requests[active_rows:] = -1
+            oracle = reference(topk, oracle_requests, states, source, resident, hot_table, dgi, lru, 4)
+            graph.replay()
+            torch.npu.synchronize()
+            for actual_value, expected_value in zip(actual, oracle):
+                torch.testing.assert_close(actual_value.cpu(), expected_value)
     graph.reset()
     mapping.close()
 
@@ -552,6 +574,51 @@ def test_invalidate_large_hot_capacity_graph():
             graph.replay()
             torch.npu.synchronize()
             torch.testing.assert_close(dgi.cpu(), expected)
+    finally:
+        torch.npu.synchronize()
+        graph.reset()
+
+
+@pytest.mark.parametrize("groups", [1, 3, 21])
+def test_common_group_invalidation_changed_graph_replay(groups):
+    """Exercise the current common pointer-table caller with changing writes."""
+    from types import SimpleNamespace
+
+    from vllm.v1.hisparse.runtime import HiSparseSlotInvalidator
+
+    initial = torch.arange(48, dtype=torch.int32).view(3, 16)
+    tables = [(initial + group * 7).npu() for group in range(groups)]
+    states = torch.tensor([2, 0, 1], dtype=torch.int32, device="npu")
+    requests = torch.tensor([0, 1, 2, -1], dtype=torch.int32, device="npu")
+    written = torch.tensor([35, 4, 19, 1], dtype=torch.int64, device="npu")
+    leaders = [
+        SimpleNamespace(index_group=SimpleNamespace(device_global_indices=table), cache_ops=HiSparseNPUOps)
+        for table in tables
+    ]
+    invalidator = HiSparseSlotInvalidator(states)
+
+    def forward():
+        invalidator(leaders, written, requests)
+
+    forward()
+    torch.npu.synchronize()
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    graph = torch.npu.NPUGraph()
+    try:
+        with torch.npu.graph(graph, stream=stream):
+            forward()
+        for values in [[35, 4, 19, 1], [47, 8, 23, 1], [-1, -1, -1, 1]]:
+            written.copy_(torch.tensor(values, dtype=torch.int64))
+            for group, table in enumerate(tables):
+                table.copy_(initial + group * 7)
+            graph.replay()
+            torch.npu.synchronize()
+            for group, table in enumerate(tables):
+                expected = initial + group * 7
+                for row, value in zip([2, 0, 1], values[:3]):
+                    expected[row][expected[row] == value] = -1
+                torch.testing.assert_close(table.cpu(), expected)
     finally:
         torch.npu.synchronize()
         graph.reset()

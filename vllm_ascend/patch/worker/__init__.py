@@ -32,6 +32,15 @@ if HAS_TRITON:
 # worker before model loading resolves kv_cache_dtype. No-op on kvquant_27.
 import vllm_ascend.patch.worker.patch_kv_cache_dtype  # noqa
 
+# Explicit, source-checked A5 HiSparse profile. Keep stream adaptation before
+# model/index-group construction; no import-time replacement for the baseline.
+from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import optimized_profile_enabled
+
+if optimized_profile_enabled():
+    from vllm_ascend.patch.worker.patch_hisparse_streams import install as install_hisparse_streams
+
+    install_hisparse_streams()
+
 # Apply before model construction on every device, including 310P.
 import vllm_ascend.patch.worker.patch_mm_input_norm  # noqa
 

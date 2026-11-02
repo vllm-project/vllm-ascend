@@ -1,3 +1,12 @@
+# Historical HiSparse source provenance
+
+The working A5 optimization implementation has moved into installed `vllm_ascend/` modules.
+The `promoted_to` entries in `manifest.json` identify each installed file and original source hash.
+Use `docs/source/developer_guide/hisparse_a5_optimization.md` for profile selection and reproduction.
+The remaining source snapshots and unselected candidates preserve historical review context.
+
+<details><summary>Earlier snapshot notes (superseded)</summary>
+
 # HiSparse 工作源码审阅快照
 
 这里保留经过范围筛选的 HiSparse 集成差异源码、测试、native 构建支持及待验证 overlay。
@@ -61,3 +70,5 @@
 保留失败及回归证据。每项新结果标明实际 tree、shape、拓扑、输出/MTP 可比性和验证范围。
 验证有独立收益后更新 PR 结论并迁入正式路径；没有收益或尚未验证的代码继续保持实验状态。
 本快照不构成新旧实验混合后的生产可用性承诺。
+
+</details>

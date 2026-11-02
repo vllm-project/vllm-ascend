@@ -2,11 +2,11 @@ pr: 19109
 entries:
   - category: feature
     text: >-
-      Added an experimental Ascend HiSparse backend for sparse MLA/DSA with
-      Model Runner V2, private Host pools and unquantized KV caches.
-      Requires the paired vLLM HiSparse backend interface; attention C8,
-      context parallelism and disaggregated P/D are outside this feature's scope.
+      Added the platform-selected Ascend HiSparse backend and an explicit,
+      source-checked A5 C8 optimization profile with reproducible source builds.
+      Final P/D, accuracy and rebased-head model qualification remain pending.
   - category: performance
     text: >-
-      Vectorized CPU page-transfer descriptor preparation for supported paired
-      HiSparse worker revisions, preserving DMA submission and completion events.
+      Installed the A5 Host-writeback, descriptor, Resident-update, lazy-MTP,
+      invalidation, metadata-view and group-prefetch implementation. Selection
+      preserves the baseline by default and requires the reviewed Core sources.

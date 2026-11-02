@@ -29,6 +29,10 @@ from typing import Any
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Non-sensitive HiSparse implementation selection. Valid values: baseline
+    # (default), a5_c8_62592 (A5, exact reviewed Core sources required).
+    # Set before worker startup; live graph/stream owner switching is unsupported.
+    "VLLM_ASCEND_HISPARSE_PROFILE": lambda: os.getenv("VLLM_ASCEND_HISPARSE_PROFILE", "baseline"),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

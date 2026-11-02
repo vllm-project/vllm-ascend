@@ -367,6 +367,12 @@ class AscendSFABackend(AttentionBackend):
     @staticmethod
     def get_builder_cls():
         if get_current_vllm_config().attention_config.hisparse_config is not None:
+            from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import optimized_profile_enabled
+
+            if optimized_profile_enabled():
+                from vllm_ascend.attention.sfa_hisparse_optimized import AscendHiSparseMetadataBuilder
+
+                return AscendHiSparseMetadataBuilder
             from vllm_ascend.attention.sfa_hisparse import AscendHiSparseMetadataBuilder
 
             return AscendHiSparseMetadataBuilder
@@ -391,6 +397,12 @@ class AscendSFABackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
         if get_current_vllm_config().attention_config.hisparse_config is not None:
+            from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import optimized_profile_enabled
+
+            if optimized_profile_enabled():
+                from vllm_ascend.attention.sfa_hisparse_optimized import AscendHiSparseImpl
+
+                return AscendHiSparseImpl
             from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
 
             return AscendHiSparseImpl

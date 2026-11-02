@@ -82,6 +82,7 @@ def prepare_residency_kernel(
     row_keys,
     cache_keys,
     metadata,
+    num_valid_rows,
     ROWS: tl.constexpr,
     TOP_K: tl.constexpr,
     HOT_SIZE: tl.constexpr,
@@ -105,10 +106,13 @@ def prepare_residency_kernel(
     HAS_RESIDENT: tl.constexpr,
     HAS_RESOLVED: tl.constexpr,
     HAS_COUNTS: tl.constexpr,
+    HAS_VALID_ROWS: tl.constexpr,
     BK: tl.constexpr,
 ):
     row = tl.program_id(0)
+    active_rows = tl.minimum(tl.maximum(tl.load(num_valid_rows), 0), ROWS) if HAS_VALID_ROWS else ROWS
     request = tl.load(requests + row) if HAS_REQUESTS else row
+    request = tl.where(row < active_rows, request, -1)
     first = row
     end = row + 1
     if HAS_REQUESTS:
@@ -118,10 +122,10 @@ def prepare_residency_kernel(
             same = same & (first > 0)
             first -= same.to(tl.int32)
             searching = same
-        searching = end < ROWS
+        searching = end < active_rows
         while searching:
-            same = tl.load(requests + end, mask=end < ROWS, other=-2147483648) == request
-            same = same & (end < ROWS)
+            same = tl.load(requests + end, mask=end < active_rows, other=-2147483648) == request
+            same = same & (end < active_rows)
             end += same.to(tl.int32)
             searching = same
     state = tl.load(states + request, mask=(request >= 0) & (request < STATE_COUNT), other=-1) if HAS_STATE else request
@@ -470,7 +474,10 @@ def invalidate_kernel(
     STATE_ROWS: tl.constexpr,
     REGION: tl.constexpr,
     BLOCK: tl.constexpr,
+    GROUPED: tl.constexpr = False,
 ):
+    if GROUPED:
+        dgi = tl.load(dgi + tl.program_id(2)).to(tl.pointer_type(tl.int32))
     token = tl.program_id(0)
     offset = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     request = tl.load(requests + token)

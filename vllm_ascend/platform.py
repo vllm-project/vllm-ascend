@@ -158,7 +158,9 @@ class NPUPlatform(Platform):
         return True
 
     def get_hisparse_backend_cls(self) -> str:
-        return "vllm_ascend.distributed.kv_transfer.hisparse.backend.AscendHiSparseBackend"
+        from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import backend_class_path
+
+        return backend_class_path()
 
     @classmethod
     def opaque_attention_op(cls) -> bool:

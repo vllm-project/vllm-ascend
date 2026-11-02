@@ -1,0 +1,93 @@
+# A5 HiSparse optimization implementation
+
+This PR installs the working A5 optimization modules in `vllm_ascend/`.
+They are selected through the backend and attention factories, not by copying
+the experimental directory over an installation.
+
+## Scope and selection
+
+`VLLM_ASCEND_HISPARSE_PROFILE` is a non-sensitive, startup-only setting:
+
+- `baseline` (default): the existing platform backend, including current-Core ABI support.
+- `a5_c8_62592`: the paired A5 optimization implementation. Exact normalized Core
+  source hashes are checked before adapters are installed. Unknown versions fail
+  explicitly. Restart workers after changing the profile or source.
+
+The A5 profile includes mapped Host writeback and lifetime ownership, CPU page
+descriptors, Resident updates, grouped/recycled invalidation, lazy MTP and row-map
+preparation, unused staging removal, bounded block-table view reuse, C8
+mapping/gather and Indexer-write primitives, and MTP group prefetch. Private
+Host pools, existing payload fences and count-copy/MTP ordering are preserved.
+Existing CANN Attention compute kernels are used; the unused custom Attention
+core remains removed. Kernels with no independent benefit claim are not described
+as individually validated improvements.
+
+The HiSparse P/D transport and its source tests are included as installed code.
+Its final integration/accuracy/performance qualification remains pending. Lazy
+Host mirrors are restricted to the recorded consumer policy; producers require
+eager mirrors. CP/PP, multi-DP, A3 and other payload formats are not qualified by
+the historical A5 result.
+
+## Reconstruct the paired Core and build
+
+Use an A5 environment with CANN 9.2, Torch 2.10, torch-npu 2.10.post7 and a
+matching triton-ascend installation. Keep the latest-main checkout separately.
+
+```bash
+python tools/hisparse/prepare_paired_core.py --output /path/to/vllm-paired
+VLLM_TARGET_DEVICE=empty uv pip install --no-deps --no-build-isolation -e /path/to/vllm-paired
+SOC_VERSION=ascend950dt_9582 uv pip install --no-deps --no-build-isolation -e .
+python csrc/hisparse_runtime/build.py --cann-root "$ASCEND_HOME_PATH" \
+  --output /path/to/new-native-output --install
+```
+
+The Core preparer merges public main `43111fd1f0c3135ff671e25e2e85238aa05743d0`
+and PR62592 `5b8e00878206c228c6ec888fbd6494d6ffe07a03`, then verifies tree
+`314b378fa399edede28784fdf52d97964b9194a2`. No private merge ref or local
+workstation path is required. LF/CRLF normalization changes no source logic.
+Native libraries are built from source; binaries and weights are not committed.
+
+## Repeat the single-D configuration
+
+Use full GLM-5.2 W4A8C8 weights, TP8/DP1 and MTP3. The saved configuration keeps
+78 target layers plus the MTP layer, FP8 Attention/Indexer with FP32 scales,
+memory 0.8, Hot10240, Host128GiB/rank, maximum length139264, batched8192,
+maximum sequences32, no prefix caching, and the original graph shapes/warmup.
+
+```bash
+python tools/hisparse/serve_reproduction.py --model "$MODEL" --arm off --port 8029
+# After that owned instance has exited and released its resources:
+python tools/hisparse/serve_reproduction.py --model "$MODEL" --arm on --port 8029
+```
+
+`--print-command` prints either configuration without starting a model.
+`--host-ip` accepts the actual data-network address when one is required.
+`reference_configuration.json` contains both exact argument lists. The fixed
+`C8-L128-O8192.jsonl` preserves prompt IDs, temperature0, seed42 and generation
+limits; only the served model alias is changed to `hisparse-review`.
+
+Use EvalScope1.13.0 in a separate environment, one unscored primer and two
+measured rounds per arm. Keep formal timing free of profilers/observers. Record
+actual output IDs, success count, MTP position acceptance, settled HiSparse
+counters, TPOT/TTFT distributions and a running8/waiting0 decode window.
+Missing counters do not establish zero misses. These fixed forced-length
+outputs are not dataset accuracy results. P/D requires its own end-to-end test.
+
+## Existing evidence and outstanding checks
+
+The saved source tree `9e4da1dd92448aa8883bc900099b12840cd985cd2baa30b34f694a286b6a6734`
+completed C8/input128/output8192, two rounds per arm, single-D TP8/MTP3.
+OFF/ON mean TPOT was 16.511773/16.946701ms, or +2.6341%; individual changes
+were -0.6374% and +5.9794%. Decode throughput was 480.0999/464.8775tok/s.
+Each arm returned 131072 token IDs with16/16 successes. Reported ON miss/H2D
+deltas settled at zero; physical DMA bytes were not measured. MTP acceptance
+and long outputs differed. Stable3%, final P/D and final accuracy remain open.
+Sanitized metrics are in `hisparse_a5_reference_result.json`.
+
+Before this submission,132 focused CPU checks passed. Earlier current-Core ABI
+tests passed12 actual NPU cases with zero skips. Neither result qualifies the
+entire relocated implementation. Historical P/D CPU tests exposed stale fixture,
+native-boundary and wire-contract failures; they remain recorded for follow-up.
+The author requested publishing now and continuing validation on the new machines.
+No additional model evaluation or full CI pass is asserted for this submission.
+AI assistance was used; human review and merge acceptance remain required.

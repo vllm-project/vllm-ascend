@@ -14,7 +14,7 @@ import pytest
 @pytest.mark.parametrize('dependency', ['topk_event', 'no_event', 'piecewise'])
 @pytest.mark.parametrize('mirror', [True, False])
 def test_current_metadata_and_existing_fences(actual, decode, flag, group, dependency, mirror):
-    source = Path(__file__).with_name('runtime_adapter.py')
+    source = Path(__file__).resolve().parents[6] / 'vllm_ascend/distributed/kv_transfer/hisparse/runtime_adapter.py'
     tree = ast.parse(source.read_bytes())
     method = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
                   and n.name == '_resolve_and_stage_group')

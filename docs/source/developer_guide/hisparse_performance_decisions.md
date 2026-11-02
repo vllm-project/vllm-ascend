@@ -1,5 +1,7 @@
 # HiSparse performance inclusion decisions
 
+> Updated2026-11-02: the A5 working optimizations are now installed under `vllm_ascend/` with explicit profile selection. See [current implementation and reproduction](hisparse_a5_optimization.md). The inclusion/exclusion tables below describe the earlier baseline review.
+
 This record separates measured CPU improvements from optional device kernels and
 from final-head model qualification. The PR now includes page-descriptor CPU
 vectorization in addition to the platform-backend feature. It does not import the

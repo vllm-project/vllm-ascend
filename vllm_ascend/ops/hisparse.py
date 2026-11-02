@@ -227,6 +227,7 @@ class HiSparseNPUOps:
         resident_block_table,
         resident_block_size,
         resident_null_block,
+        num_valid_rows=None,
     ) -> None:
         """Resolve logical selections and prepare resident/hot-cache refill plans.
 
@@ -245,6 +246,10 @@ class HiSparseNPUOps:
         _check_tensor(device_global_indices, "device_global_indices", device, (torch.int32,), ndim=2)
         _check_tensor(lru_slots, "lru_slots", device, (torch.int16,), shape=device_global_indices.shape)
         rows, topk = global_indices.shape
+        if num_valid_rows is not None:
+            _check_tensor(num_valid_rows, "num_valid_rows", device, (torch.int32,))
+            if num_valid_rows.numel() != 1:
+                raise ValueError("num_valid_rows must contain one device scalar")
         hot_size = lru_slots.size(1)
         if rows == 0:
             return
@@ -331,6 +336,7 @@ class HiSparseNPUOps:
             row_keys,
             cache_keys,
             workspace.metadata,
+            num_valid_rows if num_valid_rows is not None else dummy,
             ROWS=rows,
             TOP_K=topk,
             HOT_SIZE=hot_size,
@@ -354,6 +360,7 @@ class HiSparseNPUOps:
             HAS_RESIDENT=resident is not None,
             HAS_RESOLVED=resolved_global_indices is not None,
             HAS_COUNTS=valid_counts is not None,
+            HAS_VALID_ROWS=num_valid_rows is not None,
             BK=triton.next_power_of_2(topk),
             multibuffer=False,
         )
@@ -538,29 +545,46 @@ class HiSparseNPUOps:
 
     @staticmethod
     def hisparse_invalidate_written_slots(
-        device_global_indices, request_state_indices, req_id_per_token, written_slots
+        device_global_indices,
+        request_state_indices,
+        req_id_per_token,
+        written_slots,
+        num_state_rows=None,
+        region_stride=None,
     ) -> None:
         device = device_global_indices.device
         if device.type != "npu":
             raise ValueError("HiSparse invalidation requires NPU state")
-        _check_tensor(device_global_indices, "device_global_indices", device, (torch.int32,), ndim=2)
+        grouped = num_state_rows is not None or region_stride is not None
+        if grouped:
+            if num_state_rows is None or region_stride is None or num_state_rows < 0 or region_stride < 0:
+                raise ValueError("Grouped HiSparse invalidation requires nonnegative state and region sizes")
+            _check_tensor(device_global_indices, "group_table", device, (torch.int64,), ndim=1)
+            groups = device_global_indices.numel()
+            region = region_stride
+            state_rows = num_state_rows
+        else:
+            _check_tensor(device_global_indices, "device_global_indices", device, (torch.int32,), ndim=2)
+            groups = 1
+            region = device_global_indices.size(1)
+            state_rows = device_global_indices.size(0)
         _check_tensor(request_state_indices, "request_state_indices", device, (torch.int32,), ndim=1)
         _check_tensor(written_slots, "written_slots", device, (torch.int32, torch.int64), ndim=1)
         _check_tensor(req_id_per_token, "req_id_per_token", device, (torch.int32,), shape=written_slots.shape)
         if written_slots.numel() == 0:
             return
-        region = device_global_indices.size(1)
-        if region == 0:
+        if region == 0 or state_rows == 0 or groups == 0:
             return
-        invalidate_kernel[(written_slots.numel(), triton.cdiv(region, 256))](
+        invalidate_kernel[(written_slots.numel(), triton.cdiv(region, 256), groups)](
             device_global_indices,
             request_state_indices,
             req_id_per_token,
             written_slots,
             REQUESTS=request_state_indices.numel(),
-            STATE_ROWS=device_global_indices.size(0),
+            STATE_ROWS=state_rows,
             REGION=region,
             BLOCK=256,
+            GROUPED=grouped,
             multibuffer=False,
         )
 

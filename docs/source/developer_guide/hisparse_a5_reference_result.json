@@ -1,0 +1,74 @@
+{
+  "source_tree_sha256": "9e4da1dd92448aa8883bc900099b12840cd985cd2baa30b34f694a286b6a6734",
+  "fixture_sha256": "1f878b97afd54a0a50baf3a937442720e074db3d278e06085d04883f380990e8",
+  "C": 8,
+  "input_tokens": 128,
+  "output_tokens": 8192,
+  "repetitions_per_arm": 2,
+  "topology": "Single D23 TP8 MTP3; no P/D transfer",
+  "TPOT_regression_percent": 2.634051849891783,
+  "TPOT_regression_per_round_percent": [
+    -0.6374457069372674,
+    5.9794280901620755
+  ],
+  "decode_throughput_regression_percent": 3.17065975008185,
+  "ON_zero_reported_miss": true,
+  "physical_DMA_measurement": false,
+  "final_PD_acceptance_required": true,
+  "final_dataset_accuracy_complete": false,
+  "limitations": [
+    "Two rounds describe this run, not statistical significance.",
+    "Compare per-position MTP acceptance before attributing all walltime changes to CPU submission.",
+    "Natural controls passed exact token/text references; forced long outputs are not dataset accuracy."
+  ],
+  "arms": {
+    "on": {
+      "TPOT_mean_ms": 16.94670133262207,
+      "TTFT_mean_ms": 1091.2421556786285,
+      "pure_decode_TPS": 464.8775492766303,
+      "MTP_token_acceptance_by_round": [
+        0.48253968253968255,
+        0.4566999373161676
+      ],
+      "MTP_per_position_by_round": [
+        [
+          0.7392717086834734,
+          0.4451540616246499,
+          0.26319327731092435
+        ],
+        [
+          0.7254086503688703,
+          0.41953565745696514,
+          0.22515550412266744
+        ]
+      ],
+      "success": 16,
+      "actual_output_tokens": 131072
+    },
+    "off": {
+      "TPOT_mean_ms": 16.511772678922974,
+      "TTFT_mean_ms": 355.5382261547493,
+      "pure_decode_TPS": 480.09988302798877,
+      "MTP_token_acceptance_by_round": [
+        0.45011057318749625,
+        0.46733367538908843
+      ],
+      "MTP_per_position_by_round": [
+        [
+          0.7242603550295857,
+          0.4078895463510848,
+          0.21818181818181817
+        ],
+        [
+          0.733306457524005,
+          0.4239903247086418,
+          0.24470424393461848
+        ]
+      ],
+      "success": 16,
+      "actual_output_tokens": 131072
+    }
+  },
+  "qualification": "Historical frozen working tree; relocated formal code needs independent qualification",
+  "fixture_reproduction_change": "Only served model alias changed; source prompt IDs and generation fields retained"
+}

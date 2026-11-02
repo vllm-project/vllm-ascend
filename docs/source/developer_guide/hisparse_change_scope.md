@@ -1,5 +1,7 @@
 # HiSparse change-scope audit
 
+> Updated2026-11-02: the A5 working optimizations are now installed under `vllm_ascend/` with explicit profile selection. See [current implementation and reproduction](hisparse_a5_optimization.md). The inclusion/exclusion tables below describe the earlier baseline review.
+
 This feature PR is a platform-backend implementation, not the complete experimental
 performance branch. It also includes the measured CPU page-descriptor optimization;
 see [performance decisions](hisparse_performance_decisions.md).

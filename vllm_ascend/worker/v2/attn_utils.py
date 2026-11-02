@@ -425,7 +425,15 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         from vllm.v1.hisparse.binding import resolve_hisparse_specs
 
         from vllm_ascend.distributed.kv_transfer.hisparse.binding import align_hisparse_indexer_specs
+        from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import optimized_profile_enabled
 
+        if optimized_profile_enabled():
+            from vllm_ascend.distributed.kv_transfer.hisparse.binding_optimized import align_hisparse_indexer_specs
+
+            row_bytes = 656 if vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3") else None
+            return align_hisparse_indexer_specs(
+                resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers), packed_row_bytes=row_bytes
+            )
         return align_hisparse_indexer_specs(resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers))
     return kv_cache_spec
 
