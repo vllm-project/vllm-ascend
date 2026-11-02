@@ -1,0 +1,4 @@
+pr: 20599
+entries:
+  - category: bugfix
+    text: Fixed KV cache block copying so overlaid views of shared storage are each copied completely, preventing stale KV data in multi-layout deployments.
