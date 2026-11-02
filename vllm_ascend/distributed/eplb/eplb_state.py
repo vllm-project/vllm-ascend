@@ -6,7 +6,7 @@
 import inspect
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import fields
@@ -31,8 +31,11 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
-from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
-from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalize, PrepareAndFinalizeWithAllGather
+from vllm_ascend.distributed.eplb.tensor_ops import (
+    build_expert_replica_routing_table,
+    count_allgather_tokens,
+    make_allgather_mask,
+)
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 _EPLB_CLOSE_TIMEOUT_SECONDS = 300
@@ -114,18 +117,18 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         *,
         topk_ids: torch.Tensor,
         num_source_tokens: int,
-        is_sequence_parallel: bool,
-        prepare_finalize: PrepareAndFinalize,
+        is_sequence_parallel: bool = False,
+        all_gather_mask: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
-        """Record this layer's MRV2 load after FFN and before output finalization."""
+        """Record MRV2 load, constructing and gathering source eligibility when needed."""
         local_load = None
-        if _eplb_ops.use_allgather_eplb(True):
+        if all_gather_mask is not None:
             assert self.num_unpadded_tokens_tensors is not None and self.should_record_tensor is not None
             num_unpadded_tokens = self.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
             is_padding = self.allgather_source_is_padding
             if is_padding is None:
                 is_padding = getattr(get_forward_context(), "is_padding", None)
-            token_mask = _eplb_ops.make_allgather_mask(
+            token_mask = make_allgather_mask(
                 num_source_tokens,
                 num_unpadded_tokens,
                 self.should_record_tensor,
@@ -133,11 +136,8 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
                 tp_size=get_tensor_model_parallel_world_size() if is_sequence_parallel else 1,
                 tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
             )
-            assert isinstance(prepare_finalize, PrepareAndFinalizeWithAllGather)
-            token_mask = prepare_finalize.all_gather_eplb_mask(token_mask)
-            local_load = _eplb_ops.count_allgather_tokens(
-                topk_ids, token_mask, self.local_expert_start, self.local_expert_count
-            )
+            token_mask = all_gather_mask(token_mask)
+            local_load = count_allgather_tokens(topk_ids, token_mask, self.local_expert_start, self.local_expert_count)
             assert self.allgather_record_tensor is not None
             torch.maximum(
                 self.allgather_record_tensor,
@@ -174,7 +174,7 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         if logical_to_physical_map is None or logical_replica_count is None:
             raise RuntimeError("Cannot build the replica routing table before EPLB layer state is initialized.")
 
-        new_routing_table = _eplb_ops.build_expert_replica_routing_table(
+        new_routing_table = build_expert_replica_routing_table(
             logical_to_physical_map,
             logical_replica_count,
             get_ep_group().rank_in_group,
@@ -190,9 +190,7 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         else:
             self.expert_replica_routing_table = new_routing_table
         if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE:
-            common_table = _eplb_ops.build_expert_replica_routing_table(
-                logical_to_physical_map, logical_replica_count, ep_rank=0
-            )
+            common_table = build_expert_replica_routing_table(logical_to_physical_map, logical_replica_count, ep_rank=0)
             if self.allgather_expert_replica_routing_table is None:
                 self.allgather_expert_replica_routing_table = common_table
             else:
