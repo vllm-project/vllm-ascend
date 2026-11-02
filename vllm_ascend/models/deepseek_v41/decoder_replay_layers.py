@@ -88,32 +88,24 @@ def dsv41_decoder_replay_forward(
     pre_mix: torch.Tensor,
     positions: torch.Tensor,
     input_ids: torch.Tensor | None,
-    output_hidden_states: torch.Tensor,
-    output_pre_mix: torch.Tensor,
-    output_aux: torch.Tensor,
+    num_late_aux: int,
     layer_name: str,
-) -> None:
+) -> list[torch.Tensor]:
     """Run the decoder tail outside Dynamo's compiled model graph.
 
     The replay rows and attention context are mutable per-forward state. Resolve
     them only when this custom op executes so the compiler cannot specialize on
     the warmup value of ``AscendDecoderReplayLayers.rows``. During graph capture,
     ordinary tail operators remain in the graph; nested Ascend attention ops
-    keep their own capture boundaries.
+    keep their own capture boundaries. Return all outputs so eager and compiled
+    execution can use the same operator without caller-owned output buffers.
     """
     forward_context = get_forward_context()
     replay = forward_context.no_compile_layers[layer_name]
     outputs = replay(hidden_states, pre_mix, positions, input_ids)
-    output_hidden_states.copy_(outputs[0])
-    output_pre_mix.copy_(outputs[1])
-    aux_outputs = outputs[2:]
-    if len(aux_outputs) != output_aux.shape[0]:
-        raise RuntimeError(
-            f"Decoder replay returned {len(aux_outputs)} auxiliary outputs, "
-            f"but the compiled call reserved {output_aux.shape[0]}"
-        )
-    for index, output in enumerate(aux_outputs):
-        output_aux[index].copy_(output)
+    if len(outputs) - 2 != num_late_aux:
+        raise RuntimeError(f"Decoder replay returned {len(outputs) - 2} auxiliary outputs, expected {num_late_aux}")
+    return list(outputs)
 
 
 def dsv41_decoder_replay_forward_fake(
@@ -121,19 +113,21 @@ def dsv41_decoder_replay_forward_fake(
     pre_mix: torch.Tensor,
     positions: torch.Tensor,
     input_ids: torch.Tensor | None,
-    output_hidden_states: torch.Tensor,
-    output_pre_mix: torch.Tensor,
-    output_aux: torch.Tensor,
+    num_late_aux: int,
     layer_name: str,
-) -> None:
-    """Fake implementation for the in-place replay custom op."""
-    return None
+) -> list[torch.Tensor]:
+    """Fake outputs for decoder replay, including configured auxiliary states."""
+    return [
+        torch.empty_like(hidden_states),
+        torch.empty_like(pre_mix),
+        *(hidden_states.new_empty((positions.shape[0], hidden_states.shape[-1])) for _ in range(num_late_aux)),
+    ]
 
 
 direct_register_custom_op(
     op_name="dsv41_decoder_replay_forward",
     op_func=dsv41_decoder_replay_forward,
-    mutates_args=["output_hidden_states", "output_pre_mix", "output_aux"],
+    mutates_args=[],
     fake_impl=dsv41_decoder_replay_forward_fake,
     dispatch_key="PrivateUse1",
 )
