@@ -38,6 +38,9 @@ from tests.e2e.pull_request.rlhf.weight_transfer.utils import (
 )
 
 INFERENCE_WORLD_SIZE = 2
+# One trainer producer per inference card. This Gloo group aggregates IPC
+# handles; it is distinct from the inference workers' communication groups.
+TRAINER_WORLD_SIZE = INFERENCE_WORLD_SIZE
 # The trainer is co-located with the server on the same chip, so both models
 # have to fit; keep the budget low enough to leave room for the payload.
 GPU_MEMORY_UTILIZATION = 0.45
@@ -46,26 +49,28 @@ GPU_MEMORY_UTILIZATION = 0.45
 INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
 
 
-def _ipc_trainer_peer(_local_rank: int, case: WeightUpdateModelCase, packed: bool, server_url: str, rendezvous: str):
+def _ipc_trainer_peer(local_rank: int, case: WeightUpdateModelCase, packed: bool, server_url: str, rendezvous: str):
     from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
     from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 
     from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import NPUIPCTrainerInitInfo
 
-    torch.npu.set_device(INFERENCE_DEVICE_INDEX + 1)
-    source = FixedRandomWeightSource(case, torch.device("npu", INFERENCE_DEVICE_INDEX + 1))
+    rank = local_rank + 1  # Rank 0 runs in the parent; spawn supplies peer-local ranks.
+    device_index = INFERENCE_DEVICE_INDEX + rank
+    torch.npu.set_device(device_index)
+    source = FixedRandomWeightSource(case, torch.device("npu", device_index))
     dist.init_process_group(
         "gloo",
         init_method=rendezvous,
-        rank=1,
-        world_size=INFERENCE_WORLD_SIZE,
+        rank=rank,
+        world_size=TRAINER_WORLD_SIZE,
         timeout=timedelta(seconds=UPDATE_TIMEOUT),
     )
     try:
         register_engines_once()
         engine = WeightTransferTrainerFactory.trainer_init(
             NPUIPCTrainerInitInfo(
-                rank=1,
+                rank=rank,
                 packed=packed,
                 packed_buffer_size_bytes=packed_buffer_size_for(source),
             ),
@@ -120,7 +125,7 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
         peer = mp.spawn(
             _ipc_trainer_peer,
             args=(case, packed, server.url_root, rendezvous),
-            nprocs=1,
+            nprocs=TRAINER_WORLD_SIZE - 1,
             join=False,
         )
         engine = None
@@ -129,7 +134,7 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
                 "gloo",
                 init_method=rendezvous,
                 rank=0,
-                world_size=INFERENCE_WORLD_SIZE,
+                world_size=TRAINER_WORLD_SIZE,
                 timeout=timedelta(seconds=UPDATE_TIMEOUT),
             )
             register_engines_once()

@@ -4,9 +4,10 @@
 
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 
-from tests.e2e.pull_request.rlhf.weight_transfer.models.minimax import MINIMAX_M3_CASE
+from tests.e2e.pull_request.rlhf.weight_transfer.models.minimax import MINIMAX_M3_CASE, minimax_m3_checkpoint_name
 from tests.ut.distributed.weight_transfer.weight_transfer_test_helpers import checkpoint_source, router_meta_model
 
 
@@ -49,3 +50,16 @@ def test_minimax_checkpoint_source_splits_fused_projections():
         },
     }
     assert actual == {name: ((6, 16), torch.bfloat16) for name in expected_names}
+
+
+@pytest.mark.parametrize("module", ["q_proj", "k_proj", "q_norm", "k_norm"])
+def test_minimax_indexer_mapping_accepts_published_weights(module):
+    prefix = "language_model.model.layers.3.self_attn"
+    assert minimax_m3_checkpoint_name(f"{prefix}.indexer.{module}.weight") == f"{prefix}.index_{module}.weight"
+
+
+@pytest.mark.parametrize("suffix", ["new_proj.weight", "q_proj.nested.weight", "q_norm.bias", "nested.q_proj.weight"])
+def test_minimax_indexer_mapping_rejects_unknown_state(suffix):
+    name = f"language_model.model.layers.3.self_attn.indexer.{suffix}"
+    with pytest.raises(ValueError, match="Unsupported MiniMax-M3 indexer parameter"):
+        minimax_m3_checkpoint_name(name)

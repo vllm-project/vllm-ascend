@@ -356,6 +356,9 @@ def _common_serve_args(
         str(tensor_parallel_size),
         "--port",
         str(port),
+        # Independent of case.trust_remote_code, which controls HF meta-model
+        # enumeration. Both vLLM servers allow repository config/tokenizer code;
+        # the case's checkpoint adapter supplies the runtime loader's names.
         "--trust-remote-code",
         "--additional-config",
         '{"weight_nz_mode": 0}',

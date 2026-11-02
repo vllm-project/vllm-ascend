@@ -20,7 +20,8 @@ class WeightUpdateModelCase:
     checkpoint_model_prefix: str | None = None
     checkpoint_name_map: Callable[[str], str] | None = None
     expert_intermediate_size: int | None = None
-    # Options for enumerating native HF state in checkpoint format.
+    # HF config/meta-model enumeration only; vLLM server loading is configured
+    # independently in _common_serve_args.
     trust_remote_code: bool = True
     split_fused_mlp: bool = False
     extra_server_args: tuple[str, ...] = ()
@@ -42,7 +43,7 @@ class WeightUpdateModelCase:
         # DeepSeek-V4's block-size tables are keyed by the user-facing 32/64/128,
         # so the rewritten value (8/4/2) raises ``KeyError`` on every lookup. An
         # out-of-process worker gets its own config copy, taken before that
-        # rewrite, and the single-worker topology of these cases is unchanged.
+        # rewrite. This applies to both TP1 and multi-worker TP2 servers.
         return [
             "--hf-overrides",
             json.dumps(self.hf_overrides),

@@ -33,6 +33,10 @@ def minimax_m3_checkpoint_name(name: str) -> str:
 
     m = re.match(r"^(.*\.self_attn)\.indexer\.(.+)$", name)
     if m:
+        # Only the published direct projection/norm weights have index_* names.
+        # Reject new/nested HF state here rather than emitting a guessed key.
+        if re.fullmatch(r"(?:q_proj|k_proj|q_norm|k_norm)\.weight", m.group(2)) is None:
+            raise ValueError(f"Unsupported MiniMax-M3 indexer parameter: {name}")
         return f"{m.group(1)}.index_{m.group(2)}"
 
     m = re.match(r"^(.*)\.mlp\.gate\.e_score_correction_bias$", name)
