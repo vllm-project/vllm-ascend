@@ -55,6 +55,16 @@ class AscendDeepseekV41ForCausalLM(
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     language_model_cls = AscendDeepseekV41LLMForCausalLM
 
+    @property
+    def filter_unused_checkpoint_weights(self) -> bool:
+        return self.language_model.filter_unused_checkpoint_weights
+
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return self.language_model.is_unused_checkpoint_weight(name)
+
+    def close_shared_engram(self) -> None:
+        self.language_model.close_shared_engram()
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         del i

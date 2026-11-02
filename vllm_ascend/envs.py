@@ -29,6 +29,9 @@ from typing import Any
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Optional HIXL device listen port for the shared Engram owner. Valid range
+    # is 1-65535; unset uses the HIXL default. This value is not sensitive.
+    "VLLM_ASCEND_ENGRAM_HIXL_LISTEN_PORT": lambda: os.getenv("VLLM_ASCEND_ENGRAM_HIXL_LISTEN_PORT"),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

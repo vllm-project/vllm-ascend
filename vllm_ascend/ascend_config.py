@@ -398,6 +398,25 @@ class RlConfig:
 
 
 @config
+class SharedEngramRdmaConfig:
+    """A2 immutable table owner and per-rank receive capacity."""
+
+    model_config = ConfigDict(extra="forbid")
+    endpoint: str
+    capacity: int = 65536
+    library_path: str | None = None
+
+    @model_validator(mode="after")
+    def _validate(self):
+        host, separator, port = self.endpoint.rpartition(":")
+        if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
+            raise ValueError("shared Engram endpoint must be host:port")
+        if not 0 < self.capacity <= 65536:
+            raise ValueError("shared Engram capacity must be in [1, 65536]")
+        return self
+
+
+@config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
 
@@ -567,6 +586,7 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    shared_engram_rdma: SharedEngramRdmaConfig | None = None
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.

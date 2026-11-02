@@ -452,6 +452,10 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
+        model = getattr(getattr(self, "model_runner", None), "model", None)
+        close_engram = getattr(model, "close_shared_engram", None)
+        if callable(close_engram):
+            close_engram()
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
         if isinstance(state, AscendEplbState):
             state.close()

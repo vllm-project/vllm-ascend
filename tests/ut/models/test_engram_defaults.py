@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm_ascend.ascend_config import AscendConfig
+from vllm_ascend.ascend_config import AscendConfig, SharedEngramRdmaConfig
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
@@ -18,3 +18,15 @@ def test_engram_overlap_hardware_default_and_explicit_override(monkeypatch, devi
     config = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False), **kwargs)
     expected = device == AscendDeviceType.A5 if explicit is None else explicit
     assert config.multistream_engram_overlap is expected
+
+
+@pytest.mark.parametrize("endpoint", ["missing-port", "host:0", "host:65536", ":1234"])
+def test_remote_engram_rejects_invalid_endpoint(endpoint):
+    with pytest.raises(ValueError, match="host:port"):
+        SharedEngramRdmaConfig(endpoint=endpoint)
+
+
+def test_remote_engram_is_opt_in():
+    config = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False))
+    assert config.shared_engram_rdma is None
+    assert SharedEngramRdmaConfig(endpoint="127.0.0.1:29500").capacity == 65536

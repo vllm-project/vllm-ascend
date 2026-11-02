@@ -30,6 +30,15 @@ from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgr
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
 
 
+def test_remote_host_offload_close_retires_reader():
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    reader = Mock()
+    table._remote_reader = reader
+    table.close_host_offload()
+    reader.close.assert_called_once_with()
+
+
 @pytest.mark.parametrize("tp", [1, 2, 4])
 @pytest.mark.parametrize("dp", [1, 2])
 @pytest.mark.parametrize("tokens", [0, 3])
