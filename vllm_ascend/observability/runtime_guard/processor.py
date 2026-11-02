@@ -609,6 +609,13 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
 
         if not is_async_output_rank():
             return
+        # Logits for top1/chosen exist only on the last pipeline stage.
+        # A missing PP group means this process is the only stage.
+        try:
+            if not get_pp_group().is_last_rank:
+                return
+        except Exception:
+            pass
         import torch
 
         from vllm_ascend.observability.runtime_guard.detector.rare_chars import device_chosen_token_ids
@@ -683,32 +690,21 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         if event is not None:
             event.synchronize()
         del hold
+        req_ids = [str(rid) for rid in (getattr(output, "req_ids", None) or []) if rid]
+        if not req_ids:
+            return
         try:
-            rows = cpu.tolist()
+            from vllm_ascend.observability.runtime_guard.detector.rare_chars import pack_rare_step
+
+            token_ids, top1, chosen = pack_rare_step(cpu, getattr(output, "sampled_token_ids", None), len(req_ids))
         except Exception:
             logger.exception("[runtime_guard: rare_chars] pair D2H materialize failed")
             return
-        req_ids = [str(rid) for rid in (getattr(output, "req_ids", None) or []) if rid]
-        sampled = getattr(output, "sampled_token_ids", None) or []
-        n = min(len(rows), len(req_ids), len(sampled))
-        token_ids: list[int] = []
-        top1: list[float] = []
-        chosen: list[float] = []
-        kept_ids: list[str] = []
-        for i in range(n):
-            pair = rows[i]
-            if not isinstance(pair, (list, tuple)) or len(pair) < 2:
-                continue
-            step_ids = sampled[i] if isinstance(sampled[i], (list, tuple)) else [sampled[i]]
-            valid = [int(t) for t in step_ids if int(t) >= 0]
-            if not valid:
-                continue
-            kept_ids.append(req_ids[i])
-            token_ids.append(valid[-1])
-            top1.append(float(pair[0]))
-            chosen.append(float(pair[1]))
-        if kept_ids:
-            self._enqueue_rare_chars_feed(kept_ids, token_ids, top1, chosen)
+        n = int(token_ids.shape[0])
+        if n <= 0:
+            return
+        # Every live request is fed. There is no per-step budget and no skip interval.
+        self._enqueue_rare_chars_feed(req_ids[:n], token_ids, top1, chosen)
 
     def _enqueue_rare_chars_feed(
         self,

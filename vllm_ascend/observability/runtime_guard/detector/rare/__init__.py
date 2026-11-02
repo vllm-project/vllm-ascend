@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 
 from .rare import RareDetector
+from .rare_batch import RareRowBatch
 from .result import Result
 
 PKG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +40,7 @@ __all__ = [
     "CONFIG_RC4",
     "PKG_DIR",
     "RareDetector",
+    "RareRowBatch",
     "Result",
     "TABLES_DIR",
     "THINK_END",
