@@ -23,6 +23,7 @@ from vllm.config import (
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
+from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetadata
 from vllm_ascend.worker.v2.spec_decode.eagle import (
     speculator as eagle_speculator_module,
 )
@@ -217,6 +218,67 @@ def test_mtp_draft_config_keeps_target_pcp_topology(eplb_worker_config):
     assert draft_config.parallel_config.enable_eplb
 
 
+def _mla_pcp_decode_metadata(num_tokens, query_ends):
+    num_reqs = len(query_ends)
+    seq_lens = torch.tensor([10] + [0] * (num_reqs - 1), dtype=torch.int32)
+    block_tables = torch.zeros(num_reqs, 1, dtype=torch.int32)
+    decode = AscendMLADecodeMetadata(
+        input_positions=torch.arange(num_tokens),
+        block_table=block_tables,
+        seq_lens=seq_lens,
+        max_seq_lens=10,
+        seq_lens_list=seq_lens.tolist(),
+        actual_seq_lengths_q=query_ends,
+    )
+    return AscendMLAMetadata(
+        num_actual_tokens=num_tokens,
+        num_input_tokens=query_ends[-1],
+        num_decode_tokens=num_tokens,
+        num_decodes=num_reqs,
+        num_prefills=0,
+        slot_mapping=torch.full((2 * query_ends[-1],), -1, dtype=torch.int32),
+        query_start_loc=torch.tensor([0] + query_ends),
+        seq_lens=seq_lens,
+        seq_lens_cpu=seq_lens,
+        block_tables=block_tables,
+        decode=decode,
+    )
+
+
+@pytest.mark.parametrize(
+    "num_tokens,query_ends,expected",
+    [(4, [4, 8], [4, 4]), (0, [4, 8], [0, 0]), (1, [1, 2, 3, 4], [1, 1, 1, 1]), (8, [4, 8], [4, 8])],
+    ids=["uneven-rank", "empty-rank", "single-token", "balanced-rank"],
+)
+def test_pcp_draft_mla_query_lengths_match_real_decode_rows(num_tokens, query_ends, expected):
+    target = _mla_pcp_decode_metadata(num_tokens, query_ends)
+    target_metadata = {"mtp": target}
+    draft = AscendMTPSpeculator._get_pcp_draft_prefill_metadata(target_metadata)["mtp"]
+
+    # This is the FIA TND contract that failed on PCP1 with Q=4, offsets=[4, 8].
+    assert draft.decode.actual_seq_lengths_q == expected
+    assert draft.decode.actual_seq_lengths_q[-1] == draft.num_decode_tokens
+    assert draft.num_actual_tokens == num_tokens
+    assert target.decode.actual_seq_lengths_q == query_ends
+    assert target_metadata["mtp"] is target
+    assert draft.slot_mapping is target.slot_mapping
+    assert draft.decode.input_positions is target.decode.input_positions
+    assert draft.decode.seq_lens_list is target.decode.seq_lens_list
+    if expected != query_ends:
+        assert draft is not target and draft.decode is not target.decode
+    else:
+        assert draft is target
+
+
+def test_pcp_draft_metadata_preserves_other_attention_paths():
+    prefill_only = _mla_pcp_decode_metadata(4, [4])
+    prefill_only.decode = None
+    other_backend = SimpleNamespace(num_decode_tokens=4, decode=SimpleNamespace(actual_seq_lengths_q=[4, 8]))
+    metadata = {"prefill": prefill_only, "other": other_backend, "missing": None}
+    assert AscendMTPSpeculator._get_pcp_draft_prefill_metadata(metadata) == metadata
+    assert other_backend.decode.actual_seq_lengths_q == [4, 8]
+
+
 @pytest.mark.parametrize("pcp_enabled", [False, True])
 @pytest.mark.parametrize("mismatch", ["tokens", "uniform"])
 @pytest.mark.parametrize("dummy_run", [False, True])
@@ -224,6 +286,7 @@ def test_propose_renegotiates_pcp_draft_dp_sync(pcp_enabled, mismatch, dummy_run
     speculator = object.__new__(AscendMTPSpeculator)
     speculator.pcp_manager = object() if pcp_enabled else None
     input_batch = object()
+    attn_metadata = {"mtp": _mla_pcp_decode_metadata(4, [4, 8])}
     dp_sync = DPSyncState(num_tokens_across_dp=torch.tensor([64, 64]), uniform_token_count=4, eager=True, num_reqs=16)
 
     def parent_propose(*args, **kwargs):
@@ -247,10 +310,13 @@ def test_propose_renegotiates_pcp_draft_dp_sync(pcp_enabled, mismatch, dummy_run
         patch.object(speculator_module, "torch_gather_wrapper", return_value=nullcontext()),
         patch.object(MTPSpeculator, "propose", side_effect=parent_propose) as parent,
     ):
-        speculator.propose(input_batch, *[MagicMock() for _ in range(10)], dp_sync, dummy_run=dummy_run)
+        speculator.propose(input_batch, attn_metadata, *[MagicMock() for _ in range(9)], dp_sync, dummy_run=dummy_run)
     assert parent.call_args.args[0] is input_batch
     assert parent.call_args.args[11] is (None if pcp_enabled else dp_sync)
     assert speculator.input_batch is input_batch
+    passed_metadata = parent.call_args.args[1]["mtp"]
+    assert passed_metadata.decode.actual_seq_lengths_q == ([4, 4] if pcp_enabled else [4, 8])
+    assert attn_metadata["mtp"].decode.actual_seq_lengths_q == [4, 8]
 
 
 def test_capture_follows_upstream_contract() -> None:

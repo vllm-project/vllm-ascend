@@ -45,7 +45,7 @@ from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_pa
 from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
@@ -272,6 +272,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # PCP can change the draft prefill token layout and uniform decode
         # shape. Negotiate its DP agreement instead of reusing the target's.
         sync_state = None if self.pcp_manager is not None else dp_sync_state
+        if self.pcp_manager is not None:
+            attn_metadata = self._get_pcp_draft_prefill_metadata(attn_metadata)
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with (
@@ -297,6 +299,30 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 is_profile=is_profile,
                 num_speculative_tokens=num_speculative_tokens,
             )
+
+    @staticmethod
+    def _get_pcp_draft_prefill_metadata(attn_metadata: dict[str, Any]) -> dict[str, Any]:
+        """Keep eager draft MLA queries within the target's real decode rows.
+
+        FULL target graphs include query offsets for padded PCP requests. The
+        draft prefill runs outside FULL graphs and MLA slices its query to
+        num_decode_tokens, so padding requests must have zero query length.
+        Copy only the changed metadata: target graph updates still need the
+        original padded offsets, while KV slots and sequence lengths stay shared.
+        """
+        draft_metadata = attn_metadata.copy()
+        for name, metadata in attn_metadata.items():
+            if not isinstance(metadata, AscendMLAMetadata) or metadata.decode is None:
+                continue
+            query_ends = metadata.decode.actual_seq_lengths_q
+            if not query_ends or query_ends[-1] <= metadata.num_decode_tokens:
+                continue
+            draft_metadata[name] = copy(metadata)
+            draft_metadata[name].decode = copy(metadata.decode)
+            draft_metadata[name].decode.actual_seq_lengths_q = [
+                min(end, metadata.num_decode_tokens) for end in query_ends
+            ]
+        return draft_metadata
 
     def set_attn(
         self,
