@@ -762,3 +762,28 @@ def test_rope0_python_quant_cache_attention_pipeline(dtype):
     assert torch.count_nonzero(actual[valid_query_tokens:]) == 0
     atol, rtol = (BF16_ATOL, BF16_RTOL) if dtype == torch.bfloat16 else (FP16_ATOL, FP16_RTOL)
     torch.testing.assert_close(actual.float(), expected.float(), atol=atol, rtol=rtol)
+
+
+def _make_tnd_tail_inputs(capacity, actual=36, nseq=6, per_seq=6, seed=1006):
+    """TND NoPE (rope_dim=0) inputs: `capacity` query rows, only `actual` valid."""
+    generator = torch.Generator().manual_seed(seed)
+    heads, dim, tile, topk = 64, 512, 128, 1024
+    block_size, block_num = 128, 32
+    q = torch.randn((capacity, heads, dim), generator=generator, dtype=torch.float32).to(torch.bfloat16)
+    q[actual:] = 0
+    q = q.npu()
+    vals = torch.randint(-5, 10, (block_num, block_size, 1, dim), generator=generator, dtype=torch.int8)
+    scales = torch.rand((block_num, block_size, 1, dim // tile), generator=generator, dtype=torch.float32).uniform_(
+        0.1, 1.0
+    )
+    kv = torch.cat((vals, scales.contiguous().view(torch.int8)), dim=-1).contiguous().npu()
+    idx = torch.randint(0, block_num * block_size, (capacity, 1, topk), generator=generator, dtype=torch.int32)
+    idx[actual:] = 0
+    idx = idx.npu()
+    bt = torch.arange(block_num, dtype=torch.int32).reshape(1, block_num).expand(nseq, -1).contiguous().npu()
+    aq = torch.tensor([per_seq * (i + 1) for i in range(nseq)], dtype=torch.int32).npu()
+    akv = torch.full((nseq,), block_num * block_size, dtype=torch.int32).npu()
+    return q, kv, idx, bt, aq, akv
+
+
+@torch.inference_mode()
