@@ -8,9 +8,10 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
-from modelscope import snapshot_download
+from modelscope import snapshot_download  # type: ignore[import-untyped]
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
@@ -39,7 +40,7 @@ PROMPTS = (
 def test_deepseek_distill_replay_parity(model_name, capfd, record_property, tmp_path):
     # Keep the two engines sequential so their weights/KV caches never coexist.
     # Prefix caching is disabled so every request exercises a fresh prefill.
-    common = dict(
+    common: dict[str, Any] = dict(
         dtype="float16",
         tensor_parallel_size=1,
         block_size=128,
