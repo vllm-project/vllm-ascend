@@ -1267,7 +1267,13 @@ class NPUModelRunner(GPUModelRunner):
                 "GlmMoeDsaForCausalLM",
             )
             or spec.draft_model_config is None
-            or "Qwen3DSparkModel" not in (spec.draft_model_config.architectures or ())
+            or (
+                "Qwen3DSparkModel" not in (spec.draft_model_config.architectures or ())
+                and (
+                    "Glm5DSparkForCausalLM" not in (spec.draft_model_config.architectures or ())
+                    or not getattr(self.speculator, "use_flashmla", False)
+                )
+            )
         ):
             return False
 
@@ -1278,7 +1284,10 @@ class NPUModelRunner(GPUModelRunner):
         # Keep parallel, transfer, offload and adaptive paths on host counts.
         return (
             bool(draft_backends)
-            and all(backend is AscendFlashAttentionBackend for backend in draft_backends.values())
+            and (
+                all(backend is AscendFlashAttentionBackend for backend in draft_backends.values())
+                or getattr(self.speculator, "use_flashmla", False)
+            )
             and parallel_config.pipeline_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
             and parallel_config.decode_context_parallel_size == 1

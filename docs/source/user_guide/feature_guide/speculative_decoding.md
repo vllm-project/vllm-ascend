@@ -486,16 +486,29 @@ The following code configures vLLM Ascend to use speculative decoding where prop
 
 On 950DT Products with Model Runner V2, GLM (`GlmMoeDsaForCausalLM`) targets paired with
 `Qwen3DSparkModel` GQA drafts can use the device-length CANN FlashAttn backend.
-This requires FP16/BF16 queries and unquantized draft KV cache. MLA drafts keep
-their existing backend. When all draft layers use FlashAttn, the runner can skip
-the speculative CPU length synchronization; PP, PCP, DCP, KV transfer, sparse
-KV offload, and adaptive verification retain their existing synchronization path.
+This requires FP16/BF16 queries and unquantized draft KV cache. When all draft
+layers use FlashAttn, the runner can skip the speculative CPU length
+synchronization; PP, PCP, DCP, KV transfer, sparse KV offload, and adaptive
+verification retain their existing synchronization path.
 
-For draft heads of size 192, the backend zero-pads Q/K/V to 256 for the CANN
+For GQA draft heads of size 192, the backend zero-pads Q/K/V to 256 for the CANN
 kernel, keeps the original attention scale, and trims the output back to 192.
 Model weights and logical head sizes are unchanged. These draft KV cache pages
 use one third more storage than unpadded 192-wide pages, and padding adds work;
 this backend does not guarantee higher speculative acceptance rates.
+
+GLM also supports DSpark with MLA drafts (`Glm5DSparkForCausalLM`), which can
+use the device-length FlashMLA backend on the same hardware and runner.
+This requires FP16/BF16 queries and unquantized KV cache with matching dtype.
+When the draft selects FlashMLA, the runner can skip speculative CPU length
+synchronization under the same conditions as the GQA path; FIA fallback retains
+exact CPU length synchronization.
+
+FlashMLA currently requires local Q heads and `local Q heads * DCP size` in
+`{8, 12, 64, 96}`, with latent/RoPE dimensions of 512/64. The 64-head GLM draft
+therefore uses FIA at TP2/TP4. KV NZ and PCP are unsupported. When the target
+KV cache is FP8, set `"kv_cache_dtype": "bfloat16"` in `--speculative-config`
+for a BF16 draft.
 
 !!! warning
 
