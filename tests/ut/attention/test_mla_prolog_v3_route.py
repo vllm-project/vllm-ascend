@@ -159,18 +159,96 @@ def test_int8_projections_split_before_nz_conversion(scheme_type, managed):
         torch.testing.assert_close(layer.weight, original_weight)
 
 
-def test_mxfp8_draft_writer_defers_nz_with_mlapo_disabled():
+def _make_mxfp8_draft_impl() -> AscendMLAImpl:
     impl = _make_impl()
+    impl.is_draft_model = True
     impl.enable_mlapo = False
     impl.support_fp8_attention = True
+    impl._prolog_v3_weights = None
     scheme = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
-    for layer in (impl.fused_qkv_a_proj, impl.q_proj):
+    scheme.group_size = 32
+    projections = []
+    for output_size, input_size in (
+        (impl.q_lora_rank + FUSED_DIM, impl.q_lora_rank),
+        (impl.num_heads * impl.qk_head_dim, impl.q_lora_rank),
+    ):
+        layer = nn.Module()
+        layer.input_size = 7168
         layer.quant_method = SimpleNamespace(quant_method=scheme)
+        layer.weight = nn.Parameter(torch.randn(output_size, input_size).to(torch.float8_e4m3fn), False)
+        layer.weight_scale = nn.Parameter(
+            torch.ones(output_size, input_size // scheme.group_size, dtype=torch.uint8), False
+        )
+        projections.append(layer)
+    impl.fused_qkv_a_proj, impl.q_proj = projections
+    return impl
+
+
+@pytest.mark.parametrize(
+    "overrides,managed",
+    [
+        ({}, True),
+        ({"enable_mlapo": True}, True),
+        ({"fa_quant_layer": True}, True),
+        ({"use_mla_rope": False}, False),
+        ({"support_fp8_attention": False}, False),
+        ({"enable_kv_nz": True}, False),
+        ({"dtype": torch.float16}, False),
+    ],
+)
+def test_mxfp8_projection_nz_management_matches_prolog_eligibility(overrides, managed):
+    impl = _make_mxfp8_draft_impl()
+    for name, value in overrides.items():
+        setattr(impl, name, value)
 
     mark_fused_preprocess_weights(impl)
 
-    assert impl.fused_qkv_a_proj._fused_preprocess_managed
-    assert impl.q_proj._fused_preprocess_managed
+    assert impl.fused_qkv_a_proj._fused_preprocess_managed is managed
+    assert impl.q_proj._fused_preprocess_managed is managed
+
+
+@pytest.mark.parametrize("scheme_type", [None, AscendW8A8LinearMethod, AscendW8A8DynamicLinearMethod])
+def test_strided_writer_extends_nz_management_to_int8(scheme_type):
+    impl = _make_impl()
+    impl.enable_mlapo = False
+    impl.support_fp8_attention = True
+    scheme = scheme_type.__new__(scheme_type) if scheme_type is not None else None
+    for layer in (impl.fused_qkv_a_proj, impl.q_proj):
+        layer.quant_method = SimpleNamespace(quant_method=scheme)
+
+    assert impl.supports_prolog_v3_writer()
+    mark_fused_preprocess_weights(impl)
+
+    assert impl.fused_qkv_a_proj._fused_preprocess_managed is (scheme_type is not None)
+    assert impl.q_proj._fused_preprocess_managed is (scheme_type is not None)
+
+
+def test_mxfp8_draft_splits_prolog_weights_before_nz_conversion():
+    impl = _make_mxfp8_draft_impl()
+    mark_fused_preprocess_weights(impl)
+    scheme = impl.fused_qkv_a_proj.quant_method.quant_method
+    with (
+        patch("vllm_ascend.utils._should_trans_nz", return_value=True),
+        patch.object(torch_npu, "npu_format_cast", side_effect=lambda tensor, fmt, **kwargs: tensor) as cast,
+    ):
+        for layer in (impl.fused_qkv_a_proj, impl.q_proj):
+            scheme.process_weights_after_loading(layer)
+        cast.assert_not_called()
+
+        prepared = impl._prepare_prolog_v3_weights()
+
+    assert not impl.enable_mlapo
+    assert cast.call_count == 3
+    assert [call.args[0].shape for call in cast.call_args_list] == [
+        (impl.q_lora_rank, impl.q_lora_rank),
+        (impl.q_lora_rank, FUSED_DIM),
+        (impl.q_lora_rank, impl.num_heads * impl.qk_head_dim),
+    ]
+    fused_weight = impl.fused_qkv_a_proj.weight.data
+    assert torch.equal(prepared["weight_dq"].view(torch.uint8), fused_weight[:, : impl.q_lora_rank].view(torch.uint8))
+    assert torch.equal(
+        prepared["weight_dkv_kr"].view(torch.uint8), fused_weight[:, impl.q_lora_rank :].view(torch.uint8)
+    )
 
 
 def _construct_impl(pcp_size: int, dcp_size: int) -> AscendMLAImpl:

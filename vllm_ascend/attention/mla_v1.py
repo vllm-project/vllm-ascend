@@ -1270,6 +1270,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         if type(quant_method) in (AscendW8A8LinearMethod, AscendW8A8DynamicLinearMethod):
             if self.supports_prolog_v3_writer():
                 return PreprocessType.PROLOG_V3
+        # Strided-cache PROLOG_V3 also runs for MXFP8 drafts with MLAPO disabled.
         elif (
             self.support_fp8_attention
             and isinstance(quant_method, AscendW8A8MXFP8DynamicLinearMethod)

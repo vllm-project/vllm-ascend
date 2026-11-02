@@ -1,4 +1,4 @@
 pr: 20689
 entries:
   - category: bugfix
-    text: Defer NZ conversion of INT8 MLA projection weights until after Q/KV splitting for PROLOG_V3 writers.
+    text: Defer NZ conversion of MXFP8 draft and INT8 MLA projection weights until after Q/KV splitting for PROLOG_V3 writers.
