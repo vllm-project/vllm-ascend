@@ -37,7 +37,7 @@ def _exercise(rank, port):
     try:
         baseline = torch.full((16,), rank + 1, device=f"npu:{rank}", dtype=torch.float32)
         torch.testing.assert_close(owner.root.all_reduce(baseline), torch.full_like(baseline, 10))
-        handles = {}
+        handles: dict[int, int] = {}
         for size in (2, 3, 2, 3):
             group = owner.child(size)
             owner.barrier()

@@ -37,7 +37,14 @@ class TestPlacement(unittest.TestCase):
             replica_donors(maps, 2)
 
     def test_bad_slots_shapes_and_empty(self):
-        for maps in ([], [[]], [[[0], [0], [0, 1]]], [[[0, 0], [0, 1], [0, 1]]], [[[0, -2]] * 3]):
+        invalid_maps: list[list[list[list[int]]]] = [
+            [],
+            [[]],
+            [[[0], [0], [0, 1]]],
+            [[[0, 0], [0, 1], [0, 1]]],
+            [[[0, -2]] * 3],
+        ]
+        for maps in invalid_maps:
             with self.subTest(maps=maps), self.assertRaises(ValueError):
                 replica_donors(maps, 2)
 
