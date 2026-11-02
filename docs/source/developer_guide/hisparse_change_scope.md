@@ -7,12 +7,20 @@ Rebased onto Ascend main `24a76e84394ae3427195e3715fc08e90769d398c`.
 The paired common vLLM HiSparse interface remains a prerequisite.
 Historical integration runs do not qualify the rebased head.
 
-The complete local working-version delta is also available as a non-installed
+The retained local experimental sources are also available as a non-installed
 [experimental review snapshot](../../../benchmarks/hisparse/experimental/20261031/README.md).
-Its manifest lists every source path and hash. The exclusions below refer to the
+Its manifest lists every retained source path and hash, plus original hashes for
+files edited during cleanup. The exclusions below refer to the
 active backend, not absence from that review snapshot. Frozen-source lint/test
 exclusions preserve source bytes and prevent unrelated historical tests from
 being collected as current-head tests; they do not establish a validation pass.
+
+The unused custom BF16 Attention implementation, native registration and its
+dedicated tests were removed from the snapshot on 2026-11-02. The active backend
+already uses the existing SFA operator. Archived BF16 dispatch now also uses its
+existing SFA bridge; C8 dispatch and shared layout helper definitions are unchanged.
+The retained snapshot has 150 payload files. This cleanup changes no installed
+backend or existing Attention kernel and makes no new performance claim.
 
 ## Operator boundary
 

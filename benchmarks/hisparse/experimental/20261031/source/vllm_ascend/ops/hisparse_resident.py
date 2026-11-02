@@ -9,7 +9,7 @@ from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import tl, triton
 from vllm_ascend.attention.hisparse_resident_state import ResidentForwardState, eligible_resident_forward
-from vllm_ascend.ops.hisparse_direct import packed_cache_storage
+from vllm_ascend.ops.hisparse_layout import packed_cache_storage
 
 
 @triton.jit

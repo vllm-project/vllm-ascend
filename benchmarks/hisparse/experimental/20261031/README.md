@@ -1,23 +1,33 @@
-# HiSparse 完整工作版本审阅快照
+# HiSparse 工作源码审阅快照
 
-按用户要求，将当前本地 HiSparse 工作版本与待验证改动一并放入 #19109，便于查看全部实现。
-这里保存本任务的全部集成差异源码、测试、native 构建支持及待验证 Q-prepack overlay，
-不是未修改依赖文件的完整仓库镜像。每个文件的 SHA256、来源及必要性分类见 `manifest.json`。
+这里保留经过范围筛选的 HiSparse 集成差异源码、测试、native 构建支持及待验证 overlay。
+2026-11-02 移除了正式 backend 未使用的自定义 BF16 Attention 核心、专用绑定和测试，
+剩余 **150 个 payload 文件**。每个文件的 SHA256、来源及必要性分类见 `manifest.json`。
+
+原完整工作版本仍可从提交
+[`caed56ef4`](https://github.com/zhenwenqi2024/vllm-ascend/tree/caed56ef4fb417491ef7b8667a045dc7aa4c8241/benchmarks/hisparse/experimental/20261031)
+查阅，不再将未使用的 Attention 实现保留在本功能 PR 的 diff 中。
 
 ## 目录与状态
 
 | 目录 | 内容 | 验证边界 |
 | --- | --- | --- |
 | `source/vllm_ascend/` | 当前工作版本的 HiSparse、C8、Host DMA、P/D、lazy MTP、Resident 更新、视图复用及兼容依赖 | 包含未完成 NPU 验证的代码，不能将整组标为通过 |
-| `source/csrc/` | AscendC、Host 注册、native DMA、resolver 和旧 BF16 Attention 支持源码 | 不含编译产物；各分支历史验证范围不同 |
+| `source/csrc/` | Host 注册、native DMA 和 resolver 支持源码 | 不含编译产物或自定义 Attention 核心；各分支历史验证范围不同 |
 | `source/tests/` | 集成工作分支对应测试 | 不是当前 rebased main 的自动测试；配套依赖和硬件要求仍适用 |
 | `source/benchmarks/` | 历史 primitive qualification 工具 | 不等于模型精度或性能验收 |
 | `candidates/follower-query-prepack-v1/` | 提前准备 follower 当前 Q，保留 KV-ready 等待的候选 | 48 项 CPU proxy 合同通过；未做 NPU graph/输出和模型性能验证 |
 | `candidates/mtp-group-prefetch-a6-v1/` | 将你的 verification 整组预取移到当前冻结 Ascend adapter，仅放宽 gather 门禁 | 54 项 CPU 调用顺序/策略检查通过；当前组合未做 NPU/模型测试 |
 
 `source` 保存的是实现文件，不是补丁文件：它含该版本的完整文件内容，方便逐行查看。
-106 个模块来自实际冻结运行树，其他文件来自对应集成分支的测试和 native 支持。
+来源包括历史冻结运行树以及对应集成分支的测试和 native 支持。
+清理中编辑过的文件另记原始路径、原 SHA256 和修改原因，不能再按原运行树整组认定为逐字相同。
 没有复制机器配置、凭据、权重、二进制、原始 profiling 或私人日志。
+
+自定义 Attention 的构建入口和注册已删除。两个归档 SFA 版本的 BF16 分支复用各自已有的
+`_C_ascend.npu_sparse_flash_attention` bridge；C8 dispatch 和 bridge 定义保持不变。
+仍被缓存寻址和索引压缩调用的两个辅助函数迁到 `ops/hisparse_layout.py`，函数定义保持不变。
+以上均为非部署快照的范围清理，不改变正式 `vllm_ascend/` 路径，也不继承新的模型验证结果。
 
 ## 与正式路径的关系
 

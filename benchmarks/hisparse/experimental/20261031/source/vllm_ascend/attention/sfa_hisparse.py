@@ -3,7 +3,6 @@
 """Ascend SFA execution over upstream HiSparse's resident and hot cache pool."""
 
 from dataclasses import dataclass
-from functools import partial
 
 import torch
 import torch_npu
@@ -180,14 +179,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
             self.vllm_config.compilation_config.max_cudagraph_capture_size or 0,
         )
         self._kv_staging_capacity = (max_rows + 127) // 128 * 128
-        from vllm_ascend.ops.hisparse_direct import packed_sparse_flash_attention
-
-        # Mixed valid counts make the scan/scatter path slower under graphs.
-        # Select once from immutable serving configuration, with no per-step
-        # capture-state query or device-to-host validation.
-        self._packed_hisparse_attention = packed_sparse_flash_attention
-        if self.vllm_config.model_config.enforce_eager and get_ascend_device_type() == AscendDeviceType.A5:
-            self._packed_hisparse_attention = partial(packed_sparse_flash_attention, use_eager_compaction=True)
         self._resident_hisparse_enabled = resident_eager_transport_allowed(
             self.vllm_config.model_config.enforce_eager,
             get_ascend_device_type() == AscendDeviceType.A5,
@@ -287,20 +278,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
 
         return current_workspace_manager().get_persistent_resource(key, allocate)
 
-    def _direct_workspace(self):
-        from vllm_ascend.ops.hisparse_direct import ensure_direct_operator
-
-        ensure_direct_operator()
-        key = ("ascend_hisparse_direct_attention", self.topk, self._kv_staging_capacity)
-
-        def allocate():
-            device = self.index_group.logical_topk_indices.device
-            return (
-                torch.arange(self.topk, dtype=torch.float32, device=device).view(1, -1),
-                torch.arange(1, self._kv_staging_capacity + 1, dtype=torch.int32, device=device),
-            )
-
-        return current_workspace_manager().get_persistent_resource(key, allocate)
 
     def _kv_workspace(self, dtype):
         key = (
@@ -324,7 +301,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
 
     def forward(self, layer_name, hidden_states, kv_cache, attn_metadata, output=None):
         if not self.enable_sparse_sfa_c8:
-            self._direct_workspace()
+            self._workspace(hidden_states.dtype)
         if self.enable_sparse_sfa_c8:
             self._c8_length_workspace()
             if self.preprocess_type.name == "PROLOG_V3":
@@ -498,8 +475,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
         _c8_prepared=False,
         _mapping_scope=None,
     ):
-        from vllm_ascend.ops.hisparse_direct import packed_sparse_flash_attention
-
         if self.enable_sparse_sfa_c8:
             from vllm_ascend.ops.hisparse_c8 import c8_physical_attention
 
@@ -515,13 +490,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 _prepared_indices=_c8_prepared,
                 _mapping_scope=_mapping_scope,
             )
-        positions, query_ends = self._direct_workspace()
-        if query.shape[0] > query_ends.numel():
-            raise ValueError("HiSparse direct attention exceeds its profiled query capacity")
-        attention = self._packed_hisparse_attention if use_eager_compaction else packed_sparse_flash_attention
-        return attention(
-            query, query_rope, packed_cache, physical_topk, self.scale, positions, query_ends[: query.shape[0]]
-        )
+        return self._attention_physical_bridge(query, query_rope, packed_cache, physical_topk)
 
     def _attention_physical_bridge(self, query, query_rope, packed_cache, physical_topk):
         """Retain the materializing implementation for explicit oracle comparisons."""

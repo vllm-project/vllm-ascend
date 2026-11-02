@@ -3,7 +3,7 @@
 """Stable sparse-index compaction selected by an Ascend950 eager caller."""
 
 import torch
-from vllm_ascend.ops.hisparse_direct import _MAX_TOPK, compact_physical_indices
+from vllm_ascend.ops.hisparse_layout import _MAX_TOPK, compact_physical_indices
 
 
 def compact_physical_indices_eager(indices, capacity, positions):

@@ -5,7 +5,7 @@
   "measured_runtime_tree_sha256": "b7bf04864e45cbc7255ba5b307455a91944e5a430759058f3f0e70beb6339063",
   "latest_runtime_tree_sha256": "a6da14f89646863a22b384128119b07470a12444f94b1ca7a6b426c552754399",
   "snapshot_is_entire_runtime": false,
-  "snapshot_scope": "All integration-delta source/test/build paths plus exact collected HiSparse modules and the pending Q-prepack overlay. Unchanged repository files, weights, binaries, private logs and credentials excluded.",
+  "snapshot_scope": "Retained task-related sources after pruning unused experimental Attention; not a full runtime or immutable full snapshot",
   "latest_runtime_NPU_or_model_qualified": false,
   "follower_query_prepack": {
     "CPU_proxy_cases": 48,
@@ -38,172 +38,16 @@
       "deployed_by_this_PR": false
     },
     {
-      "path": "source/csrc/attention/hisparse_flash_attention/CMakeLists.txt",
-      "sha256": "b402e8b709c2110e43ab4a82b1538469a011926501afcfd5e6be2d8772300b17",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/README.md",
-      "sha256": "512080edb70d3111e82088fc641e6d3c5417396b31a8e47a9e090031a177b307",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/hisparse_flash_attention_torch_adpt.h",
-      "sha256": "e2f73385d731b318f7cf081a9b155660a95f5dbe7716351a13c1e87d0ec425eb",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_host/CMakeLists.txt",
-      "sha256": "00344d76d552e1e5eef83763290d73282f052aafcde87948dce61bf17a9b9812",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_host/hisparse_flash_attention_def.cpp",
-      "sha256": "b7dfdfc308b4b08d28f792756c6af4b7d08bd2494fa73fe4eb55422c4e3d2adc",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_host/hisparse_flash_attention_infershape.cpp",
-      "sha256": "62ca3092d133e61fce08ad1c31b9d562071f08ff7976e791c5cbb996eb816b63",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_host/hisparse_flash_attention_tiling.cpp",
-      "sha256": "12f165619f110a00c0e19dd689f93c7fdcde6ac501a08fd26d1ad4294146592e",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_host/hisparse_flash_attention_tiling.h",
-      "sha256": "40da4277487ed51bb58dec289ea83ad91f5351c9e683aeeba2127b97960ae134",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_host/op_api/aclnn_hisparse_flash_attention.cpp",
-      "sha256": "047099ace261e1a92eaa4f4007c32e033a9eb385876e851cb1aeeaa0f00887ce",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_host/op_api/aclnn_hisparse_flash_attention.h",
-      "sha256": "116e97855ca4fb6918d19e528be0856ffb703bc4199d8d3e383df1cdc9f7da4c",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/arch35/hisparse_flash_attention_common_arch35.h",
-      "sha256": "55d6f91180e8e8fc1924a168e04413aacfcd65129ee80971e422869210c473db",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/arch35/hisparse_flash_attention_kernel_mla.h",
-      "sha256": "ba2d463920546dbb56d3461cbf6d6925ffeaff4675ed87421ebaf706ebacc51e",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/arch35/hisparse_flash_attention_kvcache.h",
-      "sha256": "b07fff59a6b8957bf7ae4ac81351c04aa06a2821124037e343fccda30ea0d0d2",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/arch35/hisparse_flash_attention_service_cube_mla.h",
-      "sha256": "2fcc333f82c7a7aa3a83cd322f89334b4f4977df94118a8b9d1f0400dd8e73fe",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/arch35/hisparse_flash_attention_service_vector_mla.h",
-      "sha256": "690cb8c5af8b486957a40f1299c42b52b61ba7a941b90e47021c4c6edd89afaf",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/arch35/util_regbase.h",
-      "sha256": "0a69c6c7a9a555f5174a2cd1df2b57bb4ac3ad7e292d8230829a3e768e97b9e8",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/hisparse_flash_attention.cpp",
-      "sha256": "03cffcfa1b4af70d80b035b613ef2615ea6ed9704bf065288715f0748972a463",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/hisparse_flash_attention_common.h",
-      "sha256": "eb9c7e83c544aa75f0bb9b7607ccc798e9c6a4df56239b5399330ed1f8bcb4be",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/hisparse_flash_attention_template_tiling_key.h",
-      "sha256": "cfa30493d8d4305dbaab52b7dac2512d51b5073baf04eb69b1a8649413d620d7",
-      "origin": "integration source/test/build support",
-      "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
-      "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
       "path": "source/csrc/build_aclnn.sh",
-      "sha256": "ae4d278aae56a4d3302e7b520e67db8a1d788dd1948c1a431a1cade52691752d",
+      "sha256": "3a7b5a2a366d39dd573ad938e74d28e3d6db9f51c992adf0df20cbddd8274959",
       "origin": "integration source/test/build support",
       "review_category": "\u53ef\u9009BF16\u6784\u5efa",
       "necessity_review": "\u6784\u5efa\u6ce8\u518c\u6216\u591a\u7ffb\u8bd1\u5355\u5143\u94fe\u63a5\u652f\u6301\uff1b\u968f\u65e7BF16\u539f\u751f\u6ce8\u610f\u529b\u5206\u652f\u4e00\u8d77\u62c6\u5206\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/csrc/hisparse_direct_binding.cpp",
-      "sha256": "ca073f88fc9ce86d146b7d910948f317274a9b523354e1505c4fdb0a9baca98b",
-      "origin": "integration source/test/build support",
-      "review_category": "HiSparse\u529f\u80fd/\u6865\u63a5",
-      "necessity_review": "\u53c2\u4e0eAscend\u540e\u7aef\u3001Host\u6ce8\u518c\u3001KV\u6620\u5c04\u6216\u5931\u6548\u751f\u547d\u5468\u671f\uff1b\u5f53\u524d\u5b9e\u73b0\u4f9d\u8d56\uff0c\u4f46\u4e0d\u7b49\u4e8e\u552f\u4e00\u5b9e\u73b0\u3002",
-      "deployed_by_this_PR": false
+      "deployed_by_this_PR": false,
+      "original_snapshot_path": "source/csrc/build_aclnn.sh",
+      "original_snapshot_sha256": "ae4d278aae56a4d3302e7b520e67db8a1d788dd1948c1a431a1cade52691752d",
+      "scope_cleanup": "Remove unused experimental Attention; retain addressing helpers and existing SFA bridge",
+      "model_qualification_after_cleanup": false
     },
     {
       "path": "source/csrc/hisparse_runtime/batch_copy.cpp",
@@ -248,14 +92,6 @@
     {
       "path": "source/tests/e2e/pull_request/one_card/test_hisparse_attention.py",
       "sha256": "8b64303bfccd93fffc2eca309dd96748ec1f6725c95cd1e1a46004cec2ef4ceb",
-      "origin": "integration source/test/build support",
-      "review_category": "\u6d4b\u8bd5",
-      "necessity_review": "\u4e0d\u53c2\u4e0e\u63a8\u7406\uff1b\u8986\u76d6\u5bf9\u5e94\u884c\u4e3a\uff0c\u4e0d\u80fd\u56e0\u8fd0\u884c\u65f6\u4e0d\u5f15\u7528\u800c\u5220\u9664\u3002",
-      "deployed_by_this_PR": false
-    },
-    {
-      "path": "source/tests/e2e/pull_request/one_card/test_hisparse_direct_attention.py",
-      "sha256": "62d0d1cf745ec203f66cbd83d640a2fba1061915ab51cfe5562126589d6305e1",
       "origin": "integration source/test/build support",
       "review_category": "\u6d4b\u8bd5",
       "necessity_review": "\u4e0d\u53c2\u4e0e\u63a8\u7406\uff1b\u8986\u76d6\u5bf9\u5e94\u884c\u4e3a\uff0c\u4e0d\u80fd\u56e0\u8fd0\u884c\u65f6\u4e0d\u5f15\u7528\u800c\u5220\u9664\u3002",
@@ -398,12 +234,16 @@
       "deployed_by_this_PR": false
     },
     {
-      "path": "source/tests/ut/ops/test_hisparse_direct.py",
-      "sha256": "f294a4f075dfc86040f00f9aeb239d0161bb229d92835b080471b782aa6156a0",
+      "path": "source/tests/ut/ops/test_hisparse_layout.py",
+      "sha256": "749380d797cb94e4132d816f0980ef50e173d0dbd89d7bcb84d8aa4b265afd0f",
       "origin": "integration source/test/build support",
       "review_category": "\u6d4b\u8bd5",
       "necessity_review": "\u4e0d\u53c2\u4e0e\u63a8\u7406\uff1b\u8986\u76d6\u5bf9\u5e94\u884c\u4e3a\uff0c\u4e0d\u80fd\u56e0\u8fd0\u884c\u65f6\u4e0d\u5f15\u7528\u800c\u5220\u9664\u3002",
-      "deployed_by_this_PR": false
+      "deployed_by_this_PR": false,
+      "original_snapshot_path": "source/tests/ut/ops/test_hisparse_direct.py",
+      "original_snapshot_sha256": "f294a4f075dfc86040f00f9aeb239d0161bb229d92835b080471b782aa6156a0",
+      "scope_cleanup": "Remove unused experimental Attention; retain addressing helpers and existing SFA bridge",
+      "model_qualification_after_cleanup": false
     },
     {
       "path": "source/tests/ut/ops/test_shared_swiglu_a5.py",
@@ -535,11 +375,15 @@
     },
     {
       "path": "source/vllm_ascend/attention/sfa_hisparse.py",
-      "sha256": "f1c945abd0230c8696f82c703fb48c9cf35058c94bafa97e91833dd9067685cf",
+      "sha256": "3831fa5c0394f75e6e615990534d38d49b703a5713ff652704fb7e4de8b23366",
       "origin": "exact frozen runtime module",
       "review_category": "HiSparse\u529f\u80fd/\u6865\u63a5",
       "necessity_review": "\u53c2\u4e0eAscend\u540e\u7aef\u3001Host\u6ce8\u518c\u3001KV\u6620\u5c04\u6216\u5931\u6548\u751f\u547d\u5468\u671f\uff1b\u5f53\u524d\u5b9e\u73b0\u4f9d\u8d56\uff0c\u4f46\u4e0d\u7b49\u4e8e\u552f\u4e00\u5b9e\u73b0\u3002",
-      "deployed_by_this_PR": false
+      "deployed_by_this_PR": false,
+      "original_snapshot_path": "source/vllm_ascend/attention/sfa_hisparse.py",
+      "original_snapshot_sha256": "f1c945abd0230c8696f82c703fb48c9cf35058c94bafa97e91833dd9067685cf",
+      "scope_cleanup": "Remove unused experimental Attention; retain addressing helpers and existing SFA bridge",
+      "model_qualification_after_cleanup": false
     },
     {
       "path": "source/vllm_ascend/attention/sfa_v1.py",
@@ -935,27 +779,39 @@
     },
     {
       "path": "source/vllm_ascend/ops/hisparse_compact.py",
-      "sha256": "8353f7090b416ce4a519b315de4f114087609743077885d681abca40f5a4a739",
+      "sha256": "c60abb57d863c1d1152d627508c5c64a792a478f3ae3a9121a8e18ff1df233a7",
       "origin": "integration source/test/build support",
       "review_category": "HiSparse\u529f\u80fd/\u6865\u63a5",
       "necessity_review": "\u53c2\u4e0eAscend\u540e\u7aef\u3001Host\u6ce8\u518c\u3001KV\u6620\u5c04\u6216\u5931\u6548\u751f\u547d\u5468\u671f\uff1b\u5f53\u524d\u5b9e\u73b0\u4f9d\u8d56\uff0c\u4f46\u4e0d\u7b49\u4e8e\u552f\u4e00\u5b9e\u73b0\u3002",
-      "deployed_by_this_PR": false
+      "deployed_by_this_PR": false,
+      "original_snapshot_path": "source/vllm_ascend/ops/hisparse_compact.py",
+      "original_snapshot_sha256": "8353f7090b416ce4a519b315de4f114087609743077885d681abca40f5a4a739",
+      "scope_cleanup": "Remove unused experimental Attention; retain addressing helpers and existing SFA bridge",
+      "model_qualification_after_cleanup": false
     },
     {
-      "path": "source/vllm_ascend/ops/hisparse_direct.py",
-      "sha256": "d9a1ce3650152fa6dccddb47cf42bdd733c1ca8fb2996d2273ae8aa0366e6c72",
+      "path": "source/vllm_ascend/ops/hisparse_layout.py",
+      "sha256": "c5591f81ab7bff99c30f81c0b3cca1dede7cde33caf828454ed1627aa8f42725",
       "origin": "exact frozen runtime module",
       "review_category": "\u53ef\u9009BF16\u6ce8\u610f\u529b",
       "necessity_review": "\u65e7BF16\u76f4\u8c03\u6ce8\u610f\u529b\u5206\u652f\uff1b\u5f53\u524dC8\u8def\u5f84\u4e0d\u4ee5\u6b64\u4e3a\u5fc5\u8981\u6761\u4ef6\uff0c\u5e94\u4e0eC8\u652f\u6301\u62c6\u5206\u5ba1\u67e5\u3002",
-      "deployed_by_this_PR": false
+      "deployed_by_this_PR": false,
+      "original_snapshot_path": "source/vllm_ascend/ops/hisparse_direct.py",
+      "original_snapshot_sha256": "d9a1ce3650152fa6dccddb47cf42bdd733c1ca8fb2996d2273ae8aa0366e6c72",
+      "scope_cleanup": "Remove unused experimental Attention; retain addressing helpers and existing SFA bridge",
+      "model_qualification_after_cleanup": false
     },
     {
       "path": "source/vllm_ascend/ops/hisparse_resident.py",
-      "sha256": "fa23917227bcfa1ae790c27470357d1d61732a927d8c180ae4d443b145208dfd",
+      "sha256": "b93bdd9d25e760658b131b04188c2a145db6177ec49536a0fb86244cbbedd18e",
       "origin": "exact frozen runtime module",
       "review_category": "HiSparse\u529f\u80fd/\u6865\u63a5",
       "necessity_review": "\u53c2\u4e0eAscend\u540e\u7aef\u3001Host\u6ce8\u518c\u3001KV\u6620\u5c04\u6216\u5931\u6548\u751f\u547d\u5468\u671f\uff1b\u5f53\u524d\u5b9e\u73b0\u4f9d\u8d56\uff0c\u4f46\u4e0d\u7b49\u4e8e\u552f\u4e00\u5b9e\u73b0\u3002",
-      "deployed_by_this_PR": false
+      "deployed_by_this_PR": false,
+      "original_snapshot_path": "source/vllm_ascend/ops/hisparse_resident.py",
+      "original_snapshot_sha256": "fa23917227bcfa1ae790c27470357d1d61732a927d8c180ae4d443b145208dfd",
+      "scope_cleanup": "Remove unused experimental Attention; retain addressing helpers and existing SFA bridge",
+      "model_qualification_after_cleanup": false
     },
     {
       "path": "source/vllm_ascend/ops/kimi_kda.py",
@@ -1351,9 +1207,13 @@
     },
     {
       "path": "candidates/follower-query-prepack-v1/vllm_ascend/attention/sfa_hisparse.py",
-      "sha256": "2f05c134bf3a5d33c3b9b5fd360e5ca6136665ed26cbcc73b40eb5b4dea1bd8a",
+      "sha256": "f28474be4f800b7542711b9a70d5585341dd043835e0ee7075923757c84b501a",
       "origin": "pending candidate, not in frozen runtime",
-      "deployed_by_this_PR": false
+      "deployed_by_this_PR": false,
+      "original_snapshot_path": "candidates/follower-query-prepack-v1/vllm_ascend/attention/sfa_hisparse.py",
+      "original_snapshot_sha256": "2f05c134bf3a5d33c3b9b5fd360e5ca6136665ed26cbcc73b40eb5b4dea1bd8a",
+      "scope_cleanup": "Remove unused experimental Attention; retain addressing helpers and existing SFA bridge",
+      "model_qualification_after_cleanup": false
     },
     {
       "path": "candidates/follower-query-prepack-v1/vllm_ascend/ops/hisparse_c8.py",
@@ -1392,5 +1252,145 @@
       "first_AllReduce_wait_after_ms": 1.159373978125
     },
     "independent_end_to_end_gain_proven": false
+  },
+  "unused_attention_cleanup": {
+    "date": "2026-11-02",
+    "original_complete_snapshot_commit": "caed56ef4fb417491ef7b8667a045dc7aa4c8241",
+    "removed_payload": [
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/CMakeLists.txt",
+        "sha256": "b402e8b709c2110e43ab4a82b1538469a011926501afcfd5e6be2d8772300b17"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/README.md",
+        "sha256": "512080edb70d3111e82088fc641e6d3c5417396b31a8e47a9e090031a177b307"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/hisparse_flash_attention_torch_adpt.h",
+        "sha256": "e2f73385d731b318f7cf081a9b155660a95f5dbe7716351a13c1e87d0ec425eb"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_host/CMakeLists.txt",
+        "sha256": "00344d76d552e1e5eef83763290d73282f052aafcde87948dce61bf17a9b9812"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_host/hisparse_flash_attention_def.cpp",
+        "sha256": "b7dfdfc308b4b08d28f792756c6af4b7d08bd2494fa73fe4eb55422c4e3d2adc"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_host/hisparse_flash_attention_infershape.cpp",
+        "sha256": "62ca3092d133e61fce08ad1c31b9d562071f08ff7976e791c5cbb996eb816b63"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_host/hisparse_flash_attention_tiling.cpp",
+        "sha256": "12f165619f110a00c0e19dd689f93c7fdcde6ac501a08fd26d1ad4294146592e"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_host/hisparse_flash_attention_tiling.h",
+        "sha256": "40da4277487ed51bb58dec289ea83ad91f5351c9e683aeeba2127b97960ae134"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_host/op_api/aclnn_hisparse_flash_attention.cpp",
+        "sha256": "047099ace261e1a92eaa4f4007c32e033a9eb385876e851cb1aeeaa0f00887ce"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_host/op_api/aclnn_hisparse_flash_attention.h",
+        "sha256": "116e97855ca4fb6918d19e528be0856ffb703bc4199d8d3e383df1cdc9f7da4c"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/arch35/hisparse_flash_attention_common_arch35.h",
+        "sha256": "55d6f91180e8e8fc1924a168e04413aacfcd65129ee80971e422869210c473db"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/arch35/hisparse_flash_attention_kernel_mla.h",
+        "sha256": "ba2d463920546dbb56d3461cbf6d6925ffeaff4675ed87421ebaf706ebacc51e"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/arch35/hisparse_flash_attention_kvcache.h",
+        "sha256": "b07fff59a6b8957bf7ae4ac81351c04aa06a2821124037e343fccda30ea0d0d2"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/arch35/hisparse_flash_attention_service_cube_mla.h",
+        "sha256": "2fcc333f82c7a7aa3a83cd322f89334b4f4977df94118a8b9d1f0400dd8e73fe"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/arch35/hisparse_flash_attention_service_vector_mla.h",
+        "sha256": "690cb8c5af8b486957a40f1299c42b52b61ba7a941b90e47021c4c6edd89afaf"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/arch35/util_regbase.h",
+        "sha256": "0a69c6c7a9a555f5174a2cd1df2b57bb4ac3ad7e292d8230829a3e768e97b9e8"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/hisparse_flash_attention.cpp",
+        "sha256": "03cffcfa1b4af70d80b035b613ef2615ea6ed9704bf065288715f0748972a463"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/hisparse_flash_attention_common.h",
+        "sha256": "eb9c7e83c544aa75f0bb9b7607ccc798e9c6a4df56239b5399330ed1f8bcb4be"
+      },
+      {
+        "path": "source/csrc/attention/hisparse_flash_attention/op_kernel/hisparse_flash_attention_template_tiling_key.h",
+        "sha256": "cfa30493d8d4305dbaab52b7dac2512d51b5073baf04eb69b1a8649413d620d7"
+      },
+      {
+        "path": "source/csrc/hisparse_direct_binding.cpp",
+        "sha256": "ca073f88fc9ce86d146b7d910948f317274a9b523354e1505c4fdb0a9baca98b"
+      },
+      {
+        "path": "source/tests/e2e/pull_request/one_card/test_hisparse_direct_attention.py",
+        "sha256": "62d0d1cf745ec203f66cbd83d640a2fba1061915ab51cfe5562126589d6305e1"
+      }
+    ],
+    "retained_payload_files": 150,
+    "changed_payload": [
+      {
+        "before": "source/csrc/build_aclnn.sh",
+        "after": "source/csrc/build_aclnn.sh",
+        "original_sha256": "ae4d278aae56a4d3302e7b520e67db8a1d788dd1948c1a431a1cade52691752d",
+        "current_sha256": "3a7b5a2a366d39dd573ad938e74d28e3d6db9f51c992adf0df20cbddd8274959"
+      },
+      {
+        "before": "source/tests/ut/ops/test_hisparse_direct.py",
+        "after": "source/tests/ut/ops/test_hisparse_layout.py",
+        "original_sha256": "f294a4f075dfc86040f00f9aeb239d0161bb229d92835b080471b782aa6156a0",
+        "current_sha256": "749380d797cb94e4132d816f0980ef50e173d0dbd89d7bcb84d8aa4b265afd0f"
+      },
+      {
+        "before": "source/vllm_ascend/attention/sfa_hisparse.py",
+        "after": "source/vllm_ascend/attention/sfa_hisparse.py",
+        "original_sha256": "f1c945abd0230c8696f82c703fb48c9cf35058c94bafa97e91833dd9067685cf",
+        "current_sha256": "3831fa5c0394f75e6e615990534d38d49b703a5713ff652704fb7e4de8b23366"
+      },
+      {
+        "before": "source/vllm_ascend/ops/hisparse_compact.py",
+        "after": "source/vllm_ascend/ops/hisparse_compact.py",
+        "original_sha256": "8353f7090b416ce4a519b315de4f114087609743077885d681abca40f5a4a739",
+        "current_sha256": "c60abb57d863c1d1152d627508c5c64a792a478f3ae3a9121a8e18ff1df233a7"
+      },
+      {
+        "before": "source/vllm_ascend/ops/hisparse_direct.py",
+        "after": "source/vllm_ascend/ops/hisparse_layout.py",
+        "original_sha256": "d9a1ce3650152fa6dccddb47cf42bdd733c1ca8fb2996d2273ae8aa0366e6c72",
+        "current_sha256": "c5591f81ab7bff99c30f81c0b3cca1dede7cde33caf828454ed1627aa8f42725"
+      },
+      {
+        "before": "source/vllm_ascend/ops/hisparse_resident.py",
+        "after": "source/vllm_ascend/ops/hisparse_resident.py",
+        "original_sha256": "fa23917227bcfa1ae790c27470357d1d61732a927d8c180ae4d443b145208dfd",
+        "current_sha256": "b93bdd9d25e760658b131b04188c2a145db6177ec49536a0fb86244cbbedd18e"
+      },
+      {
+        "before": "candidates/follower-query-prepack-v1/vllm_ascend/attention/sfa_hisparse.py",
+        "after": "candidates/follower-query-prepack-v1/vllm_ascend/attention/sfa_hisparse.py",
+        "original_sha256": "2f05c134bf3a5d33c3b9b5fd360e5ca6136665ed26cbcc73b40eb5b4dea1bd8a",
+        "current_sha256": "f28474be4f800b7542711b9a70d5585341dd043835e0ee7075923757c84b501a"
+      }
+    ],
+    "active_backend_changed": false,
+    "C8_attention_dispatch_AST_unchanged": true,
+    "existing_SFA_bridge_AST_unchanged": true,
+    "packed_layout_helper_AST_unchanged": true,
+    "model_or_performance_requalified": false
   }
 }

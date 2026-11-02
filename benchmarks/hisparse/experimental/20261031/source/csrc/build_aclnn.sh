@@ -198,7 +198,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
 
     CUSTOM_OPS_ARRAY=(
         "sparse_flash_attention"
-        "hisparse_flash_attention"
         "chunk_gated_delta_rule_fwd_h_vllm"
         "scatter_nd_update_sk"
         "add_rms_norm_bias"

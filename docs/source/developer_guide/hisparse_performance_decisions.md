@@ -118,7 +118,8 @@ proven performance optimizations. Keep the distinction when reviewing them:
 
 | Candidate | Decision and reason |
 | --- | --- |
-| AscendC attention / union resolver | Separate layout/compute path; not needed for the current feature contract, final-head benefit not established. |
+| Custom AscendC Attention | Removed from the PR snapshot with its native registration and dedicated tests; the existing SFA operator covers the active path. |
+| AscendC union resolver | Separate residency path; not needed for the current feature contract, final-head benefit not established. |
 | C8 map-pack/fused resolver and 32-row fusion | Current feature rejects attention C8; bundle measurements do not establish each kernel's marginal benefit. |
 | C8 Indexer fused write | NPU primitive evidence exists, but isolated model benefit and this feature's C8 integration are missing. |
 | Grouped/recycled invalidation | Some variants passed correctness; some were slower. No blanket benefit claim or automatic inclusion. |
