@@ -154,6 +154,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBloc
         constInfo.gSize = this->sharedParams.gSize;
         constInfo.s1Size = this->sharedParams.s1Size;
         constInfo.needInit = this->sharedParams.needInit;
+        constInfo.n2Size = this->sharedParams.n2Size;
         constInfo.dSizeV = 512;
     }
     vecBlock.CleanOutput(attentionOut, softmaxMax, softmaxSum, constInfo);
