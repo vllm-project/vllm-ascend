@@ -1,6 +1,6 @@
 pr: 20679
 entries:
   - category: bugfix
-    text: Fixed Qwen4Exp PLE prefill compilation on A3 by using the upstream implementation when the optimized Triton kernel exceeds available UB capacity.
+    text: Fixed Qwen4Exp PLE prefill compilation on A3 by using a smaller Triton channel tile that fits its UB capacity.
     model: qwen4exp
     hardware: [A3]
