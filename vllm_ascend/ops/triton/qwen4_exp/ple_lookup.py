@@ -9,16 +9,16 @@ def _lookup(
     ptrs,
     ids,
     out,
-    START: tl.constexpr,
-    END: tl.constexpr,
+    start,
+    end,
     WIDTH: tl.constexpr,
     CHUNK: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0)
     index = tl.load(ids + row).to(tl.int64)
-    owned = (index >= START) & (index < END)
-    local = tl.where(owned, index - START, 0)
+    owned = (index >= start) & (index < end)
+    local = tl.where(owned, index - start, 0)
     base = tl.load(ptrs + local // CHUNK).to(tl.pointer_type(tl.bfloat16))
     col = tl.arange(0, BLOCK)
     value = tl.load(base + (local % CHUNK) * WIDTH + col, mask=owned & (col < WIDTH), other=0)
