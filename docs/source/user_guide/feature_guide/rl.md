@@ -329,7 +329,7 @@ illustrative, not captured model output; other response fields are omitted:
 
 ```json
 {
-  "request_id": "generate-tokens-rollout-001",
+  "request_id": "rollout-001",
   "model": "Qwen/Qwen3-0.6B",
   "output_mode": "tokens",
   "choices": [
