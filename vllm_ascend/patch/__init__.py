@@ -1,6 +1,14 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
+# Packed HCCL module adaptation (installed lazily for standalone trainers too):
+# Target: vllm.distributed.weight_transfer.packed_tensor.torch, _get_streams,
+# unpack_tensor. Implementation: distributed/weight_transfer/packed_adapter.py.
+# Why: CUDA stream contexts and views do not satisfy native HCCL/NPU ownership.
+# How: module-local device routing and boundary hooks, preserving vLLM loops.
+# Related upstream PR: no hook PR yet; this branch evaluates the extension seam.
+# Removal: use device-neutral APIs and owning-unpack/callback-completion hooks
+# once both supported vLLM pairings expose them. Real torch.cuda is unchanged.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
