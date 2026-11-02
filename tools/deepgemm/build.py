@@ -95,14 +95,35 @@ def fix_device_includes(destination):
     return hashes
 
 
+def defer_tilelang_import(destination):
+    """Keep the unrelated HC kernel optional for the MegaMoE delivery path."""
+    path = destination / "__init__.py"
+    text = path.read_text(encoding="utf-8")
+    eager = "from .tilelang_ops import tf32_hc_prenorm_gemm"
+    lazy = (
+        "def tf32_hc_prenorm_gemm(*args, **kwargs):\n"
+        "    from .tilelang_ops import tf32_hc_prenorm_gemm as implementation\n"
+        "    return implementation(*args, **kwargs)"
+    )
+    if text.count(eager) != 1:
+        raise RuntimeError("Pinned optional TileLang import no longer matches")
+    path.write_text(text.replace(eager, lazy, 1), encoding="utf-8")
+    return {"__init__.py": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
 def build(source, work_dir, destination):
     prepare_source(source)
     work_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     # Select the image's supported host compiler only for the operator build.
     # Do not change the serving process or other framework compiler settings.
-    env.setdefault("CXX", shutil.which("g++-13") or "g++")
-    env.setdefault("CC", shutil.which("gcc-13") or "gcc")
+    toolset = Path("/opt/openEuler/gcc-toolset-14/root/usr/bin")
+    if (toolset / "g++").is_file():
+        env.setdefault("CXX", str(toolset / "g++"))
+        env.setdefault("CC", str(toolset / "gcc"))
+    else:
+        env.setdefault("CXX", shutil.which("g++-13") or "g++")
+        env.setdefault("CC", shutil.which("gcc-13") or "gcc")
     for key in tuple(env):
         if key.startswith("DG_JIT_"):
             del env[key]
@@ -127,6 +148,7 @@ def build(source, work_dir, destination):
             raise RuntimeError(f"Expected one DeepGEMM wheel, found {len(wheels)}")
         vendor_wheel(wheels[0], destination)
     device_header_hashes = fix_device_includes(destination)
+    python_import_hashes = defer_tilelang_import(destination)
     shutil.copyfile(source / "LICENSE", destination / "LICENSE")
     licenses = destination / "licenses"
     licenses.mkdir(exist_ok=True)
@@ -146,6 +168,7 @@ def build(source, work_dir, destination):
         "torch_npu": torch_npu.__version__,
         "python": sys.version.split()[0],
         "device_header_fixes": device_header_hashes,
+        "python_import_fixes": python_import_hashes,
     }
     (destination / "ascend_build.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
