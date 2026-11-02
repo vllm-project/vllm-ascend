@@ -1947,3 +1947,133 @@ def test_layerwise_partial_tail_preserves_zero_external_load(pool_hit_tokens):
     assert load_spec.vllm_cached_tokens == aligned_local_tokens
     assert load_spec.kvpool_cached_tokens == pool_hit_tokens
     assert load_spec.can_load
+
+
+def _make_bare_scheduler_for_key_gen(
+    *,
+    tp_size=1,
+    put_step=1,
+    dcp_size=1,
+    pp_size=1,
+    pp_rank=0,
+    model_name="bench-model",
+    num_layers=2,
+    pp_layer_offset=0,
+    kv_cache_group_families=(),
+):
+    """Bare KVPoolScheduler holding only what _generate_store_query_keys reads."""
+    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.tp_size = tp_size
+    scheduler.put_step = put_step
+    scheduler.dcp_size = dcp_size
+    scheduler.pp_size = pp_size
+    scheduler.pp_rank = pp_rank
+    scheduler.model_name = model_name
+    scheduler.kv_cache_group_families = list(kv_cache_group_families)
+    scheduler.num_layers = num_layers
+    scheduler.pp_layer_offset = pp_layer_offset
+    return scheduler
+
+
+def test_generate_store_query_keys_golden_layerwise():
+    """Pin the exact key strings for the include_layers=True path."""
+    scheduler = _make_bare_scheduler_for_key_gen(num_layers=2)
+    hashes = [b"\x01" * 32, b"\x02" * 32]
+    keys_by_block = scheduler._generate_store_query_keys(hashes, include_layers=True)
+    prefix = "bench-model@dcp:0@head_or_tp_rank:0@group:0@cache_role:kv@cache_family:default"
+    assert keys_by_block == [
+        [
+            f"{prefix}@layer_id:0@{'01' * 32}",
+            f"{prefix}@layer_id:1@{'01' * 32}",
+        ],
+        [
+            f"{prefix}@layer_id:0@{'02' * 32}",
+            f"{prefix}@layer_id:1@{'02' * 32}",
+        ],
+    ]
+
+
+def test_generate_store_query_keys_golden_block_mode():
+    """Pin the exact key strings for the include_layers=False path (PoolKey
+    keeps the pp_rank segment that LayerPoolKey drops)."""
+    scheduler = _make_bare_scheduler_for_key_gen(pp_size=2, pp_rank=1)
+    keys_by_block = scheduler._generate_store_query_keys([b"\x01" * 32], include_layers=False)
+    assert keys_by_block == [
+        [
+            f"bench-model@dcp:0@head_or_tp_rank:0@pp_rank:0@group:0@cache_role:kv@cache_family:default@{'01' * 32}",
+            f"bench-model@dcp:0@head_or_tp_rank:0@pp_rank:1@group:0@cache_role:kv@cache_family:default@{'01' * 32}",
+        ]
+    ]
+
+
+def test_generate_store_query_keys_group_and_family():
+    """kv_cache_group_id selects the cache_family segment."""
+    scheduler = _make_bare_scheduler_for_key_gen(kv_cache_group_families=("default", "compress"))
+    keys_by_block = scheduler._generate_store_query_keys([b"\x03" * 32], include_layers=False, kv_cache_group_id=1)
+    assert keys_by_block == [
+        [
+            f"bench-model@dcp:0@head_or_tp_rank:0@pp_rank:0@group:1@cache_role:kv@cache_family:compress@{'03' * 32}",
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    "dcp_size,tp_size,put_step,pp_size,include_layers",
+    [
+        (1, 1, 1, 1, False),
+        (2, 4, 2, 1, False),
+        (2, 4, 2, 3, True),
+        (1, 8, 4, 2, True),
+    ],
+)
+def test_generate_store_query_keys_shape(dcp_size, tp_size, put_step, pp_size, include_layers):
+    """One outer entry per block; per-block key count equals the product of
+    the loop extents (layers only when include_layers, pp only when not)."""
+    num_layers, num_blocks = 3, 5
+    scheduler = _make_bare_scheduler_for_key_gen(
+        tp_size=tp_size, put_step=put_step, dcp_size=dcp_size, pp_size=pp_size, num_layers=num_layers
+    )
+    keys_by_block = scheduler._generate_store_query_keys(
+        [bytes([i]) * 32 for i in range(num_blocks)], include_layers=include_layers
+    )
+    expected_per_block = (
+        dcp_size * (tp_size // put_step) * (1 if include_layers else pp_size) * (num_layers if include_layers else 1)
+    )
+    assert len(keys_by_block) == num_blocks
+    assert all(len(block_keys) == expected_per_block for block_keys in keys_by_block)
+    # all keys unique within and across blocks
+    flat = [k for block_keys in keys_by_block for k in block_keys]
+    assert len(set(flat)) == len(flat)
+
+
+def test_generate_store_query_keys_order():
+    """Block order follows input; within a block the nesting order is
+    dcp -> head_or_tp_rank -> (pp) -> layer."""
+    scheduler = _make_bare_scheduler_for_key_gen(dcp_size=2, tp_size=2, num_layers=2)
+    keys_by_block = scheduler._generate_store_query_keys([b"\x01" * 32, b"\x02" * 32], include_layers=True)
+    assert [block_keys[0].rsplit("@", 1)[1] for block_keys in keys_by_block] == ["01" * 32, "02" * 32]
+    block0 = keys_by_block[0]
+
+    def seg(key, name):
+        return next(s.split(":", 1)[1] for s in key.split("@") if s.startswith(f"{name}:"))
+
+    coords = [(seg(k, "dcp"), seg(k, "head_or_tp_rank"), seg(k, "layer_id")) for k in block0]
+    assert coords == [
+        ("0", "0", "0"),
+        ("0", "0", "1"),
+        ("0", "1", "0"),
+        ("0", "1", "1"),
+        ("1", "0", "0"),
+        ("1", "0", "1"),
+        ("1", "1", "0"),
+        ("1", "1", "1"),
+    ]
+
+
+def test_generate_store_query_keys_hash_input_types():
+    """bytes hashes are hex-encoded; str hashes are used verbatim."""
+    scheduler = _make_bare_scheduler_for_key_gen(num_layers=1)
+    keys_bytes = scheduler._generate_store_query_keys([b"\xab" * 32], include_layers=False)
+    keys_str = scheduler._generate_store_query_keys(["deadbeef"], include_layers=False)
+    assert keys_bytes[0][0].endswith(f"@{'ab' * 32}")
+    assert keys_str[0][0].endswith("@deadbeef")

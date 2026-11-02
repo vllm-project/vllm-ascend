@@ -225,33 +225,37 @@ class KVPoolScheduler:
     ) -> list[list[str]]:
         head_or_tp_ranks = self.tp_size // self.put_step
         cache_family = get_group_cache_family(self.kv_cache_group_families, kv_cache_group_id)
+        # Every key segment except the trailing chunk_hash is invariant
+        # across blocks. Build per-combo templates once (an empty chunk_hash
+        # makes to_string() end with "@", so a real hash can be appended
+        # directly); key formats stay owned by PoolKey/LayerPoolKey.
+        templates: list[str] = []
+        pp_ranks = [self.pp_rank] if include_layers else range(self.pp_size)
+        for dcp_rank in range(self.dcp_size):
+            for head_or_tp_rank in range(head_or_tp_ranks):
+                for pp_rank in pp_ranks:
+                    pool_key = PoolKey(
+                        KeyMetadata(
+                            self.model_name,
+                            head_or_tp_rank,
+                            dcp_rank,
+                            pp_rank,
+                            kv_cache_group_id=kv_cache_group_id,
+                            cache_family=cache_family,
+                        ),
+                        "",
+                    )
+                    if include_layers:
+                        templates.extend(
+                            layer_key.to_string()
+                            for layer_key in pool_key.split_layers(self.num_layers, self.pp_layer_offset)
+                        )
+                    else:
+                        templates.append(pool_key.to_string())
         keys_by_block = []
         for block_hash in block_hashes:
-            block_keys: list[str] = []
             chunk_hash = block_hash if isinstance(block_hash, str) else block_hash.hex()
-            pp_ranks = [self.pp_rank] if include_layers else range(self.pp_size)
-            for dcp_rank in range(self.dcp_size):
-                for head_or_tp_rank in range(head_or_tp_ranks):
-                    for pp_rank in pp_ranks:
-                        pool_key = PoolKey(
-                            KeyMetadata(
-                                self.model_name,
-                                head_or_tp_rank,
-                                dcp_rank,
-                                pp_rank,
-                                kv_cache_group_id=kv_cache_group_id,
-                                cache_family=cache_family,
-                            ),
-                            chunk_hash,
-                        )
-                        if include_layers:
-                            block_keys.extend(
-                                layer_key.to_string()
-                                for layer_key in pool_key.split_layers(self.num_layers, self.pp_layer_offset)
-                            )
-                        else:
-                            block_keys.append(pool_key.to_string())
-            keys_by_block.append(block_keys)
+            keys_by_block.append([template + chunk_hash for template in templates])
         return keys_by_block
 
     def _get_store_lookup_hit_tokens(
