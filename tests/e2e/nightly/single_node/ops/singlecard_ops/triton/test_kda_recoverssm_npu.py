@@ -562,16 +562,30 @@ def test_recoverssm_ragged_tiles(key_dim, value_dim, lower_bound, record_propert
     assert_accuracy(state, expected_state, record_property, "commit_ragged")
 
 
-@pytest.mark.parametrize("mode", ["cross", "exact", "no_cross"])
+@pytest.mark.parametrize("mode", ["cross", "exact", "no_cross", "mixed", "no_cross_inplace"])
 @pytest.mark.parametrize("graph_mode", [False, True])
-@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize(
+    "state_dtype,heads,key_dim,value_dim",
+    [
+        (torch.float32, 2, 128, 128),
+        (torch.bfloat16, 2, 128, 128),
+        (torch.float32, None, 128, 128),
+        (torch.float32, 16, 128, 128),
+        (torch.float32, 8, 128, 128),
+        (torch.bfloat16, None, 128, 128),
+        (torch.float32, 2, 7, 5),
+        (torch.bfloat16, 2, 7, 8),
+    ],
+    ids=["fp32_small", "bf16_small", "fp32_model", "tp4", "tp8", "bf16_model", "masked_kv", "bf16_masked_k"],
+)
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
-def test_align_context(mode, graph_mode, state_dtype, record_property):
+def test_align_context(mode, graph_mode, state_dtype, heads, key_dim, value_dim, record_property, monkeypatch):
     if not torch.npu.is_available():
         pytest.skip("requires an Ascend NPU")
     torch.manual_seed(19516)
-    slots, heads, dim, capacity = 12, 2, 128, 6
+    slots, capacity = 12, 6
+    heads = (64 if is_950() else 32) if heads is None else heads
     blocks, starts, accepted = [1, 2, 0], [0, 6, 9, 15], [4, 3, 0]
     offsets = torch.tensor(starts, dtype=torch.int64, device="npu")
 
@@ -582,27 +596,38 @@ def test_align_context(mode, graph_mode, state_dtype, record_property):
 
     indices = strided(blocks)
     mapping, counts = strided([2, 0, 1]), strided([9, -2, 4])
-    computed_values = {"cross": [7, 0, 5], "exact": [5, 0, 4], "no_cross": [1, 0, 1]}[mode]
+    computed_values = {
+        "cross": [7, 0, 5],
+        "exact": [5, 0, 4],
+        "no_cross": [1, 0, 1],
+        "mixed": [7, 0, 1],
+        "no_cross_inplace": [1, 0, 1],
+    }[mode]
     computed = strided(computed_values)
     table_cpu = torch.tensor([[7, 8, 9], [0, 0, 0], [5, 6, 10]], dtype=torch.int32)
+    if mode == "no_cross_inplace":
+        table_cpu[0, 0], table_cpu[2, 0] = 2, 1
     table = table_cpu.npu()
     layers, expected, originals = [], [], []
     block_size = 8
     for layer_no in range(2):
-        state = (torch.randn(slots, heads, dim, dim, device="npu") * 0.03).to(state_dtype)
+        state = (torch.randn(slots, heads, value_dim, key_dim, device="npu") * 0.03).to(state_dtype)
         initial = state.clone()
-        correction = torch.full((slots, heads, capacity, dim), float("nan"), device="npu")
-        kg = torch.full((slots, heads, capacity, 2 * dim), float("nan"), dtype=torch.bfloat16, device="npu")
-        q, k, v, gate = (torch.randn(1, 15, heads, dim, dtype=torch.bfloat16, device="npu") for _ in range(4))
+        correction = torch.full((slots, heads, capacity, value_dim), float("nan"), device="npu")
+        kg = torch.full((slots, heads, capacity, 2 * key_dim), float("nan"), dtype=torch.bfloat16, device="npu")
+        q, k, v, gate = (
+            torch.randn(1, 15, heads, width, dtype=torch.bfloat16, device="npu")
+            for width in (key_dim, key_dim, value_dim, key_dim)
+        )
         beta = torch.randn(1, 15, heads, dtype=torch.bfloat16, device="npu")
         a_log = torch.randn(heads, device="npu") * 0.1
-        bias = torch.randn(heads * dim, device="npu") * 0.1
+        bias = torch.randn(heads * key_dim, device="npu") * 0.1
         golden_output, final, _ = reference(q, k, v, gate, beta, a_log, bias, -5.0, initial, starts, blocks, accepted)
         output = kda_recoverssm_verify(
             q, k, v, gate, beta, a_log, bias, -5.0, state, correction, kg, offsets, indices, capacity
         )
         assert_accuracy(output, golden_output, record_property, f"layer{layer_no}_verify")
-        conv = torch.randn(slots, 3 * heads * dim, capacity + 2, dtype=torch.bfloat16, device="npu")
+        conv = torch.randn(slots, heads * (2 * key_dim + value_dim), capacity + 2, dtype=torch.bfloat16, device="npu")
         # Different physical layouts exercise the per-layer stride-table path.
         if layer_no:
             conv = conv.transpose(-1, -2).contiguous().transpose(-1, -2)
@@ -645,13 +670,31 @@ def test_align_context(mode, graph_mode, state_dtype, record_property):
                 dt_bias=bias,
                 gate_lower_bound=-5.0,
                 local_num_heads=heads,
-                head_dim=dim,
+                head_dim=key_dim,
             )
         )
         expected.append((golden_state, golden_conv, touched))
         originals.append((initial, original_conv))
     context = KDARecoverSSMCommitContext.create(layers, spec_query_len=capacity, max_num_reqs=3)
     assert context.conv_dim_stride is None
+    launches = set()
+
+    class RecordingKernel:
+        def __init__(self, name):
+            self.name = name
+            self.kernel = getattr(recoverssm_module, name)
+
+        def __getitem__(self, grid):
+            kernel_launch = self.kernel[grid]
+
+            def invoke(*args, **kwargs):
+                launches.add((self.name, kwargs["ALIGN_MODE"]))
+                return kernel_launch(*args, **kwargs)
+
+            return invoke
+
+    for name in ["_commit_kda_state_kernel", "_commit_kda_state_grouped_kernel"]:
+        monkeypatch.setattr(recoverssm_module, name, RecordingKernel(name))
 
     def launch():
         context.commit(counts, indices, offsets, mapping, table, computed, block_size)
@@ -669,6 +712,13 @@ def test_align_context(mode, graph_mode, state_dtype, record_property):
         captured.replay()
     else:
         launch()
+    grouped = is_950() and state_dtype == torch.float32 and heads in (32, 64) and key_dim == value_dim == 128
+    fast_path = ("_commit_kda_state_grouped_kernel", False) if grouped else ("_commit_kda_state_kernel", False)
+    assert launches == {fast_path, (fast_path[0], True)}
+    torch.testing.assert_close(
+        context.state_commit_lens[:3] + context.boundary_commit_lens[:3], context.commit_lens[:3], atol=0, rtol=0
+    )
+    record_property("align_commit_paths", str(sorted(launches)))
     for index, (layer, (state, conv, touched), (initial, _)) in enumerate(zip(layers, expected, originals)):
         assert_accuracy(layer.kv_cache[1], state, record_property, f"layer{index}_align_state")
         view = layer.kv_cache[0] if is_conv_state_dim_first() else layer.kv_cache[0].transpose(-1, -2)
@@ -850,7 +900,7 @@ def test_commit_window_uses_device_path(
                 if not grouped_commit:
                     matrix_buffers = 2
                     assert (
-                        kwargs["BV"] * kwargs["BK"] * torch.float32.itemsize * matrix_buffers
+                        kwargs["BV"] * kwargs["BK"] * context.correction_caches[0].element_size() * matrix_buffers
                         <= recoverssm_module.get_ub_size_bytes()
                     )
                     assert kwargs["UNROLL_COMMIT"] == is_950()
