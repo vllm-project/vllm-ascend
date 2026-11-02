@@ -3,6 +3,7 @@ from typing import Any, Dict, Optional, Type
 from vllm.logger import logger
 
 from .w4a4_flatquant_dynamic import AscendW4A4FlatQuantDynamicLinearMethod
+from .w4a4_splitquant import AscendW4A4SplitQuantLinearMethod
 from .w4a8_dynamic import (AscendW4A8DynamicFusedMoEMethod,
                            AscendW4A8DynamicLinearMethod)
 from .w8a8 import (AscendC8KVCacheMethod, AscendW8A8FusedMoEMethod,
@@ -17,6 +18,9 @@ ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
     },
     "W4A4_FLATQUANT_DYNAMIC": {
         "linear": AscendW4A4FlatQuantDynamicLinearMethod,
+    },
+    "W4A4_SPLITQUANT": {
+        "linear": AscendW4A4SplitQuantLinearMethod,
     },
     "W8A8": {
         "linear": AscendW8A8LinearMethod,
@@ -37,6 +41,15 @@ def get_linear_quant_type(quant_description: Dict[str, Any], prefix: str,
                           packed_modules_mapping: Dict[str, Any]):
     proj_name = prefix.split(".")[-1]
     if proj_name in packed_modules_mapping:
+        if any(quant_description.get(prefix.replace(proj_name, shard_proj_name) + ".weight")
+               == "W4A4_SPLITQUANT"
+               for shard_proj_name in packed_modules_mapping[proj_name]):
+            # SplitQuant uses independent clipping and transform metadata for
+            # each source projection. A single packed weight can't represent
+            # these shards until the runtime adds a segmented fused operator.
+            raise NotImplementedError(
+                f"SplitQuant packed projection {prefix} requires independent "
+                "per-shard transforms; Qwen3 fused QKV/gate-up is not supported")
         quant_type = None
         shard_prefixes = [
             prefix.replace(proj_name, shard_proj_name)

@@ -222,11 +222,14 @@ def torch_chunk_gated_delta_rule(
         for x in (query, key, value, beta, g)
     ]
 
-    batch_size, sequence_length, num_heads, k_head_dim = key.shape
+    batch_size, num_k_heads, num_heads, k_head_dim = key.shape
+    sequence_length = value.shape[1]
+    if sequence_length % num_k_heads:
+        raise ValueError("GDN value heads must be divisible by key heads")
     v_head_dim = value.shape[-1]
     pad_size = (chunk_size - num_heads % chunk_size) % chunk_size
-    query = F.pad(query, (0, 0, 0, pad_size)).repeat_interleave(2, dim=1)
-    key = F.pad(key, (0, 0, 0, pad_size)).repeat_interleave(2, dim=1)
+    query = F.pad(query, (0, 0, 0, pad_size)).repeat_interleave(value.shape[1] // query.shape[1], dim=1)
+    key = F.pad(key, (0, 0, 0, pad_size)).repeat_interleave(value.shape[1] // key.shape[1], dim=1)
     value = F.pad(value, (0, 0, 0, pad_size))
     beta = F.pad(beta, (0, pad_size))
     g = F.pad(g, (0, pad_size))
@@ -297,3 +300,54 @@ def torch_chunk_gated_delta_rule(
     core_attn_out = core_attn_out.transpose(1,
                                             2).contiguous().to(initial_dtype)
     return core_attn_out, last_recurrent_state
+
+
+def torch_recurrent_gated_delta_rule(q, k, v, g, beta, initial_state,
+                                     inplace_final_state=True, cu_seqlens=None,
+                                     ssm_state_indices=None,
+                                     use_qk_l2norm_in_kernel=False, **kwargs):
+    """Ascend eager decode with indexed recurrent-state updates."""
+    if kwargs.get("num_accepted_tokens") is not None:
+        raise NotImplementedError("Speculative GDN decode is not supported")
+    outs = []
+    nseq = len(cu_seqlens) - 1
+    for i in range(nseq):
+        start, end = int(cu_seqlens[i]), int(cu_seqlens[i + 1])
+        index = int(ssm_state_indices[i]) if ssm_state_indices is not None else i
+        state = initial_state[index:index + 1].float()
+        query, key = q[:, start:end].float(), k[:, start:end].float()
+        if use_qk_l2norm_in_kernel:
+            query = F.normalize(query, p=2, dim=-1)
+            key = F.normalize(key, p=2, dim=-1)
+        ratio = v.shape[2] // k.shape[2]
+        query = query.repeat_interleave(ratio, dim=2) * q.shape[-1] ** -0.5
+        key = key.repeat_interleave(ratio, dim=2)
+        seq_out = []
+        for t in range(end - start):
+            kt = key[:, t]
+            state = state * g[:, start + t].float().exp()[..., None, None]
+            residual = v[:, start + t].float() - (state * kt[..., None]).sum(-2)
+            state = state + kt[..., None] * (residual * beta[:, start + t].float()[..., None])[..., None, :]
+            seq_out.append((state * query[:, t, :, :, None]).sum(-2))
+        outs.append(torch.stack(seq_out, dim=1).to(v.dtype))
+        if inplace_final_state:
+            initial_state[index].copy_(state[0].to(initial_state.dtype))
+    return torch.cat(outs, dim=1), initial_state
+
+
+def torch_causal_conv1d_update(x, conv_state, weight, bias=None,
+                               activation=None, conv_state_indices=None, **kwargs):
+    """Causal decode convolution using the last width-1 cached inputs."""
+    if x.ndim != 2:
+        raise NotImplementedError("Only single-token causal decode is supported")
+    indices = (conv_state_indices.long() if conv_state_indices is not None
+               else torch.arange(x.shape[0], device=x.device))
+    history = conv_state[indices]
+    window = torch.cat((history[..., -(weight.shape[1]-1):], x.unsqueeze(-1)), -1)
+    out = (window.float() * weight.float()).sum(-1)
+    if bias is not None:
+        out = out + bias.float()
+    if activation in (True, "silu", "swish"):
+        out = F.silu(out)
+    conv_state[indices] = window[..., -conv_state.shape[-1]:].to(conv_state.dtype)
+    return out.to(x.dtype)

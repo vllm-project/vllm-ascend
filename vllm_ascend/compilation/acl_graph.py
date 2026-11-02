@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import os
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -150,7 +151,12 @@ class ACLGraphWrapper:
 
                 # mind-exploding: carefully manage the reference and memory.
                 forward_context.capturing = True
-                with torch.npu.graph(aclgraph, pool=self.graph_pool):
+                # Custom-op tiling caches are warmed on this stream. Keep capture
+                # on it when explicitly requested, avoiding a host/device tiling
+                # upload on a newly created default graph-capture stream.
+                capture_stream = (torch.npu.current_stream() if os.getenv(
+                    "SPLITQUANT_GRAPH_CAPTURE_CURRENT_STREAM") == "1" else None)
+                with torch.npu.graph(aclgraph, pool=self.graph_pool, stream=capture_stream):
                     # `output` is managed by pytorch's aclgraph pool
                     output = self.runnable(*args, **kwargs)
                     if self.aclgraph_options.weak_ref_output:
