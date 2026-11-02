@@ -1,0 +1,9 @@
+pr: 20600
+entries:
+  - category: performance
+    text: >-
+      Sharded the DeepSeek-V4.1 Engram wkv projection across TP ranks instead of
+      replicating it, cutting per-GPU weight memory and redundant projection
+      compute when sequence parallelism is disabled.
+    model: deepseek-v4.1
+    hardware: [A2, A3, A5]

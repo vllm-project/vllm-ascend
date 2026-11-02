@@ -543,3 +543,34 @@ def test_native_mxfp8_requires_e8m0_scales_before_allocation(tmp_path):
     )
     with pytest.raises(ValueError, match="requires E8M0 scales"):
         embedding_mod.preflight_engram_checkpoint(tmp_path, [1])
+
+
+@pytest.mark.parametrize("use_sequence_parallel", [False, True])
+def test_engram_wkv_shards_columns_across_tp(monkeypatch, use_sequence_parallel):
+    """wkv shards its output columns with an all-gather, replicated only under SP."""
+    from vllm_ascend.models.deepseek_v41.engram import layer as layer_mod
+
+    recorded: dict = {}
+
+    def record(*args, **kwargs):
+        recorded["in_features"], recorded["out_features"] = args
+        recorded.update(kwargs)
+        return torch.nn.Identity()
+
+    monkeypatch.setattr(layer_mod, "ColumnParallelLinear", record)
+    config = SimpleNamespace(
+        hidden_size=64,
+        hc_mult=2,
+        rms_norm_eps=1e-5,
+        engram_max_ngram_size=4,
+        engram_n_heads=6,
+        engram_head_dim=64,
+    )
+    engram = layer_mod.AscendEngram(config, None, "layers.1.engram", use_sequence_parallel=use_sequence_parallel)
+    assert isinstance(engram.wkv, torch.nn.Identity)
+    assert (recorded["in_features"], recorded["out_features"]) == (3 * 6 * 64, 3 * 64)
+    assert recorded["gather_output"] is True
+    assert recorded["disable_tp"] is use_sequence_parallel
+    assert recorded["bias"] is False
+    assert recorded["quant_config"] is None
+    assert recorded["prefix"] == "layers.1.engram.wkv"
