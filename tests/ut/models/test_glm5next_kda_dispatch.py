@@ -11,6 +11,7 @@ import vllm_ascend.models.glm5next.kda as model_kda
 
 @pytest.mark.parametrize("needs_output_buffer", [False, True])
 def test_projection_tp_uses_shared_kda_boundary_with_live_metadata(monkeypatch, needs_output_buffer):
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
     layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
     layer.prefix = "projection_tp"
