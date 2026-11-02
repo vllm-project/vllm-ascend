@@ -76,3 +76,31 @@ def test_expand_dtype_axis_covers_runtime_dtypes():
         torch.int64,
         torch.float32,
     }
+
+
+def test_recovered_tokens_grid_covers_max_spec_len():
+    """Regression for the nightly PD DSpark crash: grid axis 1 was derived
+    from q.shape[0] (== batch_size) instead of max_spec_len, so any decode
+    step with batch_size < num_speculative_tokens left recovered-token slots
+    unwritten. The garbage ids then fed out-of-bounds gathers (SMMU fault).
+    """
+    kernel = rs._SAMPLE_RECOVERED_TOKENS_KERNEL
+    batch_size, max_spec_len = 1, 5
+    cu = torch.zeros(batch_size, dtype=torch.int32)
+    q = torch.zeros((batch_size, 128), dtype=torch.float32)
+    with patch.object(kernel, "launch") as launch:
+        kernel(
+            torch.zeros((batch_size, max_spec_len), dtype=torch.int32),
+            cu,
+            torch.zeros((batch_size, max_spec_len), dtype=torch.int32),
+            None,
+            torch.zeros((batch_size, max_spec_len, 128), dtype=torch.float32),
+            q,
+            vocab_size=128,
+            no_draft_probs=True,
+            sub_block=4 * 1024,
+            max_spec_len=max_spec_len,
+        )
+    (launch_spec, _inputs) = launch.call_args[0]
+    grid, _kwargs = launch_spec
+    assert grid == (batch_size, max_spec_len), f"grid {grid} must cover all {max_spec_len} draft positions"

@@ -10,8 +10,6 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_gather
 from vllm.logger import logger
 
-from vllm_ascend.utils import enable_dsa_cp
-
 if TYPE_CHECKING:
     from .model import DeepseekV41Model
 
@@ -36,6 +34,11 @@ class AscendDecoderReplayLayers:
 
     def __call__(self, *states: torch.Tensor | None) -> tuple[torch.Tensor, ...]:
         if self.rows is None:
+            if self.context_factory is not None:
+                # A peer DP replica compacted its batch. Keep our original PCP
+                # layout, but use the decoder's new cross-DP token counts.
+                with self.context_factory():
+                    return self.run_layers(*states)
             return self.run_layers(*states)
         assert self.context_factory is not None
         positions = states[2]
@@ -43,17 +46,7 @@ class AscendDecoderReplayLayers:
         with self.context_factory():
             rows = self.rows
             for buffer in self.row_buffers:
-                if enable_dsa_cp():
-                    # Indexer outputs use the old CP partition; replay queries
-                    # repartition the retained rows across the same TP group.
-                    tp = get_tp_group()
-                    local_tokens = positions.shape[0] // tp.world_size
-                    global_buffer = tensor_model_parallel_all_gather(buffer[:local_tokens], dim=0)
-                    replay_tokens = rows.numel() // tp.world_size
-                    local_rows = rows[tp.rank_in_group * replay_tokens : (tp.rank_in_group + 1) * replay_tokens]
-                    buffer[:replay_tokens].copy_(global_buffer.index_select(0, local_rows))
-                else:
-                    buffer[: rows.numel()].copy_(buffer.index_select(0, rows))
+                buffer[: rows.numel()].copy_(buffer.index_select(0, rows))
                 if self.num_padded_rows is not None:
                     buffer[rows.numel() : self.num_padded_rows].zero_()
             replay_states: list[torch.Tensor | None] = []
@@ -100,15 +93,13 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
     cut = max(model.config.kv_source_layer_ids)
     if cut >= model.end_layer - 1:
         return None
-    if parallel.prefill_context_parallel_size > 1 and parallel.data_parallel_size > 1:
-        reason = "PCP decoder replay currently requires DP=1"
-    elif (
-        (model.use_sequence_parallel and not enable_dsa_cp())
+    if (
+        model.use_sequence_parallel
         or parallel.pipeline_parallel_size > 1
         or parallel.decode_context_parallel_size > 1
         or parallel.use_ubatching
     ):
-        reason = "SP without DSA CP, PP, DCP and microbatching need a separate replay layout"
+        reason = "SP, PP, DCP and microbatching need a separate replay layout"
     elif config.compilation_config.cudagraph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY):
         reason = "replay prefill requires eager execution; use NONE or FULL_DECODE_ONLY"
     elif any(layer > cut for layer in model.config.engram_layer_ids):

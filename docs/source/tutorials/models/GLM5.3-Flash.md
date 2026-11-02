@@ -1484,7 +1484,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
               "kv_role": "kv_producer",
               "kv_connector_extra_config": {
                 "backend": "memcache",
-                "memcache_dp_init_barrier": true,
                 "use_layerwise": false,
                 "lookup_rpc_port": '"$((37000 + $4))"'
               }
@@ -1517,7 +1516,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
               "kv_role": "kv_consumer",
               "kv_connector_extra_config": {
                 "backend": "memcache",
-                "memcache_dp_init_barrier": true,
                 "use_layerwise": false,
                 "consumer_is_to_load": false,
                 "consumer_is_to_put": false,
@@ -1534,11 +1532,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     Decode lookup values are `37100-37103`. Keep the role-specific Mooncake KV
     base ports from [Section 5.3](#glm53-flash-5-3-a3); its workers and schedulers derive their own
     ports from the topology.
-
-    Keep `memcache_dp_init_barrier` set to `true` on every rank in each DP
-    group. It synchronizes workers after Memcache initialization and before
-    NPU graph capture. Set it in the `AscendStoreConnector` child, as shown
-    above.
 
     ##### Start the Services
 

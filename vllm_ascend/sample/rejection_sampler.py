@@ -773,6 +773,7 @@ def sample_recovered_tokens(
             vocab_size=vocab_size,
             no_draft_probs=draft_probs is None,
             sub_block=4 * 1024,
+            max_spec_len=max_spec_len,
         )
     elif use_block_verify:
         sample_recovered_tokens_blockwise_pytorch(

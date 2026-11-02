@@ -1,0 +1,8 @@
+pr: 20116
+entries:
+  - category: performance
+    text: Improved QSFA performance on Ascend A5 for optional-RoPE and INT8 paged sparse KV workloads.
+    hardware: [A5]
+  - category: bugfix
+    text: Fixed A5 QSFA handling of trailing or fully invalid sparse indices so padded entries are excluded from computation and empty valid ranges produce initialized outputs.
+    hardware: [A5]

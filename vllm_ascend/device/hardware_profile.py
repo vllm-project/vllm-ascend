@@ -239,6 +239,9 @@ class HardwareProfile:
     # Independent, additive contracts queried with ``supports``.
     capabilities: frozenset[HardwareCapability]
 
+    # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
+    requires_2d_nz_linear_input: bool = False
+
     def supports(self, capability: HardwareCapability) -> bool:
         """Return whether the exact documented ``capability`` contract is available."""
 
@@ -334,6 +337,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A5: HardwareProfile(
             _device_type=AscendDeviceType.A5,
+            requires_2d_nz_linear_input=True,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.TOPO_AFFINITY,
             default_worker_cls=_DEFAULT_WORKER_CLS,

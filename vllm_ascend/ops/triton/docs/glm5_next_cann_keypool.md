@@ -5,7 +5,7 @@
 - **Function**: Three Triton kernel types adapt GLM-5.3-Flash metadata, cache writes and token indices to CANN `KeyPool`/`PoolKeyIndexer`. The entry points are in `vllm_ascend/ops/triton/glm5_next_cann_keypool.py`.
 - **Formula**: With pool size `P`, logical block size `L`, position `p` and raw slot `s`, a completed pool has `(p + 1) % P == 0` and compressed slot `(s // L) * (L // P) + (s % L) // P`. A negative slot remains invalid. The visible tail starts at `a = ((p + 1) // P) * P` and contains `[a, ..., p]`, appended after `min(a, topk)` history columns.
 - **Algorithm flow**:
-    1. `_build_keypool_metadata_kernel` has two modes, exposed by `build_keypool_metadata` and `build_tail_inputs`. They build compressed request boundaries/slots and raw-tail read/write addresses once per metadata build. The resulting buffers are reused across layers. DSA-CP also builds rank-local cumulative query ends, visible pool counts and tail lengths in the same launch. Completed pools retain their compact output row even when their cache slot is evicted.
+    1. `_build_keypool_metadata_kernel` has two modes, exposed by `build_keypool_metadata` and `build_tail_inputs`. They build compressed request boundaries/slots and raw-tail read/write addresses once per metadata build. The resulting buffers are reused across layers. Completed pools retain their compact output row even when their cache slot is evicted.
     2. After CANN `KeyPool` has consumed the old tail, `_write_keypool_caches_kernel` writes the raw FP32 tail and completed BF16 pools in one launch. Non-MTP reads updated CANN state; MTP writes retained projected key/gate rows so rejected candidates can be overwritten after logical rollback.
     3. `_pack_indices_kernel` preserves the selected history, appends the causal tail and clears padded rows/alignment columns in one launch. It can write directly into the SFA output buffer.
 - **Supported modes**: Eager execution and fixed-shape NPU graph capture/replay.
@@ -24,8 +24,6 @@
 | `source` | Attribute | Number of available source positions/slots | int | Scalar |
 | `logical` | Attribute | `L`, raw tokens per logical cache block | int | Scalar |
 | `ratio` | Attribute | `P`, raw tokens per completed pool | int | Scalar |
-| `query_metadata` | Optional output storage | DSA-CP local `positions`, preallocated `cum_query_lens[R]`, `seq_lens[R]` and `pool_tail[R]`; the latter three receive local query ends and causal prefix lengths | int64 tensors or `None` | Contiguous ND |
-| `local_start` | Attribute | First packed global token owned by this rank; its interval has `query_metadata.positions.numel()` tokens | int | Scalar |
 | Return tuple | Output | Views of `positions[T]`, `slot_mapping[T]`, `seq_lens[R]`, `raw_seq_lens[R]`, `query_start_loc[R+1]`, `cum_query_lens[R]`, `start_pos[R]`, `pool_tail[R]`, in that order | Dtypes below | Contiguous ND |
 
 | Buffer field | Description | Data type | Minimum capacity |
@@ -76,7 +74,6 @@
 
 - Inference only. `P>1`, `D>0`, `L%P==0`, `0<=A<=source<=T`, and input storage must cover every actual token. This adapter documents the BF16 cache path.
 - Queries are contiguous within each request and packed in request order. Normalize a negative query boundary to `A`, clamp boundaries to `A`, then require nondecreasing boundaries beginning at 0 and ending at `A`. Raw sequence lengths must cover the request's query length; actual positions are nonnegative and consistent with those lengths.
-- DSA-CP partitions the packed global query into contiguous rank intervals. Each local request sees only the prefix through its last local query; requests without local queries have zero visible length. KeyPool/cache writes still use global request metadata, while selection and packing use local query metadata.
 - Tail blocks are request-local. Use `C=P` for non-MTP and `C=P+num_speculative_tokens` for speculative decoding; `0<retained_width<=C` when MTP is enabled. `page_rows>=C` and `page_rows*2D==tail.stride(0)` preserve shared page padding.
 - `tail` rows, `cache` tokens and vector columns must be contiguous. Only tail page, compressed block and pooled-vector row strides may include padding. `cache` has exactly one KV head. Metadata output buffers must not overlap unrelated tensors.
 - Invalid tail/pooled destinations are skipped. Valid destinations must be unique within their respective write set; duplicate destinations can race. CANN state and projections must be ready before cache writes. Reads of historical tail rows must finish before any overwrite.

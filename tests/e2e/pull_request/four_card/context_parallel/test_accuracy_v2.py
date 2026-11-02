@@ -263,7 +263,6 @@ DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
             "cudagraph_capture_sizes": [6, 12, 18, 24],
         },
         "additional_config": {
-            "enable_dsa_cp": False,
             "enable_sparse_li_c8": False,
         },
         "speculative_config": {"method": "mtp", "num_speculative_tokens": 5},

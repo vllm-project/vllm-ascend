@@ -8,6 +8,7 @@ from dataclasses import replace
 import torch
 from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadataBuilder
 from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 
 from vllm_ascend.ops.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
@@ -48,6 +49,16 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
         m, num_decode_draft_tokens_cpu = self._normalize_graph_padding(
             common_attn_metadata, num_actual_reqs, num_decode_draft_tokens_cpu
         )
+        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+            # MRV2's CUDA builder requires precomputed physical state IDs.
+            # Reuse the device-independent path used by Ascend's GDN builder;
+            # the upstream KDA fallback and multi-group helper require CUDA.
+            self.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+                m.block_table_tensor[: m.num_reqs],
+                m.seq_lens[: m.num_reqs],
+                self.kv_cache_spec,
+                "align",
+            )
         with _disable_upstream_graph_staging(self):
             metadata = super().build(common_prefix_len, m, num_accepted_tokens, num_decode_draft_tokens_cpu, fast_build)
         self._build_conv_metadata(m, metadata, num_decode_draft_tokens_cpu)

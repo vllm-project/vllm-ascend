@@ -295,7 +295,6 @@ def test_sfa_consumer_uses_device_local_lengths_and_ignores_cpu(monkeypatch):
     builder._get_dcp_local_block_table = lambda *_: block_table
     builder._build_block_table_replicated_view = lambda *_: block_table
     builder._build_slot_mapping_replicated_view = lambda *_: slots
-    builder._update_parallel_slot_mapping = lambda *_: None
     common = SimpleNamespace(
         slot_mapping=slots,
         block_table_tensor=block_table,
