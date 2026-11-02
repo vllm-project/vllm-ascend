@@ -692,6 +692,11 @@ class NPUWorker(WorkerBase):
                 GiB(self.init_snapshot.free_memory),
                 GiB(kv_cache_memory_bytes),
             )
+            # The explicit budget is physical device memory, like the profiled
+            # one; multi-group layouts with private per-layer allocations must
+            # take the same planner scaling so both paths derive the same
+            # block count for the same budget.
+            kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(kv_cache_memory_bytes)
             return self._apply_kvpp_memory_budget(
                 self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
             )
