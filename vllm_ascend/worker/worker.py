@@ -1008,7 +1008,10 @@ class NPUWorker(WorkerBase):
             # Elastic EP standby workers load dummy weights first and receive
             # the real weights over the standby groups afterwards (mirrors
             # vllm/v1/worker/gpu_worker.py Worker.load_model).
-            self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+            if load_dummy_weights:
+                self.model_runner.load_model(load_dummy_weights=True)
+            else:
+                self.model_runner.load_model()
 
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
             get_ec_transfer().start_worker_services()

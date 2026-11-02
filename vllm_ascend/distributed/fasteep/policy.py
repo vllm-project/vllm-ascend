@@ -78,7 +78,8 @@ def validate_config(config) -> None:
 
 def is_fasteep(config) -> bool:
     return (
-        config.parallel_config.worker_extension_cls == "vllm_ascend.distributed.fasteep.runtime.FastEEPWorkerExtension"
+        getattr(config.parallel_config, "worker_extension_cls", None)
+        == "vllm_ascend.distributed.fasteep.runtime.FastEEPWorkerExtension"
     )
 
 
