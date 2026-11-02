@@ -261,14 +261,14 @@ def test_p_eagle_acceptance(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 @pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [7])
-@pytest.mark.skip(reason="vLLM #57934: Model Runner V1 rejects DFlash candidate-head, remove it after drop MRV1")
 def test_dflash2_acceptance(
+    monkeypatch: pytest.MonkeyPatch,
     method: str,
     num_speculative_tokens: int,
 ):
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 
@@ -304,7 +304,10 @@ def test_dflash2_acceptance(
         "num_speculative_tokens": num_speculative_tokens,
     }
 
-    compilation_config = CompilationConfig(cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[9])
+    # Exercise target PIECEWISE graphs with eager DFlash2 drafting.
+    compilation_config = CompilationConfig(
+        cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[num_speculative_tokens + 1]
+    )
 
     with VllmRunner(
         main_model_name,
@@ -318,6 +321,7 @@ def test_dflash2_acceptance(
         compilation_config=compilation_config,
         enable_prefix_caching=False,
     ) as llm:
+        assert llm.model.llm_engine.vllm_config.use_v2_model_runner
         outputs = llm.model.generate(prompts, sampling_params)
         metrics = llm.model.get_metrics()
 
