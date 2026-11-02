@@ -883,10 +883,7 @@ class DeepseekV41DecoderLayer(nn.Module):
 
     def write_kv(self, hidden_states, pre_mix, positions, input_ids=None):
         """Project the attention input and write this layer's cache only."""
-        assert (
-            not self.use_sequence_parallel
-            and self.prefill_context_parallel_size == 1
-        )
+        assert not self.use_sequence_parallel and self.prefill_context_parallel_size == 1
         del positions, input_ids
         x, _, _, _ = self.hc_pre(
             hidden_states,
