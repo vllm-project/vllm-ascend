@@ -31,8 +31,11 @@ def install():
         x = x.reshape(1, 2048)
         transform = self.experts.input_group_trans.to(x)
         if os.getenv('SPLITQUANT_RAW_ROTATION') == '1':
-            x = torch.ops.npu.splitquant_raw_rotation(x.contiguous(), transform.contiguous(), 0)
-            self.experts.raw_rotation_calls = getattr(self.experts, 'raw_rotation_calls', 0) + 1
+            if hasattr(torch.ops.npu, 'splitquant_raw_rotation'):
+                x = torch.ops.npu.splitquant_raw_rotation(x.contiguous(), transform.contiguous(), 0)
+                self.experts.raw_rotation_calls = getattr(self.experts, 'raw_rotation_calls', 0) + 1
+            else:
+                raise RuntimeError('splitquant_raw_rotation operator is not registered.')
         else:
             x = torch.einsum('mgk,gkl->mgl', x.reshape(1, 16, 128), transform).reshape_as(x)
         logits, _ = self.gate(x)
