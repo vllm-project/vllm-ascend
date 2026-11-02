@@ -224,7 +224,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
     "id": "chatcmpl-9df13fd5e539af93",
     "object": "chat.completion",
     "created": 1780971952,
-    "model": "kimi_k26",
+    "model": "Eco-Tech/Kimi-K2.6-w4a8",
     "choices": [
         {
             "index": 0,
@@ -349,10 +349,7 @@ Parameter descriptions:
        --enable-expert-parallel \
        --seed 1024 \
        --quantization ascend \
-       --enable-auto-tool-choice \
-    --tool-call-parser kimi_k2 \
-    --reasoning-parser kimi_k2 \
-    --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
+       --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
        --trust-remote-code \
        --max-num-seqs 4 \
        --max-model-len 32768 \
@@ -431,10 +428,7 @@ Parameter descriptions:
        --enable-expert-parallel \
        --seed 1024 \
        --quantization ascend \
-       --enable-auto-tool-choice \
-    --tool-call-parser kimi_k2 \
-    --reasoning-parser kimi_k2 \
-    --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
+       --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
        --trust-remote-code \
        --max-num-seqs 4 \
        --max-model-len 32768 \
@@ -513,10 +507,7 @@ Parameter descriptions:
        --enable-expert-parallel \
        --seed 1024 \
        --quantization ascend \
-       --enable-auto-tool-choice \
-    --tool-call-parser kimi_k2 \
-    --reasoning-parser kimi_k2 \
-    --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
+       --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
        --trust-remote-code \
        --max-num-seqs 8 \
        --max-model-len 32768 \
@@ -595,10 +586,7 @@ Parameter descriptions:
        --enable-expert-parallel \
        --seed 1024 \
        --quantization ascend \
-       --enable-auto-tool-choice \
-    --tool-call-parser kimi_k2 \
-    --reasoning-parser kimi_k2 \
-    --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
+       --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
        --trust-remote-code \
        --max-num-seqs 8 \
        --max-model-len 32768 \
@@ -653,6 +641,8 @@ Parameter descriptions:
 
     Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
+    Save the following script as `proxy.sh` in `vllm-ascend/examples/disaggregated_prefill_v1/`.
+
     ```shell
     python load_balance_proxy_server_example.py \
       --port 1999 \
@@ -695,7 +685,7 @@ After the PD separation service is fully started, send a request through the pro
 curl http://141.xx.xx.1:1999/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "kimi_k26",
+        "model": "Eco-Tech/Kimi-K2.6-w4a8",
         "messages": [{
             "role": "user",
             "content": [
