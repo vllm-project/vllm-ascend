@@ -120,7 +120,11 @@ def test_native_mla_retires_same_stream_use_after_device_wait(monkeypatch, captu
     order = []
     stream = MagicMock()
     event = object()
-    stream.record_event.side_effect = lambda: order.append("record") or event
+    def record_event():
+        order.append("record")
+        return event
+
+    stream.record_event.side_effect = record_event
     stream.wait_event.side_effect = lambda e: order.append("wait") if e is event else None
     monkeypatch.setattr(
         torch,
