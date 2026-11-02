@@ -34,7 +34,7 @@ def test_qwen35_evs_reduces_video_prompt_tokens():
         for prompt in qwen_prompt(["Describe this video in one sentence."])
     ]
     model_path = hf_snapshot_download(
-        "Qwen/Qwen3.5-0.8B",
+        "Qwen/Qwen3.5-2B",
         local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
     )
     prompt_token_counts = []
