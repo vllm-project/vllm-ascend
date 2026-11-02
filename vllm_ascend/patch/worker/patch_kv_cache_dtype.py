@@ -46,6 +46,10 @@ import typing
 import torch
 import vllm.utils.torch_utils as _torch_utils
 
+# Ascend-only ``--kv-cache-dtype`` values; keep in sync with
+# ``_ASCEND_CACHE_DTYPES`` in ``patch/platform/patch_kv_cache_dtype.py``.
+_ASCEND_CACHE_DTYPES = ("int8", "mxfp8")
+
 
 def _apply_fp8_kv_cache_dtype_flip() -> None:
     try:
@@ -93,12 +97,12 @@ def _widen_cache_dtype_literal_for_worker() -> None:
     # ``vllm/v1/attention/selector.py`` reads the same list object). A
     # spawned worker starts from the upstream list, so append the Ascend
     # dtypes here too; idempotent when fork already inherited the append.
-    for dtype in ("int8", "mxfp8"):
+    for dtype in _ASCEND_CACHE_DTYPES:
         if dtype not in _cache_mod.KV_CACHE_DTYPES:
             _cache_mod.KV_CACHE_DTYPES.append(dtype)
 
     existing_args = getattr(_cache_mod.CacheDType, "__args__", ())
-    missing = tuple(d for d in ("int8", "mxfp8") if d not in existing_args)
+    missing = tuple(d for d in _ASCEND_CACHE_DTYPES if d not in existing_args)
     if missing:
         # Derive from the current upstream Literal and append the Ascend-only
         # dtypes so no upstream member is dropped.
