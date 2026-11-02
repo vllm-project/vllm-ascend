@@ -1352,6 +1352,40 @@ class TestNPUWorker(TestBase):
             worker.model_runner.profile_run.assert_called_once()
             self.assertEqual(result, planned_kv_cache_memory)
 
+    @patch("vllm_ascend.worker.worker.maybe_apply_startup_plan")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("vllm_ascend.worker.worker.memory_profiling")
+    def test_determine_available_memory_fast_path_applies_multi_group_scaling(
+        self,
+        mock_memory_profiling,
+        mock_get_ascend_config,
+        mock_apply_startup_plan,
+    ):
+        """An explicit kv_cache_memory_bytes must take the same multi-group
+        planner scaling as the profiled path (issue #20165)."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        physical_budget = 52 << 20
+        expected_planner_budget = int(physical_budget * 4 / 26)
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker._kvpp_cache_allocation_plan = None
+            worker.vllm_config = MagicMock(kv_transfer_config=None)
+            worker.cache_config = MagicMock()
+            worker.cache_config.kv_cache_memory_bytes = physical_budget
+            worker.init_snapshot = MagicMock(free_memory=8 << 30)
+            worker.model_runner = MagicMock()
+            worker.parallel_config = MagicMock(data_parallel_size=1)
+            worker._scale_kv_cache_memory_for_multi_group = MagicMock(return_value=expected_planner_budget)
+
+            result = worker.determine_available_memory()
+
+            worker.model_runner.profile_run.assert_called_once()
+            worker._scale_kv_cache_memory_for_multi_group.assert_called_once_with(physical_budget)
+            self.assertEqual(result, expected_planner_budget)
+
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
     @patch("vllm_ascend.worker.worker.torch.npu.reset_peak_memory_stats")
