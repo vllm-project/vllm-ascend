@@ -14,8 +14,11 @@ test_cases:
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
+      SERVER_PORT: "${PORT}"
       VLLM_USE_MODELSCOPE: "true"
     server_cmd:
+      - "--host"
+      - "0.0.0.0"
       - "--port"
       - "$SERVER_PORT"
       - "--tokenizer"
