@@ -2,7 +2,7 @@
 
 ## 1、算子功能介绍
 
-`_compute_slot_mapping_kernel` 是 vllm-ascend 在 Triton 上实现的 KV Cache 槽位映射算子，文件位置：`vllm_ascend/ops/triton/compute_slot_mapping.py`。
+`_compute_slot_mapping_kernel` 是 vllm-ascend 在 Triton 上实现的 KV Cache 槽位映射算子，文件位置：`vllm_ascend/ops/triton/v1/compute_slot_mapping.py`。
 
 在大模型推理过程中，KV Cache 通常采用 **block-based（分块）** 的物理存储方式：逻辑上属于同一序列的 token 会被分散到若干物理块中，块号由 `block_table` 维护。Attention 算子需要拿到每个 token 在物理 KV Cache 中的 **slot id（槽位号）**，才能正确地读写对应的 K/V 向量。本算子即用于完成「逻辑位置 → 物理 slot id」的映射计算。
 
@@ -97,7 +97,7 @@ import torch
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.ops.triton.compute_slot_mapping import (
+from vllm_ascend.ops.triton.v1.compute_slot_mapping import (
     _compute_slot_mapping_kernel,
     _next_power_of_2,
 )
