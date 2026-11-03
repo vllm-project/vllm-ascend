@@ -437,6 +437,7 @@ jobs:
           fi
           for arch in arm64 amd64; do
             latest_attempt=0
+            commit_file=""
             for dir in "$RUNNER_TEMP"/source-commits/build-info-source-base-*-"${SUFFIX:-a2}"-"$arch"; do
               [ -d "$dir" ] || continue
               attempt="$(basename "$dir")"
@@ -447,7 +448,10 @@ jobs:
                 commit_file="$dir/commit.txt"
               fi
             done
-            [ "$latest_attempt" -gt 0 ] && [ -f "$commit_file" ]
+            if [ -z "$commit_file" ] || [ ! -f "$commit_file" ]; then
+              echo "::error::Missing source commit for $arch"
+              exit 1
+            fi
             if [ "$arch" = arm64 ]; then ARM_COMMIT=$(cat "$commit_file"); else AMD_COMMIT=$(cat "$commit_file"); fi
           done
           REPORT_DIR="${RUNNER_TEMP}/build-info-image"
