@@ -32,7 +32,18 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import
 
 class TestMooncakePipeline(unittest.TestCase):
     def make_stage(
-        self, stage, store, *, hybrid=True, draft=False, tp_rank=0, mla=False, empty_tail=False, cache_block_size=16
+        self: unittest.TestCase,
+        stage,
+        store,
+        *,
+        hybrid=True,
+        draft=False,
+        tp_rank=0,
+        mla=False,
+        empty_tail=False,
+        cache_block_size=16,
+        pcp_size=1,
+        pcp_rank=0,
     ):
         # Uneven PP partition; the last stage optionally owns an extra draft
         # layer that is not part of get_num_layers().
@@ -73,6 +84,8 @@ class TestMooncakePipeline(unittest.TestCase):
                 num_kv_heads=1 if mla else 2,
                 use_mla=mla,
                 cache_block_size=cache_block_size,
+                pcp_size=pcp_size,
+                pcp_rank=pcp_rank,
             )
         worker.m_store = store
         arrays = {}
@@ -142,7 +155,7 @@ class TestMooncakePipeline(unittest.TestCase):
             if request.can_save:
                 worker.save_kv_layer(meta)
 
-    def make_scheduler(self, worker, store):
+    def make_scheduler(self: unittest.TestCase, worker, store):
         # Construct the real scheduler from stage 0's projected config, as vLLM
         # does; do not hand-copy the worker's layout ID into the scheduler.
         with (
@@ -385,16 +398,17 @@ class TestMooncakePipeline(unittest.TestCase):
         group.layer_names = []
         with self.assertRaisesRegex(ValueError, "empty groups"):
             protocol.validate_pp_groups(SimpleNamespace(kv_cache_groups=[group]), worker.vllm_config.parallel_config)
-        for dimension in ("decode_context_parallel_size", "prefill_context_parallel_size"):
-            config = SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=2, **{dimension: 2}))
-            with self.assertRaisesRegex(ValueError, "context parallelism"):
-                worker.layerwise_backend.bind_layerwise_keys(
-                    vllm_config=config,
-                    kv_cache_config=worker.kv_cache_config,
-                    model_name="test-model",
-                    use_hybrid=False,
-                    grouped_block_size=worker.grouped_block_size,
-                )
+        config = SimpleNamespace(
+            parallel_config=SimpleNamespace(pipeline_parallel_size=2, decode_context_parallel_size=2)
+        )
+        with self.assertRaisesRegex(ValueError, "decode context parallelism"):
+            worker.layerwise_backend.bind_layerwise_keys(
+                vllm_config=config,
+                kv_cache_config=worker.kv_cache_config,
+                model_name="test-model",
+                use_hybrid=False,
+                grouped_block_size=worker.grouped_block_size,
+            )
 
     def test_empty_last_layer_waits_for_earlier_put(self):
         store = MemoryRangeStore()
