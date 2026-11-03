@@ -122,6 +122,10 @@ runner_mapping:
   tests/e2e/pull_request/two_card:
     default: a3-2
     310p: 310p-2
+  # A5-only PR cases (DSV4.1-Flash KV pool). Must be listed separately because
+  # four_card_a5 is not covered by the four_card rule below.
+  tests/e2e/pull_request/four_card_a5:
+    default: a5-4
   tests/e2e/pull_request/four_card:
     default: a3-4
     310p: 310p-4

@@ -24,9 +24,13 @@ from unittest.mock import patch
 
 import pytest
 from vllm import SamplingParams
+from vllm.utils.network_utils import get_open_port
 from vllm.v1.metrics.reader import Counter, Vector
 
+from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
+from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMooncakeManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.kv_pool_watch import run_pool_hit_sequence
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
@@ -60,6 +64,37 @@ MTP_MIN_ACCEPTANCE_RATES = [0.85, 0.65, 0.35]
 DSPARK_MIN_ACCEPTANCE_RATES = [0.73, 0.64, 0.55, 0.49, 0.42]
 ACCEPTANCE_RATE_TOLERANCE = 0.03
 
+# KV pool watch load. 16,384 tokens = 128 full blocks at block_size=128, which
+# is the minimum size that gives the hit ratio any resolution.
+POOL_PROMPT_TOKENS = 16384
+# The prompt itself stays 128-aligned; max_model_len needs headroom for output tokens
+POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
+
+POOL_KV_TRANSFER_CONFIG = {
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "backend": "mooncake",
+        "lookup_rpc_port": "1",
+        "use_layerwise": False,
+    },
+}
+
+
+def _build_mooncake_pool_config() -> MooncakeKVPoolConfig:
+    return MooncakeKVPoolConfig(
+        config={
+            "metadata_server": "P2PHANDSHAKE",
+            "protocol": "ascend",
+            "global_segment_size": "5GB",
+            "local_buffer_size": "5GB",
+            "preferred_segment": False,
+            "prefer_alloc_in_same_node": True,
+        },
+        master_port=get_open_port(),
+        metrics_port=get_open_port(),
+    )
+
 
 def _run_test(
     model: str,
@@ -69,34 +104,49 @@ def _run_test(
     expected_output_prefixes: dict[str, str],
 ) -> None:
     sampling_params = SamplingParams(max_tokens=MAX_TOKENS, temperature=0.0, seed=0)
-    with VllmRunner(
-        model,
-        max_model_len=8192,
-        max_num_seqs=MAX_NUM_SEQS,
-        max_num_batched_tokens=1024,
-        dtype="auto",
-        tensor_parallel_size=2,
-        prefill_context_parallel_size=2,
-        enable_expert_parallel=True,
-        gpu_memory_utilization=0.9,
-        quantization="ascend",
-        tokenizer_mode="deepseek_v4",
-        block_size=128,
-        enforce_eager=False,
-        compilation_config=compilation_config,
-        disable_log_stats=False,
-        speculative_config=speculative_config,
-        attention_config={"indexer_kv_dtype": "int8"},
-        additional_config={
-            "enable_prefill_mc2": True,
-            # TODO: Re-enable after PCP decode sharding lands; DSV4 results are unstable.
-            "enable_pcp_o_proj_weight_sharding": False,
-        },
-    ) as runner:
+    pool_config = _build_mooncake_pool_config()
+    with (
+        SingleNodeMooncakeManager(pool_config, "dsv4_cp_pool_watch") as pool,
+        patch.dict(os.environ, pool.server_envs),
+        VllmRunner(
+            model,
+            max_model_len=POOL_MAX_MODEL_LEN,
+            max_num_seqs=MAX_NUM_SEQS,
+            max_num_batched_tokens=POOL_PROMPT_TOKENS,
+            dtype="auto",
+            tensor_parallel_size=2,
+            prefill_context_parallel_size=2,
+            enable_expert_parallel=True,
+            gpu_memory_utilization=0.9,
+            quantization="ascend",
+            tokenizer_mode="deepseek_v4",
+            block_size=128,
+            enforce_eager=False,
+            compilation_config=compilation_config,
+            # KV pool watch: local prefix cache must be explicitly disabled.
+            # "default off" is false -- vLLM defaults to True.
+            enable_prefix_caching=False,
+            disable_log_stats=False,  # required by LLM.get_metrics()
+            speculative_config=speculative_config,
+            attention_config={"indexer_kv_dtype": "int8"},
+            kv_transfer_config=POOL_KV_TRANSFER_CONFIG,
+            additional_config={
+                "enable_prefill_mc2": True,
+                # TODO: Re-enable after PCP decode sharding lands; DSV4 results are unstable.
+                "enable_pcp_o_proj_weight_sharding": False,
+            },
+        ) as runner,
+    ):
         outputs = runner.generate(PROMPTS_SHORT, sampling_params)
         for prompt, (_, texts) in zip(PROMPTS_SHORT, outputs, strict=True):
             print(f"Model: {model}, Prompt: {prompt!r}, Outputs: {texts!r}", flush=True)
         metrics = runner.model.get_metrics()
+
+        # KV pool hit watch: R1 cold -> R2/R3 hit -> R4 disjoint miss -> R5 intact.
+        # Original assertions stay untouched; this only appends a hit sequence.
+        run_pool_hit_sequence(
+            runner, block_size=128, prompt_tokens=POOL_PROMPT_TOKENS, tag=f"dsv4-cp-{model.split('/')[-1]}"
+        )
 
     assert len(outputs) == len(PROMPTS_SHORT), f"Expected {len(PROMPTS_SHORT)} outputs, got {len(outputs)}"
     for prompt, (_, texts) in zip(PROMPTS_SHORT, outputs, strict=True):
