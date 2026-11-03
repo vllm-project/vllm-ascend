@@ -16,7 +16,11 @@ import pytest
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_config import PushConfig
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_metadata import PushReceive, PushSource
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_metadata import (
+    MooncakePushMetadata,
+    PushReceive,
+    PushSource,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_worker import (
     MooncakePushConnectorWorker,
     ProducerPeer,
@@ -54,6 +58,7 @@ def worker(metadata, producer=False, engine=None):
     instance._sources = {}
     instance._registrations = {}
     instance._receives = {}
+    instance._target_quarantine = {}
     instance._peer_receives = {}
     instance._router = None
     instance._context = None
@@ -61,6 +66,10 @@ def worker(metadata, producer=False, engine=None):
     instance._startup_error = None
     instance._thread = None
     return instance
+
+
+def enqueue_receive(instance, receive, event=None):
+    instance._inbox.put(("receive", (receive, event if event is not None else MagicMock())))
 
 
 def free_port():
@@ -111,13 +120,13 @@ def test_real_control_rendezvous_copies_fragmented_pages(registration_first):
     )
     try:
         if registration_first:
-            consumer._inbox.put(("receive", receive))
+            enqueue_receive(consumer, receive)
             wait_until(lambda: key in producer._registrations)
             producer._inbox.put(("source", (source_task, MagicMock())))
         else:
             producer._inbox.put(("source", (source_task, MagicMock())))
             wait_until(lambda: key in producer._sources)
-            consumer._inbox.put(("receive", receive))
+            enqueue_receive(consumer, receive)
         wait_until(lambda: not consumer._completions.empty())
         assert consumer.get_transfer_results().finished_recving == {"d-different-random-id"}
         wait_until(lambda: not producer._completions.empty())
@@ -152,9 +161,7 @@ def test_cancel_during_write_does_not_complete_until_write_is_fenced():
     key = str(uuid4())
     try:
         producer._inbox.put(("source", (PushSource("p", key, ([1],), 16, True), MagicMock())))
-        consumer._inbox.put(
-            ("receive", PushReceive("d", key, ([2],), 16, "127.0.0.1", metadata.handshake_port, "p", 1))
-        )
+        enqueue_receive(consumer, PushReceive("d", key, ([2],), 16, "127.0.0.1", metadata.handshake_port, "p", 1))
         assert started.wait(3)
         consumer._inbox.put(("cancel", "d"))
         wait_until(lambda: consumer._receives["d"].cancelling)
@@ -217,13 +224,16 @@ def test_retired_sequence_cannot_reauthorize_destination_after_cancel():
     assert replies == ["CANCELLED", "RETIRED"]
 
 
-def test_invalid_page_query_does_not_consume_receive_completion():
+def test_invalid_pages_and_completions_share_one_snapshot():
     instance = worker(make_transfer_metadata())
-    instance._completions.put(PushCompletion(received={"d"}, failed={"d"}, invalid_blocks={2}))
+    instance._completions.put(PushCompletion(received={"first"}, failed={"first"}, invalid_blocks={2}))
+    first = instance.get_transfer_results()
+    instance._completions.put(PushCompletion(received={"second"}, failed={"second"}, invalid_blocks={3}))
+    assert first.finished_recving == first.failed_recving == {"first"}
     assert instance.get_block_ids_with_load_errors() == {2}
-    result = instance.get_transfer_results()
-    assert result.finished_recving == result.failed_recving == {"d"}
-    assert not instance.get_block_ids_with_load_errors()
+    second = instance.get_transfer_results()
+    assert second.finished_recving == second.failed_recving == {"second"}
+    assert instance.get_block_ids_with_load_errors() == {3}
 
 
 def test_source_expiry_without_registration_is_safe_to_release():
@@ -245,3 +255,55 @@ def test_stale_epoch_never_authorizes_a_write():
     )
     assert not instance._registrations
     assert not instance.engine.batch_transfer_sync_write.called
+
+
+def test_destination_is_not_published_before_initialization_fence():
+    entered = threading.Event()
+    initialized = threading.Event()
+    event = MagicMock()
+    event.synchronize.side_effect = lambda: (entered.set(), initialized.wait(5))
+    metadata = make_transfer_metadata(engine_id="p", handshake_port=free_port())
+    producer = worker(metadata, True)
+    producer.engine.batch_transfer_sync_write.return_value = 0
+    consumer = worker(replace(metadata, engine_id="d"))
+    start(producer)
+    start(consumer)
+    key = str(uuid4())
+    try:
+        producer._inbox.put(("source", (PushSource("p", key, ([1],), 16, True), MagicMock())))
+        enqueue_receive(
+            consumer, PushReceive("d", key, ([2],), 16, "127.0.0.1", metadata.handshake_port, "p", 1), event
+        )
+        assert entered.wait(2)
+        assert not producer._registrations
+        assert not producer.engine.batch_transfer_sync_write.called
+        initialized.set()
+        wait_until(lambda: not consumer._completions.empty())
+        assert consumer.get_transfer_results().finished_recving == {"d"}
+    finally:
+        initialized.set()
+        consumer.shutdown()
+        producer.shutdown()
+
+
+def test_failed_target_fence_does_not_release_destination():
+    instance = worker(make_transfer_metadata(engine_id="d"))
+    key = str(uuid4())
+    receive = PushReceive("d", key, ([2],), 16, "127.0.0.1", 5600, "p", 1)
+    event = MagicMock()
+    event.synchronize.side_effect = RuntimeError("device fence failed")
+    instance._register_receive(receive, event)
+    assert instance._target_quarantine["d"] == receive
+    assert not instance.get_transfer_results().finished_recving
+
+
+def test_runner_records_destination_fence_before_queueing(monkeypatch):
+    instance = worker(make_transfer_metadata(engine_id="d"))
+    event = MagicMock()
+    monkeypatch.setattr("torch.npu.Event", lambda: event)
+    metadata = MooncakePushMetadata()
+    metadata.push_receives = [PushReceive("d", str(uuid4()), ([2],), 16, "127.0.0.1", 5600, "p", 1)]
+    instance.start_load_kv(metadata)
+    event.record.assert_called_once_with()
+    kind, (receive, fence) = instance._inbox.get_nowait()
+    assert kind == "receive" and fence is event and receive is metadata.push_receives[0]

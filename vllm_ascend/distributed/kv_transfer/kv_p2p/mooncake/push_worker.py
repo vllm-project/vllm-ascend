@@ -110,6 +110,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._sources: dict[str, SourceState] = {}
         self._registrations: dict[str, Registration] = {}
         self._receives: dict[str, ReceiveState] = {}
+        self._target_quarantine: dict[str, PushReceive] = {}
         self._peer_receives: dict[tuple[int, int], str] = {}
         self._router: Any = None
         self._context: Any = None
@@ -129,7 +130,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
 
     def start_load_kv(self, metadata: MooncakePushMetadata) -> None:
         for receive in metadata.push_receives:
-            self._inbox.put(("receive", receive))
+            event = torch.npu.Event()
+            event.record()
+            self._inbox.put(("receive", (receive, event)))
         for source in metadata.push_sources:
             # Eager, synchronous scheduling is required by the initial version.
             # The event follows the completed prefill on this worker's stream.
@@ -156,8 +159,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         return results
 
     def get_block_ids_with_load_errors(self) -> set[int]:
-        # Runners can ask for invalid pages before asking for completion results.
-        self._drain_completions()
+        # The runner collects transfer results first. Do not drain new completions
+        # here: their invalid pages must remain paired with their next result batch.
         invalid, self._invalid_blocks = self._invalid_blocks, set()
         return invalid
 
@@ -364,8 +367,16 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             socket.close()
             raise
 
-    def _register_receive(self, receive: PushReceive) -> None:
-        if len(self._receives) >= self.push_config.max_pending:
+    def _register_receive(self, receive: PushReceive, event: Any) -> None:
+        try:
+            # Static metadata alone authorizes no writes. Target block IDs are
+            # published only after the model stream's allocation/zeroing fence.
+            event.synchronize()
+        except Exception:
+            self._target_quarantine[receive.request_id] = receive
+            logger.exception("Push target initialization is unconfirmed; retaining pages for %s", receive.request_id)
+            return
+        if len(self._receives) + len(self._target_quarantine) >= self.push_config.max_pending:
             if receive.num_tokens:
                 self._completions.put(
                     PushCompletion(
@@ -468,7 +479,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             except queue.Empty:
                 return
             if kind == "receive":
-                self._register_receive(value)
+                receive, event = value
+                self._register_receive(receive, event)
             elif kind == "source":
                 source, event = value
                 if source.transfer_id in self._sources:
@@ -507,6 +519,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             while (
                 not self._stop.is_set()
                 or self._receives
+                or self._target_quarantine
                 or any(source.quarantined for source in self._sources.values())
             ):
                 try:

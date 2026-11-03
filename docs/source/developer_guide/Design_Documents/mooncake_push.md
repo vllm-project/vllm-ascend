@@ -66,6 +66,8 @@ in comparisons against Pull.
 
 ## Cancellation and recovery
 
+D publishes target block IDs only after a model-stream initialization/zeroing fence.
+If that fence fails, the target pages remain quarantined.
 D cancellation retains targets until P confirms no WRITE can still access them.
 A timeout requests cancellation and does not free pages by itself.
 
