@@ -744,6 +744,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 self.A_log,
                 self.dt_bias,
                 lower_bound,
+                query_start_loc=metadata.prefill_query_start_loc,
             )
             output = prefill_output if output is None else torch.cat((output, prefill_output), dim=1)
         assert output is not None

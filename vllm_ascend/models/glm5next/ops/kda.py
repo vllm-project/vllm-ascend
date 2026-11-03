@@ -7,6 +7,7 @@ from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.triton.kda.output_writeback import write_recurrent_output
 
 KDA_MAX_RECURRENT_TOKENS = 8
+KDA_MAX_RECURRENT_PREFILL_TOKENS = 8
 
 
 def recurrent_kda(
@@ -63,6 +64,7 @@ def chunk_kda(
     a_log,
     dt_bias,
     lower_bound,
+    query_start_loc=None,
 ):
     """Run prefill with CPU chunk descriptors prepared by the GDN builder."""
     if metadata.keep_meta is not None:
@@ -70,18 +72,43 @@ def chunk_kda(
         has_initial_state = has_initial_state[metadata.keep_meta]
     initial_state = gather_initial_states(state, state_indices, has_initial_state).float().contiguous()
     cu_seqlens = metadata.cu_seqlens_host if metadata.cu_seqlens_kern is None else metadata.cu_seqlens_kern
-    output, final_state = run_chunk_kda(
-        q,
-        k,
-        v,
-        raw_gate,
-        raw_beta.float().sigmoid(),
-        initial_state,
-        cu_seqlens,
-        metadata.chunk_indices_chunk64_host,
-        a_log,
-        dt_bias,
-        lower_bound=lower_bound,
-    )
+    # Short prefills can reuse the device offsets already built for convolution.
+    # Compacted batches retain the chunk path: their state rows no longer match
+    # these uncompressed offsets. Keep the speculative rollback limit separate.
+    if (
+        query_start_loc is not None
+        and metadata.keep_meta is None
+        and 0 < q.shape[1] <= KDA_MAX_RECURRENT_PREFILL_TOKENS
+    ):
+        output = run_recurrent_kda(
+            q,
+            k,
+            v,
+            raw_gate,
+            raw_beta,
+            initial_state,
+            query_start_loc,
+            None,
+            a_log,
+            dt_bias,
+            lower_bound=lower_bound,
+            beta_is_preprocessed=False,
+        )
+        output[:, cu_seqlens[-1] :].zero_()
+        final_state = initial_state
+    else:
+        output, final_state = run_chunk_kda(
+            q,
+            k,
+            v,
+            raw_gate,
+            raw_beta.float().sigmoid(),
+            initial_state,
+            cu_seqlens,
+            metadata.chunk_indices_chunk64_host,
+            a_log,
+            dt_bias,
+            lower_bound=lower_bound,
+        )
     scatter_states(state, final_state.to(state.dtype), state_indices)
     return output
