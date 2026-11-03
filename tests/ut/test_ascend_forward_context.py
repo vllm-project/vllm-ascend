@@ -20,7 +20,7 @@ def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0),
+        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0, deepgemm_mega_moe=False),
     )
 
 
@@ -87,6 +87,7 @@ def _patch_select_moe_comm_method_deps(
     capacity: int = 128,
     ep_world_size: int = 8,
     enable_fused_mc2: int = 0,
+    deepgemm_mega_moe: bool = False,
     is_moe: bool = True,
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
@@ -96,7 +97,7 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2),
+        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, deepgemm_mega_moe=deepgemm_mega_moe),
     )
 
 
@@ -276,6 +277,22 @@ def test_select_moe_comm_method_uses_allgather_without_effective_expert_parallel
     vllm_config = _make_vllm_config(enable_expert_parallel=enable_expert_parallel)
 
     assert afc.select_moe_comm_method(16, vllm_config) == MoECommType.ALLGATHER
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v41", "other"])
+def test_deepgemm_module_owns_communication_only_for_v41(monkeypatch, model_type):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A5,
+        deepgemm_mega_moe=True,
+    )
+    config = _make_vllm_config()
+    config.model_config.hf_text_config.model_type = model_type
+    if model_type == "deepseek_v41":
+        assert afc.select_moe_comm_method(16, config) is None
+    else:
+        with pytest.raises(ValueError, match="DeepSeek V4.1 only"):
+            afc.select_moe_comm_method(16, config)
 
 
 @pytest.mark.parametrize(
@@ -510,7 +527,8 @@ def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
 
 
 @pytest.mark.parametrize("model_owned", [False, True])
-def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_owned):
+@pytest.mark.parametrize("moe_comm_type", [MoECommType.ALLTOALL, None])
+def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_owned, moe_comm_type):
     vllm_config = _make_vllm_config()
     seen: dict[str, object] = {"config": None, "inside": False}
 
@@ -535,7 +553,7 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_
     monkeypatch.setattr(afc, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(afc, "get_dp_group", lambda: SimpleNamespace(world_size=1))
     monkeypatch.setattr(afc, "has_layer_idx", lambda _model: False)
-    monkeypatch.setattr(afc, "select_moe_comm_method", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(afc, "select_moe_comm_method", lambda *_args, **_kwargs: moe_comm_type)
     monkeypatch.setattr(afc, "get_mc2_mask", lambda: None)
     monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: True)
 
@@ -549,11 +567,14 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_
         monkeypatch.setitem(sys.modules, moe_mod_name, SimpleNamespace(get_moe_comm_method=lambda _t: legacy_method))
 
     for expected in (target_method, draft_method, target_method):
-        model = SimpleNamespace(moe_comm_methods={None: expected}) if model_owned else None
+        model = SimpleNamespace(moe_comm_methods={MoECommType.ALLTOALL: expected}) if model_owned else None
         with afc.set_ascend_forward_context(None, vllm_config, num_tokens=4, model_instance=model):
             assert seen["inside"] is True
             assert seen["config"] is vllm_config
-            assert forward_context.moe_comm_method is (expected if model_owned else legacy_method)
+            if moe_comm_type is None:
+                assert forward_context.moe_comm_method is None
+            else:
+                assert forward_context.moe_comm_method is (expected if model_owned else legacy_method)
             assert afc._USE_V2_EXTRA_KWARGS is True
 
     assert seen["inside"] is False
