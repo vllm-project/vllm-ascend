@@ -1013,13 +1013,7 @@ class AscendConfig:
 
     @staticmethod
     def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
-        """Unified MegaMoe config eligibility check for A3 and A5.
-
-        The A3 and A5 MegaMoe operators are converging on the same supported
-        ranges, so this check intentionally uses one set of bounds for both
-        platforms. Where the operators currently differ, the stricter bound is
-        applied and the per-platform actuals are documented inline.
-        """
+        """Check shared MegaMoe constraints and hardware-specific FFN bounds."""
         # Guard against early-init phases where model_config is still None
         # (derive_and_validate may run before it is populated; other validators
         # in it check for None as well). Dense models need no extra guard here:
@@ -1066,15 +1060,25 @@ class AscendConfig:
             moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
             return False
-        # intermediate_hidden (the post-activation intermediate width) must be in
-        # [256, 4096] and aligned to 128.
-        # Actual operator bounds: A5 supports [256, 4096] aligned to 128; the A3
-        # operator only supports [512, 3072] aligned to 256. The unified A5-style
-        # bound is kept here; tighten per-platform if A3 rejects a passing model.
+        # A3's validated intermediate range is [512, 3072], including 128-wide
+        # tails such as 640 with a compatible MegaMoe operator package. Keep
+        # the existing [256, 4096] range for the MXFP-capable profile and for
+        # profiles that do not select the CANN MegaMoe implementation.
+        profile = get_current_hardware_profile()
+        min_intermediate_size, max_intermediate_size = (256, 4096)
+        if profile.supports(HardwareCapability.CANN_MEGAMOE) and not profile.supports(
+            HardwareCapability.CANN_MEGAMOE_MXFP
+        ):
+            min_intermediate_size, max_intermediate_size = (512, 3072)
         moe_intermediate_size = int(moe_intermediate_size)
-        if not (256 <= moe_intermediate_size <= 4096) or moe_intermediate_size % 128 != 0:
+        if (
+            not (min_intermediate_size <= moe_intermediate_size <= max_intermediate_size)
+            or moe_intermediate_size % 128 != 0
+        ):
             logger.warning(
-                "MegaMoe requires moe_intermediate_size in [256, 4096] aligned to 128; got %s.",
+                "MegaMoe requires moe_intermediate_size in [%s, %s] aligned to 128; got %s.",
+                min_intermediate_size,
+                max_intermediate_size,
                 moe_intermediate_size,
             )
             return False
