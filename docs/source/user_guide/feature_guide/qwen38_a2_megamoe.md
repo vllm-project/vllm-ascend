@@ -8,7 +8,7 @@ maximum token threshold for selecting the backend.
 
 Install a compatible `cann_ops_transformer` build including the 910B
 `MegaMoe` operator and its communication extension in every worker environment.
-The integration targets unquantized BF16 Qwen3.8-Flash-Next, registered as
+The integration targets BF16 or dynamic INT8 W8A8 Qwen3.8-Flash-Next, registered as
 `Qwen4ExpForCausalLM` or `Qwen4ExpForConditionalGeneration`, with H=2560,
 intermediate size=640, 512 experts and top-k=10.
 
@@ -25,9 +25,31 @@ vllm serve /path/to/Qwen3.8-Flash-Next \
 `dispatch_ffn_combine` operator. Both options above are required. The A2 setting
 has only an `enabled` field; token-range options are not supported.
 
-This first implementation requires TP8/EP8, DP1, PP1 and PCP1, static contiguous
+This implementation requires BF16 activations, TP8/EP8, DP1, PP1 and PCP1, static contiguous
 experts, and no LoRA, speculative decoding, EPLB or mixed placement. Invalid
 combinations fail during configuration validation. A3/A5 selection is unchanged.
+
+## W8A8 checkpoints
+
+Use the same `--additional-config` with a dynamic per-token INT8 W8A8 checkpoint.
+For a ModelSlim checkpoint, add `--quantization ascend` if required by the
+checkpoint metadata, while keeping `--dtype bfloat16` for activations.
+The resolved routed expert scheme must be `QuantType.W8A8`; FP8/MXFP, W4A8,
+and other expert schemes are rejected. Unquantized layers may coexist with
+W8A8 layers in a partially quantized checkpoint.
+
+W8A8 weights must use symmetric per-output-channel quantization: both weight
+offsets must be zero and scales finite and positive. Nonzero offsets fail during
+weight loading because this MegaMoE INT8 API has no weight zero-point input.
+The check runs only while loading, not on the forward hot path.
+
+Gate/up INT8 weights and their scales/offsets are padded independently to the
+768-wide execution layout before NZ conversion. Padded weights/offsets are zero,
+padded scales are one. W2 input rows are padded, but W2 output-channel scales
+and offsets retain their H-wide shape. Existing packed int64 scale encoding and
+per-expert NZ lists feed MegaMoE. Ordinary mixed/decode execution keeps its
+stacked NZ weights and FP32 first-layer scale copy; no per-forward repacking is
+introduced. Both paths use the same physical width and INT8 weight storage.
 
 ## Selection
 
@@ -56,7 +78,8 @@ allocation log alone is not evidence of real-request coverage.
 
 The local 910B operator requires the intermediate size to be divisible by 256.
 The loader pads 640 to 768, separately for the gate and up halves of W1, and pads
-the corresponding W2 rows with zeros. It creates per-expert BF16 ND TensorLists.
+the corresponding W2 rows with zeros. BF16 creates per-expert ND TensorLists; W8A8 creates stacked NZ weights with
+per-expert views for the fused call.
 Checkpoint mathematics and output dimensions are preserved; ordinary MoE
 fallback uses the same padded lists. Padding happens only during weight loading.
 
@@ -64,6 +87,8 @@ Only one execution copy of the expert weights remains after loading; the
 original tensors are released. A transient loading peak is still possible.
 For 48 MoE layers and EP8, routed BF16 weight payload increases from about
 28.125 GiB to 33.750 GiB per rank, excluding other model weights and buffers.
+W8A8 pure INT8 routed-weight payload is about 16.875 GiB per rank after
+padding (14.063 GiB before), excluding scales, NZ padding and other buffers.
 Both fused prefill and ordinary fallback pay the physical 768-wide GEMM cost.
 This can affect decode performance even though decode never selects MegaMoE.
 The existing fused-MC2 configuration disables shared-expert multistream overlap.
@@ -85,7 +110,7 @@ active mask excludes padding; each rank must still participate in collectives.
 
 ## Validation and rollback
 
-CPU policy, real-selector, buffer-sizing and weight-producer tests can run
+CPU policy, real-selector, buffer-sizing, BF16/W8A8 weight-producer and scale tests can run
 without a vLLM or NPU installation:
 
 ```shell

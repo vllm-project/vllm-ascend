@@ -24,6 +24,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend.a2_mega_moe import pad_w8a8_expert_weights
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -279,6 +280,23 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
+        a2_prefill = getattr(get_ascend_config(), "a2_mega_moe_prefill", None)
+        if a2_prefill is not None and a2_prefill.enabled is True:
+            if self.quant_type != QuantType.W8A8:
+                raise ValueError("A2 MegaMoE requires the dynamic INT8 W8A8 expert scheme")
+            w1, w2, scale1, offset1 = pad_w8a8_expert_weights(
+                layer.w13_weight.data,
+                layer.w2_weight.data,
+                layer.w13_weight_scale.data,
+                layer.w13_weight_offset.data,
+                layer.w2_weight_scale.data,
+                layer.w2_weight_offset.data,
+            )
+            layer.w13_weight.data = w1
+            layer.w2_weight.data = w2
+            layer.w13_weight_scale.data = scale1
+            layer.w13_weight_offset.data = offset1
+            layer.a2_mega_moe_intermediate_size = w2.shape[1]
         # TODO(zzzzwwjj): Currently, `torch_npu.npu_grouped_matmul_swiglu_quant`
         # can only support weight nz.
         if self.quant_type == QuantType.W8A8:
@@ -337,7 +355,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             # reads the fp32 scale copy during forward.
             activation = getattr(layer, "activation", "silu")
             activation = getattr(activation, "value", activation)
-            if activation != "swigluoai_uninterleave":
+            # Ordinary mixed/decode fallback still needs the FP32 scale copy.
+            if activation != "swigluoai_uninterleave" and not (a2_prefill is not None and a2_prefill.enabled is True):
                 del layer.w13_weight_scale_fp32
 
     def _get_mlp_weights(self, layer: torch.nn.Module) -> tuple:

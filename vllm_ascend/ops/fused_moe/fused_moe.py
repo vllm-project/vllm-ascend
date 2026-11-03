@@ -29,6 +29,8 @@ from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared, _unpack
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.a2_mega_moe import validate_a2_expert_quantization
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
@@ -114,6 +116,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         self.hidden_size = moe_config.hidden_dim
 
         self.quant_type = routed_experts.quant_type
+        if get_ascend_config().a2_mega_moe_prefill.enabled is True:
+            validate_a2_expert_quantization(self.quant_type)
         self.routed_experts.router = router
 
         self.moe_config.tp_group = get_tp_group()

@@ -114,9 +114,7 @@ def test_unsupported_topology(field, value):
         MODULE.validate_a2_prefill_model(cfg, dynamic_eplb=False, redundant_experts=0, mix_placement=False)
 
 
-@pytest.mark.parametrize(
-    "field,value", [("speculative_config", object()), ("lora_config", object()), ("quant_config", object())]
-)
+@pytest.mark.parametrize("field,value", [("speculative_config", object()), ("lora_config", object())])
 def test_unsupported_model_features(field, value):
     cfg = make_config()
     setattr(cfg, field, value)
@@ -370,3 +368,119 @@ def test_real_config_requires_explicit_cann_backend_and_package():
     package.util.find_spec.return_value = None
     with pytest.raises(ValueError, match="installation"):
         validate(cfg)
+
+
+def make_w8_weights():
+    torch.manual_seed(23)
+    return (
+        torch.randint(-16, 16, (2, 16, 1280), dtype=torch.int8),
+        torch.randint(-16, 16, (2, 640, 16), dtype=torch.int8),
+        (torch.rand(2, 1280, 1) + 0.1).bfloat16(),
+        torch.zeros(2, 1280, 1, dtype=torch.bfloat16),
+        (torch.rand(2, 16, 1) + 0.1).bfloat16(),
+        torch.zeros(2, 16, 1, dtype=torch.bfloat16),
+    )
+
+
+def test_quantized_checkpoint_checked_at_resolved_scheme():
+    cfg = make_config()
+    cfg.quant_config = object()
+    MODULE.validate_a2_prefill_model(cfg, dynamic_eplb=False, redundant_experts=0, mix_placement=False)
+    quant = Enum("Quant", "NONE W8A8 W4A8 W8A8MXFP W8A8FP")
+    for kind in (quant.NONE, quant.W8A8):
+        MODULE.validate_a2_expert_quantization(kind)
+    for kind in (quant.W4A8, quant.W8A8MXFP, quant.W8A8FP):
+        with pytest.raises(ValueError, match="dynamic INT8 W8A8"):
+            MODULE.validate_a2_expert_quantization(kind)
+
+
+@pytest.mark.parametrize("activation", ["silu", "situ"])
+def test_w8_padding_preserves_per_channel_gmm_and_dynamic_activation_quantization(activation):
+    w1, w2, s1, o1, s2, o2 = make_w8_weights()
+    padded1, padded2, ps1, po1 = MODULE.pad_w8a8_expert_weights(w1, w2, s1, o1, s2, o2)
+    assert padded1.shape == (2, 16, 1536) and padded2.shape == (2, 768, 16)
+    torch.testing.assert_close(ps1[:, :640], s1[:, :640, 0], rtol=0, atol=0)
+    torch.testing.assert_close(ps1[:, 768:1408], s1[:, 640:, 0], rtol=0, atol=0)
+    assert torch.all(ps1[:, 640:768] == 1) and torch.all(ps1[:, 1408:] == 1)
+    assert torch.count_nonzero(po1) == 0
+    x = torch.randint(-16, 16, (5, 16), dtype=torch.int32)
+
+    def expert(first, second, first_scale, second_scale):
+        gate, up = ((x @ first.int()).double() * first_scale.double()).chunk(2, -1)
+        if activation == "silu":
+            activated = torch.nn.functional.silu(gate) * up
+        else:
+            activated = 4 * torch.tanh(gate / 4) * torch.sigmoid(gate) * (25 * torch.tanh(up / 25))
+        scale = activated.abs().amax(-1, keepdim=True) / 127
+        quantized = (activated / scale).round().clamp(-127, 127).int()
+        return (quantized @ second.int()).double() * scale * second_scale.double()
+
+    for i in range(2):
+        torch.testing.assert_close(
+            expert(padded1[i], padded2[i], ps1[i], s2[i, :, 0]),
+            expert(w1[i], w2[i], s1[i, :, 0], s2[i, :, 0]),
+            rtol=0,
+            atol=0,
+        )
+
+
+@pytest.mark.parametrize("slot,bad", [(3, 1), (5, -1), (2, 0), (4, -1), (2, float("nan"))])
+def test_w8_rejects_asymmetric_offsets_and_invalid_scales(slot, bad):
+    values = list(make_w8_weights())
+    values[slot] = values[slot].clone()
+    values[slot].flatten()[0] = bad
+    with pytest.raises(ValueError):
+        MODULE.pad_w8a8_expert_weights(*values)
+
+
+@pytest.mark.parametrize("activation", ["silu", "situ", "swigluoai_uninterleave"])
+def test_real_w8_producer_pads_before_nz_and_retains_fallback_scale(activation):
+    source = ast.parse((ROOT / "vllm_ascend/quantization/methods/w8a8/w8a8_dynamic.py").read_text())
+    owner = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == "AscendW8A8DynamicFusedMoEMethod")
+    names = {"process_weights_after_loading", "_get_mlp_weights", "get_fused_mc2_weights"}
+    methods = [n for n in owner.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    quant = Enum("Quant", "W8A8")
+    comm = Enum("Comm", "FUSED_MC2 ALLGATHER")
+    context = SimpleNamespace(moe_comm_type=comm.FUSED_MC2, use_mega_moe=True)
+    cast = Mock(side_effect=lambda tensor, _: tensor)
+    namespace = dict(
+        torch=torch,
+        torch_npu=SimpleNamespace(npu_format_cast=cast),
+        get_ascend_config=lambda: SimpleNamespace(enable_fused_mc2=1, a2_mega_moe_prefill=Settings(enabled=True)),
+        QuantType=quant,
+        ACL_FORMAT_FRACTAL_NZ=29,
+        pad_w8a8_expert_weights=MODULE.pad_w8a8_expert_weights,
+        scale_from_float_to_int64=lambda scale: scale.float().contiguous().view(torch.int32).to(torch.int64),
+        use_cann_megamoe=lambda _: True,
+        get_current_vllm_config=make_config,
+        _EXTRA_CTX=context,
+        MoECommType=comm,
+        MoEWeights=SimpleNamespace,
+    )
+    exec(compile(ast.Module(body=methods, type_ignores=[]), "w8a8_dynamic.py", "exec"), namespace)
+    producer = type("W8Producer", (), {n.name: namespace[n.name] for n in methods})()
+    producer.quant_type = quant.W8A8
+    producer.use_expert_weight_list = False
+    tensors = make_w8_weights()
+    layer = torch.nn.Module()
+    names = ("w13_weight", "w2_weight", "w13_weight_scale", "w13_weight_offset", "w2_weight_scale", "w2_weight_offset")
+    for name, tensor in zip(names, tensors):
+        if name in ("w13_weight", "w2_weight"):
+            tensor = tensor.transpose(1, 2).contiguous()
+        layer.register_parameter(name, torch.nn.Parameter(tensor, requires_grad=False))
+    layer.activation = activation
+    producer.process_weights_after_loading(layer)
+    assert cast.call_count == 2
+    assert cast.call_args_list[0].args[0].shape == (2, 16, 1536)
+    assert cast.call_args_list[1].args[0].shape == (2, 768, 16)
+    assert layer.a2_mega_moe_intermediate_size == 768
+    fused = producer.get_fused_mc2_weights(layer)
+    assert len(fused.w1) == 2 and fused.w1_scale[0].shape == (1536,)
+    assert fused.w2_scale[0].shape == (16,) and fused.w1_scale[0].dtype == torch.int64
+    sf = layer.w13_weight_scale.float().contiguous().view(torch.int32).to(torch.int64)
+    torch.testing.assert_close(fused.w1_scale[0], sf[0], rtol=0, atol=0)
+    context.moe_comm_type = comm.ALLGATHER
+    w1, scale1, w2, scale2 = producer._get_mlp_weights(layer)
+    assert w1[0] is layer.w13_weight and w2[0] is layer.w2_weight
+    assert scale1[0].dtype == torch.float32 and scale1[0].shape == (2, 1536)
+    assert scale2[0].shape == (2, 16)

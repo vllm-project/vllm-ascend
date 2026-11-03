@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""A2 prefill policy and BF16 execution weights; no vLLM/NPU imports."""
+"""A2 prefill policy and BF16/INT8 execution weights; no vLLM/NPU imports."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 @dataclass(config=ConfigDict(extra="forbid", frozen=True))
 class A2MegaMoEPrefillConfig:
-    """Opt-in EP8 BF16 prefill experiment, configured in additional_config."""
+    """Opt-in EP8 BF16/W8A8 prefill experiment, configured in additional_config."""
 
     enabled: bool = Field(default=False, strict=True)
 
@@ -70,10 +70,10 @@ def validate_a2_prefill_model(config: Any, *, dynamic_eplb: bool, redundant_expe
         raise ValueError("a2_mega_moe_prefill requires TP8/EP8, DP1, PP1 and PCP1")
     if getattr(config, "speculative_config", None) is not None or getattr(config, "lora_config", None) is not None:
         raise ValueError("a2_mega_moe_prefill does not support speculative decoding or LoRA")
-    if dynamic_eplb or redundant_experts or mix_placement:
+    if dynamic_eplb or redundant_experts or mix_placement or getattr(parallel, "enable_eplb", False) is True:
         raise ValueError("a2_mega_moe_prefill requires static contiguous experts without EPLB or mix placement")
-    if getattr(config, "quant_config", None) is not None or str(model.dtype) != "torch.bfloat16":
-        raise ValueError("a2_mega_moe_prefill currently requires unquantized BF16 weights and activations")
+    if str(model.dtype) != "torch.bfloat16":
+        raise ValueError("a2_mega_moe_prefill requires BF16 activations; expert quantization is checked per layer")
     text = model.hf_text_config
     if (text.hidden_size, text.moe_intermediate_size, model.get_num_experts(), text.num_experts_per_tok) != (
         2560,
@@ -111,3 +111,49 @@ def pad_bf16_expert_weights(w1: torch.Tensor, w2: torch.Tensor) -> tuple[list[to
         first.append(padded)
         second.append(padded_down)
     return first, second
+
+
+def validate_a2_expert_quantization(quant_type: Any) -> None:
+    """Validate the resolved routed scheme, including partially quantized checkpoints."""
+    if getattr(quant_type, "name", None) not in ("NONE", "W8A8"):
+        raise ValueError("A2 MegaMoE prefill supports only BF16 or dynamic INT8 W8A8 routed experts")
+
+
+def pad_w8a8_expert_weights(w1, w2, scale1, offset1, scale2, offset2):
+    """Pad symmetric per-channel INT8 before any NZ conversion.
+
+    Weights are in GMM direction. Scale1/offset1 have 2I output channels;
+    scale2/offset2 have H output channels and must not be padded along I.
+    Neutral scales on padded zero-weight channels keep dynamic quantization
+    and the original channels unchanged. Called only during weight loading.
+    """
+    import torch
+
+    if w1.dtype != torch.int8 or w2.dtype != torch.int8:
+        raise ValueError("W8A8 MegaMoE requires INT8 weights")
+    if w1.ndim != 3 or w2.ndim != 3 or w1.shape[:2] != (w2.shape[0], w2.shape[2]):
+        raise ValueError("Expected expert weights [E,H,2I] and [E,I,H]")
+    experts, hidden, two_i = w1.shape
+    intermediate = w2.shape[1]
+    if two_i != 2 * intermediate:
+        raise ValueError("W1 must contain equal gate and up halves")
+    parameters = (scale1, offset1, scale2, offset2)
+    for parameter, channels in zip(parameters, (two_i, two_i, hidden, hidden)):
+        if parameter.shape[0] != experts or parameter.numel() != experts * channels:
+            raise ValueError("W8A8 requires per-expert, per-output-channel scale and offset")
+    # This API has no INT8 weight zero-point input. Never silently drop it.
+    if torch.count_nonzero(offset1).item() or torch.count_nonzero(offset2).item():
+        raise ValueError("A2 MegaMoE W8A8 requires symmetric weights (zero weight offsets)")
+    if any(not torch.isfinite(scale).all().item() or not (scale > 0).all().item() for scale in (scale1, scale2)):
+        raise ValueError("W8A8 scales must be finite and positive")
+    physical = (intermediate + 255) // 256 * 256
+    padded_w1 = w1.new_zeros((experts, hidden, 2 * physical))
+    padded_w1[:, :, :intermediate].copy_(w1[:, :, :intermediate])
+    padded_w1[:, :, physical : physical + intermediate].copy_(w1[:, :, intermediate:])
+    padded_w2 = w2.new_zeros((experts, physical, hidden))
+    padded_w2[:, :intermediate].copy_(w2)
+    padded_scale1 = scale1.new_ones((experts, 2 * physical))
+    source_scale1 = scale1.reshape(experts, two_i)
+    padded_scale1[:, :intermediate].copy_(source_scale1[:, :intermediate])
+    padded_scale1[:, physical : physical + intermediate].copy_(source_scale1[:, intermediate:])
+    return padded_w1, padded_w2, padded_scale1, offset1.new_zeros((experts, 2 * physical))
