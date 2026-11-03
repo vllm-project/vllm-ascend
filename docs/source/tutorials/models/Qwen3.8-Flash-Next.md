@@ -30,7 +30,7 @@ Select the checkpoint that matches the deployment configuration:
 | Atlas 800 A3 | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | Prepare a compatible W4A8 checkpoint separately. |
 | Ascend 950 DT | Colocated | `Qwen3.8-Flash-Next-w8a8-mxfp8` | 4 devices, TP4 × DP1 | Prepare a compatible W8A8-MXFP8 checkpoint separately. |
 
-Set `MODEL_PATH` to the mounted checkpoint directory. For PD separation, both roles must load the same checkpoint. The quantized checkpoints are specific to their hardware and deployment configuration.
+The commands use fixed model directories under `/models`. Mount the corresponding checkpoint at the shown directory or edit that path directly. For PD separation, both roles must load the same checkpoint.
 
 ## 4 Installation
 
@@ -50,13 +50,11 @@ The following example uses the AArch64 image and exposes 16 devices on an Atlas 
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:qwen3.8-next-a3
-    export NAME=vllm-ascend-qwen38-flash-next
 
-    docker pull "$IMAGE"
+    docker pull quay.io/ascend/vllm-ascend:qwen3.8-next-a3
 
     docker run --rm \
-        --name "$NAME" \
+        --name vllm-ascend-qwen38-flash-next \
         --shm-size=16g \
         --net=host \
         --device /dev/davinci0 \
@@ -85,7 +83,7 @@ The following example uses the AArch64 image and exposes 16 devices on an Atlas 
         -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /path/to/models:/models \
-        -it "$IMAGE" bash
+        -it quay.io/ascend/vllm-ascend:qwen3.8-next-a3 bash
     ```
 
 After entering the container, verify that vLLM and vLLM-Ascend can be imported:
@@ -110,8 +108,8 @@ Prefill and decode run in the same service. Select the hardware tab below.
 
 Before starting:
 
-- Set `MODEL_PATH` to the matching quantized checkpoint.
-- For 950 DT, set `LOCAL_IP` and `NIC_NAME` to the serving host address and the interface that owns it.
+- Mount the matching checkpoint at the model directory shown in the command.
+- Network examples use `192.168.0.1` and `eth0`. Replace these literals with the serving host address and its network interface.
 - Verify available NPU memory before changing context length, concurrency, or memory utilization.
 
 === "A3 Series"
@@ -123,7 +121,6 @@ Before starting:
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
     source /usr/local/Ascend/nnal/atb/set_env.sh
 
-    export MODEL_PATH=/models/Qwen3.8-Flash-Next-w8a8-mtp
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ASCEND_PLE_BACKEND=torch
@@ -131,7 +128,7 @@ Before starting:
     export VLLM_ASCEND_ENABLE_QSA_E3V=1
     unset VLLM_ASCEND_FORCE_QSA_REFERENCE
 
-    vllm serve "$MODEL_PATH" \
+    vllm serve /models/Qwen3.8-Flash-Next-w8a8-mtp \
         --host 0.0.0.0 \
         --port 8088 \
         --served-model-name qwen3.8-flash-next \
@@ -186,14 +183,11 @@ Before starting:
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
     source /usr/local/Ascend/nnal/atb/set_env.sh
 
-    export MODEL_PATH=/models/Qwen3.8-Flash-Next-w8a8-mxfp8
-    export LOCAL_IP="<SERVER_IP>"
-    export NIC_NAME="<NETWORK_INTERFACE>"
-    export VLLM_HOST_IP="$LOCAL_IP"
-    export HCCL_IF_IP="$LOCAL_IP"
-    export GLOO_SOCKET_IFNAME="$NIC_NAME"
-    export TP_SOCKET_IFNAME="$NIC_NAME"
-    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export VLLM_HOST_IP="192.168.0.1"
+    export HCCL_IF_IP="192.168.0.1"
+    export GLOO_SOCKET_IFNAME="eth0"
+    export TP_SOCKET_IFNAME="eth0"
+    export HCCL_SOCKET_IFNAME="eth0"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
@@ -206,10 +200,9 @@ Before starting:
     export HCCL_BUFFSIZE=1024
     export HCCL_NPU_SOCKET_PORT_RANGE=auto
 
-    export PROFILER_DIR=/tmp/qwen38-next-950-dt-profiling
-    mkdir -p "$PROFILER_DIR"
+    mkdir -p "/tmp/qwen38-next-950-dt-profiling"
 
-    vllm serve "$MODEL_PATH" \
+    vllm serve /models/Qwen3.8-Flash-Next-w8a8-mxfp8 \
         --host 0.0.0.0 \
         --port 8087 \
         --served-model-name qwen3.8-flash-next-950-dt \
@@ -230,7 +223,7 @@ Before starting:
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
-        --profiler-config '{"profiler":"torch","torch_profiler_dir":"'"$PROFILER_DIR"'","torch_profiler_with_stack":false}'
+        --profiler-config '{"profiler":"torch","torch_profiler_dir":"/tmp/qwen38-next-950-dt-profiling","torch_profiler_with_stack":false}'
     ```
 
     **Key parameters:**
@@ -270,53 +263,41 @@ Before starting:
 
 - Expose devices 0–15 and mount the same W4A8 checkpoint for both roles.
 - Install compatible vLLM, vLLM-Ascend, and Mooncake in the active Python environment.
-- Set the host IP, network interface, model path, and writable log directory in `pd_env.sh`. Provide sufficient host memory for Engram CPU offload.
-- Prepare a compatible `PD_proxy_server.py` that accepts the arguments shown below, and set `PROXY_SCRIPT` to its location. The proxy implementation must support Mooncake PD request routing; it is not included in this guide.
+- The scripts use `192.168.0.1`, `eth0`, and `/models/Qwen3.8-Flash-Next-w4a8`. Replace these literals consistently for the target host. Logs and profiling traces are written to `/tmp/qwen38-a3-pd`. Provide sufficient host memory for Engram CPU offload.
+- Place the compatible `PD_proxy_server.py` at `/opt/qwen38/PD_proxy_server.py`. The proxy must support Mooncake PD request routing and the options shown below; its implementation is not included in this guide.
+- The examples use the Mooncake library directory from the Python 3.12.16 environment. Edit the literal library path if Mooncake is installed elsewhere.
 
-#### 5.2.1 Common Environment
-
-Save this as `pd_env.sh` beside `P.sh` and `D.sh`. Set the serving host IP, network interface, model path, and log directory:
-
-```bash
-unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
-unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
-
-export LOCAL_IP="<SERVER_IP>"
-export NIC_NAME="<NETWORK_INTERFACE>"
-export MODEL_PATH=/models/Qwen3.8-Flash-Next-w4a8
-export ROOT=/tmp/qwen38-a3-pd
-export VLLM_SERVER_DEV_MODE=1
-export VLLM_USE_V2_MODEL_RUNNER=1
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-export VLLM_ENGINE_READY_TIMEOUT_S=2400
-export VLLM_ASCEND_PLE_BACKEND=torch
-export VLLM_HOST_IP="$LOCAL_IP"
-export HCCL_IF_IP="$LOCAL_IP"
-export GLOO_SOCKET_IFNAME="$NIC_NAME"
-export TP_SOCKET_IFNAME="$NIC_NAME"
-export HCCL_SOCKET_IFNAME="$NIC_NAME"
-export no_proxy="localhost,127.0.0.1,$LOCAL_IP"
-export NO_PROXY="$no_proxy"
-mooncake_dir=$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))')
-export LD_LIBRARY_PATH="$mooncake_dir:${LD_LIBRARY_PATH:-}"
-mkdir -p "$ROOT" "$ROOT/profiling/prefill" "$ROOT/profiling/decode"
-```
-
-#### 5.2.2 Prefill Script
+#### 5.2.1 Prefill Script
 
 Save this as `P.sh`:
 
 ```bash
 #!/usr/bin/env bash
 set -eo pipefail
-source "$(dirname "$(readlink -f "$0")")/pd_env.sh"
+unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
+unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
+
+export VLLM_SERVER_DEV_MODE=1
+export VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+export VLLM_ENGINE_READY_TIMEOUT_S=2400
+export VLLM_ASCEND_PLE_BACKEND=torch
+export VLLM_HOST_IP="192.168.0.1"
+export HCCL_IF_IP="192.168.0.1"
+export GLOO_SOCKET_IFNAME="eth0"
+export TP_SOCKET_IFNAME="eth0"
+export HCCL_SOCKET_IFNAME="eth0"
+export no_proxy="localhost,127.0.0.1,192.168.0.1"
+export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
+export LD_LIBRARY_PATH="/usr/local/python3.12.16/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
+mkdir -p "/tmp/qwen38-a3-pd" "/tmp/qwen38-a3-pd/profiling/prefill" "/tmp/qwen38-a3-pd/profiling/decode"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
 export HCCL_BUFFSIZE=4096
 
-exec vllm serve "$MODEL_PATH" \
+exec vllm serve /models/Qwen3.8-Flash-Next-w4a8 \
     --host 0.0.0.0 \
     --port 25568 \
     --served-model-name qwen38-flash-next-a3-pd \
@@ -334,24 +315,42 @@ exec vllm serve "$MODEL_PATH" \
     --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
     --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
     --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
-    --profiler-config '{"profiler":"torch","torch_profiler_dir":"'"$ROOT"'/profiling/prefill"}' \
+    --profiler-config '{"profiler":"torch","torch_profiler_dir":"/tmp/qwen38-a3-pd/profiling/prefill"}' \
     --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32600","kv_connector_extra_config":{"prefill":{"dp_size":4,"tp_size":2},"decode":{"dp_size":4,"tp_size":2}}}' \
-    > "$ROOT/prefill.log" 2>&1
+    > "/tmp/qwen38-a3-pd/prefill.log" 2>&1
 ```
 
-#### 5.2.3 Decode Script
+#### 5.2.2 Decode Script
 
 Save this as `D.sh`:
 
 ```bash
 #!/usr/bin/env bash
 set -eo pipefail
-source "$(dirname "$(readlink -f "$0")")/pd_env.sh"
+unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
+unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
+
+export VLLM_SERVER_DEV_MODE=1
+export VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+export VLLM_ENGINE_READY_TIMEOUT_S=2400
+export VLLM_ASCEND_PLE_BACKEND=torch
+export VLLM_HOST_IP="192.168.0.1"
+export HCCL_IF_IP="192.168.0.1"
+export GLOO_SOCKET_IFNAME="eth0"
+export TP_SOCKET_IFNAME="eth0"
+export HCCL_SOCKET_IFNAME="eth0"
+export no_proxy="localhost,127.0.0.1,192.168.0.1"
+export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
+export LD_LIBRARY_PATH="/usr/local/python3.12.16/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
+mkdir -p "/tmp/qwen38-a3-pd" "/tmp/qwen38-a3-pd/profiling/prefill" "/tmp/qwen38-a3-pd/profiling/decode"
 export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
 export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
 export HCCL_BUFFSIZE=512
 
-exec vllm serve "$MODEL_PATH" \
+exec vllm serve /models/Qwen3.8-Flash-Next-w4a8 \
     --host 0.0.0.0 \
     --port 25569 \
     --served-model-name qwen38-flash-next-a3-pd \
@@ -370,31 +369,28 @@ exec vllm serve "$MODEL_PATH" \
     --compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,28,32],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
     --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
-    --profiler-config '{"profiler":"torch","torch_profiler_dir":"'"$ROOT"'/profiling/decode"}' \
+    --profiler-config '{"profiler":"torch","torch_profiler_dir":"/tmp/qwen38-a3-pd/profiling/decode"}' \
     --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32700","kv_connector_extra_config":{"prefill":{"dp_size":4,"tp_size":2},"decode":{"dp_size":4,"tp_size":2}}}' \
-    > "$ROOT/decode.log" 2>&1
+    > "/tmp/qwen38-a3-pd/decode.log" 2>&1
 ```
 
-#### 5.2.4 Proxy and Startup
+#### 5.2.3 Proxy and Startup
 
-Save this as `proxy.sh`, setting the same host address used in `pd_env.sh`:
+Save this as `proxy.sh`. Use the same host address as the P and D scripts:
 
 ```bash
 #!/usr/bin/env bash
 set -eo pipefail
-LOCAL_IP="<SERVER_IP>"
-ROOT=/tmp/qwen38-a3-pd
-PROXY_SCRIPT=/path/to/PD_proxy_server.py
-mkdir -p "$ROOT"
+mkdir -p "/tmp/qwen38-a3-pd"
 unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
-export no_proxy="localhost,127.0.0.1,$LOCAL_IP"
-export NO_PROXY="$no_proxy"
+export no_proxy="localhost,127.0.0.1,192.168.0.1"
+export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
 
-exec python "$PROXY_SCRIPT" \
+exec python /opt/qwen38/PD_proxy_server.py \
     --host 0.0.0.0 --port 25570 \
-    --prefiller-host "$LOCAL_IP" --prefiller-port 25568 \
-    --decoder-host "$LOCAL_IP" --decoder-port 25569 \
-    > "$ROOT/proxy.log" 2>&1
+    --prefiller-host "192.168.0.1" --prefiller-port 25568 \
+    --decoder-host "192.168.0.1" --decoder-port 25569 \
+    > "/tmp/qwen38-a3-pd/proxy.log" 2>&1
 ```
 
 Start P and D from the directory containing the saved scripts:
@@ -430,9 +426,9 @@ curl --fail http://127.0.0.1:25570/v1/chat/completions \
     }'
 ```
 
-Inspect the prefill, decode, and proxy logs under `ROOT` if the request fails.
+Inspect the prefill, decode, and proxy logs under `/tmp/qwen38-a3-pd` if the request fails.
 
-#### 5.2.5 Key Parameters
+#### 5.2.4 Key Parameters
 
 - `VLLM_ASCEND_PLE_BACKEND=torch` selects the PLE backend for both roles.
 - Both roles enable Prefix Caching without an explicit Mamba cache mode.
@@ -456,7 +452,7 @@ The requests below use the A3 colocated endpoint. Select the endpoint and model 
 | 950 DT colocated | 8087 | `qwen3.8-flash-next-950-dt` |
 | A3 PD proxy | 25570 | `qwen38-flash-next-a3-pd` |
 
-For PD, first complete the proxy check in Section 5.2.4 and review the feature requirements in Section 5.2.5.
+For PD, first complete the proxy check in Section 5.2.3 and review the feature requirements in Section 5.2.4.
 
 ### 6.1 Basic Chat Completion
 
@@ -510,7 +506,7 @@ Expected result: the service returns HTTP 200 OK and describes the supplied imag
 
 ### 6.3 Function Calling
 
-Function Calling requires the following startup options, which are included in the colocated examples in Section 5; for A3 PD, see Section 5.2.5:
+Function Calling requires the following startup options, which are included in the colocated examples in Section 5; for A3 PD, see Section 5.2.4:
 
 ```text
 --enable-auto-tool-choice --tool-call-parser qwen3_xml
@@ -558,7 +554,7 @@ When the model chooses the function, the parsed result appears in `choices[0].me
 
 ### 6.4 Reasoning Parser and Thinking Control
 
-Reasoning parsing requires the following startup option, which is included in the colocated examples in Section 5; for A3 PD, see Section 5.2.5:
+Reasoning parsing requires the following startup option, which is included in the colocated examples in Section 5; for A3 PD, see Section 5.2.4:
 
 ```text
 --reasoning-parser qwen3
