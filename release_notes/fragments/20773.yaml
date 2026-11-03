@@ -1,4 +1,4 @@
 pr: 20773
 entries:
   - category: bugfix
-    text: Fixed rollback-state selection for zero-draft and shortened MTP decodes in hybrid models. GLM-5.3-Flash also requires the matching FLA recurrent KDA state-window fix to prevent unwritten outputs.
+    text: Fixed rollback-state selection for zero-draft and shortened MTP decodes in hybrid models. Native KDA execution for GLM-5.3-Flash additionally requires the matching FLA recurrent KDA state-window fix to prevent unwritten outputs.
