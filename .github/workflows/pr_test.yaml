@@ -608,7 +608,12 @@ jobs:
 
       - name: Select A5 single-node ops tests
         id: scope-a5-sn
-        if: needs.pre-commit.outputs.src == 'true'
+        if: >-
+          ${{
+            needs.pre-commit.outputs.src == 'true' ||
+            contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+            contains(github.event.pull_request.labels.*.name, 'ready-all')
+          }}
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install regex
