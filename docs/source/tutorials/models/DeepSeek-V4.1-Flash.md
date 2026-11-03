@@ -187,7 +187,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
 ## 5 Online Service Deployment
 
-Do not preload jemalloc with `LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2`; run `unset LD_PRELOAD` before starting vLLM.
+Run `unset LD_PRELOAD` before starting vLLM.
 
 ### 5.1 Single-Node Colocated Deployment
 

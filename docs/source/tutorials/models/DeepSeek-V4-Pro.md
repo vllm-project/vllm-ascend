@@ -2291,7 +2291,7 @@ Select the tab that matches the deployment hardware.
     `mooncake.json`. The pooled startup scripts below set this path using
     `MOONCAKE_CONFIG_DIR`.
 
-    Do not preload jemalloc with `LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2`; run `unset LD_PRELOAD` before starting vLLM.
+    Run `unset LD_PRELOAD` before starting vLLM.
 
     Reuse `launch_online_dp.py` from [Section 5.2](#dsv4pro-5-2-a2).
 

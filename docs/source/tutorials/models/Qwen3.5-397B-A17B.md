@@ -473,7 +473,7 @@ Prefill and Decode use the same service NIC and IP because they run on the same 
 
 We recommend using Mooncake for deployment. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow. This example uses `MooncakeConnectorV1` with the standard Pull proxy in [Section 5.7](#57-request-forwarding).
 
-Qwen3.5-397B-A17B on Atlas 800I A3 does not support `LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2`; run `unset LD_PRELOAD` before starting vLLM.
+Run `unset LD_PRELOAD` before starting vLLM.
 
 #### 5.4.1 Prefill Service Group
 
@@ -1022,7 +1022,7 @@ For Atlas 800I A2 (64 GB x 8), we recommend deploying 1P1D with 2 nodes for `Qwe
 
 Deploy `run_p.sh` and `run_d.sh` on the corresponding nodes, and deploy a proxy script on the prefill master node to forward requests. For details about how to deploy the agent script, see [Section 5.7](#57-request-forwarding).
 
-Qwen3.5-397B-A17B on Atlas 800I A2 does not support `LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2`; run `unset LD_PRELOAD` before starting vLLM.
+Run `unset LD_PRELOAD` before starting vLLM.
 
 #### 5.6.1 Prefill Node
 
