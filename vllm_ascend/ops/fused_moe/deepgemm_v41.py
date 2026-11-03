@@ -27,8 +27,6 @@ class DeepGemmV41Experts:
         # Import in workers only; the dependency owns native NPU state.
         from vllm_ascend.ops.fused_moe.deepgemm_loader import load_deepgemm
 
-        deep_gemm = load_deepgemm()
-
         config = get_current_vllm_config()
         text = config.model_config.hf_text_config
         # vLLM flattens HF text_config into DeepseekV41Config.
@@ -53,7 +51,6 @@ class DeepGemmV41Experts:
         if getattr(moe.activation, "value", moe.activation) != "silu":
             raise ValueError("V4.1 MegaMoE requires SwiGLU")
 
-        self.kernel = deep_gemm.fp8_fp4_mega_moe
         self.hidden = layer.w2_weight.shape[1]
         self.intermediate = layer.w13_weight.shape[1] // 2
         self.num_experts = moe.num_experts
@@ -63,6 +60,8 @@ class DeepGemmV41Experts:
         self.routed_scaling_factor = float(getattr(layer, "_deepgemm_v41_routed_scaling_factor", 1.0))
         if not math.isfinite(self.routed_scaling_factor) or self.routed_scaling_factor <= 0:
             raise ValueError("V4.1 MegaMoE requires a positive finite routed scaling factor")
+        deep_gemm = load_deepgemm()
+        self.kernel = deep_gemm.fp8_fp4_mega_moe
         self._prepare_shared_weights(layer, text, deep_gemm.transform_weights_for_mega_moe)
 
         # Byte-paired UE8M0 is packed along K, not the NZ-transposed layout

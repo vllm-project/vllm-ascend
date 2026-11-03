@@ -98,7 +98,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         shared_expert_gate=None,
         routed_input_transform=None,
         routed_output_transform=None,
-        routed_scaling_factor=1,
+        routed_scaling_factor: float = 1.0,
     ):
         super().__init__(
             layer_name,
@@ -139,7 +139,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 routed_experts._deepgemm_v41_shared_experts = weakref.ref(shared_experts)
                 shared_experts.gate_up_proj._deepgemm_v41_shared_linear = True
                 shared_experts.down_proj._deepgemm_v41_shared_linear = True
-            routed_experts._deepgemm_v41_routed_scaling_factor = self.routed_scaling_factor
+            routed_experts._deepgemm_v41_routed_scaling_factor = routed_scaling_factor
             self.routed_scaling_factor = 1.0
             self._forward_entry = torch.ops.vllm.moe_forward
         elif shared_experts is not None:

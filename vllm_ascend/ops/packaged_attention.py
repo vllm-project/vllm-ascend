@@ -17,7 +17,6 @@ from functools import cache
 from importlib import import_module
 
 import torch
-from torch_npu.npu.utils import _erase_stream
 
 
 @cache
@@ -556,7 +555,6 @@ def _mixed_quant_sparse_flash_mla_metadata_impl(
     )
 
 
-@torch.library.impl("vllm_ascend::mixed_quant_sparse_flash_mla", "PrivateUse1")
 def _mixed_quant_sparse_flash_mla_impl(
     q,
     *,
@@ -624,12 +622,19 @@ def _mixed_quant_sparse_flash_mla_impl(
     # another stream; registrations on any other consumer stream also remain.
     # Graph capture retains its original lifetime/allocator behavior.
     if not torch.npu.is_current_stream_capturing():
+        # Keep the private NPU API out of CPU/fake dispatch initialization.
+        from torch_npu.npu.utils import _erase_stream
+
         stream = torch.npu.current_stream(q.device)
         submitted = stream.record_event()
         stream.wait_event(submitted)
         _erase_stream(q, stream)
         _erase_stream(attn_out, stream)
     return (attn_out, softmax_lse)
+
+
+# Keep the implementation callable for CPU contract tests.
+torch.library.impl("vllm_ascend::mixed_quant_sparse_flash_mla", "PrivateUse1")(_mixed_quant_sparse_flash_mla_impl)
 
 
 quant_lightning_indexer_metadata = torch.ops.vllm_ascend.quant_lightning_indexer_metadata.default
