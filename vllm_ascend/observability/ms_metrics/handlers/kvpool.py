@@ -17,7 +17,11 @@ _PUT_FAILURE_SPEC = MetricSpec(
     MetricType.COUNTER,
     ("backend",),
 )
-_SPECS = (_PUT_FAILURE_SPEC,)
+_LOAD_ERROR_SPEC = MetricSpec(
+    "kvpool:load_error_blocks_total",
+    MetricType.COUNTER,
+)
+_SPECS = (_PUT_FAILURE_SPEC, _LOAD_ERROR_SPEC)
 
 _recorders: dict[str, Any] = {}
 
@@ -25,6 +29,7 @@ _recorders: dict[str, Any] = {}
 _BACKEND_LABELS = {
     "MemcacheBackend": "memcache",
     "MooncakeBackend": "mooncake",
+    "YuanrongBackend": "yuanrong",
 }
 
 
@@ -59,6 +64,28 @@ def kv_pool_put_failure_handler(original_func, backend, keys, *args, **kwargs):
             _PUT_FAILURE_SPEC,
             float(failed_keys),
             {"backend": _backend_label(backend)},
+            "kv_pool",
+        )
+    return result
+
+
+def kv_pool_load_error_handler(original_func, worker, *args, **kwargs):
+    """Count blocks that failed to load from the KV Pool.
+
+    ``get_block_ids_with_load_errors`` drains the pending set, so the handler
+    calls it once and only inspects the returned block ids.
+    """
+    result = original_func(worker, *args, **kwargs)
+
+    failed_blocks = len(result) if result else 0
+    if failed_blocks:
+        record_observation(
+            _recorders,
+            _KV_POOL_KEY,
+            _SPECS,
+            _LOAD_ERROR_SPEC,
+            float(failed_blocks),
+            {},
             "kv_pool",
         )
     return result

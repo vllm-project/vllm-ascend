@@ -88,7 +88,7 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     ]
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
-    assert len(config) == 26
+    assert len(config) == 28
     assert all(item["symbol"].startswith("vllm_ascend.") for item in config)
     assert all("id" not in item for item in config)
     assert all(
@@ -554,4 +554,48 @@ def test_kv_pool_put_failure_handler_expands_batch_failure(monkeypatch):
 
     metrics.reset_mock()
     handlers.kv_pool_put_failure_handler(lambda store, keys: True, backend, ["a", "b"])
+    metrics.record_metric.assert_not_called()
+
+
+def test_kv_pool_put_failure_handler_labels_yuanrong_backend(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_pool_yuanrong_backend", "kvpool")
+    backend = type("YuanrongBackend", (), {})()
+
+    handlers.kv_pool_put_failure_handler(lambda store, keys: False, backend, ["a", "b"])
+    metrics.record_metric.assert_called_once_with(
+        "kvpool:put_failure_keys_total",
+        value=2.0,
+        labels={"backend": "yuanrong"},
+    )
+
+
+def test_kv_pool_load_error_handler_counts_blocks(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_kv_pool_load_errors", "kvpool")
+    worker = object()
+
+    result = handlers.kv_pool_load_error_handler(lambda current_worker: {1, 2, 3}, worker)
+
+    assert result == {1, 2, 3}
+    metrics.record_metric.assert_called_once_with(
+        "kvpool:load_error_blocks_total",
+        value=3.0,
+        labels={},
+    )
+
+    metrics.reset_mock()
+    handlers.kv_pool_load_error_handler(lambda current_worker: set(), worker)
     metrics.record_metric.assert_not_called()

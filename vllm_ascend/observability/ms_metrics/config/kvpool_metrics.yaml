@@ -1,5 +1,5 @@
-# KV Pool. Per-key put results returned by the Ascend store backends.
-# Both backends use the same series shape; the backend label separates them.
+# KV Pool. Per-key put results returned by the Ascend store backends, plus the
+# blocks that failed to load back into the engine.
 
 - symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend:MemcacheBackend.put
   handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_put_failure_handler
@@ -11,4 +11,16 @@
   handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_put_failure_handler
   metrics:
     - name: kvpool:put_failure_keys_total
+      type: counter
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend:YuanrongBackend.put
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_put_failure_handler
+  metrics:
+    - name: kvpool:put_failure_keys_total
+      type: counter
+
+- symbol: vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker:KVPoolWorker.get_block_ids_with_load_errors
+  handler: vllm_ascend.observability.ms_metrics.handlers:kv_pool_load_error_handler
+  metrics:
+    - name: kvpool:load_error_blocks_total
       type: counter
