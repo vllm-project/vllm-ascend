@@ -553,35 +553,26 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::BuildCandidateMask(const QLIV2Common
         // (PipeBarrier<PIPE_V> 不足以保证标量读到 V 写数据; 参照 CANN topk_v200 的 SetFlag/WaitFlag<V_S> 模式)
         SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
     }
-    // 候选与 tile 块号 [tileBlockBase, tileBlockBase+tileBlkNum) 的最小距离, 0 即命中
+    // Sorted candidate IDs restrict the scatter to blocks inside this tile.
     // (candBuf 按行分区, R6: 同核行间覆盖已修复)
     LocalTensor<float> candPairs2 = candBuf_.Get<float>()[innerS1Idx * candBlocks * 2];
     int32_t lo = CountGE(candPairs2, candBlocks, static_cast<float>(tileBlockBase));
     int32_t hi = CountGE(candPairs2, candBlocks, static_cast<float>(tileBlockBase + tileBlkNum));
-    LocalTensor<float> blkIdxF = tmp[4096];     // [tileBlkNum]
-    LocalTensor<float> acc = tmp[4352];         // [tileBlkNum]
-    LocalTensor<float> diff = tmp[4608];        // [tileBlkNum]
-    Cast(blkIdxF, globalTopkIndice_, RoundMode::CAST_NONE, tileBlkNum);
-    PipeBarrier<PIPE_V>();
-    Adds(blkIdxF, blkIdxF, static_cast<float>(tileBlockBase), tileBlkNum);
-    PipeBarrier<PIPE_V>();
-    Duplicate(acc.ReinterpretCast<int32_t>(), QLIV2ServiceVec::POS_INF_F32, tileBlkNum);
-    PipeBarrier<PIPE_V>();
-    // 降序排序下: 值 >= base+tileBlkNum 占 [0, hi), 落在 tile 内的候选占 [hi, lo), < base (含 -1 pad) 占 [lo, ...)
-    for (int32_t j = hi; j < lo; j++) {
-        float v = candPairs2.GetValue(2 * j);
-        Adds(diff, blkIdxF, -v, tileBlkNum);
-        PipeBarrier<PIPE_V>();
-        VecAbs(diff, diff, tileBlkNum);
-        VecMinPair(acc, acc, diff, tileBlkNum);
+    // Membership is a scatter, not a minimum-distance reduction over
+    // every candidate x every tile block. Fence UB stores explicitly.
+    LocalTensor<float> blockMask = tmp[4096];
+    Duplicate(blockMask, 1.0f, tileBlkNum);
+    SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
+    for (int32_t j = hi; j < lo; ++j) {
+        int32_t block = static_cast<int32_t>(candPairs2.GetValue(2 * j)) - tileBlockBase;
+        blockMask.SetValue(block, 0.0f);
     }
-    // 距离 0 → 候选块; Brcb 展开到位置级; 距离 clamp 到 1 得 isOut (0/1)
-    LocalTensor<float> posDist = tmp[12288]; // candInt 已释放, 可复用
-    Brcb(posDist, acc, tileBlkNum / 8, {1, 8});
+    SetWaitFlag<HardEvent::S_V>(HardEvent::S_V);
+    LocalTensor<float> posMask = tmp[12288];
+    Brcb(posMask, blockMask, tileBlkNum / 8, {1, 8});
     PipeBarrier<PIPE_V>();
-    VecMinsScalar(posDist, posDist, 1.0f, s2BaseSize_);
-    PipeBarrier<PIPE_V>();
-    candIsOut_ = posDist;
+    candIsOut_ = posMask;
+
     // R11 (leak 语义, §1.6): isOut 仅用于分数降级 (pen 链), 索引保留真实位置号 —
     // 候选外可达位置作为 topk 填充泄漏成有效索引 (对齐模型 where(idxs < compress_lens) 语义),
     // 不再把候选外索引改 -1 (原 isOutI32/CAST_RINT 链已删)。
@@ -1107,8 +1098,13 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
             LocalTensor<float> tmpSortBuf = sortBuff[2 * cuS2LenVecAlign];
             QLIV2ServiceVec::SortAll(sortBuff, tmpSortBuf, cuS2LenVecAlign);
             PipeBarrier<PIPE_V>();
+            // A consumer Top512 merge needs only the best 512 entries of the sorted tile.
+            uint32_t tileMergeLen = static_cast<uint32_t>(cuS2LenVecAlign);
+            if (constInfo_.candidateMode == CANDIDATE_MODE_CONSUMER && constInfo_.sparseCount == ELE_NUM_512) {
+                tileMergeLen = Min(tileMergeLen, topkWidth_);
+            }
             QLIV2ServiceVec::MergeSort(globalTopkUb_[innerS1Idx * topkPairWidth_], topkWidth_, sortBuff,
-                                       cuS2LenVecAlign, tmpSortBuf); // P3
+                                       tileMergeLen, tmpSortBuf);
             PipeBarrier<PIPE_V>();
             bool isS2End = cuBaseS2Idx + s2BaseSize_ >= cuRealAcSeq;
             bool needCopyOutGm = blockS2StartIdx_ == 0 && isS2End;
