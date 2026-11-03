@@ -1,5 +1,4 @@
-# Replace the filename and pr value with the assigned PR number.
-pr: null
+pr: 20663
 entries:
   - category: bugfix
     text: Fixed DecodeBenchConnector FP8 KV filling on Ascend NPUs for per-request and startup fills while preserving FP8 encoding and cache layout.
