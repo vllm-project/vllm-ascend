@@ -27,7 +27,16 @@ from vllm_ascend import envs
 
 
 def _parse_token_ids(raw):
-    return [int(token) for token in (raw or "").split(",") if token.strip()]
+    try:
+        return [int(token) for token in (raw or "").split(",") if token.strip()]
+    except ValueError as e:
+        raise ValueError(
+            "VLLM_ASCEND_THINKING_MASK_EOS_TOKEN_IDS / "
+            "VLLM_ASCEND_THINKING_MASK_IMPLICIT_END_TOKEN_IDS expect a "
+            f"comma-separated list of integer token ids, got {raw!r} ({e}). "
+            "Look up the ids with the model tokenizer, e.g. "
+            "tokenizer.convert_tokens_to_ids('<|im_end|>')."
+        ) from e
 
 
 class ThinkingEosMaskV2State(ThinkingBudgetState):
