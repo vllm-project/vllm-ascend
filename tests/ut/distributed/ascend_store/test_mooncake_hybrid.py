@@ -115,7 +115,16 @@ def cpu_cache(array):
 
 
 class TestMooncakeHybrid(unittest.TestCase):
-    def make_hybrid(self, extra_entry=False, private_tail=False, tp_rank=0, tp_size=1, use_mla=False):
+    def make_hybrid(
+        self: unittest.TestCase,
+        extra_entry=False,
+        private_tail=False,
+        tp_rank=0,
+        tp_size=1,
+        use_mla=False,
+        pcp_size=1,
+        pcp_rank=0,
+    ):
         groups = [
             KVCacheGroupSpec(
                 ["model.layers.0.kv", "model.layers.2.kv"],
@@ -165,6 +174,8 @@ class TestMooncakeHybrid(unittest.TestCase):
                 tp_rank=tp_rank,
                 tp_size=tp_size,
                 use_mla=use_mla,
+                pcp_size=pcp_size,
+                pcp_rank=pcp_rank,
             )
         store = MemoryRangeStore()
         worker.m_store = store
@@ -283,7 +294,7 @@ class TestMooncakeHybrid(unittest.TestCase):
             self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (32, False))
             load = scheduler.load_specs[request.request_id]
             self.assertEqual(load.kvpool_cached_tokens, 32)
-            self.assertEqual(load.kvpool_store_skip_tokens, 64)
+            self.assertEqual(load.kvpool_store_skip_tokens, 64 if eagle else 32)
         # The full hit is a write-skip extent, not the recurrent resume point.
         worker.use_eagle = False
         request = ReqMeta(
@@ -474,7 +485,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         keys = scheduler.store_scheduler.batch_is_readable.call_args_list[0].args[0]
         self.assertEqual(keys[0], "model@mooncake_hybrid_v1:layout@group:0@block:16@6831@0")
 
-    def save_prefix(self, worker, last_chunk=True):
+    def save_prefix(self: unittest.TestCase, worker, last_chunk=True):
         request = ReqMeta(
             "request",
             token_len_chunk=64,

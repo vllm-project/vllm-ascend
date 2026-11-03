@@ -19,7 +19,6 @@ from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 @pytest.fixture
 def state(monkeypatch):
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
     monkeypatch.setattr(replay_mod, "get_mrv2_in_profile_run", lambda: False)
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=32),
@@ -415,14 +414,6 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypat
     assert torch.equal(mask, saved_mask)
     assert torch.equal(original_padding, torch.tensor([False, True, False, True]))
     assert gather_padding.call_count == int(sequence_parallel)
-
-
-def test_dsa_cp_pads_replay_without_adding_actual_rows(state, monkeypatch):
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: True)
-    state.config.parallel_config.tensor_parallel_size = 4
-    state.prepare(inputs(), CUDAGraphMode.NONE)
-    assert state.layers.num_actual_rows == 5
-    assert state.layers.rows.numel() == 8
 
 
 @pytest.mark.parametrize("prompt_logprobs", [None, 0, 3])

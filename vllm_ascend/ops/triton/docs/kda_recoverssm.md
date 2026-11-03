@@ -40,13 +40,16 @@
      accumulates decay/products and correction outer products, and writes the
      reconstructed recurrent checkpoint. `_commit_kda_state_grouped_kernel`
      performs the same operation for two adjacent heads per program on its A5
-     fast path.
+     fast path. All aligned contexts use two disjoint on-device request filters
+     to separate commits with and without a boundary snapshot. Non-crossing
+     requests use two matrix buffers; crossing requests retain the existing
+     six-buffer recovery path. A5 uses grouped heads for FP32 `H32/H64`,
+     `K=V=128`; other layouts use the ordinary kernel with UB-bounded value tiles.
 - **Supported modes**: Atlas A3 and Ascend 950DT (A5), inference only, eager and
   NPU graph execution. Atlas A2 and 950PR are not validated by these tests.
-  This operator-only change does not activate the GLM serving path. Model,
-  configuration and worker integration will be provided in a follow-up change.
-  The low-level optional align arguments do not establish serving support for
-  Mamba cache mode `align`.
+  Operator validation is separate from model/worker integration. Serving
+  configuration and restrictions are documented in the GLM RecoverSSM feature
+  guide; low-level align arguments alone do not establish model support.
 
 ## Parameters
 
@@ -107,7 +110,7 @@ Required layer fields:
 | `num_computed_tokens` | Input | Optional prior token count per sampler row, used with `block_table`; default `None` | INT32 / `None` | Strided 1D / N/A |
 | `mamba_block_size` | Attribute | Optional token span per align block, at least `Q`; default `None` | Python int / `None` | Scalar / N/A |
 | Context checkpoint/convolution pages | Input/Output | Reconstructed state and compacted history are written in place; the method returns `None` | See layer fields | Paged ND |
-| Context plan arrays | Output | Accepted lengths, final page IDs, boundary page IDs and boundary recovery lengths | INT32 | Contiguous 1D |
+| Context plan arrays | Output | Full/non-boundary/boundary accepted lengths, final page IDs, boundary page IDs and boundary recovery lengths | INT32 | Contiguous 1D |
 
 Internal kernel arguments consist of the tensors above, INT64 base-address and
 per-layer stride tables, element-stride scalars, `NULL_BLOCK_ID` and shape/tile
@@ -116,6 +119,16 @@ attributes. `K`, `V`, `BK`, `BV`, `NUM_HEADS`, `SPEC_QUERY_LEN`, `UNROLL_COMMIT`
 `BH` specialize their respective kernels. The plan's `HAS_REQUEST_INDICES` and `ALIGN_MODE` are derived
 from optional pointer presence by `triton.heuristics`. Address tables and context
 buffers are implementation-owned, not user outputs to replace between replays.
+The existing plan kernel also produces two predicated accepted-length arrays:
+one for requests without a boundary snapshot, and one for requests with one.
+Their nonzero entries are disjoint and sum to the ordinary accepted lengths.
+Inactive state programs read one zero length and return before loading page IDs.
+No constexpr parameter is added; accepted lengths, page IDs and boundary membership
+remain device data, including during graph replay. State kernels explicitly
+flatten the value/layer/head/request coordinates into a one-dimensional launch,
+keeping request rows outermost across backend grid-order differences. Their
+`num_layers` argument is runtime-only and marked `do_not_specialize`, including
+for single-layer calls; it does not introduce a layer-count constexpr.
 
 ## Constraints
 
@@ -150,15 +163,19 @@ buffers are implementation-owned, not user outputs to replace between replays.
   Finite, non-overflowing inputs/intermediates are the validated numerical domain.
 - A3 verification/commit use value tiles no larger than 64. A5 can select 128
   where its occupancy/layout rules permit. Grouped commit requires A5, FP32 state,
-  no align table, `K = V = 128` and `H` in `{32, 64}`; the window is supplied by
+  `K = V = 128` and `H` in `{32, 64}`; an align table is supported through the
+  disjoint request filters.
+  The window is supplied by
   the caller rather than restricted to six tokens. Other supported cases use
   ordinary commit. A3 strided convolution compaction uses 256-channel
   tiles; A5 and contiguous-channel compaction retain 4096-channel tiles.
-  Ordinary commit further caps its value tile using the existing
+  Ordinary and aligned grouped commit cap their value tiles using the existing
   `triton_utils.get_ub_size_bytes()` result, the key tile and align buffers.
   A3 iterates accepted records at runtime to avoid compiler-expanded matrix
   lifetimes; A5 retains static unrolling for both ordinary and grouped commit.
-  The estimate covers two matrix buffers normally and six with align enabled.
+  The estimate covers two matrix buffers without boundary reconstruction and
+  six per head for the ordinary or grouped boundary recovery path.
+  Non-crossing aligned requests do not reserve boundary matrices.
   Two rows' worth of vector temporaries
   are reserved before rounding down to a power of two. Context creation initializes
   the shared device-property cache outside graph capture; kernel launch reads its UB budget.
@@ -233,6 +250,12 @@ Window regressions explicitly check the selected ordinary/grouped path for
 Q1/Q2/Q4/Q6/Q8, both local head counts and eager/graph execution, with additional
 FP16 and unbounded-gate cases. This prevents a fixed-window fallback from masking
 missing grouped-kernel coverage.
+
+Aligned-routing tests cover H8/H16/H32/H64, FP32/BF16 states, K=V=128 and
+masked/non-square K/V dimensions, mixed boundary membership, strided metadata,
+in-place/out-of-place destinations and eager/NPU graph execution.
+They check that the disjoint accepted-length arrays sum to the full commit lengths
+and that ordinary/grouped dispatch preserves boundary snapshots and untouched pages.
 
 ```bash
 pytest -sv -o junit_family=xunit1 \

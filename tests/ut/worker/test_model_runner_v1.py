@@ -455,7 +455,7 @@ class TestDPPaddingEplb(unittest.TestCase):
 
 class TestDummyRunSlotInvalidation(unittest.TestCase):
     def test_padded_speculative_dummy_preserves_logical_query_lengths(self):
-        # DSA CP rounds 186 tokens to 192 without adding a logical request.
+        # Padding rounds 186 tokens to 192 without adding a logical request.
         # Also cover dispatchers that pad the request count itself.
         for num_tokens, padded_tokens, padded_reqs in ((186, 192, 31), (12, 24, 4), (6, 24, 4), (12, 12, 2)):
             with self.subTest(num_tokens=num_tokens):
@@ -1303,6 +1303,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             impl.use_flashmla = False
             impl.use_pcp = use_pcp
             impl.use_dcp = False
+            impl.dcp_q_replicate_enabled = False
             impl.supports_prolog_v3_writer = lambda: True
             layer.impl = impl
             layer.indexer = None
@@ -2308,18 +2309,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             {(target_layer,), (draft_layer,), (cache_layer,)},
         )
 
-    def test_cp_or_sp_decode_dispatch_keys_are_actually_captured(self):
-        cases = (
-            (True, 8, 6, False),
-            (True, 16, 6, False),
-            (True, 8, 6, True),
-            (True, 8, 1, False),
-            (False, 8, 6, True),
-            (False, 16, 6, True),
-            (False, 8, 1, True),
-        )
-        for cp_enabled, tp_size, query_len, enable_sp in cases:
-            with self.subTest(cp=cp_enabled, tp_size=tp_size, query_len=query_len, enable_sp=enable_sp):
+    def test_sp_decode_dispatch_keys_are_actually_captured(self):
+        cases = ((8, 6), (16, 6), (8, 1))
+        for tp_size, query_len in cases:
+            with self.subTest(tp_size=tp_size, query_len=query_len):
+                enable_sp = True
                 runner = self._build_runner()
                 max_tokens = 32 * query_len
                 config = CompilationConfig(
@@ -2345,7 +2339,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 runner.drafter = None
                 runner.use_aclgraph = False
                 with (
-                    patch("vllm_ascend.worker.v1.model_runner.enable_dsa_cp", return_value=cp_enabled),
                     patch("vllm_ascend.worker.v1.model_runner.enable_sp", return_value=enable_sp),
                     patch("vllm_ascend.worker.v1.model_runner.update_pass_config", return_value=nullcontext()),
                 ):
