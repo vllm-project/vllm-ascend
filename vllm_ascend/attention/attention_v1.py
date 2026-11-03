@@ -656,6 +656,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
     def _get_fia_mask_params(
         self, attn_metadata: AscendMetadata, device: torch.device
     ) -> tuple[torch.Tensor | None, int, int, int]:
+        is_decode = (
+            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and attn_metadata.max_query_len == 1
+        )
+
         if not attn_metadata.causal:
             if self.sliding_window is None:
                 return None, 0, SWA_INT_MAX, SWA_INT_MAX
@@ -667,6 +672,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self._non_causal_swa_attn_mask = AttentionMaskBuilder(device).get_splitfuse_attn_mask()
             radius = self.sliding_window - 1
             return self._non_causal_swa_attn_mask, 4, radius, radius
+        if is_decode and self.sliding_window is None:
+            return None, 0, SWA_INT_MAX, SWA_INT_MAX
+
         return (
             attn_metadata.attn_mask,
             4 if self.sliding_window else 3,
@@ -938,6 +946,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         kv_cache=None,
     ):
+        is_decode = (
+            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and attn_metadata.max_query_len == 1
+        )
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
@@ -1071,7 +1083,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     query=query,
                     key=key,
                     value=value,
-                    atten_mask=attn_metadata.attn_mask,
+                    atten_mask=None if is_decode else attn_metadata.attn_mask,
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
@@ -1087,7 +1099,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     current_value=passed_value,
                     attn_metadata=attn_metadata,
                     is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
-                    sparse_mode=3,
+                    sparse_mode=0 if is_decode else 3,
                 )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
