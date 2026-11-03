@@ -11,6 +11,7 @@ from tests.ut.quantization.conftest_quantization import (
     create_mock_vllm_config,
     create_mxfp_moe_layer,
 )
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DSDynamicLinearMethod,
     AscendW8A8MXFP8DynamicFusedMoEMethod,
@@ -302,6 +303,38 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
                         torch.testing.assert_close(expert.float(), expected.float(), rtol=0, atol=0)
         self.scheme.process_weights_after_loading(layer)
         self.assertIs(layer.cann_mega_moe_w13_weight_list, weights.w1)
+
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.use_cann_megamoe", return_value=True)
+    def test_megamoe_eplb_updates_compute_weights_in_place(self, _mock_use_megamoe, mock_vllm):
+        mock_vllm.return_value = create_mock_vllm_config()
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts,
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+        )
+        self.scheme.process_weights_after_loading(layer)
+        layer.quant_method = self.scheme
+        layer.local_num_experts = self.num_experts
+        with patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8._EXTRA_CTX") as context:
+            context.use_mega_moe = True
+            weights = self.scheme.get_fused_mc2_weights(layer)
+        registered = [
+            weight.view(torch.uint8) if weight.element_size() == 1 else weight
+            for weight in AscendRoutedExperts.get_expert_weights(layer)
+        ]
+        self.assertEqual(len(registered), 4)
+        for eplb_weights, compute_weights in zip(
+            registered, (weights.w1, weights.w2, weights.w1_scale, weights.w2_scale)
+        ):
+            self.assertEqual(len(eplb_weights), self.num_experts)
+            captured_weights = list(compute_weights)
+            expected_bytes = [weight.view(torch.uint8).clone() for weight in reversed(compute_weights)]
+            for destination, source in zip(eplb_weights, expected_bytes):
+                destination.copy_(source)
+            for actual, captured, expected in zip(compute_weights, captured_weights, expected_bytes):
+                self.assertIs(actual, captured)
+                torch.testing.assert_close(actual.view(torch.uint8), expected, rtol=0, atol=0)
 
     def test_get_weight_various_expert_counts(self):
         for num_experts in [4, 8, 16]:

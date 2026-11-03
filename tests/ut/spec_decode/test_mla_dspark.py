@@ -19,6 +19,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
 from vllm_ascend.models import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash import aclgraph as graph
@@ -41,6 +42,10 @@ def make_speculator():
         hf_config=SimpleNamespace(target_layer_ids=[0, 2], target_hidden_size=4, num_target_layers=2)
     )
     spec.vllm_config.speculative_config = SimpleNamespace(draft_model_config=spec.draft_model_config)
+    # vLLM main (#62326) reads these overrides from the speculator's own config.
+    spec.speculative_config = SimpleNamespace(  # type: ignore[assignment]
+        moe_backend=None, attention_backend=None, kv_cache_dtype=None
+    )
     spec.num_query_per_req = 5
     spec.input_buffers = SimpleNamespace(
         positions=torch.arange(20), seq_lens=torch.tensor([5, 0, 0, 0], dtype=torch.int32)
@@ -69,9 +74,19 @@ def test_dspark_sync_matches_global_draft_requests(monkeypatch, replicated_pcp):
 
     if not replicated_pcp:
         # The helper replaces the real DP state after checking capacity.
-        target_sync = DPSyncState(
-            num_tokens_across_dp=torch.tensor([4, 4]), uniform_token_count=1, eager=False, num_reqs=4
-        )
+        if vllm_version_is("0.32.0"):
+            target_sync = DPSyncState(  # type: ignore[call-arg]
+                num_tokens_across_dp=torch.tensor([4, 4]), uniform_token_count=1, eager=False, num_reqs=4
+            )
+        else:
+            # Main adds the agreed query-length bound for varlen decode graphs.
+            target_sync = DPSyncState(  # type: ignore[call-arg]
+                num_tokens_across_dp=torch.tensor([4, 4]),
+                uniform_token_count=1,
+                max_query_len=None,
+                eager=False,
+                num_reqs=4,
+            )
     monkeypatch.setattr(DSparkSpeculator, "propose", parent_propose)
     # vLLM #60754 renamed `dp_sync` -> `dp_sync_state` on main.
     dp_sync_kwarg = "dp_sync_state"

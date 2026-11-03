@@ -119,10 +119,6 @@ Before starting the service:
     source /usr/local/Ascend/nnal/atb/set_env.sh
 
     export MODEL_PATH=/models/Qwen3.8-Flash-Next-w8a8-mtp
-    export VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1
-    export VLLM_ASCEND_ENABLE_QSA_E3V=1
-    unset VLLM_ASCEND_FORCE_QSA_REFERENCE
-
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port 8088 \
@@ -150,8 +146,6 @@ Before starting the service:
 
     Key parameter descriptions:
 
-    - `VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1` enables the fused QSA Lightning Indexer path.
-    - `VLLM_ASCEND_ENABLE_QSA_E3V=1` enables the fused QSA Expand E3 path.
     - `--quantization ascend` loads the Ascend-compatible W8A8 checkpoint.
     - `--tensor-parallel-size 8` and `--data-parallel-size 1` configure the A3 single-DP TP8 topology.
     - `--max-model-len 131072` caps the maximum context length. Common values: `65536` (64K), `131072` (128K).
@@ -359,6 +353,35 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
 Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+### 9.3 Model Runner V2 Decode Submission
+
+Audited Qwen3.8 Flash Next Model Runner V2 consumers automatically use optimistic
+CPU length bounds while exact execution lengths remain on device. This capability
+is enabled by default for supported consumers and requires no configuration switch.
+The resolved target architecture must be `Qwen4ExpForCausalLM` or
+`Qwen4ExpForConditionalGeneration`. Other models retain their existing behavior.
+
+The model checks the initialized target and MTP draft attention consumers once
+after KV initialization. A supported model skips both the corrected-count D2H
+copy and its CPU synchronization, using the runner's existing paired exemption.
+Exact positions, accepted counts, KV slots and recurrent state still use device
+state. Existing connector loads, waits, acknowledgements and errors are unchanged.
+
+The same capability covers text and ordinary non-realtime multimodal requests.
+Completed prompts use the existing encoder gather fast path; there are no extra
+media certificates or PD observers.
+
+Unknown target/draft consumers, context parallelism, sparse KV offload and
+realtime media retain exact CPU synchronization. The runner's existing PP
+exact-count protection still applies. There is no extra TP8, DP1, PP1, SP-off,
+prefix-cache-off, PLE weight-offload, FULL-graph or fixed-K requirement.
+Underlying model/runtime restrictions still apply.
+
+The decision is fixed for the model state's initialized lifetime so production
+and consumption cannot switch independently between batches. Changes to runtime
+configuration or attention consumers require model-state reinitialization.
+Initialization drains the old copy stream once before enabling the exemption.
 
 ## 10 FAQ
 

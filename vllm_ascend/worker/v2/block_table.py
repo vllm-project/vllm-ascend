@@ -21,7 +21,7 @@ from vllm.triton_utils import triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
-from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
+from vllm_ascend.ops.triton.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel,
 )
 

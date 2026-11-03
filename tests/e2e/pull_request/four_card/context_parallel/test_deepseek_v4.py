@@ -88,7 +88,6 @@ def _run_test(
         speculative_config=speculative_config,
         attention_config={"indexer_kv_dtype": "int8"},
         additional_config={
-            "enable_dsa_cp": False,
             "enable_prefill_mc2": True,
             # TODO: Re-enable after PCP decode sharding lands; DSV4 results are unstable.
             "enable_pcp_o_proj_weight_sharding": False,
