@@ -123,9 +123,6 @@ from vllm_ascend.worker.v2.sample.min_p import apply_min_p  # noqa: E402
 from vllm_ascend.worker.v2.sample.penalties import apply_penalties, bincount  # noqa: E402
 from vllm_ascend.worker.v2.sample.trace_replay import apply_trace_tokens  # noqa: E402
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (  # noqa: E402
-    get_num_sampled_and_rejected as npu_get_num_sampled_and_rejected,
-)
-from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (  # noqa: E402
     rejection_sample as npu_rejection_sample,
 )
 
@@ -143,7 +140,6 @@ states.apply_temperature = apply_temperature
 logprob.compute_token_logprobs = compute_token_logprobs
 rejection_sampler_utils.rejection_sample = npu_rejection_sample
 rejection_sampler.rejection_sample = npu_rejection_sample
-rejection_sampler.get_num_sampled_and_rejected = npu_get_num_sampled_and_rejected
 # triton ops that filed in ops/triton
 gumbel.gumbel_sample = categorical_sample
 speculator.gumbel_sample = categorical_sample
