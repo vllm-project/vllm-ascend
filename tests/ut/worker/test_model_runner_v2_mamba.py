@@ -585,7 +585,9 @@ def test_mamba_padding_is_independent_of_pcp_context(
     assert kwargs["pcp_context"] is context
 
 
-def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests():
+@pytest.mark.parametrize("recover", [False, True])
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests(recover, for_capture):
     local_batch = SimpleNamespace(is_dummy=False)
     global_batch = SimpleNamespace(num_reqs=1)
     pcp_context = SimpleNamespace(
@@ -597,6 +599,7 @@ def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests():
     state = SimpleNamespace(
         pcp_manager=pcp_manager,
         vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
+        recoverssm=SimpleNamespace(record_step=MagicMock()) if recover else None,
     )
     mamba_spec = _mamba_spec()
     attn_groups = [[SimpleNamespace(kv_cache_spec=object())], [_group(mamba_spec)]]
@@ -615,10 +618,13 @@ def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests():
             slot_mappings="local_slots",
             attn_groups=attn_groups,
             kv_cache_config=MagicMock(),
+            for_capture=for_capture,
         )
 
     assert metadata == {"sfa": local_metadata["sfa"], "linear_attn": mamba_metadata}
     assert mamba_metadata.pcp_context is pcp_context
+    if recover:
+        state.recoverssm.record_step.assert_called_once_with(metadata, attn_groups, for_capture=for_capture)
     assert build_batch.call_args_list[0].args[1] is local_batch
     assert build_batch.call_args_list[0].args[5][0][0] is attn_groups[0][0]
     assert build_batch.call_args_list[0].args[5][1] == []
