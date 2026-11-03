@@ -6,11 +6,11 @@ Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experim
 
 This tutorial describes model preparation, installation, online serving, functional verification, and evaluation. It covers single-node colocated deployment on Atlas 800 A3 and Ascend 950 DT, and prefill/decode (PD) separation on Atlas 800 A3.
 
-The A3 W8A8 baseline was validated with text and multimodal input on `vllm-ascend:v0.26.0rc`, the first version supporting this model. The optional performance configuration, 950 DT configuration, and A3 W4A8 PD configuration require separate runtime and accuracy validation.
+Qwen3.8-Flash-Next was first supported in `vllm-ascend:v0.26.0rc`. The original A3 W8A8 configuration was validated with text and multimodal input. The deployment examples below include additional performance settings and require separate runtime and accuracy validation.
 
 !!! warning
 
-    Automatic Prefix Caching is experimental. On the A3 W8A8 baseline, enable it with `--enable-prefix-caching --mamba-cache-mode align` and revalidate NPU memory capacity for the target context length and concurrency.
+    Automatic Prefix Caching is experimental. For A3 colocated deployment, enable it with `--enable-prefix-caching --mamba-cache-mode align` and revalidate NPU memory capacity for the target context length and concurrency.
 
 ## 2 Supported Features
 
@@ -45,7 +45,7 @@ A pre-built Qwen3.8 A3 image is available in the [vllm-ascend repository](https:
 
 The following example uses the AArch64 image and exposes 16 devices on an Atlas 800 A3 node. The service command in [Section 5.1](#51-single-node-online-deployment) uses the first eight devices; the A3 PD example in Section 5.2 uses all 16.
 
-=== "A3 series"
+=== "A3 Series"
 
     Start the docker image on each node.
 
@@ -114,9 +114,9 @@ Before starting:
 - For 950 DT, set `LOCAL_IP` and `NIC_NAME` to the serving host address and the interface that owns it.
 - Verify available NPU memory before changing context length, concurrency, or memory utilization.
 
-=== "A3 series"
+=== "A3 Series"
 
-    This W8A8 baseline uses TP8 × DP1 and enables QSA acceleration, MTP, Function Calling, and reasoning parsing.
+    Run the following command to serve the W8A8 model with TP8 × DP1 and a maximum context length of 131072 tokens.
 
     ```bash
     unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
@@ -124,6 +124,9 @@ Before starting:
     source /usr/local/Ascend/nnal/atb/set_env.sh
 
     export MODEL_PATH=/models/Qwen3.8-Flash-Next-w8a8-mtp
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ASCEND_PLE_BACKEND=torch
     export VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1
     export VLLM_ASCEND_ENABLE_QSA_E3V=1
     unset VLLM_ASCEND_FORCE_QSA_REFERENCE
@@ -145,15 +148,16 @@ Before starting:
         --gpu-memory-utilization 0.93 \
         --enable-prefix-caching \
         --mamba-cache-mode align \
+        --async-scheduling \
         --enable-auto-tool-choice \
         --tool-call-parser qwen3_xml \
         --reasoning-parser qwen3 \
         --compilation-config '{"cudagraph_capture_sizes":[4,8,12,16,20,24,28,32],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
+        --additional-config '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}'
     ```
 
-    Key parameter descriptions:
+    **Key parameters:**
 
     - `VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1` enables the fused QSA Lightning Indexer path.
     - `VLLM_ASCEND_ENABLE_QSA_E3V=1` enables the fused QSA Expand E3 path.
@@ -162,43 +166,16 @@ Before starting:
     - `--max-model-len 131072` caps the maximum context length. Common values: `65536` (64K), `131072` (128K).
     - `--enable-expert-parallel` enables expert parallelism for the MoE layers.
     - `--enable-prefix-caching --mamba-cache-mode align` enables Prefix Caching with aligned GDN and PLE state checkpoints.
-    - The validated command does not set `--language-model-only`, so the vision encoder remains enabled and the service accepts both text and multimodal requests. For a text-only deployment, you may add `--language-model-only` to skip loading the vision encoder.
+    - The command does not set `--language-model-only`, so the vision encoder remains enabled and the service accepts both text and multimodal requests. For a text-only deployment, you may add `--language-model-only` to skip loading the vision encoder.
     - `--enable-auto-tool-choice --tool-call-parser qwen3_xml` enables automatic Function Calling with the Qwen3 XML parser.
     - `--reasoning-parser qwen3` separates reasoning from the final answer in the OpenAI-compatible response.
     - `--speculative-config` uses the model's MTP head to draft three tokens. `enforce_eager=true` keeps the MTP proposer in eager mode.
     - `--compilation-config` enables `FULL_DECODE_ONLY` ACLGraph for decode.
-    - `fuse_norm_quant=false` selects the validated norm and quantization path for this W8A8 deployment.
-
-    Verify the service is ready: the log should show `Application startup complete`.
-
-    **Optional performance configuration**
-
-    To evaluate async scheduling and MoE communication optimizations, export:
-
-    ```bash
-    export VLLM_USE_V2_MODEL_RUNNER=1
-    export VLLM_ASCEND_PLE_BACKEND=torch
-    ```
-
-    Add `--async-scheduling` to the command above and replace its `--additional-config` value with:
-
-    ```json
-    {
-      "enable_cpu_binding": true,
-      "enable_shared_expert_dp": true,
-      "enable_fused_mc2": 0,
-      "enable_flashcomm1": true,
-      "multistream_overlap_shared_expert": true,
-      "ascend_compilation_config": {
-        "fuse_norm_quant": false,
-        "enable_npugraph_ex": true,
-        "enable_static_kernel": false,
-        "enable_super_kernel": false
-      }
-    }
-    ```
-
-    Shared expert DP requires expert parallelism and TP > 1. Keep fused MC2 disabled when using shared expert multistream overlap. This optional combination requires accuracy, memory, and performance validation; the baseline's evaluation result does not cover it.
+    - `fuse_norm_quant=false` disables norm/quantization fusion for this W8A8 deployment.
+    - `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2; `VLLM_ASCEND_PLE_BACKEND=torch` selects the PLE backend.
+    - `--async-scheduling` enables asynchronous scheduling.
+    - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert multistream overlap. Shared expert DP requires expert parallelism and TP > 1. Keep `enable_fused_mc2=0` when using shared expert overlap.
+    - `enable_npugraph_ex=true` enables NPU graph extension; static kernels and super kernels remain disabled.
 
 === "950 DT"
 
@@ -251,24 +228,12 @@ Before starting:
         --tool-call-parser qwen3_xml \
         --reasoning-parser qwen3 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{
-          "enable_cpu_binding": true,
-          "enable_shared_expert_dp": true,
-          "enable_fused_mc2": 0,
-          "enable_flashcomm1": true,
-          "multistream_overlap_shared_expert": true,
-          "ascend_compilation_config": {
-            "fuse_norm_quant": false,
-            "enable_npugraph_ex": true,
-            "enable_static_kernel": false,
-            "enable_super_kernel": false
-          }
-        }' \
+        --additional-config '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
         --profiler-config '{"profiler":"torch","torch_profiler_dir":"'"$PROFILER_DIR"'","torch_profiler_with_stack":false}'
     ```
 
-    Key parameter descriptions:
+    **Key parameters:**
 
     - `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3` selects the four devices for TP4.
     - `--max-model-len 141312` and `--max-num-seqs 32` set context and concurrency limits; verify memory capacity before increasing them.
@@ -276,6 +241,16 @@ Before starting:
     - `FULL_DECODE_ONLY` enables decode graph capture. The MTP configuration uses three draft tokens without explicitly forcing eager execution.
     - Prefix caching is enabled without an explicit Mamba cache mode. Confirm cache behavior with the installed runtime.
     - `--profiler-config` sets the trace output directory; it does not start profiling by itself.
+
+**Service verification:**
+
+Wait for model loading and graph capture to complete, then check the service from the serving host. Use port `8088` for A3 or `8087` for 950 DT:
+
+```bash
+curl --fail http://127.0.0.1:8088/v1/models
+```
+
+The response should list the configured model name. After startup, use [Section 6](#6-functional-verification) to verify generation.
 
 ### 5.2 PD Separation Deployment
 
@@ -290,14 +265,6 @@ On a single Atlas 800 A3 host, prefill and decode each use eight devices with TP
 | HCCL socket port range | 61400–61499 | 61500–61599 |
 | HCCL buffer size | 4096 | 512 |
 | Maximum context / sequences / batched tokens | 141312 / 32 / 4096 | 141312 / 32 / 4096 |
-| Memory utilization | 0.90 | 0.90 |
-| Prefix caching | Enabled | Enabled |
-| Engram CPU offload / requested DP shared memory | `true` / `false` | `true` / `false` |
-| Prefill MC2 | Explicitly enabled; fused MC2 disabled | Not explicitly set |
-| Graph mode | Not explicitly set | `FULL_DECODE_ONLY` |
-| Static kernel / super kernel | Not explicitly set | `true` / `false` |
-| MTP draft tokens / eager proposer | 3 / `true` | 3 / `false` |
-| Recompute scheduler | Not set | Enabled |
 
 Before starting:
 
@@ -365,34 +332,10 @@ exec vllm serve "$MODEL_PATH" \
     --async-scheduling \
     --enable-expert-parallel \
     --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
-    --additional-config '{
-      "enable_shared_expert_dp": true,
-      "enable_flashcomm1": true,
-      "enable_prefill_mc2": true,
-      "enable_fused_mc2": 0,
-      "enable_cpu_binding": true,
-      "multistream_overlap_shared_expert": true,
-      "ascend_compilation_config": {
-        "fuse_norm_quant": false
-      }
-    }' \
+    --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
     --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
     --profiler-config '{"profiler":"torch","torch_profiler_dir":"'"$ROOT"'/profiling/prefill"}' \
-    --kv-transfer-config '{
-      "kv_connector": "MooncakeConnectorV2",
-      "kv_role": "kv_producer",
-      "kv_port": "32600",
-      "kv_connector_extra_config": {
-        "prefill": {
-          "dp_size": 4,
-          "tp_size": 2
-        },
-        "decode": {
-          "dp_size": 4,
-          "tp_size": 2
-        }
-      }
-    }' \
+    --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32600","kv_connector_extra_config":{"prefill":{"dp_size":4,"tp_size":2},"decode":{"dp_size":4,"tp_size":2}}}' \
     > "$ROOT/prefill.log" 2>&1
 ```
 
@@ -425,38 +368,10 @@ exec vllm serve "$MODEL_PATH" \
     --enable-expert-parallel \
     --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
     --compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,28,32],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{
-      "enable_flashcomm1": true,
-      "enable_cpu_binding": true,
-      "enable_shared_expert_dp": true,
-      "multistream_overlap_shared_expert": true,
-      "scheduler_config": {
-        "recompute_scheduler_enable": true
-      },
-      "ascend_compilation_config": {
-        "fuse_norm_quant": false,
-        "enable_npugraph_ex": true,
-        "enable_static_kernel": true,
-        "enable_super_kernel": false
-      }
-    }' \
+    --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
     --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
     --profiler-config '{"profiler":"torch","torch_profiler_dir":"'"$ROOT"'/profiling/decode"}' \
-    --kv-transfer-config '{
-      "kv_connector": "MooncakeConnectorV2",
-      "kv_role": "kv_consumer",
-      "kv_port": "32700",
-      "kv_connector_extra_config": {
-        "prefill": {
-          "dp_size": 4,
-          "tp_size": 2
-        },
-        "decode": {
-          "dp_size": 4,
-          "tp_size": 2
-        }
-      }
-    }' \
+    --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32700","kv_connector_extra_config":{"prefill":{"dp_size":4,"tp_size":2},"decode":{"dp_size":4,"tp_size":2}}}' \
     > "$ROOT/decode.log" 2>&1
 ```
 
@@ -533,7 +448,7 @@ Inspect the prefill, decode, and proxy logs under `ROOT` if the request fails.
 
 After the service is started, the model can be invoked by sending a prompt. The `chat/completions` API is supported. Use the `--served-model-name` you configured (`qwen3.8-flash-next` for `Qwen3.8-Flash-Next`).
 
-The requests below use the A3 colocated baseline. Select the endpoint and model name for the deployment being tested:
+The requests below use the A3 colocated endpoint. Select the endpoint and model name for the deployment being tested:
 
 | Deployment | Port | Model name |
 | --- | --- | --- |
@@ -562,7 +477,7 @@ Expected result: the service returns HTTP 200 OK.
 
 ### 6.2 Multimodal Chat Completion
 
-The validated deployment accepts image-and-text input. Replace `<IMAGE_URL>` with an image URL accessible from the serving environment:
+The A3 W8A8 model supports image-and-text input. Replace `<IMAGE_URL>` with an image URL accessible from the serving environment:
 
 ```bash
 curl http://127.0.0.1:8088/v1/chat/completions \
@@ -673,7 +588,7 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 
 The final answer is returned in `choices[0].message.content`, while the parsed reasoning is returned separately in the `reasoning_content` field of the response.
 
-To disable thinking and request a direct answer, use the validated non-thinking request:
+To disable thinking and request a direct answer, use the following request:
 
 ```bash
 curl http://127.0.0.1:8088/v1/chat/completions \
@@ -703,7 +618,7 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 
 2. After execution, you can get the result. Here are the results of `Qwen3.8-Flash-Next` in `vllm-ascend:v0.26.0rc` for reference only.
 
-The A3 W8A8 deployment described in [Section 5.1](#51-single-node-online-deployment) was validated on GPQA Diamond with the following result.
+The following result was recorded for the original A3 W8A8 TP8 × DP1 configuration, before adding Model Runner V2, the explicit torch PLE backend, async scheduling, and MoE communication optimizations to the command in [Section 5.1](#51-single-node-online-deployment). It does not establish the accuracy of the updated command or the 950 DT and W4A8 PD configurations.
 
 | Hardware | Dataset | Metric | Score |
 | --- | --- | --- | --- |
@@ -723,7 +638,14 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ### 9.1 Recommended Configurations
 
-Start with the matching configuration in [Section 5](#5-online-service-deployment). For A3 colocated serving, evaluate the optional async scheduling and MoE communication settings independently of the baseline accuracy result. For PD serving, tune prefill and decode separately and keep the Mooncake parallel-size declarations consistent with the services.
+Use the configuration for your hardware and deployment mode. The table summarizes the commands in [Section 5](#5-online-service-deployment); tune context length, concurrency, and memory utilization for the target workload.
+
+| Hardware | Deployment / role | Devices | TP × DP | Max model length | Max sequences | Batch tokens |
+| --- | --- | --- | --- | --- | --- | --- |
+| A3 | Colocated | 0–7 | 8 × 1 | 131072 | 8 | 4096 |
+| 950 DT | Colocated | 0–3 | 4 × 1 | 141312 | 32 | 4096 |
+| A3 | Prefill | 0–7 | 2 × 4 | 141312 | 32 | 4096 |
+| A3 | Decode | 8–15 | 2 × 4 | 141312 | 32 | 4096 |
 
 ### 9.2 Tuning Guidelines
 
