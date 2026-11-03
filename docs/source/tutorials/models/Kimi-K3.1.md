@@ -39,6 +39,10 @@ Follow [verify multi-node communication environment](../../getting_started/insta
 
 Use the same K3.1-enabled A5 image on every node. Follow the 950DT container setup in [Kimi K3 Section 4.1](Kimi-K3.md#41-docker-image-installation) and the [A5 container requirements](../features/pd_disaggregation_mooncake_multi_node.md#atlas-850850e950-superpod-950pr950dt-container-requirements) for host networking, devices, driver, firmware, and communication mounts. Also mount the target weights, draft weights, and MemCache configuration directories.
 
+For the MemCache-backed pool used by the PD templates, follow [Kimi K3 Sections 5.4.1–5.4.4](Kimi-K3.md#541-install-mf) to install `memcache_hybrid` and `memfabric_hybrid`, prepare the configuration files, and start the shared MetaService and a standalone MemCache process on every node. Use the same MetaService address throughout the cluster, and select the local transport and DRAM capacity for the actual A5 environment.
+
+Wait for every standalone process to report successful initialization. The vLLM engines use `<MEMCACHE_CONFIG_DIR>/mmc-local.conf`; standalone MemCache processes use `mmc-local-standalone.conf`.
+
 ### 4.2 Source Code Installation
 
 For source builds, follow [Kimi K3 Section 4.2](Kimi-K3.md#42-source-code-installation) with a K3.1-enabled source revision, and keep that revision and its compiled operators consistent across all eight nodes. Check the model registration inside the runtime container:
@@ -60,77 +64,13 @@ Registration alone does not validate the required operators or PP transport.
 
 ### 5.2 Basic Eight-Node PD Separation Deployment
 
-The eight-node layout follows [Kimi K3 Section 5.2](Kimi-K3.md#52-basic-eight-node-pd-separation-deployment). Four Prefill nodes form **one** DP1/TP8/PP4 instance with layer partition `24,24,24,21`. The other four nodes form a DP4 Decode group, with TP8 and PP1 on each node. Only Prefill rank 0 exposes an HTTP endpoint; each Decode rank exposes its own endpoint.
+This A5 deployment uses eight nodes with eight devices per node. Four Prefill nodes form **one** DP1/TP8/PP4 instance with layer partition `24,24,24,21`. The other four nodes form a DP4 Decode group, with TP8 and PP1 on each node. Only Prefill rank 0 exposes an HTTP endpoint; each Decode rank exposes its own endpoint.
 
-The complete A5 configuration in this guide uses the pooled 1M settings in [Section 5.4](#54-pooled-pd-separation-deployment). Keep the P/D master addresses, RPC ports, HTTP ports, and KV port ranges independent.
+The following templates provide the complete PD configuration: a 1M context window, DCP8 on Decode, three-token DSpark, and `MultiConnector` combining Mooncake P-to-D transfer with the MemCache-backed AscendStore pool. Both roles must use the same target and compatible draft checkpoints, TP8, and speculative-token count. Cache dtypes remain at their model defaults. The 1M limit includes input and output tokens; reserve space for the generated response.
 
-### 5.3 Long-Context and 1M PD Separation Deployment
+Keep the P/D master addresses, RPC ports, HTTP ports, and KV port ranges independent. Complete the MemCache environment setup in [Section 4.1](#41-docker-image-installation) before starting the engines.
 
-Both roles set `--max-model-len 1048576`, and Decode enables `--decode-context-parallel-size 8`, `--block-size 768`, and `--cp-kv-cache-interleave-size 768`. The 1M limit includes input and output tokens; reserve space for the generated response. Follow [Section 5.4](#54-pooled-pd-separation-deployment) for the complete engine templates and launch commands.
-
-### 5.4 Pooled PD Separation Deployment
-
-`MultiConnector` combines `MooncakeConnectorV2` for P-to-D transfer with `AscendStoreConnector` for the MemCache-backed KV Cache Pool. Both roles use the same target checkpoint, draft checkpoint, TP8, and three speculative tokens. Cache dtypes remain at their model defaults.
-
-#### 5.4.1 Install MF
-
-Check that the K3.1-enabled runtime contains `memcache_hybrid` and `memfabric_hybrid`:
-
-```shell
-pip show memcache_hybrid memfabric_hybrid
-```
-
-Follow [Kimi K3 Section 5.4.1](Kimi-K3.md#541-install-mf) to install the versions required by the selected runtime. The `memcache_hybrid/config` directory under the reported installation location is represented below by `<MEMCACHE_CONFIG_DIR>`.
-
-#### 5.4.2 Prepare the MemCache configuration files
-
-Follow [Kimi K3 Section 5.4.2](Kimi-K3.md#542-prepare-the-memcache-configuration-files) to configure `mmc-meta.conf`, `mmc-local.conf`, and a separate `mmc-local-standalone.conf`. Use the same MetaService address on every node, and select the local transport and DRAM capacity for the actual A5 environment.
-
-Keep the engine's `MMC_LOCAL_CONFIG_PATH` set to `mmc-local.conf`. The standalone MemCache process uses `mmc-local-standalone.conf`.
-
-#### 5.4.3 Start MetaService
-
-On the selected MetaService node:
-
-```shell
-export MMC_META_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-meta.conf
-python -c "from memcache_hybrid import MetaService; MetaService.main()"
-```
-
-Keep this process running, and ensure that the configured MetaService and configuration-store ports are reachable from every Prefill and Decode node.
-
-#### 5.4.4 Start the standalone MemCache processes
-
-Create `memcache_standalone.py` on every node:
-
-```python
-import time
-
-from memcache_hybrid import DistributedObjectStore
-
-
-if __name__ == "__main__":
-    store = DistributedObjectStore()
-    result = store.init(0)
-    if result != 0:
-        print(f"Failed to initialize MemCache, result = {result}", flush=True)
-        raise SystemExit(1)
-    print("Successfully initialized MemCache.", flush=True)
-
-    while True:
-        time.sleep(1)
-```
-
-Start one standalone process on each node:
-
-```shell
-export MMC_LOCAL_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-local-standalone.conf
-python memcache_standalone.py
-```
-
-Wait until every node prints `Successfully initialized MemCache.` before starting the engines.
-
-#### 5.4.5 Create the pooled vLLM engine templates
+#### 5.2.1 Create the engine templates
 
 Use the same seven template arguments and `run_dp_template.sh` filename as Kimi K3. Replace each node's `local_ip` and `nic_name`, the role's KV base port, and the model and MemCache paths. Both templates use `lookup_rpc_port=0` for one local engine per node; use distinct IPC identifiers if multiple engines share the same local IPC namespace.
 
@@ -371,7 +311,7 @@ Use the same seven template arguments and `run_dp_template.sh` filename as Kimi 
 
         On all four Prefill nodes, pass the same Prefill master IP as the fifth argument (`--master-addr`) and the same master port as the sixth argument (`--master-port`). Keep PP4, TP8, `24,24,24,21`, and checkpoint paths consistent. Start the master before the workers, keeping it running in a separate shell while the group forms.
 
-#### 5.4.6 Start the pooled vLLM engines
+#### 5.2.2 Start the engines
 
 Deploy [`launch_online_dp.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py) and save the corresponding Prefill or Decode template as `run_dp_template.sh` on every node. Start MetaService and all standalone MemCache processes before launching the engines.
 
@@ -460,7 +400,7 @@ Follow [Kimi K3 Section 8.2](Kimi-K3.md#82-using-vllm-benchmark), replacing the 
 
 ### 9.1 Recommended Configurations
 
-The following reference values match the engine templates in [Section 5.4](#54-pooled-pd-separation-deployment). Validate memory capacity and concurrency for the selected checkpoints and workload.
+The following reference values match the engine templates in [Section 5.2](#52-basic-eight-node-pd-separation-deployment). Validate memory capacity and concurrency for the selected checkpoints and workload.
 
 | Setting | 950DT Prefill | 950DT Decode |
 | --- | --- | --- |
