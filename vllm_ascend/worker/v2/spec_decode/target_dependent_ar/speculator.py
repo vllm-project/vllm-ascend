@@ -20,6 +20,7 @@ import logging
 from collections.abc import Mapping
 from contextlib import contextmanager
 from copy import copy
+from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -48,6 +49,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
@@ -69,6 +71,39 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 logger = logging.getLogger(__name__)
+
+
+def _install_full_token_draft_embedding(draft_model: torch.nn.Module) -> None:
+    """Restore full-token rows at the drafter's own embedding seam.
+
+    Under dense sequence parallelism the drafter shares the target's
+    sequence-parallel embedding (``maybe_share_target_embed``), whose output
+    arrives on the rank-local token shard — zero rows beyond the true count.
+    Draft heads run the stock full-token layout (their per-step token counts
+    are not runner-padded to the TP multiple), so the core predictor's
+    ``embed_input_ids`` must return full rows. One instance-level wrap covers
+    both consumers: the speculator's pre-computed ``inputs_embeds`` path
+    (which goes through the wrapper's ``embed_input_ids`` delegating to the
+    core's) and the forward's self-embedding branch. Gated on the shared
+    embedding's ``dense_sp_entry`` flag, so draft heads that keep their own
+    (non-shared, full-token) embedding — and every non-SP deployment — keep
+    the stock path. Generic across MTP families: the flag carries the
+    layout, not the family.
+    """
+    core = getattr(draft_model, "model", None)
+    if core is None or not hasattr(core, "embed_input_ids") or not hasattr(core, "embed_tokens"):
+        return
+    if not getattr(core.embed_tokens, "dense_sp_entry", False):
+        return
+    original_embed = core.embed_input_ids
+
+    @wraps(original_embed)
+    def full_token_embed_input_ids(input_ids, *args, **kwargs):
+        embeds = original_embed(input_ids, *args, **kwargs)
+        embeds = sp_all_gather(embeds)
+        return embeds[: input_ids.shape[0]]
+
+    core.embed_input_ids = full_token_embed_input_ids
 
 
 class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDependentARSpeculator):
@@ -122,8 +157,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # when in decode phase of eagle speculator, we need some value in
         # draft model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
-        self._eplb_source_is_padding: torch.Tensor | None = None
-        self._eplb_dummy_run = False
         self.pcp_manager: AscendPCPManager | None = None
         self._sparse_kv_offload_metadata = SparseKVOffloadMetadata(
             enabled=get_ascend_config().sparse_kv_offload_config.enabled,
@@ -205,6 +238,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             target_attn_layer_names,
         )
         self._maybe_remove_d2t(draft_model)
+        _install_full_token_draft_embedding(draft_model)
         return draft_model
 
     @property
@@ -304,34 +338,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         self.prefill_cudagraph_manager.update_stream = self.update_stream
         self.decode_cudagraph_manager.update_stream = self.update_stream
 
-    def set_eplb_state(self, eplb_state: Any) -> None:
-        super().set_eplb_state(eplb_state)
-        if eplb_state.allgather_record_tensor is None:
-            return
-        # Only graph-external phase hooks update draft source validity.
-        if self._eplb_source_is_padding is None:
-            self._eplb_source_is_padding = torch.ones_like(self.input_buffers.is_padding)
-        model_state = eplb_state.model_states[self.speculative_config.draft_model_config.compute_hash()]
-        for layer in model_state.model.moe_layers:
-            layer.eplb_state.allgather_source_is_padding = self._eplb_source_is_padding
-
-    def on_prefill_begin(self, num_reqs: int) -> None:
-        super().on_prefill_begin(num_reqs)
-        source_mask = getattr(self, "_eplb_source_is_padding", None)
-        if source_mask is not None:
-            source_mask.fill_(True)
-            if not self._eplb_dummy_run and self.input_batch is not None:
-                num_tokens = self.input_batch.num_tokens_after_padding
-                source_mask[:num_tokens].copy_(self.input_batch.is_padding[:num_tokens])
-
-    def on_multi_step_decode_begin(self, num_reqs: int) -> None:
-        super().on_multi_step_decode_begin(num_reqs)
-        source_mask = getattr(self, "_eplb_source_is_padding", None)
-        if source_mask is not None:
-            source_mask.fill_(True)
-            if not self._eplb_dummy_run:
-                source_mask[:num_reqs].fill_(False)
-
     def propose(
         self,
         input_batch: InputBatch,
@@ -358,7 +364,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         generate_draft.
         """
         self.input_batch = input_batch
-        self._eplb_dummy_run = dummy_run
         # Replicated drafts use global tokens, unlike the PCP-local target.
         # Every DP rank must take the draft sync, including decode and idle ranks.
         sync_state = None if self.replicated_pcp else dp_sync_state
@@ -426,7 +431,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
 
     def capture(self) -> None:
-        self._eplb_dummy_run = True
         logger.info("Capturing model for speculator...")
         # Reset indices to zeros to prevent stale values from prior
         # dummy runs to cause out-of-bounds indexing during capture.

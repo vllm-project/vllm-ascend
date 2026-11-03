@@ -698,16 +698,16 @@ class _FakeMtpLayer:
 
 
 class TestMtpDraftFullTokenLayout:
-    """The patched Qwen3.5 MTP forward runs the drafter full-token: the
-    self-embedding path gathers the shared embedding's token shard back to
-    full rows, and speculator-precomputed embeds are already full."""
+    """The drafter's own embedding seam restores full rows generically: the
+    speculator installs a gather on the core predictor's ``embed_input_ids``
+    instance (flag-gated on the shared embedding's ``dense_sp_entry``), so
+    the patched Qwen3.5 MTP forward itself stays stock — no family wiring —
+    and future MTP dense families work without any patch."""
 
-    def _make_predictor(self, dense_sp_entry, layer, embed_rows):
+    def _make_predictor(self, layer):
         return SimpleNamespace(
-            embed_tokens=SimpleNamespace(dense_sp_entry=dense_sp_entry),
-            # The self-embedding path emits the rank-local token shard under
-            # dense SP (the shared target embedding's entry reduce-scatter).
-            embed_input_ids=lambda input_ids: torch.arange(embed_rows * 2, dtype=torch.float64).reshape(embed_rows, 2),
+            embed_tokens=SimpleNamespace(dense_sp_entry=True),
+            embed_input_ids=lambda input_ids: torch.arange(3 * 2, dtype=torch.float64).reshape(3, 2),
             pre_fc_norm_embedding=lambda x: x,
             pre_fc_norm_hidden=lambda x: x,
             fc=lambda x: x,
@@ -716,54 +716,63 @@ class TestMtpDraftFullTokenLayout:
             norm=lambda h, r: (h, r),
         )
 
-    def _run(self, monkeypatch, dense_sp_entry, num_embed_rows, precomputed: bool):
+    def _run(self, monkeypatch):
         from vllm_ascend.patch.worker import patch_qwen3_5
 
-        def fake_all_gather(x, dim):
-            # TP=2 simulation: duplicate rows; the rows beyond the true
-            # count are the reduce-scatter zero padding.
-            return torch.cat([x, x], dim=dim)
-
-        monkeypatch.setattr(patch_qwen3_5, "tensor_model_parallel_all_gather", fake_all_gather)
         monkeypatch.setattr(patch_qwen3_5, "get_pp_group", lambda: SimpleNamespace(is_last_rank=True))
         layer = _FakeMtpLayer()
-        predictor = self._make_predictor(dense_sp_entry, layer, num_embed_rows)
-        # T=5 with tp=2: under dense SP the shared embedding emitted
-        # ceil(5/2)=3 shard rows; without it the embedding is full (5 rows).
-        # The target's hidden states are always full.
+        predictor = self._make_predictor(layer)
         hidden_states = torch.arange(5 * 2, dtype=torch.float64).reshape(5, 2) + 10
-        inputs_embeds = None
-        if precomputed:
-            # The speculator's propose pre-compute (Qwen3_5MTP.embed_input_ids
-            # wrapped) already restores the full rows.
-            full_rows = 5 if dense_sp_entry else num_embed_rows
-            inputs_embeds = torch.arange(full_rows * 2, dtype=torch.float64).reshape(full_rows, 2)
         out = patch_qwen3_5.qwen3_5_mtp_forward(
             predictor,
             input_ids=torch.zeros(5, dtype=torch.int64),
             positions=torch.arange(5, dtype=torch.int64),
             hidden_states=hidden_states,
-            inputs_embeds=inputs_embeds,
+            inputs_embeds=None,
             spec_step_idx=0,
         )
-        return out, layer
+        return out, layer, predictor
 
-    def test_self_embedded_shard_gathered_to_full_rows(self, monkeypatch):
-        out, layer = self._run(monkeypatch, dense_sp_entry=True, num_embed_rows=3, precomputed=False)
-        # The draft layer ran on the full 5 rows, not the 3-row shard.
-        assert layer.rows_seen == [5]
-        assert out.shape[0] == 5
+    def _install(self, monkeypatch, dense_sp_entry):
+        from vllm_ascend.worker.v2.spec_decode import target_dependent_ar as spec_module
 
-    def test_precomputed_embeds_pass_through_ungathered(self, monkeypatch):
-        out, layer = self._run(monkeypatch, dense_sp_entry=True, num_embed_rows=3, precomputed=True)
-        # The speculator-side wrap already restored full rows; the forward
-        # must not gather them again (that would double the rows).
-        assert layer.rows_seen == [5]
-        assert out.shape[0] == 5
+        def fake_gather(x):
+            # TP=2 simulation: duplicate rows; the rows beyond the true count
+            # are the reduce-scatter zero padding.
+            return torch.cat([x, x], dim=0)
 
-    def test_mtp_forward_stays_stock_without_dense_sp(self, monkeypatch):
-        out, layer = self._run(monkeypatch, dense_sp_entry=False, num_embed_rows=5, precomputed=False)
-        # No gather: the full rows flow through unchanged.
+        monkeypatch.setattr(spec_module, "sp_all_gather", fake_gather)
+        draft = SimpleNamespace(
+            embed_input_ids=lambda input_ids: torch.arange(3 * 2, dtype=torch.float64).reshape(3, 2),
+            embed_tokens=SimpleNamespace(dense_sp_entry=dense_sp_entry),
+        )
+        wrapper = SimpleNamespace(model=draft)
+        spec_module._install_full_token_draft_embedding(wrapper)
+        return draft
+
+    def test_installed_wrap_gathers_and_trims_the_shard(self, monkeypatch):
+        draft = self._install(monkeypatch, dense_sp_entry=True)
+        input_ids = torch.zeros(5, dtype=torch.int64)
+        embeds = draft.embed_input_ids(input_ids)
+        # The 3-row shard was gathered to 6 and trimmed to the true 5.
+        assert embeds.shape[0] == 5
+
+    def test_no_wrap_without_shared_sequence_parallel_embedding(self, monkeypatch):
+        draft = self._install(monkeypatch, dense_sp_entry=False)
+        input_ids = torch.zeros(5, dtype=torch.int64)
+        # The draft kept its own full-token embedding: stock path, no gather.
+        assert draft.embed_input_ids(input_ids).shape[0] == 3
+
+    def test_no_wrap_without_core_model(self, monkeypatch):
+        from vllm_ascend.worker.v2.spec_decode import target_dependent_ar as spec_module
+
+        spec_module._install_full_token_draft_embedding(SimpleNamespace())  # no .model
+
+    def test_forward_runs_stock_on_installed_full_rows(self, monkeypatch):
+        # With the wrap installed on the core's embed_input_ids, the patched
+        # forward consumes its output unchanged: no gather inside the forward.
+        self._install(monkeypatch, dense_sp_entry=True)
+        out, layer, predictor = self._run(monkeypatch)
         assert layer.rows_seen == [5]
         assert out.shape[0] == 5
 

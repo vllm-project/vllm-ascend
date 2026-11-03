@@ -31,11 +31,10 @@ from vllm.model_executor.models.qwen3_5 import (
 from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 
 try:
-    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MTP, Qwen3_5MultiTokenPredictor
+    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
     from vllm.sequence import IntermediateTensors
 except ImportError:
     Qwen3_5MultiTokenPredictor = None
-    Qwen3_5MTP = None
     IntermediateTensors = None
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
@@ -166,18 +165,12 @@ if Qwen3_5MultiTokenPredictor is not None:
         # Backport upstream Qwen3.5 MTP behavior: the local drafter runs on the
         # last PP stage and should always combine token embeddings with the
         # target hidden states instead of consuming PP intermediate tensors.
+        # Dense sequence parallelism needs no family wiring here: the
+        # speculator installs a full-token gather on the drafter's shared
+        # embedding seam (AscendTargetDependentARSpeculator.load_draft_model),
+        # so this forward runs unchanged under dense SP.
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
-            if getattr(self.embed_tokens, "dense_sp_entry", False):
-                # Self-embedded through the shared (sequence-parallel)
-                # embedding: the output arrived on the rank-local token shard
-                # (the reduce-scatter padding rows are zeros). The drafter
-                # runs the stock full-token layout, so restore the full rows
-                # and trim the padding with the true position count.
-                inputs_embeds = tensor_model_parallel_all_gather(inputs_embeds, 0)
-                inputs_embeds = inputs_embeds[: positions.shape[-1]]
-        # else: pre-computed by the speculator (the wrapped
-        # Qwen3_5MTP.embed_input_ids below already restores full rows).
         assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
         inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
         hidden_states = self.pre_fc_norm_hidden(hidden_states)
@@ -216,40 +209,6 @@ if Qwen3_5MultiTokenPredictor is not None:
         return hidden_states
 
     Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward
-
-    _QWEN3_5_MTP_WRAPPER_EMBED_ORIGINAL = Qwen3_5MTP.embed_input_ids
-
-    def _qwen3_5_mtp_embed_input_ids_full_token(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings=None,
-        *,
-        is_multimodal: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self._embed_text_input_ids(
-            input_ids,
-            self.model.embed_input_ids,
-            is_multimodal=is_multimodal,
-        )
-        if getattr(self.model.embed_tokens, "dense_sp_entry", False):
-            # Dense sequence parallelism: the drafter shares the target's
-            # embedding, whose text output arrived on the rank-local token
-            # shard (the reduce-scatter padding rows are zeros). The
-            # speculator's propose pre-compute and the multimodal merge below
-            # consume full-token rows, so restore them before merging; the
-            # drafter itself keeps the stock full-token layout.
-            inputs_embeds = tensor_model_parallel_all_gather(inputs_embeds, 0)
-            inputs_embeds = inputs_embeds[: input_ids.shape[0]]
-        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
-            return inputs_embeds
-        is_multimodal = _require_is_multimodal(is_multimodal)
-        return _merge_multimodal_embeddings(
-            inputs_embeds=inputs_embeds,
-            multimodal_embeddings=multimodal_embeddings,
-            is_multimodal=is_multimodal,
-        )
-
-    Qwen3_5MTP.embed_input_ids = _qwen3_5_mtp_embed_input_ids_full_token
 
 
 def _qwen3_5_cg_embed_input_ids_full_token(
