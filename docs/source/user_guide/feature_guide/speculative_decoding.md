@@ -1095,6 +1095,8 @@ For prefill/decode separation, use `MooncakeConnectorV2` or
 cache dtypes, convolution layout and RecoverSSM settings on both sides.
 PCP producers may use a different KDA head-shard count from Decode consumers:
 Mooncake gathers the producer head shards into each receiving consumer's state.
+Use SD convolution state layout `[state_len, conv_dim]` on both roles when
+their KDA head-shard counts differ.
 
 For example, an eight-device Prefill role and an eight-device Decode role can
 use the following layout with `--use-replayssm` and MTP5 on both sides:
