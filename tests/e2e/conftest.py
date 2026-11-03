@@ -986,10 +986,18 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
             elif command == "score":
                 req_outputs = llm.score(request["text_1"], request["text_2"], *request["args"], **request["kwargs"])
                 result = [req_output.outputs.score for req_output in req_outputs]
+            elif command == "get_metrics":
+                # PromMetric objects are not picklable (they hold prometheus
+                # handles), so flatten to name -> value here.
+                result = {
+                    metric.name: float(metric.value)
+                    for metric in llm.get_metrics()
+                    if getattr(metric, "value", None) is not None
+                }
             else:
                 raise ValueError(f"Unsupported data parallel command: {command}")
 
-            conn.send({"status": "ok", "rank": dp_rank, "indices": request["indices"], "result": result})
+            conn.send({"status": "ok", "rank": dp_rank, "indices": request.get("indices", []), "result": result})
     except Exception:
         with contextlib.suppress(Exception):
             conn.send({"status": "error", "rank": dp_rank, "traceback": traceback.format_exc()})
@@ -1213,6 +1221,15 @@ class VllmRunner:
     ) -> list[float]:
         req_outputs = self.model.score(text_1, text_2, *args, **kwargs)
         return [req_output.outputs.score for req_output in req_outputs]
+
+    def get_metrics(self) -> list[Any]:
+        """Return the engine's raw prometheus metrics.
+
+        Requires ``disable_log_stats=False``; ``LLM.get_metrics()`` asserts on
+        disabled stats. Pool watch helpers read ``external_prefix_cache_*``
+        and ``ascend_store_*`` from this list.
+        """
+        return self.model.get_metrics()
 
     def __enter__(self):
         return self
@@ -1487,6 +1504,28 @@ class DPVllmRunner(VllmRunner):
     @property
     def model(self) -> LLM:
         raise RuntimeError("Direct access to `runner.model` is not supported by `DPVllmRunner`.")
+
+    def get_metrics(self) -> dict[str, float]:
+        """Aggregate engine metrics across DP ranks.
+
+        Returns ``name -> value`` with counters/gauges summed over ranks, which
+        is what pool-hit assertions need when a prompt is served by one rank.
+        Requires ``disable_log_stats=False``.
+        """
+        merged: dict[str, float] = {}
+        for rank, conn in enumerate(self._dp_parent_conns):
+            conn.send({"command": "get_metrics"})
+            if not conn.poll(self._dp_request_timeout):
+                raise TimeoutError(f"Timed out waiting for data parallel worker {rank} to finish `get_metrics`")
+            message = conn.recv()
+            if message["status"] != "ok":
+                raise RuntimeError(
+                    f"Data parallel worker {rank} failed during `get_metrics`:\n"
+                    f"{message.get('traceback', 'unknown error')}"
+                )
+            for name, value in message["result"].items():
+                merged[name] = merged.get(name, 0.0) + float(value)
+        return merged
 
     def _start_data_parallel_workers(self, llm_kwargs: dict[str, Any]) -> None:
         ctx = multiprocessing.get_context("spawn")

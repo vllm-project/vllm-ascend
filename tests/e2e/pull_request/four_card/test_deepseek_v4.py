@@ -17,13 +17,50 @@
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
 import os
+from unittest.mock import patch
 
 import pytest
+from vllm.utils.network_utils import get_open_port
 
+from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
+from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMooncakeManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.kv_pool_watch import run_pool_hit_sequence
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+# KV pool watch load. 16,384 tokens = 128 full blocks at block_size=128, the
+# minimum size that gives the hit ratio any resolution.
+POOL_PROMPT_TOKENS = 16384
+# The prompt stays 128-aligned; max_model_len needs headroom for output tokens.
+POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
+
+# DSV4-Flash block-key layerwise is the only mooncake layerwise slot in PR.
+POOL_KV_TRANSFER_CONFIG = {
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "backend": "mooncake",
+        "lookup_rpc_port": "1",
+        "use_layerwise": True,
+    },
+}
+
+
+def _build_mooncake_pool_config() -> MooncakeKVPoolConfig:
+    return MooncakeKVPoolConfig(
+        config={
+            "metadata_server": "P2PHANDSHAKE",
+            "protocol": "ascend",
+            "global_segment_size": "5GB",
+            "local_buffer_size": "5GB",
+            "preferred_segment": False,
+            "prefer_alloc_in_same_node": True,
+        },
+        master_port=get_open_port(),
+        metrics_port=get_open_port(),
+    )
 
 
 @pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")
@@ -45,24 +82,34 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
     ]
     max_tokens = 5
 
-    with VllmRunner(
-        "gdydems/DeepSeek-V4-Flash-w4a8-mtp",
-        max_model_len=8192,
-        max_num_seqs=16,
-        max_num_batched_tokens=4096,
-        dtype="auto",
-        tensor_parallel_size=4,
-        enable_expert_parallel=True,
-        gpu_memory_utilization=0.9,
-        quantization="ascend",
-        tokenizer_mode="deepseek_v4",
-        block_size=128,
-        attention_config={"indexer_kv_dtype": "int8"},
-        compilation_config={
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-        },
-        speculative_config={"num_speculative_tokens": 1, "method": "mtp"},
-    ) as vllm_model:
+    pool_config = _build_mooncake_pool_config()
+    with (
+        SingleNodeMooncakeManager(pool_config, "dsv4_tp4_pool_watch") as pool,
+        patch.dict(os.environ, pool.server_envs),
+        VllmRunner(
+            "gdydems/DeepSeek-V4-Flash-w4a8-mtp",
+            max_model_len=POOL_MAX_MODEL_LEN,
+            max_num_seqs=16,
+            max_num_batched_tokens=POOL_PROMPT_TOKENS,
+            dtype="auto",
+            tensor_parallel_size=4,
+            enable_expert_parallel=True,
+            gpu_memory_utilization=0.9,
+            quantization="ascend",
+            tokenizer_mode="deepseek_v4",
+            block_size=128,
+            # KV pool watch: local prefix cache must be explicitly disabled,
+            # and pool metrics require log stats.
+            enable_prefix_caching=False,
+            disable_log_stats=False,
+            kv_transfer_config=POOL_KV_TRANSFER_CONFIG,
+            attention_config={"indexer_kv_dtype": "int8"},
+            compilation_config={
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+            },
+            speculative_config={"num_speculative_tokens": 1, "method": "mtp"},
+        ) as vllm_model,
+    ):
         outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         expected_token_ids = [
             [19923, 14, 1026, 2329, 344, 680, 2852, 95, 305, 342],
@@ -73,6 +120,8 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
             assert len(output_str) > 0
             assert len(output_ids) > 0
             assert output_ids == expected_token_ids[i]
+
+        run_pool_hit_sequence(vllm_model, block_size=128, prompt_tokens=POOL_PROMPT_TOKENS, tag="dsv4-tp4-layerwise")
 
 
 @pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")

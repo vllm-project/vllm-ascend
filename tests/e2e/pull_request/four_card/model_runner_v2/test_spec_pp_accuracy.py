@@ -34,14 +34,48 @@ from unittest.mock import patch
 
 import pytest
 import regex as re
+from vllm.utils.network_utils import get_open_port
 from vllm.v1.metrics.reader import Counter, Vector
 
+from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
+from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMooncakeManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.kv_pool_watch import run_pool_hit_sequence
 
 DEEPSEEK_V4_MODEL = os.environ.get(
     "DEEPSEEK_V4_DSPARK_MODEL_PATH",
     "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test",
 )
+
+# 16,384 tokens = 128 full blocks at block_size=128.
+POOL_PROMPT_TOKENS = 16384
+POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
+
+POOL_KV_TRANSFER_CONFIG = {
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "backend": "mooncake",
+        "lookup_rpc_port": "1",
+        "use_layerwise": False,
+    },
+}
+
+
+def _build_mooncake_pool_config() -> MooncakeKVPoolConfig:
+    return MooncakeKVPoolConfig(
+        config={
+            "metadata_server": "P2PHANDSHAKE",
+            "protocol": "ascend",
+            "global_segment_size": "5GB",
+            "local_buffer_size": "5GB",
+            "preferred_segment": False,
+            "prefer_alloc_in_same_node": True,
+        },
+        master_port=get_open_port(),
+        metrics_port=get_open_port(),
+    )
+
 
 GSM8K_PROMPT = (
     'Answer the following question. The last line of the response should follow this format: "answer:$ANSWER" '
@@ -103,35 +137,43 @@ def _assert_speculative_accuracy(outputs, metrics) -> None:
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_deepseek_v4_dspark_pp_accuracy() -> None:
-    with VllmRunner(
-        DEEPSEEK_V4_MODEL,
-        max_model_len=4096,
-        max_num_seqs=2,
-        max_num_batched_tokens=512,
-        tensor_parallel_size=2,
-        pipeline_parallel_size=2,
-        enable_expert_parallel=True,
-        distributed_executor_backend="mp",
-        gpu_memory_utilization=0.8,
-        quantization="ascend",
-        tokenizer_mode="deepseek_v4",
-        block_size=128,
-        enforce_eager=True,
-        enable_prefix_caching=False,
-        disable_log_stats=False,
-        attention_config={
-            "indexer_kv_dtype": "int8",
-        },
-        speculative_config={
-            "method": "dspark",
-            "num_speculative_tokens": 5,
-            "enforce_eager": True,
-        },
-        additional_config={
-            "enable_fused_mc2": 0,
-        },
-    ) as runner:
+    pool_config = _build_mooncake_pool_config()
+    with (
+        SingleNodeMooncakeManager(pool_config, "dsv4_pp2_pool_watch") as pool,
+        patch.dict(os.environ, pool.server_envs),
+        VllmRunner(
+            DEEPSEEK_V4_MODEL,
+            max_model_len=POOL_MAX_MODEL_LEN,
+            max_num_seqs=2,
+            max_num_batched_tokens=POOL_PROMPT_TOKENS,
+            tensor_parallel_size=2,
+            pipeline_parallel_size=2,
+            enable_expert_parallel=True,
+            distributed_executor_backend="mp",
+            gpu_memory_utilization=0.8,
+            quantization="ascend",
+            tokenizer_mode="deepseek_v4",
+            block_size=128,
+            enforce_eager=True,
+            enable_prefix_caching=False,
+            disable_log_stats=False,
+            kv_transfer_config=POOL_KV_TRANSFER_CONFIG,
+            attention_config={
+                "indexer_kv_dtype": "int8",
+            },
+            speculative_config={
+                "method": "dspark",
+                "num_speculative_tokens": 5,
+                "enforce_eager": True,
+            },
+            additional_config={
+                "enable_fused_mc2": 0,
+            },
+        ) as runner,
+    ):
         outputs = runner.generate_greedy([GSM8K_PROMPT], max_tokens=512)
         metrics = runner.model.get_metrics()
+
+        run_pool_hit_sequence(runner, block_size=128, prompt_tokens=POOL_PROMPT_TOKENS, tag="dsv4-pp2-mooncake")
 
     _assert_speculative_accuracy(outputs, metrics)
