@@ -69,16 +69,7 @@ def _is_dflash2_graph(speculative_config: object) -> bool:
 def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
     """Reasons this config is not V2-ready and should default to V1."""
     reasons: list[str] = []
-    model_config = getattr(vllm_config, "model_config", None)
     spec_config = getattr(vllm_config, "speculative_config", None)
-
-    if _is_configured(model_config):
-        if (
-            getattr(model_config, "runner_type", None) == "pooling"
-            or getattr(model_config, "is_pooling_model", False) is True
-        ):
-            reasons.append("pooling KV")
-
     compilation_config = getattr(vllm_config, "compilation_config", None)
     if _is_configured(compilation_config) and getattr(compilation_config, "cudagraph_mm_encoder", False) is True:
         reasons.append("VL encoder graph")
@@ -111,7 +102,6 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     ``VLLM_USE_V2_MODEL_RUNNER`` wins when set. Otherwise V2 is the default,
     except for these models and features, which fall back to V1:
 
-    * pooling KV (``runner_type="pooling"``)
     * VL encoder graph (``compilation_config.cudagraph_mm_encoder``)
     * draft_window_size
     * suffix speculative decoding
