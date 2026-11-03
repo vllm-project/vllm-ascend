@@ -55,10 +55,6 @@ curated_tests:
 # of paying for a runner slot that executes nothing. Move the file back into
 # rotation once the underlying issue is fixed, and remove it from this list.
 skip_tests:
-  # DeepSeek-V4 reload still requires the attention-sink fix (#16355).
-  # Keep its standalone IPC case for manual collection without scheduling an all-skipped job.
-  # Remove this entry and the model case skip_reason together after reload E2E passes.
-  - tests/e2e/pull_request/two_card/rlhf/weight_transfer/ipc/test_deepseek_ipc.py
   # Temporarily skipped: intermittent output mismatch with MRV2 + PP; investigating.
   - tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py
   # Temporarily skipped: the precision check in test_graph_mode.py is
