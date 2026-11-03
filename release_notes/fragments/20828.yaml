@@ -1,0 +1,4 @@
+pr: 20828
+entries:
+  - category: bugfix
+    text: Fixed stale block-table rows (move_row/add_row) that could corrupt mamba/GDN recurrent state and produce garbled output for prefix-cache-hit requests on hybrid models.
