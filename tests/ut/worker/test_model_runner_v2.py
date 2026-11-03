@@ -30,6 +30,7 @@ def _make_runner(need_timing: bool = True):
     runner.kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False, finish_execution=Mock())
+    runner.prompt_logprobs_worker = None
     runner.execute_model_state = None
     runner.use_pp = False
     runner.is_last_pp_rank = False

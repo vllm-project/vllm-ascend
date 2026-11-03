@@ -270,6 +270,7 @@ class NPUModelRunner(GPUModelRunner):
         aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
         super().load_model(load_dummy_weights, *args, **kwargs)
         self.pd_dspark_aux_layer_ids = aux_layers
+        self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
 
     def _restore_replicated_draft_target_states(self) -> None:
         """Restore target states consumed by a replicated PCP draft."""
@@ -614,7 +615,11 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        if batch_state is not None and is_pd_decode_recompute_scheduler_enabled(self.vllm_config):
+        # vLLM 0.30 has no separate decode-graph eligibility field. Preserve
+        # its RFC P/D workaround only when replay is off: replayed prompt tails
+        # must retain their prefill state so the window gets rebuilt.
+        replay_enabled = getattr(getattr(self.vllm_config, "cache_config", None), "swa_bounded_replay", False)
+        if batch_state is not None and not replay_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config):
             pd_decode_recompute = (
                 batch_state.is_prefilling_np
                 & (batch_state.num_computed_prefill_tokens_np > 0)

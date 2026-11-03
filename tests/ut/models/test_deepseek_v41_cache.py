@@ -1908,12 +1908,13 @@ def test_only_the_sliding_window_group_carries_the_length(runtime):
     assert metadata.ori_mask_mode == 4
 
 
-def test_the_swa_cache_carries_the_replay_flag_into_its_spec():
+def test_the_swa_cache_carries_the_replay_flag_into_its_spec(monkeypatch):
     """Where the switch becomes a spec field, and the field becomes the two
     properties the scheduler and the worker read. On a lane pinned before
     #56227 there is no field to carry, and then there is no flag either."""
     if not declared_kwarg(AscendSlidingWindowMLASpec, "bounded_replay", True):
         pytest.skip("bounded_replay is absent from this baseline's SlidingWindowMLASpec.")
+    monkeypatch.setattr("vllm_ascend.models.deepseek_v41.cache_config.uses_a5_packed_cache", lambda: False)
 
     cache = AscendDeepseekV41SWACache(
         head_dim=8,

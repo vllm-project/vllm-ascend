@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch.distributed as dist
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import get_dp_group, get_tp_group, tensor_model_parallel_all_gather
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.utils.math_utils import round_up
@@ -61,14 +61,15 @@ class DecoderReplayState:
         self.slots = torch.empty(
             (inputs.slot_mappings.shape[0], self.rows.numel()), dtype=torch.int64, device=self.rows.device
         )
-        for group_id, groups in enumerate(inputs.attn_groups):
-            for group in groups:
-                if is_circular_kv_cache_spec(group.kv_cache_spec):
-                    continue
-                builder_cls = group.backend.get_builder_cls()
-                if issubclass(builder_cls, AscendDSAV41MetadataBuilder):
-                    builder = builder_cls(group.kv_cache_spec, group.layer_names, self.config, self.rows.device)
-                    self.builders.append((group_id, group.layer_names, builder))
+        with set_current_vllm_config(self.config):
+            for group_id, groups in enumerate(inputs.attn_groups):
+                for group in groups:
+                    if is_circular_kv_cache_spec(group.kv_cache_spec):
+                        continue
+                    builder_cls = group.backend.get_builder_cls()
+                    if issubclass(builder_cls, AscendDSAV41MetadataBuilder):
+                        builder = builder_cls(group.kv_cache_spec, group.layer_names, self.config, self.rows.device)
+                        self.builders.append((group_id, group.layer_names, builder))
         self._gather(inputs, warmup=True)
 
     def _gather(self, inputs: DecoderReplayInputs, *, warmup: bool = False) -> None:

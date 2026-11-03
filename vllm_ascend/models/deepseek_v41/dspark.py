@@ -92,6 +92,7 @@ class DeepseekV41DSparkSWACache(AscendDeepseekV41SWACache):
             sliding_window=spec.sliding_window,
             cache_dtype_str=spec.cache_dtype_str,
             model_version=spec.model_version,
+            bounded_replay=spec.bounded_replay,
         )
 
     def get_attn_backend(self):
