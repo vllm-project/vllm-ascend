@@ -50,6 +50,7 @@ from vllm.models.qwen4_exp.amd import model as upstream_model  # noqa: E402
 from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
+upstream_model.GatedResidual = AscendGatedResidual
 
 
 class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):

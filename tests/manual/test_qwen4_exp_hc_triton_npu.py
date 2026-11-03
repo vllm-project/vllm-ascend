@@ -11,8 +11,11 @@ import torch
 import torch.nn.functional as F
 import torch_npu  # noqa: F401
 from vllm.models.qwen4_exp.amd import hyperconnection as upstream_hc
+from vllm.models.qwen4_exp.amd import model as upstream_model
+from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
 
 import vllm_ascend.models.qwen4_exp.model  # noqa: F401
+import vllm_ascend.models.qwen4_exp.mtp  # noqa: F401
 from vllm_ascend.models.qwen4_exp.hc_dual_stream import AscendGatedResidual
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
     grouped_gemma_rmsnorm,
@@ -35,6 +38,10 @@ RTOL = 3e-2
 def verify_model_binding() -> None:
     if upstream_hc.GatedResidual is not AscendGatedResidual:
         raise AssertionError("Qwen4Exp model did not bind AscendGatedResidual")
+    if upstream_model.GatedResidual is not AscendGatedResidual:
+        raise AssertionError("Qwen4Exp decoder did not bind AscendGatedResidual")
+    if upstream_mtp.GatedResidual is not AscendGatedResidual:
+        raise AssertionError("Qwen4Exp MTP did not bind AscendGatedResidual")
     functions = {
         "grouped_gemma_rmsnorm": grouped_gemma_rmsnorm,
         "hc_silu": hc_silu,
