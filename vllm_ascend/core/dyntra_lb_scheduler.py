@@ -433,6 +433,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
+        # Whether any scheduled request has a synchronous connector KV load.
+        has_sync_kv_loads = False
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -1002,6 +1004,9 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 request = request_queue.pop_request()
                 self.deferred_waiting.discard(request)
                 self.running.append(request)
+                if num_external_computed_tokens > 0:
+                    # load_kv_async is False here
+                    has_sync_kv_loads = True
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
@@ -1167,6 +1172,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             scheduler_output_kwargs["kv_cache_block_copies"] = pending_kv_cache_block_copies
         if self._scheduler_output_supports("kv_connector_block_state"):
             scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
+        if self._scheduler_output_supports("has_sync_kv_loads"):
+            scheduler_output_kwargs["has_sync_kv_loads"] = has_sync_kv_loads
         if self._scheduler_output_supports("ec_manager_metadata"):
             get_manager_metadata = getattr(
                 self.encoder_cache_manager,
