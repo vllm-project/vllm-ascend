@@ -95,17 +95,7 @@ def compact_c8_indices(indices: torch.Tensor) -> torch.Tensor:
 
 
 def c8_physical_attention(
-    query,
-    query_rope,
-    cache,
-    indices,
-    scale,
-    query_ends,
-    key_length,
-    *,
-    _prepared_indices=False,
-    _mapping_scope=None,
-    _prepacked_query=None,
+    query, query_rope, cache, indices, scale, query_ends, key_length, *, _prepared_indices=False, _mapping_scope=None
 ):
     """Use custom quantized SFA with its LSE-enabled valid-length path.
 
@@ -135,14 +125,7 @@ def c8_physical_attention(
         raise ValueError("HiSparse C8 attention scale must be finite and positive")
     from vllm_ascend.ops.hisparse_c8_mapping import map_compact_c8_indices
 
-    packed_query = _prepacked_query
-    if packed_query is not None and (
-        packed_query.shape != (*query.shape[:-1], 576)
-        or packed_query.dtype != query.dtype
-        or packed_query.device != query.device
-        or not packed_query.is_contiguous()
-    ):
-        raise ValueError("Prepacked C8 query must match the current query's BF16 layout/device")
+    packed_query = None
     if _prepared_indices:
         if indices.dtype != torch.int32 or stride_rows != block or not indices.is_contiguous():
             raise ValueError("Prepared C8 indices require contiguous int32 rows and an identity staging layout")
@@ -152,8 +135,7 @@ def c8_physical_attention(
         # Followers reuse only its mapped indices; each packs its own query.
         fused = None
         if (
-            packed_query is None
-            and _mapping_scope is not None
+            _mapping_scope is not None
             and rows in (8, 16, 32)
             and _mapping_scope.context() is not None
             and torch.npu.is_current_stream_capturing()

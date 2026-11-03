@@ -525,34 +525,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # before the same-stream SFA consumer. No additional fills are needed.
         return query_end, key_length
 
-    def _query_before_swap_or_none(self, query, query_rope, metadata):
-        """Pack a captured C8 follower query independently of pending KV DMA.
-
-        TopK readiness has already been published. Preserve the leader's
-        existing fused map+pack, all KV events, and all metadata ownership.
-        The packed query is local to this invocation and consumed on the
-        same compute stream; no value survives into the next forward.
-        """
-        if (
-            not self.enable_sparse_sfa_c8
-            or metadata.num_prefills != 0
-            or self.index_group_index == 0
-            or query.shape[0] not in (8, 16, 32)
-        ):
-            return None
-        from vllm_ascend.ops.hisparse_c8_scope import current_c8_mapping_scope
-
-        scope = current_c8_mapping_scope(self.hisparse_cache.runtime.index_group, get_forward_context())
-        if scope is None or scope.result is None:
-            return None
-        from vllm_ascend.ops.hisparse_c8 import c8_storage_view
-        from vllm_ascend.ops.triton.hisparse_c8_fused import pack_c8_query_lengths
-
-        cache = self.index_group.physical_kv_cache(self.index_group_index)
-        view, _, _, _ = c8_storage_view(cache)
-        query_end, key_length = self._c8_attention_metadata(cache, query.shape[0])
-        return pack_c8_query_lengths(query, query_rope, query_end, key_length, view.shape[0])
-
     def _attention_physical(
         self,
         query,
@@ -563,7 +535,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
         use_eager_compaction=False,
         _c8_prepared=False,
         _mapping_scope=None,
-        _prepacked_query=None,
     ):
         if self.enable_sparse_sfa_c8:
             from vllm_ascend.ops.hisparse_c8 import c8_physical_attention
@@ -579,7 +550,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 key_length,
                 _prepared_indices=_c8_prepared,
                 _mapping_scope=_mapping_scope,
-                _prepacked_query=_prepacked_query,
             )
         return self._attention_physical_bridge(query, query_rope, packed_cache, physical_topk)
 
@@ -667,11 +637,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 enforce_eager=self._resident_hisparse_enabled and metadata.num_prefills == 0 and num_decode <= 64,
             )
             mapping_scope = None
-            prepacked_query = None
             if physical is None:
-                prepacked_query = self._query_before_swap_or_none(
-                    ql_nope[:num_decode], q_pe[:num_decode] if q_pe is not None else None, metadata
-                )
                 physical = cache.swap_in(
                     metadata.req_id_per_token[:num_decode],
                     block_table=cache.source_block_table,
@@ -691,7 +657,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
                     physical,
                     use_eager_compaction=metadata.num_prefills == 0,
                     _mapping_scope=mapping_scope,
-                    _prepacked_query=prepacked_query,
                 )
             )
         if metadata.num_prefills:

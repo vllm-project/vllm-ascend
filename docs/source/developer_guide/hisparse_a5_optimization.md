@@ -95,7 +95,8 @@ measured 37.07 ms before and 3.08 ms after, including table reset. This was besi
 an idle owned model, not an exclusive-host model benchmark. Nine changing replay
 cases matched an independent integer oracle. Follower query prepacking retained
 KV readiness and passed three interleaved graph owners across six shapes;
-its separate end-to-end contribution has not been isolated.
+its separate end-to-end contribution has not been isolated, so that scheduling
+change is excluded from the submitted implementation.
 
 A full GLM-5.2 W4A8C8 A5 single-D run used TP8/DP1, MTP3, V2, C4,
 32768 input/8192 output, EvalScope 1.13.0, temperature0, seed42 and no prefix
