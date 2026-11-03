@@ -36,6 +36,7 @@ Requires Mooncake (built with -DUSE_ASCEND_DIRECT=ON) for KV transfer.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import signal
@@ -200,8 +201,7 @@ def launch_process(cmd: list[str], env: dict[str, str] | None, log_file: str, na
     """Launch one subprocess with its own process group; log to file."""
     print(f"[{name}] Launching: {' '.join(cmd)}")
     print(f"[{name}] Log: {log_file}")
-    log_handle = open(log_file, "w")
-    try:
+    with open(log_file, "w") as log_handle:
         proc = subprocess.Popen(
             cmd,
             env=env,
@@ -209,8 +209,7 @@ def launch_process(cmd: list[str], env: dict[str, str] | None, log_file: str, na
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-    finally:
-        log_handle.close()  # child keeps its own dup; avoid leaking the fd here
+    # log_handle is closed here; the child keeps its own inherited fd
     return proc
 
 
@@ -223,10 +222,8 @@ def terminate_process(proc: subprocess.Popen, name: str) -> None:
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         proc.wait(timeout=15)
     except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, OSError):
-            pass
+            with contextlib.suppress(ProcessLookupError, OSError):
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     print(f"[{name}] Stopped.")
 
 
