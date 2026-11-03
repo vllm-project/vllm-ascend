@@ -1344,33 +1344,6 @@ class NPUModelRunner(GPUModelRunner):
         ):
             return True
 
-        if spec is None or self.speculator is None or spec.method != "dspark" or spec.draft_model_config is None:
-            return False
-
-        draft_architectures = spec.draft_model_config.architectures or ()
-        use_flashmla = getattr(self.speculator, "use_flashmla", False)
-        # K3.1 SFA/KDA and the FlashMLA draft consume corrected device lengths.
-        # The initialized target producer also covers sharded SFA DCP metadata.
-        kimi_k31_device_lengths = (
-            self.model_config.architecture == "KimiK31ForConditionalGeneration"
-            and "K3DSparkModel" in draft_architectures
-            and use_flashmla
-            and getattr(self.model_state, "device_metadata", None) is not None
-        )
-        if not kimi_k31_device_lengths and (
-            self.model_config.architecture
-            not in (
-                "MiniMaxM3SparseForCausalLM",
-                "MiniMaxM3SparseForConditionalGeneration",
-                "GlmMoeDsaForCausalLM",
-            )
-            or (
-                "Qwen3DSparkModel" not in draft_architectures
-                and ("Glm5DSparkForCausalLM" not in draft_architectures or not use_flashmla)
-            )
-        ):
-            return False
-
         if (
             spec is not None
             and self.speculator is not None
@@ -1390,11 +1363,21 @@ class NPUModelRunner(GPUModelRunner):
                 for backend in backends
             )
 
-        if (
-            spec is None
-            or self.speculator is None
-            or spec.method != "dspark"
-            or self.model_config.architecture
+        if spec is None or self.speculator is None or spec.method != "dspark" or spec.draft_model_config is None:
+            return False
+
+        draft_architectures = spec.draft_model_config.architectures or ()
+        use_flashmla = getattr(self.speculator, "use_flashmla", False)
+        # K3.1 SFA/KDA and the FlashMLA draft consume corrected device lengths.
+        # The initialized target producer also covers sharded SFA DCP metadata.
+        kimi_k31_device_lengths = (
+            self.model_config.architecture == "KimiK31ForConditionalGeneration"
+            and "K3DSparkModel" in draft_architectures
+            and use_flashmla
+            and getattr(self.model_state, "device_metadata", None) is not None
+        )
+        if not kimi_k31_device_lengths and (
+            self.model_config.architecture
             not in (
                 "MiniMaxM3SparseForCausalLM",
                 "MiniMaxM3SparseForConditionalGeneration",

@@ -8,11 +8,11 @@ standalone-checkpoint configuration contract and native BF16/MXFP8 weight
 mapping. Target verification, Markov drafting, confidence, batching and
 cache metadata use the supplied vLLM/vLLM-Ascend implementations unchanged.
 
-``patch/platform/patch_speculative_config.py`` wires ``draft_hf_override``
-into ``SpeculativeConfig``. The draft geometry comes from the checkpoint's
-own ``dspark/config.json``; ``draft_config_from_file`` only adds the
-aliases the DSpark stack reads and corrects the export's target-model
-leftovers.
+``SpeculativeConfig.hf_config_override`` routes the draft checkpoint's
+config through ``draft_hf_override``. The draft geometry comes from the
+checkpoint's own ``dspark/config.json``; ``draft_config_from_file`` only
+adds the aliases the DSpark stack reads and corrects the export's
+target-model leftovers.
 """
 
 import json
@@ -200,7 +200,6 @@ def draft_config_from_file(source, header):
         {
             "architectures": [ADAPTER_ARCHITECTURE],
             "model_type": "minimax_m3_text",
-            "ascend_minimax_dspark": 1,
             # Aliases the upstream DSpark speculator reads.
             "n_predict": block_size,
             "target_layer_ids": list(draft["dspark_target_layer_ids"]),
@@ -247,18 +246,20 @@ def draft_config_from_file(source, header):
     return config
 
 
-def draft_hf_override(hf_config, *, model_root):
-    # Called only for a MiniMax DSpark draft, through the target's copied
-    # hf_overrides. A module-level callable remains picklable for workers.
+def draft_hf_override(hf_config):
+    # Called through SpeculativeConfig.hf_config_override once the draft
+    # ModelConfig is built from the standalone checkpoint under
+    # ``<model_root>/dspark``: the loaded config's ``_name_or_path`` is that
+    # draft directory, so the checkpoint stays the source of truth. A
+    # module-level callable remains picklable for workers.
     # HFConfigParser probes callables with an empty sentinel config before
     # loading the real checkpoint. Preserve its source config class selection.
     if hf_config.model_type.startswith("dummy_"):
         return hf_config
     from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3TextConfig
 
-    config_path = Path(model_root) / "dspark" / "config.json"
-    source = json.loads(config_path.read_text())
-    config = draft_config_from_file(source, read_draft_header(model_root))
+    model_root = Path(hf_config._name_or_path).parent
+    config = draft_config_from_file(hf_config.to_dict(), read_draft_header(model_root))
     return MiniMaxM3TextConfig(**config)
 
 
@@ -348,8 +349,6 @@ class MiniMaxFlashDSparkForCausalLM(AscendQwen3DSparkForCausalLM):
 
     def __init__(self, *, vllm_config, prefix=""):
         config = vllm_config.speculative_config.draft_model_config.hf_config
-        if getattr(config, "ascend_minimax_dspark", None) != 1:
-            raise ValueError("Use the MiniMax M3.1 DSpark configuration")
         if not config.use_gemma_norm or config.hidden_act != "swigluoai":
             raise ValueError("Unexpected MiniMax draft decoder semantics")
         if getattr(config, "dspark_hybrid_context_fusion", False):

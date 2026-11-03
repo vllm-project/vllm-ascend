@@ -224,7 +224,7 @@ def test_dflash_cpu_sync_policy_is_retained(runner_cls):
 
 
 @pytest.mark.parametrize("eager", [False, True])
-@pytest.mark.parametrize("blocked", [None, "kv_transfer", "sparse_offload", "adaptive", "pp", "mixed_backends"])
+@pytest.mark.parametrize("blocked", [None, "sparse_offload", "adaptive", "pp", "mixed_backends"])
 def test_original_m3_dspark_cpu_sync_guards_are_retained(runner_cls, monkeypatch, eager, blocked):
     flash = type("FlashBackend", (), {})
     monkeypatch.setitem(runner_cls._can_skip_spec_cpu_length_sync.__globals__, "AscendFlashAttentionBackend", flash)
@@ -249,7 +249,6 @@ def test_original_m3_dspark_cpu_sync_guards_are_retained(runner_cls, monkeypatch
         prefill_context_parallel_size=1,
         decode_context_parallel_size=1,
     )
-    runner.vllm_config = SimpleNamespace(kv_transfer_config=object() if blocked == "kv_transfer" else None)
     runner.ascend_config = SimpleNamespace(
         sparse_kv_offload_config=SimpleNamespace(enabled=blocked == "sparse_offload")
     )

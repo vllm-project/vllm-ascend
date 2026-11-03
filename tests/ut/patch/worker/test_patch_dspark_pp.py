@@ -12,10 +12,9 @@ from vllm_ascend.patch.worker import patch_dspark
 
 @pytest.mark.parametrize("architecture", ["GlmMoeDsaForCausalLM", "KimiK31ForConditionalGeneration"])
 @pytest.mark.parametrize("inherits_quant", [True, False])
-@pytest.mark.parametrize("minimax_draft", [True, False])
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("fail", [True, False])
-def test_dspark_draft_partition_isolation(monkeypatch, inherits_quant, minimax_draft, pp_size, fail):
+def test_dspark_draft_partition_isolation(monkeypatch, inherits_quant, pp_size, fail, architecture):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
         model_config=SimpleNamespace(model="target", architecture=architecture),
@@ -23,7 +22,6 @@ def test_dspark_draft_partition_isolation(monkeypatch, inherits_quant, minimax_d
             method="dspark",
             draft_model_config=SimpleNamespace(
                 model="target" if inherits_quant else "draft",
-                hf_config=SimpleNamespace(ascend_minimax_dspark=minimax_draft),
             ),
         ),
         quant_config=object(),
@@ -47,7 +45,7 @@ def test_dspark_draft_partition_isolation(monkeypatch, inherits_quant, minimax_d
 
         assert _should_share is should_share
         assert "_should_share" not in vars(patch_dspark.dspark_utils)
-        if inherits_quant and not minimax_draft:
+        if inherits_quant:
             assert patch_dspark.model_utils.get_draft_quant_config(config) is config.quant_config
         else:
             assert patch_dspark.model_utils.get_draft_quant_config is get_quant_config

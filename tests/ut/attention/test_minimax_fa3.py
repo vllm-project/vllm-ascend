@@ -47,7 +47,12 @@ def selection(monkeypatch, profiles):
     target = NS(hf_config=NS(architectures=["MiniMaxM3SparseForConditionalGeneration"]))
     runtime.config = NS(
         model_config=target,
-        speculative_config=NS(method="dspark", target_model_config=target, enable_adaptive_verification=False),
+        speculative_config=NS(
+            method="dspark",
+            target_model_config=target,
+            draft_model_config=NS(architectures=["DSparkMiniMaxDraftModel"]),
+            enable_adaptive_verification=False,
+        ),
         parallel_config=NS(pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1),
         cache_config=NS(cache_dtype="auto"),
         quant_config=None,
@@ -75,7 +80,7 @@ def selection(monkeypatch, profiles):
         "_validate_flash_attn_backend": lambda *args: False,
     }
     path = ROOT / "vllm_ascend/platform.py"
-    execute_nodes(path, {"_validate_minimax_ecosystem_fa3", "_uses_minimax_ecosystem_fa3"}, namespace)
+    execute_nodes(path, {"_validate_flash_attn_npu_3", "_uses_minimax_fa3"}, namespace)
     cls = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "NPUPlatform")
     method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_select_attn_backend_cls")
     method.decorator_list = []
@@ -87,14 +92,23 @@ def selection(monkeypatch, profiles):
 
 @pytest.mark.parametrize("device", ["A2", "A3", "A5", "_310P"])
 @pytest.mark.parametrize("installed", [False, True])
-@pytest.mark.parametrize("arch", ["MiniMaxM3SparseForCausalLM", "DSparkMiniMaxDraftModel", "Qwen3DSparkModel", "Other"])
+@pytest.mark.parametrize(
+    "arch",
+    [
+        "MiniMaxM3SparseForCausalLM",
+        "DSparkMiniMaxDraftModel",
+        "Qwen3DSparkModel",
+        "MiniMaxM31FlashA3DSparkModel",
+        "Other",
+    ],
+)
 def test_hardware_and_model_routing(selection, device, installed, arch):
     r = selection
     r.device = getattr(r.profiles.AscendDeviceType, device)
     r.installed = installed
     r.config.model_config = NS(hf_config=NS(architectures=[arch]))
     actual = r.select()
-    if device in ("A2", "A3") and installed and arch != "Other":
+    if device in ("A2", "A3") and installed and arch not in ("Other", "MiniMaxM3SparseForCausalLM"):
         assert actual == "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
     else:
         assert "flash_attention_v3" not in actual
@@ -287,7 +301,7 @@ def test_graph_fusion_pass_registration(monkeypatch, method, enabled):
     config = NS(speculative_config=NS(use_dspark=lambda: method == "dspark") if method else None)
     manager = NS(passes=[])
     namespace["configure"](manager, config)
-    assert fusion.call_count == len(manager.passes) == int(enabled and method != "dspark")
+    assert fusion.call_count == len(manager.passes) == int(enabled)
 
 
 def test_prefill_bounds_causal_storage_and_oversized_tiling(fa3):
@@ -329,7 +343,8 @@ def test_prefill_bounds_causal_storage_and_oversized_tiling(fa3):
 
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("padded", [False, True])
-def test_minimax_fa3_scheduler_api(fa3, causal, padded):
+@pytest.mark.parametrize("softcap", [0.0, 30.0])
+def test_minimax_fa3_scheduler_api(fa3, causal, padded, softcap):
     builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
     builder.device = torch.device("cpu")
     builder.capture_sizes = set()
@@ -337,7 +352,7 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded):
     builder.block_size = 128
     builder.max_num_reqs = 3
     scale = 0.123
-    spec = (16, 1, 128, torch.bfloat16, scale, 0.0, 4096)
+    spec = (16, 1, 128, torch.bfloat16, scale, softcap, 4096)
     builder.scheduler_specs = {spec}
     builder.scheduler_buffers = {}
     offsets = torch.tensor([0, 8, 8] if padded else [0, 8, 11], dtype=torch.int32)
@@ -354,7 +369,7 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded):
         causal=causal,
     )
 
-    # Match the keyword-only subset of the v0.4.2.post2 public scheduler API.
+    # Match the keyword-only subset of the public scheduler API.
     def scheduler(
         *,
         batch_size,
@@ -369,12 +384,10 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded):
         page_size,
         causal,
         window_size,
-        softcap,
-        softmax_scale,
+        has_softcap,
         num_splits,
     ):
-        assert softcap == 0.0
-        assert softmax_scale == scale
+        assert has_softcap is (softcap != 0.0)
         assert window_size == (4095, 0 if causal else 4095)
         assert cache_seqlens.numel() == batch_size
         assert cu_seqlens_q.numel() == batch_size + 1
