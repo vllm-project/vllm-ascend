@@ -164,7 +164,7 @@ jobs:
           python-version: "3.11"
       - name: Install deps for select_tests
         run: |
-          pip install pyyaml
+          pip install pyyaml regex
       - name: Run select_tests.py to generate presmoke groups
         id: gen_groups
         run: |
