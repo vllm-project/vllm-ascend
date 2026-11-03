@@ -19,3 +19,9 @@ entries:
     text: >
       Add the kvpool:load_error_blocks_total counter so KV Pool load failures
       are reported, and cover the Yuanrong backend in the put failure counter.
+  - category: feature
+    text: >
+      Add the parallel:sp_padding_ratio histogram so the tokens padded away by
+      sequence-parallel sharding are visible per step, and the
+      parallel:moe_comm_selection_total counter for the MoE communication
+      method chosen each forward context.

@@ -27,12 +27,6 @@ _SAMPLE_SPEC = MetricSpec(
     ("runner",),
     level=METRIC_LEVEL_DETAIL,
 )
-_GRAPH_REPLAY_SPEC = MetricSpec(
-    "graph:replay:duration",
-    MetricType.HISTOGRAM,
-    (),
-    level=METRIC_LEVEL_DETAIL,
-)
 # The whole ``_update_seq_lens_cpu`` call, including the D2H event wait.
 # The wait and the seq_lens assignment are not separate functions.
 _SEQ_LENS_SPEC = MetricSpec(
@@ -47,7 +41,7 @@ _PREEMPT_SPEC = MetricSpec(
     ("reason",),
     level=METRIC_LEVEL_BASIC,
 )
-_SPECS = (_SAMPLE_SPEC, _GRAPH_REPLAY_SPEC, _SEQ_LENS_SPEC, _PREEMPT_SPEC)
+_SPECS = (_SAMPLE_SPEC, _SEQ_LENS_SPEC, _PREEMPT_SPEC)
 
 
 def _record(spec: MetricSpec, value: float, labels: dict[str, str]) -> None:
@@ -58,13 +52,6 @@ def sample_tokens_handler(original_func, runner, *args, **kwargs):
     """Wall clock of ModelRunner V2 ``sample_tokens``, including grammar and rejection."""
     result, elapsed_ms = invoke_original(original_func, (runner, *args), kwargs)
     _record(_SAMPLE_SPEC, elapsed_ms, {"runner": "v2"})
-    return result
-
-
-def graph_replay_handler(original_func, graph_manager, *args, **kwargs):
-    """Wall clock of V2 ``ModelAclGraphManager.run_fullgraph``."""
-    result, elapsed_ms = invoke_original(original_func, (graph_manager, *args), kwargs)
-    _record(_GRAPH_REPLAY_SPEC, elapsed_ms, {})
     return result
 
 

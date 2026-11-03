@@ -7,12 +7,6 @@
     - name: executor:sample_tokens:duration_ms
       type: histogram
 
-- symbol: vllm_ascend.worker.v2.aclgraph_utils:ModelAclGraphManager.run_fullgraph
-  handler: vllm_ascend.observability.ms_metrics.handlers:graph_replay_handler
-  metrics:
-    - name: graph:replay:duration
-      type: histogram
-
 - symbol: vllm_ascend.worker.v2.model_runner:NPUModelRunner._update_seq_lens_cpu
   handler: vllm_ascend.observability.ms_metrics.handlers:seq_lens_update_handler
   metrics:
