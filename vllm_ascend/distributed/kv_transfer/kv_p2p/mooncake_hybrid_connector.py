@@ -54,6 +54,7 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.hybrid_prefill_capture import PrefillCaptureWriter
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     as_kv_cache_tensors,
     collect_configured_register_regions,
@@ -1350,6 +1351,20 @@ class MooncakeConnectorScheduler:
         self._reqs_need_send: dict[str, float] = {}
         self._reqs_in_batch: set[str] = set()
 
+        # Opt-in diagnostics for D endpoints expected to receive P/D handoffs.
+        self._log_missing_kv_params = (
+            vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+            and vllm_config.kv_transfer_config.get_from_extra_config("log_missing_kv_params", False)
+        )
+        self._missing_kv_requests: dict[str, Request] = {}
+        capture_dir = vllm_config.kv_transfer_config.get_from_extra_config("prefill_capture_dir", None)
+        self._prefill_capture = (
+            PrefillCaptureWriter(capture_dir, engine_id)
+            if vllm_config.kv_transfer_config.kv_role == "kv_consumer" and capture_dir
+            else None
+        )
+        self._prefill_capture_requests: dict[str, tuple[Request, dict[str, bool]]] = {}
+
         # master-slave meta information for cross-nodes
         self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
 
@@ -1466,6 +1481,29 @@ class MooncakeConnectorScheduler:
         # The scheduler looks up local KV before asking connectors for hits.
         # Truncate first so both lookups use the same prompt length.
         params = request.kv_transfer_params
+        # Check only at admission: update_state_after_alloc intentionally clears
+        # do_remote_prefill after registering a receive, even for healthy requests.
+        if self._prefill_capture is not None:
+            self._prefill_capture_requests[request.request_id] = (
+                request,
+                {
+                    "has_kv_params": params is not None,
+                    "do_remote_prefill": bool(params and params.get("do_remote_prefill")),
+                    "do_remote_decode": bool(params and params.get("do_remote_decode")),
+                },
+            )
+        if self._log_missing_kv_params and not (params and params.get("do_remote_prefill")):
+            self._missing_kv_requests[request.request_id] = request
+            logger.warning(
+                "[HybridDMissingKV] event=received engine_id=%s request_id=%s "
+                "has_kv_params=%s do_remote_prefill=%s do_remote_decode=%s prompt_tokens=%d",
+                self.engine_id,
+                request.request_id,
+                params is not None,
+                bool(params and params.get("do_remote_prefill")),
+                bool(params and params.get("do_remote_decode")),
+                request.num_prompt_tokens,
+            )
         if params is not None and params.get("do_remote_decode") and self.need_truncate:
             self._truncate_request_for_prefill(request)
 
@@ -1532,6 +1570,45 @@ class MooncakeConnectorScheduler:
     ) -> KVConnectorMetadata:
         meta = MooncakeConnectorMetadata()
 
+        if self._prefill_capture_requests:
+            for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+                tracked = self._prefill_capture_requests.get(req_id)
+                if tracked is None:
+                    continue
+                request, admission_flags = tracked
+                remaining = max(request.num_prompt_tokens - request.num_computed_tokens, 0)
+                prompt_tokens = min(num_tokens, remaining)
+                # Exclude normal last-token replay, but catch chunked prefill
+                # even if the current batch has room for just one prompt token.
+                if remaining > 1 and prompt_tokens > 0:
+                    self._prefill_capture.submit(request, num_tokens, prompt_tokens, admission_flags)
+                    self._prefill_capture_requests.pop(req_id, None)
+            for req_id in scheduler_output.finished_req_ids:
+                self._prefill_capture_requests.pop(req_id, None)
+
+        if self._missing_kv_requests:
+            for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+                request = self._missing_kv_requests.pop(req_id, None)
+                if request is None:
+                    continue
+                # Scheduler counters precede this step; cached tokens may have
+                # come from local prefix/pool hits even without a P/D handoff.
+                remaining = max(request.num_prompt_tokens - request.num_computed_tokens, 0)
+                prompt_tokens = min(num_tokens, remaining)
+                if prompt_tokens > 1:
+                    logger.warning(
+                        "[HybridDMissingKV] event=prompt_compute_scheduled engine_id=%s request_id=%s "
+                        "prompt_tokens=%d computed_tokens=%d scheduled_tokens=%d scheduled_prompt_tokens=%d",
+                        self.engine_id,
+                        req_id,
+                        request.num_prompt_tokens,
+                        request.num_computed_tokens,
+                        num_tokens,
+                        prompt_tokens,
+                    )
+            for req_id in scheduler_output.finished_req_ids:
+                self._missing_kv_requests.pop(req_id, None)
+
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids, num_external_tokens) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
@@ -1564,6 +1641,8 @@ class MooncakeConnectorScheduler:
         should be freed now or will be sent asynchronously and freed later.
         """
 
+        self._missing_kv_requests.pop(request.request_id, None)
+        self._prefill_capture_requests.pop(request.request_id, None)
         params = request.kv_transfer_params
         logger.debug(
             "MooncakeConnector request_finished, request_status=%s, kv_transfer_params=%s", request.status, params
