@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -7,8 +9,12 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache
 from vllm_ascend.ops.triton.glm5_next_cann_keypool import write_keypool_caches
+
+pytestmark = pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A3, reason="Requires Ascend A3")
 
 
 @pytest.mark.parametrize("use_graph", [False, True])
@@ -76,7 +82,12 @@ def test_int8_key_scale_write_preserves_padding_and_invalid_slots(use_graph):
 @pytest.mark.parametrize("use_graph", [False, True])
 @torch.inference_mode()
 def test_int8_operator_reads_managed_pages(use_graph):
-    pytest.importorskip("cann_ops_transformer")
+    ops_transformer = pytest.importorskip("cann_ops_transformer")
+    # The INT8 PoolKeyIndexer API is available starting with ops-transformer 9.3.0.
+    # The built-in Python package lives under the versioned CANN install directory.
+    version_match = re.search(r"cann-(\d+)\.(\d+)\.(\d+)", str(Path(ops_transformer.__file__).resolve()))
+    if version_match and tuple(map(int, version_match.groups())) < (9, 3, 0):
+        pytest.skip("INT8 PoolKeyIndexer requires ops-transformer 9.3.0 or later")
     spec = AscendMLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
