@@ -123,6 +123,9 @@ runner_mapping:
   tests/e2e/pull_request/one_card:
     default: a2-1
     310p: 310p-1
+  tests/e2e/pull_request/singlecard_ops:
+    default: a2-1
+    310p: 310p-1
   tests/e2e/pull_request/two_card:
     default: a3-2
     310p: 310p-2

@@ -105,5 +105,5 @@ For `P=4`, `L=128`, `D=128`, a token at position 65539 completes a pool. Raw slo
 The INT8 NPU tests compare complete managed pages byte-for-byte after valid, invalid and page-boundary writes, including untouched padding. They also compare CANN `PoolKeyIndexer` outputs from managed strided pages against contiguous key/scale tensors in eager and graph modes.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_glm5next_int8_kpool_cache.py
+pytest -sv tests/e2e/pull_request/singlecard_ops/triton/test_glm5next_int8_kpool_cache.py
 ```

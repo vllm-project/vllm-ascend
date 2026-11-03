@@ -42,7 +42,7 @@ pytest -q tests/ut/models/qwen4_exp/test_fia_dispatch.py tests/ut/models/qwen4_e
 Run the A3 native kernels with:
 
 ```bash
-pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qwen4_exp_qsa.py
+pytest -q tests/e2e/pull_request/singlecard_ops/triton/test_qwen4_exp_qsa.py
 ```
 
 The native test is discovered by the existing `singlecard-ops-a3` nightly matrix. It compiles and executes QSA packing, FIA wide-to-narrow workspace reuse, and GBSA preparation against independent PyTorch expectations, including residual boundaries, invalid holes, ragged requests, and a non-contiguous block table.

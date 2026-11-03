@@ -26,6 +26,6 @@ own input-preparation paths.
 Run the existing operator tests on NPU:
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_prepare_inputs_padded.py
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_copy_and_expand_dflash_dspark.py
+pytest -sv tests/e2e/pull_request/singlecard_ops/triton/test_prepare_inputs_padded.py
+pytest -sv tests/e2e/pull_request/singlecard_ops/triton/test_copy_and_expand_dflash_dspark.py
 ```

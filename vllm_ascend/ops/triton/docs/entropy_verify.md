@@ -104,8 +104,8 @@ export ASCEND_RT_VISIBLE_DEVICES="${NPU_DEVICE_ID:?Set NPU_DEVICE_ID to an avail
 export VLLM_USE_V2_MODEL_RUNNER=1
 python -m pytest -q tests/ut/worker/v2/test_entropy_verify.py
 python -m pytest -q \
-  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample_v2.py \
-  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_resample.py \
+  tests/e2e/pull_request/singlecard_ops/triton/test_rejection_sample_v2.py \
+  tests/e2e/pull_request/singlecard_ops/triton/test_resample.py \
   -o junit_family=xunit1 --junitxml=entropy-contract.xml
 ```
 

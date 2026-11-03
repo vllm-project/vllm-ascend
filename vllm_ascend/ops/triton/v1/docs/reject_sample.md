@@ -16,5 +16,5 @@ with [`spec_decode/resample.py`](../../spec_decode/resample.py).
 Run the existing operator tests on NPU:
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample.py
+pytest -sv tests/e2e/pull_request/singlecard_ops/triton/test_rejection_sample.py
 ```
