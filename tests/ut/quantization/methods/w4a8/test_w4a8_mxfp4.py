@@ -147,10 +147,14 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
     intermediate_size = 256
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm):
+    def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
-        mock_ascend.return_value = create_mock_ascend_config()
+        self.enterContext(
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_ascend_config",
+                return_value=create_mock_ascend_config(),
+            )
+        )
         self.scheme = AscendW4A8MXFPDynamicFusedMoEMethod()
 
     def test_get_weight_static_method(self):
