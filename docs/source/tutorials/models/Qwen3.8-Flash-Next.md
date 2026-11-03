@@ -26,8 +26,10 @@ Select the checkpoint that matches the deployment configuration:
 
 | Hardware | Deployment | Checkpoint | Device allocation | Download Links |
 | --- | --- | --- | --- | --- |
-| A2 series / A3 series | Colocated | `Qwen3.8-Flash-Next-w8a8-mtp` | 8 devices, TP8 × DP1 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
-| A2 series / A3 series | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | |
+| A2 series | Colocated | `Qwen3.8-Flash-Next-w8a8-mtp` | 8 devices, TP8 × DP1 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
+| A3 series | Colocated | `Qwen3.8-Flash-Next-w8a8-mtp` | 8 devices, TP8 × DP1 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
+| A2 series | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | |
+| A3 series | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | |
 | Ascend 950 DT | Colocated | `Qwen3.8-Flash-Next-w8a8-mxfp8` | 4 devices, TP4 × DP1 | |
 | Ascend 950 DT | PD separation | `Qwen3.8-Flash-Next-w4a8-mxfp` | 8 devices, TP2 × DP2 per role | |
 
@@ -716,9 +718,11 @@ The requests below use the A2 series / A3 series colocated endpoint. Select the 
 
 | Deployment | Port | Model name |
 | --- | --- | --- |
-| A2 series / A3 series colocated | 8088 | `qwen3.8-flash-next` |
+| A2 series colocated | 8088 | `qwen3.8-flash-next` |
+| A3 series colocated | 8088 | `qwen3.8-flash-next` |
 | Ascend 950 DT colocated | 8087 | `qwen3.8-flash-next-950-dt` |
-| A2 series / A3 series PD proxy | 25570 | `qwen38-flash-next-a2-a3-pd` |
+| A2 series PD proxy | 25570 | `qwen38-flash-next-a2-a3-pd` |
+| A3 series PD proxy | 25570 | `qwen38-flash-next-a2-a3-pd` |
 | Ascend 950 DT PD proxy | 8087 | `qwen38-flash-next-950-dt-pd` |
 
 For PD, first complete the proxy check and review the key parameters in [Section 5.2](#52-pd-separation-deployment).
@@ -905,10 +909,13 @@ Use the configuration for your hardware and deployment mode. The table summarize
 
 | Hardware | Deployment / role | Devices | TP × DP | Max model length | Max sequences | Batch tokens |
 | --- | --- | --- | --- | --- | --- | --- |
-| A2 series / A3 series | Colocated | 0–7 | 8 × 1 | 131072 | 8 | 4096 |
+| A2 series | Colocated | 0–7 | 8 × 1 | 131072 | 8 | 4096 |
+| A3 series | Colocated | 0–7 | 8 × 1 | 131072 | 8 | 4096 |
 | Ascend 950 DT | Colocated | 0–3 | 4 × 1 | 141312 | 32 | 4096 |
-| A2 series / A3 series | Prefill | 0–7 | 2 × 4 | 141312 | 32 | 4096 |
-| A2 series / A3 series | Decode | 8–15 | 2 × 4 | 141312 | 32 | 4096 |
+| A2 series | Prefill | 0–7 | 2 × 4 | 141312 | 32 | 4096 |
+| A3 series | Prefill | 0–7 | 2 × 4 | 141312 | 32 | 4096 |
+| A2 series | Decode | 8–15 | 2 × 4 | 141312 | 32 | 4096 |
+| A3 series | Decode | 8–15 | 2 × 4 | 141312 | 32 | 4096 |
 | Ascend 950 DT | Prefill | 0–3 | 2 × 2 | 141312 | 64 | 4096 |
 | Ascend 950 DT | Decode | 4–7 | 2 × 2 | 141312 | 64 | 4096 |
 
