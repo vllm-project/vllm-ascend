@@ -848,6 +848,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         max_reqs = getattr(vllm_config.scheduler_config, "max_num_seqs", 256)
         self.common_v41_metadata: dict[str, Any] = {}
         self.common_v41_batch_metadata: dict[str, Any] = {}
+        self.common_v41_smla_metadata: dict[str, Any] = {}
+        self._request_counts_metadata: dict[str, int] = {}
         self._supports_device_ops = getattr(device, "type", "cpu") != "cpu"
         # Allocate both decode and prefill owners before graph capture.
         self._build_query_metadata = build_query_metadata
@@ -1024,7 +1026,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         max_seq_len = int(getattr(common, "max_seq_len", 0))
         if seq_lens_cpu is not None:
             max_seq_len = int(seq_lens_cpu[:num_actual_reqs].max().item()) if num_actual_reqs else 0
-        num_decodes, num_decode_tokens, num_prefills, num_prefill_tokens = _request_counts(common, num_reqs)
         positions = common.positions
         if positions is not None:
             positions = positions[:num_input_tokens].long()
@@ -1035,10 +1036,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             seq_lens_cpu=seq_lens_cpu,
             positions=positions,
             max_cache_seq_len=max_seq_len,
-            num_decodes=num_decodes,
-            num_decode_tokens=num_decode_tokens,
-            num_prefills=num_prefills,
-            num_prefill_tokens=num_prefill_tokens,
         )
 
     def _new_req_metadata(
@@ -1052,6 +1049,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         is_state = self._cache_kind == "compressor_state"
 
         values = dict(self.common_v41_batch_metadata["batch"])
+        values.update(self._request_counts_metadata)
         values["cache_seq_lens"] = values["seq_lens"]
 
         return AscendDSAV41Metadata(
@@ -1085,6 +1083,30 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self.common_v41_metadata = {} if shared is None else shared
         batch_shared = kwargs.get("common_v41_batch_metadata")
         self.common_v41_batch_metadata = self.common_v41_metadata if batch_shared is None else batch_shared
+        # Classification alone depends on is_prefilling. Lengths, positions and
+        # compression calculations remain shared when that field is overridden.
+        counts_cache = (
+            self.common_v41_metadata if kwargs.get("v41_prefill_override", False) else self.common_v41_batch_metadata
+        )
+        counts = counts_cache.get("request_counts")
+        if counts is None:
+            counts = dict(
+                zip(
+                    ("num_decodes", "num_decode_tokens", "num_prefills", "num_prefill_tokens"),
+                    _request_counts(common, num_reqs),
+                )
+            )
+            counts_cache["request_counts"] = counts
+        self._request_counts_metadata = counts
+        separate_smla = (
+            kwargs.get("v41_smla_override", False)
+            or getattr(common, "causal", True) is not True
+            or getattr(common, "replay_start", None) is not None
+            or kwargs.get("replay_start") is not None
+            or kwargs.get("ori_sparse_indices") is not None
+            or kwargs.get("num_query_heads") is not None
+        )
+        self.common_v41_smla_metadata = self.common_v41_metadata if separate_smla else self.common_v41_batch_metadata
         # Cache references are rebound for every build. Physical addressing is
         # group-local; compatible request coordinates span cache groups.
         if "batch" not in self.common_v41_batch_metadata:
@@ -1512,7 +1534,7 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                 self._a5_smla_metadata.copy_(value)
 
             req.smla_metadata = self._publish_task(
-                self.common_v41_batch_metadata,
+                self.common_v41_smla_metadata,
                 "smla:a5",
                 self._a5_smla_metadata,
                 DeviceMetadataStage.ATTENTION,
@@ -1557,7 +1579,7 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                 self._smla_metadata.copy_(value)
 
             req.smla_metadata = self._publish_task(
-                self.common_v41_batch_metadata,
+                self.common_v41_smla_metadata,
                 f"smla:c{operator_ratio}",
                 self._smla_metadata,
                 DeviceMetadataStage.ATTENTION,

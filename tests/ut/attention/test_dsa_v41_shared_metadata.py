@@ -19,6 +19,74 @@ builders = pcp_builders
 
 
 class TestSharedPCPMetadata:
+    def test_prefill_override_only_isolates_request_counts(self, builders, monkeypatch):
+        owners = [builders(specialized=True)["long_kv"] for _ in range(2)]
+        batch_cache: dict[str, Any] = {}
+        common = _batch(2, 0, "prefill").local
+        counts = Mock(wraps=dsa_v41._request_counts)
+        monkeypatch.setattr(dsa_v41, "_request_counts", counts)
+        metadata = []
+        for owner, prefill in zip(owners, (True, False)):
+            metadata.append(
+                dsa_v41.AscendDSAV41MetadataBuilder.build(
+                    owner,
+                    0,
+                    common.replace(is_prefilling=torch.full_like(common.is_prefilling, prefill)),
+                    build_query=False,
+                    update_cache=False,
+                    common_v41_metadata={},
+                    common_v41_batch_metadata=batch_cache,
+                    v41_prefill_override=True,
+                )
+            )
+        assert counts.call_count == 2
+        assert metadata[0].num_prefills > 0
+        assert metadata[1].num_prefills == 0
+        assert metadata[0].seq_lens.data_ptr() == metadata[1].seq_lens.data_ptr()
+        assert metadata[0].cache_seq_lens.data_ptr() == metadata[1].cache_seq_lens.data_ptr()
+
+    def test_replay_shares_pcp_and_rope_but_not_smla(self, builders, monkeypatch):
+        original = builders(specialized=True)["swa"]
+        duplicate = type(original)(
+            original.kv_cache_spec, original.layer_names, original.vllm_config, torch.device("cpu")
+        )
+        duplicate.prepare_source_rope()
+        owners = [original, duplicate]
+        dsa_v41_cp.AscendDSAV41PCPMetadataBuilder.prepare_shared_buffers(owners)
+        context_owner = original._pcp_context_owner
+        prepare = Mock(wraps=context_owner._prepare_graph_pcp_context)
+        monkeypatch.setattr(context_owner, "_prepare_graph_pcp_context", prepare)
+        gather = Mock(wraps=torch.gather)
+        monkeypatch.setattr(torch, "gather", gather)
+        smla = Mock(return_value=torch.zeros(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32))
+        monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_mla_metadata", smla, raising=False)
+        batch = _batch(2, 0, "prefill")
+        batch_cache: dict[Any, Any] = {}
+        metadata = []
+        for group, owner in enumerate(owners):
+            owner._supports_device_ops = True
+            replay_start = torch.zeros_like(batch.local.seq_lens)
+            if group:
+                query_lens = batch.local.query_start_loc[1:] - batch.local.query_start_loc[:-1]
+                replay_start = batch.local.seq_lens - query_lens
+            metadata.append(
+                owner.build(
+                    0,
+                    batch.local.replace(replay_start=replay_start),
+                    pcp_context=batch.context,
+                    pcp_cache_group_idx=group,
+                    common_v41_metadata={},
+                    common_v41_batch_metadata=batch_cache,
+                )
+            )
+        assert prepare.call_count == 1
+        assert gather.call_count == 4
+        assert smla.call_count == 2
+        assert metadata[0].seq_lens.data_ptr() == metadata[1].seq_lens.data_ptr()
+        assert metadata[0].cos[LAYER].data_ptr() == metadata[1].cos[LAYER].data_ptr()
+        assert metadata[0].smla_metadata.data_ptr() != metadata[1].smla_metadata.data_ptr()
+        assert not torch.equal(metadata[0].ori_topk_length, metadata[1].ori_topk_length)
+
     def test_build_rebinds_shared_caches_for_each_invocation(self, builders, monkeypatch):
         builder = builders(specialized=True)["long_kv"]._global_builder
         prepare = Mock(wraps=builder._build_batch_metadata)

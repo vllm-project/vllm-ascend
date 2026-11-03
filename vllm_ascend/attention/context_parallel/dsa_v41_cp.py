@@ -357,17 +357,9 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         batch_shared = kwargs.get("common_v41_batch_metadata")
         if batch_shared is None:
             batch_shared = {}
-        # Query variants may carry group-dependent windows or replay bounds.
-        # They still use the optimized builder, with a separate sharing scope.
-        variant = (
-            pcp_cache_group_idx
-            if common_attn_metadata.causal is not True
-            or getattr(common_attn_metadata, "replay_start", None) is not None
-            or kwargs.get("replay_start") is not None
-            or kwargs.get("ori_sparse_indices") is not None
-            else None
-        )
-        shared = batch_shared.setdefault(("v41_pcp_specialized", id(self.vllm_config), variant), {})
+        # Query overrides do not change PCP request layout. Query-dependent
+        # outputs are scoped separately by the base metadata builder.
+        shared = batch_shared.setdefault(("v41_pcp_specialized", id(self.vllm_config), None), {})
         full_graph_mode = bool(kwargs.get("full_graph_mode", False))
         signature = (
             common_attn_metadata.num_reqs,
