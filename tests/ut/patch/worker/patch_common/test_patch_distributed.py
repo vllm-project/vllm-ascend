@@ -102,13 +102,15 @@ def _load_patch_distributed_module():
     torch_distributed: Any = ModuleType("torch.distributed")
     torch_distributed_c10d: Any = ModuleType("torch.distributed.distributed_c10d")
 
-    def new_group(ranks, backend, pg_options=None):
+    def new_group(ranks, backend, pg_options=None, group_desc=None, timeout=None):
         backend_name = str(backend)
         new_group_calls.append(
             {
                 "ranks": tuple(ranks),
                 "backend": backend_name,
                 "pg_options": pg_options,
+                "group_desc": group_desc,
+                "timeout": timeout,
             }
         )
         if get_rank() not in ranks:
@@ -143,7 +145,20 @@ def _load_patch_distributed_module():
     parallel_state_module: Any = ModuleType("vllm.distributed.parallel_state")
 
     class BaseGroupCoordinator:
-        pass
+        def make_sibling_device_group(self, group_desc=None):
+            # Model the upstream helper: no Ascend pg_options are supplied.
+            sibling = None
+            for ranks in self.group_ranks:
+                pg = new_group(
+                    ranks,
+                    backend=self.torch_distributed_backend,
+                    group_desc=group_desc,
+                    timeout=distributed_utils_module.get_distributed_timeout_or_none(),
+                )
+                if self.rank in ranks:
+                    sibling = pg
+            assert sibling is not None
+            return sibling
 
     def _get_unique_name(group_name: str) -> str:
         unique_name_counter["value"] += 1
@@ -167,6 +182,7 @@ def _load_patch_distributed_module():
 
     distributed_utils_module: Any = ModuleType("vllm.distributed.utils")
     distributed_utils_module.get_cpu_distributed_timeout_or_none = lambda: None
+    distributed_utils_module.get_distributed_timeout_or_none = lambda: timedelta(seconds=91)
 
     vllm_distributed.parallel_state = parallel_state_module
     vllm_distributed.utils = distributed_utils_module
@@ -293,11 +309,10 @@ def test_group_coordinator_is_patched(module_env):
     assert module_env.parallel_state_module.GroupCoordinator is module_env.module.GroupCoordinatorPatch
 
 
-def test_group_coordinator_preserves_backend_for_inherited_helpers(module_env):
+def test_group_coordinator_preserves_backend_for_device_helpers(module_env):
     coordinator = _make_group(module_env, backend="hccl")
 
     assert coordinator.torch_distributed_backend == "hccl"
-    assert "make_sibling_device_group" not in type(coordinator).__dict__
 
 
 def test_same_hccl_group_reuses_device_pg_once(module_env):
@@ -634,3 +649,56 @@ def test_non_hccl_destroy_path_destroys_device_group_directly(module_env):
     ]
     assert not hasattr(group, "cpu_group")
     assert not hasattr(group, "device_group")
+
+
+@pytest.mark.parametrize("rank", range(4))
+@pytest.mark.parametrize("backend", ["hccl", FakeBackend("hccl")])
+def test_sibling_group_uses_parent_policy_for_all_rank_groups(module_env, rank, backend):
+    module_env.get_rank.return_value = rank
+    coordinator = _make_group(module_env, backend=backend, group_name="pp", group_ranks=[[0, 2], [1, 3]])
+    factory = module_env.utils_module.create_hccl_pg_options
+    factory.reset_mock()
+    factory.side_effect = lambda _name: RealisticFakeHcclOptions(hccl_config={"hccl_buffer_size": 73})
+    module_env.new_group_calls.clear()
+
+    sibling = coordinator.make_sibling_device_group(group_desc="pp_broadcast")
+
+    calls = module_env.new_group_calls
+    assert [entry["ranks"] for entry in calls] == [(0, 2), (1, 3)]
+    assert factory.call_args_list == [call("pp"), call("pp")]
+    assert all(entry["pg_options"].hccl_config == {"hccl_buffer_size": 73} for entry in calls)
+    assert calls[0]["pg_options"] is not calls[1]["pg_options"]
+    assert all(entry["backend"] == "hccl" for entry in calls)
+    assert all(entry["group_desc"] == "pp_broadcast" for entry in calls)
+    assert all(entry["timeout"] == timedelta(seconds=91) for entry in calls)
+    assert sibling.ranks == ((0, 2) if rank % 2 == 0 else (1, 3))
+    assert sibling is not coordinator.device_group
+
+
+def test_sibling_groups_stay_independent_of_shared_parent_registry(module_env):
+    first = _make_group(module_env, group_name="pp")
+    same_parent = _make_group(module_env, group_name="pp")
+    assert first.device_group is same_parent.device_group
+
+    sibling = first.make_sibling_device_group("pp_broadcast")
+    another_sibling = same_parent.make_sibling_device_group("pp_broadcast")
+
+    assert sibling is not first.device_group
+    assert another_sibling is not first.device_group
+    assert sibling is not another_sibling
+    assert sibling.pg_options == first.device_group.pg_options
+    assert another_sibling.pg_options == first.device_group.pg_options
+    assert _make_group(module_env, group_name="pp").device_group is first.device_group
+    assert len(_calls_with_backend(module_env, "hccl")) == 3
+
+
+def test_non_hccl_sibling_delegates_to_upstream(module_env, monkeypatch):
+    coordinator = _make_group(module_env, backend="gloo")
+    parent_method = MagicMock(return_value=object())
+    monkeypatch.setattr(type(coordinator).__mro__[1], "make_sibling_device_group", parent_method)
+    module_env.utils_module.create_hccl_pg_options.reset_mock()
+
+    assert coordinator.make_sibling_device_group("custom_broadcast") is parent_method.return_value
+
+    parent_method.assert_called_once_with("custom_broadcast")
+    module_env.utils_module.create_hccl_pg_options.assert_not_called()

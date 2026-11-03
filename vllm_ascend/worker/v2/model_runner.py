@@ -790,6 +790,22 @@ class NPUModelRunner(GPUModelRunner):
         necessary HCCL buffer for the MC2 operator before standard `profile_run`. Additionally, we set
         override_mrv2_in_profile_run to True to force moe load to be balanced when executing `profile_run`
         """
+        if self.use_pp:
+            pp_handler = self.pp_handler
+            assert pp_handler is not None
+            # HCCL allocates communicator buffers lazily. Materialize them
+            # inside memory profiling, before the KV cache budget is computed.
+            # Keep the handler's queue and sampled-token state untouched.
+            with torch.npu.stream(pp_handler.broadcast_stream):
+                sampled_tokens = torch.zeros(
+                    (self.max_num_reqs, pp_handler.max_sample_len), dtype=torch.int64, device=self.device
+                )
+                combined = torch.zeros((2, self.max_num_reqs), dtype=torch.int32, device=self.device)
+                torch.distributed.broadcast(sampled_tokens, src=pp_handler.last_rank, group=pp_handler.broadcast_group)
+                torch.distributed.broadcast(combined, src=pp_handler.last_rank, group=pp_handler.broadcast_group)
+            pp_handler.broadcast_stream.synchronize()
+            del sampled_tokens, combined
+
         sparse_cfg = self.ascend_config.sparse_kv_offload_config
         if sparse_cfg.enabled:
             allocate_kv_offload_topk_profile_buffers(self.get_kv_cache_spec(), self.vllm_config, sparse_cfg)
