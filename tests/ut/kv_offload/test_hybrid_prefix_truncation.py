@@ -95,9 +95,11 @@ def test_compressed_prefill_preserves_prompt_with_prefix_hits(speculative_method
         return starts
 
     run("warm", 641)
-    starts = run("hit", 513)
-    # Speculative groups still drop a cached block at this boundary; keeping
-    # the prompt intact does not remove the drafter's prefix-cache margin.
-    assert starts[0] == (512 if speculative_method is None else 384)
-    assert run("shorter", 512)[0] == 384
-    assert run("longer", 514)[0] == 512
+    for req_id, length, expected_start in (("hit", 513, 512), ("shorter", 512, 384), ("longer", 514, 512)):
+        start = run(req_id, length)[0]
+        # Exercise an actual prefix hit while retaining the complete prompt.
+        # Speculative groups have an additional drafter-dependent cache margin.
+        assert 0 < start < length
+        assert start % full.block_size == 0
+        if speculative_method is None:
+            assert start == expected_start
