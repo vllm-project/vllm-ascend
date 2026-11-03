@@ -1,0 +1,75 @@
+# A3 serving settings match the TP8/DP1/EP, MTP=3 performance runs on 2026-10-31.
+# CI retains its model identifier, port, and NPU IDs.
+# The CI image must provide the CANN/ATB environment used by that command.
+# Performance baselines are three-run mean output TPS from the local A3 service;
+# validate the Nightly image and ModelScope model artifact in CI.
+test_cases:
+  - name: "Qwen3.8-Flash-Next-w8a8-mtp-A3"
+    model: "Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp"
+    envs:
+      VLLM_USE_MODELSCOPE: "true"
+      VLLM_SERVER_DEV_MODE: "1"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+      SERVER_PORT: "DEFAULT_PORT"
+      VLLM_ENGINE_READY_TIMEOUT_S: "3000"
+      VLLM_RPC_TIMEOUT: "6000"
+    server_cmd:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--served-model-name"
+      - "Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "1"
+      - "--max-model-len"
+      - "141312"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-num-batched-tokens"
+      - "4096"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--enable-expert-parallel"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,28,32],"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
+      - "--speculative-config"
+      - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
+    test_content: []
+    benchmarks:
+      perf_16k:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 128
+        max_out_len: 1024
+        batch_size: 32
+        request_rate: 0
+        baseline: 98.8035
+        threshold: 0.97
+        temperature: 0
+        ignore_eos: true
+      perf_128k:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in131072-bs100-qwen3
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 8
+        max_out_len: 1024
+        batch_size: 2
+        request_rate: 0
+        baseline: 16.4417
+        threshold: 0.97
+        temperature: 0
+        ignore_eos: true
