@@ -1,0 +1,10 @@
+pr: 20811
+entries:
+  - category: feature
+    text: Added an opt-in EOS mask for reasoning models: while a request is
+      inside its think block, configured EOS token ids are masked so a
+      mid-thought EOS can no longer end generation with an empty content
+      field. Enabled with VLLM_ASCEND_THINKING_MASK_EOS_TOKEN_IDS; implicit
+      think-end markers (e.g. the Qwen3 tool-call start token) can be
+      declared with VLLM_ASCEND_THINKING_MASK_IMPLICIT_END_TOKEN_IDS.
+      Covers both model runners and works with speculative decoding.
