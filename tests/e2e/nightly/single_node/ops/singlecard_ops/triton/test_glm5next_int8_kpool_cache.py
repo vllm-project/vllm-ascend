@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import regex as re
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import regex as re
 import torch
 import torch_npu  # noqa: F401
 
