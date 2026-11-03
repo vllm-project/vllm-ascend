@@ -72,6 +72,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # rare_chars pair D2H+feed: default async on a dedicated wait queue so
+    # get_output does not block on the pair copy. Set to "1" to synchronize
+    # and feed on the get_output path (debug / comparison only).
+    "VLLM_ASCEND_RARE_PAIR_SYNC": lambda: os.getenv("VLLM_ASCEND_RARE_PAIR_SYNC", "0") == "1",
 }
 
 # end-env-vars-definition

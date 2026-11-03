@@ -363,6 +363,13 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
 
     # ---- sample / get_output hooks ----------------------------------------
 
+    def _enable_rare_chars_finish_on_reap(self) -> None:
+        """Pair sync+feed runs off ``mark_finished``; flush look-ahead at reap."""
+        self._rare_chars_finish_on_reap = True
+
+    def _rare_chars_finish_deferred(self) -> bool:
+        return bool(getattr(self, "_rare_chars_finish_on_reap", False))
+
     def mark_finished(self, finished_req_ids: Any) -> None:
         """Mark requests finished; defer Store.clear until last sample is consumed.
 
@@ -372,13 +379,18 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         detect / append still see the same state. Sidecars + clear happen in
         :meth:`_reap_finished_requests`.
 
-        Also flushes ``rare_chars`` look-ahead (rc4 decides the held-back last
-        token at stream end) before the Store finished bit is set.
+        ``rare_chars`` look-ahead flush normally runs here. When pair D2H+feed
+        is async (default), finish is deferred to reap after ``rare_pair_jobs``
+        drain — otherwise ``finish_row`` sets ``_done`` and drops queued tokens.
         """
         if not finished_req_ids:
             return
         ids = [str(r) for r in finished_req_ids if r]
-        if ids and bool(self.runtime_config.detector_get("rare_chars", "enabled", False)):
+        if (
+            ids
+            and not self._rare_chars_finish_deferred()
+            and bool(self.runtime_config.detector_get("rare_chars", "enabled", False))
+        ):
             for alert in self.detectors.finish_rare_chars(ids):
                 self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
         RequestGuardStore.get().mark_finished(finished_req_ids, wave=self._current_wave())
@@ -393,6 +405,12 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         reapable = store.list_reapable(current_wave=wave)
         if not reapable:
             return
+        # Async pair path: feeds done (rare_pair_jobs==0). Flush look-ahead, then clear.
+        if self._rare_chars_finish_deferred() and bool(
+            self.runtime_config.detector_get("rare_chars", "enabled", False)
+        ):
+            for alert in self.detectors.finish_rare_chars(reapable):
+                self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
         store.clear_many(reapable, detectors=self.detectors)
         self.wave_tracker.discard_many(reapable)
 
@@ -679,7 +697,12 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             self.runner._rg_rare_pair_hold = None
 
     def consume_rare_pairs(self, output: Any) -> None:
-        """After token-id ``get_output``: wait for the pair copy and enqueue rc4."""
+        """After token-id ``get_output``: complete pair D2H and feed rc4.
+
+        Default: submit sync+pack+feed to :class:`RarePairWaitQueue` so this
+        path does not block on the pair copy. Set ``VLLM_ASCEND_RARE_PAIR_SYNC=1``
+        to synchronize and feed inline (debug).
+        """
         pending = getattr(self, "_pending_rare_pair", None)
         self._pending_rare_pair = None
         hold = getattr(self.runner, "_rg_rare_pair_hold", None)
@@ -687,56 +710,108 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         if pending is None:
             return
         cpu, event = pending
-        if event is not None:
-            event.synchronize()
-        del hold
         req_ids = [str(rid) for rid in (getattr(output, "req_ids", None) or []) if rid]
-        if not req_ids:
+        n_req = len(req_ids)
+        sampled = getattr(output, "sampled_token_ids", None)
+
+        from vllm_ascend import envs as _envs
+
+        if n_req <= 0:
+            if event is not None:
+                event.synchronize()
+            del hold
             return
+
+        if _envs.VLLM_ASCEND_RARE_PAIR_SYNC:
+            if event is not None:
+                event.synchronize()
+            del hold
+            self._rare_pair_pack_and_feed(cpu, sampled, req_ids, n_req)
+            return
+
+        # Async default: pin before submit; finish_rare_chars deferred to reap.
+        self._enable_rare_chars_finish_on_reap()
+        pinned = tuple(rid for rid in req_ids[:n_req] if rid)
+        store = RequestGuardStore.get()
+        if pinned:
+            store.add_rare_pair_jobs(pinned)
+
+        def _finish_pair(
+            pair_hold=hold,
+            cpu=cpu,
+            event=event,
+            req_ids=req_ids,
+            n_req=n_req,
+            sampled=sampled,
+            pinned_ids=pinned,
+        ) -> None:
+            released = False
+
+            def _release() -> None:
+                nonlocal released
+                if released:
+                    return
+                released = True
+                if pinned_ids:
+                    RequestGuardStore.get().finish_rare_pair_jobs(pinned_ids)
+                self._reap_finished_requests()
+
+            try:
+                if event is not None:
+                    event.synchronize()
+                del pair_hold
+                if n_req <= 0:
+                    return
+                self._rare_pair_pack_and_feed(cpu, sampled, req_ids, n_req)
+            except Exception:
+                logger.exception("[runtime_guard: rare_chars] async pair finish failed")
+            finally:
+                _release()
+
+        from vllm_ascend.observability.runtime_guard.rare_pair_wait import (
+            get_rare_pair_wait_queue,
+        )
+
+        ok = bool(get_rare_pair_wait_queue().submit(_finish_pair))
+        if not ok:
+            if pinned:
+                store.finish_rare_pair_jobs(pinned)
+            logger.warning(
+                "[runtime_guard: rare_chars] pair wait queue full; dropped sync+feed req_ids=%s",
+                req_ids,
+            )
+
+    def _rare_pair_pack_and_feed(
+        self,
+        cpu: Any,
+        sampled: Any,
+        req_ids: list[str],
+        n_req: int,
+    ) -> None:
+        """Materialize host pairs and feed every live request (no step budget)."""
         try:
             from vllm_ascend.observability.runtime_guard.detector.rare_chars import pack_rare_step
 
-            token_ids, top1, chosen = pack_rare_step(cpu, getattr(output, "sampled_token_ids", None), len(req_ids))
+            token_ids, top1, chosen = pack_rare_step(cpu, sampled, n_req)
         except Exception:
             logger.exception("[runtime_guard: rare_chars] pair D2H materialize failed")
             return
         n = int(token_ids.shape[0])
         if n <= 0:
             return
-        # Every live request is fed. There is no per-step budget and no skip interval.
-        self._enqueue_rare_chars_feed(req_ids[:n], token_ids, top1, chosen)
-
-    def _enqueue_rare_chars_feed(
-        self,
-        req_ids: list[str],
-        token_ids: list[int],
-        top1: list[float],
-        chosen: list[float],
-    ) -> None:
-        """Rc4 ``feed`` on ActionQueue. ``get_output`` only submits."""
-
-        def _cpu_job() -> None:
-            try:
-                detector = self.detectors.get("rare_chars")
-                if detector is None:
-                    return
-                for alert in detector.feed_precomputed(
-                    req_ids=req_ids,
-                    token_ids=token_ids,
-                    top1_logprobs=top1,
-                    chosen_logprobs=chosen,
-                ):
-                    self._handle_alert(alert, detector=detector)
-            except Exception:
-                logger.exception("[runtime_guard: rare_chars] queued feed failed")
-
-        queue = self.action_executor.action_queue
-        ok = bool(queue.submit(_cpu_job, heavy=True))
-        if not ok:
-            logger.warning(
-                "[runtime_guard: rare_chars] queued feed dropped (queue full or stopping); req_ids=%s",
-                req_ids,
-            )
+        detector = self.detectors.get("rare_chars")
+        if detector is None:
+            return
+        try:
+            for alert in detector.feed_precomputed(
+                req_ids=req_ids[:n],
+                token_ids=token_ids,
+                top1_logprobs=top1,
+                chosen_logprobs=chosen,
+            ):
+                self._handle_alert(alert, detector=detector)
+        except Exception:
+            logger.exception("[runtime_guard: rare_chars] feed_precomputed failed")
 
     def check_after_sample(
         self,
