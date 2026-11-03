@@ -5,9 +5,9 @@
 
 import pytest
 
-from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.cases import (
+from tests.e2e.pull_request.rlhf.weight_transfer.model import WeightUpdateModelCase
+from tests.e2e.pull_request.two_card.rlhf.weight_transfer.cases import (
     GLM_CASES,
-    WeightUpdateModelCase,
     pytest_model_cases,
 )
 from tests.e2e.pull_request.two_card.rlhf.weight_transfer.ipc.runner import (

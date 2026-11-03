@@ -32,20 +32,20 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 import torch
 
-from tests.e2e.pull_request.two_card.rlhf.conftest import server_visible_devices
-from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common import oracle, weight_source
-from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.cases import (
+from tests.e2e.pull_request.rlhf.common import server_visible_devices
+from tests.e2e.pull_request.rlhf.weight_transfer import oracle, weight_source
+from tests.e2e.pull_request.rlhf.weight_transfer.oracle import (
+    live_update_serve_args,
+    reference_serve_args,
+    reference_signature,
+)
+from tests.e2e.pull_request.two_card.rlhf.weight_transfer.cases import (
     DEEPSEEK_CASES,
     GLM_CASES,
     MINIMAX_CASES,
     MODEL_CASES,
     QWEN_CASES,
     pytest_model_cases,
-)
-from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.oracle import (
-    live_update_serve_args,
-    reference_serve_args,
-    reference_signature,
 )
 from tests.ut.distributed.weight_transfer.weight_transfer_test_helpers import checkpoint_source, router_meta_model
 

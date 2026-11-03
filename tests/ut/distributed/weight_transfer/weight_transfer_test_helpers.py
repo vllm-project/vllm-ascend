@@ -7,7 +7,7 @@ from unittest.mock import patch
 import torch
 from transformers import PretrainedConfig
 
-from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common import weight_source
+from tests.e2e.pull_request.rlhf.weight_transfer import weight_source
 
 
 def checkpoint_source(model, case):

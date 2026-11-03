@@ -8,9 +8,9 @@ from contextlib import contextmanager
 
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.pull_request.two_card.rlhf.conftest import rlhf_server, wait_for_free_device_memory
-from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.cases import WeightUpdateModelCase
-from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.weight_source import (
+from tests.e2e.pull_request.rlhf.common import rlhf_server, wait_for_free_device_memory
+from tests.e2e.pull_request.rlhf.weight_transfer.model import WeightUpdateModelCase
+from tests.e2e.pull_request.rlhf.weight_transfer.weight_source import (
     FixedRandomWeightSource,
     fixed_startup_checkpoint,
 )

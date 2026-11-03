@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Shared device selection and HTTP control helpers for two-card RLHF tests."""
+"""Shared server, device and control helpers for RLHF tests across card counts."""
 
 from __future__ import annotations
 

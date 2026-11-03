@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.adapters.minimax import minimax_m3_checkpoint_name
-from tests.e2e.pull_request.two_card.rlhf.weight_transfer.common.cases import (
+from tests.e2e.pull_request.rlhf.weight_transfer.adapters.minimax import minimax_m3_checkpoint_name
+from tests.e2e.pull_request.two_card.rlhf.weight_transfer.cases import (
     MINIMAX_M3_CASE,
 )
 from tests.ut.distributed.weight_transfer.weight_transfer_test_helpers import checkpoint_source
