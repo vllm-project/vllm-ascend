@@ -20,6 +20,24 @@ from vllm.v1.worker.utils import (
 )
 
 
+def _iter_overlapping_cache_views(
+    cache_views: Sequence[tuple[int, int, torch.Tensor]],
+) -> Iterator[list[torch.Tensor]]:
+    """Group views by their precomputed byte spans, excluding unrelated caches."""
+    group: list[torch.Tensor] = []
+    group_end = 0
+    for start, end, tensor in sorted(cache_views, key=lambda view: view[0]):
+        if start == end:
+            continue
+        if group and start >= group_end:
+            yield group
+            group = []
+        group.append(tensor)
+        group_end = max(group_end, end)
+    if group:
+        yield group
+
+
 def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor | Sequence[torch.Tensor | None] | None],
     num_blocks: int,
@@ -37,8 +55,8 @@ def copy_kv_cache_blocks_inplace(
     if not kv_cache_block_copies:
         return
 
-    cache_tensors: list[torch.Tensor] = []
-    seen_tensors: set[int] = set()
+    cache_views: list[tuple[int, int, torch.Tensor]] = []
+    seen_tensors: set[tuple[torch.device, int, tuple[int, ...], tuple[int, ...], int]] = set()
     for entry in kv_caches:
         if entry is None:
             continue
@@ -49,36 +67,53 @@ def copy_kv_cache_blocks_inplace(
         for tensor in tensors:
             if tensor is None:
                 continue
-            data_ptr = tensor.data_ptr()
-            if data_ptr in seen_tensors:
+            # Hybrid state and attention views may start at the same address
+            # but cover different bytes. Deduplicate only identical layouts.
+            start = tensor.data_ptr()
+            shape, strides, element_size = tensor.shape, tensor.stride(), tensor.element_size()
+            view_key = (tensor.device, start, shape, strides, element_size)
+            if view_key in seen_tensors:
                 continue
-            seen_tensors.add(data_ptr)
-            cache_tensors.append(tensor)
+            seen_tensors.add(view_key)
+            # Include stride gaps to conservatively detect overlaps. Reuse the
+            # layout metadata above rather than querying each tensor again.
+            span = 0 if 0 in shape else 1 + sum((size - 1) * stride for size, stride in zip(shape, strides))
+            cache_views.append((start, start + span * element_size, tensor))
 
-    if not cache_tensors:
+    if not cache_views:
         return
 
-    device = cache_tensors[0].device
-    for tensor in cache_tensors:
+    device = cache_views[0][2].device
+    for _, _, tensor in cache_views:
         assert tensor.device == device
         assert tensor.shape[0] % num_blocks == 0
-        # FP8 is storage here. NPU stack/index operators need byte views;
-        # same-size bitcasts preserve the non-contiguous page geometry.
-        if tensor.dtype == torch.float8_e4m3fn:
-            tensor = tensor.view(torch.int8)
-        kernel_blocks_per_block = tensor.shape[0] // num_blocks
-        # Page-strided MLA views are non-contiguous, so a flat ``view`` would
-        # either fail or materialize a copy. Split only dim 0 to preserve the
-        # original strided storage while copying every kernel block in a page.
-        blocks = torch.as_strided(
-            tensor,
-            size=(num_blocks, kernel_blocks_per_block, *tensor.shape[1:]),
-            stride=(tensor.stride(0) * kernel_blocks_per_block, tensor.stride(0), *tensor.stride()[1:]),
-            storage_offset=tensor.storage_offset(),
-        )
-        source_blocks = torch.stack([blocks[copy.src_block_id] for copy in kv_cache_block_copies])
-        for index, copy in enumerate(kv_cache_block_copies):
-            blocks[copy.dst_block_id].copy_(source_blocks[index])
+
+    for group in _iter_overlapping_cache_views(cache_views):
+        pending_copies: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for tensor in group:
+            # FP8 is storage here. NPU stack/index operators need byte views;
+            # same-size bitcasts preserve the non-contiguous page geometry.
+            if tensor.dtype == torch.float8_e4m3fn:
+                tensor = tensor.view(torch.int8)
+            kernel_blocks_per_block = tensor.shape[0] // num_blocks
+            # Split only dim 0 so page-strided views keep their storage layout.
+            blocks = torch.as_strided(
+                tensor,
+                size=(num_blocks, kernel_blocks_per_block, *tensor.shape[1:]),
+                stride=(tensor.stride(0) * kernel_blocks_per_block, tensor.stride(0), *tensor.stride()[1:]),
+                storage_offset=tensor.storage_offset(),
+            )
+            source_blocks = torch.stack([blocks[copy.src_block_id] for copy in kv_cache_block_copies])
+            pending_copies.append((blocks, source_blocks))
+
+        # Snapshot every overlapping view before writing any destination. A
+        # per-view snapshot would read modified data during cycles or chains.
+        for blocks, source_blocks in pending_copies:
+            for index, copy in enumerate(kv_cache_block_copies):
+                blocks[copy.dst_block_id].copy_(source_blocks[index])
+        # Bound temporary storage to this group, including the loop reference.
+        pending_copies.clear()
+        del source_blocks
 
 
 def _group_tensor_strides(
