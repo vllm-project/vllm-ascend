@@ -43,7 +43,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_manager,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.utils import should_skip_allreduce_across_dp_group
+from vllm_ascend.utils import is_deepseek_v41, should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -511,6 +511,17 @@ class AscendModelState(DefaultModelState):
                 )
         is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
+        if for_capture and input_batch.max_query_len is not None:
+            spec = self.vllm_config.speculative_config
+            if (
+                spec is not None
+                and spec.method == "dspark"
+                and spec.enable_adaptive_verification
+                and is_deepseek_v41(self.vllm_config.model_config.hf_config)
+            ):
+                # Capture uses dummy query lengths. Size C2 launches for the
+                # widest query the graph can replay, including small buckets.
+                max_query_len = min(input_batch.max_query_len, num_input_tokens)
         pcp_context = (
             self.pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
             if self.pcp_manager is not None
