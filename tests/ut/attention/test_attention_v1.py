@@ -765,8 +765,8 @@ class TestAscendAttentionBackendImpl(TestBase):
     def test_multi_token_batch_labeled_decode_keeps_attn_mask_and_sparse_mode_three(
         self, mock_fia, mock_get_forward_context
     ):
-        # Multi-token batches labeled DecodeOnly (spec-decode draft/verify and
-        # mixed FULL-graph capture dummies) still need the causal mask.
+        # Multi-token batches labeled DecodeOnly (spec-decode draft/verify)
+        # still need the causal mask.
         query = torch.randn(2, 8, 64)
         key = torch.randn(2, 8, 64)
         value = torch.randn(2, 8, 64)
@@ -818,9 +818,17 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch("vllm_ascend.attention.attention_v1.register_task")
     @patch("vllm_ascend.attention.attention_v1.get_capture_resource", return_value=MagicMock())
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    def test_full_graph_fia_decode_capture_skips_attn_mask_and_uses_sparse_mode_zero(
+    def test_full_graph_fia_decode_capture_keeps_attn_mask_and_sparse_mode_three(
         self, mock_get_forward_context, mock_get_capture_resource, mock_register_task
     ):
+        # FULL-graph capture dummies are always DecodeOnly with one query
+        # token per request (AscendInputBatch.make_dummy), but the captured
+        # graphs also replay multi-token batches (speculative-decode and
+        # adaptive-verification batches, chunked prefill). FIA graph replay
+        # cannot rebind atten_mask/sparse_mode, so capture must keep the
+        # right-aligned causal mask (sparse_mode=3), which is valid for every
+        # replay shape. Skipping the mask at capture corrupts spec-decode
+        # acceptance rates (test_dynamic dspark/dflash, cf. #17948).
         query = torch.randn(2, 8, 64)
         key = torch.randn(2, 8, 64)
         value = torch.randn(2, 8, 64)
@@ -840,8 +848,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.impl.full_graph_fia(query, key, value, metadata, output)
 
         task_kwargs = mock_register_task.call_args[0][1]
-        self.assertIsNone(task_kwargs["atten_mask"])
-        self.assertEqual(task_kwargs["sparse_mode"], 0)
+        self.assertIs(task_kwargs["atten_mask"], metadata.attn_mask)
+        self.assertEqual(task_kwargs["sparse_mode"], 3)
 
     @patch("vllm_ascend.attention.attention_v1.register_task")
     @patch("vllm_ascend.attention.attention_v1.get_capture_resource", return_value=MagicMock())
@@ -849,9 +857,10 @@ class TestAscendAttentionBackendImpl(TestBase):
     def test_full_graph_fia_spec_verify_capture_keeps_attn_mask_and_sparse_mode_three(
         self, mock_get_forward_context, mock_get_capture_resource, mock_register_task
     ):
-        # FULL graph capture forces DecodeOnly onto spec-decode verify dummies
-        # (max_query_len == 1 + num_speculative_tokens); they still need the
-        # causal mask (cf. PR #17948).
+        # Spec-decode verify batches replay the same FULL graphs captured
+        # with single-token decode dummies; the multi-token queries need the
+        # right-aligned causal mask, which capture must therefore keep
+        # (cf. PR #17948).
         query = torch.randn(4, 8, 64)
         key = torch.randn(4, 8, 64)
         value = torch.randn(4, 8, 64)
