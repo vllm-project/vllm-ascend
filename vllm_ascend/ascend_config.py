@@ -397,7 +397,7 @@ class RlConfig:
 class QuantizedAllReduceConfig:
     """Configuration Object for ``additional_config["quantized_all_reduce_config"]``.
 
-    Opt-in int8 quantized all-reduce for large bf16 TP collectives (Atlas A2/A3,
+    Opt-in int8 quantized all-reduce for large bf16 TP collectives (Atlas A2 only,
     1 < TP <= 8). A collective takes the int8 path only when its payload reaches
     ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data: the default
     16,777,216 elements is 32 MiB, the measured break-even rounded up.
