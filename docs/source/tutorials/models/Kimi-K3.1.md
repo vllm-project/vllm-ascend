@@ -2,11 +2,11 @@
 
 ## 1 Introduction
 
-This document describes Kimi K3.1 Prefill/Decode (PD) separation on 950DT products (A5), using eight nodes with eight devices per node. It follows the directory structure and engine-template conventions of [Kimi K3](Kimi-K3.md).
+This document describes Kimi K3.1 Prefill/Decode (PD) separation on 950DT products (A5), using eight nodes with eight devices per node.
 
 !!! note
 
-    This is a reference configuration requiring a K3.1-enabled vLLM/vLLM-Ascend build. The model registration, sparse-attention operators, AttnRes pipeline-parallel transport, and connector support must be available in that build. End-to-end eight-node validation is still required; an unmodified K3 release image does not establish K3.1 support.
+    This is a reference configuration requiring a K3.1-enabled vLLM/vLLM-Ascend build. The model registration, sparse-attention operators, AttnRes pipeline-parallel transport, and connector support must be available in that build. End-to-end eight-node validation is still required.
 
 ## 2 Supported Features
 
@@ -37,15 +37,15 @@ Follow [verify multi-node communication environment](../../getting_started/insta
 
 ### 4.1 Docker Image Installation
 
-Use the same K3.1-enabled A5 image on every node. Follow the 950DT container setup in [Kimi K3 Section 4.1](Kimi-K3.md#41-docker-image-installation) and the [A5 container requirements](../features/pd_disaggregation_mooncake_multi_node.md#atlas-850850e950-superpod-950pr950dt-container-requirements) for host networking, devices, driver, firmware, and communication mounts. Also mount the target weights, draft weights, and MemCache configuration directories.
+Use the same K3.1-enabled A5 image on every node. Configure host networking, devices, driver, firmware, and communication mounts according to the [A5 container requirements](../features/pd_disaggregation_mooncake_multi_node.md#atlas-850850e950-superpod-950pr950dt-container-requirements). Also mount the target weights, draft weights, and MemCache configuration directories.
 
-For the MemCache-backed pool used by the PD templates, follow [Kimi K3 Sections 5.4.1–5.4.4](Kimi-K3.md#541-install-mf) to install `memcache_hybrid` and `memfabric_hybrid`, prepare the configuration files, and start the shared MetaService and a standalone MemCache process on every node. Use the same MetaService address throughout the cluster, and select the local transport and DRAM capacity for the actual A5 environment.
+For the MemCache-backed pool used by the PD templates, install `memcache_hybrid` and `memfabric_hybrid`, prepare the configuration files, and start the shared MetaService and a standalone MemCache process on every node. See the [KV Cache Pool deployment guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) for backend configuration and software requirements. Use the same MetaService address throughout the cluster, and select the local transport and DRAM capacity for the actual A5 environment.
 
 Wait for every standalone process to report successful initialization. The vLLM engines use `<MEMCACHE_CONFIG_DIR>/mmc-local.conf`; standalone MemCache processes use `mmc-local-standalone.conf`.
 
 ### 4.2 Source Code Installation
 
-For source builds, follow [Kimi K3 Section 4.2](Kimi-K3.md#42-source-code-installation) with a K3.1-enabled source revision, and keep that revision and its compiled operators consistent across all eight nodes. Check the model registration inside the runtime container:
+Build and install a K3.1-enabled source revision using the [installation guide](../../getting_started/installation.md). Keep that revision and its compiled operators consistent across all eight nodes. Check the model registration inside the runtime container:
 
 ```shell
 python - <<'PY'
@@ -72,7 +72,7 @@ Keep the P/D master addresses, RPC ports, HTTP ports, and KV port ranges indepen
 
 #### 5.1.1 Create the engine templates
 
-Use the same seven template arguments and `run_dp_template.sh` filename as Kimi K3. Replace each node's `local_ip` and `nic_name`, the role's KV base port, and the model and MemCache paths. Both templates use `lookup_rpc_port=0` for one local engine per node; use distinct IPC identifiers if multiple engines share the same local IPC namespace.
+Save the corresponding Prefill or Decode engine template as `run_dp_template.sh` on each node. The templates accept the seven positional arguments listed in [Section 5.1.2](#512-start-the-engines). Replace each node's `local_ip` and `nic_name`, the role's KV base port, and the model and MemCache paths. Both templates use `lookup_rpc_port=0` for one local engine per node; use distinct IPC identifiers if multiple engines share the same local IPC namespace.
 
 === "950DT products"
 
@@ -394,7 +394,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Follow [Kimi K3 Section 8.2](Kimi-K3.md#82-using-vllm-benchmark), replacing the served model name with `kimi`, the tokenizer path with the K3.1 checkpoint, and the service address with the proxy. Record request lengths, concurrency, cache state, and draft acceptance alongside latency and throughput. No performance results are claimed for this reference configuration.
+Use `vllm bench serve` against the proxy endpoint, with served model name `kimi`, the K3.1 checkpoint as the tokenizer path, and tokenizer mode `kimi_k3`. See the [performance benchmark guide](../../developer_guide/performance_and_debug/performance_benchmark.md) for workload preparation and measurement. Record request lengths, concurrency, cache state, and draft acceptance alongside latency and throughput. No performance results are claimed for this reference configuration.
 
 ## 9 Performance Tuning
 
@@ -426,7 +426,7 @@ Adjust `max-model-len`, `max-num-seqs`, `max-num-batched-tokens`, and `gpu-memor
 ## 10 FAQ
 
 - **Q: Why does the model registration check fail?**
-A: The runtime needs K3.1 model registration and its matching operators and PP support. A K3-only image is insufficient.
+A: The runtime needs K3.1 model registration and its matching operators and PP support. Verify that all required components are installed in the runtime container.
 - **Q: Which nodes should be registered with the proxy?**
 A: Register Prefill rank 0 and all four Decode HTTP endpoints. Prefill ranks 1–3 are headless PP workers.
 - **Q: Which DSpark settings must match?**
