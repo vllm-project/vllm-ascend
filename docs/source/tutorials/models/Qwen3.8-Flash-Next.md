@@ -26,8 +26,8 @@ Select the checkpoint that matches the deployment configuration:
 
 | Hardware | Deployment | Checkpoint | Device allocation | Download Links |
 | --- | --- | --- | --- | --- |
-| A2 Series / Atlas 800 A3 | Colocated | `Qwen3.8-Flash-Next-w8a8-mtp` | 8 devices, TP8 × DP1 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
-| A2 Series / Atlas 800 A3 | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | |
+| A2/A3 | Colocated | `Qwen3.8-Flash-Next-w8a8-mtp` | 8 devices, TP8 × DP1 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
+| A2/A3 | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | |
 | Ascend 950 DT | Colocated | `Qwen3.8-Flash-Next-w8a8-mxfp8` | 4 devices, TP4 × DP1 | |
 | Ascend 950 DT | PD separation | `Qwen3.8-Flash-Next-w4a8-mxfp` | 8 devices, TP2 × DP2 per role | |
 
@@ -92,7 +92,7 @@ python -c "import vllm, vllm_ascend; print('vllm and vllm-ascend are ready')"
 
 ### 4.2 Source Code Installation
 
-To install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md#installation-existing-cann-install).
+For A2/A3 and Ascend 950 DT, install `vllm-ascend` from source by following [installation](../../getting_started/installation.md#installation-existing-cann-install).
 
 If you want to deploy a multi-node environment, you need to set up the environment on each node.
 
@@ -108,7 +108,7 @@ Before starting:
 - Network examples use `192.168.0.1` and `eth0`. Replace these literals with the serving host address and its network interface.
 - Verify available NPU memory before changing context length, concurrency, or memory utilization.
 
-=== "A2 Series / A3 Series"
+=== "A2/A3"
 
     This W8A8 deployment uses TP8 × DP1, a maximum context length of 131072 tokens, and up to 8 active sequences.
 
@@ -170,7 +170,7 @@ Before starting:
     - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert multistream overlap. Shared expert DP requires expert parallelism and TP > 1. Keep `enable_fused_mc2=0` when using shared expert overlap.
     - `enable_npugraph_ex=true` enables NPU graph extension; static kernels and super kernels remain disabled.
 
-=== "950 DT"
+=== "Ascend 950 DT"
 
     This W8A8-MXFP8 deployment uses TP4 × DP1, a maximum context length of 141312 tokens, and up to 32 active sequences.
 
@@ -250,7 +250,7 @@ The response should list the configured model name. After startup, use [Section 
 
 Select the hardware tab below.
 
-=== "A2 Series / A3 Series"
+=== "A2/A3"
 
     A2 and A3 use the same TP2 × DP4 configuration per role: prefill and decode each require eight devices. The commands below show the 16-device single-host layout. An eight-device A2 host cannot run both roles with this layout; deployment across two hosts requires separate host addresses, device numbering, and proxy endpoints. Both roles load the same W4A8 checkpoint and enable expert parallelism, async scheduling, and Model Runner V2. MooncakeConnectorV2 transfers KV cache between them; requests enter the proxy on port 25570.
 
@@ -304,7 +304,7 @@ Select the hardware tab below.
     exec vllm serve /models/Qwen3.8-Flash-Next-w4a8 \
         --host 0.0.0.0 \
         --port 25568 \
-        --served-model-name qwen38-flash-next-a3-pd \
+        --served-model-name qwen38-flash-next-a2-a3-pd \
         --trust-remote-code \
         --quantization ascend \
         --tensor-parallel-size 2 \
@@ -353,7 +353,7 @@ Select the hardware tab below.
     exec vllm serve /models/Qwen3.8-Flash-Next-w4a8 \
         --host 0.0.0.0 \
         --port 25569 \
-        --served-model-name qwen38-flash-next-a3-pd \
+        --served-model-name qwen38-flash-next-a2-a3-pd \
         --trust-remote-code \
         --quantization ascend \
         --tensor-parallel-size 2 \
@@ -390,7 +390,7 @@ Select the hardware tab below.
 
     **Service Verification:**
 
-    Wait for both services to finish loading. On the serving host, check that both APIs respond successfully and list `qwen38-flash-next-a3-pd`:
+    Wait for both services to finish loading. On the serving host, check that both APIs respond successfully and list `qwen38-flash-next-a2-a3-pd`:
 
     ```bash
     curl --fail http://127.0.0.1:25568/v1/models
@@ -405,7 +405,7 @@ Select the hardware tab below.
     curl --fail http://127.0.0.1:25570/v1/chat/completions \
         -H "Content-Type: application/json" \
         -d '{
-            "model": "qwen38-flash-next-a3-pd",
+            "model": "qwen38-flash-next-a2-a3-pd",
             "messages": [{"role": "user", "content": "Who are you?"}],
             "max_tokens": 1024,
             "temperature": 0
@@ -426,7 +426,7 @@ Select the hardware tab below.
     - Keep the Mooncake DP4 / TP2 declarations synchronized with both services' parallel settings.
     - For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to both roles and verify proxy forwarding. Multimodal input and thinking control also require validation through the proxy with the W4A8 checkpoint.
 
-=== "950 DT"
+=== "Ascend 950 DT"
 
     This W4A8-MXFP deployment uses eight devices on one Ascend 950 DT host. Prefill and decode each use TP2 × DP2, with a separate API process for each DP rank. MooncakeConnectorV2 transfers KV cache between the two roles.
 
@@ -719,9 +719,9 @@ The requests below use the A2/A3 colocated endpoint. Select the endpoint and mod
 | Deployment | Port | Model name |
 | --- | --- | --- |
 | A2/A3 colocated | 8088 | `qwen3.8-flash-next` |
-| 950 DT colocated | 8087 | `qwen3.8-flash-next-950-dt` |
-| A2/A3 PD proxy | 25570 | `qwen38-flash-next-a3-pd` |
-| 950 DT PD proxy | 8087 | `qwen38-flash-next-950-dt-pd` |
+| Ascend 950 DT colocated | 8087 | `qwen3.8-flash-next-950-dt` |
+| A2/A3 PD proxy | 25570 | `qwen38-flash-next-a2-a3-pd` |
+| Ascend 950 DT PD proxy | 8087 | `qwen38-flash-next-950-dt-pd` |
 
 For PD, first complete the proxy check and review the key parameters in [Section 5.2](#52-pd-separation-deployment).
 
@@ -908,11 +908,11 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | Hardware | Deployment / role | Devices | TP × DP | Max model length | Max sequences | Batch tokens |
 | --- | --- | --- | --- | --- | --- | --- |
 | A2/A3 | Colocated | 0–7 | 8 × 1 | 131072 | 8 | 4096 |
-| 950 DT | Colocated | 0–3 | 4 × 1 | 141312 | 32 | 4096 |
+| Ascend 950 DT | Colocated | 0–3 | 4 × 1 | 141312 | 32 | 4096 |
 | A2/A3 | Prefill | 0–7 | 2 × 4 | 141312 | 32 | 4096 |
 | A2/A3 | Decode | 8–15 | 2 × 4 | 141312 | 32 | 4096 |
-| 950 DT | Prefill | 0–3 | 2 × 2 | 141312 | 64 | 4096 |
-| 950 DT | Decode | 4–7 | 2 × 2 | 141312 | 64 | 4096 |
+| Ascend 950 DT | Prefill | 0–3 | 2 × 2 | 141312 | 64 | 4096 |
+| Ascend 950 DT | Decode | 4–7 | 2 × 2 | 141312 | 64 | 4096 |
 
 ### 9.2 Tuning Guidelines
 
