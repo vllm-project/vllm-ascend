@@ -18,7 +18,7 @@ Typical use inside a test::
         run_pool_hit_sequence(runner, block_size=128, prompt_tokens=16384)
 
 The low-level helpers (``snapshot_metrics`` / ``assert_hit_ratio`` /
-``assert_no_hit`` / ``assert_output_identical`` / ``scan_pool_errors``) stay
+``assert_no_hit`` / ``assert_output_identical``) stay
 public so a test can build a custom sequence when the shared one does not fit.
 """
 
@@ -28,23 +28,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-import regex as re
-
 HITS_METRIC = "vllm:external_prefix_cache_hits"
 QUERIES_METRIC = "vllm:external_prefix_cache_queries"
 LOAD_KEYS_METRIC = "vllm:ascend_store_load_get_keys"
 DELAYED_BLOCKS_METRIC = "vllm:ascend_store_delayed_release_blocks"
-
-# Deterministic pool-link error signatures: any hit fails the case.
-POOL_ERROR_PATTERNS: tuple[str, ...] = (
-    r"BatchCopyWritePath",
-    r"-3102",
-    r"\b107020\b",
-    r"\b107023\b",
-    r"-3004",
-    r"NOTIFY_WAIT",
-    r"event wait timeout",
-)
 
 
 @dataclass(frozen=True)
@@ -161,25 +148,6 @@ def assert_output_identical(cold_tokens: Sequence[int], hit_tokens: Sequence[int
         f"[{tag}] H3 failed: pool-hit output differs from cold start\n"
         f"  cold={list(cold_tokens)}\n  hit ={list(hit_tokens)}"
     )
-
-
-def scan_pool_errors(text: str) -> list[str]:
-    """Return log lines matching known pool failure signatures."""
-    found: list[str] = []
-    for line in text.splitlines():
-        for pattern in POOL_ERROR_PATTERNS:
-            if re.search(pattern, line):
-                found.append(line.strip())
-                break
-    return found
-
-
-def assert_no_pool_errors(text: str, *, tag: str = "", limit: int = 5) -> None:
-    """L4: fail if any known pool failure signature appears in the log."""
-    hits = scan_pool_errors(text)
-    if hits:
-        head = "\n".join(f"  {line[:300]}" for line in hits[:limit])
-        raise AssertionError(f"[{tag}] L4 failed: {len(hits)} pool error signature(s) found:\n{head}")
 
 
 # Deterministic token-id prompts. Token IDs are model-independent here: every
