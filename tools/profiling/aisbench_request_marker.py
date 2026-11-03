@@ -53,7 +53,11 @@ class TimedGenInferencer(GenInferencer):
 
         def publish_count():
             temporary = path.with_suffix(".tmp")
-            temporary.write_text(str(self.status_counter.get_req))
+            # The base method assigns status_counter at its start; on loaded
+            # runners the monitor below may publish before that assignment,
+            # so tolerate the window instead of letting the monitor die.
+            counter = getattr(self, "status_counter", None)
+            temporary.write_text(str(0 if counter is None else counter.get_req))
             temporary.replace(path)
 
         def monitor():
