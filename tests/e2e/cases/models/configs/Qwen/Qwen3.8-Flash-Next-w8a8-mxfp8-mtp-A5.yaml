@@ -3,8 +3,8 @@
 # CI supplies the model identifier and port; device visibility is inherited
 # from the runner/container environment without a per-case override.
 # The CI image must provide matching CANN/ATB and compiled custom operators.
-# Performance baselines are three-run mean output TPS from the local A5 service;
-# validate the Nightly image and ModelScope model artifact in CI.
+# Performance baselines are provisional conservative values calibrated from
+# one successful release Nightly CI run on 2026-11-02 (overall output token/s).
 test_cases:
   - name: "Qwen3.8-Flash-Next-w8a8-mxfp8-mtp-A5"
     model: "Eco-Tech/Qwen3.8-Flash-Next-w8a8-mxfp8-mtp"
@@ -61,7 +61,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 16
         request_rate: 0
-        baseline: 64.6506
+        baseline: 61
         threshold: 0.97
         temperature: 0
         ignore_eos: true
@@ -74,7 +74,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 16
         request_rate: 0
-        baseline: 145.1943
+        baseline: 160
         threshold: 0.97
         temperature: 0
         ignore_eos: true
