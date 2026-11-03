@@ -446,6 +446,7 @@ def test_manager_probe_tolerates_objects_it_cannot_introspect():
     ``TypeError`` on anything that is not callable, so a manager class carrying
     either must not take the coordinator down with it.
     """
+
     class _CLevelLookup:
         find_longest_cache_hit = range
 

@@ -160,9 +160,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # it permanently None and skipped the validation below. `getattr` keeps
         # this tolerant of config objects that predate the field (test / mock
         # configs); on a real build the field is always present.
-        self.retention_interval = getattr(
-            kv_cache_config, "prefix_cache_retention_interval", None
-        )
+        self.retention_interval = getattr(kv_cache_config, "prefix_cache_retention_interval", None)
         validate_retention_interval = getattr(
             vllm_kv_cache_coordinator,
             "_validate_prefix_cache_retention_interval",
