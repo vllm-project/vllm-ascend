@@ -470,7 +470,10 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.NONE])
 @pytest.mark.parametrize("num_draft_tokens", [0, 3])
-def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata, graph_mode, num_draft_tokens):
+@pytest.mark.parametrize("draft_counts_missing", [False, True])
+def test_prepare_attn_classifies_one_token_prompt_tails(
+    mock_build_attn_metadata, graph_mode, num_draft_tokens, draft_counts_missing
+):
     """vLLM #58400 requires prompt-tail drafts to use rollback-capable decode metadata."""
     state = SimpleNamespace(
         vllm_config=SimpleNamespace(num_speculative_tokens=3, parallel_config=SimpleNamespace()),
@@ -486,7 +489,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata
         is_prefilling_np=np.array([True, True, False]),
         prefill_runs_as_decode_np=np.array([True, False, False]),
         idx_mapping=torch.arange(3),
-        num_draft_tokens_per_req=np.array([num_draft_tokens, 0, num_draft_tokens]),
+        num_draft_tokens_per_req=None if draft_counts_missing else np.array([num_draft_tokens, 0, num_draft_tokens]),
         num_scheduled_tokens=np.array([num_draft_tokens + 1, 4, num_draft_tokens + 1]),
         query_start_loc=torch.tensor([0, 1, 5, 6], dtype=torch.int32)
         + torch.tensor([0, 1, 1, 2], dtype=torch.int32) * num_draft_tokens,
@@ -509,8 +512,9 @@ def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata
     )
     metadata = mock_build_attn_metadata.call_args.kwargs["model_specific_attn_metadata"]
     assert metadata.is_prefilling.tolist() == [False, True, False]
-    expected_drafts = num_draft_tokens if num_draft_tokens else -1
+    expected_drafts = 0 if draft_counts_missing else num_draft_tokens
     assert metadata.num_decode_draft_tokens_cpu.tolist() == [expected_drafts, -1, expected_drafts]
+    assert metadata.num_accepted_tokens.tolist() == [1, 2, 3]
     np.testing.assert_array_equal(input_batch.is_prefilling_np, [True, True, False])
 
 
