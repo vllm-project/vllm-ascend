@@ -33,13 +33,10 @@ The official release of MiniMax-M3.1-Flash is available on [Hugging Face](https:
 
 Download the weight variant used by the serving commands to the same model directory on all participating nodes. It is recommended to place the model weight in a shared cache directory.
 
-<<<<<<< HEAD
 The Ascend-adapted W8A8 and W8A8-MXFP8 weights above are published on ModelScope only; the Hugging Face repository contains the original NVFP4 checkpoint, which cannot be loaded on Ascend.
 
 Record the downloaded model directories, for example `/models/MiniMax-M3.1-Flash-W8A8` and `/models/MiniMax-M3.1-Flash-W8A8-MXFP8`, and ensure they are accessible inside the container. The commands in this guide use the placeholders `<MINIMAX_M31_FLASH_W8A8_PATH>` and `<MINIMAX_M31_FLASH_W8A8_MXFP8_PATH>` in Section 4.1, and the `MODEL_PATH` variable in Section 5. Replace them with the paths you recorded.
 
-=======
->>>>>>> 018d73f62 (docs: remove MiniMax DSpark guide changes from PR 20167)
 ### 3.2 Verify Multi-node Communication
 
 Prepare the business network and the NPU interconnect by following
