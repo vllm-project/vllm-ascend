@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# TEMPORARY: validate the 800i FED runners only. Do not merge.
+# TEMPORARY: validate the A2 and 800i FED runners only. Do not merge.
 name: E2E
 
 on:
@@ -92,7 +92,7 @@ jobs:
           }
           echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
 
-      - name: Select only 800i tests and route to FED runners
+      - name: Select only A2 and 800i tests and route to FED runners
         id: scope
         run: |
           pip install regex pyyaml
@@ -108,11 +108,17 @@ jobs:
               for line in Path(os.environ["RUNNER_TEMP"], "all-test-groups.txt").read_text().splitlines()
           )
           prefix = "linux-aarch64-a3-800i-"
-          groups = [group for group in json.loads(outputs["test_groups"]) if group["runner"].startswith(prefix)]
+          groups = [
+              group for group in json.loads(outputs["test_groups"])
+              if group["npu_type"] == "a2" or group["runner"].startswith(prefix)
+          ]
           if not groups:
-              raise SystemExit("No 800i tests selected")
+              raise SystemExit("No A2 or 800i tests selected")
           for group in groups:
-              group["runner"] = group["runner"].replace(prefix, prefix + "fed-", 1)
+              if group["npu_type"] == "a2":
+                  group["runner"] = f"linux-aarch64-a2-fed-{group['num_npus']}"
+              else:
+                  group["runner"] = group["runner"].replace(prefix, prefix + "fed-", 1)
               print(f"{group['runner']} / {group['partition']}: {group['tests']}")
           target_ids = sorted({group["csrc_cache_target"] for group in groups})
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
