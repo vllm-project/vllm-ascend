@@ -9,6 +9,7 @@ test_cases:
       VLLM_SERVER_DEV_MODE: "1"
       VLLM_USE_V2_MODEL_RUNNER: "1"
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3000"
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "1"
