@@ -1473,41 +1473,32 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.kv_send_thread.add_save_batch.assert_not_called()
         worker.kv_send_thread.request_queue.join.assert_not_called()
 
-    def test_handle_released_saves_noop_without_send_thread(self):
+    def test_handle_save_reuse_noop_without_send_thread(self):
         worker = self._make_worker()
         worker.kv_send_thread = None
-        worker.handle_released_saves({"r1"})
+        worker.handle_save_reuse({"r1"}, {623})
 
-    def test_handle_released_saves_drains_only_released_requests(self):
+    def test_handle_save_reuse_fences_preempted_and_reallocated_jobs_once(self):
         worker = self._make_worker()
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
 
         worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
-        released = {"r1", "r2"}
-        worker.handle_released_saves(released)
+        preempted = {"r1", "r2"}
+        worker.handle_save_reuse(preempted, {623})
         worker.kv_send_thread.raise_if_failed.assert_called_once_with()
-        worker.kv_send_thread.wait_for_requests_saved.assert_called_once_with(released)
-        worker.kv_send_thread.wait_for_blocks_saved.assert_called_once_with(None)
+        worker.kv_send_thread.wait_for_safe_reuse.assert_called_once_with(preempted, {623})
+        worker.kv_send_thread.wait_for_requests_saved.assert_not_called()
 
-    def test_handle_released_saves_waits_for_reallocated_swa_block(self):
-        worker = self._make_worker()
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
-
-        worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
-        worker.handle_released_saves(set(), {623})
-        worker.kv_send_thread.wait_for_requests_saved.assert_called_once_with(set())
-        worker.kv_send_thread.wait_for_blocks_saved.assert_called_once_with({623})
-
-    def test_handle_released_saves_skips_layerwise_thread(self):
+    def test_handle_save_reuse_skips_layerwise_thread(self):
         worker = self._make_worker()
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
             KVCacheStoreLayerSendingThread,
         )
 
-        # A spec'd layerwise-thread mock has no wait_for_requests_saved member,
+        # A spec'd layerwise-thread mock has no wait_for_safe_reuse member,
         # so a wrong dispatch would raise AttributeError here.
         worker.kv_send_thread = MagicMock(spec=KVCacheStoreLayerSendingThread)
-        worker.handle_released_saves({"r1"})
+        worker.handle_save_reuse({"r1"}, {623})
         worker.kv_send_thread.raise_if_failed.assert_called_once_with()
 
     def test_get_finished_producer_clears_synchronous_completions(self):

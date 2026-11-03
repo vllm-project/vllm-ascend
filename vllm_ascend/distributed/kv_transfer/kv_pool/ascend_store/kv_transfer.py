@@ -449,8 +449,7 @@ class KVCacheStoreBatch:
         self.done = threading.Event()
 
 
-# Poll interval for waiting on a specific request's queued save chunks
-# (released-block fence; keep it small so scheduling stays responsive).
+# Poll interval for queued save-job fences; keep it small so scheduling stays responsive.
 SAVE_REQUEST_POLL_INTERVAL_S = 0.001
 
 
@@ -588,12 +587,21 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self.request_queue.put(save_batch)
         return save_batch
 
-    def wait_for_blocks_saved(self, block_ids: set[int] | None) -> None:
-        """Wait only for saves reading a block assigned in this schedule."""
-        if not block_ids:
+    def wait_for_safe_reuse(
+        self,
+        preempted_req_ids: set[str] | None,
+        allocated_block_ids: set[int] | None,
+    ) -> None:
+        """Drain preempted jobs and jobs reading blocks assigned this step."""
+        if not preempted_req_ids and not allocated_block_ids:
             return
         with self.done_task_lock:
-            pending = {job_id for block_id in block_ids for job_id in self._block_to_save_jobs.get(block_id, ())}
+            pending = {job_id for req_id in preempted_req_ids or () for job_id in self.stored_requests.get(req_id, ())}
+            pending.update(
+                job_id
+                for block_id in allocated_block_ids or ()
+                for job_id in self._block_to_save_jobs.get(block_id, ())
+            )
         while pending:
             self.raise_if_failed()
             with self.done_task_lock:
@@ -603,13 +611,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.raise_if_failed()
 
     def wait_for_requests_saved(self, req_ids: set[str] | None) -> None:
-        """Block until every queued save chunk of these requests completed.
+        """Wait for complete saves when a caller needs a request snapshot.
 
-        Block-reuse fence: the scheduler frees a finished or preempted
-        request's blocks immediately, so before this step's forward may
-        reallocate them, all of that request's queued puts must drain. A
-        request never queues new puts after it finishes or is preempted, so
-        draining it once makes its blocks safe to reuse from then on.
+        Runtime block reuse is fenced by wait_for_safe_reuse instead.
         """
         if not req_ids:
             return
