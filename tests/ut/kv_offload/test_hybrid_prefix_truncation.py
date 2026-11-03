@@ -21,7 +21,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSl
 
 
 @pytest.mark.parametrize("speculative_method", [None, "mtp", "dspark"])
-def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, monkeypatch):
+def test_compressed_prefill_preserves_prompt_with_prefix_hits(speculative_method, monkeypatch):
     monkeypatch.setattr(KVConnectorFactory, "_registry", KVConnectorFactory._registry.copy())
     if "MooncakeHybridConnector" not in KVConnectorFactory._registry:
         KVConnectorFactory.register_connector(
@@ -88,12 +88,16 @@ def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, mon
                 scheduler.schedule()
                 break
         assert request.is_finished()
-        assert request.num_prompt_tokens == length - 1
+        assert request.num_prompt_tokens == length
+        assert request.prompt_token_ids == list(range(length))
+        assert not request.kv_transfer_params.get("_p_side_truncated")
         assert_scheduler_empty(scheduler)
         return starts
 
     run("warm", 641)
     starts = run("hit", 513)
-    assert starts[0] == 384
+    # Speculative groups still drop a cached block at this boundary; keeping
+    # the prompt intact does not remove the drafter's prefix-cache margin.
+    assert starts[0] == (512 if speculative_method is None else 384)
     assert run("shorter", 512)[0] == 384
     assert run("longer", 514)[0] == 512

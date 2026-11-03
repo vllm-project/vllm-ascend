@@ -1362,7 +1362,9 @@ class MooncakeConnectorScheduler:
         self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
 
         self.kv_cache_specs = []
-        self.need_truncate = self.use_compress
+        # Do not infer prompt truncation from compressed KV.
+        # Keep the full DSV4 prompt; Mamba specs below opt into the N-1 handoff.
+        self.need_truncate = False
         sw_sizes_tokens: list[tuple[int, int]] = []
         self.group_block_size = []
         for g in kv_cache_config.kv_cache_groups:
