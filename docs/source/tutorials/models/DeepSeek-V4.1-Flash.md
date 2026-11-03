@@ -142,6 +142,7 @@ separate images from the v0.32.0 release branch.
     docker run --rm -it \
       --name deepseek-v41-950dt \
       --net=host \
+      --ulimit nofile=65536:524288 \
       --shm-size=512g \
       --privileged=true \
       --device /dev/davinci0 \
