@@ -42,7 +42,6 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from vllm_ascend import utils as ascend_utils
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -58,12 +57,19 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
-from vllm_ascend.ops.triton.spec_decode.utils import (
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.ops.triton.v1.spec_decode.utils import (
     _PREPARE_INPUTS_PADDED_KERNEL,
     PREPARE_INPUTS_BLOCK_SIZE,
 )
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import _is_glm_model, check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph
+from vllm_ascend.utils import (
+    _is_glm_model,
+    check_gdn_layer,
+    enable_sp,
+    lmhead_tp_enable,
+    use_updatable_graph,
+    vllm_version_is,
+)
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 from vllm_ascend.worker.v1.spec_decode.utils import (
     SlidingWindowAdapter,
@@ -1216,6 +1222,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.query_start_loc_group[0][: num_reqs_padded + 1].copy_(common_attn_metadata.query_start_loc)
         self.query_start_loc_group[0][num_reqs_padded + 1 :].fill_(0)
         common_attn_metadata.query_start_loc = self.query_start_loc_group[0][: num_reqs_padded + 1]
+        if not vllm_version_is("0.32.0"):
+            # seq_lens/query_start_loc were replaced above; drop cached layouts.
+            common_attn_metadata.invalidate_cached_layout()  # type: ignore[attr-defined]
 
         common_attn_metadata.num_input_tokens = num_input_tokens
 
@@ -1499,8 +1508,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 compact_mtp_topk_indices(
                     draft_model,
                     token_indices_to_sample,
-                    num_input_tokens,
-                    tp_group=get_tp_group() if ascend_utils.enable_dsa_cp() else None,
                     lim_topk_compactors=self._lim_topk_compactors,
                 )
 
@@ -2073,6 +2080,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # sequence length to 1 to minimize their overheads in attention.
         exceeds_mask = common_attn_metadata.seq_lens[:batch_size] > self.max_model_len
         common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_mask, 1)
+        if not vllm_version_is("0.32.0"):
+            # seq_lens was advanced in place above; drop cached layouts.
+            common_attn_metadata.invalidate_cached_layout()  # type: ignore[attr-defined]
         if common_attn_metadata.seq_lens_cpu is not None:
             if advance_draft_positions:
                 common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1

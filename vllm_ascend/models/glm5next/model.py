@@ -11,6 +11,7 @@ from transformers import Glm5NextTextConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
+    divide,
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -48,7 +49,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_v2 import _get_moe_router_dtype
+from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts, _get_moe_router_dtype
 from vllm.model_executor.models.glm4_1v import (
     Glm4vDummyInputsBuilder,
     Glm4vForConditionalGeneration,
@@ -56,7 +57,6 @@ from vllm.model_executor.models.glm4_1v import (
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
-    MixtureOfExperts,
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
@@ -77,8 +77,9 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 
-from vllm_ascend.utils import pad_sequence_parallel_tokens
+from vllm_ascend.utils import pad_sequence_parallel_tokens, vllm_version_is
 
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention, get_kda_parallel_size
@@ -773,7 +774,13 @@ class Glm5NextModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
-        _pending_wk_fp8: dict = {}
+        if vllm_version_is("0.32.0"):
+            _pending_wk_fp8: dict = {}
+        else:
+            # Reordering loaders can split an FP8 indexer wk weight/scale pair
+            # across load_weights() calls; keep the pending buffer on the model.
+            _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", {})
+            self._pending_indexer_wk_fp8 = _pending_wk_fp8
 
         for args in weights:
             name, loaded_weight = args[:2]
@@ -866,7 +873,7 @@ class Glm5NextModel(nn.Module):
         return loaded_params
 
 
-class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid):
+class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2MixtureOfExperts, IsHybrid):
     supports_replayssm: ClassVar[Literal[True]] = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -888,6 +895,22 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(self.config.vocab_size, scale=_LOGIT_SCALE)
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self):
+        self.num_expert_groups = getattr(self.config, "n_group", 1)
+        self.moe_layers = []
+        self.moe_mlp_layers = []
+        example_moe = None
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            if isinstance(layer.mlp, Glm5NextMoE):
+                example_moe = layer.mlp
+                self.moe_mlp_layers.append(layer.mlp)
+                self.moe_layers.append(layer.mlp.experts)
+        self.num_moe_layers = len(self.moe_layers)
+        self.extract_moe_parameters(example_moe)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -914,7 +937,11 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
         if use_glm_recoverssm(vllm_config):
-            return MambaStateDtypeCalculator.append_kda_recoverssm_record(dtypes, vllm_config.model_config.dtype)
+            if vllm_version_is("0.32.0"):
+                return MambaStateDtypeCalculator.append_kda_recoverssm_record(dtypes, vllm_config.model_config.dtype)
+            # vLLM main moved KDA RecoverSSM records out of the KV cache and
+            # removed the calculator helper, but Ascend still packs them in.
+            return (*dtypes, torch.float32, get_kv_cache_torch_dtype("auto", vllm_config.model_config.dtype))
         return dtypes
 
     @classmethod
@@ -933,8 +960,16 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
             num_spec=num_spec,
         )
         if use_glm_recoverssm(vllm_config):
-            return MambaStateShapeCalculator.append_kda_recoverssm_record(
-                shapes, hf_config.linear_num_heads, hf_config.linear_head_dim, tp_size, num_spec + 1
+            if vllm_version_is("0.32.0"):
+                return MambaStateShapeCalculator.append_kda_recoverssm_record(
+                    shapes, hf_config.linear_num_heads, hf_config.linear_head_dim, tp_size, num_spec + 1
+                )
+            local_num_heads = divide(hf_config.linear_num_heads, tp_size)
+            spec_query_len = num_spec + 1
+            return (
+                *shapes,
+                (local_num_heads, spec_query_len, hf_config.linear_head_dim),
+                (local_num_heads, spec_query_len, 2 * hf_config.linear_head_dim),
             )
         return shapes
 
