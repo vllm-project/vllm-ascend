@@ -394,8 +394,8 @@ A few important things to consider when using DFlash2 draft models:
    restriction on draft tokens.
 
    The model-level acceptance test exercises DFlash2 draft graphs using
-   `VLLM_COMPILE` with both `FULL_DECODE_ONLY` and `FULL_AND_PIECEWISE` on two
-   NPUs, including request reuse across batch sizes `1 -> 2 -> 1`:
+   `VLLM_COMPILE` with `FULL_AND_PIECEWISE` on two NPUs, including request
+   reuse across batch sizes `1 -> 2 -> 1`:
 
    ```shell
    pytest -sv tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py -k test_dflash2_v2_acceptance

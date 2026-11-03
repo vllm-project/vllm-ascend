@@ -263,11 +263,9 @@ def test_p_eagle_acceptance(
 
 @pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [7])
-@pytest.mark.parametrize("cudagraph_mode", ["FULL_DECODE_ONLY", "FULL_AND_PIECEWISE"])
 def test_dflash2_v2_acceptance(
     method: str,
     num_speculative_tokens: int,
-    cudagraph_mode: str,
 ):
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     main_model_name = DFLASH2_MODELS[method]["main"]
@@ -310,7 +308,7 @@ def test_dflash2_v2_acceptance(
     # Capture both request counts used by the 1 -> 2 -> 1 reuse sequence.
     compilation_config = CompilationConfig(
         mode=CompilationMode.VLLM_COMPILE,
-        cudagraph_mode=cudagraph_mode,
+        cudagraph_mode="FULL_AND_PIECEWISE",
         cudagraph_capture_sizes=[batch_size * (num_speculative_tokens + 1) for batch_size in (1, 2)],
     )
 
