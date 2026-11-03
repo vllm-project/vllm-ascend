@@ -111,6 +111,4 @@ def test_only_explicit_set_env_normalization_changes_path_identity(tmp_path):
     assert recipe(roots[0]) != recipe(roots[1])
     selected = ["ASCEND_CUSTOM_OPP_PATH"]
     assert recipe(roots[0], normalized=selected) == recipe(roots[1], normalized=selected)
-    assert recipe(roots[0], normalized=selected, name="CPATH") != recipe(
-        roots[1], normalized=selected, name="CPATH"
-    )
+    assert recipe(roots[0], normalized=selected, name="CPATH") != recipe(roots[1], normalized=selected, name="CPATH")

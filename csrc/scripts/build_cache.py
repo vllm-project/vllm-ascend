@@ -1486,7 +1486,9 @@ def run(args: argparse.Namespace) -> int:
     operator_text_manifest: list[dict] = []
     if args.domain == "custom_operator":
         repo_root = Path(args.repo_root) if args.repo_root else None
-        operator_text_hash, operator_text_manifest = _hash_operator_text(Path(args.operator_source), repo_root, excludes)
+        operator_text_hash, operator_text_manifest = _hash_operator_text(
+            Path(args.operator_source), repo_root, excludes
+        )
 
     recipe_hash, recipe_manifest = _hash_recipe(
         recipe_files, args.recipe_value, command, normalize_paths, args.set_env, args.normalize_set_env
