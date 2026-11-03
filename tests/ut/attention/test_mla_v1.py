@@ -287,6 +287,8 @@ def test_mla_fused_preprocess_checks_weight_support(quant_method, device_type, e
 def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, fa_quant_layer, scheme_type):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.use_flashmla = False
+    # Isolate MLAPO/FA-quant policy from the strided-cache writer.
+    impl.use_mla_rope = False
     profile = get_hardware_profile(device_type)
     impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
     impl.enable_mlapo = enable_mlapo
@@ -3098,10 +3100,15 @@ class TestAscendMLAImpl(TestBase):
         with (
             patch.object(mla_v1, "_EXTRA_CTX", SimpleNamespace(num_tokens=2)),
             patch.object(mla_v1, "maybe_save_kv_layer_to_connector"),
+            patch.object(
+                mla_v1,
+                "wait_for_kv_layer_from_connector",
+                side_effect=lambda name: events.append(("connector_wait", name)),
+            ),
         ):
             self.assertIs(self.impl.forward("layer", hidden, (torch.zeros(2, 1, 2),), metadata, output), output)
             self.assertTrue(torch.all(output == 1))
-            self.assertEqual(events, [("wait", "layer"), "fused_cache"])
+            self.assertEqual(events, [("connector_wait", "layer"), ("wait", "layer"), "fused_cache"])
             events.clear()
             self.impl.forward("layer", hidden, (), None, output)
         self.assertEqual(events, [])

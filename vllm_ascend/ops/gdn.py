@@ -44,7 +44,10 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
+from vllm_ascend.ops.gdn_attn_builder import (
+    AscendGDNFusedAttentionBackend,
+    GDNSpecCausalConv1dMetadata,
+)
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -158,6 +161,7 @@ def _flatten_recurrent_state_indices(
     state_indices: torch.Tensor,
     total_tokens: int,
     query_start_loc: torch.Tensor | None = None,
+    flat_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Reduce state indices to exactly one entry per recurrent token.
 
@@ -180,6 +184,8 @@ def _flatten_recurrent_state_indices(
         return state_indices.reshape(-1).contiguous()
     if query_start_loc is None:
         raise ValueError("query_start_loc is required to flatten non-uniform speculative state indices")
+    if flat_indices is not None:
+        return state_indices.reshape(-1)[flat_indices]
     # Variable-length speculative sequences: map each token to its
     # (sequence, slot) pair on device. The output length is host-known
     # (total_tokens), so this path stays sync-free, unlike masked_select or
@@ -191,7 +197,31 @@ def _flatten_recurrent_state_indices(
     token_ids = torch.arange(total_tokens, device=state_indices.device, dtype=qsl.dtype)
     seq_ids = torch.searchsorted(bounds, token_ids, right=True).clamp_(max=num_seqs - 1)
     slot_ids = (token_ids - starts[seq_ids]).clamp_(min=0, max=num_slots - 1)
-    return state_indices[seq_ids, slot_ids].contiguous()
+    return state_indices.reshape(-1)[seq_ids * num_slots + slot_ids]
+
+
+def _get_recurrent_state_flat_indices(
+    metadata: GDNSpecCausalConv1dMetadata,
+    state_indices: torch.Tensor,
+    total_tokens: int,
+    query_start_loc: torch.Tensor,
+) -> torch.Tensor | None:
+    """Build the layer-independent token-to-state mapping once per step."""
+    if state_indices.ndim != 2 or total_tokens == state_indices.numel():
+        return None
+    cached = getattr(metadata, "recurrent_state_flat_indices", None)
+    if cached is not None and cached.numel() == total_tokens:
+        return cached
+    num_seqs, num_slots = state_indices.shape
+    qsl = query_start_loc[: num_seqs + 1]
+    lens = (qsl[1:] - qsl[:-1]).clamp(min=0, max=num_slots)
+    bounds = lens.cumsum(0)
+    starts = bounds - lens
+    token_ids = torch.arange(total_tokens, device=state_indices.device, dtype=qsl.dtype)
+    seq_ids = torch.searchsorted(bounds, token_ids, right=True).clamp(max=num_seqs - 1)
+    flat_indices = seq_ids * num_slots + (token_ids - starts[seq_ids]).clamp(min=0, max=num_slots - 1)
+    metadata.recurrent_state_flat_indices = flat_indices
+    return flat_indices
 
 
 def _split_head_first_conv_output(
@@ -728,6 +758,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     spec_state_indices_tensor,
                     query_spec.shape[1],
                     spec_causal_conv1d_meta.query_start_loc,
+                    _get_recurrent_state_flat_indices(
+                        spec_causal_conv1d_meta,
+                        spec_state_indices_tensor,
+                        query_spec.shape[1],
+                        spec_causal_conv1d_meta.query_start_loc,
+                    ),
                 ),
                 num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
             ).unsqueeze(0)
@@ -854,24 +890,38 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     last_recurrent_state,
                 )
             else:
-                initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
-                clear_ssm_states(initial_state, prefill_has_initial_state)
+                # Under the hybrid KV-cache manager the state cache is a view
+                # over padded physical pages, so ``ssm_state[indices]`` would
+                # first copy the entire cache on NPU. Gather only the selected
+                # rows there; a packed contiguous cache keeps the plain index.
+                padded_state = ssm_state.stride(0) != ssm_state[0].numel()
+                if padded_state:
+                    initial_state = gather_ssm_states(
+                        ssm_state,
+                        prefill_state_indices,
+                        prefill_has_initial_state,
+                    )
+                else:
+                    initial_state = ssm_state[prefill_state_indices]
+                    clear_ssm_states(initial_state, prefill_has_initial_state)
                 (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
                     g=g_non_spec,
                     beta=beta_non_spec,
-                    initial_state=initial_state,
+                    initial_state=initial_state.transpose(-1, -2).contiguous(),
                     output_final_state=True,
                     cu_seqlens=prefill_query_start_loc,
                     prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
                 )
-                ssm_state[prefill_state_indices] = (
-                    last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
-                )
+                final_state = last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+                if padded_state:
+                    scatter_ssm_states_(ssm_state, prefill_state_indices, final_state)
+                else:
+                    ssm_state[prefill_state_indices] = final_state
             if split_non_spec:
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec],

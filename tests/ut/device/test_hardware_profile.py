@@ -43,6 +43,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
+        HardwareCapability.SFA_NOPE_PROLOG_V3,
         HardwareCapability.SCATTER_ND_CACHE_STORE,
         HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE,
         HardwareCapability.STANDARD_MAMBA_PATCH,
@@ -53,13 +54,16 @@ _STANDARD_CAPABILITIES = frozenset(
 )
 
 _EXPECTED_CAPABILITIES = {
-    AscendDeviceType.A2: _STANDARD_CAPABILITIES | {HardwareCapability.RMS_NORM_CAST},
+    AscendDeviceType.A2: _STANDARD_CAPABILITIES
+    | {HardwareCapability.RMS_NORM_CAST, HardwareCapability.MINIMAX_ECOSYSTEM_FA3},
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.RMS_NORM_CAST,
+        HardwareCapability.MINIMAX_ECOSYSTEM_FA3,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
+        HardwareCapability.POOL_KEY_INDEXER_INT8,
     },
     AscendDeviceType._310P: frozenset(
         {
@@ -93,6 +97,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
             HardwareCapability.FLA_GDN_PREFILL,
             HardwareCapability.FP8_ATTENTION,
+            HardwareCapability.POOL_KEY_INDEXER_FP8,
             HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
             HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION,
             HardwareCapability.GRAPH_MULS_ADD_FUSION,

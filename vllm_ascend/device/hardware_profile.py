@@ -72,6 +72,9 @@ class HardwareCapability(Enum):
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
     # CANN device-side FlashAttn metadata with strided paged GQA K/V.
     DEVICE_LENGTH_FLASH_ATTN = auto()
+    # Optional flash_attn_npu_3 device-tiling ABI for ordinary MiniMax target/draft
+    # attention. Restricted to A2/A3; A5 uses the CANN backend instead.
+    MINIMAX_ECOSYSTEM_FA3 = auto()
     # Build CPU-affinity pools from the cluster-aware CPU topology.
     CLUSTER_CPU_TOPOLOGY = auto()
     # Legacy implementation selector: install the 310P-specific operator overrides.
@@ -97,6 +100,10 @@ class HardwareCapability(Enum):
     # Enable the FP8/C8 attention KV-cache ABI and matching attention preprocess paths.
     # This is not a general statement that every FP8 operation is supported.
     FP8_ATTENTION = auto()
+    # CANN PoolKeyIndexer quant_mode=0 with E4M3 query/key and FP32 descales.
+    POOL_KEY_INDEXER_FP8 = auto()
+    # CANN PoolKeyIndexer quant_mode=2 with INT8 query/key and FP16 descales.
+    POOL_KEY_INDEXER_INT8 = auto()
     # Select the compatibility grouped-top-k router used by the fused-MoE path.
     FUSED_MOE_COMPATIBILITY = auto()
     # Use npu_rotary_mul with adjacent pairs (rotary_mode="interleave").
@@ -125,6 +132,8 @@ class HardwareCapability(Enum):
     LORA_CUSTOM_OPS = auto()
     # Use the token-fused MLA cache protocol for eligible FlashMLA models.
     MLA_FLASH = auto()
+    # NoPE Prolog V3 with W8A8 projections and per-group INT8 KV.
+    SFA_NOPE_PROLOG_V3 = auto()
     # Allow MLAPO with native floating-point projection weights, not only quantized weights.
     MLAPO_NATIVE_WEIGHTS = auto()
     # Accept ``fullmesh_v2`` as the MC2 communication algorithm.
@@ -269,6 +278,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
+        HardwareCapability.SFA_NOPE_PROLOG_V3,
         HardwareCapability.SCATTER_ND_CACHE_STORE,
         HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE,
         HardwareCapability.STANDARD_MAMBA_PATCH,
@@ -294,7 +304,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_STANDARD_CAPABILITIES | {HardwareCapability.RMS_NORM_CAST},
+            capabilities=_STANDARD_CAPABILITIES
+            | {HardwareCapability.RMS_NORM_CAST, HardwareCapability.MINIMAX_ECOSYSTEM_FA3},
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
@@ -309,7 +320,9 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=_A3_CAPABILITIES
             | {
                 HardwareCapability.CANN_MEGAMOE,
+                HardwareCapability.MINIMAX_ECOSYSTEM_FA3,
                 HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
+                HardwareCapability.POOL_KEY_INDEXER_INT8,
             },
         ),
         AscendDeviceType._310P: HardwareProfile(
@@ -366,6 +379,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
                     HardwareCapability.FLA_GDN_PREFILL,
                     HardwareCapability.FP8_ATTENTION,
+                    HardwareCapability.POOL_KEY_INDEXER_FP8,
                     HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
                     HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION,
                     HardwareCapability.GRAPH_MULS_ADD_FUSION,
