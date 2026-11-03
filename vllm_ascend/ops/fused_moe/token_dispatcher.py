@@ -160,7 +160,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
         expert_map = token_dispatch_input.routing.expert_map
-        global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         comm_quant_mode = token_dispatch_input.quant.comm_quant_mode
 
         assert expert_map is not None, "expert_map is required for MC2 token dispatch."
@@ -173,7 +172,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             quant_mode = 4 if self.need_shared_expert_args and token_dispatch_input.quant.is_mxfp else 2
         else:
             quant_mode = 0
-        self.moe_expert_num = len(expert_map) + global_redundant_expert_num
+        # expert_map is a full-length physical map (logical + redundant), so
+        # its length already is the global physical expert count.
+        self.moe_expert_num = len(expert_map)
         expert_token_nums_type = _get_expert_token_nums_type(token_dispatch_input)
         kwargs_mc2 = {
             "x": hidden_states,
@@ -387,7 +388,6 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             if token_dispatch_input.quant.mxfp is not None and not unquantized_mxfp4_dispatch
             else None
         )
-        global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         restore_shape = hidden_states.shape
         num_tokens = hidden_states.shape[:-1].numel()
         apply_router_weight_on_input = token_dispatch_input.routing.apply_router_weight_on_input
@@ -417,11 +417,21 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             quant_mode = -1
 
         if expert_map is not None:
-            global_num_experts = len(expert_map) + global_redundant_expert_num
-            mask = expert_map[topk_ids] != -1
-            topk_weights = topk_weights * mask
+            # topk_ids are global FLAT expert ids produced by log2phy:
+            # flat = local_slot + ep_rank * num_experts_local. Ownership of a
+            # flat id is exactly the per-rank window below, which stays valid
+            # after a dynamic-EPLB rebalance relocates physical experts.
+            # Indexing the physical-id-based ascend_expert_map with flat ids
+            # only coincides with ownership for the initial contiguous
+            # placement; after a rebalance it masks out experts from their
+            # new owners (silently dropping their contributions) and lets the
+            # wrong rank compute others (issue: A2 dynamic EPLB output
+            # degrades after every rebalance cycle).
+            global_num_experts = self.num_experts
             first_expert_idx = get_ep_group().rank_in_group * self.num_experts_local
             last_expert_idx = first_expert_idx + self.num_experts_local
+            mask = (topk_ids >= first_expert_idx) & (topk_ids < last_expert_idx)
+            topk_weights = topk_weights * mask
         else:
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
