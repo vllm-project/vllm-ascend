@@ -142,7 +142,7 @@ def _run_test(
             print(f"Model: {model}, Prompt: {prompt!r}, Outputs: {texts!r}", flush=True)
         metrics = runner.model.get_metrics()
 
-        # KV pool hit watch: R1 cold -> R2/R3 hit -> R4 disjoint miss -> R5 intact.
+        # KV pool hit watch: R1 cold -> R2/R3 hit -> R4 disjoint miss.
         # Original assertions stay untouched; this only appends a hit sequence.
         run_pool_hit_sequence(
             runner, block_size=128, prompt_tokens=POOL_PROMPT_TOKENS, tag=f"dsv4-cp-{model.split('/')[-1]}"
