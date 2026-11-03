@@ -119,6 +119,7 @@ Before starting:
 
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
     export VLLM_ASCEND_PLE_BACKEND=torch
     export VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1
     export VLLM_ASCEND_ENABLE_QSA_E3V=1
@@ -189,7 +190,7 @@ Before starting:
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
@@ -298,7 +299,7 @@ Select the hardware tab below.
     export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
     export VLLM_ASCEND_PLE_BACKEND=torch
     export VLLM_HOST_IP="192.168.0.1"
     export HCCL_IF_IP="192.168.0.1"
@@ -347,7 +348,7 @@ Select the hardware tab below.
     export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
     export VLLM_ASCEND_PLE_BACKEND=torch
     export VLLM_HOST_IP="192.168.0.1"
     export HCCL_IF_IP="192.168.0.1"
@@ -472,7 +473,7 @@ Select the hardware tab below.
     export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
@@ -526,7 +527,7 @@ Select the hardware tab below.
     export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
@@ -582,7 +583,7 @@ Select the hardware tab below.
     export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
@@ -636,7 +637,7 @@ Select the hardware tab below.
     export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=1
