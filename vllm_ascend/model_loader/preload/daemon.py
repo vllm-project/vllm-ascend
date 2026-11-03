@@ -17,6 +17,8 @@ from .config import validate_preload_config
 
 
 class AscendWeightCacheDaemon(upstream.WeightCacheDaemon):
+    model: torch.nn.Module | None
+
     def load_model(self) -> None:
         # Unlike engine workers, a preload process does not construct NPUWorker.
         from vllm_ascend import ops

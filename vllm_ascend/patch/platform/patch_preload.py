@@ -28,7 +28,7 @@ def apply_preload_patch() -> None:
     ipc_loader.check_ipc_platform_support = check_ipc_platform_support
     cli = sys.modules.get("vllm.entrypoints.cli.preload")
     if cli is not None:
-        cli.check_ipc_platform_support = check_ipc_platform_support
+        cli.__dict__["check_ipc_platform_support"] = check_ipc_platform_support
 
 
 def check_ipc_platform_support() -> None:
