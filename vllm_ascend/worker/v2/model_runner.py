@@ -601,20 +601,19 @@ class NPUModelRunner(GPUModelRunner):
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
     def shutdown(self) -> None:
-        try:
-            if self.expert_offload_manager is not None:
-                self.expert_offload_manager.close()
-        finally:
-            # Drop C8 packet views before the parent collects tensors and
-            # empties the allocator cache, even when offload cleanup fails.
-            entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
-            if entries is not None:
-                entries.clear()
-            zeroer = getattr(self, "kv_block_zeroer", None)
-            if isinstance(zeroer, C8KVBlockZeroer):
-                zeroer.entries.clear()
-                self.kv_block_zeroer = zeroer.delegate
-            super().shutdown()
+        if self.expert_offload_manager is not None:
+            self.expert_offload_manager.close()
+
+        # Drop C8 packet views before the parent collects tensors and
+        # empties the allocator cache.
+        entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
+        if entries is not None:
+            entries.clear()
+        zeroer = getattr(self, "kv_block_zeroer", None)
+        if isinstance(zeroer, C8KVBlockZeroer):
+            zeroer.entries.clear()
+            self.kv_block_zeroer = zeroer.delegate
+        super().shutdown()
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""

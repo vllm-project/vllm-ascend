@@ -325,17 +325,6 @@ def test_execute_failure_preserves_native_metadata_cleanup():
     runner._maybe_send_draft_kv.assert_not_called()
 
 
-def test_shutdown_preserves_parent_even_on_offload_cleanup_failure():
-    manager = Mock()
-    manager.close.side_effect = RuntimeError("cleanup failed")
-    runner, events = make_runner(manager=manager)
-    runner._c8_mxfp_v_scale_caches = [object()]
-    with pytest.raises(RuntimeError, match="cleanup failed"):
-        runner.shutdown()
-    assert events == ["parent_shutdown"]
-    assert runner._c8_mxfp_v_scale_caches == []
-
-
 def test_shutdown_drains_offload_before_native_cleanup():
     manager = Mock()
     runner, events = make_runner(manager=manager)
