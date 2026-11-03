@@ -9,6 +9,7 @@
 # do not trigger the full CI suite.
 
 estimated_times:
+  tests/e2e/pull_request/one_card/model_runner_v2/test_uva_prefix.py: 30
   tests/e2e/pull_request/one_card/test_kv_pool_accuracy.py: 410
   tests/e2e/pull_request/one_card/test_flash_attn_precision.py: 30
   tests/e2e/pull_request/one_card/test_swiglu_mx_quant.py: 30
@@ -102,6 +103,8 @@ estimated_times:
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dflash.py: 600
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dspark.py: 600
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py: 710
+  # Initial estimate: one target-only and three LiLiCorr model runs.
+  tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_8_lilicorr.py: 1200
   tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 460
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 850
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode_heavy.py: 1020
@@ -155,6 +158,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_next_w8a8.py: 360
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
   tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 300
+  tests/e2e/pull_request/four_card/test_sparse_hccl_checkpoint.py: 250
   tests/e2e/pull_request/two_card/test_gemma4.py: 290
   tests/e2e/pull_request/four_card/test_minimax_m3.py: 240
   tests/e2e/pull_request/four_card/test_kimi_k3.py: 600

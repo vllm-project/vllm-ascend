@@ -420,6 +420,10 @@ class NPUModelRunner(GPUModelRunner):
 
     def _init_kv_zero_meta(self) -> None:
         """Use a tuple-aware zeroer for Ascend V1-compatible cache protocols."""
+        offload_manager = getattr(self, "sparse_kv_offload_manager", None)
+        excluded_cache_components = (
+            offload_manager.get_topk_cache_components() if offload_manager is not None else set()
+        )
         self.kv_block_zeroer = AscendV2KVBlockZeroer(
             self.device,
             attn_groups_iter=(g for groups in self.attn_groups for g in groups),
@@ -427,6 +431,7 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=self.compilation_config.static_forward_context,
             num_blocks=self.kv_cache_config.num_blocks,
             cache_dtype=self.cache_config.cache_dtype,
+            excluded_cache_components=excluded_cache_components,
         )
         if is_c8_mxfp_kv_quant(self.vllm_config):
             # The zeroer skips the static V scales (4th tuple component); the
@@ -1299,7 +1304,11 @@ class NPUModelRunner(GPUModelRunner):
             or self.speculator is None
             or spec.method != "dspark"
             or self.model_config.architecture
-            not in ("MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration")
+            not in (
+                "MiniMaxM3SparseForCausalLM",
+                "MiniMaxM3SparseForConditionalGeneration",
+                "GlmMoeDsaForCausalLM",
+            )
             or spec.draft_model_config is None
             or "Qwen3DSparkModel" not in (spec.draft_model_config.architectures or ())
         ):

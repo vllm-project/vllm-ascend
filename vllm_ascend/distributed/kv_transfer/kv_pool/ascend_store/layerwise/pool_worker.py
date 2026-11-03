@@ -1958,8 +1958,12 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                     leased_infos = self.m_store.batch_get_key_info(leased_keys)
                     if leased_infos is None or len(leased_infos) != len(leased_keys):
                         return False
+                    key_indices: dict[str, int] = {}
+                    for index, key in enumerate(keys):
+                        # Preserve keys.index()'s first occurrence for repeated keys.
+                        key_indices.setdefault(key, index)
                     for key, info in zip(leased_keys, leased_infos, strict=True):
-                        index = keys.index(key)
+                        index = key_indices[key]
                         gvas[index] = (
                             next((address for address in info.gva_list() if address > 0), 0) if info is not None else 0
                         )

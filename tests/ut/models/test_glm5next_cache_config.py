@@ -25,6 +25,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_max_memory_usage,
     get_glm5_next_pool_bytes_per_block,
 )
+from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
@@ -191,6 +192,79 @@ def test_standalone_mtp_layout_has_no_mamba_groups():
     assert len(groups) == 2
     assert layout is not None
     assert layout.mamba_groups == ()
+
+
+def test_fp8_shared_pages_preserve_tail_rows_and_kernel_scale_alignment():
+    specs = make_specs(pool=4)
+    indexer_name = "model.layers.3.indexer.k_cache"
+    tail_name = "model.layers.3.indexer.tail_cache"
+    specs["model.layers.3.attn"] = replace(specs["model.layers.3.attn"], block_size=640)
+    specs[indexer_name] = AscendMLAAttentionSpec(
+        block_size=640,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float8_e4m3fn,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        model_version="glm5_next",
+        tokens_per_state=4,
+    )
+    groups = get_glm5_next_kv_cache_groups(make_config(), specs)
+    plan = get_glm5_next_kv_cache_config(make_config(), groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
+    descriptor = next(tensor for tensor in plan.kv_cache_tensors if indexer_name in get_kv_cache_tensor_layers(tensor))
+    raw = torch.zeros(descriptor.size, dtype=torch.uint8)
+    (tail,) = view_kpool_tail_cache(tail_name, specs[tail_name], raw, plan.num_blocks)
+    page_rows = specs[tail_name].page_size_bytes // (2 * specs[tail_name].head_size * tail.element_size())
+    assert page_rows * tail.shape[-1] == tail.stride(0)
+
+    backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d: (n, b, h, d))
+    keys, scales = view_compressed_indexer_cache(indexer_name, specs[indexer_name], raw, backend, 128)
+    page_bytes = descriptor.size // plan.num_blocks
+    assert keys.shape == (15, 32, 1, 128)
+    assert scales.shape == (15, 32, 1, 1)
+    assert keys.stride(0) == scales.stride(0) * scales.element_size() == page_bytes // 5
+    assert scales.data_ptr() - keys.data_ptr() == 32 * 128
+    assert page_bytes == 25600
+
+
+@pytest.mark.parametrize(
+    "block_size,lookahead,bf16_page_bytes,fp8_page_bytes",
+    [(128, 0, 8192, 5120), (128, 5, 9216, 9216), (512, 5, 32768, 17408), (640, 5, 40960, 25600)],
+)
+def test_fp8_cache_budget_accounts_for_scales_tail_and_padding(block_size, lookahead, bf16_page_bytes, fp8_page_bytes):
+    config = make_config()
+    budget = 64 * 1024 * 1024
+    bytes_per_block, capacities = [], []
+    for dtype, expected_page_bytes in ((torch.bfloat16, bf16_page_bytes), (torch.float8_e4m3fn, fp8_page_bytes)):
+        specs = make_specs(pool=4)
+        specs["model.layers.3.attn"] = replace(specs["model.layers.3.attn"], block_size=block_size)
+        specs["model.layers.3.indexer.k_cache"] = AscendMLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=dtype,
+            scale_dim=1 if dtype == torch.float8_e4m3fn else 0,
+            scale_dtype=torch.float32 if dtype == torch.float8_e4m3fn else torch.int8,
+            model_version="glm5_next",
+            tokens_per_state=4,
+        )
+        specs["model.layers.3.indexer.tail_cache"] = replace(
+            specs["model.layers.3.indexer.tail_cache"], block_size=4 + lookahead
+        )
+        groups = get_glm5_next_kv_cache_groups(config, specs)
+        layout = _get_glm5_next_cache_layout(groups)
+        assert layout is not None and layout.small_page_size == expected_page_bytes
+        plan = get_glm5_next_kv_cache_config(config, groups, budget)
+        block_bytes = get_glm5_next_pool_bytes_per_block(groups)
+        assert sum(tensor.size for tensor in plan.kv_cache_tensors) == plan.num_blocks * block_bytes <= budget
+        bytes_per_block.append(block_bytes)
+        capacities.append(plan.num_blocks)
+
+    assert bytes_per_block[0] - bytes_per_block[1] == bf16_page_bytes - fp8_page_bytes
+    if fp8_page_bytes < bf16_page_bytes:
+        assert capacities[1] > capacities[0]
+    else:
+        assert capacities[1] == capacities[0]
 
 
 def test_pipeline_projection_supports_a_mamba_only_worker():
