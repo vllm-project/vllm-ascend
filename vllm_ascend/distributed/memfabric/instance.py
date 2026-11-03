@@ -46,14 +46,13 @@ def plan_offload_instances(
     those objects in ``initialization_order`` on every participating rank; the
     native library assigns the per-process entity ID. Sorting owners makes the
     plan independent of input mapping order. ``reserved_instances`` counts
-    Offload instances initialized outside this plan, such as the module-level
-    default instance; initialize them first and in the same order on relevant
-    ranks. A rank must not skip an earlier
-    instance and then join a later SHARED instance, because the resulting
-    native entity IDs would differ across ranks.  The order also includes any
-    instance count reserved before these bindings.
-    The default module-level Offload client is outside this plan and remains
-    available for legacy callers.
+    entity IDs consumed outside this plan, including the module-level default
+    instance and failed initialization attempts; initialize them first and in
+    the same order on relevant ranks. A rank must not skip an earlier instance
+    and then join a later SHARED instance, because native entity IDs would
+    differ across ranks. Planned ``initialization_order`` values start after
+    ``reserved_instances``. The default module-level client remains available
+    for legacy callers.
 
     SHARED instances require distinct, deployment-canonical store URLs. The
     planner cannot detect hostname/IP aliases that compare differently as
@@ -68,7 +67,7 @@ def plan_offload_instances(
         raise ValueError("reserved_instances must be a non-negative integer")
     reserved_instances = int(reserved_instances)
     if len(store_urls) + reserved_instances > 63:
-        raise ValueError("at most 63 Offload instances may be initialized per process")
+        raise ValueError("at most 63 Offload entity IDs may be consumed per process")
     if len(set(store_urls.values())) != len(store_urls):
         raise ValueError("each SHARED Offload instance must have a distinct store_url")
 
