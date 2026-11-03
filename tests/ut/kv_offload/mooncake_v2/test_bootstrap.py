@@ -26,6 +26,7 @@ def scheduler():
             data_parallel_index=0,
         )
     )
+    scheduler._metadata_thread = None
     scheduler.bootstrap_server = None
     return scheduler
 
