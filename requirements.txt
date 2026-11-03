@@ -4,6 +4,7 @@ decorator
 einops
 numpy
 packaging
+pillow>=11.3.0
 pip
 pybind11
 pyyaml
