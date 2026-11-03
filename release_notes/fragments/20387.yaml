@@ -1,0 +1,4 @@
+pr: 20387
+entries:
+  - category: bugfix
+    text: Fixed FP8 KV cache dtype resolution on Ascend workers when the upstream registration API exists but no FP8 handler has populated the mapping.

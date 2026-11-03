@@ -19,10 +19,11 @@ Worker process — the launcher's platform patch does not propagate to the
 workers' fresh interpreters. It is applied before model loading, which is
 when ``kv_cache_dtype_str_to_dtype`` is called.
 
-On vllm builds that *do* provide ``register_kv_cache_dtype`` (kvquant_27 /
-future main) this patch is a no-op: the eager handler import in
-``vllm_ascend/worker/worker.py`` already flipped the dtype, so we must not
-touch the dict again (idempotency, and to avoid masking the handler path).
+The presence of ``register_kv_cache_dtype`` does not prove that an FP8
+handler has been registered. Verify the live mapping in that case too.
+Ascend's FP8 MLA/DSA paths need ``torch.float8_e4m3fn``; an already-correct
+mapping is left unchanged. This fallback can be removed when the supported
+vLLM/Ascend pair reliably installs the native FP8 mapping in every worker.
 
 Worker-side dtype Literal widening: the launcher's platform patches
 (``patch/platform/patch_kv_cache_dtype.py`` and
@@ -54,10 +55,13 @@ def _apply_fp8_kv_cache_dtype_flip() -> None:
         # int8 already maps to torch.int8 upstream; nothing to flip.
         return
 
-    # Pluggable mechanism present: the handler import in worker.py already
-    # injected fp8 -> float8_e4m3fn. Leave the dict untouched so the handler
-    # path stays the source of truth (and so is_quantized/quant_mode queries
-    # routed through the handler remain consistent).
+    # Pluggable mechanism present, but on this build (vllm 544f182d9f) nothing
+    # ever calls register_kv_cache_dtype("fp8"), so the mapping stays at
+    # upstream uint8 raw bytes and every c8 site (v1 model_runner, indexer,
+    # v2 attn_utils) falls through with an unset c8 scale dtype. Verify and
+    # flip so fp8 resolves to float8_e4m3fn as this patch intends.
+    if _torch_utils.STR_DTYPE_TO_TORCH_DTYPE.get("fp8") is not torch.float8_e4m3fn:
+        _torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"] = torch.float8_e4m3fn
     return
 
 
