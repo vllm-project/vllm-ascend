@@ -107,8 +107,8 @@ def build_qsa_request_plan(
 
 def dispatch_qsa_attention(
     query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
+    key: torch.Tensor | None,
+    value: torch.Tensor | None,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
     compact_indices: torch.Tensor,
@@ -142,7 +142,9 @@ def dispatch_qsa_attention(
             logical_positions[rows].add(1).clamp_min(0),
             seq_lens[request.request_index].clamp_max(fia_kv_length),
         )
-        if request.use_paged_kv:
+        # Callers whose ABI does not carry the freshly projected K/V pass None;
+        # the rows were already stored, so gather them from the paged cache.
+        if request.use_paged_kv or key is None or value is None:
             keys, values, table, _ = prepare_qsa_fia_paged_kv(
                 key_cache,
                 value_cache,
