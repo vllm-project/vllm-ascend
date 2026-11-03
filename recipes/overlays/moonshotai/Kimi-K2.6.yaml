@@ -1,0 +1,97 @@
+# Migrated from https://github.com/vllm-project/recipes/pull/1170
+# Source head: 57f458067d08c8d86a04131f1c6fe3e47f5db109
+meta:
+  hardware:
+    ascend_950dt: supported
+    ascend_910c: supported
+hardware_opt_in_features:
+  ascend_950dt:
+    - spec_decoding
+variants:
+  w4a8_ascend:
+    model_id: Eco-Tech/Kimi-K2.6-w4a8
+    precision: int4
+    label: W4A8 (Ascend)
+    vram_minimum_gb: 714
+    description: Ascend W4A8 checkpoint on ModelScope, documented and validated on Atlas 800 A3 (16 x 64 GB NPUs) in the vLLM-Ascend Kimi-K2.6 tutorial. The 714 GB VRAM requirement remains an estimate.
+    supported_hardware:
+      - ascend_950dt
+      - ascend_910c
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+    extra_args:
+      - '--quantization'
+      - ascend
+strategy_hardware:
+  pd_cluster:
+    ascend_950dt: unsupported
+  multi_node_tp:
+    ascend_950dt: unsupported
+  multi_node_tp_pp:
+    ascend_950dt: unsupported
+  multi_node_dep:
+    ascend_950dt: unsupported
+  multi_node_tep:
+    ascend_950dt: unsupported
+guide_sections:
+  ascend: |
+    ## Ascend deployment
+
+    Prerequisites: 1 Atlas 800 A3 node (16 x 64 GB NPUs, Ascend 910C).
+
+    ### Huawei Ascend 910C
+
+    The [official vLLM-Ascend single-node deployment example](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html#51-single-node-online-deployment)
+    serves W4A8 on one Atlas 800 A3 node (16 x 64 GB NPUs) with TP=4, DP=4,
+    and expert parallelism. Use the vLLM-Ascend environment described in the
+    tutorial. Download the main and draft checkpoints first and replace their
+    model arguments with the corresponding local paths when necessary.
+    The host CPU/sysctl tuning commands require appropriate host permissions.
+    This reference command is independent of the interactive command builder.
+
+    ```bash
+    #!/bin/sh
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+
+    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+    sysctl -w vm.swappiness=0
+    sysctl -w kernel.numa_balancing=0
+    sysctl -w kernel.sched_migration_cost_ns=50000
+
+    export HCCL_BUFFSIZE=600
+
+    # Ensure the model path matches the directory recorded during download
+    vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
+        --quantization ascend \
+        --tool-call-parser kimi_k2 \
+        --reasoning-parser kimi_k2 \
+        --allowed-local-media-path / \
+        --served-model-name kimi_k26 \
+        --trust-remote-code \
+        --tensor-parallel-size 4 \
+        --data-parallel-size 4 \
+        --no-enable-prefix-caching \
+        --enable-expert-parallel \
+        --port 8000 \
+        --max-num-seqs 4 \
+        --max-model-len 34816 \
+        --max-num-batched-tokens 16384 \
+        --gpu-memory-utilization 0.87 \
+        --seed 42 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
+        --mm-processor-cache-gb 0 \
+        --mm-encoder-tp-mode data \
+        --additional-config '{"scheduler_config":{"enable_balance_scheduling":false},"enable_mlapo":true}' \
+        --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
+    ```
+
+    ### References
+
+    - [Kimi-K2.6 on ModelScope](https://www.modelscope.cn/models/moonshotai/Kimi-K2.6)
+    - [Eco-Tech Kimi-K2.6-W4A8 on ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.6-w4a8)
+    - [vLLM-Ascend Kimi-K2.6 tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html)
