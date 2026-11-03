@@ -17,6 +17,9 @@ import torch
 DIRECTION_H2D = 0
 DIRECTION_D2H = 1
 
+# Amortize run discovery over the host descriptor arrays, keeping small jobs unchanged.
+_MIN_COALESCE_DESCRIPTORS = 32_768
+
 
 class BatchMemcpyParams(NamedTuple):
     """Pre-computed per-tensor descriptors for batched block copy."""
@@ -86,11 +89,27 @@ def copy_blocks(
     src_ids = np.asarray(src_block_ids, dtype=np.int64)
     dst_ids = np.asarray(dst_block_ids, dtype=np.int64)
 
-    # Layout: (num_sub_tensors, n) flattened — contract of swap_blocks_batch.
+    run_lengths = None
+    if params.num_sub_tensors > 1 and n * params.num_sub_tensors >= _MIN_COALESCE_DESCRIPTORS:
+        breaks = (np.diff(src_ids) != 1) | (np.diff(dst_ids) != 1)
+        num_runs = int(np.count_nonzero(breaks)) + 1
+        # Save at least one descriptor per inspected block before compacting.
+        if (n - num_runs) * params.num_sub_tensors >= n:
+            boundaries = np.empty(num_runs + 1, dtype=np.intp)
+            boundaries[0], boundaries[-1] = 0, n
+            boundaries[1:-1] = np.flatnonzero(breaks) + 1
+            src_ids = src_ids[boundaries[:-1]]
+            dst_ids = dst_ids[boundaries[:-1]]
+            run_lengths = np.diff(boundaries)
+
+    # Keep each sub-tensor's allocation and block-pair order independent.
     bpb_col = params.bpb[:, None]
     src_all = (params.src_bases[:, None] + src_ids[None, :] * bpb_col).ravel()
     dst_all = (params.dst_bases[:, None] + dst_ids[None, :] * bpb_col).ravel()
-    sz_all = np.broadcast_to(bpb_col, (params.num_sub_tensors, n)).ravel().copy()
+    if run_lengths is None:
+        sz_all = np.broadcast_to(bpb_col, (params.num_sub_tensors, n)).ravel().copy()
+    else:
+        sz_all = (bpb_col * run_lengths[None, :]).ravel()
 
     batch_src = torch.from_numpy(src_all)
     batch_dst = torch.from_numpy(dst_all)
