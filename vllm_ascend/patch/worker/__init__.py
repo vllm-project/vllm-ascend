@@ -24,6 +24,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 # the AscendC patch must be imported first.
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_ascend_ops  # noqa
+    import vllm_ascend.patch.worker.patch_mrope_vit_setup  # noqa
     import vllm_ascend.patch.worker.patch_triton  # noqa
 
 
@@ -95,3 +96,5 @@ if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKE
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+
+import vllm_ascend.patch.worker.patch_worker_watchdog  # noqa

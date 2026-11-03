@@ -72,7 +72,8 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
     # same-checkpoint drafts; self-contained drafts keep their own quant.
     speculative_config = vllm_config.speculative_config
     draft_model_config = speculative_config.draft_model_config
-    inherits_target_quant = draft_model_config.model == vllm_config.model_config.model
+    is_minimax_draft = bool(getattr(draft_model_config.hf_config, "ascend_minimax_dspark", False))
+    inherits_target_quant = draft_model_config.model == vllm_config.model_config.model and not is_minimax_draft
     spec_pp_support = resolve_spec_pp_support(vllm_config)
     if inherits_target_quant:
         model_utils.get_draft_quant_config = lambda _vllm_config: vllm_config.quant_config

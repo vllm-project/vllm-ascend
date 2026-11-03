@@ -18,12 +18,13 @@ from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
 import vllm_ascend.attention.mla_v1 as mla_v1
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
-from vllm_ascend.attention.utils import supports_strided_mla_cache
+from vllm_ascend.attention.utils import mark_fused_preprocess_weights, supports_strided_mla_cache
 from vllm_ascend.model_executor.offloader.prefetch import AscendPrefetchOffloader
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8FP8DynamicLinearMethod,
     AscendW8A8LinearMethod,
+    AscendW8A8MXFP8DynamicLinearMethod,
 )
 
 NOPE_DIM = 512
@@ -72,6 +73,182 @@ def _make_impl() -> AscendMLAImpl:
         "num_heads": 8,
     }
     return impl
+
+
+@pytest.mark.parametrize("scheme_type", [AscendW8A8LinearMethod, AscendW8A8DynamicLinearMethod])
+@pytest.mark.parametrize("is_draft", [False, True])
+@pytest.mark.parametrize(
+    "overrides,managed",
+    [
+        ({}, True),
+        ({"use_mla_rope": False}, False),
+        ({"dtype": torch.float16}, False),
+        ({"enable_kv_nz": True}, False),
+        ({"qkv_a_gate_fused": True}, False),
+    ],
+)
+def test_int8_writer_owns_projection_nz(scheme_type, is_draft, overrides, managed):
+    impl = _make_impl()
+    impl.is_draft_model = is_draft
+    impl.enable_mlapo = False
+    scheme = scheme_type.__new__(scheme_type)
+    for layer in (impl.fused_qkv_a_proj, impl.q_proj):
+        layer.quant_method = SimpleNamespace(quant_method=scheme)
+    for name, value in overrides.items():
+        setattr(impl, name, value)
+
+    mark_fused_preprocess_weights(impl)
+
+    assert impl.fused_qkv_a_proj._fused_preprocess_managed is managed
+    assert impl.q_proj._fused_preprocess_managed is managed
+
+
+@pytest.mark.parametrize("scheme_type", [AscendW8A8LinearMethod, AscendW8A8DynamicLinearMethod])
+@pytest.mark.parametrize("managed", [False, True])
+def test_int8_projections_split_before_nz_conversion(scheme_type, managed):
+    impl = _make_impl()
+    impl.enable_mlapo = False
+    impl.use_mla_rope = managed
+    impl._prolog_v3_weights = None
+    scheme = scheme_type.__new__(scheme_type)
+    scheme.quant_method = "ascend"
+    input_size = impl.q_lora_rank
+    output_sizes = (impl.q_lora_rank + FUSED_DIM, impl.num_heads * impl.qk_head_dim)
+    projections = []
+    original_weights = []
+    for output_size in output_sizes:
+        layer = nn.Module()
+        layer.quant_method = SimpleNamespace(quant_method=scheme)
+        layer.input_size = 7168
+        layer._chunk_size = 0
+        weight = torch.arange(output_size * input_size).reshape(output_size, input_size).to(torch.int8)
+        original_weights.append(weight.T.contiguous())
+        layer.weight = nn.Parameter(weight, requires_grad=False)
+        layer.input_scale = nn.Parameter(torch.ones(1), requires_grad=False)
+        layer.input_offset = nn.Parameter(torch.zeros(1, dtype=torch.int8), requires_grad=False)
+        layer.deq_scale = nn.Parameter(torch.ones(output_size), requires_grad=False)
+        layer.weight_scale = nn.Parameter(torch.ones(output_size, 1), requires_grad=False)
+        layer.weight_offset = nn.Parameter(torch.zeros(output_size, 1), requires_grad=False)
+        projections.append(layer)
+    impl.fused_qkv_a_proj, impl.q_proj = projections
+    scheme_module = "w8a8_static" if scheme_type is AscendW8A8LinearMethod else "w8a8_dynamic"
+    mark_fused_preprocess_weights(impl)
+
+    with patch(
+        f"vllm_ascend.quantization.methods.w8a8.{scheme_module}.maybe_trans_nz",
+        side_effect=lambda tensor: tensor,
+    ) as early_cast:
+        for layer in projections:
+            scheme.process_weights_after_loading(layer)
+    assert early_cast.call_count == (0 if managed else 2)
+    if not managed:
+        return
+
+    with patch.object(torch_npu, "npu_format_cast", side_effect=lambda tensor, fmt: tensor) as cast:
+        prepared = impl._prepare_prolog_v3_weights()
+
+    assert [call.args[0].shape for call in cast.call_args_list] == [
+        (input_size, impl.q_lora_rank),
+        (input_size, FUSED_DIM),
+        (input_size, output_sizes[1]),
+    ]
+    torch.testing.assert_close(prepared["weight_dq"], original_weights[0][:, : impl.q_lora_rank])
+    torch.testing.assert_close(prepared["weight_dkv_kr"], original_weights[0][:, impl.q_lora_rank :])
+    torch.testing.assert_close(prepared["weight_uq_qr"], original_weights[1])
+    for layer, original_weight in zip(projections, original_weights):
+        torch.testing.assert_close(layer.weight, original_weight)
+
+
+def _make_mxfp8_draft_impl() -> AscendMLAImpl:
+    impl = _make_impl()
+    impl.is_draft_model = True
+    impl.enable_mlapo = False
+    impl.support_fp8_attention = True
+    impl._prolog_v3_weights = None
+    scheme = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
+    scheme.group_size = 32
+    projections = []
+    for output_size, input_size in (
+        (impl.q_lora_rank + FUSED_DIM, impl.q_lora_rank),
+        (impl.num_heads * impl.qk_head_dim, impl.q_lora_rank),
+    ):
+        layer = nn.Module()
+        layer.input_size = 7168
+        layer.quant_method = SimpleNamespace(quant_method=scheme)
+        layer.weight = nn.Parameter(torch.randn(output_size, input_size).to(torch.float8_e4m3fn), False)
+        layer.weight_scale = nn.Parameter(
+            torch.ones(output_size, input_size // scheme.group_size, dtype=torch.uint8), False
+        )
+        projections.append(layer)
+    impl.fused_qkv_a_proj, impl.q_proj = projections
+    return impl
+
+
+@pytest.mark.parametrize(
+    "overrides,managed",
+    [
+        ({}, True),
+        ({"enable_mlapo": True}, True),
+        ({"fa_quant_layer": True}, True),
+        ({"use_mla_rope": False}, False),
+        ({"support_fp8_attention": False}, False),
+        ({"enable_kv_nz": True}, False),
+        ({"dtype": torch.float16}, False),
+    ],
+)
+def test_mxfp8_projection_nz_management_matches_prolog_eligibility(overrides, managed):
+    impl = _make_mxfp8_draft_impl()
+    for name, value in overrides.items():
+        setattr(impl, name, value)
+
+    mark_fused_preprocess_weights(impl)
+
+    assert impl.fused_qkv_a_proj._fused_preprocess_managed is managed
+    assert impl.q_proj._fused_preprocess_managed is managed
+
+
+@pytest.mark.parametrize("scheme_type", [None, AscendW8A8LinearMethod, AscendW8A8DynamicLinearMethod])
+def test_strided_writer_extends_nz_management_to_int8(scheme_type):
+    impl = _make_impl()
+    impl.enable_mlapo = False
+    impl.support_fp8_attention = True
+    scheme = scheme_type.__new__(scheme_type) if scheme_type is not None else None
+    for layer in (impl.fused_qkv_a_proj, impl.q_proj):
+        layer.quant_method = SimpleNamespace(quant_method=scheme)
+
+    assert impl.supports_prolog_v3_writer()
+    mark_fused_preprocess_weights(impl)
+
+    assert impl.fused_qkv_a_proj._fused_preprocess_managed is (scheme_type is not None)
+    assert impl.q_proj._fused_preprocess_managed is (scheme_type is not None)
+
+
+def test_mxfp8_draft_splits_prolog_weights_before_nz_conversion():
+    impl = _make_mxfp8_draft_impl()
+    mark_fused_preprocess_weights(impl)
+    scheme = impl.fused_qkv_a_proj.quant_method.quant_method
+    with (
+        patch("vllm_ascend.utils._should_trans_nz", return_value=True),
+        patch.object(torch_npu, "npu_format_cast", side_effect=lambda tensor, fmt, **kwargs: tensor) as cast,
+    ):
+        for layer in (impl.fused_qkv_a_proj, impl.q_proj):
+            scheme.process_weights_after_loading(layer)
+        cast.assert_not_called()
+
+        prepared = impl._prepare_prolog_v3_weights()
+
+    assert not impl.enable_mlapo
+    assert cast.call_count == 3
+    assert [call.args[0].shape for call in cast.call_args_list] == [
+        (impl.q_lora_rank, impl.q_lora_rank),
+        (impl.q_lora_rank, FUSED_DIM),
+        (impl.q_lora_rank, impl.num_heads * impl.qk_head_dim),
+    ]
+    fused_weight = impl.fused_qkv_a_proj.weight.data
+    assert torch.equal(prepared["weight_dq"].view(torch.uint8), fused_weight[:, : impl.q_lora_rank].view(torch.uint8))
+    assert torch.equal(
+        prepared["weight_dkv_kr"].view(torch.uint8), fused_weight[:, impl.q_lora_rank :].view(torch.uint8)
+    )
 
 
 def _construct_impl(pcp_size: int, dcp_size: int) -> AscendMLAImpl:

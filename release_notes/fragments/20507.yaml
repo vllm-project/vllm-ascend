@@ -1,0 +1,4 @@
+pr: 20507
+entries:
+  - category: feature
+    text: Backport ModelSlim W4A8 dynamic Linear support with symmetric per-channel INT4 weights and per-token INT8 activations to the v0.32.0rc release branch.

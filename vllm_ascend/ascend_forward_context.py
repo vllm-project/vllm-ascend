@@ -355,6 +355,7 @@ def _select_capacity_and_world_size_moe_comm_method(
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
+    skip_draft_mc2 = False
     if get_ascend_config().enable_fused_mc2 == 1:
         if is_mega_moe_supported():
             if is_draft_model and draft_moe_quant_type not in A5_SUPPORT_MEGA_MOE_QUANT_TYPES:
@@ -362,7 +363,14 @@ def _select_capacity_and_world_size_moe_comm_method(
                 # quantized weight layouts. An unquantized (or unsupported-quantized)
                 # MTP draft MoE layer must skip FUSED_MC2 and fall through to the
                 # original MoE path (MC2/ALLGATHER/ALLTOALL) below.
-                pass
+                # The shared capacity is sized for MegaMoE, whose per-rank limit
+                # is larger than the ordinary MC2 dispatch limit.
+                mc2_tokens_capacity = min(
+                    mc2_tokens_capacity,
+                    _MC2_TOKENS_PER_RANK_LIMIT * vllm_config.parallel_config.tensor_parallel_size,
+                )
+                # Ordinary MC2 dispatch fails CANN WinSize tiling for SP draft.
+                skip_draft_mc2 = getattr(vllm_config.parallel_config, "use_sequence_parallel_moe", False)
             else:
                 return MoECommType.FUSED_MC2
     num_experts_per_tok = getattr(
@@ -371,7 +379,7 @@ def _select_capacity_and_world_size_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
-    if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
+    if not skip_draft_mc2 and (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
         return MoECommType.MC2
     if world_size <= num_experts_per_tok:
         return MoECommType.ALLGATHER
