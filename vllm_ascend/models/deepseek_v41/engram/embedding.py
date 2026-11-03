@@ -64,8 +64,10 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         remote_reader=None,
     ) -> None:
         self._remote_reader = remote_reader
-        if remote_reader is not None and (not cpu_offload or not dp_shared_memory or storage_dtype != torch.int8):
-            raise ValueError("Remote Engram requires INT8 cpu_offload with dp_shared_memory")
+        if remote_reader is not None and (
+            not cpu_offload or not dp_shared_memory or storage_dtype not in (torch.int8, torch.float8_e4m3fn)
+        ):
+            raise ValueError("Remote Engram requires INT8 or FP8 cpu_offload with dp_shared_memory")
         self.storage_dtype = storage_dtype
         if storage_dtype not in (torch.bfloat16, torch.int8, torch.float8_e4m3fn):
             raise ValueError(f"Unsupported Engram storage dtype: {storage_dtype}")
