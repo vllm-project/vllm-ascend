@@ -32,7 +32,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.utils import (
-    is_deepseek_v4_kv_cache_config as _is_deepseek_v4_kv_cache_config,
+    is_deepseek_v4_kv_cache_config,
     resolve_deepseek_v4_retention,
 )
 
@@ -518,7 +518,7 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     # their independent manager geometry when prefix caching is disabled too.
     num_cacheable_groups = sum(is_prefix_cacheable(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
     has_private_groups = 0 < num_cacheable_groups < len(kv_cache_config.kv_cache_groups)
-    if _is_deepseek_v4_kv_cache_config(kv_cache_config) or has_private_groups:
+    if is_deepseek_v4_kv_cache_config(kv_cache_config) or has_private_groups:
         return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
     if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
