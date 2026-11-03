@@ -42,13 +42,14 @@ configuration/entry under `tests/e2e/cases/models`, and unit tests under `tests/
 
 ### Source checkpoint version used in this experiment
 
-The pruning input was the **Kimi-K3 W4A8 MXFP QuaRot temporary checkpoint**, locally
-identified as `Kimi-K3-w4a8-mxfp-QuaRot_temp`, with 93 layers and 896 routed experts
-per MoE layer. The recorded input directory was
-`/mnt/share/weights/Kimi-K3-w4a8-mxfp-QuaRot_temp`; the published output was
+The pruning input was the **Kimi-K3 W4A8 MXFP QuaRot checkpoint**, locally
+identified as `Kimi-K3-w4a8-mxfp-QuaRot`, with 93 layers and 896 routed experts
+per MoE layer. The canonical source directory is
+`/mnt/share/weights/Kimi-K3-w4a8-mxfp-QuaRot`; the published output was
 `/mnt/share/weights/Kimi-K3-w4a8-mxfp-QuaRot-slim_ep_256xps`.
 
-The pruning manifest records these source identity checksums:
+The experiment used a copy of this source checkpoint; the same original checkpoint
+can be used directly. The pruning manifest records these source identity checksums:
 
 | Source file | SHA256 |
 | --- | --- |
@@ -60,7 +61,7 @@ The directory name and recorded checksums identify the experiment input; the che
 cover configuration/index files, not every source weight byte. The vLLM/vllm-ascend
 runtime versions in section 9 are not checkpoint versions.
 
-Start from the original quantized temporary checkpoint. In each of 92 MoE layers,
+Start from the original quantized checkpoint. In each of 92 MoE layers,
 select `keep_ids[j] = floor(j * 896 / 256)`, `j=0..255`. Slice router rows and
 correction bias identically and remap retained expert IDs to 0..255.
 Copy retained quantized weights and scales byte-for-byte without requantization.
