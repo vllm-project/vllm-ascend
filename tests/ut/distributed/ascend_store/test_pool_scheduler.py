@@ -1079,10 +1079,10 @@ def test_connector_metadata_preserves_unscheduled_request_order(unfinished_ids, 
     scheduler._request_trackers = {}
     scheduler._unfinished_requests = {req_id: (SimpleNamespace(request_id=req_id), []) for req_id in unfinished_ids}
     scheduler._preempted_req_ids = set()
-    scheduler._loading_req_ids = set()
+    scheduler._async_loading_req_ids = set()
     scheduler._process_new_request = MagicMock(return_value=None)
     scheduler._process_async_load_request = MagicMock(side_effect=lambda req_id, *_: SimpleNamespace(req_id=req_id))
-    scheduler.touch_sending_mamba_blocks = MagicMock()
+    scheduler.retain_blocks_for_save = MagicMock()
     output = SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
@@ -1109,7 +1109,7 @@ def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cl
     scheduler._request_trackers = {}
     scheduler._unfinished_requests = {} if cleared_by == "already-empty" else {"retired": (None, [])}
     scheduler._preempted_req_ids = set()
-    scheduler._loading_req_ids = set()
+    scheduler._async_loading_req_ids = set()
     scheduler._process_new_request = MagicMock(return_value=None)
     scheduler._process_async_load_request = MagicMock()
     output = SimpleNamespace(
@@ -1150,9 +1150,9 @@ def test_connector_metadata_filter_has_linear_key_lookup_work():
     scheduler._request_trackers = {}
     scheduler._unfinished_requests = {req_id: (None, []) for req_id in request_ids + pending_ids}
     scheduler._preempted_req_ids = set()
-    scheduler._loading_req_ids = set()
+    scheduler._async_loading_req_ids = set()
     scheduler._process_async_load_request = MagicMock(side_effect=lambda req_id, *_: SimpleNamespace(req_id=req_id))
-    scheduler.touch_sending_mamba_blocks = MagicMock()
+    scheduler.retain_blocks_for_save = MagicMock()
     output = SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
