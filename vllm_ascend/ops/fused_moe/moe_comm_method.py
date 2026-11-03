@@ -299,8 +299,13 @@ class FusedMC2CommImpl(MoECommMethod):
     def __init__(self, moe_config):
         super().__init__(moe_config)
         self._mega_moe_hccl_state_stale = False
+        self.deepgemm_backend = None
         self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
+        if get_ascend_config().enable_deepgemm_mega_moe:
+            from vllm_ascend.ops.fused_moe.deepgemm_mega_moe import DeepGemmMegaMoE
+
+            self.deepgemm_backend = DeepGemmMegaMoE(moe_config, self.token_dispatcher.max_num_tokens_per_rank)
+        if self.enable_fused_mc2 == 1 and is_mega_moe_supported() and self.deepgemm_backend is None:
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
             # Resolve the Python ABI once, before the first collective/capture.
@@ -334,6 +339,8 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def prepare_hccl_teardown(self) -> bool:
         """Invalidate the MegaMoe context before its MC2 group is destroyed."""
+        if getattr(self, "deepgemm_backend", None) is not None:
+            raise RuntimeError("DeepGEMM MegaMoE does not support HCCL teardown/rebind")
         symm_buffer = getattr(self, "mega_moe_symm_buffer", None)
         if symm_buffer is None:
             return True
@@ -565,6 +572,11 @@ class FusedMC2CommImpl(MoECommMethod):
         fused_experts_input: MoEFusedExpertsInput,
         quant_method=None,
     ):
+        if getattr(self, "deepgemm_backend", None) is not None:
+            return FusedExpertsResult(
+                routed_out=self.deepgemm_backend.apply(fused_experts_input),
+                expert_tokens=None,
+            )
         if quant_method is not None:
             weights = quant_method.get_fused_mc2_weights(fused_experts_input.layer)
         else:
