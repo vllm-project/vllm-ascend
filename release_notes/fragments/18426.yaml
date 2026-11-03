@@ -1,0 +1,4 @@
+pr: 18426
+entries:
+  - category: performance
+    text: Improved MiniMax-M3 sparse attention on A3 and A5 with CANN GBSA, reusable decode metadata, and fused TopK index postprocessing.
