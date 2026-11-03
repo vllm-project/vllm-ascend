@@ -1188,6 +1188,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ) -> torch.Tensor:
         if self.sliding_window is not None:
             raise NotImplementedError("PrefixLM pooling with sliding attention is not supported")
+        assert attn_metadata.prefix_masks is not None
         start = 0
         for end, mask in zip(attn_metadata.actual_seq_lengths_q, attn_metadata.prefix_masks):
             length = end - start
