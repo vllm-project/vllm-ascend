@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 from vllm_ascend import ascend_forward_context
 from vllm_ascend.models.glm5next import kda as model_kda
-from vllm_ascend.models.glm5next import kda_projection_tp
+from vllm_ascend.models.glm5next import kda_input_projection_tp
 from vllm_ascend.ops import linear_op
 
 
@@ -115,7 +115,7 @@ def test_projection_tp_matches_dense_weights_with_ragged_and_idle_owners(monkeyp
             return work
         work.wait()
 
-    monkeypatch.setattr(kda_projection_tp.dist, "all_to_all_single", all_to_all)
+    monkeypatch.setattr(kda_input_projection_tp.dist, "all_to_all_single", all_to_all)
 
     def linear(weight):
         return lambda tensor: (F.linear(tensor, weight), None)
@@ -168,7 +168,7 @@ def test_projection_tp_matches_dense_weights_with_ragged_and_idle_owners(monkeyp
                 qkv_proj_states, g1, beta, core_attn_out
             ),
         )
-        layer.projection_tp = kda_projection_tp.KDAProjectionTP(group, heads, dim)
+        layer.projection_tp = kda_input_projection_tp.KDAInputProjectionTP(group, heads, dim)
         for step, batches in enumerate(inputs):
             hidden = batches[rank]
             extras = {"max_tokens_across_dp": max(counts[step])}

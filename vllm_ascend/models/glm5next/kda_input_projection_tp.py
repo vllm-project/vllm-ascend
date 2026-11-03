@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""KDA projection sharding with request-local recurrent state."""
+"""KDA input projection sharding with request-local recurrent state."""
 
 from typing import TYPE_CHECKING
 
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from .kda import Glm5NextLinearAttention
 
 
-class KDATPLayout:
+class KDAInputProjectionTPLayout:
     def __init__(self, group: GroupCoordinator, num_heads: int, head_dim: int):
         self.group = group
         self.size = group.world_size
@@ -29,7 +29,7 @@ class KDATPLayout:
         return output
 
 
-class KDAProjectionTP(KDATPLayout):
+class KDAInputProjectionTP(KDAInputProjectionTPLayout):
     def project(
         self, layer: "Glm5NextLinearAttention", hidden: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
