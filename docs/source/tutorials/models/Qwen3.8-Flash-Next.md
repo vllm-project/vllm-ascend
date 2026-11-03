@@ -235,7 +235,7 @@ Before starting:
     - Prefix caching is enabled without an explicit Mamba cache mode. Confirm cache behavior with the installed runtime.
     - `--profiler-config` sets the trace output directory; it does not start profiling by itself.
 
-**Service verification:**
+**Service Verification:**
 
 Wait for model loading and graph capture to complete, then check the service from the serving host. Use port `8088` for A3 or `8087` for 950 DT:
 
@@ -267,7 +267,7 @@ Before starting:
 - Place the compatible `PD_proxy_server.py` at `/opt/qwen38/PD_proxy_server.py`. The proxy must support Mooncake PD request routing and the options shown below; its implementation is not included in this guide.
 - The examples use the Mooncake library directory from the Python 3.12.16 environment. Edit the literal library path if Mooncake is installed elsewhere.
 
-#### 5.2.1 Prefill (P.sh)
+**Prefill:**
 
 ```bash
 #!/usr/bin/env bash
@@ -318,7 +318,7 @@ exec vllm serve /models/Qwen3.8-Flash-Next-w4a8 \
     > "/tmp/qwen38-a3-pd/prefill.log" 2>&1
 ```
 
-#### 5.2.2 Decode (D.sh)
+**Decode:**
 
 ```bash
 #!/usr/bin/env bash
@@ -370,7 +370,7 @@ exec vllm serve /models/Qwen3.8-Flash-Next-w4a8 \
     > "/tmp/qwen38-a3-pd/decode.log" 2>&1
 ```
 
-#### 5.2.3 Proxy (proxy.sh) and Startup
+**Proxy:**
 
 ```bash
 #!/usr/bin/env bash
@@ -422,7 +422,7 @@ curl --fail http://127.0.0.1:25570/v1/chat/completions \
 
 Inspect the prefill, decode, and proxy logs under `/tmp/qwen38-a3-pd` if the request fails.
 
-#### 5.2.4 Key Parameters
+**Key parameters:**
 
 - `VLLM_ASCEND_PLE_BACKEND=torch` selects the PLE backend for both roles.
 - Both roles enable Prefix Caching without an explicit Mamba cache mode.
@@ -446,7 +446,7 @@ The requests below use the A3 colocated endpoint. Select the endpoint and model 
 | 950 DT colocated | 8087 | `qwen3.8-flash-next-950-dt` |
 | A3 PD proxy | 25570 | `qwen38-flash-next-a3-pd` |
 
-For PD, first complete the proxy check in Section 5.2.3 and review the feature requirements in Section 5.2.4.
+For PD, first complete the proxy check and review the key parameters in [Section 5.2](#52-pd-separation-deployment).
 
 ### 6.1 Basic Chat Completion
 
@@ -500,7 +500,7 @@ Expected result: the service returns HTTP 200 OK and describes the supplied imag
 
 ### 6.3 Function Calling
 
-Function Calling requires the following startup options, which are included in the colocated examples in Section 5; for A3 PD, see Section 5.2.4:
+Function Calling requires the following startup options, which are included in the colocated examples in Section 5; for A3 PD, see [Section 5.2](#52-pd-separation-deployment):
 
 ```text
 --enable-auto-tool-choice --tool-call-parser qwen3_xml
@@ -548,7 +548,7 @@ When the model chooses the function, the parsed result appears in `choices[0].me
 
 ### 6.4 Reasoning Parser and Thinking Control
 
-Reasoning parsing requires the following startup option, which is included in the colocated examples in Section 5; for A3 PD, see Section 5.2.4:
+Reasoning parsing requires the following startup option, which is included in the colocated examples in Section 5; for A3 PD, see [Section 5.2](#52-pd-separation-deployment):
 
 ```text
 --reasoning-parser qwen3
