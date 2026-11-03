@@ -672,7 +672,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # Passing the explicit mask with sparse_mode=3 forces FIA to build a
         # redundant mask and costs ~10% end-to-end performance (issue #16889,
         # same pattern as PR #10302). Sliding-window decode keeps the mask.
-        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly and self.sliding_window is None:
+        # The max_query_len == 1 guard excludes multi-token batches that carry
+        # a DecodeOnly label: graph capture forces DecodeOnly onto FULL-graph
+        # dummies (including spec-decode verify and mixed batches) and MRV2
+        # speculators label their draft batches DecodeOnly, while those
+        # queries still need the causal mask (review feedback, cf. #17948).
+        if (
+            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and attn_metadata.max_query_len == 1
+            and self.sliding_window is None
+        ):
             return None, 0, SWA_INT_MAX, SWA_INT_MAX
         return (
             attn_metadata.attn_mask,
@@ -1078,7 +1087,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # token attends to all its cached keys). Skip the explicit
                 # mask and use sparse_mode=0 to avoid redundant mask
                 # construction in FIA (issue #16889, same pattern as #10302).
-                is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+                # max_query_len == 1 excludes multi-token batches labeled
+                # DecodeOnly (spec-decode draft/verify), cf. #17948.
+                is_decode = (
+                    attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
+                )
                 attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
                     query=query,
                     key=key,

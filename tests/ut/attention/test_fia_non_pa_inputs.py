@@ -40,6 +40,7 @@ def _make_metadata(state=AscendAttentionState.PrefillNoCache):
     return SimpleNamespace(
         attn_state=state,
         actual_seq_lengths_q=[3],
+        max_query_len=3,
         seq_lens=torch.tensor([3], dtype=torch.int32),
         seq_lens_list=[3],
         block_tables=torch.tensor([[0]], dtype=torch.int32),

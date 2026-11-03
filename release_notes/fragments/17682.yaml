@@ -1,6 +1,6 @@
 pr: 17682
 entries:
   - category: performance
-    text: Optimized FIA decode paths by skipping redundant attention mask construction for decode-only batches, improving end-to-end decode performance by ~10% on A2/A3.
+    text: Optimized FIA decode paths by skipping redundant attention mask construction for genuine single-token decode-only batches, improving end-to-end decode performance by ~10% on A2/A3.
   - category: bugfix
-    text: Fixed divergent mask handling between eager and ACL graph capture paths for sliding-window decode.
+    text: Kept the causal mask for multi-token batches labeled decode-only (speculative-decode verification and draft expansion), fixing spec-decode acceptance-rate regressions on A2/A3.
