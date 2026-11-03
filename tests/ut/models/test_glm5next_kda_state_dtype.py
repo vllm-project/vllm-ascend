@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.config import CacheConfig
+from vllm.model_executor.layers.mamba import mamba_utils
 
 from vllm_ascend.models.glm5next.kda import Glm5NextLinearAttention
 from vllm_ascend.models.glm5next.model import Glm5NextForCausalLM, Glm5NextForConditionalGeneration
@@ -60,3 +61,21 @@ def test_kda_rejects_unsupported_recurrent_state_dtype():
         layer.get_state_dtype()
     with pytest.raises(ValueError, match="KDA recurrent state supports only"):
         Glm5NextForCausalLM.get_mamba_state_dtype_from_config(config)
+
+
+@pytest.mark.parametrize("pcp_size", [1, 2, 8])
+def test_recoverssm_cache_records_follow_effective_pcp_head_shards(monkeypatch, pcp_size):
+    monkeypatch.setattr(mamba_utils, "is_conv_state_dim_first", lambda: False)
+    layer, config = make_layer_and_config("float32")
+    layer.use_recoverssm = True
+    layer.tp_size = pcp_size
+    config.cache_config.use_replayssm = True
+    config.parallel_config = SimpleNamespace(tensor_parallel_size=1, prefill_context_parallel_size=pcp_size)
+    hf = config.model_config.hf_text_config
+    hf.linear_num_heads, hf.linear_head_dim, hf.linear_conv_kernel_dim = 64, 128, 4
+    heads = 64 // pcp_size
+    expected = ((8, 3 * heads * 128), (heads, 128, 128), (heads, 6, 128), (heads, 6, 256))
+    assert layer.get_state_shape() == expected
+    assert Glm5NextForCausalLM.get_mamba_state_shape_from_config(config) == expected
+    assert Glm5NextForConditionalGeneration.get_mamba_state_shape_from_config(config) == expected
+    assert layer.get_state_dtype() == (torch.bfloat16, torch.float32, torch.float32, torch.bfloat16)
