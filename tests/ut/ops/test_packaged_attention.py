@@ -3,6 +3,8 @@
 
 """Test packaged operator dispatcher contracts without the DSL compiler."""
 
+import sys
+
 import pytest
 import torch
 
@@ -148,20 +150,8 @@ def test_native_mla_retires_same_stream_use_after_device_wait(monkeypatch, captu
         erased.append(tensor)
 
     monkeypatch.setattr(ops, "_get_dsl_ops", lambda name: (native, None))
-    monkeypatch.setattr(ops, "_erase_stream", erase)
-    # torch.library.impl registers the function but returns None in torch 2.10.
-    # Execute the production function body with CPU tensors and mocked NPU APIs.
-    import ast
-    import inspect
-
-    module = ast.parse(inspect.getsource(ops))
-    node = next(
-        n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "_mixed_quant_sparse_flash_mla_impl"
-    )
-    node.decorator_list = []
-    namespace = vars(ops).copy()
-    exec(compile(ast.Module(body=[node], type_ignores=[]), ops.__file__, "exec"), namespace)
-    out, _ = namespace[node.name](q, quant_mode=0)
+    monkeypatch.setitem(sys.modules, "torch_npu.npu.utils", SimpleNamespace(_erase_stream=erase))
+    out, _ = ops._mixed_quant_sparse_flash_mla_impl(q, quant_mode=0)
     assert torch.equal(out, q)
     assert order == (["native"] if capturing else ["native", "record", "wait", "erase", "erase"])
     if not capturing:
