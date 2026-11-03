@@ -339,7 +339,7 @@ are not interchangeable.
       --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": false}'
     ```
 
-    The output upon successful startup is:
+    A successful startup includes output similar to:
 
     ```text
     INFO:     Waiting for application startup.
