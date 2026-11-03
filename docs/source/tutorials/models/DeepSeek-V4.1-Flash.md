@@ -34,6 +34,9 @@ Use the matching upstream vLLM revision for the selected vLLM Ascend version.
 For source builds, use the upstream vLLM tag recorded in
 `.github/vllm-release-tag.commit` at the vLLM Ascend **v0.32.0rc** tag.
 
+For 950DT products (A5), Section 5.2 provides a DP8/TP1 PD reference using
+the original checkpoint, model runner V2, and native SWA bounded replay.
+
 ## 2 Supported Features
 
 Refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md)
@@ -46,6 +49,9 @@ and model runner V2. The single-node colocated configuration uses DP4/TP4.
 The PD configuration uses DP4/PCP4/TP1 on the Prefill node, DP16/TP1 on the
 Decode node, SWA bounded replay and MegaMoE on Prefill, DSpark speculative
 decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode.
+
+The A5 PD reference uses model runner V2, enabled with
+`VLLM_USE_V2_MODEL_RUNNER=1`.
 
 ## 3 Prerequisites
 
@@ -75,6 +81,25 @@ W8A8, set `MODEL_PATH` to the W8A8 directory instead. For A3 PD deployment
 with W8A8 weights, use Prefill DP4/TP4 and Decode DP8/TP2, as described in
 Section 5.2.
 
+For the A5 reference, use the original DeepSeek-V4.1-Flash-1017 checkpoint
+with `--quantization deepseek_v4_fp8`, including its DSpark parameters and
+Engram tables. Use its actual local directory as `<YOUR_MODEL_PATH>`; the
+ModelSlim W8A8 checkpoint above is for the A2/A3 examples.
+
+Use one of the following hardware configurations:
+
+- **A5 1P1D**: two 950DT products servers, each with eight Ascend950DT NPUs
+  and 96 GiB of HBM per NPU. Each role uses all eight devices (DP8/TP1).
+- **A3 single-node colocated**: one Atlas 800I A3 server with 8 NPUs and 128GB
+  memory per NPU. The server exposes 16 logical devices to the container.
+- **A3 1P1D**: two Atlas 800I A3 servers with the same device configuration.
+- **A2 series**: two Atlas 800I A2 servers. Each server has 8 NPUs with 64GB
+  memory per NPU and exposes 8 devices to the container.
+- **A2 1P1D**: four Atlas 800I A2 servers with the same device configuration.
+
+Store the checkpoint in a shared directory or copy it to the same absolute
+path on every server.
+
 ### 3.2 Verify Multi-node Communication
 
 Before deployment, follow
@@ -88,6 +113,21 @@ interfaces, and the service ports must not be blocked.
 
 Select the tab for the target hardware. A2 products and A3 products use
 separate images from the v0.32.0 release branch.
+
+=== "950DT products (A5)"
+
+    Use an A5 runtime built from `Dockerfile.a5` at the selected vLLM Ascend
+    checkout, with the matching upstream vLLM revision. For a main-branch source
+    build, select `.github/vllm-main-verified.commit`; for the v0.32.0 release
+    line, select the matching vLLM v0.32.0 build. Record the image digest and
+    repository commits rather than relying on an unpinned image tag.
+
+    Follow the [950DT server precheck](../../getting_started/installation.md)
+    and the [PD communication configuration](../features/pd_disaggregation_mooncake_multi_node.md#atlas-850850e950-superpod-communication-configuration).
+    Expose all eight NPUs to each role's container and provide enough host memory
+    and shared memory for Engram CPU offload and local DP sharing. The templates
+    use `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` for automatic UB resource
+    generation. Use the same absolute checkpoint path on both nodes.
 
 === "A3 series"
 
@@ -272,6 +312,272 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         CPUs, while `enable_npugraph_ex` enables the enhanced ACL Graph path.
 
 ### 5.2 1P1D PD Disaggregated Deployment
+
+=== "950DT products (A5)"
+
+    This reference configuration uses two 950DT products (A5) servers with
+    eight NPUs per server and the original DeepSeek-V4.1-Flash-1017 checkpoint.
+    Both Prefill and Decode use DP8/TP1 with expert parallelism. Reuse
+    `launch_online_dp.py` from [Prepare the DP Launcher](#5211-prepare-the-dp-launcher)
+    in a separate directory for each role; the seven template arguments are unchanged.
+
+    Use model runner V2 and an upstream vLLM build with native bounded replay.
+    The A5 commands below target vLLM 0.32.0 or the verified upstream revision
+    recorded in `.github/vllm-main-verified.commit` at the selected vLLM Ascend
+    checkout. The A2/A3 v0.30.0rc2 validation baseline does not apply to this tab.
+    The vLLM 0.30.0 compatibility path in Section 12 supports local prefix caching
+    only and cannot be used for this replay-enabled PD configuration.
+
+    #### A5 Prefill Node
+
+    Save the following as `run_dp_template.sh` on Prefill. Set `local_ip`,
+    `nic_name`, and `MODEL_PATH` to the Prefill communication IP, network
+    interface, and checkpoint path recorded in Section 3.1.
+
+    ```bash
+    #!/usr/bin/env bash
+
+    unset ftp_proxy
+    unset https_proxy
+    unset http_proxy
+    unset HCCL_INTRA_ROCE_ENABLE
+
+    local_ip="<PREFILL_NODE_IP>"
+    nic_name="<NETWORK_INTERFACE>"
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+
+    export HCCL_IF_IP="$local_ip"
+    export GLOO_SOCKET_IFNAME="$nic_name"
+    export TP_SOCKET_IFNAME="$nic_name"
+    export HCCL_SOCKET_IFNAME="$nic_name"
+    export HCCL_ALGO=level0:fullmesh
+
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+    export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_CONNECT_TIMEOUT=1200
+    export HCCL_BUFFSIZE=1024
+
+    export HCCL_OP_EXPANSION_MODE=CCU_SCHED
+    export VLLM_USE_V2_MODEL_RUNNER=1
+
+    vllm serve "$MODEL_PATH" \
+      --data-parallel-size "$3" \
+      --data-parallel-size-local 1 \
+      --host 0.0.0.0 \
+      --port "$2" \
+      --data-parallel-rank "$4" \
+      --data-parallel-address "$5" \
+      --data-parallel-rpc-port "$6" \
+      --tensor-parallel-size "$7" \
+      --max-model-len 1048576 \
+      --max-num-batched-tokens 5120 \
+      --served-model-name dsv41 \
+      --gpu-memory-utilization 0.9 \
+      --enable-expert-parallel \
+      --max-num-seqs 16 \
+      --block-size 128 \
+      --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+      --quantization deepseek_v4_fp8 \
+      --tokenizer-mode deepseek_v41 \
+      --tool-call-parser deepseek_v41 \
+      --enable-auto-tool-choice \
+      --reasoning-parser deepseek_v41 \
+      --enable-prefix-caching \
+      --trust-remote-code \
+      --enforce-eager \
+      --swa-bounded-replay \
+      --speculative-config '{"num_speculative_tokens": 5,"method": "dspark"}' \
+      --kv-transfer-config '{
+        "kv_connector": "MooncakeHybridConnector",
+        "kv_role": "kv_producer",
+        "kv_port": "36010",
+        "kv_connector_extra_config": {
+          "prefill": {
+            "tp_size": 1,
+            "dp_size": 8
+          },
+          "decode": {
+            "dp_size": 8,
+            "tp_size": 1
+          }
+        }
+      }' \
+      --additional-config '{"multistream_engram_overlap":false,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"multistream_dsv4_dsa_overlap":true}'
+    ```
+
+    Start all eight Prefill engines from the directory containing the launcher
+    and template:
+
+    ```bash
+    PREFILL_NODE_IP="<PREFILL_NODE_IP>"
+
+    python launch_online_dp.py \
+      --dp-size 8 \
+      --tp-size 1 \
+      --dp-size-local 8 \
+      --dp-rank-start 0 \
+      --dp-address "$PREFILL_NODE_IP" \
+      --dp-rpc-port 12321 \
+      --vllm-start-port 8000
+    ```
+
+    #### A5 Decode Node
+
+    Save the following as `run_dp_template.sh` on Decode. Set its local IP and
+    interface to the Decode node's values and use the same checkpoint as Prefill.
+
+    ```bash
+    #!/usr/bin/env bash
+
+    unset ftp_proxy
+    unset https_proxy
+    unset http_proxy
+    unset HCCL_INTRA_ROCE_ENABLE
+
+    local_ip="<DECODE_NODE_IP>"
+    nic_name="<NETWORK_INTERFACE>"
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+
+    export HCCL_IF_IP="$local_ip"
+    export GLOO_SOCKET_IFNAME="$nic_name"
+    export TP_SOCKET_IFNAME="$nic_name"
+    export HCCL_SOCKET_IFNAME="$nic_name"
+
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_CONNECT_TIMEOUT=1200
+    export HCCL_BUFFSIZE=1600
+
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+    export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
+    unset CPLUS_INCLUDE_PATH
+    export HCCL_OP_EXPANSION_MODE=CCU_SCHED
+    export VLLM_USE_V2_MODEL_RUNNER=1
+
+    vllm serve "$MODEL_PATH" \
+      --host 0.0.0.0 \
+      --port "$2" \
+      --data-parallel-size "$3" \
+      --data-parallel-size-local 1 \
+      --data-parallel-rank "$4" \
+      --data-parallel-address "$5" \
+      --data-parallel-rpc-port "$6" \
+      --tensor-parallel-size "$7" \
+      --max-model-len 1048576 \
+      --max-num-batched-tokens 1024 \
+      --served-model-name dsv41 \
+      --gpu-memory-utilization 0.92 \
+      --enable-expert-parallel \
+      --async-scheduling \
+      --max-num-seqs 64 \
+      --block-size 128 \
+      --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+      --quantization deepseek_v4_fp8 \
+      --tokenizer-mode deepseek_v41 \
+      --tool-call-parser deepseek_v41 \
+      --enable-auto-tool-choice \
+      --reasoning-parser deepseek_v41 \
+      --no-enable-prefix-caching \
+      --no-swa-bounded-replay \
+      --trust-remote-code \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --speculative-config '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager":false}' \
+      --kv-transfer-config '{
+        "kv_connector": "MooncakeHybridConnector",
+        "kv_role": "kv_consumer",
+        "kv_port": "36010",
+        "kv_connector_extra_config": {
+          "prefill": {
+            "dp_size": 8,
+            "tp_size": 1
+          },
+          "decode": {
+            "dp_size": 8,
+            "tp_size": 1
+          }
+        }
+      }' \
+      --additional-config '{"multistream_engram_overlap":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"multistream_dsv4_dsa_overlap":true,"enable_fused_mc2":0,"enable_force_eplb":false,"combine_quant_mode":4,"scheduler_config":{"recompute_scheduler_enable":true}}'
+    ```
+
+    Start all eight Decode engines from the Decode launcher directory:
+
+    ```bash
+    DECODE_NODE_IP="<DECODE_NODE_IP>"
+
+    python launch_online_dp.py \
+      --dp-size 8 \
+      --tp-size 1 \
+      --dp-size-local 8 \
+      --dp-rank-start 0 \
+      --dp-address "$DECODE_NODE_IP" \
+      --dp-rpc-port 12321 \
+      --vllm-start-port 8000
+    ```
+
+    #### A5 Proxy and Configuration Notes
+
+    Wait for all 16 engine endpoints to become healthy, then deploy the
+    [PD proxy](../features/pd_disaggregation_mooncake_multi_node.md) with Prefill
+    endpoints `<PREFILL_NODE_IP>:8000` through `:8007` and Decode endpoints
+    `<DECODE_NODE_IP>:8000` through `:8007`. In Section 6, use the proxy URL and
+    the served model name `dsv41` to verify generation.
+    If the proxy runs in a separate container, pass `--ulimit nofile=65536:524288`
+    to `docker run` before the image name; these values are file descriptor limits.
+
+    | Setting | Prefill | Decode |
+    | --- | --- | --- |
+    | DP / TP | 8 / 1 | 8 / 1 |
+    | Model runner | V2 | V2 |
+    | Prefix caching | Enabled | Disabled |
+    | SWA bounded replay | Explicitly enabled | Explicitly disabled |
+    | Target execution | Eager | `FULL_DECODE_ONLY` |
+    | DSpark tokens | 5 | 5, draft graph enabled |
+    | `max-num-batched-tokens` | 5120 | 1024 |
+    | `max-num-seqs` | 16 | 64 |
+    | `gpu-memory-utilization` | 0.9 | 0.92 |
+
+    - The main replay-related change from an existing A5 DP8/TP1 PD setup is
+      `--swa-bounded-replay` on Prefill, together with prefix caching. In the
+      pinned native vLLM build replay defaults to enabled; the explicit flag
+      records the intended behavior. Replay rebuilds the trailing SWA window
+      after a prefix hit instead of reusing its SWA cache blocks.
+    - Decode retains `scheduler_config.recompute_scheduler_enable: true`.
+      This Ascend scheduler does not support bounded replay; the backend would
+      disable replay automatically. `--no-swa-bounded-replay` makes that choice
+      explicit. It is independent of Prefill's replay setting.
+    - Each launcher child starts one local DP engine, so the template passes
+      `--data-parallel-size-local 1`; the launcher's `--dp-size-local 8` starts
+      eight such children. The connector topology must remain DP8/TP1 for both
+      roles in both templates.
+    - The role-specific batch, sequence, and memory settings are from the 1017
+      reference configuration, not mandatory changes introduced by v0.32.0.
+      Tune them for the request lengths and concurrency of the target workload.
+    - Use `--quantization deepseek_v4_fp8` with the original checkpoint. The
+      A2/A3 ModelSlim W8A8 commands use a different checkpoint and quantization
+      path. No manual MegaMoE source modification is required by this recipe.
+    - `MooncakeHybridConnector` transfers live KV between Prefill and Decode.
+      Adding SSD pooling is a separate configuration; see the
+      [AscendStore KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
+      This reference does not establish A5 DSV4.1 SSD-pool validation.
+
+    If startup fails, check the A5 communication prerequisites, checkpoint format,
+    free ports, and the installed vLLM/Ascend revisions; see the
+    [Public FAQs](../../faqs.md). This documentation update does not establish
+    end-to-end accuracy, throughput, or replay-hit validation for either branch.
+    Record the image digest and both repository commits when validating it.
 
 === "A3 series"
 
@@ -1762,7 +2068,7 @@ curl -sS "$SERVICE_URL/v1/models" | \
 ```
 
 The response must contain a model entry whose `id` matches the configured
-`--served-model-name`: `dsv41` for the A3 examples and `deepseek-v41` for the
+`--served-model-name`: `dsv41` for the A5 and A3 examples and `deepseek-v41` for the
 retained A2 example.
 
 ## 6 Functional Verification
