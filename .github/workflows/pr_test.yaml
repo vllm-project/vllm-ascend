@@ -579,7 +579,12 @@ jobs:
 
       - name: Select A3 single-node ops tests
         id: scope-a3-sn
-        if: needs.pre-commit.outputs.src == 'true'
+        if: >-
+          ${{
+            needs.pre-commit.outputs.src == 'true' ||
+            contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+            contains(github.event.pull_request.labels.*.name, 'ready-all')
+          }}
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install regex
@@ -589,7 +594,12 @@ jobs:
 
       - name: Set no-tests output for A3-sn when source paths unchanged
         id: noop-a3-sn
-        if: needs.pre-commit.outputs.src != 'true'
+        if: >-
+          ${{
+            needs.pre-commit.outputs.src != 'true' &&
+            !contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
+            !contains(github.event.pull_request.labels.*.name, 'ready-all')
+          }}
         run: |
           {
             echo "has_tests=false"
@@ -608,7 +618,12 @@ jobs:
 
       - name: Set no-tests output for A5-sn when source paths unchanged
         id: noop-a5-sn
-        if: needs.pre-commit.outputs.src != 'true'
+        if: >-
+          ${{
+            needs.pre-commit.outputs.src != 'true' &&
+            !contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
+            !contains(github.event.pull_request.labels.*.name, 'ready-all')
+          }}
         run: |
           {
             echo "has_tests=false"
@@ -757,8 +772,7 @@ jobs:
         needs.select-tests.outputs.has_tests_a3_sn == 'true' &&
         (
           contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-all') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-sn-ops')
+          contains(github.event.pull_request.labels.*.name, 'ready-all')
         )
       }}
     name: run-selected-tests-a3-sn (vllm@${{ matrix.vllm_version_short }})
@@ -785,8 +799,7 @@ jobs:
         needs.select-tests.outputs.has_tests_a5_sn == 'true' &&
         (
           contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-all') ||
-          contains(github.event.pull_request.labels.*.name, 'ready-sn-ops')
+          contains(github.event.pull_request.labels.*.name, 'ready-all')
         )
       }}
     name: run-selected-tests-a5-sn (vllm@${{ matrix.vllm_version_short }})
@@ -816,7 +829,6 @@ jobs:
           HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
           HAS_READY_ALL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
           HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
-          HAS_READY_SN_OPS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-sn-ops') }}
           SELECTION_SOURCE: ${{ needs.select-tests.outputs.source }}
           MATCHED_MODULES: ${{ needs.select-tests.outputs.matched_modules }}
         run: |
@@ -838,7 +850,7 @@ jobs:
           echo "select-tests: ${SELECT_TESTS_RESULT} (source: ${SELECTION_SOURCE:-unknown})"
           echo "has_tests: ${HAS_TESTS}"
           echo "has_tests_a5: ${HAS_TESTS_A5}"
-          echo "labels: main2main=${HAS_MAIN2MAIN_LABEL} ready-precise=${HAS_READY_LABEL} ready-all=${HAS_READY_ALL_LABEL} ready-a5=${HAS_READY_A5_LABEL} ready-sn-ops=${HAS_READY_SN_OPS_LABEL}"
+          echo "labels: main2main=${HAS_MAIN2MAIN_LABEL} ready-precise=${HAS_READY_LABEL} ready-all=${HAS_READY_ALL_LABEL} ready-a5=${HAS_READY_A5_LABEL}"
           echo "has_tests_a3_sn: ${HAS_TESTS_A3_SN}"
           echo "has_tests_a5_sn: ${HAS_TESTS_A5_SN}"
           if [ "${SELECT_TESTS_RESULT}" = "success" ] && [ -n "${MATCHED_MODULES// /}" ]; then
@@ -938,16 +950,11 @@ jobs:
             fi
           fi
 
-          HAS_SN_TRIGGER_LABEL="false"
-          if [ "${HAS_READY_LABEL}" = "true" ] || [ "${HAS_READY_ALL_LABEL}" = "true" ] || [ "${HAS_READY_SN_OPS_LABEL}" = "true" ]; then
-            HAS_SN_TRIGGER_LABEL="true"
-          fi
-
           if [ "${HAS_TESTS_A3_SN}" = "true" ]; then
             TESTS_A3_SN_RESULT="${{ needs.run-selected-tests-a3-sn.result }}"
             echo "run-selected-tests-a3-sn: ${TESTS_A3_SN_RESULT}"
-            if [ "${TESTS_A3_SN_RESULT}" = "skipped" ] && [ "${HAS_SN_TRIGGER_LABEL}" != "true" ]; then
-              echo "::notice::run-selected-tests-a3-sn was skipped (no ready-precise/ready-all/ready-sn-ops label)"
+            if [ "${TESTS_A3_SN_RESULT}" = "skipped" ] && [ "${HAS_READY_LABEL}" != "true" ] && [ "${HAS_READY_ALL_LABEL}" != "true" ]; then
+              echo "::notice::run-selected-tests-a3-sn was skipped (no ready-precise/ready-all label)"
             elif [ "${TESTS_A3_SN_RESULT}" != "success" ]; then
               echo "::error::run-selected-tests-a3-sn did not succeed (result: ${TESTS_A3_SN_RESULT})."
               echo "::error::The A3 single-node ops test suite failed. Open the failed run-selected-tests-a3-sn job above for details."
@@ -958,8 +965,8 @@ jobs:
           if [ "${HAS_TESTS_A5_SN}" = "true" ]; then
             TESTS_A5_SN_RESULT="${{ needs.run-selected-tests-a5-sn.result }}"
             echo "run-selected-tests-a5-sn: ${TESTS_A5_SN_RESULT}"
-            if [ "${TESTS_A5_SN_RESULT}" = "skipped" ] && [ "${HAS_SN_TRIGGER_LABEL}" != "true" ]; then
-              echo "::notice::run-selected-tests-a5-sn was skipped (no ready-precise/ready-all/ready-sn-ops label)"
+            if [ "${TESTS_A5_SN_RESULT}" = "skipped" ] && [ "${HAS_READY_LABEL}" != "true" ] && [ "${HAS_READY_ALL_LABEL}" != "true" ]; then
+              echo "::notice::run-selected-tests-a5-sn was skipped (no ready-precise/ready-all label)"
             elif [ "${TESTS_A5_SN_RESULT}" != "success" ]; then
               echo "::error::run-selected-tests-a5-sn did not succeed (result: ${TESTS_A5_SN_RESULT})."
               echo "::error::The A5 single-node ops test suite failed. Open the failed run-selected-tests-a5-sn job above for details."
