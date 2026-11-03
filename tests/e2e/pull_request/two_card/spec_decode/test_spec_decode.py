@@ -23,11 +23,13 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import pytest
 from transformers import AutoTokenizer
 from vllm import SamplingParams
 from vllm.config import CompilationConfig, CompilationMode
+from vllm.inputs import TokensPrompt
 from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
@@ -64,6 +66,35 @@ BASELINES_SP = {
     "p-eagle": [0.5625, 0.25, 0.0625, 0.0, 0.0, 0.0, 0.0, 0.0],
     "dflash2": [0.855, 0.593, 0.359, 0.290, 0.193, 0.152, 0.076, 0.007],
 }
+
+
+class DFlash2GraphModeWorker:
+    model_runner: Any
+
+    def install_graph_mode_probe(self):
+        # Install after initialization and the acceptance run so capture/warmup
+        # cannot satisfy the assertions for the real requests below.
+        self.graph_mode_calls: dict[str, set[tuple[str, int, int]]] = {"target": set(), "draft": set()}
+
+        def record_dispatch(dispatch, calls):
+            def wrapped(num_reqs, num_tokens, *args, **kwargs):
+                desc = dispatch(num_reqs, num_tokens, *args, **kwargs)
+                calls.add((desc.cg_mode.name, num_reqs, num_tokens))
+                return desc
+
+            return wrapped
+
+        for name, manager in (
+            ("target", self.model_runner.cudagraph_manager),
+            ("draft", self.model_runner.speculator.query_cudagraph_manager),
+        ):
+            manager.dispatch = record_dispatch(manager.dispatch, self.graph_mode_calls[name])
+
+    def take_graph_mode_calls(self):
+        calls = {name: sorted(records) for name, records in self.graph_mode_calls.items()}
+        for records in self.graph_mode_calls.values():
+            records.clear()
+        return calls
 
 
 @pytest.mark.skip(reason="skip test_eagle3_sp_acceptance")
@@ -305,11 +336,14 @@ def test_dflash2_v2_acceptance(
         "enforce_eager": False,
     }
 
-    # Capture both request counts used by the 1 -> 2 -> 1 reuse sequence.
+    # Leave three-request batches outside the captured range to exercise eager
+    # fallback without changing FULL_AND_PIECEWISE or disabling draft graphs.
+    decode_query_len = num_speculative_tokens + 1
+    eager_batch_size = 3
     compilation_config = CompilationConfig(
         mode=CompilationMode.VLLM_COMPILE,
         cudagraph_mode="FULL_AND_PIECEWISE",
-        cudagraph_capture_sizes=[batch_size * (num_speculative_tokens + 1) for batch_size in (1, 2)],
+        cudagraph_capture_sizes=[batch_size * decode_query_len for batch_size in (1, 2)],
     )
 
     with VllmRunner(
@@ -317,8 +351,10 @@ def test_dflash2_v2_acceptance(
         max_model_len=2048,
         disable_log_stats=False,
         tensor_parallel_size=2,
-        max_num_seqs=2,
+        max_num_seqs=eager_batch_size,
+        max_num_batched_tokens=2048,
         distributed_executor_backend="mp",
+        worker_extension_cls=f"{__name__}.DFlash2GraphModeWorker",
         gpu_memory_utilization=0.9,
         speculative_config=speculative_config,
         enforce_eager=False,
@@ -329,34 +365,52 @@ def test_dflash2_v2_acceptance(
         outputs = llm.model.generate(prompts, sampling_params)
         metrics = llm.model.get_metrics()
 
-        # Keep the acceptance baseline above unchanged while exercising both
-        # captured buckets and released request slots with short follow-ups.
-        reuse_sampling_params = SamplingParams(temperature=0, ignore_eos=False, max_tokens=48, seed=42)
-        reuse_prompts = [
-            prompts[0],
-            tokenizer.apply_chat_template(
-                [{"role": "user", "content": "Write a short introduction to the city of Paris."}],
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
+        # Keep the acceptance metrics above separate from graph-path coverage.
+        # With K=7, a 9-token prefill uses PIECEWISE (padded to 16), then
+        # 8-token decode steps use FULL. Three concurrent requests require
+        # 24 decode/draft tokens, exceeding both buckets and falling back to NONE.
+        prompt_len = decode_query_len + 1
+        prompt_token_ids = tokenizer.encode("Continue counting: 1, 2, 3, 4, 5.", add_special_tokens=False)
+        assert len(prompt_token_ids) >= prompt_len
+        graph_prompt: TokensPrompt = {"prompt_token_ids": prompt_token_ids[:prompt_len]}
+        graph_sampling_params = SamplingParams(temperature=0, ignore_eos=True, max_tokens=48, seed=42)
+        captured_target = {("PIECEWISE", 1, prompt_len), ("FULL", 1, decode_query_len)}
+        captured_draft = {("FULL", 1, decode_query_len)}
+        cases = [
+            ("captured", 1, captured_target, captured_draft),
+            (
+                "eager",
+                eager_batch_size,
+                {("NONE", eager_batch_size, eager_batch_size * decode_query_len)},
+                {("NONE", eager_batch_size, eager_batch_size * decode_query_len)},
             ),
+            ("captured_after_eager", 1, captured_target, captured_draft),
         ]
-        batched_outputs = llm.model.generate(reuse_prompts, reuse_sampling_params)
-        assert len(batched_outputs) == 2
-        for output in batched_outputs:
-            assert output.finished
-            completion = output.outputs[0]
-            assert 0 < len(completion.token_ids) <= reuse_sampling_params.max_tokens
-            assert len(completion.token_ids) == reuse_sampling_params.max_tokens or completion.finish_reason == "stop"
+        captured_token_ids = None
+        llm.model.collective_rpc("install_graph_mode_probe")
+        for name, batch_size, expected_target, expected_draft in cases:
+            graph_outputs = llm.model.generate([graph_prompt] * batch_size, graph_sampling_params)
+            assert len(graph_outputs) == batch_size
+            for output in graph_outputs:
+                assert output.finished
+                assert len(output.outputs[0].token_ids) == graph_sampling_params.max_tokens
 
-        replay_outputs = llm.model.generate(prompts, reuse_sampling_params)
-        assert len(replay_outputs) == 1
-        assert replay_outputs[0].finished
-        # Compare the same batch shape before and after reuse: greedy output
-        # need not be bitwise invariant across different batch sizes.
-        expected_tokens = outputs[0].outputs[0].token_ids[: reuse_sampling_params.max_tokens]
-        assert expected_tokens
-        assert replay_outputs[0].outputs[0].token_ids == expected_tokens
+            # DP=1: each dispatch result directly selects the execution path.
+            # Check every TP worker, and clear observations between workloads.
+            worker_calls = llm.model.collective_rpc("take_graph_mode_calls")
+            assert len(worker_calls) == 2
+            for rank, calls in enumerate(worker_calls):
+                for model, expected in (("target", expected_target), ("draft", expected_draft)):
+                    observed = {tuple(call) for call in calls[model]}
+                    assert expected <= observed, f"{name}: TP rank {rank} {model}: {expected=}, {observed=}"
+
+            if batch_size == 1:
+                token_ids = graph_outputs[0].outputs[0].token_ids
+                if captured_token_ids is None:
+                    captured_token_ids = token_ids
+                else:
+                    # Compare the same prompt and batch shape across eager reuse.
+                    assert token_ids == captured_token_ids
 
     for output in outputs:
         prompt = output.prompt

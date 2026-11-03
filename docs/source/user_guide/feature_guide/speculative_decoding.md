@@ -393,9 +393,15 @@ A few important things to consider when using DFlash2 draft models:
    execution. The compressed mask is a band-mode template, not a causal
    restriction on draft tokens.
 
-   The model-level acceptance test exercises DFlash2 draft graphs using
-   `VLLM_COMPILE` with `FULL_AND_PIECEWISE` on two NPUs, including request
-   reuse across batch sizes `1 -> 2 -> 1`:
+   The model-level acceptance test uses `VLLM_COMPILE` with
+   `FULL_AND_PIECEWISE` on two NPUs. With `K=7` and capture sizes `[8, 16]`,
+   a single 9-token prompt exercises target PIECEWISE prefill and FULL decode;
+   three such requests exceed the captured range and exercise eager fallback.
+   After initialization and the acceptance run, a test probe records actual
+   dispatch modes on each TP worker, asserting target FULL/PIECEWISE/NONE and
+   draft FULL/NONE. The DFlash2 draft uses FULL decode graphs or eager execution,
+   while PIECEWISE is exercised by the target model. Repeating the single request
+   after eager execution checks graph reuse and identical greedy output:
 
    ```shell
    pytest -sv tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py -k test_dflash2_v2_acceptance
