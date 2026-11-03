@@ -14,19 +14,209 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import os as _r144_ovl_os
+import sys as _r144_ovl_sys
 
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any
+print(
+    f"[R144-OVL-LOAD] R144 overlay attention_v1 LOADED pid={_r144_ovl_os.getpid()} file={__file__}",
+    file=_r144_ovl_sys.stderr,
+    flush=True,
+)
+# R218ID: child-side source-identity banner (stderr -- EngineCore stdout is
+# dropped, only stderr reaches the serve log; probe legs proved this). The
+# wrapper gates expensive legs on file+sha matching the frozen candidate.
+try:
+    _r218_id_stat = _r144_ovl_os.stat(__file__)
+    import hashlib as _r218_id_hl
 
-import torch
-import torch_npu
-import vllm.envs as envs_vllm
-from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
-from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
-from vllm.v1.attention.backend import (  # type: ignore
+    _r218_id_sha = _r218_id_hl.sha256(open(__file__, "rb").read()).hexdigest()[:16]  # noqa: SIM115 - one-shot identity banner read
+    print(
+        f"[R218ID] file={__file__} sha={_r218_id_sha} "
+        f"mtime={int(_r218_id_stat.st_mtime)} size={_r218_id_stat.st_size} "
+        f"pid={_r144_ovl_os.getpid()}",
+        file=_r144_ovl_sys.stderr,
+        flush=True,
+    )
+except Exception as _r218_id_e:
+    print(f"[R218ID] FAILED {_r218_id_e!r}", file=_r144_ovl_sys.stderr, flush=True)
+
+from dataclasses import dataclass, field  # noqa: E402 - sectioned/lazy import (port layout)
+
+# OSCAR INT2: shared helpers live in their own module (relocated from this
+# file's prologue); importing them here keeps the monolith-era call sites in
+# the class bodies below working without re-inlining them.
+from vllm_ascend.attention.int2.helpers import (  # noqa: F401,E402 - sectioned/lazy import (port layout)
+    _R170_EDGEFENCE_MODE,
+    _R170_EDGEFENCE_N,
+    _R170_MID2_ON,
+    _R170_ROWSLOT_ON,
+    _oscar_diag_write,
+    _r136_p0_dump,
+    _r218_diag,
+)
+
+_r218_diag("IMPORT file={}".format(__file__))
+# R170_ROWSLOT (default OFF): decode-graph ROW-SLOT contract. FULL decode
+# graphs bake hk[row] addresses at capture; the runtime rid->slot binding
+# (monotonic under R164_SLOTMAP=1) puts request k's ring at slot k != row.
+# Proof R170 (r170e all-slot dump): solo_k>=1 prefill wrote slot_k (fresh,
+# frozen), every replay read+slid slot0 = previous generation's final window
+# => E27 foreign-token corruption. Fix: (a) at capture bake slot=row
+# (torch.npu.is_current_stream_capturing in _tt_slot), (b) bind rid->slot via
+# the R166 free-list allocator (_r164_bind_slots first branch), (c) before
+# each pure-decode replay, _r170_rowslot_migrate copies ring content so the
+# rid at row b lives at slot b (evicting live non-decoding owners out of
+# row/pad/scratch slots). Requires R161_FENCE in (1,3) so the update stream's
+# copies are ordered after eager prefill writes (F1) and the previous replay
+# (F3). All changes gated by this single env; OFF => byte-identical legacy
+# behavior.
+# R170_MIDDUMP2: host-side pre-replay paged-cache dump (the in-graph
+# R170_MIDDUMP hook cannot fire at replay — python never re-executes inside
+# captured code; trap found 2026-09-22 when h10 produced zero records).
+# R170_EDGEFENCE: host-side full device sync at the END of update_graph_params
+# (before the caller launches the graph replay). Root evidence 2026-09-22: the
+# outlse census on h10/h1_fix shows the FIRST pure-replay decode step reading
+# seq_lens/bt-era values for a L0..L12(h1_fix)/L18(h10) layer PREFIX — exact
+# empty-attention signature (lse=-9999.0, out=0.0), extent varying per leg =>
+# a race (the cross-stream carrier/input fill lands MID-replay), not structure.
+# R161_FENCE=3 orders update_stream AFTER the previous replay, but nothing
+# orders the replay AFTER this step's fills at the capture->replay edge.
+# =1: sync every step (correctness probe; perf-costly). =2: only the first 3
+# update calls (the edge itself). OFF => byte-identical legacy behavior.
+# R160: install warmup-fix monkeypatch. Runs in the EngineCore process (where
+# attention_v1 is imported, before graph capture). Gated by R160_WFIX / R160_WDIAG
+# internally (no-op if both off). Patch module sits at overlay root (on sys.path).
+try:
+    import importlib as _il160
+
+    _r160_wfix = _il160.import_module("r160_warmup_fix")
+    _r160_wfix.start()
+except Exception as _r160_e:
+    print(f"[R160-OVL] warmup_fix start failed: {_r160_e!r}", file=_r144_ovl_sys.stderr, flush=True)
+
+# R161: race-edge fence matrix (diagnostic; default OFF via R161_FENCE=0).
+# Locates the missing cross-stream dependency edge for B>1 INT2 graph replay.
+try:
+    import importlib as _il161
+    from typing import Any
+
+    _r161_f: Any = _il161.import_module("r161_fence")
+    print(
+        f"[R161-OVL] fence loaded label={_r161_f.fence_label()} "
+        f"pid={_r144_ovl_os.getpid()} "
+        f"PBCARRIER={_r144_ovl_os.environ.get('R159K_PBCARRIER', '?')} "
+        f"PBCVERIFY={_r144_ovl_os.environ.get('R161_PBCVERIFY', '?')} "
+        f"ENPU={_r144_ovl_os.environ.get('ENPU_ENABLE', '?')}",
+        file=_r144_ovl_sys.stderr,
+        flush=True,
+    )
+except Exception as _r161_e:
+    print(f"[R161-OVL] fence load failed: {_r161_e!r}", file=_r144_ovl_sys.stderr, flush=True)
+    import types as _r161_t
+
+    _r161_f = _r161_t.SimpleNamespace(
+        on_update_enter=lambda *a, **k: None,
+        on_update_exit=lambda *a, **k: None,
+        on_replay_enter=lambda *a, **k: None,
+        on_replay_done=lambda *a, **k: None,
+        on_cu_done=lambda *a, **k: None,
+        on_middle_enter=lambda *a, **k: None,
+        fence_label=lambda: "F0-off",
+    )
+
+# ---- R164 tier-dump atexit (default OFF via R164_TIERDUMP) ----
+if _r144_ovl_os.environ.get("R164_TIERDUMP", "0") == "1":
+    import atexit as _r164_atx
+
+    def _r164_dump_tiers():
+        try:
+            import json as _j164
+            import sys as _s164
+
+            _m164 = _s164.modules.get("vllm_ascend.attention.attention_v1")
+            _buf = None
+            if _m164 is not None:
+                _c164 = getattr(_m164, "AscendINT2AttentionBackendImpl", None)
+                if _c164 is not None:
+                    _buf = getattr(_c164, "_r164_tdbuf", None)
+            if _buf is None:
+                return
+            _cpu = _buf.detach().to("cpu")
+            _rows = {}
+            for _l in range(_cpu.shape[0]):
+                for _b in range(_cpu.shape[1]):
+                    _v = _cpu[_l, _b]
+                    if float(_v.abs().sum()) == 0.0:
+                        continue
+                    _rows[f"L{_l}b{_b}"] = [round(float(x), 4) for x in _v.tolist()]
+            with open("/tmp/r164_tierdump.jsonl", "a") as _f164:
+                _f164.write(_j164.dumps({"pid": _r144_ovl_os.getpid(), "rows": _rows}) + "\n")
+        except Exception as _e164:
+            try:
+                with open("/tmp/r164_tierdump.jsonl", "a") as _f164e:
+                    _f164e.write("dump_error " + repr(_e164) + "\n")
+            except Exception:
+                pass
+
+    _r164_atx.register(_r164_dump_tiers)
+
+# ---- R150 P0 trace helper (file-based; default OFF via R150_TRACE) ----
+# R166_REFTRACE: PFQUANT lifecycle reference trace (default OFF). Cheap host-side
+# ints only — no device syncs, no allocation. One jsonl per pid; correlate with
+# R164_STEPDUMP via rids. Covers: quantize calls, paged-write coverage (slot
+# span), CU skip decisions, lazy-CU fires, three-tier prefill/decode boundaries.
+# R203_METAFIX (default OFF): per-STEP host mirror of step-constant metadata.
+# kprof r202b step_25 (composed stack, pass-2 big step): every layer re-reads
+# the SAME query_start_loc device tensor to host — q_start.cpu() at
+# three-tier-prefill entry + _qs201.cpu() in the R201_PFNOMASK core = 2
+# full-stream-sync D2H per layer (71 x ~1.0-1.2ms host-blocked aten::to/copy_
+# pairs per step + the device starvation behind them; ~160ms/step device-idle
+# gap class). The tensor is built ONCE per step (init_ascent_attn_metadata
+# H2D) and never mutated within the step, so all 36 layer calls read identical
+# values. Mirror it once per metadata OBJECT; mismatch (length vs
+# seq_lens_list) or any failure falls back to the exact base read.
+# R216 (default OFF): in-vivo LSE forensics. The product's 3-tier merge consumes
+# l_h (the middle op's softmaxLse OUTPUT) via exp(l_h - m) weighting. R215 proved
+# the op's LSE output is racy on real data at the B=1 base path; whether the
+# GROUP-M decode path (graph replay, what serving actually runs) feeds the merge
+# a correct l_h has NEVER been adjudicated against an independent reference
+# (SR_CMP compares graph-vs-eager arms of the SAME op — a shared defect cancels).
+# These helpers capture, at the REAL consumption boundary:
+#   _r216_mid  — called at the R146 convergence point right after the carrier
+#                out/lse are filled (covers BOTH graph-replay and eager calls):
+#                the exact op INPUTS (qrot, Kc/Vc packed INT2, bt, per-token
+#                affines, askv) + OUTPUTS (out, lse) + row identity.
+#   _r216_merge— called right before the tier-merge compute: the four merge
+#                operands (l_pr, l_h, o_pr, o_h) as consumed.
+# Offline (RAW/r216_adjudicate.py) rebuilds the middle-tier LSE in fp32 from the
+# captured INT2 operands and adjudicates. Full dumps are budget-capped; a light
+# per-call ledger (lse vectors + identity) runs for every GROUP-M call to expose
+# intermittent corruption across a whole leg.
+# R203_D2HTRACE (DIAGNOSTIC_ONLY/default OFF): count long device-to-host reads
+# (Tensor.cpu/tolist/item over the threshold) with their Python call sites —
+# each is a full-stream sync on the eager path (the kprof r202b gap class).
+# Used to enumerate REMAINING D2H sites after the R203_METAFIX edits; never
+# enabled in A/B legs. Log: /tmp/r203_d2h.log (container /tmp — docker cp).
+
+import logging  # noqa: E402 - sectioned/lazy import (port layout)
+import os  # noqa: E402 - sectioned/lazy import (port layout)
+from enum import Enum  # noqa: E402 - sectioned/lazy import (port layout)
+from typing import Any  # noqa: E402 - sectioned/lazy import (port layout)
+
+import torch  # noqa: E402 - sectioned/lazy import (port layout)
+import torch_npu  # noqa: E402 - sectioned/lazy import (port layout)
+import vllm.envs as envs_vllm  # noqa: E402 - sectioned/lazy import (port layout)
+from vllm.config import (  # noqa: E402 - sectioned/lazy import (port layout)
+    VllmConfig,
+    get_current_vllm_config,
+)
+from vllm.distributed import (  # noqa: E402 - sectioned/lazy import (port layout)
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
+from vllm.utils.math_utils import cdiv  # noqa: E402 - sectioned/lazy import (port layout)
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype  # noqa: E402 - sectioned/lazy import (port layout)
+from vllm.v1.attention.backend import (  # type: ignore  # noqa: E402 - sectioned/lazy import (port layout)
     AttentionBackend,
     AttentionCGSupport,
     AttentionImpl,
@@ -34,21 +224,28 @@ from vllm.v1.attention.backend import (  # type: ignore
     AttentionMetadataBuilder,
     AttentionType,
 )
-from vllm.v1.attention.backends.registry import (  # type: ignore
+from vllm.v1.attention.backends.registry import (  # type: ignore  # noqa: E402 - sectioned/lazy import (port layout)
     AttentionBackendEnum,
     register_backend,
 )
-from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.attention.ops.pcp import (  # noqa: E402 - sectioned/lazy import (port layout)
+    _gather_prefill_cache_inputs,  # type: ignore[import-not-found]  # noqa: E402 - sectioned/lazy import (port layout)
+)
+from vllm.v1.core.sched.output import SchedulerOutput  # noqa: E402 - sectioned/lazy import (port layout)
+from vllm.v1.kv_cache_interface import (  # noqa: E402 - sectioned/lazy import (port layout)
+    AttentionSpec,
+    CrossAttentionSpec,
+)
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
-from vllm_ascend.attention.context_parallel.common_cp import (
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX  # noqa: E402 - sectioned/lazy import (port layout)
+from vllm_ascend.attention.attention_mask import (  # noqa: E402 - sectioned/lazy import (port layout)
+    AttentionMaskBuilder,  # noqa: E402 - sectioned/lazy import (port layout)
+)
+from vllm_ascend.attention.context_parallel.common_cp import (  # noqa: E402 - sectioned/lazy import (port layout)
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
-from vllm_ascend.attention.utils import (
+from vllm_ascend.attention.utils import (  # noqa: E402 - sectioned/lazy import (port layout)
     AscendCommonAttentionMetadata,
     _select_seq_lens,
     is_dcp_enabled,
@@ -58,13 +255,21 @@ from vllm_ascend.attention.utils import (
     uses_pcp_sharded_layout,
     using_paged_attention,
 )
-from vllm_ascend.compilation.updatable_graph import (
+from vllm_ascend.compilation.updatable_graph import (  # noqa: E402 - sectioned/lazy import (port layout)
     get_capture_resource,
     register_task,
 )
-from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+from vllm_ascend.device.device_op import DeviceOperator  # noqa: E402 - sectioned/lazy import (port layout)
+from vllm_ascend.device.hardware_profile import (  # noqa: E402 - sectioned/lazy import (port layout)
+    HardwareCapability,
+    get_current_hardware_profile,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (  # noqa: E402 - sectioned/lazy import (port layout)
+    attention_transfer_window,  # noqa: E402 - sectioned/lazy import (port layout)
+)
+
+logger = logging.getLogger(__name__)
+
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -73,6 +278,14 @@ _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
 
 
+# R144 P0: module-level dynamic-lifecycle counters (gated by R144_TT_DEBUG=1).
+# Bumped by _tt_resolve_slots when the req_id slot map finishes/reuses a slot.
+# R136 P0: env-gated (R136_P0_DIAG=1, default OFF) dump of the middle launch
+# OPERANDS (shapes + content hashes + key scalars) at BOTH the V1 eager launch
+# site (_r109_middle_candidate) and the V1 graph replay updater site
+# (_r113_update_oscar_mid), keyed by (mode, layer, step). Purpose: locate the
+# FIRST step/layer/FIELD where F_eager and B_graph middle operands diverge —
+# BEFORE the idx-8/idx-2 token symptom. Production byte-identical when OFF.
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -119,7 +332,11 @@ class AscendAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
-        if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
+        if cache_dtype_str == "int2_per_token_head":
+            # OSCAR INT2: packed 4xINT2 per byte divides K/V head_size by 4
+            # before the paged-cache shape is derived.
+            head_size = head_size // 4
+        elif envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
             return (2, num_blocks, num_kv_heads, block_size, head_size)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
@@ -154,6 +371,26 @@ class AscendAttentionBackend(AttentionBackend):
         return [128]
 
 
+# R116 quiet mode: gate THIS MODULE's debug prints (the ~25.7K-line/leg noise
+# source). Module-level `print` shadow keeps the rest of the process
+# untouched; allowlisted prefixes pass through. Default OFF = R115 behavior.
+if os.environ.get("R116_QUIET", "0") == "1":
+    _r116_builtin_print = print
+
+    def _r116_gate_print(*args, **kwargs):
+        try:
+            _s = " ".join(str(a) for a in args)
+        except Exception:
+            _s = ""
+        if _s.startswith(("PERFLEG", "PHASE_", "R116-KEY", "[R116-ERR")):
+            _r116_builtin_print(*args, **kwargs)
+
+    print = _r116_gate_print
+
+
+# R114 steady-token hook: runs INSIDE EngineCore (the overlay is what the
+# engine imports; the R112/R113 parent-side monkeypatch never reached the
+# engine subprocess). One timestamp per decode step = layer-0 attention entry.
 class AscendAttentionState(Enum):
     PrefillNoCache = 0
     PrefillCacheHit = 1
@@ -236,6 +473,17 @@ class AscendMetadata:
     pcp_local_num_input_tokens: int | None = None
     # Resolved by the builder; execution must not infer layout from tensor sizes.
     uses_pcp_sharded_layout: bool = False
+
+    # R144 P0: stable per-request identity (req_id strings, batch_idx->req_id)
+    # plumbed from InputBatch.req_ids via AscendCommonAttentionMetadata. None
+    # when R144_TT_REQID=0 (b-keyed verbatim path) or non-ascend paths.
+    request_ids: list[str] | None = None
+
+    # R144 P0.1: explicit scheduler lifecycle events (consumed by the resolver
+    # instead of absence-inference). None when R144_TT_REQID=0.
+    finished_req_ids: set[str] | None = None
+    preempted_req_ids: set[str] | None = None
+    new_req_ids: set[str] | None = None
 
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
@@ -463,6 +711,10 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
             **backend_metadata,
+            request_ids=getattr(common_attn_metadata, "request_ids", None),
+            finished_req_ids=getattr(common_attn_metadata, "finished_req_ids", None),
+            preempted_req_ids=getattr(common_attn_metadata, "preempted_req_ids", None),
+            new_req_ids=getattr(common_attn_metadata, "new_req_ids", None),
         )
         if pcp_shard_slot_mapping is not None:
             self._finalize_pcp_metadata(attn_metadata, pcp_shard_slot_mapping)
@@ -563,6 +815,13 @@ class PAParamProvider:
 
 
 class AscendAttentionBackendImpl(AttentionImpl):
+    # R113: class-level defaults so lazily-created instances (the __new__ path in
+    # _forward_int2, class-surgery rebinds) also expose the attributes the graph
+    # path queries at init (first hit: 'sliding_window' during EAGER=0 init).
+    sliding_window = None
+    alibi_slopes = None
+    logits_soft_cap = None
+
     def __init__(
         self,
         num_heads: int,
@@ -611,6 +870,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
         # Note: Some embedding model weights are in float32 format.
         if self.kv_cache_dtype in [torch.float16, torch.bfloat16, torch.float32]:
+            self.enable_c8_quant = False
+        elif self.vllm_config.cache_config.cache_dtype == "int2_per_token_head":
+            # OSCAR True-INT2 stores its own per-token-head scales in the page
+            # layout (prepared by the INT2 backend), so it does not require a
+            # recipe-derived quantized checkpoint like the C8 dtypes above.
             self.enable_c8_quant = False
         else:
             from vllm_ascend.utils import is_c8_mxfp_kv_quant
@@ -1332,6 +1596,110 @@ class AscendAttentionBackendImpl(AttentionImpl):
         assert output is not None, "Output tensor must be provided."
         self._layer_name = layer.layer_name
 
+        # INT2 KV cache dispatch: if cache is uint8 (packed INT2), use INT2 forward
+        if kv_cache is not None and len(kv_cache) >= 2:
+            k_cache = kv_cache[0]
+            if not getattr(type(self), "_r190_dtype_logged", False):
+                type(self)._r190_dtype_logged = True
+                _oscar_diag_write(
+                    "r190_probe.log", f"[R190-DTYPE] k_cache.dtype={k_cache.dtype} kv_cache_len={len(kv_cache)}\n"
+                )
+            if isinstance(k_cache, torch.Tensor) and k_cache.dtype == torch.uint8:
+                # R189 PROBE: run a small MSD_ON LSE before this layer's attention to check cube state
+                if os.environ.get("R189_PROBE") == "1":
+                    _oscar_diag_write("r190_probe.log", "[R189-ENTRY] forward INT2 path entered\n")
+                if os.environ.get("R189_PROBE") == "1" and not getattr(type(self), "_r189_done", False):
+                    type(self)._r189_done = True
+                    try:
+                        if not hasattr(type(self), "_r189_mod"):
+                            import torch.utils.cpp_extension as _ce189
+
+                            _R152 = os.environ.get("R152_LAUNCHER_DIR", "")
+                            _TN = os.path.dirname(torch_npu.__file__)
+                            _INC = [
+                                os.path.join(_TN, "include"),
+                                os.path.join(_TN, "include", "third_party", "op-plugin"),
+                                "/usr/local/Ascend/cann-9.0.0/aarch64-linux/include",
+                                "/usr/local/Ascend/cann-9.0.0/include",
+                            ]
+                            _VENDOR = os.environ.get("R183_COMPOSITE_OPP", "")
+                            _INC.append(_VENDOR + "/op_api/include")
+                            _LD = [
+                                "-L/usr/local/Ascend/cann-9.0.0/lib64",
+                                "-lascendcl",
+                                "-lopapi",
+                                "-L" + os.path.join(_TN, "lib"),
+                                "-ltorch_npu",
+                                "-L" + _VENDOR + "/op_api/lib",
+                                "-lcust_opapi",
+                                "-Wl,-rpath,/usr/local/Ascend/cann-9.0.0/lib64",
+                                "-Wl,-rpath," + _VENDOR + "/op_api/lib",
+                            ]
+                            os.environ["TORCH_EXTENSIONS_DIR"] = f"/tmp/r189_{os.getpid()}"
+                            os.makedirs(os.environ["TORCH_EXTENSIONS_DIR"], exist_ok=True)
+                            type(self)._r189_mod = _ce189.load(
+                                name="r189",
+                                sources=[_R152 + "/int2_op_launch_lse_fast_r152.cpp"],
+                                extra_include_paths=_INC,
+                                extra_ldflags=_LD,
+                                build_directory=os.environ["TORCH_EXTENSIONS_DIR"],
+                                verbose=False,
+                            )
+                        _dev = query.device
+                        _D, _nq, _nkv, _bs = 128, 32, 8, 128
+                        _q = (torch.randn(1, _nq, 1, _D, device=_dev) * 0.5).bfloat16()
+                        _k = torch.randint(0, 256, (4, _nkv, _bs, _D // 4), device=_dev, dtype=torch.uint8).view(
+                            torch.int8
+                        )
+                        _v = torch.randint(0, 256, (4, _nkv, _bs, _D // 4), device=_dev, dtype=torch.uint8).view(
+                            torch.int8
+                        )
+                        _bt = torch.arange(4, dtype=torch.int32, device=_dev).unsqueeze(0)
+                        _ks = (torch.rand(1, _nkv, 4 * _bs, device=_dev) * 0.05 + 0.001).bfloat16()
+                        _ko = (torch.randn(1, _nkv, 4 * _bs, device=_dev) * 0.02).bfloat16()
+                        _vs = (torch.rand(1, _nkv, 4 * _bs, device=_dev) * 0.05 + 0.001).bfloat16()
+                        _vo = (torch.randn(1, _nkv, 4 * _bs, device=_dev) * 0.02).bfloat16()
+                        _o = torch.zeros(1, _nq, 1, _D, dtype=torch.bfloat16, device=_dev)
+                        _l = torch.zeros(1, _nq, 1, dtype=torch.float32, device=_dev)
+                        _oscar_diag_write("r190_probe.log", "[R189-PROBE] BEFORE-LSE-call\n")
+                        _r = type(self)._r189_mod.launch_lse_fast(
+                            _q,
+                            _k,
+                            _v,
+                            _bt,
+                            _ks,
+                            _ko,
+                            _vs,
+                            _vo,
+                            _o,
+                            _l,
+                            _nq,
+                            1.0 / (_D**0.5),
+                            _nkv,
+                            "BNSD",
+                            _bs,
+                            1,
+                            1,
+                            [4 * _bs],
+                            torch.zeros(0, dtype=torch.bfloat16, device=_dev),
+                            0,
+                            0,
+                            0,
+                            True,
+                        )
+                        torch.npu.synchronize()
+                        _oscar_diag_write(
+                            "r190_probe.log",
+                            f"[R189-PROBE-L0-BEFORE-ATTN] rc={int(_r[0])} finite={torch.isfinite(_o).all().item()}\n",
+                        )
+                    except Exception as _e:
+                        _oscar_diag_write("r190_probe.log", f"[R189-PROBE-L0-BEFORE-ATTN] CRASH: {str(_e)[:80]}\n")
+                # Dispatch to INT2 forward method
+                return self._forward_int2(layer, query, key, value, kv_cache, attn_metadata, output)
+
+        # release-line kvcomp/hamming-sparse feature: main has neither the
+        # feature module nor the attribute, so this branch is not ported.
+
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not yet supported for AscendAttentionBackendImpl")
 
@@ -1378,6 +1746,62 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
+
+    def _forward_int2(
+        self,
+        layer: "AttentionLayer",
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: "AscendMetadata",
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward pass with INT2 KV cache (packed uint8).
+
+        This method handles INT2 KV cache when the cache dtype is uint8.
+        It quantizes K/V to INT2 before writing to cache, and dequantizes
+        before attention computation.
+        """
+        from vllm_ascend.attention.attention_int2 import AscendINT2AttentionBackendImpl
+
+        # Lazy initialization of INT2 backend instance
+        if not hasattr(self, "_int2_backend"):
+            self._int2_backend = AscendINT2AttentionBackendImpl.__new__(AscendINT2AttentionBackendImpl)
+            # Copy necessary attributes from self
+            self._int2_backend.num_heads = self.num_heads
+            self._int2_backend.head_size = self.head_size
+            self._int2_backend.scale = self.scale
+            self._int2_backend.num_kv_heads = self.num_kv_heads
+            self._int2_backend.vllm_config = self.vllm_config
+            self._int2_backend.device = query.device  # Use query device instead of self.device
+            self._int2_backend.kv_cache_dtype = self.kv_cache_dtype
+            # R113: also copy the standard attrs queried on the graph init path
+            # (class-level defaults exist as backstop; copy real values when present).
+            for _a in (
+                "sliding_window",
+                "alibi_slopes",
+                "attn_type",
+                "logits_soft_cap",
+                "hidden_size",
+                "num_heads",
+                "head_size",
+            ):
+                if getattr(self, _a, None) is not None:
+                    setattr(self._int2_backend, _a, getattr(self, _a))
+            self._int2_backend.key_cache = None
+            self._int2_backend.value_cache = None
+            # Set KV transfer attributes
+            self._int2_backend.is_kv_producer = getattr(self, "is_kv_producer", False)
+            self._int2_backend.is_kv_consumer = getattr(self, "is_kv_consumer", False)
+            # Populate Oscar rotation matrices (this __new__ bypassed __init__).
+            self._int2_backend._oscar_R_k = None
+            self._int2_backend._oscar_R_v = None
+            self._int2_backend._oscar_rot_loaded = False
+            self._int2_backend._load_oscar_rotations()
+
+        # Delegate to INT2 backend's forward method
+        return self._int2_backend.forward(layer, query, key, value, kv_cache, attn_metadata, output)
 
 
 class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):

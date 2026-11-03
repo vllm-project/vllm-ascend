@@ -607,6 +607,14 @@ class AscendModelSlimConfig(QuantizationConfig):
                     ".v_proj.kv_cache_offset": ".attn.v_cache_offset",
                 }
             )
+        if self.enable_int2_quant:
+            # OSCAR INT2: symmetric per-token-head KV recipe, scales only.
+            suffix_map.update(
+                {
+                    ".k_proj.kv_cache_scale": ".attn.k_cache_scale",
+                    ".v_proj.kv_cache_scale": ".attn.v_cache_scale",
+                }
+            )
         if self.enable_mxfp_c8_quant:
             # MXFP C8 quantizes K dynamically, but V uses the static E8M0
             # per-channel scale stored in the ModelSlim checkpoint
@@ -853,6 +861,11 @@ class AscendModelSlimConfig(QuantizationConfig):
 
                 scheme = AscendC8KVCacheAttentionMethod(self.quant_description, prefix)
                 logger.debug("Select AscendKVCacheMethod(C8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8]")
+            elif self.is_int2_quant_layer(prefix):
+                from ..methods.kv_int2 import AscendINT2KVCacheAttentionMethod
+
+                scheme = AscendINT2KVCacheAttentionMethod(self.quant_description, prefix)
+                logger.debug("Select AscendKVCacheMethod(INT2) for %s (layer=%s)", prefix, "AttentionLayerBase[INT2]")
             elif self.enable_mxfp_c8_quant and self._is_full_attention_layer(layer):
                 if self._has_mxfp_c8_recipe is False:
                     logger.warning_once(
@@ -925,6 +938,13 @@ class AscendModelSlimConfig(QuantizationConfig):
         if self.enable_c8_quant:
             layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
             if layer_id_str.isdigit() and int(layer_id_str) in self.c8_quant_layers:
+                return True
+        return False
+
+    def is_int2_quant_layer(self, prefix):
+        if self.enable_int2_quant:
+            layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
+            if layer_id_str.isdigit() and int(layer_id_str) in self.int2_quant_layers:
                 return True
         return False
 
@@ -1184,7 +1204,9 @@ class AscendModelSlimConfig(QuantizationConfig):
         kv_quant_type = self.quant_description.get("kv_cache_type", "")
         self.enable_c8_quant = kv_quant_type == "C8"
         self.c8_quant_layers = []
-        if self.enable_fa_quant or self.enable_indexer_quant or self.enable_c8_quant:
+        self.enable_int2_quant = kv_quant_type == "INT2"
+        self.int2_quant_layers = []
+        if self.enable_fa_quant or self.enable_indexer_quant or self.enable_c8_quant or self.enable_int2_quant:
             for key in self.quant_description:
                 _id = "".join(re.findall(r"\.(\d+)\.", key))
                 if "fa_k.scale" in key:
@@ -1192,4 +1214,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                 if "indexer.quant_type" in key:
                     self.indexer_quant_layers.append(int(_id))
                 if "k_proj.kv_cache_scale" in key:
-                    self.c8_quant_layers.append(int(_id))
+                    if self.enable_c8_quant:
+                        self.c8_quant_layers.append(int(_id))
+                    if self.enable_int2_quant:
+                        self.int2_quant_layers.append(int(_id))
