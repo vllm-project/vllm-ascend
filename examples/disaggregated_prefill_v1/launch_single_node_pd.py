@@ -222,8 +222,8 @@ def terminate_process(proc: subprocess.Popen, name: str) -> None:
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         proc.wait(timeout=15)
     except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
-            with contextlib.suppress(ProcessLookupError, OSError):
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     print(f"[{name}] Stopped.")
 
 
@@ -351,7 +351,7 @@ def main() -> int:
                 launch_process(
                     prefill_cfg.build_command(), prefill_cfg.build_env(), str(log_dir / "prefill.log"), "prefill"
                 ),
-            "prefill",
+                "prefill",
             )
         )
         time.sleep(2)
