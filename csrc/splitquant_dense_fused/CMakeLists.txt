@@ -24,8 +24,12 @@ ascendc_library(splitquant_cube STATIC
 # MatmulImpl and TCubeTiling are provided by the public AscendC advanced API.
 # The legacy precompile helper reads include paths from this interface target.
 set_property(TARGET splitquant_cube_interface APPEND PROPERTY INCLUDES
-    "${ASCEND_CANN_PACKAGE_LINUX_PATH}/asc/include"
     "${ASCEND_HOME_PATH}/aarch64-linux/asc/include"
+)
+# CANN 8.5's legacy external project forwards OPTIONS more reliably than
+# custom include properties. Keep the device include in both representations.
+set_property(TARGET splitquant_cube_interface APPEND PROPERTY OPTIONS
+    "-I${ASCEND_HOME_PATH}/aarch64-linux/asc/include"
 )
 ascendc_compile_definitions(splitquant_cube PRIVATE HAVE_WORKSPACE HAVE_TILING)
 ascendc_library(splitquant_raw STATIC
