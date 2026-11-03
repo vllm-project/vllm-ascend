@@ -38,9 +38,11 @@ def make_case(tokens=3):
 
 
 @pytest.mark.parametrize("tokens", [0, 1, 3, 8])
-def test_stage_inputs_and_collective(tokens):
+@pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
+def test_stage_inputs_and_collective(tokens, scale_dtype):
     obj, inputs = make_case(tokens)
-    scales = torch.tensor([127, 126], dtype=torch.uint8).expand(tokens, 2).contiguous()
+    scale_bytes = torch.tensor([127, 126], dtype=torch.uint8).expand(tokens, 2).contiguous()
+    scales = scale_bytes.view(scale_dtype)
     with patch.object(
         backend.torch_npu, "npu_dynamic_mx_quant", return_value=(torch.ones(tokens, 64), scales)
     ) as quant:
@@ -53,7 +55,7 @@ def test_stage_inputs_and_collective(tokens):
     assert "apply_router_weight_on_output" not in obj.ops.fp8_fp4_mega_moe.call_args.kwargs
     assert "use_cann_mxfp_quant" not in obj.ops.fp8_fp4_mega_moe.call_args.kwargs
     assert torch.equal(obj.buffer.topk_idx[:tokens], inputs.topk_ids)
-    assert torch.equal(obj.buffer.x_sf[:tokens], scales.view(torch.int16))
+    assert torch.equal(obj.buffer.x_sf[:tokens].view(torch.uint8), scale_bytes)
 
 
 @pytest.mark.parametrize("invalid", ["overflow", "dtype", "input_weight", "eplb", "weights"])
@@ -72,9 +74,16 @@ def test_reject_invalid_input_before_launch(invalid):
     obj.ops.fp8_fp4_mega_moe.assert_not_called()
 
 
-def test_packed_weight_and_scale_bits_preserved():
+@pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
+@pytest.mark.parametrize("noncontiguous", [False, True])
+def test_packed_weight_and_scale_bits_preserved(scale_dtype, noncontiguous):
     weights = torch.tensor([0, 127, 128, 255], dtype=torch.uint8).repeat(2, 2, 1)
-    scales = torch.tensor([122, 128], dtype=torch.uint8).repeat(2, 2, 1)
+    scale_bytes = torch.tensor([122, 128], dtype=torch.uint8).repeat(2, 2, 1)
+    scales = scale_bytes.view(scale_dtype)
+    if noncontiguous:
+        weights = weights.transpose(0, 2)
+        scales = scales.transpose(0, 2)
+        scale_bytes = scale_bytes.transpose(0, 2)
     module = MagicMock()
     with patch.dict("sys.modules", {"deep_gemm": module}):
         backend.prepare_weights(weights, scales, weights, scales)
@@ -82,7 +91,7 @@ def test_packed_weight_and_scale_bits_preserved():
     for weight, scale in args:
         assert weight.dtype == torch.int8 and scale.dtype == torch.int16
         assert torch.equal(weight.view(torch.uint8), weights)
-        assert torch.equal(scale.view(torch.uint8), scales)
+        assert torch.equal(scale.view(torch.uint8), scale_bytes)
 
 
 def test_teardown_refused_for_deepgemm():
@@ -90,6 +99,20 @@ def test_teardown_refused_for_deepgemm():
     comm.deepgemm_backend = object()
     with pytest.raises(RuntimeError, match="HCCL teardown"):
         comm.prepare_hccl_teardown()
+
+
+def test_fused_experts_delegates_to_deepgemm():
+    comm = object.__new__(FusedMC2CommImpl)
+    comm.deepgemm_backend = MagicMock()
+    _, inputs = make_case()
+    output = torch.empty_like(inputs.hidden_states)
+    comm.deepgemm_backend.apply.return_value = output
+
+    result = comm.fused_experts(inputs)
+
+    comm.deepgemm_backend.apply.assert_called_once_with(inputs)
+    assert result.routed_out is output
+    assert result.expert_tokens is None
 
 
 def model_config():
@@ -148,6 +171,19 @@ def test_config_constraints(invalid):
         else:
             with pytest.raises(ValueError):
                 config._validate_deepgemm_mega_moe(vc)
+
+
+def test_config_rejects_rl_weight_reloading():
+    from vllm_ascend.ascend_config import AscendConfig
+
+    config = AscendConfig(sparse_kv_offload_config={})
+    config.rl_config.enabled = True
+    with (
+        patch("vllm_ascend.ascend_config.get_current_hardware_profile") as hw,
+        pytest.raises(ValueError, match="RL mode"),
+    ):
+        hw.return_value.supports.return_value = True
+        config._validate_deepgemm_mega_moe(model_config())
 
 
 def test_buffer_allocated_once_and_layer_clamp_used():

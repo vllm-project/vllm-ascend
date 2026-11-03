@@ -304,6 +304,7 @@ class FusedMC2CommImpl(MoECommMethod):
         if get_ascend_config().enable_deepgemm_mega_moe:
             from vllm_ascend.ops.fused_moe.deepgemm_mega_moe import DeepGemmMegaMoE
 
+            assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
             self.deepgemm_backend = DeepGemmMegaMoE(moe_config, self.token_dispatcher.max_num_tokens_per_rank)
         if self.enable_fused_mc2 == 1 and is_mega_moe_supported() and self.deepgemm_backend is None:
             self.mega_moe_symm_buffer = None
@@ -572,9 +573,10 @@ class FusedMC2CommImpl(MoECommMethod):
         fused_experts_input: MoEFusedExpertsInput,
         quant_method=None,
     ):
-        if getattr(self, "deepgemm_backend", None) is not None:
+        deepgemm_backend = getattr(self, "deepgemm_backend", None)
+        if deepgemm_backend is not None:
             return FusedExpertsResult(
-                routed_out=self.deepgemm_backend.apply(fused_experts_input),
+                routed_out=deepgemm_backend.apply(fused_experts_input),
                 expert_tokens=None,
             )
         if quant_method is not None:

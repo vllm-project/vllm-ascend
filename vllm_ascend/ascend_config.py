@@ -1060,8 +1060,9 @@ class AscendConfig:
             vc.speculative_config is not None
             or vc.lora_config is not None
             or getattr(model, "enable_sleep_mode", False)
+            or self.rl_config.enabled
         ):
-            raise ValueError("DeepGEMM MegaMoE does not support speculation, LoRA or sleep mode")
+            raise ValueError("DeepGEMM MegaMoE does not support speculation, LoRA, sleep mode or RL mode")
         if hf.hidden_size % 128 or hf.moe_intermediate_size % 128:
             raise ValueError("DeepGEMM MegaMoE dimensions must be multiples of 128")
 

@@ -17,8 +17,11 @@ def prepare_weights(w13, w13_scale, w2, w2_scale):
     import deep_gemm
 
     return deep_gemm.transform_weights_for_mega_moe(
-        (w13.data.contiguous().view(torch.int8), w13_scale.data.contiguous().view(torch.int16)),
-        (w2.data.contiguous().view(torch.int8), w2_scale.data.contiguous().view(torch.int16)),
+        (
+            w13.detach().contiguous().view(torch.int8),
+            w13_scale.detach().contiguous().view(torch.uint8).view(torch.int16),
+        ),
+        (w2.detach().contiguous().view(torch.int8), w2_scale.detach().contiguous().view(torch.uint8).view(torch.int16)),
     )
 
 
@@ -69,7 +72,7 @@ class DeepGemmMegaMoE:
         if count:
             quantized, scales = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
             buffer.x[:count].copy_(quantized)
-            buffer.x_sf[:count].copy_(scales.contiguous().view(torch.int16).reshape(count, -1))
+            buffer.x_sf[:count].copy_(scales.contiguous().view(torch.uint8).view(torch.int16).reshape(count, -1))
             buffer.topk_idx[:count].copy_(inputs.topk_ids)
             buffer.topk_weights[:count].copy_(inputs.topk_weights)
         output = torch.empty_like(x)
