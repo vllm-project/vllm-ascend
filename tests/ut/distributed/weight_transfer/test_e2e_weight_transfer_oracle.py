@@ -199,7 +199,8 @@ def test_checkpoint_source_preserves_existing_buffer_metadata(
     ):
         source = weight_source.FixedRandomWeightSource(case, torch.device("cpu"))
     expected = {f"{checkpoint_gate}.weight": ((8, 16), torch.bfloat16), **expected_buffers}
-    assert {meta.name: (meta.shape, meta.dtype) for meta in source.metadata()} == expected
+    metadata = source.metadata() if weight_source.vllm_version_is("0.32.0") else source.metadata
+    assert {meta.name: (meta.shape, meta.dtype) for meta in metadata} == expected
     weights = dict(source)
     assert {name: (tuple(tensor.shape), tensor.dtype) for name, tensor in weights.items()} == expected
     for name, tensor in weights.items():
@@ -237,13 +238,20 @@ def test_checkpoint_source_preserves_existing_buffer_metadata(
 def test_packed_buffer_size_uses_largest_tensor_bytes(dtype, tensor_bytes, expected_capacity):
     """Exercise the 1-GiB floor and growth without allocating large tensors."""
     source = MagicMock(spec=weight_source.FixedRandomWeightSource)
-    source.metadata.return_value = [
+    metadata = [
         weight_source.ParamMeta("small_before", torch.bfloat16, (8, 16)),
         weight_source.ParamMeta("largest", dtype, (1, tensor_bytes // dtype.itemsize)),
         weight_source.ParamMeta("small_after", torch.float32, (8,)),
     ]
+    if weight_source.vllm_version_is("0.32.0"):
+        source.metadata.return_value = metadata
+    else:
+        source.metadata = metadata
     assert weight_source.packed_buffer_size_for(source) == expected_capacity
-    source.metadata.assert_called_once_with()
+    if weight_source.vllm_version_is("0.32.0"):
+        source.metadata.assert_called_once_with()
+    else:
+        assert source.metadata is metadata
     source.__iter__.assert_not_called()
 
 
