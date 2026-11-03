@@ -7,12 +7,6 @@
     - name: executor:sample_tokens:duration_ms
       type: histogram
 
-- symbol: vllm_ascend.worker.v2.model_runner:NPUModelRunner._update_seq_lens_cpu
-  handler: vllm_ascend.observability.ms_metrics.handlers:seq_lens_update_handler
-  metrics:
-    - name: executor:seq_lens_update:duration_ms
-      type: histogram
-
 # schedule() reports preempted request ids and no reason. Capacity preemption
 # and prefix-cache reset share reason=scheduled.
 - symbol: vllm_ascend.core.scheduler_profiling_chunk:ProfilingChunkScheduler.schedule

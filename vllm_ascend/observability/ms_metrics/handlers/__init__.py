@@ -10,6 +10,9 @@ them. Re-export new feature handlers here so the YAML reference
 from vllm_ascend.observability.ms_metrics.handlers.acl_graph import (
     graph_replay_handler,
 )
+from vllm_ascend.observability.ms_metrics.handlers.async_scheduling import (
+    seq_lens_update_handler,
+)
 from vllm_ascend.observability.ms_metrics.handlers.eplb import (
     eplb_do_update_hotness_handler,
     eplb_expert_weight_transfer_handler,
@@ -32,7 +35,6 @@ from vllm_ascend.observability.ms_metrics.handlers.schedule_execute import (
     recompute_preempt_handler,
     sample_tokens_handler,
     schedule_preempt_handler,
-    seq_lens_update_handler,
 )
 
 __all__ = [

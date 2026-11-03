@@ -25,3 +25,12 @@ entries:
       sequence-parallel sharding are visible per step, and the
       parallel:moe_comm_selection_total counter for the MoE communication
       method chosen each forward context.
+  - category: breaking
+    text: >
+      Rename executor:seq_lens_update:duration_ms to
+      async_scheduling:seq_lens_update_ms and move it to the async scheduling
+      metric group.
+  - category: feature
+    text: >
+      Add the async_scheduling:d2h_sync_ms histogram so the blocking D2H wait
+      that can stall the async scheduling pipeline is visible per step.

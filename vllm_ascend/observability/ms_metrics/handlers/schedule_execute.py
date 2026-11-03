@@ -27,21 +27,13 @@ _SAMPLE_SPEC = MetricSpec(
     ("runner",),
     level=METRIC_LEVEL_DETAIL,
 )
-# The whole ``_update_seq_lens_cpu`` call, including the D2H event wait.
-# The wait and the seq_lens assignment are not separate functions.
-_SEQ_LENS_SPEC = MetricSpec(
-    "executor:seq_lens_update:duration_ms",
-    MetricType.HISTOGRAM,
-    (),
-    level=METRIC_LEVEL_DETAIL,
-)
 _PREEMPT_SPEC = MetricSpec(
     "scheduler:preempt_total",
     MetricType.COUNTER,
     ("reason",),
     level=METRIC_LEVEL_BASIC,
 )
-_SPECS = (_SAMPLE_SPEC, _SEQ_LENS_SPEC, _PREEMPT_SPEC)
+_SPECS = (_SAMPLE_SPEC, _PREEMPT_SPEC)
 
 
 def _record(spec: MetricSpec, value: float, labels: dict[str, str]) -> None:
@@ -52,13 +44,6 @@ def sample_tokens_handler(original_func, runner, *args, **kwargs):
     """Wall clock of ModelRunner V2 ``sample_tokens``, including grammar and rejection."""
     result, elapsed_ms = invoke_original(original_func, (runner, *args), kwargs)
     _record(_SAMPLE_SPEC, elapsed_ms, {"runner": "v2"})
-    return result
-
-
-def seq_lens_update_handler(original_func, runner, *args, **kwargs):
-    """Wall clock of ``_update_seq_lens_cpu``, including the D2H synchronize."""
-    result, elapsed_ms = invoke_original(original_func, (runner, *args), kwargs)
-    _record(_SEQ_LENS_SPEC, elapsed_ms, {})
     return result
 
 
