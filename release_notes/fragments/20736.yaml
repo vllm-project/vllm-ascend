@@ -1,0 +1,4 @@
+pr: 20736
+entries:
+  - category: bugfix
+    text: Fixed MLA DSpark initialization with PCP-backed decode context parallelism while retaining sharded draft KV caches.
