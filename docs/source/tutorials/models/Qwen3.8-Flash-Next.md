@@ -267,9 +267,7 @@ Before starting:
 - Place the compatible `PD_proxy_server.py` at `/opt/qwen38/PD_proxy_server.py`. The proxy must support Mooncake PD request routing and the options shown below; its implementation is not included in this guide.
 - The examples use the Mooncake library directory from the Python 3.12.16 environment. Edit the literal library path if Mooncake is installed elsewhere.
 
-#### 5.2.1 Prefill Script
-
-Save this as `P.sh`:
+#### 5.2.1 Prefill (P.sh)
 
 ```bash
 #!/usr/bin/env bash
@@ -320,9 +318,7 @@ exec vllm serve /models/Qwen3.8-Flash-Next-w4a8 \
     > "/tmp/qwen38-a3-pd/prefill.log" 2>&1
 ```
 
-#### 5.2.2 Decode Script
-
-Save this as `D.sh`:
+#### 5.2.2 Decode (D.sh)
 
 ```bash
 #!/usr/bin/env bash
@@ -374,9 +370,7 @@ exec vllm serve /models/Qwen3.8-Flash-Next-w4a8 \
     > "/tmp/qwen38-a3-pd/decode.log" 2>&1
 ```
 
-#### 5.2.3 Proxy and Startup
-
-Save this as `proxy.sh`. Use the same host address as the P and D scripts:
+#### 5.2.3 Proxy (proxy.sh) and Startup
 
 ```bash
 #!/usr/bin/env bash
@@ -393,7 +387,7 @@ exec python /opt/qwen38/PD_proxy_server.py \
     > "/tmp/qwen38-a3-pd/proxy.log" 2>&1
 ```
 
-Start P and D from the directory containing the saved scripts:
+Start prefill and decode:
 
 ```bash
 nohup bash P.sh > p.launcher.log 2>&1 &
