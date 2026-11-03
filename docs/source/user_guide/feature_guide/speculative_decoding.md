@@ -395,12 +395,15 @@ A few important things to consider when using DFlash2 draft models:
 
    The model-level acceptance test uses `VLLM_COMPILE` with
    `FULL_AND_PIECEWISE` on two NPUs and initializes the engine once. After the
-   acceptance run, it submits two single-request generations sequentially.
+   initial acceptance request, it completes two single-request generations
+   sequentially, then submits the same two prompts together.
    With `K=7` and capture sizes `[8, 16]`, the 9-token prompt exercises target
    PIECEWISE prefill, while the 32-token prompt exceeds the captured range and
    exercises eager prefill. Both use 8-token FULL decode, and the DFlash2 draft
    stays within its FULL graph bucket. Fixed token-ID inputs and a sufficient
-   prefill token budget keep the two prefill paths distinct:
+   prefill token budget keep the two single-request prefill paths distinct.
+   Acceptance metrics are collected after all generations and include the
+   initial request, both single-request runs, and the joint submission:
 
    ```shell
    pytest -sv tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py -k test_dflash2_v2_acceptance

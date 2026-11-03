@@ -332,24 +332,32 @@ def test_dflash2_v2_acceptance(
     ) as llm:
         assert llm.model.llm_engine.vllm_config.use_v2_model_runner
         outputs = llm.model.generate(prompts, sampling_params)
-        metrics = llm.model.get_metrics()
 
-        # Keep the acceptance metrics above separate from graph-path coverage.
-        # Reuse this engine for two sequential single-request generations:
+        # Reuse this engine for two sequential single-request generations,
+        # then submit both prompts together to exercise request-slot reuse.
         # K=7 gives a 9-token PIECEWISE prefill and a 32-token eager prefill,
-        # followed by 8-token FULL decode in both cases. Token IDs fix the
-        # lengths, and the token budget admits each prefill in one step.
+        # followed by 8-token FULL decode in each single-request generation.
+        # Token IDs fix the lengths, and the token budget admits each prefill
+        # in one step. The joint submission also exercises batched execution.
         prefill_lengths = (decode_query_len + 1, 2 * max(capture_sizes))
         prompt_token_ids = tokenizer.encode("Continue counting: 1, 2, 3, 4, 5.", add_special_tokens=False)
         assert prompt_token_ids
         prompt_token_ids *= (max(prefill_lengths) + len(prompt_token_ids) - 1) // len(prompt_token_ids)
         graph_sampling_params = SamplingParams(temperature=0, ignore_eos=True, max_tokens=48, seed=42)
-        for prefill_len in prefill_lengths:
-            graph_prompt: TokensPrompt = {"prompt_token_ids": prompt_token_ids[:prefill_len]}
-            graph_outputs = llm.model.generate([graph_prompt], graph_sampling_params)
-            assert len(graph_outputs) == 1
-            assert graph_outputs[0].finished
-            assert len(graph_outputs[0].outputs[0].token_ids) == graph_sampling_params.max_tokens
+        graph_prompts: list[TokensPrompt] = [
+            {"prompt_token_ids": prompt_token_ids[:prefill_len]} for prefill_len in prefill_lengths
+        ]
+        # generate() completes each batch before the next one is submitted.
+        for graph_batch in [[prompt] for prompt in graph_prompts] + [graph_prompts]:
+            graph_outputs = llm.model.generate(graph_batch, graph_sampling_params)
+            assert len(graph_outputs) == len(graph_batch)
+            for output in graph_outputs:
+                assert output.finished
+                assert len(output.outputs[0].token_ids) == graph_sampling_params.max_tokens
+            outputs.extend(graph_outputs)
+
+        # Aggregate acceptance over the original request and all graph batches.
+        metrics = llm.model.get_metrics()
 
     for output in outputs:
         prompt = output.prompt
