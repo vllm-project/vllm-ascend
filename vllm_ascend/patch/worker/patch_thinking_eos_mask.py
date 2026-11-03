@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+﻿# SPDX-License-Identifier: Apache-2.0
 # This file is a part of the vllm-ascend project.
 """Model Runner V2: mask EOS while a request is inside its think block.
 
@@ -17,7 +17,6 @@ Removal plan: drop this patch once upstream lands an engine-side fix for
 vllm-project/vllm#55420 (e.g. a merged successor of PR #55562).
 """
 
-import numpy as np
 import torch
 import vllm.v1.worker.gpu.sample.sampler as v2_sampler
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -51,18 +50,20 @@ class ThinkingEosMaskV2State(ThinkingBudgetState):
             envs.VLLM_ASCEND_THINKING_MASK_IMPLICIT_END_TOKEN_IDS
         )
         self._mask_enabled = bool(self._eos_mask_token_ids) and self.enabled
-        # Python-side incremental scan state, mirroring the V1 holder:
-        # scan_pos is the first committed token index not yet scanned.
-        self._scan_pos = np.zeros(self.max_num_reqs, dtype=np.int64)
-        self._in_think = np.zeros(self.max_num_reqs, dtype=bool)
+        # CPU copies of the marker id lists (the parent keeps device
+        # tensors); snapshot once here to avoid per-step device syncs.
+        self._start_ids_cpu = (
+            self.reasoning_start_token_ids.tolist() if self.enabled else []
+        )
+        self._end_ids_cpu = (
+            self.natural_reasoning_end_token_ids.tolist() if self.enabled else []
+        )
 
     def add_request(self, req_idx, sampling_params):
         budget_used = super().add_request(req_idx, sampling_params)
         if self._mask_enabled:
             # Every request needs the logits-processing path so that
             # apply() can run the mask.
-            self._scan_pos[req_idx] = 0
-            self._in_think[req_idx] = False
             return True
         return budget_used
 
@@ -83,13 +84,17 @@ class ThinkingEosMaskV2State(ThinkingBudgetState):
             row_req = idx_mapping_np
         row_req = row_req[:num_rows]
 
+        # Refresh in_think once per request per call (a request can own
+        # several rows under spec decode).
+        in_think_cache: dict = {}
         rows = []
         for row in range(num_rows):
             req_idx = row_req[row]
             if req_idx < 0:
                 continue
-            self._refresh_in_think(req_idx)
-            if self._in_think[req_idx]:
+            if req_idx not in in_think_cache:
+                in_think_cache[req_idx] = self._refresh_in_think(req_idx)
+            if in_think_cache[req_idx]:
                 rows.append(row)
         if not rows:
             return
@@ -104,22 +109,27 @@ class ThinkingEosMaskV2State(ThinkingBudgetState):
         fill = logits.new_full((len(flat_rows),), float("-inf"))
         logits.index_put_((rows_tensor, tokens_tensor), fill)
 
-    def _refresh_in_think(self, req_idx):
+    def _refresh_in_think(self, req_idx) -> bool:
         """Recompute in_think from the committed token history.
 
         Mirrors the V1 holder's last-occurrence semantics: in think iff the
         last think-start marker occurs after every think-end / implicit-end
-        marker. Rescans the full committed tail each step; correct and simple
-        at the cost of a per-step O(len) scan.
+        marker. ``total_len`` / ``all_token_ids`` are StagedWriteTensors with
+        a device-side ``.gpu`` view only, so each refresh pays one small
+        D2H copy per active request per step; acceptable for the benchmark
+        scale this patch targets. A device-side marker kernel (as upstream
+        vllm#55420 discusses) is the production-throughput follow-up.
         """
-        total_len = int(self.req_states.total_len.np[req_idx])
-        tokens = self.req_states.all_token_ids.np[req_idx][:total_len].tolist()
-        last_start = self._rfind_marker(tokens, self.reasoning_start_token_ids.tolist())
+        total_len = int(self.req_states.total_len.gpu[req_idx].item())
+        tokens = (
+            self.req_states.all_token_ids.gpu[req_idx, :total_len].cpu().tolist()
+        )
+        last_start = self._rfind_marker(tokens, self._start_ids_cpu)
         last_end = max(
-            self._rfind_marker(tokens, self.natural_reasoning_end_token_ids.tolist()),
+            self._rfind_marker(tokens, self._end_ids_cpu),
             self._rfind_marker(tokens, self._implicit_end_token_ids),
         )
-        self._in_think[req_idx] = last_start > last_end
+        return last_start > last_end
 
     @staticmethod
     def _rfind_marker(tokens, marker_ids):
