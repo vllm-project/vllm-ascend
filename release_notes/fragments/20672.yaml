@@ -1,0 +1,7 @@
+pr: 20672
+entries:
+  - category: performance
+    text: >-
+      Improved DeepSeek V4.1 decode latency by overlapping indexer weights projection with the C2 compressor input cast
+      while avoiding concurrent Cube-heavy compressor GEMMs.
+    model: deepseek-v4.1
