@@ -1,0 +1,4 @@
+pr: 20814
+entries:
+  - category: config
+    text: Added an optional Qwen3.8-Flash-Next HyperConnection projection overlap switch, `multistream_qwen4_exp_hc`, for controlled dual-stream experiments. It is disabled by default.
