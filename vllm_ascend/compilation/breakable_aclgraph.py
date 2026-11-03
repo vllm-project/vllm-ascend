@@ -33,6 +33,7 @@ from vllm_ascend.compilation.acl_graph import (
     get_graph_params,
     weak_ref_workspaces,
 )
+from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 
 
 class BreakableACLGraphWrapper(BreakableCUDAGraphWrapper):
@@ -85,7 +86,19 @@ class BreakableACLGraphWrapper(BreakableCUDAGraphWrapper):
             # Match ACLGraphWrapper's ordering between async attention
             # parameter updates and the previous/current FULL graph replay.
             is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
-            if not self.enable_enpu and not is_draft_eagle:
+            # An UpdatableGraph that actually registered attention tasks already
+            # enforces the same ordering without blocking the host:
+            # wait_stream()/begin_update_barrier() gates the update stream
+            # behind everything the model-runner stream has enqueued so far
+            # (i.e. the previous replay), and the captured per-task
+            # ExternalEvent gates each replayed attention node behind its
+            # parameter update. The full-stream host synchronize below is
+            # redundant there and only adds a per-step host/device bubble that
+            # shows up as device idle. Keep it for graphs without registered
+            # tasks (e.g. the legacy non-updatable relay path).
+            graph = getattr(entry, "aclgraph", None)
+            is_updatable = isinstance(graph, UpdatableGraph) and bool(graph.tasks)
+            if not self.enable_enpu and not is_draft_eagle and not is_updatable:
                 torch.npu.current_stream().synchronize()
         super()._replay(entry, args, kwargs)
         return entry.output
