@@ -26,10 +26,8 @@ Select the checkpoint that matches the deployment configuration:
 
 | Hardware | Deployment | Checkpoint | Device allocation | Download Links |
 | --- | --- | --- | --- | --- |
-| A2 series | Colocated | `Qwen3.8-Flash-Next-w8a8-mtp` | 8 devices, TP8 × DP1 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
-| A3 series | Colocated | `Qwen3.8-Flash-Next-w8a8-mtp` | 8 devices, TP8 × DP1 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
-| A2 series | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | |
-| A3 series | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | |
+| A2 series / A3 series | Colocated | `Qwen3.8-Flash-Next-w8a8-mtp` | 8 devices, TP8 × DP1 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
+| A2 series / A3 series | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | |
 | Ascend 950 DT | Colocated | `Qwen3.8-Flash-Next-w8a8-mxfp8` | 4 devices, TP4 × DP1 | |
 | Ascend 950 DT | PD separation | `Qwen3.8-Flash-Next-w4a8-mxfp` | 8 devices, TP2 × DP2 per role | |
 
