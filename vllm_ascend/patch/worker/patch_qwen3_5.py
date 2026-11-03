@@ -160,10 +160,6 @@ if Qwen3_5MultiTokenPredictor is not None:
         # Backport upstream Qwen3.5 MTP behavior: the local drafter runs on the
         # last PP stage and should always combine token embeddings with the
         # target hidden states instead of consuming PP intermediate tensors.
-        # Dense sequence parallelism needs no family wiring here: the
-        # speculator installs a full-token gather on the drafter's shared
-        # embedding seam (AscendTargetDependentARSpeculator.load_draft_model),
-        # so this forward runs unchanged under dense SP.
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
         assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
