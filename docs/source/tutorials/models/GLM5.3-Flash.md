@@ -29,7 +29,7 @@ GLM-5.3-Flash uses Model Runner V2 on 950DT products. Set
 | Feature | Configuration |
 | --- | --- |
 | Quantization | W8A8-MXFP8 weights with `--quantization ascend`; FP8 main KV cache with `--kv-cache-dtype fp8`. |
-| KPool indexer cache | BF16 by default; optional [FP8 indexer cache](#a5-fp8-kpool), configured independently of the main KV cache. |
+| KPool indexer cache | [FP8 indexer cache](#a5-fp8-kpool) in the examples, configured independently of the main KV cache. |
 | MTP and graph mode | `deepseek_mtp` with five speculative tokens. Prefill uses eager mode for the target and MTP draft models; single-node deployment and Decode use `FULL_DECODE_ONLY` for both models. |
 | Prefix caching and chunked prefill | Enabled in the examples; keep the hybrid KV cache manager enabled. |
 | PD disaggregation | `MooncakeConnectorV2` with TP1/PCP8/DP1 Prefill and TP1/PCP1/DP8 Decode. Both roles use EP8. |
@@ -46,9 +46,8 @@ Use a CANN ops-transformer build with FP8 `PoolKeyIndexer` support on
 Ascend 950, and match cache formats between PD roles.
 
 FP8 indexer caches do not support `OffloadingConnector` or
-`PreemptOffloadConnector`. Keep the BF16 indexer for the pooling scenario
-described below. The INT8 indexer option in the next subsection is
-A3-specific.
+`PreemptOffloadConnector`. The INT8 indexer option in the next subsection
+is A3-specific.
 
 ### INT8 KPool indexer cache on A3
 
@@ -138,31 +137,15 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
     -itd $IMAGE bash
     ```
 
-    Run the following commands on the host to check the container status:
+    Check the container status and installed package versions:
 
     ```shell
     docker ps --filter "name=$NAME"
-    docker inspect --format '{{ "{{.HostConfig.Privileged}}" }}' "$NAME"
+    docker exec "$NAME" python3 -m pip show vllm vllm-ascend
     ```
 
-    The container status must be `Up`, and the inspect command must print:
-
-    ```text
-    true
-    ```
-
-    **Check the software stack inside the 950DT products container**
-
-    ```shell
-    docker exec -it "$NAME" bash
-    python3 -m pip show vllm vllm-ascend torch-npu triton-ascend transformers
-    python3 -c 'import torch_npu, vllm, vllm_ascend; print("imports: OK")'
-    npu-smi info
-    ```
-
-    The import check should print `imports: OK`, and `npu-smi info` should
-    show all eight devices. For common environment and installation issues,
-    refer to the [Public FAQs](../../faqs.md).
+    The container status should be `Up`, and the package versions should
+    match the selected image.
 
 === "A3 series"
 
@@ -259,12 +242,6 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
     matching vLLM, vLLM-Ascend, and Transformers dependencies for the checked-out
     revision.
 
-### 4.2 Source Code Installation
-
-For source installation, follow the [installation guide](../../getting_started/installation.md).
-Use matching vLLM and vLLM-Ascend revisions for the release listed in
-Section 1.
-
 ## 5 Online Service Deployment
 
 !!! note
@@ -282,8 +259,6 @@ are not interchangeable.
 | Parameter | Meaning and constraints |
 | --- | --- |
 | `VLLM_USE_V2_MODEL_RUNNER` | Selects the model runner. The 950DT products examples set it to `1` to use Model Runner V2. |
-| `ASCEND_RT_VISIBLE_DEVICES` | Specifies the device IDs visible to the current process. The PD launcher passes this list as `$1` to each role script. |
-| `VLLM_HOST_IP` | Sets the current node's IP address for communication between vLLM processes and KV transfer. Set it to the node IP that peers can reach. |
 | `HCCL_BUFFSIZE` | CANN/HCCL communication buffer size in MB; a positive integer, with a documented default of 200. Larger buffers consume more device memory, multiplied by the number of communication domains. Keep the example's hardware/role-specific value and account for this memory when sizing the KV cache. See the [CANN HCCL reference](https://www.hiascend.com/document/detail/zh/canncommercial/latest/API/hcclug/hcclenvref_07_0005.html) for allocation details and version-specific constraints. |
 | `HCCL_IF_IP` and socket interface variables | Set the current node's communication IP and matching network interface. Peers must be reachable through the selected network. |
 | `--data-parallel-size`, `--tensor-parallel-size`, `--pipeline-parallel-size` | DP is the number of data-parallel ranks; TP and PP partition each model engine across devices and pipeline stages. Follow the topology and placement in the selected tab. |
@@ -310,7 +285,6 @@ are not interchangeable.
     # Replace <YOUR_MODEL_PATH> with the directory recorded in Section 3.1.
     MODEL_PATH="<YOUR_MODEL_PATH>"
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
 
@@ -323,7 +297,7 @@ are not interchangeable.
       --seed 1024 \
       --quantization ascend \
       --kv-cache-dtype fp8 \
-      --attention-config.indexer_kv_dtype bf16 \
+      --attention-config.indexer_kv_dtype fp8 \
       --served-model-name glm \
       --max-num-seqs 32 \
       --max-model-len 133120 \
@@ -618,8 +592,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
     TP1/PCP1/DP8. Both roles use EP8.
     Both nodes use the same GLM-5.3-Flash W8A8-MXFP8 checkpoint and software build.
     Set the local IP, network interface and checkpoint path in each script.
-    Start Decode first, then Prefill, and start the proxy after all nine
-    API endpoints are healthy.
+    Start the proxy after all nine Prefill and Decode API endpoints are healthy.
 
     ##### Prepare the Scripts
 
@@ -639,7 +612,6 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
             MODEL_PATH="<YOUR_MODEL_PATH>"
 
             export VLLM_USE_V2_MODEL_RUNNER=1
-            export VLLM_HOST_IP="$local_ip"
             export HCCL_IF_IP=$local_ip
             export GLOO_SOCKET_IFNAME=$nic_name
             export TP_SOCKET_IFNAME=$nic_name
@@ -647,7 +619,6 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export HCCL_BUFFSIZE=3072
             export HCCL_OP_EXPANSION_MODE="AIV"
-            export ASCEND_RT_VISIBLE_DEVICES=$1
 
             vllm serve "$MODEL_PATH" \
               --host 0.0.0.0 \
@@ -663,7 +634,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
               --served-model-name glm \
               --safetensors-load-strategy prefetch \
               --kv-cache-dtype fp8 \
-              --attention-config.indexer_kv_dtype bf16 \
+              --attention-config.indexer_kv_dtype fp8 \
               --max-num-seqs 256 \
               --max-model-len 133120 \
               --max-num-batched-tokens 24576 \
@@ -706,7 +677,6 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
             MODEL_PATH="<YOUR_MODEL_PATH>"
 
             export VLLM_USE_V2_MODEL_RUNNER=1
-            export VLLM_HOST_IP="$local_ip"
             export HCCL_IF_IP=$local_ip
             export GLOO_SOCKET_IFNAME=$nic_name
             export TP_SOCKET_IFNAME=$nic_name
@@ -714,7 +684,6 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export HCCL_BUFFSIZE=1024
             export HCCL_OP_EXPANSION_MODE="AIV"
-            export ASCEND_RT_VISIBLE_DEVICES=$1
 
             vllm serve "$MODEL_PATH" \
               --host 0.0.0.0 \
@@ -730,7 +699,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
               --served-model-name glm \
               --safetensors-load-strategy prefetch \
               --kv-cache-dtype fp8 \
-              --attention-config.indexer_kv_dtype bf16 \
+              --attention-config.indexer_kv_dtype fp8 \
               --max-num-seqs 30 \
               --max-model-len 133120 \
               --max-num-batched-tokens 120 \
@@ -763,23 +732,23 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
 
     ##### Start the Engines
 
-    1. Decode node
-
-        ```shell
-        D0_IP="<D0_IP>"
-        python launch_online_dp.py --template ./run_dp_template.sh \
-            --dp-size 8 --tp-size 1 --dp-size-local 8 \
-            --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 12325 \
-            --vllm-start-port 8000
-        ```
-
-    2. Prefill node
+    1. Prefill node
 
         ```shell
         P0_IP="<P0_IP>"
         python launch_online_dp.py --template ./run_dp_template.sh \
             --dp-size 1 --tp-size 1 --pcp-size 8 --dp-size-local 1 \
             --dp-rank-start 0 --dp-address "$P0_IP" --dp-rpc-port 12325 \
+            --vllm-start-port 8000
+        ```
+
+    2. Decode node
+
+        ```shell
+        D0_IP="<D0_IP>"
+        python launch_online_dp.py --template ./run_dp_template.sh \
+            --dp-size 8 --tp-size 1 --dp-size-local 8 \
+            --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 12325 \
             --vllm-start-port 8000
         ```
 
@@ -822,8 +791,8 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
     - `--data-parallel-size`, `--tensor-parallel-size`, and
       `--prefill-context-parallel-size` define TP1/PCP8/DP1 on Prefill
       and TP1/PCP1/DP8 on Decode. Each role uses eight devices on one node.
-      The launcher assigns all eight devices to the single Prefill engine
-      and one device to each Decode engine.
+      Prefill runs one eight-device engine. Decode selects one device per
+      DP rank.
     - `--data-parallel-address` and `--data-parallel-rpc-port` coordinate
       ranks within each role. Prefill and Decode use their respective node
       IPs; RPC port `12325` is reused on the separate hosts.
@@ -1491,8 +1460,8 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
 
 ### 5.4 Prefill-Decode Disaggregation with KV Cache Pool
 
-This section uses the Mooncake backend for A5 and A2 series, and the
-Memcache backend for A3 series. Select the platform subsection that matches
+This section uses the Memcache backend for 950DT products and A3 series,
+and the Mooncake backend for A2 series. Select the platform subsection that matches
 the PD topology in [Section 5.3](#53-1p1d-pd-disaggregated-deployment).
 `MultiConnector` combines two connectors:
 
@@ -1508,19 +1477,20 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     #### 950DT products {: #glm53-flash-5-4-950dt }
 
     Refer to
-    [Scenario 1: Mooncake Backend](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend)
-    for backend installation and A5 UB/UBOE communication configuration.
+    [Scenario 2: Memcache Backend](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend)
+    for backend installation and configuration. Set `backend` to `memcache`
+    in the `AscendStoreConnector` child configuration. Use `device_urma`
+    for UB or `device_uboe` for UBOE in `mmc-local.conf`.
 
     Use the Prefill TP1/PCP8/DP1 and Decode TP1/PCP1/DP8 topology from
-    [Section 5.3](#glm53-flash-5-3-950dt). Keep the indexer in BF16,
+    [Section 5.3](#glm53-flash-5-3-950dt). Keep the indexer in FP8,
     prefix caching and the hybrid KV cache manager enabled, and
     `mamba_cache_mode=align`. Use non-layerwise pooling
     (`use_layerwise=false`) and PP=DCP=1. The experimental RecoverSSM
     path requires PCP=PP=DCP=1 and does not accept `MultiConnector`.
 
-    For SSD Offload configuration, refer to
-    [MooncakeStore SSD Offload](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-5-mooncakestore-ssd-offload-embedded-real-client-mode).
-    Check Store lookup/load hits to verify KV Cache Pool reuse.
+    Start the Memcache MetaService before the vLLM engines. Check Memcache
+    lookup/load hits to verify KV Cache Pool reuse.
 
 === "A3 series"
 
@@ -2054,7 +2024,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 #### 950DT products {: #glm53-flash-a5-tuning }
 
 The following configurations use W8A8-MXFP8 weights, FP8 main KV cache,
-a BF16 indexer, and DCP1. Set `max-model-len` and `max-num-seqs`
+an FP8 indexer, and DCP1. Set `max-model-len` and `max-num-seqs`
 according to the actual usage scenario.
 
 | Deployment | NPUs | TP | PCP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Tokens | Graph Mode |
