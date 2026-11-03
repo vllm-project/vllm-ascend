@@ -1,7 +1,12 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 # SPDX-License-Identifier: Apache-2.0
-"""Four-card regression for cross-Encoder Mooncake Store transfers."""
+"""Four-card regression for cross-Encoder Mooncake Store transfers.
+
+Run on a RoCE-configured runner by default. Set
+ASCEND_ENABLE_USE_FABRIC_MEM=1 on a FabricMem-capable runner to test that path
+instead, with its transport environment configured before pytest starts.
+"""
 
 from __future__ import annotations
 
@@ -498,21 +503,14 @@ def _consumer_args(port: int, reservation_port: int) -> list[str]:
     quantization="BF16",
     graph_mode="eager",
 )
-@pytest.mark.parametrize(
-    "use_fabric_mem",
-    [
-        pytest.param(True, id="fabricmem"),
-        pytest.param(False, id="non-fabricmem"),
-    ],
-)
 @wait_until_npu_memory_free()
 def test_cross_encoder_store_put_then_remote_hit(
     baseline_outputs: dict[str, str],
     mooncake_store_config: str,
-    use_fabric_mem: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """E0 publishes outputs that E1 reuses through both Store transports."""
+    """E0 publishes outputs that E1 reuses through the configured transport."""
+    use_fabric_mem = os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") == "1"
     encoder0_port = get_open_port()
     encoder1_port = get_open_port()
     pd0_port = get_open_port()
