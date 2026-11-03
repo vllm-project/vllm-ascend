@@ -167,7 +167,7 @@ Before starting:
     - `fuse_norm_quant=false` disables norm/quantization fusion for this W8A8 deployment.
     - `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2; `VLLM_ASCEND_PLE_BACKEND=torch` selects the PLE backend.
     - `--async-scheduling` enables asynchronous scheduling.
-    - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert multistream overlap. Shared expert DP requires expert parallelism and TP > 1. Keep `enable_fused_mc2=0` when using shared expert overlap.
+    - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert multistream overlap. Shared expert DP requires expert parallelism and TP > 1. `enable_fused_mc2=0` disables fused MC2 and is compatible with shared expert overlap.
     - `enable_npugraph_ex=true` enables NPU graph extension; static kernels and super kernels remain disabled.
 
 === "Ascend 950 DT"
@@ -227,7 +227,7 @@ Before starting:
     - `--quantization ascend` loads the Ascend-compatible W8A8-MXFP8 checkpoint.
     - `--max-model-len 141312` and `--max-num-seqs 32` set context and concurrency limits; verify memory capacity before increasing them.
     - `--async-scheduling` enables asynchronous scheduling; `--enable-expert-parallel` enables expert parallelism for MoE layers.
-    - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert multistream overlap. Shared expert DP requires expert parallelism and TP > 1. Keep `enable_fused_mc2=0` when using shared expert overlap.
+    - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert multistream overlap. Shared expert DP requires expert parallelism and TP > 1. `enable_fused_mc2=0` disables fused MC2 and is compatible with shared expert overlap.
     - NPU graph extension is enabled; static kernels, super kernels, and norm/quantization fusion are disabled.
     - `FULL_DECODE_ONLY` enables decode graph capture. The MTP configuration uses three draft tokens without explicitly forcing eager execution.
     - Prefix caching is enabled without an explicit Mamba cache mode. Confirm cache behavior with the installed runtime.
@@ -267,7 +267,7 @@ Select the hardware tab below.
     - Expose devices 0–15 and mount the same W4A8 checkpoint for both roles.
     - Install compatible vLLM, vLLM-Ascend, and Mooncake in the active Python environment.
     - The commands use `192.168.0.1`, `eth0`, and `/models/Qwen3.8-Flash-Next-w4a8`. Replace these literals consistently for the target host. Provide sufficient host memory for Engram CPU offload.
-    - Place the compatible `PD_proxy_server.py` at `/opt/qwen38/PD_proxy_server.py`. The proxy must support Mooncake PD request routing and the options shown below; its implementation is not included in this guide.
+    - Run the proxy command from the vLLM-Ascend repository root. Both hardware examples use the repository-provided load-balancing proxy; this configuration exposes one API endpoint per role, while the 950 DT configuration exposes two per role.
     - The examples use the Mooncake library directory from the Python 3.12.16 environment. Edit the literal library path if Mooncake is installed elsewhere.
 
     Run Prefill and Decode in separate terminals. Start Proxy after both model APIs are ready.
@@ -379,10 +379,10 @@ Select the hardware tab below.
     export no_proxy="localhost,127.0.0.1,192.168.0.1"
     export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
 
-    exec python /opt/qwen38/PD_proxy_server.py \
+    exec python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 25570 \
-        --prefiller-host "192.168.0.1" --prefiller-port 25568 \
-        --decoder-host "192.168.0.1" --decoder-port 25569
+        --prefiller-hosts "192.168.0.1" --prefiller-ports 25568 \
+        --decoder-hosts "192.168.0.1" --decoder-ports 25569
     ```
 
     **Service Verification:**
@@ -415,11 +415,11 @@ Select the hardware tab below.
 
     - `VLLM_ASCEND_PLE_BACKEND=torch` selects the PLE backend for both roles.
     - Both roles enable Prefix Caching without an explicit Mamba cache mode.
-    - Engram requires a checkpoint with supported n-gram layers. Both roles set `cpu_offload=true` and `dp_shared_memory=true`. Check the resolved configuration in the startup logs.
+    - Engram requires a checkpoint with supported n-gram layers. `cpu_offload=true` keeps Engram embedding tables in host memory. `dp_shared_memory=true` shares the corresponding table shards among node-local DP replicas; replicas must share the same host and shared-memory namespace. Both options are booleans. This DP configuration satisfies the DP > 1 requirement; elastic EP is not supported with shared memory.
     - Prefill sets `cudagraph_mode=NONE`, enables `enable_prefill_mc2=true`, and disables fused MC2. Verify MC2 token limits for TP2 × DP4 before increasing the batch token budget.
     - Decode enables `FULL_DECODE_ONLY`, NPU graph extension, static kernels, and recompute scheduling. Super kernels remain disabled.
     - Both roles use three MTP draft tokens. Prefill sets `enforce_eager=true`; decode sets `enforce_eager=false`.
-    - Keep fused MC2 disabled when using shared expert multistream overlap. The decode command relies on the runtime's default value of zero.
+    - `enable_fused_mc2=0` disables fused MC2, so it does not conflict with `multistream_overlap_shared_expert=true`. The decode command relies on the runtime's default value of zero.
     - Keep the Mooncake DP4 / TP2 declarations synchronized with both services' parallel settings.
     - For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to both roles and verify proxy forwarding. Multimodal input and thinking control also require validation through the proxy with the W4A8 checkpoint.
 
@@ -698,12 +698,13 @@ Select the hardware tab below.
     **Key parameters:**
 
     - Each command starts one DP rank with TP2. Keep each role's DP address, RPC port, and model settings consistent across its two ranks.
-    - Both roles enable Model Runner V2, async scheduling, expert parallelism, Engram CPU offload, and DP shared memory.
+    - Both roles enable Model Runner V2, async scheduling, and expert parallelism (EP). EP is distinct from expert parallel load balancing (EPLB); these commands do not enable EPLB.
+    - `cpu_offload=true` keeps Engram embedding tables in host memory; `dp_shared_memory=true` shares the corresponding table shards among node-local DP replicas. Both options are booleans. DP replicas must share the same host and shared-memory namespace; this DP2 configuration satisfies the DP > 1 requirement and does not enable elastic EP.
     - Prefill enables Prefix Caching and uses `cudagraph_mode=NONE`; static kernels are disabled.
     - Decode disables Prefix Caching and enables `FULL_DECODE_ONLY`, static kernels, and recompute scheduling.
     - Both roles enable CPU binding, shared expert DP, FlashComm1, shared expert multistream overlap, and NPU graph extension. Fused MC2, norm/quantization fusion, and super kernels are disabled.
-    - Both roles use three MTP draft tokens without explicitly forcing eager execution.
-    - Keep the Mooncake DP2 / TP2 declarations synchronized with the service topology and route both ranks of each role through the proxy.
+    - Both roles use three MTP draft tokens and omit `enforce_eager`, leaving the default override unset. This does not require identical graph execution: prefill uses `cudagraph_mode=NONE`, while decode uses `FULL_DECODE_ONLY`. Keep these role-specific settings.
+    - Keep the Mooncake DP2 / TP2 declarations synchronized with the service topology and route both ranks of each role through the proxy. `kv_port` is a base port shared by ranks of the same role: the connector adds the DP serving index × TP × PP × PCP, then the local device index. With TP2 and PP=PCP=1, prefill rank 0 uses ports 30000–30001 and rank 1 uses 30002–30003; decode uses 30100–30103. Do not increment the configured base port for rank 1.
     - The profiler configuration sets trace output paths without starting profiling.
     - For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to all four model commands and verify proxy forwarding. Validate multimodal input and thinking control through the proxy with the selected checkpoint.
 
