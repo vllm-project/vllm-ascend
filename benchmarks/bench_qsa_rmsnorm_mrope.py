@@ -25,8 +25,14 @@ def reference(tensor: torch.Tensor, weight: torch.Tensor, cos_sin: torch.Tensor,
     first = normalized[..., :32]
     second = normalized[..., 32:64]
     out = normalized.clone()
-    out[..., :32] = ((first.float() * cos[:, None, :]).to(torch.bfloat16) - (second.float() * sin[:, None, :]).to(torch.bfloat16)).to(torch.bfloat16)
-    out[..., 32:64] = ((second.float() * cos[:, None, :]).to(torch.bfloat16) + (first.float() * sin[:, None, :]).to(torch.bfloat16)).to(torch.bfloat16)
+    out[..., :32] = (
+        (first.float() * cos[:, None, :]).to(torch.bfloat16)
+        - (second.float() * sin[:, None, :]).to(torch.bfloat16)
+    ).to(torch.bfloat16)
+    out[..., 32:64] = (
+        (second.float() * cos[:, None, :]).to(torch.bfloat16)
+        + (first.float() * sin[:, None, :]).to(torch.bfloat16)
+    ).to(torch.bfloat16)
     return out
 
 
@@ -78,7 +84,22 @@ def main() -> None:
     median_us = statistics.median(samples_us)
     mean_us = statistics.mean(samples_us)
     cv = statistics.pstdev(samples_us) / mean_us if mean_us else 0.0
-    print(json.dumps({"tokens": args.tokens, "heads": args.heads, "dtype": "bfloat16", "shape": list(tensor.shape), "max_abs": diff.max().item(), "median_us": median_us, "mean_us": mean_us, "cv": cv, "samples_us": samples_us}, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "tokens": args.tokens,
+                "heads": args.heads,
+                "dtype": "bfloat16",
+                "shape": list(tensor.shape),
+                "max_abs": diff.max().item(),
+                "median_us": median_us,
+                "mean_us": mean_us,
+                "cv": cv,
+                "samples_us": samples_us,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 if __name__ == "__main__":
