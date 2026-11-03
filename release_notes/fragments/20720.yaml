@@ -1,4 +1,6 @@
 pr: 20720
 entries:
   - category: bugfix
-    text: Fixed W8A8 MXFP8 MegaMoE initialization with EPLB by registering the prepared per-expert weights and scales.
+    text: >-
+      Fixed GLM-5.3-Flash EPLB initialization by registering target MoE metadata
+      and MegaMoE's prepared MXFP8 expert weights and scales.
