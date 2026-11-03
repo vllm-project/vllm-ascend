@@ -394,12 +394,12 @@ class _AscendVLPreprocessMixin:
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class AscendQwen3_5ForConditionalGeneration(_AscendVLPreprocessMixin, Qwen3_5ForConditionalGeneration):
-    # Dense sequence parallelism is wired for this family under the V2 model
-    # runner: patch_qwen3_5 restores the full-token text embeddings around the
-    # multimodal merge (the merge happens full-token side, in the runner's
-    # inputs_embeds preparation) and shards the merged embeds back to the
-    # rank-local token shard in the Qwen3_5Model.forward wrap, so the vision
-    # feature scatter never touches the sequence-parallel region.
+    # Opt-in consumed by the dense-SP mm gate (utils._mm_arch_supports_dense_sp):
+    # this family's mm boundary is validated against the generic seams — the
+    # V2 model state gathers the language model's token-sharded text embeddings
+    # around the full-token-side multimodal merge and shards the merged embeds
+    # back before the decoder stack. Unvalidated mm families keep the stock
+    # layout with a precise reason logged.
     supports_dense_sp = True
 
 
