@@ -65,6 +65,7 @@ _CACHE_DTYPE_WITH_ASCEND = typing.Literal[
     "turboquant_3bit_nc",
     "int4_per_token_head",
     "int8_per_token_head",
+    "int2_per_token_head",  # OSCAR True-INT2 paged KV cache (main port)
     "fp8_per_token_head",
     "nvfp4",
     "nvfp4_4over6",
@@ -96,9 +97,9 @@ def _apply_kv_cache_dtype_int8_patch() -> None:
     call multiple times / across plugin entry points (the ``force`` flag
     rebuilds even though ``__pydantic_complete__`` is already True).
     """
-    # Idempotency: if int8 is already accepted, nothing to do.
+    # Idempotency: if every Ascend dtype is already accepted, nothing to do.
     existing_args = getattr(_ORIG_CACHE_DTYPE, "__args__", ())
-    if "int8" in existing_args and "mxfp8" in existing_args:
+    if "int8" in existing_args and "mxfp8" in existing_args and "int2_per_token_head" in existing_args:
         return
 
     _cache_mod.CacheDType = _CACHE_DTYPE_WITH_ASCEND
@@ -115,6 +116,22 @@ def _apply_kv_cache_dtype_int8_patch() -> None:
         _parent_namespace_depth=1,
     )
     logger.info("Patched CacheConfig.cache_dtype to accept 'int8' and 'mxfp8' (Ascend KV cache dtypes).")
+
+
+def _register_int2_storage_dtype() -> None:
+    """Register the packed INT2 storage dtype in vLLM's string->dtype map.
+
+    vLLM's ``STR_DTYPE_TO_TORCH_DTYPE`` is a plain dict imported by several
+    modules (e.g. the V1/V2 model runners), so mutating it in place is
+    visible everywhere. INT2 packs four 2-bit values per byte, hence uint8.
+    """
+    import torch
+    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+
+    STR_DTYPE_TO_TORCH_DTYPE.setdefault("int2_per_token_head", torch.uint8)
+
+
+_register_int2_storage_dtype()
 
 
 _apply_kv_cache_dtype_int8_patch()
