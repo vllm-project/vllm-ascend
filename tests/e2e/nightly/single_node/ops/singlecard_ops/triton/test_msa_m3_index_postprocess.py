@@ -186,6 +186,7 @@ def test_sorted_decode_indices_match_normalized_selection(query_len: int, stride
     "requests,query_len,width,context_tokens,strided",
     [
         (5, 8, 1024, 131072, False),
+        (10, 8, 512, 65536, True),
         (11, 4, 512, 65536, True),
         (1, 1, 2055, 263000, False),
         (2, 9, 33, 4095, False),
@@ -196,7 +197,7 @@ def test_sorted_decode_indices_match_normalized_selection(query_len: int, stride
 def test_sorted_decode_model_shapes_and_workspace_contract(
     requests: int, query_len: int, width: int, context_tokens: int, strided: bool, context_dtype: torch.dtype
 ) -> None:
-    # Actual C40/DP8 K7 and C88/DP8 K3 geometry, plus maximum-context and
+    # Actual C40/C80 DP8 K7 and historical C88 DP8 K3 geometry, plus maximum-context and
     # supported-width boundary cases. The oracle never calls the fused path.
     heads, topk = 1, 16
     tokens = requests * query_len
@@ -240,12 +241,12 @@ def test_sorted_decode_model_shapes_and_workspace_contract(
 
 @pytest.mark.parametrize("init_blocks,local_blocks", [(0, 0), (1, 2)])
 def test_sorted_topk_unaligned_multihead_repeated(init_blocks: int, local_blocks: int, tmp_path) -> None:
-    # Narrow rows cross device store boundaries; exercise repeated independent
-    # allocations and compare both paths with a CPU oracle, not just each other.
+    # MiniMax M3/M3.1 select 16 blocks. Exercise an unaligned score width with
+    # repeated allocations and compare both paths with an independent CPU oracle.
     import vllm_ascend.ops  # noqa: F401
     from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import _sort_valid_gbsa_prefix
 
-    heads, requests, query_len, topk, width = 4, 2, 9, 3, 33
+    heads, requests, query_len, topk, width = 4, 2, 8, 16, 33
     generator = torch.Generator().manual_seed(18426)
     lengths = torch.full((requests,), (width - 1) * 128, dtype=torch.int32, device="npu")
     expected_counts = torch.full((heads, requests * query_len), topk, dtype=torch.int32)
@@ -274,7 +275,15 @@ def test_sorted_topk_unaligned_multihead_repeated(init_blocks: int, local_blocks
             torch.testing.assert_close(fused_score.cpu(), prepared, rtol=0, atol=0)
         except AssertionError:
             torch.save(
-                dict(source=source, prepared=prepared, expected=expected, raw=raw.cpu(), **actual),
+                dict(
+                    source=source,
+                    prepared=prepared,
+                    expected=expected,
+                    raw=raw.cpu(),
+                    legacy_counts=legacy_counts.cpu(),
+                    fused_counts=fused_counts.cpu(),
+                    **actual,
+                ),
                 tmp_path / f"unaligned-topk-trial-{trial}.pt",
             )
             raise

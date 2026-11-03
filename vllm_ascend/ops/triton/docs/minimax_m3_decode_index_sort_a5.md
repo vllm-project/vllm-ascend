@@ -64,6 +64,9 @@ index-score computation, TopK selection, max context and optional output.
 
 ## Test Cases
 
+Model acceptance uses M3/M3.1's `sparse_topk_blocks=16` with their runtime shapes.
+Other TopK helper fixtures are supplementary and are not a model-support claim.
+
 ```bash
 python -m pytest -q tests/e2e/pull_request/one_card/test_minimax_m3_decode_index_sort.py
 python benchmarks/msa_decode_index_postprocess.py --device npu:0 --paths cann a5 --output a5-operator-results.json

@@ -171,7 +171,8 @@ def main():
 
     torch.npu.set_device(args.device)
     generator = torch.Generator().manual_seed(18426)
-    cases = [(1, 1, 1, 16, 512), (1, 5, 8, 16, 1024), (1, 11, 4, 16, 512), (4, 2, 9, 3, 33), (1, 2, 16, 32, 2055)]
+    # M3/M3.1 use sparse_topk_blocks=16; vary runtime geometry, not the model parameter.
+    cases = [(1, 1, 1, 16, 512), (1, 5, 8, 16, 1024), (1, 10, 8, 16, 512), (4, 2, 8, 16, 33), (1, 2, 8, 16, 2055)]
     rows = []
     for heads, requests, query_len, topk, width in cases:
         tokens = requests * query_len

@@ -83,6 +83,11 @@ to zero, and keyword-only `sort_indices`, which defaults to False.
 
 ## Test Cases
 
+Model integration and performance acceptance target the M3/M3.1 configuration
+`sparse_topk_blocks=16`. Vary query length, batch size, context, dtype and padding
+within that model contract. Existing helper boundary fixtures are supplementary;
+they do not establish support for other models or arbitrary TopK configurations.
+
 Accuracy and interface cases are in
 `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_msa_m3_index_postprocess.py`.
 
@@ -95,8 +100,8 @@ Accuracy and interface cases are in
 | Input types/layout | int32/int64 context; contiguous and strided score/context |
 | Forced blocks | Disabled and overlapping initial/local windows |
 | Invalid inputs | Rank/dtype, device mismatch, query length/batch mismatch, invalid TopK/block counts |
-| Model geometry | Local B=5/Q=8/128K; B=11/Q=4/64K; maximum context 263000; Q=9/16 |
-| Narrow multihead rows | H=4/B=2/Q=9/K=3/W=33, repeated allocations, independent CPU oracle, failure tensor artifact |
+| Model geometry | Local B=5/Q=8/128K; B=10/Q=8/64K; historical B=11/Q=4/64K; maximum context 263000; Q=9/16 |
+| Repeated model TopK | H=4/B=2/Q=8/K=16/W=33, repeated allocations, independent CPU oracle, failure tensor artifact |
 | Input side effects | Allowed score-workspace writes; strided backing guards; context and input metadata unchanged |
 
 Integer IDs/counts require 100% exact agreement (`rtol=0, atol=0`). Floating-point
