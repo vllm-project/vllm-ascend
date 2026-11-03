@@ -10,9 +10,7 @@ The A3 W8A8 baseline was validated with text and multimodal input on `vllm-ascen
 
 !!! warning
 
-    Automatic Prefix Caching is experimental. On the A3 W8A8 baseline, enable it
-    with `--enable-prefix-caching --mamba-cache-mode align` and revalidate NPU
-    memory capacity for the target context length and concurrency.
+    Automatic Prefix Caching is experimental. On the A3 W8A8 baseline, enable it with `--enable-prefix-caching --mamba-cache-mode align` and revalidate NPU memory capacity for the target context length and concurrency.
 
 ## 2 Supported Features
 
@@ -38,9 +36,7 @@ Set `MODEL_PATH` to the mounted checkpoint directory. For PD separation, both ro
 
 ### 4.1 Docker Image Installation
 
-The following images apply to the A3 W8A8 baseline. For 950 DT, prepare an
-environment with compatible vLLM and vLLM-Ascend versions; do not use an A3
-image for that deployment.
+The following images apply to the A3 W8A8 baseline. For 950 DT, prepare an environment with compatible vLLM and vLLM-Ascend versions; do not use an A3 image for that deployment.
 
 A pre-built Qwen3.8 A3 image is available in the [vllm-ascend repository](https://quay.io/repository/ascend/vllm-ascend?tab=tags&tag=latest). Select the image that matches the host operating system:
 
@@ -115,15 +111,12 @@ Prefill and decode run in the same service. Select the hardware tab below.
 Before starting:
 
 - Set `MODEL_PATH` to the matching quantized checkpoint.
-- For 950 DT, set `LOCAL_IP` and `NIC_NAME` to the serving host address and
-  the interface that owns it.
-- Verify available NPU memory before changing context length, concurrency,
-  or memory utilization.
+- For 950 DT, set `LOCAL_IP` and `NIC_NAME` to the serving host address and the interface that owns it.
+- Verify available NPU memory before changing context length, concurrency, or memory utilization.
 
 === "A3 series"
 
-    This W8A8 baseline uses TP8 × DP1 and enables QSA acceleration, MTP,
-    Function Calling, and reasoning parsing.
+    This W8A8 baseline uses TP8 × DP1 and enables QSA acceleration, MTP, Function Calling, and reasoning parsing.
 
     ```bash
     unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
@@ -187,8 +180,7 @@ Before starting:
     export VLLM_ASCEND_PLE_BACKEND=torch
     ```
 
-    Add `--async-scheduling` to the command above and replace its
-    `--additional-config` value with:
+    Add `--async-scheduling` to the command above and replace its `--additional-config` value with:
 
     ```json
     {
@@ -206,16 +198,11 @@ Before starting:
     }
     ```
 
-    Shared expert DP requires expert parallelism and TP > 1. Keep fused MC2
-    disabled when using shared expert multistream overlap. This optional
-    combination requires accuracy, memory, and performance validation;
-    the baseline's evaluation result does not cover it.
+    Shared expert DP requires expert parallelism and TP > 1. Keep fused MC2 disabled when using shared expert multistream overlap. This optional combination requires accuracy, memory, and performance validation; the baseline's evaluation result does not cover it.
 
 === "950 DT"
 
-    The W8A8-MXFP8 example uses TP4 × DP1, Model Runner V2, async scheduling,
-    FlashComm1, shared expert DP, shared expert multistream overlap, and MTP.
-    Static kernels and super kernels are disabled.
+    The W8A8-MXFP8 example uses TP4 × DP1, Model Runner V2, async scheduling, FlashComm1, shared expert DP, shared expert multistream overlap, and MTP. Static kernels and super kernels are disabled.
 
     ```bash
     unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
@@ -284,22 +271,15 @@ Before starting:
     Key parameter descriptions:
 
     - `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3` selects the four devices for TP4.
-    - `--max-model-len 141312` and `--max-num-seqs 32` set context and
-      concurrency limits; verify memory capacity before increasing them.
+    - `--max-model-len 141312` and `--max-num-seqs 32` set context and concurrency limits; verify memory capacity before increasing them.
     - `enable_fused_mc2=0` preserves shared expert multistream overlap.
-    - `FULL_DECODE_ONLY` enables decode graph capture. The MTP configuration
-      uses three draft tokens without explicitly forcing eager execution.
-    - Prefix caching is enabled without an explicit Mamba cache mode.
-      Confirm cache behavior with the installed runtime.
-    - `--profiler-config` sets the trace output directory; it does not start
-      profiling by itself.
+    - `FULL_DECODE_ONLY` enables decode graph capture. The MTP configuration uses three draft tokens without explicitly forcing eager execution.
+    - Prefix caching is enabled without an explicit Mamba cache mode. Confirm cache behavior with the installed runtime.
+    - `--profiler-config` sets the trace output directory; it does not start profiling by itself.
 
 ### 5.2 PD Separation Deployment
 
-On a single Atlas 800 A3 host, prefill and decode each use eight devices with
-TP2 × DP4. Both roles load the same W4A8 checkpoint and enable expert
-parallelism, async scheduling, and Model Runner V2. MooncakeConnectorV2
-transfers KV cache between them; requests enter the proxy on port 25570.
+On a single Atlas 800 A3 host, prefill and decode each use eight devices with TP2 × DP4. Both roles load the same W4A8 checkpoint and enable expert parallelism, async scheduling, and Model Runner V2. MooncakeConnectorV2 transfers KV cache between them; requests enter the proxy on port 25570.
 
 | Setting | Prefill | Decode |
 | --- | --- | --- |
@@ -322,18 +302,13 @@ transfers KV cache between them; requests enter the proxy on port 25570.
 Before starting:
 
 - Expose devices 0–15 and mount the same W4A8 checkpoint for both roles.
-- Install compatible vLLM, vLLM-Ascend, and Mooncake in the active Python
-  environment.
-- Set the host IP, network interface, model path, and writable log directory
-  in `pd_env.sh`. Provide sufficient host memory for Engram CPU offload.
-- Prepare a compatible `PD_proxy_server.py` that accepts the arguments shown
-  below, and set `PROXY_SCRIPT` to its location. The proxy implementation
-  must support Mooncake PD request routing; it is not included in this guide.
+- Install compatible vLLM, vLLM-Ascend, and Mooncake in the active Python environment.
+- Set the host IP, network interface, model path, and writable log directory in `pd_env.sh`. Provide sufficient host memory for Engram CPU offload.
+- Prepare a compatible `PD_proxy_server.py` that accepts the arguments shown below, and set `PROXY_SCRIPT` to its location. The proxy implementation must support Mooncake PD request routing; it is not included in this guide.
 
 #### 5.2.1 Common Environment
 
-Save this as `pd_env.sh` beside `P.sh` and `D.sh`. Set the serving host IP,
-network interface, model path, and log directory:
+Save this as `pd_env.sh` beside `P.sh` and `D.sh`. Set the serving host IP, network interface, model path, and log directory:
 
 ```bash
 unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
@@ -514,8 +489,7 @@ nohup bash P.sh > p.launcher.log 2>&1 &
 nohup bash D.sh > d.launcher.log 2>&1 &
 ```
 
-Wait for both services to finish loading. On the serving host, check that both
-APIs respond successfully and list `qwen38-flash-next-a3-pd`:
+Wait for both services to finish loading. On the serving host, check that both APIs respond successfully and list `qwen38-flash-next-a3-pd`:
 
 ```bash
 curl --fail http://127.0.0.1:25568/v1/models
@@ -547,31 +521,19 @@ Inspect the prefill, decode, and proxy logs under `ROOT` if the request fails.
 
 - `VLLM_ASCEND_PLE_BACKEND=torch` selects the PLE backend for both roles.
 - Both roles enable Prefix Caching without an explicit Mamba cache mode.
-- Engram requires a checkpoint with supported n-gram layers. Both roles
-  request `cpu_offload=true` and `dp_shared_memory=false`; Model Runner V2
-  with DP > 1 may enable sharing automatically, depending on the runtime
-  version. Check the resolved configuration in the startup logs.
-- Prefill enables `enable_prefill_mc2=true` and disables fused MC2. Verify
-  MC2 token limits for TP2 × DP4 before increasing the batch token budget.
-- Decode enables `FULL_DECODE_ONLY`, NPU graph extension, static kernels, and
-  recompute scheduling. Super kernels remain disabled.
-- Both roles use three MTP draft tokens. Prefill sets `enforce_eager=true`;
-  decode sets `enforce_eager=false`.
-- Keep fused MC2 disabled when using shared expert multistream overlap.
-  The decode command relies on the runtime's default value of zero.
-- Keep the Mooncake DP4 / TP2 declarations synchronized with both services'
-  parallel settings.
-- For Function Calling and reasoning parsing, add
-  `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3`
-  to both roles and verify proxy forwarding. Multimodal input and thinking
-  control also require validation through the proxy with the W4A8 checkpoint.
+- Engram requires a checkpoint with supported n-gram layers. Both roles request `cpu_offload=true` and `dp_shared_memory=false`; Model Runner V2 with DP > 1 may enable sharing automatically, depending on the runtime version. Check the resolved configuration in the startup logs.
+- Prefill enables `enable_prefill_mc2=true` and disables fused MC2. Verify MC2 token limits for TP2 × DP4 before increasing the batch token budget.
+- Decode enables `FULL_DECODE_ONLY`, NPU graph extension, static kernels, and recompute scheduling. Super kernels remain disabled.
+- Both roles use three MTP draft tokens. Prefill sets `enforce_eager=true`; decode sets `enforce_eager=false`.
+- Keep fused MC2 disabled when using shared expert multistream overlap. The decode command relies on the runtime's default value of zero.
+- Keep the Mooncake DP4 / TP2 declarations synchronized with both services' parallel settings.
+- For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to both roles and verify proxy forwarding. Multimodal input and thinking control also require validation through the proxy with the W4A8 checkpoint.
 
 ## 6 Functional Verification
 
 After the service is started, the model can be invoked by sending a prompt. The `chat/completions` API is supported. Use the `--served-model-name` you configured (`qwen3.8-flash-next` for `Qwen3.8-Flash-Next`).
 
-The requests below use the A3 colocated baseline. Select the endpoint and model
-name for the deployment being tested:
+The requests below use the A3 colocated baseline. Select the endpoint and model name for the deployment being tested:
 
 | Deployment | Port | Model name |
 | --- | --- | --- |
@@ -579,8 +541,7 @@ name for the deployment being tested:
 | 950 DT colocated | 8087 | `qwen3.8-flash-next-950-dt` |
 | A3 PD proxy | 25570 | `qwen38-flash-next-a3-pd` |
 
-For PD, first complete the proxy check in Section 5.2.4 and review the feature
-requirements in Section 5.2.5.
+For PD, first complete the proxy check in Section 5.2.4 and review the feature requirements in Section 5.2.5.
 
 ### 6.1 Basic Chat Completion
 
@@ -762,11 +723,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ### 9.1 Recommended Configurations
 
-Start with the matching configuration in [Section 5](#5-online-service-deployment).
-For A3 colocated serving, evaluate the optional async scheduling and MoE
-communication settings independently of the baseline accuracy result.
-For PD serving, tune prefill and decode separately and keep the Mooncake
-parallel-size declarations consistent with the services.
+Start with the matching configuration in [Section 5](#5-online-service-deployment). For A3 colocated serving, evaluate the optional async scheduling and MoE communication settings independently of the baseline accuracy result. For PD serving, tune prefill and decode separately and keep the Mooncake parallel-size declarations consistent with the services.
 
 ### 9.2 Tuning Guidelines
 
@@ -778,32 +735,15 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ### 9.3 Model Runner V2 Decode Submission
 
-Audited Qwen3.8 Flash Next Model Runner V2 consumers automatically use optimistic
-CPU length bounds while exact execution lengths remain on device. This capability
-is enabled by default for supported consumers and requires no configuration switch.
-The resolved target architecture must be `Qwen4ExpForCausalLM` or
-`Qwen4ExpForConditionalGeneration`. Other models retain their existing behavior.
+Audited Qwen3.8 Flash Next Model Runner V2 consumers automatically use optimistic CPU length bounds while exact execution lengths remain on device. This capability is enabled by default for supported consumers and requires no configuration switch. The resolved target architecture must be `Qwen4ExpForCausalLM` or `Qwen4ExpForConditionalGeneration`. Other models retain their existing behavior.
 
-The model checks the initialized target and MTP draft attention consumers once
-after KV initialization. A supported model skips both the corrected-count D2H
-copy and its CPU synchronization, using the runner's existing paired exemption.
-Exact positions, accepted counts, KV slots and recurrent state still use device
-state. Existing connector loads, waits, acknowledgements and errors are unchanged.
+The model checks the initialized target and MTP draft attention consumers once after KV initialization. A supported model skips both the corrected-count D2H copy and its CPU synchronization, using the runner's existing paired exemption. Exact positions, accepted counts, KV slots and recurrent state still use device state. Existing connector loads, waits, acknowledgements and errors are unchanged.
 
-The same capability covers text and ordinary non-realtime multimodal requests.
-Completed prompts use the existing encoder gather fast path; there are no extra
-media certificates or PD observers.
+The same capability covers text and ordinary non-realtime multimodal requests. Completed prompts use the existing encoder gather fast path; there are no extra media certificates or PD observers.
 
-Unknown target/draft consumers, context parallelism, sparse KV offload and
-realtime media retain exact CPU synchronization. The runner's existing PP
-exact-count protection still applies. There is no extra TP8, DP1, PP1, SP-off,
-prefix-cache-off, PLE weight-offload, FULL-graph or fixed-K requirement.
-Underlying model/runtime restrictions still apply.
+Unknown target/draft consumers, context parallelism, sparse KV offload and realtime media retain exact CPU synchronization. The runner's existing PP exact-count protection still applies. There is no extra TP8, DP1, PP1, SP-off, prefix-cache-off, PLE weight-offload, FULL-graph or fixed-K requirement. Underlying model/runtime restrictions still apply.
 
-The decision is fixed for the model state's initialized lifetime so production
-and consumption cannot switch independently between batches. Changes to runtime
-configuration or attention consumers require model-state reinitialization.
-Initialization drains the old copy stream once before enabling the exemption.
+The decision is fixed for the model state's initialized lifetime so production and consumption cannot switch independently between batches. Changes to runtime configuration or attention consumers require model-state reinitialization. Initialization drains the old copy stream once before enabling the exemption.
 
 ## 10 FAQ
 
