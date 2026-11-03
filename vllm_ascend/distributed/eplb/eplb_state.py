@@ -210,7 +210,9 @@ def refresh_model_routing_tables(
             layer_state.refresh_expert_replica_routing_table()
     if hasattr(model_state, "_allgather_physical_map"):
         current_map = model_state.physical_to_logical_map
-        if not torch.equal(current_map, model_state._allgather_physical_map):
+        # Async layer refreshes follow changed-layer commits. Comparing the
+        # device maps here would synchronize the foreground inference stream.
+        if layer_idx is not None or not torch.equal(current_map, model_state._allgather_physical_map):
             if model_state._allgather_physical_map.shape == current_map.shape:
                 model_state._allgather_physical_map.copy_(current_map)
             else:
