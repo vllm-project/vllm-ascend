@@ -50,6 +50,43 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_upd
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 
+def _validate_dense_sp_projections(model: nn.Module) -> None:
+    """Fail fast if a decoder projection is not in the dense-SP name tables.
+
+    Under dense SP the embedding entry shards the token dim; a decoder stack
+    containing an unwrapped residual-stream projection would compute on the
+    shard with metadata built for the full sequence — a cryptic kernel error
+    or, on backends that clamp, silently wrong output. The row wrapper's
+    shape check only fires when a listed row projection exists downstream;
+    families whose row projection is also unlisted (e.g. ChatGLM's
+    ``query_key_value``/``dense``, GPT-NeoX's ``dense_h_to_4h``) would pass
+    silently. This validation walks the model once at load and lists every
+    unrecognized name.
+    """
+    from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
+
+    from vllm_ascend.ops.linear_op import _DENSE_SP_COLUMN_PROJECTIONS, _DENSE_SP_ROW_PROJECTIONS
+
+    missing: list[str] = []
+    for name, module in model.named_modules():
+        if ".layers." not in name:
+            continue
+        leaf = name.rsplit(".", 1)[-1]
+        if isinstance(module, (ColumnParallelLinear, RowParallelLinear)) and not hasattr(module, "custom_op"):
+            if leaf in _DENSE_SP_COLUMN_PROJECTIONS or leaf in _DENSE_SP_ROW_PROJECTIONS:
+                continue
+            if leaf not in missing:
+                missing.append(leaf)
+    if missing:
+        raise ValueError(
+            f"dense sequence parallelism is enabled but this checkpoint has decoder "
+            f"projections not in the wrapper name tables: {missing}. The embedding "
+            "entry would shard tokens while these projections run unwrapped on "
+            "the shard. Report these names (from the model definition) to extend "
+            "the tables, or disable the FlashComm switch for this model."
+        )
+
+
 def _install_full_token_mm_text_embedding(model: nn.Module) -> None:
     """Restore full-token rows at the mm wrapper's text-embedding seam.
 
@@ -158,8 +195,14 @@ class AscendModelState(DefaultModelState):
                 )
                 self._offload_request_states = CopySfaRequestStates()
         self._initialize_decoder_replay()
-        if self.supports_mm_inputs and enable_dense_sp(self.vllm_config):
-            _install_full_token_mm_text_embedding(model)
+        # Cache the dense-SP decision: the predicate walks ~13 structural
+        # gates (and resolves the model registry for VL checkpoints), too
+        # expensive to re-run per batch on the prepare/dummy hot paths.
+        self._dense_sp = enable_dense_sp(vllm_config)
+        if self._dense_sp:
+            _validate_dense_sp_projections(model)
+            if self.supports_mm_inputs:
+                _install_full_token_mm_text_embedding(model)
 
     def _initialize_decoder_replay(self) -> None:
         self.decoder_replay: AscendDecoderReplayLayers | None = getattr(self.model, "decoder_replay_layers", None)
@@ -426,7 +469,7 @@ class AscendModelState(DefaultModelState):
         if set_embedding_num_tokens_padded is not None:
             set_embedding_num_tokens_padded(input_batch.num_tokens_after_padding)
         inputs_embeds = super().prepare_inputs_embeds(scheduled_encoder_inputs, input_batch, req_states)
-        if inputs_embeds is not None and enable_dense_sp(self.vllm_config):
+        if inputs_embeds is not None and self._dense_sp:
             # Dense sequence parallelism: the runner pre-computes inputs_embeds
             # (text embed + multimodal merge, full-token side) only for
             # mm-capable / prompt-embeds models, and the decoder stack's
@@ -438,7 +481,7 @@ class AscendModelState(DefaultModelState):
 
     def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
         inputs_embeds = super().dummy_inputs_embeds(num_tokens)
-        if enable_dense_sp(self.vllm_config):
+        if self._dense_sp:
             # Same boundary as prepare_inputs_embeds for the dummy/capture
             # forwards; upstream's prepare_dummy_inputs and the execute_model
             # dummy path both route through this method, so the shard covers

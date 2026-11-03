@@ -241,11 +241,12 @@ def clear_enable_sp():
     enable_pcp_o_proj_weight_sharding.cache_clear()
     enable_pcp_embedding_lmhead_weight_sharding.cache_clear()
     _libc_getenv.cache_clear()
-    # The cached MoE verdict is config-scoped: a config re-init must
-    # invalidate it, or the next is_moe_model reader sees the stale verdict
-    # of the previous config.
-    global _IS_MOE_MODEL
+    # The cached MoE/VL verdicts are config-scoped: a config re-init must
+    # invalidate them, or the next reader sees the stale verdict of the
+    # previous config.
+    global _IS_MOE_MODEL, _IS_VL_MODEL
     _IS_MOE_MODEL = None
+    _IS_VL_MODEL = None
 
 
 _IS_RC_DEVICE: bool | None = None
@@ -1103,6 +1104,8 @@ def dense_sp_unavailable_reason(vllm_config) -> str | None:
             "multimodal checkpoint without a dense-SP-wired model class "
             "(the multimodal merge needs full-token rows before the model)"
         )
+    if getattr(model_config, "is_encoder_decoder", False):
+        return "encoder-decoder checkpoint (cross-attention consumes full-token encoder states)"
     if getattr(model_config, "use_mla", False):
         return "MLA checkpoint (stacked projections break the gather-per-block invariant)"
     if getattr(model_config, "hf_text_config", None) is None:

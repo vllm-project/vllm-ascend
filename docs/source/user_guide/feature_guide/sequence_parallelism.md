@@ -87,6 +87,7 @@ Qwen3.5 family (including its GDN linear-attention layers), and others —
 without per-model switches. Requirements:
 
 - `tensor_parallel_size > 1` and `pipeline_parallel_size == 1`.
+- The V2 model runner (the default; the V1 runner is not supported for dense SP).
 - `--additional-config '{"enable_flashcomm1": true}'` (or the
   `VLLM_ASCEND_ENABLE_FLASHCOMM1` env var).
 
@@ -96,46 +97,40 @@ vllm serve <dense-model> \
   --additional-config '{"enable_flashcomm1": true}'
 ```
 
-The runner pads every step's executed token count up to the TP multiple
-(V2 rounds the batch token counts in `_prepare_inputs_impl`, V1 keeps its
-existing `_pad_for_sequence_parallelism`), so the padding rows ride along
-exactly like graph-bucket padding rows (PAD_SLOT_ID cache slots,
-`is_padding` mask) and are dropped before logits.
+The V2 runner pads every step's executed token count up to the TP multiple
+(in `_prepare_inputs_impl`), so the padding rows ride along exactly like
+graph-bucket padding rows (PAD_SLOT_ID cache slots, `is_padding` mask) and
+are dropped before logits.
 
-MTP speculative decoding (`qwen3_5_mtp`) is supported together with dense SP
-under the V2 model runner: the drafter shares the target's embedding, and the
-patched MTP forward gathers the embedding's token shard back to full rows
-before combining them with the target's hidden states, so the draft head
-itself runs the stock full-token layout. Other speculative methods (EAGLE,
-DSpark, ...) and the V1 runner keep the SP-off layout.
+MTP speculative decoding (`qwen3_5_mtp`) is supported together with dense SP:
+the drafter shares the target's embedding, and the Ascend speculator installs
+a full-token gather on the drafter's embedding seam at draft-model load, so
+the draft head itself runs the stock full-token layout regardless of family.
+Other speculative methods (EAGLE, DSpark, ...) keep the SP-off layout.
 
 Multimodal-capable checkpoints of the dense Qwen3.5 family
 (`Qwen3_5ForConditionalGeneration`, a separate `text_config` in the HF config)
-also run dense SP under the V2 runner: the multimodal merge happens
-full-token side in the runner's `inputs_embeds` preparation, and the wrapper
-restores the full-token text embeddings around the merge before sharding the
-merged embeds to the rank-local token shard, so the vision feature scatter
-never touches the sequence-parallel region. Other multimodal families keep
-the SP-off layout (their model classes do not declare the wiring).
+also run dense SP: the multimodal merge happens full-token side in the
+runner's `inputs_embeds` preparation, and the V2 model state restores the
+full-token text embeddings around the merge before sharding the merged embeds
+to the rank-local token shard, so the vision feature scatter never touches
+the sequence-parallel region. Other multimodal families keep the SP-off layout
+(their model classes do not declare `supports_dense_sp`).
 
-Unsupported topologies keep the stock all-reduce layout: MoE checkpoints
-(upstream SP MoE owns their layout), MLA checkpoints, multimodal and
-speculative-decoding deployments, PCP/DCP topologies, pipeline parallelism,
-LoRA, and the finegrained TP groups. A checkpoint whose residual-stream
-projection is not recognized fails loudly (shape check in the row wrapper)
-rather than computing on a wrong token layout; report the projection name to
-extend the coverage list.
+The following topologies are excluded: MoE checkpoints (upstream SP MoE owns
+their layout), MLA checkpoints, other multimodal families, non-MTP speculative
+methods, PCP/DCP topologies, pipeline parallelism, LoRA, and the finegrained
+TP groups (a config-time `ValueError` is raised if combined). A checkpoint
+whose residual-stream projection is not recognized fails loudly (shape check
+in the row wrapper) rather than computing on a wrong token layout; report the
+projection name to extend the coverage list.
 
 ### Matmul reduce-scatter fusion
 
-On supported Ascend devices, enable `fuse_gemm_comms` to fuse a
-sequence-parallel, bias-free row-parallel projection with its token-dimension
-reduce-scatter. The fused implementation supports BF16/FP16 with TP size 2,
-4, or 8; unmatched graphs continue to use the unfused path.
-
-```bash
---compilation-config '{"pass_config":{"fuse_gemm_comms":true}}'
-```
+On supported Ascend devices, the matmul+reduce-scatter fusion pass is enabled
+automatically when sequence parallelism is active; no user-facing knob is
+required. The fused implementation supports BF16/FP16 with TP size 2, 4, or
+8; unmatched graphs continue to use the unfused path.
 
 ### FlashComm switch (Ascend only)
 

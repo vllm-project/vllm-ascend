@@ -150,6 +150,10 @@ class NPUModelRunner(GPUModelRunner):
     max_num_reqs: int
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        # Cache the dense-SP decision: the predicate walks ~13 structural
+        # gates (and resolves the model registry for VL checkpoints), which is
+        # too expensive to re-run per batch on the hot paths below.
+        self._dense_sp = enable_dense_sp(vllm_config)
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
         self.sparse_kv_offload_manager = None
@@ -704,7 +708,7 @@ class NPUModelRunner(GPUModelRunner):
             # Zero-token steps return before publishing a fresh state; the
             # stale one is already gathered and never consumed this step.
             scheduler_output.total_num_scheduled_tokens > 0
-            and enable_dense_sp(self.vllm_config)
+            and self._dense_sp
             and self.execute_model_state is not None
             and self.execute_model_state.hidden_states is not None
             # FULL-graph replays restore full rows inside the captured graph
@@ -867,7 +871,7 @@ class NPUModelRunner(GPUModelRunner):
             graph_num_reqs = global_graph_num_reqs
             num_tokens_after_padding = global_graph_num_reqs * batch_desc.uniform_token_count
         assert num_tokens > 0
-        if enable_dense_sp(self.vllm_config):
+        if self._dense_sp:
             # Dense sequence parallelism keeps hidden states token-sharded
             # between the decoder projections; every TP rank must hold the
             # same shard size, so round the token counts up to the TP
@@ -1286,7 +1290,7 @@ class NPUModelRunner(GPUModelRunner):
                 "the profile-run marker, which makes XLite bypass its graph path."
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
-        if enable_dense_sp(self.vllm_config):
+        if self._dense_sp:
             # Dummy/profile/warmup forwards skip _prepare_inputs_impl, so they
             # miss its dense-SP TP rounding. Round here instead: the dummy
             # batch then carries the same TP-aligned token count the real

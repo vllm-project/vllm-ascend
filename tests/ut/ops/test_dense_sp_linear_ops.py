@@ -11,9 +11,9 @@ Covers the three layers of the generic path:
   (merged-qkv Llama-style, split q/k/v, GDN in-projections), TP sizes and
   unaligned token counts.
 
-The embedding entry (reduce-scatter) is exercised through a placement test;
-the runner-side TP alignment (V2 ``_prepare_inputs_impl`` / V1
-``_pad_for_sequence_parallelism``) and the sample-time exit need NPU e2e runs.
+The runner-side seams (model-state inputs_embeds sharding, speculator draft
+embedding gather, FULL-graph capture wrapper, TP rounding) need NPU e2e runs;
+dense SP requires the V2 model runner (the V1 runner is hard-gated off).
 """
 
 import math
@@ -223,11 +223,6 @@ class TestEnableDenseSpPredicate:
             )
             assert enable_dense_sp(config), model_type
 
-    def test_runner_choice_is_not_a_gate(self):
-        # Both runners are supported: V2 rounds the executed token count in
-        # _prepare_inputs_impl, V1 pads in _pad_for_sequence_parallelism.
-        assert enable_dense_sp(_make_vllm_config())
-
     def test_enable_sp_covers_dense_models(self):
         assert enable_sp(_make_vllm_config())
 
@@ -245,18 +240,42 @@ class TestEnableDenseSpPredicate:
 
 
 class TestProjectionSelection:
+    # Pin the tables to their expected contents so accidentally removing an
+    # entry fails here rather than silently shrinking coverage in the
+    # parametrized wrap tests below (which iterate the live table).
+    EXPECTED_COLUMN_PROJECTIONS = frozenset(
+        {
+            "qkv_proj",
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "gate_up_proj",
+            "gate_proj",
+            "up_proj",
+            "in_proj_qkvz",
+            "in_proj_qkv",
+            "in_proj_z",
+            "in_proj_ba",
+        }
+    )
+    EXPECTED_ROW_PROJECTIONS = frozenset({"o_proj", "down_proj", "out_proj"})
+
+    def test_projection_tables_are_pinned(self):
+        assert _DENSE_SP_COLUMN_PROJECTIONS == self.EXPECTED_COLUMN_PROJECTIONS
+        assert _DENSE_SP_ROW_PROJECTIONS == self.EXPECTED_ROW_PROJECTIONS
+
     @pytest.fixture(autouse=True)
     def _selection_env(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(linear_op, "mlp_tp_enable", lambda: False)
         monkeypatch.setattr(linear_op, "oproj_tp_enable", lambda: False)
         monkeypatch.setattr(linear_op, "enable_dense_sp", lambda: True)
 
-    @pytest.mark.parametrize("prefix", sorted(_DENSE_SP_COLUMN_PROJECTIONS))
+    @pytest.mark.parametrize("prefix", sorted(EXPECTED_COLUMN_PROJECTIONS))
     def test_decoder_column_projections_are_wrapped(self, prefix):
         op = _get_column_parallel_op(f"model.layers.0.self_attn.{prefix}", MagicMock())
         assert isinstance(op, SequenceColumnParallelOp)
 
-    @pytest.mark.parametrize("prefix", sorted(_DENSE_SP_ROW_PROJECTIONS))
+    @pytest.mark.parametrize("prefix", sorted(EXPECTED_ROW_PROJECTIONS))
     def test_decoder_row_projections_are_wrapped(self, prefix):
         op = _get_row_parallel_op(f"model.layers.0.mlp.{prefix}", MagicMock())
         assert isinstance(op, SequenceRowParallelOp)
