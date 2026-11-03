@@ -3,10 +3,12 @@
 
 import gc
 import socket
+from copy import copy
+from urllib.parse import urlsplit
 
 import torch
 from torch.utils.hooks import RemovableHandle
-from vllm.config import set_current_vllm_config
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.model_loader.weight_cache import daemon as upstream
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -32,7 +34,24 @@ class AscendWeightCacheDaemon(upstream.WeightCacheDaemon):
             register_ascend_customop(self.vllm_config)
             register_ascend_fla_customop()
             set_random_seed(self.model_config.seed)
-        super().load_model()
+        # Upstream initializes communication before entering its own model
+        # config context. HCCL options need a config even when DP is 1.
+        with set_current_vllm_config(self._get_daemon_init_config()):
+            super().load_model()
+
+    def _get_daemon_init_config(self) -> VllmConfig:
+        init_config = self.vllm_config
+        if init_config.parallel_config.nnodes > 1:
+            rendezvous = urlsplit(self.distributed_init_method)
+            if rendezvous.scheme != "tcp" or rendezvous.hostname is None or rendezvous.port is None:
+                raise ValueError("Multi-node Ascend preload requires a TCP rendezvous with an explicit port")
+            # Upstream uses the config's master endpoint for multi-node TP.
+            # Keep the daemon's endpoint without changing the engine config.
+            init_config = copy(init_config)
+            init_config.parallel_config = copy(init_config.parallel_config)
+            init_config.parallel_config.master_addr = rendezvous.hostname
+            init_config.parallel_config.master_port = rendezvous.port
+        return init_config
 
     def warmup(self) -> None:
         # The upstream daemon warmup is specific to FlashInfer. Ascend engine

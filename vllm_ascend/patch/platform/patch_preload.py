@@ -46,3 +46,6 @@ def exported_weight_bytes(model) -> int:
     from vllm_ascend.model_loader.preload.transport import exported_npu_weight_bytes
 
     return daemon._exported_weight_bytes_original(model) + exported_npu_weight_bytes(model)
+
+
+apply_preload_patch()

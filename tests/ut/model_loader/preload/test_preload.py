@@ -441,15 +441,94 @@ def test_fp32_weight_reload_preserves_graph_storage(monkeypatch):
     torch.testing.assert_close(layer.weight_fp32, layer.weight)
 
 
-def test_daemon_world_group_does_not_require_engine_config(monkeypatch):
-    from vllm_ascend import utils
-    from vllm_ascend.platform import NPUPlatform
+@pytest.fixture
+def daemon_loading_setup(monkeypatch):
+    from vllm_ascend import ascend_forward_context, ops, utils
+    from vllm_ascend.model_loader.preload import daemon
 
-    calculation = Mock(side_effect=AssertionError("world group must retain the daemon rendezvous context"))
-    monkeypatch.setattr(utils, "calculate_dp_buffer_size", calculation)
-    assert utils.get_hccl_config_for_pg_options("world") == utils.get_default_buffer_config()
-    assert NPUPlatform.dist_backend == "hccl"
-    calculation.assert_not_called()
+    # Isolate device/operator bootstrap; exercise the actual config scopes.
+    monkeypatch.setattr(daemon, "validate_preload_config", Mock())
+    monkeypatch.setattr(daemon.current_platform, "logical_device_id_to_visible_device_id", lambda rank: rank)
+    monkeypatch.setattr(torch.npu, "set_device", Mock())
+    monkeypatch.setattr(torch.npu, "config", SimpleNamespace(allow_internal_format=False))
+    monkeypatch.setattr(ascend_forward_context, "sync_v2_extra_kwargs", Mock(), raising=False)
+    monkeypatch.setattr(ops, "register_dummy_fusion_op", Mock(), raising=False)
+    for name in ("adapt_patch", "register_ascend_customop", "register_ascend_fla_customop"):
+        monkeypatch.setattr(utils, name, Mock(), raising=False)
+    monkeypatch.setattr(daemon, "set_random_seed", Mock())
+    return daemon
+
+
+@pytest.mark.parametrize("nnodes", [1, 2])
+def test_daemon_load_retains_its_rendezvous(monkeypatch, daemon_loading_setup, nnodes):
+    from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none, set_current_vllm_config
+
+    from vllm_ascend import utils
+
+    daemon = daemon_loading_setup
+    instance = daemon.AscendWeightCacheDaemon.__new__(daemon.AscendWeightCacheDaemon)
+    instance.vllm_config = _config()
+    instance.model_config = instance.vllm_config.model_config
+    instance.model_config.seed = 0
+    parallel = instance.vllm_config.parallel_config
+    parallel.nnodes = nnodes
+    parallel.master_addr = "engine-host"
+    parallel.master_port = 29501
+    instance.distributed_init_method = "tcp://127.0.0.1:29601"
+    instance.local_rank = 0
+    previous_config = get_current_vllm_config_or_none()
+
+    def load_upstream(self):
+        current = get_current_vllm_config()
+        assert current.parallel_config.data_parallel_size == 1
+        assert utils.get_hccl_config_for_pg_options("world") == utils.get_default_buffer_config()
+        if nnodes > 1:
+            assert current is not self.vllm_config
+            assert current.parallel_config.master_addr == "127.0.0.1"
+            assert current.parallel_config.master_port == 29601
+        else:
+            assert current is self.vllm_config
+        # Upstream switches to the original config for model construction.
+        with set_current_vllm_config(self.vllm_config):
+            assert get_current_vllm_config() is self.vllm_config
+        assert get_current_vllm_config() is current
+
+    load_mock = Mock(side_effect=lambda: load_upstream(instance))
+    monkeypatch.setattr(daemon.upstream.WeightCacheDaemon, "load_model", load_mock)
+    instance.load_model()
+    load_mock.assert_called_once()
+    assert get_current_vllm_config_or_none() is previous_config
+    assert parallel.master_addr == "engine-host"
+    assert parallel.master_port == 29501
+
+
+def test_daemon_load_restores_config_after_failure(monkeypatch, daemon_loading_setup):
+    from vllm.config import get_current_vllm_config_or_none
+
+    daemon = daemon_loading_setup
+    instance = daemon.AscendWeightCacheDaemon.__new__(daemon.AscendWeightCacheDaemon)
+    instance.vllm_config = _config()
+    instance.vllm_config.parallel_config.nnodes = 1
+    instance.model_config = instance.vllm_config.model_config
+    instance.model_config.seed = 0
+    instance.local_rank = 0
+    previous_config = get_current_vllm_config_or_none()
+    monkeypatch.setattr(daemon.upstream.WeightCacheDaemon, "load_model", Mock(side_effect=RuntimeError("load failed")))
+    with pytest.raises(RuntimeError, match="load failed"):
+        instance.load_model()
+    assert get_current_vllm_config_or_none() is previous_config
+
+
+@pytest.mark.parametrize("rendezvous", ["tcp://127.0.0.1", "file:///tmp/preload-rendezvous"])
+def test_multinode_daemon_rejects_invalid_rendezvous(rendezvous):
+    from vllm_ascend.model_loader.preload import daemon
+
+    instance = daemon.AscendWeightCacheDaemon.__new__(daemon.AscendWeightCacheDaemon)
+    instance.vllm_config = _config()
+    instance.vllm_config.parallel_config.nnodes = 2
+    instance.distributed_init_method = rendezvous
+    with pytest.raises(ValueError, match="TCP rendezvous"):
+        instance._get_daemon_init_config()
 
 
 def test_daemon_memory_logging_uses_native_npu_allocator():
