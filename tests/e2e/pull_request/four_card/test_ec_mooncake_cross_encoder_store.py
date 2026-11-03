@@ -551,6 +551,8 @@ def test_cross_encoder_store_put_then_remote_hit(
         "MOONCAKE_EC_PROTOCOL": "ascend",
         "VLLM_SERVER_DEV_MODE": "1",
         "VLLM_USE_V2_MODEL_RUNNER": "1",
+        # CI defaults to ERROR; the PUT and remote-hit assertions need INFO.
+        "VLLM_LOGGING_LEVEL": "INFO",
     }
     if use_fabric_mem:
         env_dict["ASCEND_ENABLE_USE_FABRIC_MEM"] = "1"
