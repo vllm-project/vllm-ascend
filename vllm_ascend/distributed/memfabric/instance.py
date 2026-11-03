@@ -29,9 +29,9 @@ class OffloadInstanceBinding:
         if not isinstance(self.store_url, str) or not self.store_url.startswith("tcp://"):
             raise ValueError("store_url must be a dedicated tcp:// endpoint")
         if isinstance(self.initialization_order, bool) or not isinstance(self.initialization_order, Integral):
-            raise ValueError("initialization_order must be a non-negative integer")
-        if self.initialization_order < 0:
-            raise ValueError("initialization_order must be a non-negative integer")
+            raise ValueError("initialization_order must be an integer in [0, 63)")
+        if not 0 <= self.initialization_order < 63:
+            raise ValueError("initialization_order must be an integer in [0, 63)")
         object.__setattr__(self, "initialization_order", int(self.initialization_order))
 
 

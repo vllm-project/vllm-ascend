@@ -65,6 +65,6 @@ def test_instance_binding_validates_owner_and_endpoint():
     for invalid in ("", "http://127.0.0.1:8501"):
         with pytest.raises(ValueError):
             OffloadInstanceBinding("ple", invalid, 0)
-    for invalid_order in (True, -1, 1.5):
+    for invalid_order in (True, -1, 1.5, 63):
         with pytest.raises(ValueError, match="initialization_order"):
             OffloadInstanceBinding("ple", "tcp://127.0.0.1:8501", invalid_order)
