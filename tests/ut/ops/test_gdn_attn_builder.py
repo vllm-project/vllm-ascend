@@ -280,6 +280,40 @@ def _build_attn_metadata(
     return builder, common_attn_metadata, attn_metadata
 
 
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
+@pytest.mark.parametrize("query_len", [1, 2, 6])
+def test_shortened_spec_decode_keeps_previous_acceptance(graph_mode, query_len):
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[100, 200], query_lens=[query_len, query_len]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common.is_prefilling.zero_()
+    common.block_table_tensor = torch.arange(12, dtype=torch.int32).view(2, 6) + 10
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=5,
+        cudagraph_mode=graph_mode,
+    )
+    accepted = torch.tensor([3, 5], dtype=torch.int32)
+    metadata = builder.build(
+        0,
+        common,
+        num_actual_reqs=2,
+        num_accepted_tokens=accepted,
+        num_decode_draft_tokens_cpu=torch.full((2,), query_len - 1, dtype=torch.int32),
+    )
+
+    assert metadata.num_spec_decodes == 2
+    assert metadata.num_decodes == metadata.num_prefills == 0
+    torch.testing.assert_close(metadata.num_accepted_tokens[:2], accepted)
+    torch.testing.assert_close(metadata.spec_state_indices_tensor[:2], common.block_table_tensor)
+    conv = metadata.spec_decode_metadata.spec_causal_conv1d
+    torch.testing.assert_close(conv.num_accepted_tokens[:2], accepted)
+    torch.testing.assert_close(conv.query_start_loc[:3], torch.tensor([0, query_len, 2 * query_len], dtype=torch.int32))
+
+
 def _assert_chunk_meta_matches_runtime(builder, chunk_meta, cu_seqlens: torch.Tensor) -> None:
     hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
     linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)

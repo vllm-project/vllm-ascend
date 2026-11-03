@@ -751,17 +751,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         else:
             num_reqs = num_decode_draft_tokens_cpu.numel()
             spec_sequence_masks_cpu = self.spec_sequence_masks_cpu[:num_reqs]
-            runtime_draft_tokens = num_decode_draft_tokens_cpu[num_decode_draft_tokens_cpu >= 0]
-            if runtime_draft_tokens.sum().item() > 0:
-                torch.ge(
-                    num_decode_draft_tokens_cpu,
-                    0,
-                    out=spec_sequence_masks_cpu,
-                )
-            else:
-                # Dynamic speculative decoding can be enabled while this batch
-                # carries no draft tokens. Keep the normal prefill/decode split.
-                spec_sequence_masks_cpu.zero_()
+            torch.ge(
+                num_decode_draft_tokens_cpu,
+                0,
+                out=spec_sequence_masks_cpu,
+            )
             num_spec_decodes = int(spec_sequence_masks_cpu.sum())
             if num_spec_decodes == 0:
                 spec_sequence_masks = None
