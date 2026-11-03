@@ -148,7 +148,7 @@ class AscendModelState(DefaultModelState):
                 device=device,
                 pin_memory=pin_memory,
             )
-            if sparse_cfg.use_fused_copy:
+            if sparse_cfg.use_fused_copy_sfa:
                 pool_capacity = vllm_config.scheduler_config.max_num_seqs + 2
                 self._offload_pool_slots = CpuGpuBuffer(
                     pool_capacity, dtype=torch.int32, device=device, pin_memory=pin_memory
