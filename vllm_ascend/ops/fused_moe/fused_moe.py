@@ -24,6 +24,7 @@ from vllm.distributed import (
     get_tp_group,
     tensor_model_parallel_all_reduce,
 )
+from vllm.forward_context import ForwardContext
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared, _unpack
@@ -35,6 +36,7 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExp
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_mlp import maybe_record_event
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
+from vllm_ascend.ops.fused_moe.routed_experts_capture import collect_local_routing_rows
 from vllm_ascend.ops.fused_moe.shared_experts import (
     AscendSharedExperts,
     PreparedSharedExpertExecution,
@@ -149,6 +151,14 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     expert_ids_per_ep_rank,
                     persistent=False,
                 )
+
+    def restore_routed_experts_rows(self, topk_ids: torch.Tensor, ctx: ForwardContext) -> torch.Tensor:
+        return collect_local_routing_rows(
+            topk_ids,
+            ctx,
+            dp_rank=self.moe_config.dp_group.rank_in_group,
+            tp_size=self.moe_config.tp_group.world_size,
+        )
 
     def forward(
         self,
