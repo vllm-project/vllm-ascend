@@ -5334,6 +5334,13 @@ class NPUModelRunner(GPUModelRunner):
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+        # Window-capped per-group pools (Plan B): map each layer to its KV
+        # cache group so per-layer buffers can be sized by that group's block
+        # count (sliding groups hold window-sized pools, not the full pool).
+        kv_cache_layer_group_ids: dict[str, int] = {}
+        for _group_idx, _group in enumerate(kv_cache_config.kv_cache_groups):
+            for _layer_name in _group.layer_names:
+                kv_cache_layer_group_ids[_layer_name] = _group_idx
         if is_deepseek_v41_cache(layer_kv_cache_spec):
             # V4.1 overlays the layers in each tuple on one physical slot.
             # Unlike DSV4's shared-tuple layout below, each descriptor owns
@@ -5654,8 +5661,12 @@ class NPUModelRunner(GPUModelRunner):
                     # count times this layer's own page size. Using the layer's
                     # spec page (rather than dividing the tensor) stays correct
                     # when the tensor's group is not the largest group.
+                    layer_num_blocks = kv_cache_config.num_blocks
+                    _layer_group = kv_cache_layer_group_ids.get(layer_name)
+                    if _layer_group is not None and getattr(kv_cache_config, "group_num_blocks", None):
+                        layer_num_blocks = kv_cache_config.group_num_blocks[_layer_group]
                     kv_cache_tensor_size = (
-                        kv_cache_config.num_blocks * current_kv_cache_spec.page_size_bytes
+                        layer_num_blocks * current_kv_cache_spec.page_size_bytes
                     )
                     if current_packed_sfa_main_cache:
                         k_tensor_size = kv_cache_tensor_size
@@ -6183,7 +6194,26 @@ class NPUModelRunner(GPUModelRunner):
                     # different memory capacities, `num_blocks` can be different on
                     # different GPUs, and `kv_cache_config.num_blocks` is set to
                     # the min of all `num_blocks`. Verify it here.
-                    assert num_blocks >= kv_cache_config.num_blocks
+                    # Window-capped per-group pools (Plan B): each per-layer
+                    # buffer is sized by its own group's block count, so the
+                    # global num_blocks (largest group) is not a lower bound for
+                    # every layer. Verify against this layer's own group.
+                    _group_idx = (
+                        next(
+                            (
+                                gi
+                                for gi, _g in enumerate(kv_cache_config.kv_cache_groups)
+                                if layer_name in _g.layer_names
+                            ),
+                            None,
+                        )
+                        if getattr(kv_cache_config, "group_num_blocks", None)
+                        else None
+                    )
+                    if _group_idx is not None:
+                        assert num_blocks >= kv_cache_config.group_num_blocks[_group_idx]
+                    else:
+                        assert num_blocks >= kv_cache_config.num_blocks
 
                     block_size_chunk = (
                         current_kv_cache_spec.block_size // kernel_block_size
