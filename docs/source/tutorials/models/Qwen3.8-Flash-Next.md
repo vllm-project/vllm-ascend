@@ -4,7 +4,7 @@
 
 Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experimental preview of the architecture that will underpin Qwen4. Its language model combines Gated DeltaNet (GDN) and Qwen Sparse Attention (QSA), gated residual connections, Position Learning Enhancement (PLE), and a native Multi-Token Prediction (MTP) head.
 
-This tutorial describes model preparation, installation, online serving, functional verification, and evaluation. It covers single-node colocated deployment on Atlas 800 A3 and Ascend 950 DT, and prefill/decode (PD) separation on Atlas 800 A3.
+This tutorial describes model preparation, installation, online serving, functional verification, and evaluation. It covers single-node colocated deployment on Atlas 800 A3 and Ascend 950 DT, and prefill/decode (PD) separation on both platforms.
 
 Qwen3.8-Flash-Next was first supported in `vllm-ascend:v0.26.0rc`. The original A3 W8A8 configuration was validated with text and multimodal input. The deployment examples below include additional performance settings and require separate runtime and accuracy validation.
 
@@ -29,6 +29,7 @@ Select the checkpoint that matches the deployment configuration:
 | Atlas 800 A3 | Colocated | `Qwen3.8-Flash-Next-w8a8-mtp` | 8 devices, TP8 × DP1 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
 | Atlas 800 A3 | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | |
 | Ascend 950 DT | Colocated | `Qwen3.8-Flash-Next-w8a8-mxfp8` | 4 devices, TP4 × DP1 | |
+| Ascend 950 DT | PD separation | Ascend-compatible W4A8-MXFP | 8 devices, TP2 × DP2 per role | |
 
 The commands use fixed model directories under `/models`. Mount the corresponding checkpoint at the shown directory or edit that path directly. For PD separation, both roles must load the same checkpoint.
 
@@ -247,183 +248,467 @@ The response should list the configured model name. After startup, use [Section 
 
 ### 5.2 PD Separation Deployment
 
-On a single Atlas 800 A3 host, prefill and decode each use eight devices with TP2 × DP4. Both roles load the same W4A8 checkpoint and enable expert parallelism, async scheduling, and Model Runner V2. MooncakeConnectorV2 transfers KV cache between them; requests enter the proxy on port 25570.
+Select the hardware tab below.
 
-| Setting | Prefill | Decode |
-| --- | --- | --- |
-| Visible devices | 0–7 | 8–15 |
-| TP × DP | 2 × 4 | 2 × 4 |
-| API port | 25568 | 25569 |
-| Mooncake role / KV port | `kv_producer` / 32600 | `kv_consumer` / 32700 |
-| HCCL socket port range | 61400–61499 | 61500–61599 |
-| HCCL buffer size | 4096 | 512 |
-| Maximum context / sequences / batched tokens | 141312 / 32 / 4096 | 141312 / 32 / 4096 |
+=== "A3 Series"
 
-Before starting:
+    On a single Atlas 800 A3 host, prefill and decode each use eight devices with TP2 × DP4. Both roles load the same W4A8 checkpoint and enable expert parallelism, async scheduling, and Model Runner V2. MooncakeConnectorV2 transfers KV cache between them; requests enter the proxy on port 25570.
 
-- Expose devices 0–15 and mount the same W4A8 checkpoint for both roles.
-- Install compatible vLLM, vLLM-Ascend, and Mooncake in the active Python environment.
-- The commands use `192.168.0.1`, `eth0`, and `/models/Qwen3.8-Flash-Next-w4a8`. Replace these literals consistently for the target host. Logs and profiling traces are written to `/tmp/qwen38-a3-pd`. Provide sufficient host memory for Engram CPU offload.
-- Place the compatible `PD_proxy_server.py` at `/opt/qwen38/PD_proxy_server.py`. The proxy must support Mooncake PD request routing and the options shown below; its implementation is not included in this guide.
-- The examples use the Mooncake library directory from the Python 3.12.16 environment. Edit the literal library path if Mooncake is installed elsewhere.
+    | Setting | Prefill | Decode |
+    | --- | --- | --- |
+    | Visible devices | 0–7 | 8–15 |
+    | TP × DP | 2 × 4 | 2 × 4 |
+    | API port | 25568 | 25569 |
+    | Mooncake role / KV port | `kv_producer` / 32600 | `kv_consumer` / 32700 |
+    | HCCL socket port range | 61400–61499 | 61500–61599 |
+    | HCCL buffer size | 4096 | 512 |
+    | Maximum context / sequences / batched tokens | 141312 / 32 / 4096 | 141312 / 32 / 4096 |
 
-Run Prefill and Decode in separate terminals. Start Proxy after both model APIs are ready.
+    Before starting:
 
-**Prefill:**
+    - Expose devices 0–15 and mount the same W4A8 checkpoint for both roles.
+    - Install compatible vLLM, vLLM-Ascend, and Mooncake in the active Python environment.
+    - The commands use `192.168.0.1`, `eth0`, and `/models/Qwen3.8-Flash-Next-w4a8`. Replace these literals consistently for the target host. Profiling traces are written to `/tmp/qwen38-a3-pd`. Provide sufficient host memory for Engram CPU offload.
+    - Place the compatible `PD_proxy_server.py` at `/opt/qwen38/PD_proxy_server.py`. The proxy must support Mooncake PD request routing and the options shown below; its implementation is not included in this guide.
+    - The examples use the Mooncake library directory from the Python 3.12.16 environment. Edit the literal library path if Mooncake is installed elsewhere.
 
-```bash
-#!/usr/bin/env bash
-set -eo pipefail
-unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
-unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
+    Run Prefill and Decode in separate terminals. Start Proxy after both model APIs are ready.
 
-export VLLM_SERVER_DEV_MODE=1
-export VLLM_USE_V2_MODEL_RUNNER=1
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-export VLLM_ENGINE_READY_TIMEOUT_S=2400
-export VLLM_ASCEND_PLE_BACKEND=torch
-export VLLM_HOST_IP="192.168.0.1"
-export HCCL_IF_IP="192.168.0.1"
-export GLOO_SOCKET_IFNAME="eth0"
-export TP_SOCKET_IFNAME="eth0"
-export HCCL_SOCKET_IFNAME="eth0"
-export no_proxy="localhost,127.0.0.1,192.168.0.1"
-export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
-export LD_LIBRARY_PATH="/usr/local/python3.12.16/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
-export HCCL_BUFFSIZE=4096
+    **Prefill:**
 
-exec vllm serve /models/Qwen3.8-Flash-Next-w4a8 \
-    --host 0.0.0.0 \
-    --port 25568 \
-    --served-model-name qwen38-flash-next-a3-pd \
-    --trust-remote-code \
-    --quantization ascend \
-    --tensor-parallel-size 2 \
-    --data-parallel-size 4 \
-    --max-model-len 141312 \
-    --max-num-seqs 32 \
-    --max-num-batched-tokens 4096 \
-    --gpu-memory-utilization 0.90 \
-    --enable-prefix-caching \
-    --async-scheduling \
-    --enable-expert-parallel \
-    --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
-    --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
-    --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
-    --profiler-config '{"profiler":"torch","torch_profiler_dir":"/tmp/qwen38-a3-pd/profiling/prefill"}' \
-    --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32600","kv_connector_extra_config":{"prefill":{"dp_size":4,"tp_size":2},"decode":{"dp_size":4,"tp_size":2}}}' \
-    > "/tmp/qwen38-a3-pd/prefill.log" 2>&1
-```
+    ```bash
+    #!/usr/bin/env bash
+    set -eo pipefail
+    unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    source /usr/local/Ascend/nnal/atb/set_env.sh
 
-**Decode:**
+    export VLLM_SERVER_DEV_MODE=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ASCEND_PLE_BACKEND=torch
+    export VLLM_HOST_IP="192.168.0.1"
+    export HCCL_IF_IP="192.168.0.1"
+    export GLOO_SOCKET_IFNAME="eth0"
+    export TP_SOCKET_IFNAME="eth0"
+    export HCCL_SOCKET_IFNAME="eth0"
+    export no_proxy="localhost,127.0.0.1,192.168.0.1"
+    export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
+    export LD_LIBRARY_PATH="/usr/local/python3.12.16/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
+    export HCCL_BUFFSIZE=4096
 
-```bash
-#!/usr/bin/env bash
-set -eo pipefail
-unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
-unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
+    exec vllm serve /models/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25568 \
+        --served-model-name qwen38-flash-next-a3-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --data-parallel-size 4 \
+        --max-model-len 141312 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 4096 \
+        --gpu-memory-utilization 0.90 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+        --profiler-config '{"profiler":"torch","torch_profiler_dir":"/tmp/qwen38-a3-pd/profiling/prefill"}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32600","kv_connector_extra_config":{"prefill":{"dp_size":4,"tp_size":2},"decode":{"dp_size":4,"tp_size":2}}}'
+    ```
 
-export VLLM_SERVER_DEV_MODE=1
-export VLLM_USE_V2_MODEL_RUNNER=1
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-export VLLM_ENGINE_READY_TIMEOUT_S=2400
-export VLLM_ASCEND_PLE_BACKEND=torch
-export VLLM_HOST_IP="192.168.0.1"
-export HCCL_IF_IP="192.168.0.1"
-export GLOO_SOCKET_IFNAME="eth0"
-export TP_SOCKET_IFNAME="eth0"
-export HCCL_SOCKET_IFNAME="eth0"
-export no_proxy="localhost,127.0.0.1,192.168.0.1"
-export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
-export LD_LIBRARY_PATH="/usr/local/python3.12.16/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
-export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
-export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
-export HCCL_BUFFSIZE=512
+    **Decode:**
 
-exec vllm serve /models/Qwen3.8-Flash-Next-w4a8 \
-    --host 0.0.0.0 \
-    --port 25569 \
-    --served-model-name qwen38-flash-next-a3-pd \
-    --trust-remote-code \
-    --quantization ascend \
-    --tensor-parallel-size 2 \
-    --data-parallel-size 4 \
-    --max-model-len 141312 \
-    --max-num-seqs 32 \
-    --max-num-batched-tokens 4096 \
-    --gpu-memory-utilization 0.90 \
-    --enable-prefix-caching \
-    --async-scheduling \
-    --enable-expert-parallel \
-    --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
-    --compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,28,32],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
-    --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
-    --profiler-config '{"profiler":"torch","torch_profiler_dir":"/tmp/qwen38-a3-pd/profiling/decode"}' \
-    --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32700","kv_connector_extra_config":{"prefill":{"dp_size":4,"tp_size":2},"decode":{"dp_size":4,"tp_size":2}}}' \
-    > "/tmp/qwen38-a3-pd/decode.log" 2>&1
-```
+    ```bash
+    #!/usr/bin/env bash
+    set -eo pipefail
+    unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    source /usr/local/Ascend/nnal/atb/set_env.sh
 
-**Proxy:**
+    export VLLM_SERVER_DEV_MODE=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ASCEND_PLE_BACKEND=torch
+    export VLLM_HOST_IP="192.168.0.1"
+    export HCCL_IF_IP="192.168.0.1"
+    export GLOO_SOCKET_IFNAME="eth0"
+    export TP_SOCKET_IFNAME="eth0"
+    export HCCL_SOCKET_IFNAME="eth0"
+    export no_proxy="localhost,127.0.0.1,192.168.0.1"
+    export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
+    export LD_LIBRARY_PATH="/usr/local/python3.12.16/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
+    export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
+    export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
+    export HCCL_BUFFSIZE=512
 
-```bash
-#!/usr/bin/env bash
-set -eo pipefail
-mkdir -p "/tmp/qwen38-a3-pd"
-unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
-export no_proxy="localhost,127.0.0.1,192.168.0.1"
-export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
+    exec vllm serve /models/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25569 \
+        --served-model-name qwen38-flash-next-a3-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --data-parallel-size 4 \
+        --max-model-len 141312 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 4096 \
+        --gpu-memory-utilization 0.90 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,28,32],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
+        --profiler-config '{"profiler":"torch","torch_profiler_dir":"/tmp/qwen38-a3-pd/profiling/decode"}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32700","kv_connector_extra_config":{"prefill":{"dp_size":4,"tp_size":2},"decode":{"dp_size":4,"tp_size":2}}}'
+    ```
 
-exec python /opt/qwen38/PD_proxy_server.py \
-    --host 0.0.0.0 --port 25570 \
-    --prefiller-host "192.168.0.1" --prefiller-port 25568 \
-    --decoder-host "192.168.0.1" --decoder-port 25569 \
-    > "/tmp/qwen38-a3-pd/proxy.log" 2>&1
-```
+    **Proxy:**
 
-**Service Verification:**
+    ```bash
+    #!/usr/bin/env bash
+    set -eo pipefail
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    export no_proxy="localhost,127.0.0.1,192.168.0.1"
+    export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
 
-Wait for both services to finish loading. On the serving host, check that both APIs respond successfully and list `qwen38-flash-next-a3-pd`:
+    exec python /opt/qwen38/PD_proxy_server.py \
+        --host 0.0.0.0 --port 25570 \
+        --prefiller-host "192.168.0.1" --prefiller-port 25568 \
+        --decoder-host "192.168.0.1" --decoder-port 25569
+    ```
 
-```bash
-curl --fail http://127.0.0.1:25568/v1/models
-curl --fail http://127.0.0.1:25569/v1/models
-```
+    **Service Verification:**
 
-After both checks succeed, run the Proxy command in a separate terminal.
+    Wait for both services to finish loading. On the serving host, check that both APIs respond successfully and list `qwen38-flash-next-a3-pd`:
 
-Once the proxy is listening, verify the complete PD path:
+    ```bash
+    curl --fail http://127.0.0.1:25568/v1/models
+    curl --fail http://127.0.0.1:25569/v1/models
+    ```
 
-```bash
-curl --fail http://127.0.0.1:25570/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "qwen38-flash-next-a3-pd",
-        "messages": [{"role": "user", "content": "Who are you?"}],
-        "max_tokens": 1024,
-        "temperature": 0
-    }'
-```
+    After both checks succeed, run the Proxy command in a separate terminal.
 
-Inspect the prefill, decode, and proxy logs under `/tmp/qwen38-a3-pd` if the request fails.
+    Once the proxy is listening, verify the complete PD path:
 
-**Key parameters:**
+    ```bash
+    curl --fail http://127.0.0.1:25570/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "qwen38-flash-next-a3-pd",
+            "messages": [{"role": "user", "content": "Who are you?"}],
+            "max_tokens": 1024,
+            "temperature": 0
+        }'
+    ```
 
-- `VLLM_ASCEND_PLE_BACKEND=torch` selects the PLE backend for both roles.
-- Both roles enable Prefix Caching without an explicit Mamba cache mode.
-- Engram requires a checkpoint with supported n-gram layers. Both roles request `cpu_offload=true` and `dp_shared_memory=false`; Model Runner V2 with DP > 1 may enable sharing automatically, depending on the runtime version. Check the resolved configuration in the startup logs.
-- Prefill enables `enable_prefill_mc2=true` and disables fused MC2. Verify MC2 token limits for TP2 × DP4 before increasing the batch token budget.
-- Decode enables `FULL_DECODE_ONLY`, NPU graph extension, static kernels, and recompute scheduling. Super kernels remain disabled.
-- Both roles use three MTP draft tokens. Prefill sets `enforce_eager=true`; decode sets `enforce_eager=false`.
-- Keep fused MC2 disabled when using shared expert multistream overlap. The decode command relies on the runtime's default value of zero.
-- Keep the Mooncake DP4 / TP2 declarations synchronized with both services' parallel settings.
-- For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to both roles and verify proxy forwarding. Multimodal input and thinking control also require validation through the proxy with the W4A8 checkpoint.
+    Inspect the prefill, decode, and proxy terminal output if the request fails.
+
+    **Key parameters:**
+
+    - `VLLM_ASCEND_PLE_BACKEND=torch` selects the PLE backend for both roles.
+    - Both roles enable Prefix Caching without an explicit Mamba cache mode.
+    - Engram requires a checkpoint with supported n-gram layers. Both roles request `cpu_offload=true` and `dp_shared_memory=false`; Model Runner V2 with DP > 1 may enable sharing automatically, depending on the runtime version. Check the resolved configuration in the startup logs.
+    - Prefill enables `enable_prefill_mc2=true` and disables fused MC2. Verify MC2 token limits for TP2 × DP4 before increasing the batch token budget.
+    - Decode enables `FULL_DECODE_ONLY`, NPU graph extension, static kernels, and recompute scheduling. Super kernels remain disabled.
+    - Both roles use three MTP draft tokens. Prefill sets `enforce_eager=true`; decode sets `enforce_eager=false`.
+    - Keep fused MC2 disabled when using shared expert multistream overlap. The decode command relies on the runtime's default value of zero.
+    - Keep the Mooncake DP4 / TP2 declarations synchronized with both services' parallel settings.
+    - For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to both roles and verify proxy forwarding. Multimodal input and thinking control also require validation through the proxy with the W4A8 checkpoint.
+
+=== "950 DT"
+
+    This W4A8-MXFP deployment uses eight devices on one Ascend 950 DT host. Prefill and decode each use TP2 × DP2, with a separate API process for each DP rank. MooncakeConnectorV2 transfers KV cache between the two roles.
+
+    | Setting | Prefill | Decode |
+    | --- | --- | --- |
+    | Rank 0 / rank 1 devices | 0,1 / 2,3 | 4,5 / 6,7 |
+    | TP × DP | 2 × 2 | 2 × 2 |
+    | Rank 0 / rank 1 API ports | 8088 / 8089 | 8092 / 8093 |
+    | DP RPC port | 13388 | 13389 |
+    | Mooncake role / KV base port | `kv_producer` / 30000 | `kv_consumer` / 30100 |
+    | Maximum context / sequences / batched tokens | 141312 / 64 / 4096 | 141312 / 64 / 4096 |
+
+    Mount the same compatible W4A8-MXFP checkpoint at `/models/Qwen3.8-Flash-Next-w4a8-mxfp` for all four processes. Install compatible vLLM, vLLM-Ascend, and Mooncake in the active Python environment. Replace `192.168.0.1` and `eth0` with the serving host address and network interface. Provide sufficient host memory for Engram CPU offload and shared memory.
+
+    Run each rank command in a separate terminal. Start the proxy after all four APIs are ready. Port 8087 is also used by the colocated example, so stop that service before starting this proxy.
+
+    **Prefill:**
+
+    Rank 0:
+
+    ```bash
+    unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+
+    export VLLM_HOST_IP="192.168.0.1"
+    export HCCL_IF_IP="192.168.0.1"
+    export GLOO_SOCKET_IFNAME="eth0"
+    export TP_SOCKET_IFNAME="eth0"
+    export HCCL_SOCKET_IFNAME="eth0"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1
+    export VLLM_SERVER_DEV_MODE=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export OPENBLAS_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_BUFFSIZE=1024
+    export HCCL_NPU_SOCKET_PORT_RANGE=auto
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+
+    vllm serve /models/Qwen3.8-Flash-Next-w4a8-mxfp \
+        --host 0.0.0.0 \
+        --port 8088 \
+        --served-model-name qwen38-flash-next-950-dt-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --data-parallel-size 2 \
+        --data-parallel-size-local 1 \
+        --data-parallel-rank 0 \
+        --data-parallel-address 192.168.0.1 \
+        --data-parallel-rpc-port 13388 \
+        --max-model-len 141312 \
+        --max-num-seqs 64 \
+        --max-num-batched-tokens 4096 \
+        --gpu-memory-utilization 0.90 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --compilation-config '{"cudagraph_mode":"NONE"}' \
+        --additional-config '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
+        --profiler-config '{"profiler":"torch","torch_profiler_dir":"/tmp/qwen38-950-dt-pd/prefill/rank0","torch_profiler_with_stack":false}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":30000,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
+    ```
+
+    Rank 1:
+
+    ```bash
+    unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+
+    export VLLM_HOST_IP="192.168.0.1"
+    export HCCL_IF_IP="192.168.0.1"
+    export GLOO_SOCKET_IFNAME="eth0"
+    export TP_SOCKET_IFNAME="eth0"
+    export HCCL_SOCKET_IFNAME="eth0"
+    export ASCEND_RT_VISIBLE_DEVICES=2,3
+    export VLLM_SERVER_DEV_MODE=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export OPENBLAS_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_BUFFSIZE=1024
+    export HCCL_NPU_SOCKET_PORT_RANGE=auto
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+
+    vllm serve /models/Qwen3.8-Flash-Next-w4a8-mxfp \
+        --host 0.0.0.0 \
+        --port 8089 \
+        --served-model-name qwen38-flash-next-950-dt-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --data-parallel-size 2 \
+        --data-parallel-size-local 1 \
+        --data-parallel-rank 1 \
+        --data-parallel-address 192.168.0.1 \
+        --data-parallel-rpc-port 13388 \
+        --max-model-len 141312 \
+        --max-num-seqs 64 \
+        --max-num-batched-tokens 4096 \
+        --gpu-memory-utilization 0.90 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --compilation-config '{"cudagraph_mode":"NONE"}' \
+        --additional-config '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
+        --profiler-config '{"profiler":"torch","torch_profiler_dir":"/tmp/qwen38-950-dt-pd/prefill/rank1","torch_profiler_with_stack":false}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":30000,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
+    ```
+
+    **Decode:**
+
+    Rank 0:
+
+    ```bash
+    unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+
+    export VLLM_HOST_IP="192.168.0.1"
+    export HCCL_IF_IP="192.168.0.1"
+    export GLOO_SOCKET_IFNAME="eth0"
+    export TP_SOCKET_IFNAME="eth0"
+    export HCCL_SOCKET_IFNAME="eth0"
+    export ASCEND_RT_VISIBLE_DEVICES=4,5
+    export VLLM_SERVER_DEV_MODE=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export OPENBLAS_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_BUFFSIZE=1024
+    export HCCL_NPU_SOCKET_PORT_RANGE=auto
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+
+    vllm serve /models/Qwen3.8-Flash-Next-w4a8-mxfp \
+        --host 0.0.0.0 \
+        --port 8092 \
+        --served-model-name qwen38-flash-next-950-dt-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --data-parallel-size 2 \
+        --data-parallel-size-local 1 \
+        --data-parallel-rank 0 \
+        --data-parallel-address 192.168.0.1 \
+        --data-parallel-rpc-port 13389 \
+        --max-model-len 141312 \
+        --max-num-seqs 64 \
+        --max-num-batched-tokens 4096 \
+        --gpu-memory-utilization 0.90 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --no-enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false},"scheduler_config":{"recompute_scheduler_enable":true}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
+        --profiler-config '{"profiler":"torch","torch_profiler_dir":"/tmp/qwen38-950-dt-pd/decode/rank0","torch_profiler_with_stack":false}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":30100,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
+    ```
+
+    Rank 1:
+
+    ```bash
+    unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+
+    export VLLM_HOST_IP="192.168.0.1"
+    export HCCL_IF_IP="192.168.0.1"
+    export GLOO_SOCKET_IFNAME="eth0"
+    export TP_SOCKET_IFNAME="eth0"
+    export HCCL_SOCKET_IFNAME="eth0"
+    export ASCEND_RT_VISIBLE_DEVICES=6,7
+    export VLLM_SERVER_DEV_MODE=1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export OPENBLAS_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_BUFFSIZE=1024
+    export HCCL_NPU_SOCKET_PORT_RANGE=auto
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+
+    vllm serve /models/Qwen3.8-Flash-Next-w4a8-mxfp \
+        --host 0.0.0.0 \
+        --port 8093 \
+        --served-model-name qwen38-flash-next-950-dt-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --data-parallel-size 2 \
+        --data-parallel-size-local 1 \
+        --data-parallel-rank 1 \
+        --data-parallel-address 192.168.0.1 \
+        --data-parallel-rpc-port 13389 \
+        --max-model-len 141312 \
+        --max-num-seqs 64 \
+        --max-num-batched-tokens 4096 \
+        --gpu-memory-utilization 0.90 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --no-enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false},"scheduler_config":{"recompute_scheduler_enable":true}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
+        --profiler-config '{"profiler":"torch","torch_profiler_dir":"/tmp/qwen38-950-dt-pd/decode/rank1","torch_profiler_with_stack":false}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":30100,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
+    ```
+
+    **Proxy:**
+
+    Run the following command from the vLLM-Ascend repository root after all four model APIs are ready:
+
+    ```bash
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        --host 192.168.0.1 \
+        --port 8087 \
+        --prefiller-hosts 192.168.0.1 192.168.0.1 \
+        --prefiller-ports 8088 8089 \
+        --decoder-hosts 192.168.0.1 192.168.0.1 \
+        --decoder-ports 8092 8093
+    ```
+
+    **Service Verification:**
+
+    Check that all four APIs list `qwen38-flash-next-950-dt-pd` before starting the proxy:
+
+    ```bash
+    curl --fail http://192.168.0.1:8088/v1/models
+    curl --fail http://192.168.0.1:8089/v1/models
+    curl --fail http://192.168.0.1:8092/v1/models
+    curl --fail http://192.168.0.1:8093/v1/models
+    ```
+
+    Once the proxy is listening, verify the complete PD path:
+
+    ```bash
+    curl --fail http://192.168.0.1:8087/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -d '{"model":"qwen38-flash-next-950-dt-pd","messages":[{"role":"user","content":"Who are you?"}],"max_tokens":1024,"temperature":0}'
+    ```
+
+    **Key parameters:**
+
+    - Each command starts one DP rank with TP2. Keep each role's DP address, RPC port, and model settings consistent across its two ranks.
+    - Both roles enable Model Runner V2, async scheduling, expert parallelism, Engram CPU offload, and DP shared memory.
+    - Prefill enables Prefix Caching and uses `cudagraph_mode=NONE`; static kernels are disabled.
+    - Decode disables Prefix Caching and enables `FULL_DECODE_ONLY`, static kernels, and recompute scheduling.
+    - Both roles enable CPU binding, shared expert DP, FlashComm1, shared expert multistream overlap, and NPU graph extension. Fused MC2, norm/quantization fusion, and super kernels are disabled.
+    - Both roles use three MTP draft tokens without explicitly forcing eager execution.
+    - Keep the Mooncake DP2 / TP2 declarations synchronized with the service topology and route both ranks of each role through the proxy.
+    - The profiler configuration sets trace output paths without starting profiling.
+    - For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to all four model commands and verify proxy forwarding. Validate multimodal input and thinking control through the proxy with the selected checkpoint.
 
 ## 6 Functional Verification
 
@@ -436,6 +721,7 @@ The requests below use the A3 colocated endpoint. Select the endpoint and model 
 | A3 colocated | 8088 | `qwen3.8-flash-next` |
 | 950 DT colocated | 8087 | `qwen3.8-flash-next-950-dt` |
 | A3 PD proxy | 25570 | `qwen38-flash-next-a3-pd` |
+| 950 DT PD proxy | 8087 | `qwen38-flash-next-950-dt-pd` |
 
 For PD, first complete the proxy check and review the key parameters in [Section 5.2](#52-pd-separation-deployment).
 
@@ -491,7 +777,7 @@ Expected result: the service returns HTTP 200 OK and describes the supplied imag
 
 ### 6.3 Function Calling
 
-Function Calling requires the following startup options, which are included in the colocated examples in Section 5; for A3 PD, see [Section 5.2](#52-pd-separation-deployment):
+Function Calling requires the following startup options, which are included in the colocated examples in Section 5; for PD separation, see [Section 5.2](#52-pd-separation-deployment):
 
 ```text
 --enable-auto-tool-choice --tool-call-parser qwen3_xml
@@ -539,7 +825,7 @@ When the model chooses the function, the parsed result appears in `choices[0].me
 
 ### 6.4 Reasoning Parser and Thinking Control
 
-Reasoning parsing requires the following startup option, which is included in the colocated examples in Section 5; for A3 PD, see [Section 5.2](#52-pd-separation-deployment):
+Reasoning parsing requires the following startup option, which is included in the colocated examples in Section 5; for PD separation, see [Section 5.2](#52-pd-separation-deployment):
 
 ```text
 --reasoning-parser qwen3
@@ -625,6 +911,8 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | 950 DT | Colocated | 0–3 | 4 × 1 | 141312 | 32 | 4096 |
 | A3 | Prefill | 0–7 | 2 × 4 | 141312 | 32 | 4096 |
 | A3 | Decode | 8–15 | 2 × 4 | 141312 | 32 | 4096 |
+| 950 DT | Prefill | 0–3 | 2 × 2 | 141312 | 64 | 4096 |
+| 950 DT | Decode | 4–7 | 2 × 2 | 141312 | 64 | 4096 |
 
 ### 9.2 Tuning Guidelines
 
