@@ -287,7 +287,7 @@ def test_graph_fusion_pass_registration(monkeypatch, method, enabled):
     config = NS(speculative_config=NS(use_dspark=lambda: method == "dspark") if method else None)
     manager = NS(passes=[])
     namespace["configure"](manager, config)
-    assert fusion.call_count == len(manager.passes) == int(enabled and method != "dspark")
+    assert fusion.call_count == len(manager.passes) == int(enabled)
 
 
 def test_prefill_bounds_causal_storage_and_oversized_tiling(fa3):
@@ -329,7 +329,8 @@ def test_prefill_bounds_causal_storage_and_oversized_tiling(fa3):
 
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("padded", [False, True])
-def test_minimax_fa3_scheduler_api(fa3, causal, padded):
+@pytest.mark.parametrize("softcap", [0.0, 30.0])
+def test_minimax_fa3_scheduler_api(fa3, causal, padded, softcap):
     builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
     builder.device = torch.device("cpu")
     builder.capture_sizes = set()
@@ -337,7 +338,7 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded):
     builder.block_size = 128
     builder.max_num_reqs = 3
     scale = 0.123
-    spec = (16, 1, 128, torch.bfloat16, scale, 0.0, 4096)
+    spec = (16, 1, 128, torch.bfloat16, scale, softcap, 4096)
     builder.scheduler_specs = {spec}
     builder.scheduler_buffers = {}
     offsets = torch.tensor([0, 8, 8] if padded else [0, 8, 11], dtype=torch.int32)
@@ -354,7 +355,7 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded):
         causal=causal,
     )
 
-    # Match the keyword-only subset of the v0.4.2.post2 public scheduler API.
+    # Match the keyword-only subset of the public scheduler API.
     def scheduler(
         *,
         batch_size,
@@ -369,11 +370,11 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded):
         page_size,
         causal,
         window_size,
-        softcap,
+        has_softcap,
         softmax_scale,
         num_splits,
     ):
-        assert softcap == 0.0
+        assert has_softcap is (softcap != 0.0)
         assert softmax_scale == scale
         assert window_size == (4095, 0 if causal else 4095)
         assert cache_seqlens.numel() == batch_size
