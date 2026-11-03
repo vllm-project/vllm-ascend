@@ -1,0 +1,9 @@
+pr: 20755
+entries:
+  - category: feature
+    text: Added opt-in reuse of decode-generated GLM-5.3-Flash hybrid-cache checkpoints through Ascend Store, restoring attention, recurrent and MTP state with the V1 model runner.
+    model: glm-5.3-flash
+    hardware: [A3]
+  - category: config
+    text: Honor explicit block_size for hybrid packed-C8 SFA caches instead of capping it during automatic configuration.
+    hardware: [A3]
