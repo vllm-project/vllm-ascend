@@ -26,7 +26,7 @@ from tests.e2e.rlhf.common import (
     server_visible_devices,
 )
 from tests.e2e.rlhf.weight_transfer.case import WeightUpdateModelCase
-from tests.e2e.rlhf.weight_transfer.oracle import (
+from tests.e2e.rlhf.weight_transfer.reference_check import (
     UPDATE_ROUNDS,
     assert_weight_update_matches_reference,
     generation_signature,
