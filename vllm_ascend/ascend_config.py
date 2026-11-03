@@ -1102,7 +1102,11 @@ class AscendConfig:
 
     @staticmethod
     def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
-        if get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+        # utils imports ascend_config; defer this import to avoid a cycle.
+        from vllm_ascend.utils import is_deepseek_v41
+
+        hardware_profile = get_current_hardware_profile()
+        if hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_MXFP):
             mega_moe_supported_by_config = AscendConfig._is_a5_megamoe_supported_by_config(vllm_config)
             logger.debug("mega moe operator is supported by current a5 config: %r", mega_moe_supported_by_config)
             return mega_moe_supported_by_config
@@ -1121,7 +1125,14 @@ class AscendConfig:
             moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
             return False
-        if moe_intermediate_size < 1024 or moe_intermediate_size > 3072 or moe_intermediate_size % 512 != 0:
+        supported_intermediate_sizes = {1024, 1536, 2048, 2560, 3072}
+        # A3 MegaMoE accepts 256-aligned intermediate dimensions. Keep the
+        # existing shapes for other models and allow V4.1's 2304 explicitly.
+        if hardware_profile.supports(HardwareCapability.CANN_MEGAMOE) and is_deepseek_v41(
+            getattr(vllm_config.model_config, "hf_config", hf_text_config)
+        ):
+            supported_intermediate_sizes.add(2304)
+        if moe_intermediate_size not in supported_intermediate_sizes:
             return False
 
         quant_type = getattr(hf_text_config, "moe_quantize", getattr(hf_text_config, "quantize", None))

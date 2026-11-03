@@ -813,6 +813,61 @@ class TestSharedWeightLifecycle(unittest.TestCase):
                 self.assertEqual(kwargs["shared_l2_weights_sf"][0].dtype, "e8m0")
 
 
+class TestA3MegaMoEModelDimensions(unittest.TestCase):
+    def setUp(self):
+        utils = load_functions("vllm_ascend/utils.py", ["is_deepseek_v41"], {})
+        self.utils = SimpleNamespace(is_deepseek_v41=utils["is_deepseek_v41"])
+        capability = SimpleNamespace(CANN_MEGAMOE="mega", CANN_MEGAMOE_MXFP="mxfp")
+        self.profile = SimpleNamespace(supports=lambda cap: cap == "mega")
+        self.validate = load_functions(
+            "vllm_ascend/ascend_config.py",
+            ["_is_megamoe_supported_by_config"],
+            {"HardwareCapability": capability, "get_current_hardware_profile": lambda: self.profile},
+        )["_is_megamoe_supported_by_config"]
+        self.text = SimpleNamespace(model_type="deepseek_v41_text", hidden_size=5120, moe_intermediate_size=2304)
+        self.config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=self.text))
+
+    def supports(self):
+        with patch.dict(sys.modules, {"vllm_ascend.utils": self.utils}):
+            return self.validate(self.config)
+
+    def test_v41_accepts_2304_from_multimodal_text_and_missing_hf_config(self):
+        self.assertTrue(self.supports())
+        for config in (
+            SimpleNamespace(model_type="deepseek_v41", text_config=self.text),
+            self.text,
+            {"text_config": {"model_type": "deepseek_v41_text"}},
+        ):
+            with self.subTest(config=config):
+                self.config.model_config.hf_config = config
+                self.assertTrue(self.supports())
+
+    def test_exception_does_not_widen_other_models_or_a2(self):
+        for model_type in ("deepseek_v4", "kimi_k3", "qwen3_moe"):
+            with self.subTest(model_type=model_type):
+                self.text.model_type = model_type
+                self.assertFalse(self.supports())
+        self.text.model_type = "deepseek_v41_text"
+        self.profile.supports = lambda cap: False
+        self.assertFalse(self.supports())
+
+    def test_existing_dimensions_and_hidden_quantization_guards(self):
+        for size in (1024, 1536, 2048, 2560, 3072):
+            self.text.moe_intermediate_size = size
+            self.assertTrue(self.supports())
+        for size in (512, 1280, 1792, 2816, 3328):
+            self.text.moe_intermediate_size = size
+            self.assertFalse(self.supports())
+        self.text.moe_intermediate_size = 2304
+        self.text.hidden_size = 896
+        self.assertFalse(self.supports())
+        self.text.hidden_size = 5120
+        self.text.moe_quantize = "mxfp4"
+        self.assertFalse(self.supports())
+        self.text.moe_quantize = "w8a8_dynamic"
+        self.assertTrue(self.supports())
+
+
 class TestMegaMoEModelDimensions(unittest.TestCase):
     def setUp(self):
         utils = load_functions("vllm_ascend/utils.py", ["is_deepseek_v41"], {})
