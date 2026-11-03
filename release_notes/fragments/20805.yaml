@@ -1,0 +1,4 @@
+pr: 20805
+entries:
+  - category: bugfix
+    text: Added a physical-block reuse fence for asynchronous KV Pool saves when sliding-window blocks are reassigned during inference.
