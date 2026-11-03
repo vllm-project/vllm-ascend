@@ -131,8 +131,8 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
             # Every MoE layer of this model derives the same mask from the same
             # per-forward inputs, so gathering it in each one repeats a
             # collective as many times as the model has MoE layers. The slots
-            # hold it for the rest of the forward and the controller clears them
-            # at the start of the next one.
+            # hold it for the rest of the forward and AscendEplbState.
+            # prepare_forward clears them at the start of the next one.
             ubatch = dbo_current_ubatch_id()
             slots = self.allgather_source_masks
             token_mask = None if slots is None else slots[ubatch]
@@ -338,14 +338,26 @@ class AscendEplbState(_eplb_state.EplbState):
                 layer.eplb_state.allgather_record_tensor = self.allgather_record_tensor
                 layer.eplb_state.allgather_source_masks = source_masks
 
-    def clear_allgather_source_masks(self) -> None:
-        """Drop the gathered source masks so the next forward rebuilds them.
+    def prepare_forward(
+        self,
+        model_config,
+        num_unpadded_tokens: int,
+        ubatch_slices: list | None = None,
+    ) -> None:
+        """Retire the gathered source masks before filling the token counts.
 
-        The masks are only valid for the forward that built them. Clearing them
-        where the controller already resets the per-forward recording tensors
-        keeps their lifetime tied to a forward step, so nothing has to describe
-        what they depend on.
+        A mask is only valid for the forward that built it, and this is the one
+        call every forward makes: draft models reach the state directly instead
+        of through AscendEPLBController, and a drafter runs one forward per
+        speculative step. Clearing beside the controller's other per-forward
+        resets would leave those steps reading the mask of the prefill before
+        them.
         """
+        self.clear_allgather_source_masks()
+        super().prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
+
+    def clear_allgather_source_masks(self) -> None:
+        """Drop the gathered source masks so the next forward rebuilds them."""
         for source_masks in self._allgather_source_mask_slots:
             for index in range(len(source_masks)):
                 source_masks[index] = None

@@ -230,6 +230,28 @@ def test_repropagating_a_model_retires_the_slots_it_replaces(monkeypatch):
     assert all(layer.eplb_state.allgather_source_masks is current for layer in layers)
 
 
+def test_prepare_forward_retires_the_masks_of_the_previous_forward():
+    """Every forward reaches the state here, including the ones no controller sees.
+
+    Draft models call ``prepare_forward`` on the state directly, so clearing
+    beside the controller's other per-forward resets would miss them.
+    """
+    state = AscendEplbState.__new__(AscendEplbState)
+    slots = [torch.tensor([True]), torch.tensor([False])]
+    state._allgather_source_mask_slots = [slots]
+    num_unpadded_tokens_tensors = [torch.tensor(0), torch.tensor(0)]
+    model_config = SimpleNamespace(compute_hash=lambda: "draft")
+    state.model_states = {
+        "draft": SimpleNamespace(num_unpadded_tokens_tensors=num_unpadded_tokens_tensors),
+    }
+
+    state.prepare_forward(model_config, 3)
+
+    assert slots == [None, None]
+    # Upstream still fills the token counts for this forward.
+    assert [tensor.item() for tensor in num_unpadded_tokens_tensors] == [3, 0]
+
+
 def test_clear_allgather_source_masks_empties_every_model():
     state = AscendEplbState.__new__(AscendEplbState)
     first = [torch.tensor([True]), None]

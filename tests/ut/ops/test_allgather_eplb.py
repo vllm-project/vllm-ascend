@@ -11,7 +11,7 @@ from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.distributed.eplb import eplb_state as state_module
-from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState, AscendEplbState
 from vllm_ascend.distributed.eplb.tensor_ops import (
     build_expert_replica_routing_table,
     count_allgather_tokens,
@@ -249,6 +249,31 @@ def test_source_mask_is_gathered_once_for_all_layers_of_a_model(monkeypatch):
 
     assert gather.call_count == 1
     assert [layer.expert_load_view.item() for layer in layers] == [2, 2, 2, 2]
+
+
+def test_consecutive_draft_forwards_each_gather_their_own_mask(monkeypatch):
+    """A drafter runs one forward per speculative step, each with its own tokens.
+
+    Draft models call ``EplbState.prepare_forward`` directly instead of going
+    through AscendEPLBController, so a decode step would otherwise record
+    against the mask its draft prefill gathered.
+    """
+    monkeypatch.setattr(state_module, "get_forward_context", lambda: SimpleNamespace(is_padding=None))
+    monkeypatch.setattr(state_module, "dbo_current_ubatch_id", lambda: 0)
+    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
+    gather = MagicMock(side_effect=lambda mask: mask)
+    slots = [None, None]
+    layer = _mask_layer_state(slots)
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._allgather_source_mask_slots = [slots]
+    state.model_states = {}
+
+    _record(layer, gather)
+    # The next draft step, announced to the state and to nothing else.
+    state.prepare_forward(SimpleNamespace(compute_hash=lambda: "draft"), 2)
+    _record(layer, gather)
+
+    assert gather.call_count == 2
 
 
 @pytest.mark.parametrize("separated_by", ["model", "ubatch"])
