@@ -50,10 +50,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandsha
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.layers.quantization.online.lm_head import (
-    restore_quantized_lm_heads,
-    share_source_lm_heads,
-)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -121,6 +117,13 @@ from vllm_ascend.utils import (
     setup_ascend_local_comm_res,
     vllm_version_is,
 )
+
+# Online-quantized LM-head copies and these helpers exist only on paired main.
+if not vllm_version_is("0.32.0"):
+    from vllm.model_executor.layers.quantization.online.lm_head import (
+        restore_quantized_lm_heads,
+        share_source_lm_heads,
+    )
 
 # vLLM #61183 moved the planning helpers on main; v0.32.0 keeps them
 # in kv_cache_utils, so importing the main-only module breaks worker startup.
@@ -426,12 +429,12 @@ class NPUWorker(WorkerBase):
         try:
             if is_draft:
                 self._set_draft_weight_update_target()
-            if draft_model is not None:
+            if draft_model is not None and not vllm_version_is("0.32.0"):
                 share_source_lm_heads(draft_model)
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
             self.weight_transfer_engine.reset_weight_update_target()
-            if draft_model is not None:
+            if draft_model is not None and not vllm_version_is("0.32.0"):
                 restore_quantized_lm_heads(draft_model, refresh=False)
             raise
         self._weight_update_active = True
@@ -452,7 +455,11 @@ class NPUWorker(WorkerBase):
             except BaseException:
                 self._weight_update_active = False
                 self.weight_transfer_engine.reset_weight_update_target()
-                if self._weight_update_is_draft and (draft_model := self.get_draft_model()) is not None:
+                if (
+                    not vllm_version_is("0.32.0")
+                    and self._weight_update_is_draft
+                    and (draft_model := self.get_draft_model()) is not None
+                ):
                     restore_quantized_lm_heads(draft_model, refresh=False)
                 self._weight_update_is_draft = False
                 raise
@@ -469,11 +476,11 @@ class NPUWorker(WorkerBase):
             try:
                 self.weight_transfer_engine.finish_weight_update()
             except BaseException:
-                if draft_model is not None:
+                if draft_model is not None and not vllm_version_is("0.32.0"):
                     restore_quantized_lm_heads(draft_model, refresh=False)
                 raise
             else:
-                if draft_model is not None:
+                if draft_model is not None and not vllm_version_is("0.32.0"):
                     restore_quantized_lm_heads(draft_model)
                 if not is_draft:
                     self.model_runner.reset_lora_state()
