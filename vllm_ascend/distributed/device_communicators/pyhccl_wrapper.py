@@ -227,6 +227,28 @@ class HCCLLibrary:
         )
         return comm
 
+    def hcclCommInitRankWithQos(
+        self,
+        world_size: int,
+        unique_id: hcclUniqueId,
+        rank: int,
+        qos_config: dict[str, int],
+        group_name: str,
+    ) -> hcclComm_t:
+        from vllm_ascend import vllm_ascend_C
+
+        result, comm_address = vllm_ascend_C.hccl_comm_init_root_info_config(
+            world_size,
+            ctypes.addressof(unique_id),
+            rank,
+            qos_config["hccl_sdma_qos"],
+            qos_config["qos_service_level"],
+            qos_config["qos_traffic_class"],
+            group_name,
+        )
+        self.HCCL_CHECK(result)
+        return hcclComm_t(comm_address)
+
     def hcclAllReduce(
         self,
         sendbuff: buffer_type,

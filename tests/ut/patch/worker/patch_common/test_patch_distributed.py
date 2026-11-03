@@ -125,10 +125,14 @@ def _load_patch_distributed_module():
     class GroupMember:
         NON_GROUP_MEMBER = non_group_member
 
+    def init_process_group(*args, **kwargs):
+        return None
+
     torch_distributed.Backend = FakeBackend
     torch_distributed.get_rank = get_rank
     torch_distributed.new_group = new_group
     torch_distributed.destroy_process_group = destroy_process_group
+    torch_distributed.init_process_group = init_process_group
     torch_distributed.distributed_c10d = torch_distributed_c10d
     torch_distributed_c10d.GroupMember = GroupMember
 
@@ -185,6 +189,7 @@ def _load_patch_distributed_module():
 
     npu_communicator_module.NPUCommunicator = FakeNPUCommunicator
     utils_module.create_hccl_pg_options = MagicMock(return_value=shared_hccl_options)
+    utils_module.get_hccl_qos_config = MagicMock(return_value={})
 
     vllm_ascend_module.patch = vllm_ascend_patch
     vllm_ascend_patch.worker = vllm_ascend_patch_worker

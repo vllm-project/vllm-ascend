@@ -31,7 +31,9 @@ from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (
     hcclRedOpTypeEnum,
     hcclUniqueId,
 )
-from vllm_ascend.utils import current_stream
+from vllm_ascend.utils import current_stream, get_hccl_qos_config
+
+WEIGHT_TRANSFER_GROUP_NAME = "weight_transfer"
 
 
 class PyHcclCommunicator:
@@ -118,7 +120,7 @@ class PyHcclCommunicator:
         # `torch.npu.device` is a context manager that changes the
         # current npu device to the specified one
         with torch.npu.device(device):
-            self.comm: hcclComm_t = self.hccl.hcclCommInitRank(self.world_size, self.unique_id, self.rank)
+            self.comm: hcclComm_t = self._init_hccl_comm()
 
             stream = current_stream()
             # A small all_reduce for warmup.
@@ -126,6 +128,19 @@ class PyHcclCommunicator:
             self.all_reduce(data)
             stream.synchronize()
             del data
+
+    def _init_hccl_comm(self) -> hcclComm_t:
+        qos_config = get_hccl_qos_config(WEIGHT_TRANSFER_GROUP_NAME)
+        if not qos_config:
+            return self.hccl.hcclCommInitRank(self.world_size, self.unique_id, self.rank)
+
+        return self.hccl.hcclCommInitRankWithQos(
+            self.world_size,
+            self.unique_id,
+            self.rank,
+            qos_config,
+            WEIGHT_TRANSFER_GROUP_NAME,
+        )
 
     def close(self) -> None:
         """Destroy the native communicator at most once."""
