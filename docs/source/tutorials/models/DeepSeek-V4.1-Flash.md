@@ -22,17 +22,20 @@ speculative decoding. These designs reduce the global KV cache footprint to
 one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports
 a continuously adjustable reasoning effort from 1 to 100.
 
-vLLM Ascend supports W8A8 deployment on Atlas 800 A3 and A2 servers. This
+vLLM Ascend supports W8A8 deployment on Atlas 800 A3 and A2 servers.
+Section 5.2 also provides a W4A8 A3 configuration using model runner V2. This
 guide provides a single-node colocated A3 configuration and a two-node A3
 Prefill-Decode (PD) disaggregated configuration. It also supports a two-node hybrid A2 configuration and a four-node Prefill-Decode (PD) disaggregated configuration.
 
 DeepSeek-V4.1-Flash is supported in **vLLM Ascend v0.30.0rc1 and later**. This guide uses **vLLM Ascend
-v0.30.0rc2** as its documentation and model-validation baseline. To use the
+v0.30.0rc2** as its documentation and model-validation baseline, except for
+the A3 1P1D configuration in Section 5.2, which uses a v0.32.0rc-compatible
+build. To use the
 latest features, use the latest supported vLLM Ascend version.
 
 Use the matching upstream vLLM revision for the selected vLLM Ascend version.
 For source builds, use the upstream vLLM tag recorded in
-`.github/vllm-release-tag.commit` at the vLLM Ascend **v0.30.0rc2** tag.
+`.github/vllm-release-tag.commit` at the selected vLLM Ascend revision.
 
 ## 2 Supported Features
 
@@ -41,12 +44,12 @@ for the complete support matrix and the
 [Feature Guide](../../user_guide/feature_guide/index.md) for feature
 configuration.
 
-The A3 configurations in this guide use W8A8 weights and INT8 Engram storage.
-The single-node colocated configuration uses DP4/TP4. The PD configuration
-uses DP4/TP4 on the Prefill node, DP8/TP2 on the Decode node, DSpark
-speculative decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode. The
-DeepSeek-V4.1-Flash model currently supports only model runner V1 on Ascend, so
-all A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
+The A3 single-node configuration uses W8A8 weights, INT8 Engram storage,
+DP4/TP4, and model runner V1. The A3 1P1D configuration in Section 5.2 uses
+W4A8 weights, model runner V2, DP4/PCP4/TP1 on Prefill, DP16/TP1 on Decode,
+SWA bounded replay on Prefill, MegaMoE on Prefill only, DSpark speculative
+decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode. Other examples retain
+their explicitly configured model-runner settings.
 
 ## 3 Prerequisites
 
@@ -56,7 +59,7 @@ The official DeepSeek-V4.1-Flash checkpoint is available from
 [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) and
 [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4.1-Flash).
 
-The Ascend W8A8 checkpoint used by this guide will be published as
+The Ascend W8A8 checkpoint used by the W8A8 examples in this guide will be published as
 [Eco-Tech/DeepSeek-V4.1-Flash-w8a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-w8a8)
 on ModelScope. It includes the DSpark draft parameters and INT8 Engram tables.
 After the checkpoint is available, download it to the same absolute path on
@@ -65,6 +68,10 @@ command.
 
 Alternatively, use [ModelSlim](https://github.com/Ascend/msmodelslim) to
 prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
+
+For the A3 1P1D example in Section 5.2, use the
+`DeepSeek-V4.1-Flash-1017-w4a8` checkpoint, including its DSpark draft
+parameters and Engram tables, at the same absolute path on both nodes.
 
 Use one of the following hardware configurations:
 
@@ -276,11 +283,25 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
 === "A3 series"
 
-    This example uses two Atlas 800 A3 servers. The Prefill node runs four DP
-    ranks with TP4 (DP4/TP4), and the Decode node runs eight DP ranks with TP2
-    (DP8/TP2). Both layouts consume all 16 logical devices on their respective
+    This example uses W4A8 weights and model runner V2 on two Atlas 800 A3
+    servers. The Prefill node runs DP4/PCP4/TP1, and the Decode node runs
+    DP16/TP1. Both layouts consume all 16 logical devices on their respective
     servers. Mooncake transfers KV cache from the Prefill engines to the Decode
     engines.
+
+    !!! note
+
+        This A3 example requires a v0.32.0rc-compatible build with model runner
+        V2, SWA bounded replay with PCP, and the MegaMoE operator package
+        (`cann_ops_transformer`). Use that build with the Docker command in
+        Section 4.1 instead of its v0.30.0rc2 image, retaining `--net=host` and
+        `--ipc=host`. Set `MODEL_PATH` on both nodes to the W4A8 checkpoint
+        specified in Section 3.1.
+        Check startup logs to confirm that MegaMoE is enabled; requesting
+        `enable_fused_mc2: 2` alone does not confirm that the path is active.
+
+    Start the Prefill and Decode launchers on their respective nodes in parallel.
+    Start the proxy only after all engines are ready.
 
     #### 5.2.1.1 Prepare the DP Launcher
 
@@ -300,6 +321,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         parser = argparse.ArgumentParser()
         parser.add_argument("--dp-size", type=int, required=True)
         parser.add_argument("--tp-size", type=int, default=1)
+        parser.add_argument("--pcp-size", type=int, default=1)
         parser.add_argument("--dp-size-local", type=int, default=-1)
         parser.add_argument("--dp-rank-start", type=int, default=0)
         parser.add_argument("--dp-address", type=str, required=True)
@@ -311,6 +333,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     args = parse_args()
     dp_size = args.dp_size
     tp_size = args.tp_size
+    pcp_size = args.pcp_size
     dp_size_local = args.dp_size if args.dp_size_local == -1 else args.dp_size_local
 
 
@@ -325,6 +348,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
             args.dp_address,
             args.dp_rpc_port,
             str(tp_size),
+            str(pcp_size),
         ]
         subprocess.run(command, check=True)
 
@@ -334,12 +358,14 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
             print("Template file ./run_dp_template.sh does not exist.")
             sys.exit(1)
 
+        devices_per_rank = tp_size * pcp_size
         processes = []
         for i in range(dp_size_local):
             dp_rank = args.dp_rank_start + i
             vllm_engine_port = args.vllm_start_port + i
             visible_devices = ",".join(
-                str(device) for device in range(i * tp_size, (i + 1) * tp_size)
+                str(device)
+                for device in range(i * devices_per_rank, (i + 1) * devices_per_rank)
             )
             process = multiprocessing.Process(
                 target=run_command,
@@ -357,7 +383,8 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     | Parameter | Description |
     |-----------|-------------|
     | `--dp-size` | Global DP size within the Prefill or Decode node group. |
-    | `--tp-size` | Number of logical devices used by each DP rank. |
+    | `--tp-size` | Tensor-parallel size within each DP rank. |
+    | `--pcp-size` | Prefill context-parallel size; each DP rank uses `tp-size * pcp-size` logical devices. Defaults to `1`. |
     | `--dp-size-local` | Number of DP ranks started on the current node. |
     | `--dp-rank-start` | First DP rank assigned to this node. It is `0` for both single-node groups in this 1P1D example. |
     | `--dp-address` | IP address of the node that coordinates the corresponding DP group. Use the Prefill IP on the Prefill node and the Decode IP on the Decode node. |
@@ -385,7 +412,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
@@ -401,6 +428,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         --data-parallel-address $5 \
         --data-parallel-rpc-port $6 \
         --tensor-parallel-size $7 \
+        --prefill-context-parallel-size $8 \
         --enable-expert-parallel \
         --seed 1024 \
         --served-model-name dsv41 \
@@ -418,34 +446,36 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         --gpu-memory-utilization 0.9 \
         --quantization ascend \
         --enforce-eager \
+        --swa-bounded-replay \
         --enable-prefix-caching \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
             "enable_cpu_binding":true,
-            "enable_fused_mc2":1,
-            "enable_dsa_cp":true,
-            "enable_flashcomm1":true,
-            "enable_shared_expert_dp":true
+            "enable_fused_mc2":2,
+            "enable_flashcomm1":false,
+            "enable_shared_expert_dp":true,
+            "multistream_overlap_shared_expert":false
         }' \
         --kv-transfer-config '{
             "kv_connector":"MooncakeHybridConnector",
             "kv_role":"kv_producer",
             "kv_port":"30000",
             "kv_connector_extra_config":{
-                "prefill":{"dp_size":4,"tp_size":4},
-                "decode":{"dp_size":8,"tp_size":2}
+                "prefill":{"dp_size":4,"tp_size":1},
+                "decode":{"dp_size":16,"tp_size":1}
             }
         }'
     ```
 
-    Start four DP4/TP4 Prefill engines. `--dp-address` uses the Prefill node IP.
+    Start four DP4/PCP4/TP1 Prefill engines. `--dp-address` uses the Prefill node IP.
 
     ```shell
     PREFILL_NODE_IP="<PREFILL_NODE_IP>"
 
     python launch_online_dp.py \
         --dp-size 4 \
-        --tp-size 4 \
+        --tp-size 1 \
+        --pcp-size 4 \
         --dp-size-local 4 \
         --dp-rank-start 0 \
         --dp-address "$PREFILL_NODE_IP" \
@@ -471,14 +501,14 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     LOCAL_IP="<DECODE_NODE_IP>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export HCCL_BUFFSIZE=1800
+    export HCCL_BUFFSIZE=4096
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     # Ensure the model path matches the directory recorded during download
@@ -490,6 +520,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         --data-parallel-address $5 \
         --data-parallel-rpc-port $6 \
         --tensor-parallel-size $7 \
+        --prefill-context-parallel-size $8 \
         --enable-expert-parallel \
         --seed 1024 \
         --served-model-name dsv41 \
@@ -507,15 +538,15 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         --safetensors-load-strategy lazy \
         --gpu-memory-utilization 0.95 \
         --quantization ascend \
-        --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
+        --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":false}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --kv-transfer-config '{
             "kv_connector":"MooncakeHybridConnector",
             "kv_role":"kv_consumer",
             "kv_port":"30100",
             "kv_connector_extra_config":{
-                "prefill":{"dp_size":4,"tp_size":4},
-                "decode":{"dp_size":8,"tp_size":2}
+                "prefill":{"dp_size":4,"tp_size":1},
+                "decode":{"dp_size":16,"tp_size":1}
             }
         }' \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
@@ -525,20 +556,22 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
                 "enable_static_kernel":false
             },
             "enable_cpu_binding":true,
+            "enable_flashcomm1":false,
             "multistream_overlap_shared_expert":true,
             "recompute_scheduler_enable":true
         }'
     ```
 
-    Start eight DP8/TP2 Decode engines. `--dp-address` uses the Decode node IP.
+    Start sixteen DP16/TP1 Decode engines. `--dp-address` uses the Decode node IP.
 
     ```shell
     DECODE_NODE_IP="<DECODE_NODE_IP>"
 
     python launch_online_dp.py \
-        --dp-size 8 \
-        --tp-size 2 \
-        --dp-size-local 8 \
+        --dp-size 16 \
+        --tp-size 1 \
+        --pcp-size 1 \
+        --dp-size-local 16 \
         --dp-rank-start 0 \
         --dp-address "$DECODE_NODE_IP" \
         --dp-rpc-port 12321 \
@@ -551,23 +584,25 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     in [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
     Configure the proxy with Prefill endpoints `<PREFILL_NODE_IP>:7100` through
     `<PREFILL_NODE_IP>:7103` and Decode endpoints `<DECODE_NODE_IP>:7100` through
-    `<DECODE_NODE_IP>:7107`.
+    `<DECODE_NODE_IP>:7115`.
 
     #### 5.2.1.5 Key Parameter Descriptions
 
     - `VLLM_ENGINE_READY_TIMEOUT_S=36000` gives every Prefill and Decode engine up
       to 36,000 seconds to finish startup. This includes weight loading and Decode
       graph preparation.
-    - `VLLM_USE_V2_MODEL_RUNNER=0` explicitly selects model runner V1 on both
-      Prefill and Decode. Keep this value at `0` because DeepSeek-V4.1-Flash
-      currently does not support model runner V2 on Ascend.
-    - `--data-parallel-size` and `--tensor-parallel-size` define DP4/TP4 on
-      Prefill and DP8/TP2 on Decode. Their product must be 16 on each A3 node.
+    - `VLLM_USE_V2_MODEL_RUNNER=1` selects model runner V2 on both roles.
+    - `--data-parallel-size`, `--prefill-context-parallel-size`, and
+      `--tensor-parallel-size` define DP4/PCP4/TP1 on Prefill and DP16/PCP1/TP1
+      on Decode. Their product is 16 on each node. The launcher assigns four
+      devices to each Prefill rank and one device to each Decode rank.
+    - `--swa-bounded-replay` enables SWA bounded replay on Prefill together with
+      PCP4; Prefill still uses `--enforce-eager`.
     - `--data-parallel-address` and `--data-parallel-rpc-port` coordinate DP ranks
       within one role. Prefill and Decode use their respective node IPs; port
       `12321` can be reused because the roles run on different hosts.
     - `--vllm-start-port 7100` assigns API ports `7100-7103` on Prefill and
-      `7100-7107` on Decode. These endpoints must be reachable by the PD proxy.
+      `7100-7115` on Decode. These endpoints must be reachable by the PD proxy.
     - Both roles use `--max-model-len 1048576`. Prefill uses
       `--max-num-batched-tokens 8192` and `--max-num-seqs 16` to favor prompt
       throughput, while Decode uses `512` and `72` respectively to favor decode
@@ -576,12 +611,14 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
       `kv_role` must be `kv_producer` on Prefill and `kv_consumer` on Decode.
       `kv_port` must be reachable and must not conflict with another service.
     - `kv_connector_extra_config` must match the actual global layouts on both
-      sides: Prefill DP4/TP4 and Decode DP8/TP2. Keep the values identical in the
+      sides: Prefill DP4/TP1 and Decode DP16/TP1. PCP4 is configured separately
+      with `--prefill-context-parallel-size`; it does not change `tp_size` in the
+      connector configuration. Keep both connector layouts identical in the
       Prefill and Decode commands.
     - Both roles use DSpark with five speculative tokens. Prefill runs the target
       model in eager mode. Decode uses `FULL_DECODE_ONLY` for the target model,
-      while `enforce_eager` inside `--speculative-config` applies to the Decode
-      draft model.
+      and sets `enforce_eager: false` inside `--speculative-config` to allow the
+      DSpark draft model to use graph execution as well.
     - `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
       Engram table in host memory and lets local DP ranks share the host-memory
       allocation. `dp_shared_memory` is required on A3 because the model's 24
@@ -595,16 +632,14 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
         processes and runtime threads.
-        - `enable_fused_mc2: 1` enables the fused MoE communication and computation
-        path to reduce expert dispatch, FFN, and combine overhead.
-        - `enable_dsa_cp: true` enables context parallelism for DeepSeek Sparse
-        Attention. This option applies to models with an indexer and requires the
-        sequence-parallel MoE path used by this topology.
-        - `enable_flashcomm1: true` enables the FlashComm communication backend used
-        by the sequence-parallel MoE and DSA context-parallel paths.
-        - `enable_shared_expert_dp: true` uses data parallelism for shared experts.
-        It takes effect only when expert parallelism is enabled and TP is greater
-        than one; both conditions are met by Prefill DP4/TP4.
+        - `enable_fused_mc2: 2` requests the MegaMoE path. It requires a compatible
+        `cann_ops_transformer` package and a supported model configuration.
+        - `enable_flashcomm1: false` disables FlashComm. The old `enable_dsa_cp`
+        option is omitted because this example uses PCP instead of DSA CP.
+        - `enable_shared_expert_dp: true` retains the shared-expert DP setting, but
+        the framework disables it at TP1 because this option requires TP > 1.
+        - `multistream_overlap_shared_expert: false` explicitly disables shared-
+        expert multistream overlap on Prefill for this MegaMoE configuration.
 
     - Decode uses the following `--additional-config` options:
 
@@ -614,6 +649,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         kernel generation while retaining the enhanced ACL Graph path.
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
         processes and runtime threads.
+        - `enable_flashcomm1: false` disables FlashComm on Decode as on Prefill.
         - `multistream_overlap_shared_expert: true` overlaps shared-expert execution
         with routed-expert computation on separate streams to improve Decode MoE
         throughput.
@@ -622,13 +658,13 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         sent back to Prefill to recompute it. Enable this option only on Decode.
 
       The Prefill and Decode configurations are role-specific. Do not copy the
-      Prefill fused-MC2 and DSA options to Decode, or the Decode graph, multistream,
+      Prefill MegaMoE and PCP options to Decode, or the Decode graph, multistream,
       and recomputation options to Prefill, without validating the resulting
       topology and performance.
 
       `HCCL_IF_IP` and the socket interface variables must select the same high-speed
       service network used by the configured node IPs. `HCCL_BUFFSIZE` is `1024` on
-      Prefill and `1800` on Decode; retain these role-specific values unless another
+      Prefill and `4096` on Decode; retain these role-specific values unless another
       setting has been validated. The DP RPC, engine, Mooncake, and proxy ports must
       be allowed by the host firewall.
       Wait until every engine finishes loading weights and Decode finishes graph
