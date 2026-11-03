@@ -264,7 +264,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9)
 
     # Extra configs
-    p.add_argument("--additional-config", default=None, help='JSON string for --additional-config')
     p.add_argument("--additional-config", default=None, help="JSON string for --additional-config")
     p.add_argument(
         "--compilation-config",
@@ -353,9 +352,9 @@ def main() -> int:
         processes.append(
             (
                 launch_process(
-                 prefill_cfg.build_command(),prefill_cfg.build_env(),str(log_dir / "prefill.log"), "prefill"
-             ),
-             "prefill"
+                    prefill_cfg.build_command(), prefill_cfg.build_env(), str(log_dir / "prefill.log"), "prefill"
+                ),
+            "prefill",
             )
         )
         time.sleep(2)
@@ -411,10 +410,11 @@ def main() -> int:
             print(
                 f"\n  Quick test:\n\n"
                 f"    curl http://127.0.0.1:{args.proxy_port}/v1/chat/completions \\\n"
-                f"        -H \"Content-Type: application/json\" \\\n"
-                f"        -d '{{\"model\": \"{args.model}\","
-                f" \"messages\": [{{\"role\": \"user\", \"content\": \"Hello!\"}}],"
-                f" \"max_completion_tokens\": 64}}'\n")
+                f'        -H "Content-Type: application/json" \\\n'
+                f'        -d \'{{"model": "{args.model}",'
+                f' "messages": [{{"role": "user", "content": "Hello!"}}],'
+                f' "max_completion_tokens": 64}}\'\n'
+            )
         else:
             print(f"\n  Prefill: http://127.0.0.1:{args.prefill_port}/v1/chat/completions")
             print(f"  Decode:  http://127.0.0.1:{args.decode_port}/v1/chat/completions")
