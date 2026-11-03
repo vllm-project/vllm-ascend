@@ -1035,6 +1035,8 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_build_connector_meta_released_req_ids_union(self, mock_client_cls):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import mid_step_frees
+
         config = self._make_config()
         scheduler = KVPoolScheduler(config, use_layerwise=False)
 
@@ -1056,8 +1058,14 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         sched_output.scheduled_cached_reqs = MagicMock()
         sched_output.scheduled_cached_reqs.req_ids = []
 
+        # A running request whose sliding window freed blocks mid-step
+        # joins the same fence as the finished and preempted requests.
+        mid_step_frees.activate_mid_step_release_tracking()
+        mid_step_frees.record_mid_step_release("swa1")
+        self.addCleanup(mid_step_frees.take_mid_step_released_req_ids)
+
         meta = scheduler.build_connector_meta(sched_output)
-        self.assertEqual(meta.released_req_ids, {"f1", "f2", "p1"})
+        self.assertEqual(meta.released_req_ids, {"f1", "f2", "p1", "swa1"})
 
 
 @pytest.mark.parametrize(

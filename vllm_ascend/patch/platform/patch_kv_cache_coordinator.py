@@ -35,8 +35,66 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import mid_step_frees
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
+_orig_remove_skipped_blocks = KVCacheCoordinator.remove_skipped_blocks
+
+
+def _pool_saved_managers(coordinator: KVCacheCoordinator) -> frozenset:
+    """Managers of prefix-cacheable groups: only those are saved to the pool.
+
+    Cached on the instance; managers are hashable by identity. An empty set
+    (no config, or nothing cacheable) disables the before/after inspection.
+    """
+    cached = coordinator.__dict__.get("_ascend_pool_saved_managers")
+    if cached is None:
+        kv_cache_config = getattr(coordinator, "kv_cache_config", None)
+        managers = getattr(coordinator, "single_type_managers", ())
+        groups = getattr(kv_cache_config, "kv_cache_groups", None) if kv_cache_config is not None else None
+        if groups is None:
+            cached = frozenset()
+        else:
+            cached = frozenset(
+                manager for manager, group in zip(managers, groups) if is_prefix_cacheable(group.kv_cache_spec)
+            )
+        coordinator.__dict__["_ascend_pool_saved_managers"] = cached
+    return cached
+
+
+def _ascend_remove_skipped_blocks(
+    self,
+    request_id: str,
+    processed_computed_tokens: int,
+    num_prompt_tokens: int | None = None,
+) -> None:
+    """``remove_skipped_blocks`` with mid-step block-release recording.
+
+    Upstream frees the sliding-window / R-SWA gap / mamba-align blocks of
+    RUNNING requests here; the freed blocks can be reallocated within the
+    same ``schedule()`` call, and ``SchedulerOutput`` never surfaces these
+    frees. A store put queued by such a request may still be reading a
+    freed block, so record the request for the AscendStore released-block
+    fence (merged into the next connector metadata's ``released_req_ids``).
+    Only prefix-cacheable groups are saved to the pool, so only their
+    managers are inspected. With no pool scheduling in this process, this
+    is exactly upstream behavior.
+    """
+    if not mid_step_frees.is_tracking():
+        _orig_remove_skipped_blocks(self, request_id, processed_computed_tokens, num_prompt_tokens)
+        return
+    pool_saved = _pool_saved_managers(self)
+    released = False
+    for manager in self.single_type_managers:
+        blocks = manager.req_to_blocks.get(request_id) if manager in pool_saved else None
+        before = sum(1 for b in blocks if not b.is_null) if blocks else 0
+        manager.remove_skipped_blocks(request_id, processed_computed_tokens, num_prompt_tokens)
+        if blocks:
+            blocks = manager.req_to_blocks.get(request_id)
+            after = sum(1 for b in blocks if not b.is_null) if blocks else before
+            released = released or after < before
+    if released:
+        mid_step_frees.record_mid_step_release(request_id)
 
 
 def _skips_eagle_block_drop(kv_transfer_config) -> bool:
@@ -576,6 +634,11 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
 
 
 vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]
+
+# Route every coordinator subclass through the recording wrapper: no
+# subclass overrides remove_skipped_blocks, so patching the base method
+# covers hybrid, unitary and no-prefix-cache coordinators alike.
+vllm_kv_cache_coordinator.KVCacheCoordinator.remove_skipped_blocks = _ascend_remove_skipped_blocks
 
 # `kv_cache_manager` imports `get_kv_cache_coordinator` with
 # `from ... import ...`, so if it was loaded before this patch runs
