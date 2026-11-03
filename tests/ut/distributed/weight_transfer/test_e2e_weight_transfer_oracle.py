@@ -27,6 +27,8 @@ caching contract are pinned here.
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
+from safetensors.torch import load_file
 
 from tests.e2e.pull_request.rlhf import weight_transfer_test_utils as utils
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
@@ -187,3 +189,60 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
     assert mock_generate.call_count == 2
     # One gate per startup, not per call: a cache hit must not stop the world.
     assert mock_wait.call_count == 2
+
+
+def test_offline_flash_source_does_not_require_a_transformers_model():
+    case = utils.glm53flash_ipc_case()
+    with (
+        patch.object(utils.AutoConfig, "from_pretrained", side_effect=AssertionError("unexpected config download")),
+        patch.object(utils.AutoModelForCausalLM, "from_config", side_effect=AssertionError("unexpected meta model")),
+    ):
+        source = utils.FixedRandomWeightSource(case, torch.device("cpu"))
+    metadata = source.metadata()
+    assert len(metadata) == 132
+    assert all(meta.dtype == torch.bfloat16 for meta in metadata)
+    assert len({meta.name for meta in metadata}) == len(metadata)
+
+
+def test_offline_flash_checkpoint_and_transfer_use_identical_tensors(tmp_path, monkeypatch):
+    case = utils.glm53flash_ipc_case()
+    source = utils.FixedRandomWeightSource(case, torch.device("cpu"))
+    # Keep this a serialization-contract check without allocating a 4.64 GiB
+    # payload on CPU. Retain actual shapes for recurrent and mHC parameters.
+    selected = {
+        "model.layers.0.self_attn.A_log",
+        "model.layers.0.self_attn.dt_bias",
+        "model.layers.0.hc_attn_fn",
+        "model.layers.0.hc_attn_scale",
+        "model.layers.0.input_layernorm.weight",
+    }
+    source._parameters = [entry for entry in source._parameters if entry[0] in selected]
+    monkeypatch.setattr(torch, "npu", MagicMock(), raising=False)
+    source.write_checkpoint(tmp_path)
+    assert (tmp_path / "config.json").read_bytes() == (utils.GLM53FLASH_ASSETS / "config.json").read_bytes()
+    checkpoint = load_file(str(tmp_path / "model.safetensors"))
+    first_round = dict(source)
+    second_round = dict(source)
+    assert checkpoint.keys() == first_round.keys() == second_round.keys() == selected
+    for name in selected:
+        assert torch.equal(checkpoint[name], first_round[name])
+        assert torch.equal(first_round[name], second_round[name])
+
+
+def test_flash_is_excluded_from_shared_one_card_and_hccl_matrix():
+    shared = utils.pytest_model_cases()
+    flash_id = utils.glm53flash_ipc_case().id
+    assert all(parameter.values[0].id != flash_id for parameter in shared)
+
+
+def test_flash_ipc_reference_and_live_lane_share_conditions():
+    case = utils.glm53flash_ipc_case()
+    lane = _flag_map(
+        live_update_serve_args(case, backend="npu_ipc", port=PORT, gpu_memory_utilization=0.45, tensor_parallel_size=2)
+    )
+    reference = _flag_map(reference_serve_args(case, port=PORT, gpu_memory_utilization=0.45, tensor_parallel_size=2))
+    assert lane["--tensor-parallel-size"] == reference["--tensor-parallel-size"] == "2"
+    assert lane.pop("--load-format") == "dummy"
+    assert lane.pop("--weight-transfer-config") == '{"backend": "npu_ipc"}'
+    assert reference.pop("--tokenizer") == reference.pop("--served-model-name") == case.model
+    assert lane == reference

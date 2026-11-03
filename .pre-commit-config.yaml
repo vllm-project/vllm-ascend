@@ -19,6 +19,8 @@ repos:
   rev: v2.4.1
   hooks:
     - id: codespell
+      # Preserve the published tokenizer's subword vocabulary verbatim.
+      exclude: '^tests/e2e/pull_request/rlhf/glm53flash_assets/tokenizer\.json$'
       args: [
         --toml, pyproject.toml,
         '--skip', 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,typos.toml',
@@ -31,6 +33,7 @@ repos:
   rev: v1.32.0
   hooks:
   - id: typos
+    exclude: '^tests/e2e/pull_request/rlhf/glm53flash_assets/tokenizer\.json$'
     args: [
       "--force-exclude",
       "--exclude", "csrc/**"
