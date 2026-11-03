@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
-from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager, OffloadState
+from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
 from vllm_ascend.expert_offload.graph import GraphExpertStaging, supports_descriptor
 from vllm_ascend.expert_offload.residency import ExpertResidency
 from vllm_ascend.expert_offload.transfer import TorchExpertTransfer
@@ -42,8 +42,6 @@ def test_glm_mtp_three_draft_tokens_with_68_resident_experts(requests, expected)
 
 def staging_double():
     manager = ExpertOffloadManager()
-    manager.state = OffloadState.READY
-    manager.begin_execution()
     manager.graph_load_stream = object()
     binding = SimpleNamespace(
         manager=manager, residency=ExpertResidency(6, 2), device="cpu", adapter=None, host_store=None, resident={}
@@ -91,9 +89,12 @@ def test_callback_failure_is_rejected_and_never_commits_partial_bundle():
     with pytest.raises(RuntimeError, match="rejecting execution output") as raised:
         manager.check_graph_errors()
     assert str(raised.value.__cause__) == "injected transfer failure"
-    assert manager.state is OffloadState.FAILED
-    with pytest.raises(RuntimeError, match="ready"):
-        manager.begin_execution()
+    # Later callbacks must not publish another map after the first failure.
+    with patch.object(TorchExpertTransfer, "copy_experts") as copy:
+        staging.update()
+        copy.assert_not_called()
+    with pytest.raises(RuntimeError, match="rejecting execution output"):
+        manager.check_graph_errors()
 
 
 def test_subscriptions_are_runner_owned_and_deduplicated():
@@ -113,16 +114,14 @@ def test_subscriptions_are_runner_owned_and_deduplicated():
 
 
 @pytest.mark.parametrize("failed", [False, True])
-def test_capture_lifecycle_is_retired_on_success_and_failure(failed):
+def test_capture_flags_are_reset_on_success_and_failure(failed):
     manager = ExpertOffloadManager()
-    manager.state = OffloadState.READY
+    manager.is_profile = True
     if failed:
         with pytest.raises(RuntimeError, match="capture failed"), manager.graph_capture():
-            assert manager.executing and manager.capturing_graphs and not manager.has_prefill
+            assert manager.capturing_graphs and not manager.has_prefill and not manager.is_profile
             raise RuntimeError("capture failed")
     else:
         with manager.graph_capture():
-            assert manager.executing and manager.capturing_graphs and not manager.has_prefill
-    assert not manager.executing and not manager.capturing_graphs
-    assert manager.has_prefill
-    assert manager.state is (OffloadState.FAILED if failed else OffloadState.READY)
+            assert manager.capturing_graphs and not manager.has_prefill and not manager.is_profile
+    assert not manager.capturing_graphs

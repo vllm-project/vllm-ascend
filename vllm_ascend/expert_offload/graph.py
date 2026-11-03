@@ -38,8 +38,6 @@ class GraphExpertStaging:
         try:
             if manager.graph_error is not None:
                 return
-            if not manager.executing:
-                raise RuntimeError("expert graph callback outside runner-owned execution")
             plan = self.binding.residency.plan(self.ids.reshape(-1).tolist())
             if plan.use_full_pool:
                 raise RuntimeError("expert graph exceeded its prevalidated resident capacity")

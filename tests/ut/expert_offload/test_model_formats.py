@@ -172,7 +172,6 @@ def test_native_preparation_prefill_and_eviction_preserve_every_expert_tensor(ki
     manager.get_comm = lambda *_a: None
     addresses = {name: tensor.data_ptr() for name, tensor in binding.resident.items()}
     for prefill, logical in ((True, [[4, 1]]), (False, [[3, 5]]), (False, [[0, 4]])):
-        manager.begin_execution()
         manager.has_prefill = prefill
         ids = torch.tensor(logical, dtype=torch.int32)
         view, physical, _ = binding.prepare(layer, ids)
@@ -182,7 +181,6 @@ def test_native_preparation_prefill_and_eviction_preserve_every_expert_tensor(ki
             expected = getattr(reference, name)[ids.long()].float()
             torch.testing.assert_close(actual, expected)
         assert addresses == {name: tensor.data_ptr() for name, tensor in binding.resident.items()}
-        manager.finish_execution(failed=False)
     if kind == "block_fp8":
         assert not hasattr(layer, "w13_weight_scale_inv")
         assert expert_adapter_type(scheme) is BlockFP8ExpertAdapter

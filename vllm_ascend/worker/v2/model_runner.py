@@ -303,41 +303,33 @@ class NPUModelRunner(GPUModelRunner):
             raise ValueError(
                 "expert offload requires checkpoint shard tracking; dummy checkpoint loading is unsupported"
             )
+        from vllm_ascend.model_executor.warmup.nz_warmup import (
+            join_nz_warm_thread,
+            start_nz_warm_thread,
+        )
+
+        # Overlap the one-off NZ cast with weight I/O. Every model goes
+        # through here.
+        start_nz_warm_thread("thread")
         try:
-            from vllm_ascend.model_executor.warmup.nz_warmup import (
-                join_nz_warm_thread,
-                start_nz_warm_thread,
-            )
+            aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
+            with expert_offload_loading(self):
+                super().load_model(load_dummy_weights, *args, **kwargs)
+            self.pd_dspark_aux_layer_ids = aux_layers
+        finally:
+            # Join even when weight loading fails: these threads touch the NPU
+            # device and must not outlive this call. Joining here is also before
+            # memory profiling.
+            join_nz_warm_thread()
 
-            # Overlap the one-off NZ cast with weight I/O. Every model goes
-            # through here.
-            start_nz_warm_thread("thread")
-            try:
-                aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
-                with expert_offload_loading(self):
-                    super().load_model(load_dummy_weights, *args, **kwargs)
-                self.pd_dspark_aux_layer_ids = aux_layers
-            finally:
-                # Join even when weight loading fails: these threads touch the NPU
-                # device and must not outlive this call. Joining here is also before
-                # memory profiling.
-                join_nz_warm_thread()
+        finalize_expert_offload_loading(self)
 
-            finalize_expert_offload_loading(self)
-
-            # In cudagraph modes the dumper must be started before graph capture so
-            # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
-            # the dumper at the end of load_model).
-            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-                self._start_dump_data()
-            self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
-        except Exception:
-            if offload is not None:
-                try:
-                    offload.close()
-                except Exception:
-                    logger.exception("Failed to clean up expert offload after model loading failure")
-            raise
+        # In cudagraph modes the dumper must be started before graph capture so
+        # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
+        # the dumper at the end of load_model).
+        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            self._start_dump_data()
+        self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
 
     def _restore_replicated_draft_target_states(self) -> None:
         """Restore target states consumed by a replicated PCP draft."""
@@ -718,7 +710,9 @@ class NPUModelRunner(GPUModelRunner):
         forward_failed = True
         offload_manager = self.expert_offload_manager
         if offload_manager is not None:
-            offload_manager.begin_execution(is_profile=is_profile or dummy_run)
+            # Batch metadata below refines this conservative prefill default.
+            offload_manager.has_prefill = True
+            offload_manager.is_profile = is_profile or dummy_run
         with dp_coordination_context:
             try:
                 output = super().execute_model(
@@ -733,8 +727,6 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 forward_failed = False
             finally:
-                if offload_manager is not None:
-                    offload_manager.finish_execution(failed=forward_failed)
                 finish_execution = getattr(self.model_state, "finish_execution", None)
                 if finish_execution is not None:
                     finish_execution(failed=forward_failed)

@@ -16,7 +16,7 @@ import pytest
 import torch
 
 from vllm_ascend.expert_offload.config import ExpertOffloadConfig
-from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager, OffloadState
+from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
 from vllm_ascend.expert_offload.quantization import expert_adapter_type, maybe_offload_quant_method
 from vllm_ascend.expert_offload.utils import (
     expert_offload_loading,
@@ -150,15 +150,13 @@ def make_runner(*, manager=None, fail_load=False, fail_forward=False, has_prefil
             self.model_memory_usage = 1000
 
         def execute_model(self, scheduler_output, **kwargs):
-            if manager is not None:
-                assert manager.executing
             self.gather_batch_req_state(scheduler_output, kwargs["dummy_run"])
             if fail_forward:
                 raise RuntimeError("forward failed")
             return "result"
 
         def gather_batch_req_state(self, scheduler_output, dummy_run):
-            return SimpleNamespace(has_prefill=has_prefill), 1
+            return SimpleNamespace(has_prefill=getattr(scheduler_output, "has_prefill", has_prefill)), 1
 
         def shutdown(self):
             events.append("parent_shutdown")
@@ -233,16 +231,12 @@ def test_disabled_load_does_not_allocate_or_finalize_offload(loading_memory):
     loading_memory.assert_not_called()
 
 
-def test_dummy_load_rejected_before_parent_and_loading_failure_closes_manager():
+def test_dummy_load_rejected_before_parent():
     manager = Mock()
     runner, events = make_runner(manager=manager)
     with pytest.raises(ValueError, match="dummy"):
         runner.load_model(True)
     assert not events
-    runner, _ = make_runner(manager=manager, fail_load=True)
-    with pytest.raises(RuntimeError, match="load failed"):
-        runner.load_model()
-    manager.close.assert_called_once()
     manager.finalize_loading.assert_not_called()
 
 
@@ -251,7 +245,7 @@ def test_dummy_load_rejected_before_parent_and_loading_failure_closes_manager():
     [(enabled, failure) for enabled in (False, True) for failure in ("start_nz", "load", "join")]
     + [(True, "finalize")],
 )
-def test_loading_failure_preserves_native_warmup_behavior_and_closes_offload(warmups, enabled, failure):
+def test_loading_failure_preserves_native_warmup_behavior(warmups, enabled, failure):
     manager = Mock() if enabled else None
     runner, _ = make_runner(manager=manager, fail_load=failure == "load")
     if failure == "start_nz":
@@ -268,22 +262,8 @@ def test_loading_failure_preserves_native_warmup_behavior_and_closes_offload(war
     else:
         warmups.nz_warmup.join_nz_warm_thread.assert_called_once_with()
     if manager is not None:
-        manager.close.assert_called_once_with()
         if failure != "finalize":
             manager.finalize_loading.assert_not_called()
-
-
-def test_loading_cleanup_failure_preserves_the_original_error():
-    manager = Mock()
-    manager.close.side_effect = RuntimeError("cleanup failed")
-    runner, _ = make_runner(manager=manager, fail_load=True)
-    with (
-        patch.object(runner.load_model.__globals__["logger"], "exception") as log,
-        pytest.raises(RuntimeError, match="load failed"),
-    ):
-        runner.load_model()
-    manager.close.assert_called_once_with()
-    log.assert_called_once_with("Failed to clean up expert offload after model loading failure")
 
 
 def test_pool_accounting_starts_after_native_warmup(warmups, loading_memory):
@@ -301,21 +281,6 @@ def test_pool_accounting_starts_after_native_warmup(warmups, loading_memory):
     assert runner.model_state.prompt_logprobs_worker is runner.prompt_logprobs_worker
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_dumper_failure_preserves_error_and_releases_offload(enabled, loading_memory):
-    manager = Mock() if enabled else None
-    runner, _ = make_runner(manager=manager)
-    runner.compilation_config.cudagraph_mode = 1
-    runner._start_dump_data.side_effect = RuntimeError("dumper failed")
-    with pytest.raises(RuntimeError, match="dumper failed"):
-        runner.load_model()
-    if manager is not None:
-        manager.finalize_loading.assert_called_once_with(runner.model)
-        manager.close.assert_called_once_with()
-    else:
-        loading_memory.assert_not_called()
-
-
 def test_load_preserves_keyword_argument_forwarding():
     manager = Mock()
     runner, events = make_runner(manager=manager)
@@ -327,25 +292,40 @@ def test_load_preserves_keyword_argument_forwarding():
 @pytest.mark.parametrize(
     "prefill,profile,dummy", [(False, False, False), (True, False, False), (False, True, False), (False, False, True)]
 )
-def test_execute_uses_real_batch_phase_and_retires_lifecycle(prefill, profile, dummy):
+def test_execute_uses_real_batch_phase_and_preserves_native_cleanup(prefill, profile, dummy):
     manager = ExpertOffloadManager()
-    manager.state = OffloadState.READY
     runner, _ = make_runner(manager=manager, has_prefill=prefill)
     scheduler_output = SimpleNamespace(total_num_scheduled_tokens=1, num_scheduled_tokens={"request": 1})
     assert runner.execute_model(scheduler_output, is_profile=profile, dummy_run=dummy) == "result"
-    assert not manager.executing and manager.state is OffloadState.READY
-    assert manager.has_prefill and not manager.is_profile
+    assert manager.has_prefill is prefill
+    assert manager.is_profile is (profile or dummy)
     runner.model_state.finish_execution.assert_called_once_with(failed=False)
     runner.kvpp.complete_forward.assert_called_once()
 
 
-def test_execute_failure_retires_offload_and_existing_metadata():
+def test_execute_refreshes_batch_flags_after_profile_dummy_and_prefill():
     manager = ExpertOffloadManager()
-    manager.state = OffloadState.READY
+    runner, _ = make_runner(manager=manager)
+    scheduler_output = SimpleNamespace(
+        total_num_scheduled_tokens=1, num_scheduled_tokens={"request": 1}, has_prefill=False
+    )
+    for profile, dummy, prefill in (
+        (True, False, False),
+        (False, True, False),
+        (False, False, True),
+        (False, False, False),
+    ):
+        scheduler_output.has_prefill = prefill
+        runner.execute_model(scheduler_output, is_profile=profile, dummy_run=dummy)
+        assert manager.has_prefill is prefill
+        assert manager.is_profile is (profile or dummy)
+
+
+def test_execute_failure_preserves_native_metadata_cleanup():
+    manager = ExpertOffloadManager()
     runner, _ = make_runner(manager=manager, fail_forward=True)
     with pytest.raises(RuntimeError, match="forward failed"):
         runner.execute_model(SimpleNamespace(total_num_scheduled_tokens=1, num_scheduled_tokens={"request": 1}))
-    assert not manager.executing and manager.state is OffloadState.FAILED
     runner.model_state.finish_execution.assert_called_once_with(failed=True)
     runner._maybe_send_draft_kv.assert_not_called()
 

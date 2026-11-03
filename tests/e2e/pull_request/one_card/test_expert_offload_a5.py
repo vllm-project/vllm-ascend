@@ -15,7 +15,7 @@ from transformers import Qwen3MoeConfig
 from vllm import LLM, SamplingParams
 from vllm.config import VllmConfig, set_current_vllm_config
 
-from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager, OffloadState
+from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
 from vllm_ascend.expert_offload.graph import GraphExpertStaging
 from vllm_ascend.expert_offload.host_store import HostExpertStore
 from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter
@@ -100,7 +100,6 @@ def test_acl_graph_replay_updates_nz_slots_and_rejects_callback_failure(expert_b
     device = torch.device("npu:0")
     torch.npu.set_device(device)
     manager = ExpertOffloadManager()
-    manager.state = OffloadState.READY
     manager.graph_load_stream = torch.npu.Stream(device=device)
     resident = adapter.materialize(store, [0, 1], device)
     binding = SimpleNamespace(
@@ -159,22 +158,17 @@ def test_acl_graph_replay_updates_nz_slots_and_rejects_callback_failure(expert_b
             hidden = torch.nn.functional.silu(gate) * up
             output = forward(resident["w2_weight"], resident["w2_weight_scale"], hidden, counts)
         for expert_id in (5, 3, 1, 4, 5):
-            manager.begin_execution()
-            try:
-                ids.fill_(expert_id)
-                graph.replay()  # Replay on the default stream, not capture_stream.
-                torch.npu.current_stream().synchronize()
-                manager.check_graph_errors()
-                expected_counts = [int(i >= expert_id) for i in range(NUM_EXPERTS)]
-                gate, up = _gemm(x, full["w13_weight"], full["w13_weight_scale"], expected_counts).chunk(2, -1)
-                expected = _gemm(
-                    torch.nn.functional.silu(gate) * up, full["w2_weight"], full["w2_weight_scale"], expected_counts
-                )
-                torch.testing.assert_close(output, expected, rtol=0, atol=0)
-                assert {name: tensor.data_ptr() for name, tensor in resident.items()} == pointers
-            finally:
-                manager.finish_execution(failed=manager.graph_error is not None)
-        manager.begin_execution()
+            ids.fill_(expert_id)
+            graph.replay()  # Replay on the default stream, not capture_stream.
+            torch.npu.current_stream().synchronize()
+            manager.check_graph_errors()
+            expected_counts = [int(i >= expert_id) for i in range(NUM_EXPERTS)]
+            gate, up = _gemm(x, full["w13_weight"], full["w13_weight_scale"], expected_counts).chunk(2, -1)
+            expected = _gemm(
+                torch.nn.functional.silu(gate) * up, full["w2_weight"], full["w2_weight_scale"], expected_counts
+            )
+            torch.testing.assert_close(output, expected, rtol=0, atol=0)
+            assert {name: tensor.data_ptr() for name, tensor in resident.items()} == pointers
         before = binding.residency.logical_to_physical()
 
         def fail_copy(*_args, **_kwargs):
@@ -187,7 +181,6 @@ def test_acl_graph_replay_updates_nz_slots_and_rejects_callback_failure(expert_b
         with pytest.raises(RuntimeError, match="rejecting execution output"):
             manager.check_graph_errors()
         assert binding.residency.logical_to_physical() == before
-        assert manager.state is OffloadState.FAILED
     finally:
         manager.close()
 
@@ -207,7 +200,7 @@ class ExpertOffloadAuditWorker:
         manager = runner.expert_offload_manager
         assert manager is not None
         if action == "install":
-            assert manager.state.name == "READY"
+            assert manager.bindings
             audit: _ExpertOffloadAudit = {"steps": [], "replays": 0}
             runner._expert_offload_test_audit = audit
             prepare = runner._prepare_inputs_impl
@@ -233,7 +226,6 @@ class ExpertOffloadAuditWorker:
         audit = runner._expert_offload_test_audit
         bindings = tuple(manager.bindings.values())
         snapshot = {
-            "state": manager.state.name,
             "steps": list(audit["steps"]),
             "replays": audit["replays"],
             "capture_sizes": list(runner.cudagraph_manager.capture_sizes),
@@ -246,7 +238,6 @@ class ExpertOffloadAuditWorker:
         }
         if action == "close":
             runner.shutdown()
-            snapshot["closed_state"] = manager.state.name
             snapshot["released"] = (
                 not manager.bindings
                 and not manager.prefill_pool.tensors
@@ -375,12 +366,12 @@ def test_checkpoint_prefill_graph_decode_capacity_fallback_and_cleanup(tiny_chec
         assert before["loaded"] and len(before["layer_names"]) == 2
         assert set(before["capture_sizes"]) == {1, 2}
         assert after["addresses"] == before["addresses"]
-        assert after["state"] == "READY" and after["replays"] > 0
+        assert after["replays"] > 0
         assert any(step["prefill"] for step in after["steps"])
         assert any(not step["prefill"] and step["mode"] == "FULL" for step in after["steps"])
         assert any(not step["prefill"] and step["mode"] == "NONE" and step["tokens"] > 2 for step in after["steps"])
         closed = llm.collective_rpc("expert_offload_test_audit", args=("close",))[0]
-        assert closed["closed_state"] == "CLOSED" and closed["released"]
+        assert closed["released"]
     finally:
         _stop(llm)
     reference = LLM(**common, enforce_eager=True)

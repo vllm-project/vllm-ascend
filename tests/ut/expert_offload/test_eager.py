@@ -9,7 +9,6 @@ from vllm_ascend.expert_offload.config import ExpertOffloadConfig
 from vllm_ascend.expert_offload.expert_offload_manager import (
     ExpertOffloadManager,
     LayerOffloadBinding,
-    OffloadState,
 )
 from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter
 from vllm_ascend.expert_offload.residency import ExpertResidency
@@ -133,7 +132,6 @@ def test_decode_eviction_prefill_and_overflow_preserve_parameters():
     binding = layer._expert_offload_binding
     addresses = {name: getattr(layer, name).data_ptr() for name in binding.resident}
     map_addresses = (binding.mapping.host_map.data_ptr(), binding.mapping.device_map.data_ptr())
-    manager.begin_execution()
     manager.has_prefill = False
     with patch.object(manager, "get_comm", return_value=object()):
         for ids in (torch.tensor([[5, 4]]), torch.tensor([[4, 2]]), torch.tensor([[2, 2]])):
@@ -158,8 +156,6 @@ def test_decode_eviction_prefill_and_overflow_preserve_parameters():
         assert_selected_bundles(binding, view, physical, ids)
     assert addresses == {name: getattr(layer, name).data_ptr() for name in binding.resident}
     assert map_addresses == (binding.mapping.host_map.data_ptr(), binding.mapping.device_map.data_ptr())
-    manager.finish_execution(failed=False)
-    assert manager.state is OffloadState.READY
     manager.close()
     assert binding.mapping is None
 
@@ -171,21 +167,18 @@ def test_pool_is_reused_between_layers_and_restores_correct_contents():
     for tensor in second_binding.host_store.tensors.values():
         tensor.add_(10)
     addresses = {name: tensor.data_ptr() for name, tensor in manager.prefill_pool.tensors.items()}
-    manager.begin_execution()
     with patch.object(manager, "get_comm", return_value=None):
         for layer in (first, second, first):
             ids = torch.tensor([[1, 4]])
             view, physical, _ = layer._expert_offload_binding.prepare(layer, ids)
             assert_selected_bundles(layer._expert_offload_binding, view, physical, ids)
     assert addresses == {name: tensor.data_ptr() for name, tensor in manager.prefill_pool.tensors.items()}
-    manager.finish_execution(failed=False)
 
 
-def test_transfer_failure_never_publishes_plan_and_invalidates_worker():
+def test_transfer_failure_propagates_without_publishing_plan():
     layer = ExpertLayer()
     manager = ready_model(layer)
     binding = layer._expert_offload_binding
-    manager.begin_execution()
     manager.has_prefill = False
     before = binding.residency.logical_to_physical()
     with (
@@ -194,28 +187,20 @@ def test_transfer_failure_never_publishes_plan_and_invalidates_worker():
     ):
         binding.prepare(layer, torch.tensor([[4, 5]]))
     assert binding.residency.logical_to_physical() == before
-    assert manager.state is OffloadState.FAILED
-    manager.finish_execution(failed=True)
-    with pytest.raises(RuntimeError, match="ready"):
-        manager.begin_execution()
 
 
-def test_lifecycle_reentrancy_profile_and_close():
+def test_profile_uses_full_pool_and_close_releases_resources():
     layer = ExpertLayer()
     manager = ready_model(layer)
-    manager.begin_execution(is_profile=True)
-    with pytest.raises(RuntimeError, match="serialized"):
-        manager.begin_execution()
+    manager.is_profile = True
     manager.has_prefill = False
     with patch.object(manager, "get_comm", return_value=None):
         ids = torch.tensor([[0, 1]])
         view, physical, _ = layer._expert_offload_binding.prepare(layer, ids)
         assert view.w13_weight.shape[0] == 6
         assert torch.equal(physical, ids)
-    manager.finish_execution(failed=False)
     manager.close()
     manager.close()
-    assert manager.state is OffloadState.CLOSED
     assert not manager.bindings and not manager.prefill_pool.tensors
 
 
