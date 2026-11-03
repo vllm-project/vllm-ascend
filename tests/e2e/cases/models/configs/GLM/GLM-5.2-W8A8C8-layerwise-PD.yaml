@@ -108,8 +108,6 @@ templates:
       - --async-scheduling
       - --quantization
       - ascend
-      - --safetensors-load-strategy
-      - prefetch
       - --enable-auto-tool-choice
       - --tool-call-parser
       - glm47
@@ -162,8 +160,6 @@ templates:
       - --async-scheduling
       - --quantization
       - ascend
-      - --safetensors-load-strategy
-      - prefetch
       - --enable-auto-tool-choice
       - --tool-call-parser
       - glm47
@@ -214,8 +210,6 @@ templates:
       - --async-scheduling
       - --quantization
       - ascend
-      - --safetensors-load-strategy
-      - prefetch
       - --enable-auto-tool-choice
       - --tool-call-parser
       - glm47
@@ -267,8 +261,6 @@ templates:
       - --async-scheduling
       - --quantization
       - ascend
-      - --safetensors-load-strategy
-      - prefetch
       - --enable-auto-tool-choice
       - --tool-call-parser
       - glm47
