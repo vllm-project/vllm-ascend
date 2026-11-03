@@ -29,7 +29,6 @@ else:
 
 _NGRAM_SPEC_METHODS = frozenset({"ngram", "ngram_gpu"})
 _P_EAGLE_SPEC_METHODS = frozenset({"eagle", "eagle3"})
-_DFLASH2_ARCHITECTURES = frozenset({"DFlash2DraftModel"})
 
 
 def _is_configured(value: object) -> bool:
@@ -44,41 +43,10 @@ def _additional(vllm_config: VllmConfig, key: str) -> object:
     return extra.get(key) if isinstance(extra, dict) else getattr(extra, key, None)
 
 
-def _architectures(model_config: object) -> list[str]:
-    names: list[str] = []
-    architecture = getattr(model_config, "architecture", None)
-    if isinstance(architecture, str):
-        names.append(architecture)
-    for owner in (
-        model_config,
-        getattr(model_config, "hf_config", None),
-        getattr(model_config, "hf_text_config", None),
-    ):
-        names.extend(getattr(owner, "architectures", None) or ())
-    return [name for name in names if isinstance(name, str)]
-
-
-def _is_dflash2_graph(speculative_config: object) -> bool:
-    """DFlash2 graph capture still fails on NPU; eager drafts stay on V2."""
-    if getattr(speculative_config, "enforce_eager", False) is True:
-        return False
-    draft = getattr(speculative_config, "draft_model_config", None)
-    return any(name in _DFLASH2_ARCHITECTURES for name in _architectures(draft))
-
-
 def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
     """Reasons this config is not V2-ready and should default to V1."""
     reasons: list[str] = []
-    model_config = getattr(vllm_config, "model_config", None)
     spec_config = getattr(vllm_config, "speculative_config", None)
-
-    if _is_configured(model_config):
-        if (
-            getattr(model_config, "runner_type", None) == "pooling"
-            or getattr(model_config, "is_pooling_model", False) is True
-        ):
-            reasons.append("pooling KV")
-
     compilation_config = getattr(vllm_config, "compilation_config", None)
     if _is_configured(compilation_config) and getattr(compilation_config, "cudagraph_mm_encoder", False) is True:
         reasons.append("VL encoder graph")
@@ -95,8 +63,6 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
         # a separate draft model still runs on the V1 proposer.
         if method == "draft_model":
             reasons.append("draft_model speculative decoding")
-        if _is_dflash2_graph(spec_config):
-            reasons.append("dflash2 graph")
         # V2 FULL capture builds attention metadata inside ACL graph GLOBAL
         # capture. p-eagle reads NPU seq_lens there, and that copy is rejected.
         if method in _P_EAGLE_SPEC_METHODS and getattr(spec_config, "parallel_drafting", False) is True:
@@ -111,13 +77,11 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     ``VLLM_USE_V2_MODEL_RUNNER`` wins when set. Otherwise V2 is the default,
     except for these models and features, which fall back to V1:
 
-    * pooling KV (``runner_type="pooling"``)
     * VL encoder graph (``compilation_config.cudagraph_mm_encoder``)
     * draft_window_size
     * suffix speculative decoding
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
     * draft_model speculative decoding
-    * dflash2 graph (DFlash2 drafts without ``enforce_eager``)
     * p-eagle (``eagle`` / ``eagle3`` with ``parallel_drafting``)
 
     Set ``VLLM_USE_V2_MODEL_RUNNER=0`` to force V1.

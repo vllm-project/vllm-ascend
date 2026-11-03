@@ -52,6 +52,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStorePromMetrics,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
+    BaseKVPoolScheduler,
     KVPoolScheduler,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
@@ -62,7 +63,7 @@ if TYPE_CHECKING:
 
 def create_kv_pool_scheduler(
     vllm_config: VllmConfig, use_layerwise: bool, kv_cache_config: KVCacheConfig | None = None
-) -> KVPoolScheduler:
+) -> BaseKVPoolScheduler:
     scheduler_class = LayerwiseKVPoolScheduler if use_layerwise else KVPoolScheduler
     return scheduler_class(vllm_config, use_layerwise, kv_cache_config)
 
@@ -178,7 +179,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # Waiting requests have finished loading before their next model step.
         self.requires_mamba_state_copy_after_load = not self.use_layerwise and not self.requires_load_wait
 
-        self.connector_scheduler: KVPoolScheduler | None = None
+        self.connector_scheduler: BaseKVPoolScheduler | None = None
         self.connector_worker: KVPoolWorker | None = None
         self.dspark_prefix_cache_enabled = False
 
@@ -542,11 +543,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.build_connector_worker_meta()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.connector_scheduler is not None:
-            return self.connector_scheduler.get_stats()
-        if self.connector_worker is not None:
-            return self.connector_worker.get_stats()
-        return None
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_stats()
 
     @classmethod
     def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> KVConnectorStats:

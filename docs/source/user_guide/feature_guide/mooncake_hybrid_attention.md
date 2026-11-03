@@ -23,13 +23,60 @@ It does not translate Mooncake operations into Memcache GVA operations.
   paths. Start validation in eager mode. Graph-mode execution and additional
   attention backends require separate integration validation.
 - Topology-matched PP supports uneven partitions and stage-local hybrid groups.
-  DCP, PCP and prefill/decode TP mismatch remain unsupported.
+  PCP is supported with matching producer/consumer topologies. DCP and
+  prefill/decode TP mismatch remain unsupported.
 - Recurrent/linear-attention groups using `MambaSpec` require
   `mamba_cache_mode="align"`. Their state is saved after the attention kernels
   update it; they do not submit PUTs at attention entry.
 - Only complete, coordinator-aligned block snapshots are published. Partial
   block offloading and cross-layer cache-buffer reuse are not part of this
   hybrid implementation.
+
+## Prefill context parallelism (PCP)
+
+Mooncake layerwise pooling supports `--prefill-context-parallel-size 4`, including
+DeepSeek-V4-Flash on Model Runner V2 with hybrid caches and MTP. Keep
+`--decode-context-parallel-size 1` and use the same TP, PP and PCP sizes on
+producer and consumer instances. Combining PCP with `enable_kvpp` layer-sharded
+caches is not supported.
+
+For example, combine these options with the model's usual serving arguments:
+
+```bash
+export VLLM_USE_V2_MODEL_RUNNER=1
+vllm serve /path/to/DeepSeek-V4-Flash \
+  --tensor-parallel-size 1 \
+  --pipeline-parallel-size 1 \
+  --prefill-context-parallel-size 4 \
+  --decode-context-parallel-size 1 \
+  --block-size 32 \
+  --no-enable-prefix-caching \
+  --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
+  --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"backend":"mooncake","use_layerwise":true,"layerwise_prefetch_layers":2}}'
+```
+
+Each PCP worker owns separate Mooncake sessions. Keys append
+`@pcp_size:<size>@pcp_rank:<rank>` to the existing single-group or hybrid key.
+The scheduler reports a hit only after every required PP stage, PCP rank and
+saving TP/head has committed its object. TP-replicated MLA still has one writer
+per head within each PCP rank; recurrent state retains its per-TP keys.
+`PCP=1` keys remain unchanged, and objects from different PCP sizes are isolated.
+
+PCP does not multiply the logical group or hash block sizes. DSV4's PCP path
+updates its SWA, compressor and indexer caches from the global input view before
+local attention. The connector copies the existing per-rank cache pages as bytes,
+including FP8 payloads, and preserves the hybrid coordinator's reachability masks
+and private-state exclusions. This implementation stores one copy per PCP rank;
+budget Mooncake capacity and transfer bandwidth accordingly.
+
+For hardware validation, first run in eager mode, then repeat with
+`FULL_DECODE_ONLY`, FP8 main/indexer caches, async scheduling and MTP enabled.
+Use a prompt longer than `max_num_batched_tokens` to exercise chunked prefill.
+Submit the same prompt again with local prefix caching disabled, verify remote
+hits and compare deterministic outputs against a run without KV transfer.
+Also test simultaneous shared-prefix requests and a missing remote rank object;
+an incomplete snapshot must trigger recomputation. These NPU checks are required
+in addition to the CPU session/range tests.
 
 ## Group-aware objects and range offsets
 

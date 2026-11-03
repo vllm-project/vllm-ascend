@@ -117,12 +117,16 @@ with the sleep-mode memory pool. The former top-level
 
 ### Weight transfer
 
-vLLM-Ascend exposes two Ascend-specific weight-transfer backends:
+vLLM-Ascend exposes the following Ascend-specific weight-transfer backends:
 
 | Backend | Use case | Transport |
 | --- | --- | --- |
 | `ipc` | Trainer and rollout engine use the same physical NPU | NPU IPC handles |
 | `hccl` | Trainer and rollout engine use separate NPUs | HCCL collectives |
+| `sparse_hccl` | Replace selected checkpoint weight values on separate NPUs | HCCL collectives |
+
+The table describes transport choices. Sparse transfer requires the trainer and
+rollout engine to start from the same checkpoint.
 
 Start an HCCL-enabled server with:
 
@@ -154,15 +158,39 @@ The control flow is:
 5. finish the weight update;
 6. resume generation.
 
-The repository contains runnable examples for both backends:
+The repository contains runnable examples for weight transfer:
 
 - [`rlhf_http_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_hccl.py)
 - [`rlhf_http_npu_ipc.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_npu_ipc.py)
 - [`rlhf_async_new_apis.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_async_new_apis.py)
+- [`rlhf_sparse_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/182ea0448550a970e4f0ae3624fe35e38b37bc80/examples/rl/rlhf_sparse_hccl.py)
 
 FRACTAL_NZ must be disabled for weight updates. RL mode forces
 `weight_nz_mode=0`; the weight-transfer start path validates the effective
 Ascend configuration.
+
+#### Sparse HCCL
+
+For sparse checkpoint updates, follow the upstream [Sparse NCCL
+guide](https://docs.vllm.ai/en/latest/training/weight_transfer/nccl/#sparse-nccl)
+for patch semantics and the update lifecycle. On Ascend, select `sparse_hccl`
+and enable RL mode:
+
+```bash
+vllm serve /path/to/checkpoint \
+    --weight-transfer-config '{"backend": "sparse_hccl"}' \
+    --additional-config '{"rl_config": {"enabled": true}}'
+```
+
+Run `rlhf_sparse_hccl.py` to initialize the trainer and send sparse checkpoint
+updates. Its TP2 launch commands explicitly enable expert parallelism. Reserve
+a separate NPU for the trainer; the transfer group size is `1 + TP * DP`, with
+no additional EP factor. Pipeline parallelism is currently unsupported.
+
+Sparse HCCL requires unquantized ND weights and static expert placement with
+EPLB disabled. FRACTAL_NZ, fused MC2 expert weight lists, draft models, and packed
+sparse updates are unsupported. Updates apply in place: after a failed update,
+keep generation paused until the baseline is restored or the engine restarts.
 
 ### Pause and resume generation
 
@@ -260,15 +288,25 @@ limitations.
 
 ## Tokens in, tokens out
 
-The experimental tokens-only endpoint accepts pre-tokenized prompts and
-returns generated token IDs. Start the normal `serve` command with
-`--tokens-only`:
+The experimental token-in/token-out (TITO) endpoint accepts pre-tokenized
+prompts and, by default (`output_mode="tokens"`), returns generated token IDs.
+Apply tokenization and any chat template on the client before sending
+`token_ids`. Choose one of two serving modes:
 
 ```bash
+# Dedicated token-only serving: skips tokenizer initialization.
 vllm serve Qwen/Qwen3-0.6B --tokens-only
+
+# Enable TITO while retaining the normal serving setup and tokenizer.
+vllm serve Qwen/Qwen3-0.6B --enable-scale-out
 ```
 
-Send requests to `/inference/v1/generate`:
+`--tokens-only` uses token output and does not support stop strings; use
+`sampling_params.stop_token_ids` instead. A normal server started without
+either flag returns HTTP 403 for TITO requests, with a message to enable
+`--enable-scale-out`.
+
+Send a non-streaming request to `/inference/v1/generate`:
 
 ```bash
 curl http://127.0.0.1:8000/inference/v1/generate \
@@ -276,38 +314,80 @@ curl http://127.0.0.1:8000/inference/v1/generate \
     -d '{
         "request_id": "rollout-001",
         "token_ids": [151644, 8948, 198],
+        "output_mode": "tokens",
         "sampling_params": {
             "temperature": 1.0,
-            "max_tokens": 32,
+            "max_tokens": 2,
             "logprobs": 1
         }
     }'
 ```
 
-A non-streaming response has the following shape:
+The following non-streaming response excerpt illustrates the structure for a
+request that reaches the two-token limit. Token IDs and logprob values are
+illustrative, not captured model output; other response fields are omitted:
 
 ```json
 {
-  "request_id": "rollout-001",
+  "request_id": "generate-tokens-rollout-001",
   "model": "Qwen/Qwen3-0.6B",
+  "output_mode": "tokens",
   "choices": [
     {
       "index": 0,
-      "logprobs": null,
-      "finish_reason": "stop",
+      "logprobs": {
+        "content": [
+          {
+            "token_id": 123,
+            "logprob": -0.5,
+            "rank": 1,
+            "top_logprobs": [
+              {"token_id": 123, "logprob": -0.5, "rank": 1}
+            ]
+          },
+          {
+            "token_id": 456,
+            "logprob": -0.7,
+            "rank": 1,
+            "top_logprobs": [
+              {"token_id": 456, "logprob": -0.7, "rank": 1}
+            ]
+          }
+        ]
+      },
+      "finish_reason": "length",
+      "stop_reason": null,
       "token_ids": [123, 456],
       "routed_experts": null
     }
   ],
   "prompt_logprobs": null,
-  "usage": null
+  "usage": {
+    "prompt_tokens": 3,
+    "completion_tokens": 2,
+    "total_tokens": 5
+  }
 }
 ```
 
-The exact logprob and usage values depend on the sampling parameters and
-server configuration. The API is intended for disaggregated serving and may
-change; track the upstream [Tokens API RFC](https://github.com/vllm-project/vllm/issues/22817)
-for its status.
+In token output mode, `choices[].logprobs.content` contains an integer
+`token_id`, its `logprob` and `rank`, and `top_logprobs` for each generated
+position. Non-streaming responses include `usage` without requiring
+`stream_options.include_usage`. Here, three prompt tokens and two completion
+tokens give five total tokens; `stop_reason` is `null` because generation
+reached `max_tokens`.
+
+Set `stream=true` to receive server-sent events (SSE), ending with
+`data: [DONE]`. To cancel an in-flight request, send a POST to
+`/inference/v1/abort_requests` with a JSON body containing `request_ids`, a
+list of IDs returned by the server (including the `generate-tokens-` prefix),
+rather than the original client-supplied IDs.
+
+For the full protocol and the `text` output mode, which requires a tokenizer,
+see the upstream
+[TITO guide](https://docs.vllm.ai/en/latest/serving/online_serving/token_in_token_out/).
+The [Tokens API RFC](https://github.com/vllm-project/vllm/issues/22817)
+provides design background.
 
 ## Tool calling for agentic RL
 
@@ -358,15 +438,16 @@ model runner V2 and the scale-out endpoints:
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=1 \
-VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 \
 vllm serve Qwen/Qwen3-8B \
+    --enable-scale-out \
     --enable-trace-replay
 ```
 
 `VLLM_USE_V2_MODEL_RUNNER=1` prevents the server from falling back to model
 runner V1, which is incompatible with trace replay.
-`VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1` registers the
+`--enable-scale-out` registers the
 `/inference/v1/generate` endpoint for a normal serving process.
+`--enable-trace-replay` opts the server into accepting trace replay requests.
 
 Send requests to `/inference/v1/generate`:
 
@@ -399,7 +480,7 @@ The output tokens will always be `[15, 284, 1026, 374]`. The logprobs reflect th
 | `--weight-transfer-config '{"backend": "ipc"}'` | Same-NPU weight transfer | Select the Ascend NPU IPC transfer engine |
 | `--enable-return-routed-experts` | MoE router replay | Return encoded expert routing decisions |
 | `VLLM_USE_V2_MODEL_RUNNER=1` | Trace replay | Select the required model runner V2 implementation |
-| `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1` | Token-in/token-out requests on a normal server | Register `/inference/v1/generate` |
+| `--enable-scale-out` | Token-in/token-out requests on a normal server | Register `/inference/v1/generate`; `--tokens-only` also registers this endpoint |
 | `--enable-trace-replay` | trace replay | Forces decoding to follow a predetermined token sequence |
 
 For the Ascend-specific option definitions, see

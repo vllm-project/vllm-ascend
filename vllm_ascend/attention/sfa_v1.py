@@ -266,7 +266,11 @@ class SparseMLAMetadataState:
         expand_factor = max(cache_block_size // kernel_block_size, 1)
         table_width = cdiv(vllm_config.model_config.max_model_len, cache_block_size) * expand_factor
         capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or []
-        table_rows = max([vllm_config.scheduler_config.max_num_seqs + 1, *capture_sizes])
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            # PCP represents each prefill with two rank-local request chunks.
+            max_num_reqs *= 2
+        table_rows = max([max_num_reqs + 1, *capture_sizes])
         self.block_table_buffer = torch.empty(table_rows, table_width, dtype=torch.int32, device=device)
         if self.use_smla:
             config = vllm_config.model_config.hf_text_config
@@ -1640,11 +1644,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             actual_seq_lengths_key,
             block_table=block_table,
         )
-        if self.qk_rope_head_dim == 0:
-            # As in floating NoPE, graph-capacity rows may be unwritten by the kernel.
-            assert isinstance(output, torch.Tensor)
-            valid = torch.arange(ql_nope.shape[0], device=ql_nope.device) < actual_seq_lengths_query[-1]
-            output = output.masked_fill(~valid[:, None, None], 0)
         return output
 
     def _record_query_gather_context(

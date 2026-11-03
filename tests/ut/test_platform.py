@@ -345,8 +345,9 @@ def test_setup_compile_backend_scopes_kda_splitting_to_piecewise(mode):
 
     _setup_compile_backend(config, compile_backend="test_backend")
 
+    assert "vllm::glm5next_kda_forward" not in compilation_config.splitting_ops
     expected_count = int(mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE))
-    assert compilation_config.splitting_ops.count("vllm::glm5next_kda_forward") == expected_count
+    assert compilation_config.splitting_ops.count("vllm::glm5next_kda_forward_with_output") == expected_count
     if mode in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY):
         assert compilation_config.splitting_ops == []
 

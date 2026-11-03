@@ -64,7 +64,7 @@ def test_upstream_context_creation_uses_ascend_patch_and_caches(monkeypatch):
     builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
     builder.recoverssm_context = None
     builder.layer_names = ["layer0", "layer1"]
-    layers = [object(), object()]
+    layers = [SimpleNamespace(recoverssm_backend="triton") for _ in builder.layer_names]
     builder.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm5_next")),
         cache_config=SimpleNamespace(use_replayssm=True),
@@ -79,7 +79,13 @@ def test_upstream_context_creation_uses_ascend_patch_and_caches(monkeypatch):
     monkeypatch.setattr(KDARecoverSSMCommitContext, "create", create)
     assert builder._get_recoverssm_context() is context
     assert builder._get_recoverssm_context() is context
-    create.assert_called_once_with(layers, spec_query_len=6, max_num_reqs=12)
+    create.assert_called_once()
+    args, kwargs = create.call_args
+    assert args == (layers,)
+    assert kwargs["spec_query_len"] == 6
+    assert kwargs["max_num_reqs"] == 12
+    # vLLM main forwards the commit backend; 0.32.0 does not.
+    assert kwargs.get("backend", "triton") == "triton"
 
 
 @pytest.mark.parametrize("model_type", ["glm5_next", "glm5_next_text", "kimi_k3", None])
