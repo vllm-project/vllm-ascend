@@ -195,7 +195,7 @@ class SingleNodeConfigLoader:
                 if per_instance_envs and len(per_instance_envs) != len(cmds):
                     raise ValueError(
                         f"pd_server_envs has {len(per_instance_envs)} entries "
-                        f"but pd_server_cmds has {len(cmds)}"
+                        f"pd_server_envs has {len(per_instance_envs)} entries but pd_server_cmds has {len(cmds)}"
                     )
 
     @classmethod
