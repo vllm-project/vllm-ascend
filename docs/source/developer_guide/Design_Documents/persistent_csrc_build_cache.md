@@ -184,6 +184,20 @@ recipe values after the same root normalization contract. `--set-env` compiler
 overrides also participate, using their exact values: an override may point to
 an input not otherwise covered by the prepared-input identity.
 
+`--normalize-set-env NAME` opts a declared override into the existing path
+normalization. The custom-operator caller uses this only for its generated
+`ASCEND_CUSTOM_OPP_PATH`, with the OPP root in `NORMALIZE_PATH` and the generated
+SoC configuration and tiling library in `PREPARED_INPUT`. Moving or renaming
+that root preserves identity when those inputs are unchanged. Different
+configuration or library bytes still invalidate the entry. Other overrides
+retain exact-value identity.
+
+Custom-operator callers exclude README, Markdown/reStructuredText and `docs/`
+from both prepared inputs and the operator namespace. They also exclude
+`tests/` when `ENABLE_TEST` and `BENCHMARK` are both off. Test builds retain
+their test-source identity; kernel, host/tiling and shared compiler sources
+remain identity-sensitive.
+
 The compiler-environment identity covers the host platform, selected compiler
 profile, tool version output, CANN metadata, and explicit environment values.
 Absolute compiler installation paths are not semantic when the reported tool
@@ -203,6 +217,9 @@ update the matching identity group in the same change:
   compiler/toolkit environment; and
 - `NORMALIZE_PATH` removes only a physical location whose referenced semantic
   content is already covered by one of those identity groups.
+
+`NORMALIZE_SET_ENV` selects which `SET_ENV` values use those declared roots.
+`EXCLUDE` applies consistently to prepared inputs and the operator namespace.
 
 Removing or omitting an identity argument can cause a false HIT. Adding a
 non-semantic physical path can cause avoidable cross-workspace misses. Changes

@@ -27,6 +27,8 @@ def build_cache_command(
     normalize_paths: Sequence[Path] = (),
     artifact_includes: Sequence[str] = (),
     set_env_values: Sequence[str] = (),
+    normalize_set_env: Sequence[str] = (),
+    excludes: Sequence[str] = (),
     soc: str | None = None,
     operator: str | None = None,
     action: str | None = None,
@@ -57,6 +59,8 @@ def build_cache_command(
         "--normalize-path": normalize_paths,
         "--artifact-include": artifact_includes,
         "--set-env": set_env_values,
+        "--normalize-set-env": normalize_set_env,
+        "--exclude": excludes,
     }
     for option, values in repeated_options.items():
         for value in values:

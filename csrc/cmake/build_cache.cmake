@@ -74,6 +74,7 @@ function(vllm_ascend_build_cache_command OUT_VAR)
         ENVIRONMENT_VALUE
         ENVIRONMENT_TOOL
         NORMALIZE_PATH
+        NORMALIZE_SET_ENV
         ARTIFACT_INCLUDE
         EXCLUDE
         SET_ENV
@@ -195,6 +196,10 @@ function(vllm_ascend_build_cache_command OUT_VAR)
     list(APPEND _cache_command --normalize-path "${CMAKE_BINARY_DIR}")
     foreach(value IN LISTS CACHE_NORMALIZE_PATH)
         list(APPEND _cache_command --normalize-path "${value}")
+    endforeach()
+
+    foreach(value IN LISTS CACHE_NORMALIZE_SET_ENV)
+        list(APPEND _cache_command --normalize-set-env "${value}")
     endforeach()
 
     foreach(value IN LISTS CACHE_ARTIFACT_INCLUDE)

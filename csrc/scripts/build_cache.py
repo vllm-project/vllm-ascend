@@ -487,6 +487,7 @@ def _git_tracked_files(source_dir: Path, repo_root: Path) -> list[Path] | None:
 def _hash_operator_text(
     source_dir: Path,
     repo_root: Path | None,
+    excludes: Sequence[str] = (),
 ) -> tuple[str, list[dict]]:
     source_dir = source_dir.resolve()
     candidates = _git_tracked_files(source_dir, repo_root) if repo_root is not None else None
@@ -509,6 +510,9 @@ def _hash_operator_text(
                 relative = path.relative_to(source_dir).as_posix()
             except ValueError:
                 continue
+
+        if _is_excluded(relative, excludes):
+            continue
 
         if path.is_symlink():
             target = os.readlink(path)
@@ -591,6 +595,7 @@ def _hash_recipe(
     command: Sequence[str],
     normalize_paths: Sequence[Path],
     set_env_values: Sequence[str] = (),
+    normalize_set_env: Sequence[str] = (),
 ) -> tuple[str, list[dict]]:
     records: list[tuple[str, str]] = []
     manifest: list[dict] = []
@@ -645,9 +650,11 @@ def _hash_recipe(
     )
     manifest.append({"kind": "command", "argv": normalized_command})
 
-    # Compiler overrides can reference inputs outside the prepared-input set.
-    # Hash exact values: normalizing those paths could create a false HIT.
+    # Only normalize explicitly declared variables whose referenced inputs are
+    # covered independently. Other compiler overrides keep their exact values.
     for index, value in enumerate(set_env_values):
+        if value.partition("=")[0] in normalize_set_env:
+            value = _normalize_text(value, normalize_paths)
         value_hash = _sha256_bytes(value.encode("utf-8"))
         records.append((f"set_env[{index}]", value_hash))
         manifest.append({"kind": "set_env", "index": index, "sha256": value_hash})
@@ -1479,9 +1486,11 @@ def run(args: argparse.Namespace) -> int:
     operator_text_manifest: list[dict] = []
     if args.domain == "custom_operator":
         repo_root = Path(args.repo_root) if args.repo_root else None
-        operator_text_hash, operator_text_manifest = _hash_operator_text(Path(args.operator_source), repo_root)
+        operator_text_hash, operator_text_manifest = _hash_operator_text(Path(args.operator_source), repo_root, excludes)
 
-    recipe_hash, recipe_manifest = _hash_recipe(recipe_files, args.recipe_value, command, normalize_paths, args.set_env)
+    recipe_hash, recipe_manifest = _hash_recipe(
+        recipe_files, args.recipe_value, command, normalize_paths, args.set_env, args.normalize_set_env
+    )
     environment_hash, environment_manifest = _hash_compiler_environment(
         args.environment_profile,
         environment_files,
@@ -1725,6 +1734,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--environment-value", action="append", default=[])
     run_parser.add_argument("--environment-tool", action="append", default=[])
     run_parser.add_argument("--normalize-path", action="append", default=[])
+    run_parser.add_argument("--normalize-set-env", action="append", default=[])
     run_parser.add_argument("--artifact-include", action="append", default=[])
     run_parser.add_argument("--exclude", action="append", default=[])
     run_parser.add_argument("--set-env", action="append", default=[])

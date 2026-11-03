@@ -100,6 +100,8 @@ def _run_cache(
     publish_state_dir: Path | None = None,
     normalize_paths: list[Path] | None = None,
     set_env_values: list[str] | None = None,
+    normalize_set_env: list[str] | None = None,
+    excludes: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     is_custom = domain == "custom_operator"
     actual_output = output_dir
@@ -124,6 +126,8 @@ def _run_cache(
         normalize_paths=normalize_paths or [],
         artifact_includes=artifact_includes or [],
         set_env_values=set_env_values or [],
+        normalize_set_env=normalize_set_env or [],
+        excludes=excludes or [],
         build_command=[
             sys.executable,
             str(builder),

@@ -702,6 +702,17 @@ function(add_bin_compile_target)
             )
             if (ENABLE_OPS_HOST OR ENABLE_HOST_TILING)
                 list(APPEND _CACHE_SET_ENV ASCEND_CUSTOM_OPP_PATH=${CUSTOM_DIR})
+                # Hash the generated OPP inputs before normalizing its location.
+                # Use the library target, rather than its absolute symlink text.
+                list(APPEND _CACHE_PREPARED_INPUTS
+                    ${CUSTOM_DIR}/op_impl/ai_core/tbe/config/${BINARY_COMPUTE_UNIT}
+                    $<TARGET_FILE:cust_opmaster>
+                )
+            endif()
+
+            set(_CACHE_EXCLUDES "*.md" "*.rst" "README" "docs" "docs/**")
+            if (NOT ENABLE_TEST AND NOT BENCHMARK)
+                list(APPEND _CACHE_EXCLUDES "tests" "tests/**")
             endif()
 
             # Compile every action into a private directory. Multiple
@@ -737,7 +748,9 @@ function(add_bin_compile_target)
                 RECIPE_FILE ${bin_script}
                 ENVIRONMENT_PROFILE ascendc
                 ENVIRONMENT_FILE ${_CACHE_ENVIRONMENT_FILES}
-                NORMALIZE_PATH ${ASCEND_CANN_PACKAGE_PATH}
+                NORMALIZE_PATH ${ASCEND_CANN_PACKAGE_PATH} ${CUSTOM_DIR}
+                NORMALIZE_SET_ENV ASCEND_CUSTOM_OPP_PATH
+                EXCLUDE ${_CACHE_EXCLUDES}
                 SET_ENV ${_CACHE_SET_ENV}
                 COMMAND bash ${bin_script} ${OP_SRC_OUT_DIR}/${op_type}.py ${_CACHE_ACTION_STAGE_DIR}
             )
