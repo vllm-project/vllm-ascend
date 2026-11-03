@@ -18,11 +18,7 @@ import torch
 from vllm_ascend.expert_offload.config import ExpertOffloadConfig
 from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
 from vllm_ascend.expert_offload.quantization import expert_adapter_type, maybe_offload_quant_method
-from vllm_ascend.expert_offload.utils import (
-    expert_offload_loading,
-    finalize_expert_offload_loading,
-    is_offload_target_loading,
-)
+from vllm_ascend.expert_offload.utils import finalize_expert_offload_loading
 from vllm_ascend.quantization.quant_type import QuantType
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -169,7 +165,6 @@ def make_runner(*, manager=None, fail_load=False, fail_forward=False, has_prefil
         {
             "torch": torch,
             "finalize_expert_offload_loading": finalize_expert_offload_loading,
-            "expert_offload_loading": expert_offload_loading,
             "logger": Mock(),
             "CUDAGraphMode": SimpleNamespace(NONE=0),
             "C8KVBlockZeroer": type("C8KVBlockZeroer", (), {}),
@@ -425,10 +420,9 @@ def quant_methods(monkeypatch):
             "expert_adapter_type": expert_adapter_type,
         },
     )
-    target = object()
-    state = SimpleNamespace(config=None, model_config=target)
+    state = SimpleNamespace(config=None)
     monkeypatch.setattr("vllm.compilation.backends.model_tag", "backbone")
-    runner = SimpleNamespace(vllm_config=SimpleNamespace(model_config=target), expert_offload_manager=object())
+    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: object())
     config_module = ModuleType("vllm_ascend.ascend_config")
     monkeypatch.setattr(
         config_module, "get_ascend_config", lambda: SimpleNamespace(expert_offload_config=state.config), raising=False
@@ -459,7 +453,6 @@ def quant_methods(monkeypatch):
         state=state,
         scheme=scheme,
         binding=binding_factory,
-        runner=runner,
     )
 
 
@@ -473,9 +466,8 @@ def test_quant_wrapper_only_offloads_target_and_preserves_native_draft(quant_met
     layer = q.layer
     native = q.native_cls(q.scheme, layer.moe_config)
     quant_config = SimpleNamespace(get_quant_method=Mock(return_value=native))
-    with expert_offload_loading(q.runner):
-        monkeypatch.setattr("vllm.compilation.backends.model_tag", model_tag)
-        method = layer._get_quant_method("experts", quant_config, layer.moe_config)
+    monkeypatch.setattr("vllm.compilation.backends.model_tag", model_tag)
+    method = layer._get_quant_method("experts", quant_config, layer.moe_config)
     quant_config.get_quant_method.assert_called_once_with(layer, "experts", tid2eid=None)
     offloaded = enabled and not is_draft
     assert isinstance(method, q.offload_cls) is offloaded
@@ -506,40 +498,38 @@ def test_missing_offload_config_preserves_native_method(quant_methods):
     assert layer._get_quant_method("experts", quant_config, None) is native
 
 
-@pytest.mark.parametrize("fail", [False, True])
-def test_loading_scope_restores_nested_disabled_load_and_failure(quant_methods, fail):
+def test_no_runtime_config_preserves_native_method(quant_methods, monkeypatch):
+    q = quant_methods
+    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: None)
+    get_config = Mock(side_effect=AssertionError("standalone layers must not require Ascend config"))
+    monkeypatch.setattr("vllm_ascend.ascend_config.get_ascend_config", get_config)
+    native = object()
+    quant_config = SimpleNamespace(get_quant_method=lambda *_a, **_k: native)
+    assert q.layer._get_quant_method("experts", quant_config, None) is native
+    get_config.assert_not_called()
+
+
+@pytest.mark.parametrize("draft_tag", ["dspark_head", "eagle_head"])
+def test_native_draft_tag_preserves_method_and_restores_target_selection(quant_methods, draft_tag):
     from vllm.compilation.backends import set_model_tag
 
-    assert not is_offload_target_loading()
-    try:
-        with expert_offload_loading(quant_methods.runner):
-            assert is_offload_target_loading()
-            # A multimodal inner model may clone ModelConfig; the loading tag
-            # still identifies the target without a model-specific exception.
-            with patch("vllm.config.get_current_vllm_config", return_value=object()):
-                assert is_offload_target_loading()
-            with expert_offload_loading(SimpleNamespace(expert_offload_manager=None)):
-                assert not is_offload_target_loading()
-            assert is_offload_target_loading()
-            with set_model_tag("dspark_head"):
-                assert not is_offload_target_loading()
-            assert is_offload_target_loading()
-            if fail:
-                raise RuntimeError("loading failed")
-    except RuntimeError as error:
-        assert fail and str(error) == "loading failed"
-    assert not is_offload_target_loading()
+    q = quant_methods
+    q.state.config = ExpertOffloadConfig(enabled=True, num_device_experts=2)
+    native = q.native_cls(q.scheme, q.layer.moe_config)
+    quant_config = SimpleNamespace(get_quant_method=lambda *_a, **_k: native)
+    with set_model_tag(draft_tag):
+        assert q.layer._get_quant_method("experts", quant_config, q.layer.moe_config) is native
+    assert isinstance(q.layer._get_quant_method("experts", quant_config, q.layer.moe_config), q.offload_cls)
 
 
 def test_routed_owner_rejects_unquantized_or_unsupported_adapter(quant_methods):
     quant_methods.state.config = ExpertOffloadConfig(enabled=True, num_device_experts=2)
     layer = quant_methods.layer
-    with expert_offload_loading(quant_methods.runner), pytest.raises(ValueError, match="quantized"):
+    with pytest.raises(ValueError, match="quantized"):
         layer._get_quant_method("experts", None, object())
     quant_config = SimpleNamespace(get_quant_method=lambda *_args, **_kwargs: object())
-    with expert_offload_loading(quant_methods.runner), pytest.raises(ValueError, match="does not support"):
+    with pytest.raises(ValueError, match="does not support"):
         layer._get_quant_method("experts", quant_config, object())
-    assert layer._get_quant_method("experts", quant_config, object()) is not None
 
 
 @pytest.mark.parametrize("offload,fail", [(False, False), (True, False), (True, True)])

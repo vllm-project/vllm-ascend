@@ -5,11 +5,12 @@ import torch
 
 from vllm_ascend.quantization.quant_type import QuantType
 
-from .utils import is_offload_target_loading
-
 
 def maybe_offload_quant_method(layer, method):
-    if not is_offload_target_loading():
+    from vllm.config import get_current_vllm_config_or_none
+
+    # Standalone layer construction keeps the native path without Ascend config.
+    if get_current_vllm_config_or_none() is None:
         return method
 
     # Called during RoutedExperts construction, after Ascend config is ready.
@@ -17,6 +18,12 @@ def maybe_offload_quant_method(layer, method):
 
     config = getattr(get_ascend_config(), "expert_offload_config", None)
     if config is None or not config.enabled:
+        return method
+
+    from vllm.compilation import backends
+
+    # Native draft loaders switch away from the target's default backbone tag.
+    if backends.model_tag != "backbone":
         return method
 
     from .method import ExpertOffloadMoEMethod

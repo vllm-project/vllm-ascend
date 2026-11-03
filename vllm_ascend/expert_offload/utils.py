@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -12,35 +10,6 @@ from .residency import ExpertResidency
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner
-
-# Each loading call owns its token; reset on success or failure. ContextVar keeps
-# concurrent/nested loads isolated instead of changing global Ascend configuration.
-_OFFLOAD_TARGET: ContextVar[str | None] = ContextVar("expert_offload_target", default=None)
-
-
-@contextmanager
-def expert_offload_loading(runner: NPUModelRunner):
-    target = None
-    if runner.expert_offload_manager is not None:
-        from vllm.compilation import backends
-
-        target = backends.model_tag
-    token = _OFFLOAD_TARGET.set(target)
-    try:
-        yield
-    finally:
-        _OFFLOAD_TARGET.reset(token)
-
-
-def is_offload_target_loading() -> bool:
-    target = _OFFLOAD_TARGET.get()
-    if target is None:
-        return False
-    from vllm.compilation import backends
-
-    # Native draft loaders switch model_tag (DSpark retains target ModelConfig).
-    # Multimodal language submodels keep the target tag while cloning ModelConfig.
-    return backends.model_tag == target
 
 
 class ExpertMapBuffer:

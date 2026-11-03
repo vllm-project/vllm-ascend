@@ -94,7 +94,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     init_sparse_kv_offload_manager,
 )
 from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
-from vllm_ascend.expert_offload.utils import expert_offload_loading, finalize_expert_offload_loading
+from vllm_ascend.expert_offload.utils import finalize_expert_offload_loading
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -313,8 +313,7 @@ class NPUModelRunner(GPUModelRunner):
         start_nz_warm_thread("thread")
         try:
             aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
-            with expert_offload_loading(self):
-                super().load_model(load_dummy_weights, *args, **kwargs)
+            super().load_model(load_dummy_weights, *args, **kwargs)
             self.pd_dspark_aux_layer_ids = aux_layers
         finally:
             # Join even when weight loading fails: these threads touch the NPU
