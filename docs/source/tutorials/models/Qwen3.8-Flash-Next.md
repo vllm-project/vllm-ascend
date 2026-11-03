@@ -4,13 +4,13 @@
 
 Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experimental preview of the architecture that will underpin Qwen4. Its language model combines Gated DeltaNet (GDN) and Qwen Sparse Attention (QSA), gated residual connections, Position Learning Enhancement (PLE), and a native Multi-Token Prediction (MTP) head.
 
-This tutorial describes model preparation, installation, online serving, functional verification, and evaluation. It covers single-node colocated deployment on Atlas 800 A3 and Ascend 950 DT, and prefill/decode (PD) separation on both platforms.
+This tutorial describes model preparation, installation, online serving, functional verification, and evaluation. It covers colocated deployment and prefill/decode (PD) separation on A2 Series, Atlas 800 A3, and Ascend 950 DT. A2 and A3 share the service configuration; PD separation requires 16 devices in total for the shared TP2 × DP4 configuration.
 
 Qwen3.8-Flash-Next was first supported in `vllm-ascend:v0.26.0rc`. The original A3 W8A8 configuration was validated with text and multimodal input. The deployment examples below include additional performance settings and require separate runtime and accuracy validation.
 
 !!! warning
 
-    Automatic Prefix Caching is experimental. For A3 colocated deployment, enable it with `--enable-prefix-caching --mamba-cache-mode align` and revalidate NPU memory capacity for the target context length and concurrency.
+    Automatic Prefix Caching is experimental. For A2/A3 colocated deployment, enable it with `--enable-prefix-caching --mamba-cache-mode align` and revalidate NPU memory capacity for the target context length and concurrency.
 
 ## 2 Supported Features
 
@@ -26,8 +26,8 @@ Select the checkpoint that matches the deployment configuration:
 
 | Hardware | Deployment | Checkpoint | Device allocation | Download Links |
 | --- | --- | --- | --- | --- |
-| Atlas 800 A3 | Colocated | `Qwen3.8-Flash-Next-w8a8-mtp` | 8 devices, TP8 × DP1 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
-| Atlas 800 A3 | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | |
+| A2 Series / Atlas 800 A3 | Colocated | `Qwen3.8-Flash-Next-w8a8-mtp` | 8 devices, TP8 × DP1 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
+| A2 Series / Atlas 800 A3 | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | |
 | Ascend 950 DT | Colocated | `Qwen3.8-Flash-Next-w8a8-mxfp8` | 4 devices, TP4 × DP1 | |
 | Ascend 950 DT | PD separation | Ascend-compatible W4A8-MXFP | 8 devices, TP2 × DP2 per role | |
 
@@ -37,7 +37,7 @@ The commands use fixed model directories under `/models`. Mount the correspondin
 
 ### 4.1 Docker Image Installation
 
-The following images apply to the A3 W8A8 baseline. For 950 DT, prepare an environment with compatible vLLM and vLLM-Ascend versions; do not use an A3 image for that deployment.
+The following images apply to the A3 W8A8 baseline. For A2, use a compatible environment as described in Section 4.2. For 950 DT, prepare an environment with compatible vLLM and vLLM-Ascend versions; do not use an A3 image for that deployment.
 
 A pre-built Qwen3.8 A3 image is available in the [vllm-ascend repository](https://quay.io/repository/ascend/vllm-ascend?tab=tags&tag=latest). Select the image that matches the host operating system:
 
@@ -108,7 +108,7 @@ Before starting:
 - Network examples use `192.168.0.1` and `eth0`. Replace these literals with the serving host address and its network interface.
 - Verify available NPU memory before changing context length, concurrency, or memory utilization.
 
-=== "A3 Series"
+=== "A2 Series / A3 Series"
 
     This W8A8 deployment uses TP8 × DP1, a maximum context length of 131072 tokens, and up to 8 active sequences.
 
@@ -155,7 +155,7 @@ Before starting:
     - `VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1` enables the fused QSA Lightning Indexer path.
     - `VLLM_ASCEND_ENABLE_QSA_E3V=1` enables the fused QSA Expand E3 path.
     - `--quantization ascend` loads the Ascend-compatible W8A8 checkpoint.
-    - `--tensor-parallel-size 8` and `--data-parallel-size 1` configure the A3 single-DP TP8 topology.
+    - `--tensor-parallel-size 8` and `--data-parallel-size 1` configure the A2/A3 single-DP TP8 topology.
     - `--max-model-len 131072` caps the maximum context length. Common values: `65536` (64K), `131072` (128K).
     - `--enable-expert-parallel` enables expert parallelism for the MoE layers.
     - `--enable-prefix-caching --mamba-cache-mode align` enables Prefix Caching with aligned GDN and PLE state checkpoints.
@@ -238,7 +238,7 @@ Before starting:
 
 **Service Verification:**
 
-Wait for model loading and graph capture to complete, then check the service from the serving host. Use port `8088` for A3 or `8087` for 950 DT:
+Wait for model loading and graph capture to complete, then check the service from the serving host. Use port `8088` for A2/A3 or `8087` for 950 DT:
 
 ```bash
 curl --fail http://127.0.0.1:8088/v1/models
@@ -250,9 +250,9 @@ The response should list the configured model name. After startup, use [Section 
 
 Select the hardware tab below.
 
-=== "A3 Series"
+=== "A2 Series / A3 Series"
 
-    On a single Atlas 800 A3 host, prefill and decode each use eight devices with TP2 × DP4. Both roles load the same W4A8 checkpoint and enable expert parallelism, async scheduling, and Model Runner V2. MooncakeConnectorV2 transfers KV cache between them; requests enter the proxy on port 25570.
+    A2 and A3 use the same TP2 × DP4 configuration per role: prefill and decode each require eight devices. The commands below show the 16-device single-host layout. An eight-device A2 host cannot run both roles with this layout; deployment across two hosts requires separate host addresses, device numbering, and proxy endpoints. Both roles load the same W4A8 checkpoint and enable expert parallelism, async scheduling, and Model Runner V2. MooncakeConnectorV2 transfers KV cache between them; requests enter the proxy on port 25570.
 
     | Setting | Prefill | Decode |
     | --- | --- | --- |
@@ -714,13 +714,13 @@ Select the hardware tab below.
 
 After the service is started, the model can be invoked by sending a prompt. The `chat/completions` API is supported. Use the `--served-model-name` you configured (`qwen3.8-flash-next` for `Qwen3.8-Flash-Next`).
 
-The requests below use the A3 colocated endpoint. Select the endpoint and model name for the deployment being tested:
+The requests below use the A2/A3 colocated endpoint. Select the endpoint and model name for the deployment being tested:
 
 | Deployment | Port | Model name |
 | --- | --- | --- |
-| A3 colocated | 8088 | `qwen3.8-flash-next` |
+| A2/A3 colocated | 8088 | `qwen3.8-flash-next` |
 | 950 DT colocated | 8087 | `qwen3.8-flash-next-950-dt` |
-| A3 PD proxy | 25570 | `qwen38-flash-next-a3-pd` |
+| A2/A3 PD proxy | 25570 | `qwen38-flash-next-a3-pd` |
 | 950 DT PD proxy | 8087 | `qwen38-flash-next-950-dt-pd` |
 
 For PD, first complete the proxy check and review the key parameters in [Section 5.2](#52-pd-separation-deployment).
@@ -883,7 +883,7 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 
 Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for evaluation setup and usage. The result below is for reference only.
 
-The following result was recorded for the original A3 W8A8 TP8 × DP1 configuration, before adding Model Runner V2, the explicit torch PLE backend, async scheduling, and MoE communication optimizations to the command in [Section 5.1](#51-single-node-online-deployment). It does not establish the accuracy of the updated command or the 950 DT and W4A8 PD configurations.
+The following result was recorded for the original A3 W8A8 TP8 × DP1 configuration, before adding Model Runner V2, the explicit torch PLE backend, async scheduling, and MoE communication optimizations to the command in [Section 5.1](#51-single-node-online-deployment). It does not establish the accuracy of the updated command or the A2, 950 DT, and W4A8 PD configurations.
 
 | Hardware | Dataset | Metric | Score |
 | --- | --- | --- | --- |
@@ -907,10 +907,10 @@ Use the configuration for your hardware and deployment mode. The table summarize
 
 | Hardware | Deployment / role | Devices | TP × DP | Max model length | Max sequences | Batch tokens |
 | --- | --- | --- | --- | --- | --- | --- |
-| A3 | Colocated | 0–7 | 8 × 1 | 131072 | 8 | 4096 |
+| A2/A3 | Colocated | 0–7 | 8 × 1 | 131072 | 8 | 4096 |
 | 950 DT | Colocated | 0–3 | 4 × 1 | 141312 | 32 | 4096 |
-| A3 | Prefill | 0–7 | 2 × 4 | 141312 | 32 | 4096 |
-| A3 | Decode | 8–15 | 2 × 4 | 141312 | 32 | 4096 |
+| A2/A3 | Prefill | 0–7 | 2 × 4 | 141312 | 32 | 4096 |
+| A2/A3 | Decode | 8–15 | 2 × 4 | 141312 | 32 | 4096 |
 | 950 DT | Prefill | 0–3 | 2 × 2 | 141312 | 64 | 4096 |
 | 950 DT | Decode | 4–7 | 2 × 2 | 141312 | 64 | 4096 |
 
