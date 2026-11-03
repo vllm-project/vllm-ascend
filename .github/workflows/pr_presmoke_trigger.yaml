@@ -17,6 +17,7 @@ jobs:
       # ========== 核心修改：head.ref → head.sha ==========
       vllm_ascend_branch: ${{ github.event.pull_request.head.sha }}
       # ==================================================
+      base_image_branch: ${{ github.event.pull_request.base.ref }}
       vllm_ref_for_test: ${{ github.event.pull_request.head.sha }}
       should_push: false
       run_presmoke: true
