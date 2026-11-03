@@ -1,19 +1,27 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import queue
+import signal
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import torch
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
+    Backend,
+    StoreCapacityError,
+    TransferCompletionUnknown,
+    require_aligned_batch_results,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
 )
@@ -22,6 +30,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     get_block_hashes,
 )
+
+if TYPE_CHECKING:
+    from .state_store.state_store_layout import AcceptedStateStoreLayout
+
 
 _TRANSFER_SHUTDOWN_POLL_S = 0.1
 
@@ -62,6 +74,8 @@ class KVTransferThread(threading.Thread):
         self.kv_event_lock = threading.Lock()
         self.kv_events: list[BlockStored] = []
         self._fatal_error: BaseException | None = None
+        # Keep the request and its fences alive until DMA completion is proven.
+        self._inflight_request: ReqMeta | None = None
         self.save_disabled = threading.Event()
         self.load_disabled = threading.Event()
 
@@ -98,9 +112,11 @@ class KVTransferThread(threading.Thread):
     def add_request(self, request: Any) -> None:
         with self._request_submit_lock:
             if self._stopping.is_set():
+                self._discard_request(request)
                 return
             if self._fatal_error is not None:
                 logger.error("Reject KV transfer submission to failed thread %s: %s", self.name, self._fatal_error)
+                self._discard_request(request)
                 return
             self.request_queue.put(request)
 
@@ -110,6 +126,20 @@ class KVTransferThread(threading.Thread):
                 self._stopping.set()
                 if self.is_alive():
                     self.request_queue.put(None)
+                else:
+                    self._discard_queued_requests()
+
+    def _discard_request(self, request: Any) -> None:
+        """Retire an item that has never submitted backend work."""
+
+    def _discard_queued_requests(self) -> None:
+        while True:
+            try:
+                request = self.request_queue.get_nowait()
+            except queue.Empty:
+                return
+            self._discard_request(request)
+            self.request_queue.task_done()
 
     def _wait_for_event(
         self,
@@ -316,19 +346,36 @@ class KVTransferThread(threading.Thread):
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         self._set_os_thread_name()
-        self.m_store.set_device()
-        self.ready_event.set()
+        try:
+            self.m_store.set_device()
+        except Exception as exc:
+            with self._request_submit_lock:
+                self._fatal_error = exc
+                self._handle_request_exception(None)
+            return
+        finally:
+            self.ready_event.set()
         while True:
             request_data = None
             try:
                 request_data = self.request_queue.get()
                 if request_data is None or self._stopping.is_set():
+                    self._discard_request(request_data)
                     self.request_queue.task_done()
                     if request_data is None:
                         return
                     continue
                 self._handle_request(request_data)
             except Exception as e:
+                if isinstance(e, TransferCompletionUnknown):
+                    # DMA termination is unproven. Preserve buffers and SDK
+                    # handles through process teardown without Python finalizers.
+                    logger.critical(
+                        "KV transfer completion unknown in %s; terminating worker with buffers retained",
+                        self.name,
+                        exc_info=True,
+                    )
+                    os.kill(os.getpid(), signal.SIGKILL)
                 with self._request_submit_lock:
                     self._fatal_error = e
                     try:
@@ -470,6 +517,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         group_uses_align_state: list[bool] | None = None,
         enable_kv_event: bool = False,
         worker: Any = None,
+        *,
+        state_store_layouts: dict[int, AcceptedStateStoreLayout] | None = None,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
@@ -487,6 +536,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
         self.worker = worker
+        self.state_store_layouts = dict(state_store_layouts or {})
+        self._use_store_jobs = state_store_layouts is not None
         # Request-local durable high-water marks. They are advanced only after
         # the backend store succeeds, so a failed range is retried on the next
         # Decode boundary instead of being lost when scheduler metadata moves
@@ -554,16 +605,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # either drains this complete batch or rejects it before registration.
         with self._request_submit_lock:
             if self._stopping.is_set():
+                for request in requests:
+                    self._discard_request(request)
                 save_batch.done.set()
                 return save_batch
             if self._fatal_error is not None:
                 logger.error("Reject KV save batch to failed thread %s: %s", self.name, self._fatal_error)
                 # No source KV is read, but completion must release Scheduler pins.
                 # Reject without registering jobs, advancing offsets, or emitting BlockStored.
-                with self.completed_events_lock:
-                    for request in requests:
-                        if request.event_id is not None:
-                            self.completed_events[request.event_id] = self.completed_events.get(request.event_id, 0) + 1
+                for request in requests:
+                    self._discard_request(request)
                 save_batch.done.set()
                 return save_batch
             for request in requests:
@@ -695,8 +746,35 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self.completed_events.clear()
         return completed_events
 
+    def _finish_state_job(self, request: ReqMeta) -> None:
+        remaining = self.finish_store_job(request)
+        if remaining == 0:
+            self.set_finished_request(request.req_id)
+        assert request.store_job_id is not None
+        with self.completed_events_lock:
+            self.completed_events[request.store_job_id] = 1
+
+    def _discard_request(self, request: Any) -> None:
+        if isinstance(request, KVCacheStoreBatch):
+            request.done.set()
+        elif isinstance(request, ReqMeta):
+            if self._use_store_jobs:
+                self._finish_state_job(request)
+            else:
+                remaining = self.finish_store_job(request)
+                if remaining == 0:
+                    self.set_finished_request(request.req_id)
+                if request.event_id is not None:
+                    with self.completed_events_lock:
+                        self.completed_events[request.event_id] = self.completed_events.get(request.event_id, 0) + 1
+
     def _handle_request_exception(self, request_data: Any):
         def finish_failed_request(failed_request: Any) -> None:
+            if failed_request is self._inflight_request:
+                return
+            if self._use_store_jobs:
+                self._discard_request(failed_request)
+                return
             if isinstance(failed_request, ReqMeta):
                 remaining = self.finish_store_job(failed_request)
                 if remaining == 0:
@@ -733,6 +811,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if isinstance(req_meta, KVCacheStoreBatch):
             req_meta.done.set()
             self.request_queue.task_done()
+            return
+
+        if self._use_store_jobs:
+            self._handle_store_job(req_meta)
             return
 
         if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
@@ -784,16 +866,103 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     self.completed_events[req_meta.event_id] = 1
             self.request_queue.task_done()
 
-    def _handle_stored_request(self, req_meta: ReqMeta) -> bool:
+    def _handle_store_job(self, request: ReqMeta) -> None:
+        """Finish only after checked DMA completion, including ordinary pages."""
+        self._inflight_request = request
+        try:
+            # Record durable progress at the same full-page boundary used by
+            # the sender, including a prefix shortened by skipped drafting.
+            coordinator = self.token_database.cache_coordinator
+            assert coordinator is not None
+            granularity = coordinator.lcm_block_size
+            request.token_len_chunk = request.token_len_chunk // granularity * granularity
+            request.save_end_token = min(request.save_end_token, request.token_len_chunk)
+            try:
+                if self.is_live_store_job(request) and request.can_save is not False:
+                    source_ready = False
+                    if request.boundary_puts:
+                        source_ready = self._store_boundary_states(request)
+                    if request.token_len_chunk:
+                        if self._handle_stored_request(request, source_ready=source_ready):
+                            self.record_saved_offset(request, request.token_len_chunk)
+                            self._clear_retry_token_ids(request)
+                        else:
+                            self._remember_retry_token_ids(request)
+            except StoreCapacityError:
+                self._remember_retry_token_ids(request)
+                logger.warning(
+                    "Store capacity rejected save job %s for request %s",
+                    request.store_job_id,
+                    request.req_id,
+                )
+            # Retired queued jobs still report their own references releasable.
+            self._finish_state_job(request)
+            self._inflight_request = None
+        finally:
+            # Queue completion never substitutes for DMA completion. An unknown
+            # SDK result propagates to run's fatal path and retains job refs.
+            self.request_queue.task_done()
+
+    def _store_boundary_states(self, request: ReqMeta) -> bool:
+        """Store scheduler-pinned states using registered layout templates.
+
+        The scheduler supplies committed dependency keys. This thread owns
+        the copy fence and backend I/O before retiring source references.
+        Return whether the source event was synchronized for this job.
+        """
+        if request.event_id is None or request.current_event is None:
+            raise ValueError("boundary save requires pinned blocks and a copy-completion event")
+        hashes = request.cache_key_hashes
+        if hashes is None:
+            raise ValueError("boundary save lacks committed model-dependent keys")
+        keys, addresses, sizes = [], [], []
+        for put in request.boundary_puts or ():
+            layout = self.state_store_layouts.get(put.group_id)
+            if layout is None:
+                raise ValueError(f"state Store layout is not registered for group {put.group_id}")
+            key_hash = hashes.get(put.num_tokens)
+            if not isinstance(key_hash, bytes) or not key_hash:
+                raise ValueError("boundary hash is missing or not committed bytes")
+            shards = layout.local_shard_ids
+            block_ids = [put.block_id] * len(shards)
+            group_addresses, group_sizes = layout.prepare_boundary_values(block_ids, shards)
+            keys.extend(layout.key_for(shard, key_hash) for shard in shards)
+            addresses.extend(group_addresses)
+            sizes.extend(group_sizes)
+        if not keys:
+            raise ValueError("boundary save has no state objects")
+        if len(set(keys)) != len(keys):
+            raise ValueError("boundary save contains duplicate Store objects")
+        # Match the native boundary-state save path: only missing objects
+        # need a source fence and DMA, including partially published states.
+        missing = self._get_missing_indices(keys, require_exists_check=True)
+        if not missing:
+            return False
+        keys = [keys[i] for i in missing]
+        addresses = [addresses[i] for i in missing]
+        sizes = [sizes[i] for i in missing]
+        request.current_event.synchronize()
+        self.m_store.put_checked(keys, addresses, sizes)
+        return True
+
+    def _handle_stored_request(self, req_meta: ReqMeta, *, source_ready: bool = False) -> bool:
         """Store missing KV chunks; log validation/PUT failures and return False."""
         if req_meta.can_save is False:
             return False
         token_len = req_meta.token_len_chunk
+        if self._use_store_jobs:
+            coord = self.token_database.cache_coordinator
+            assert coord is not None
+            token_len = token_len // coord.lcm_block_size * coord.lcm_block_size
+            if token_len == 0:
+                return True
         req_id = req_meta.req_id
         current_event = req_meta.current_event
         try:
             store_masks = self.token_database.store_mask(token_len, req_meta.num_prompt_tokens)
         except AssertionError as exc:
+            if self._use_store_jobs:
+                raise
             logger.debug("Skip AscendStore store mask for unaligned request %s: %s", req_id, exc)
             store_masks = None
         load_spec = req_meta.load_spec
@@ -820,6 +989,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
         for group_id in req_meta.kv_cache_group_ids or [0]:
+            if self._use_store_jobs and group_id in self.state_store_layouts:
+                continue
             group_block_size = self._get_block_size(group_id)
 
             group_store_mask = (
@@ -847,6 +1018,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return not should_skip(start, start + group_block_size, save_start)
 
             tp_replicas = self.put_step if self.dcp_size <= 1 and not align_state_group else 1
+            if self._use_store_jobs:
+                tp_replicas = self.tp_size
             # PCP=2, TP=4, KV heads=2, tp_replicas=2:
             # PCP  TP (KV 0 / KV 1)  shard_rank  filtered candidates
             #  0        0 / 2            0      0, 4, ...
@@ -865,6 +1038,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 chunk_mask=group_store_mask,
             )
             for start, end, key, block_hash, block_id in iterator:
+                if self._use_store_jobs:
+                    bound_hash = (req_meta.cache_key_hashes or {}).get(end)
+                    if bound_hash is None:
+                        raise ValueError("page save boundary lacks its bound identity")
+                    key = self.token_database.key_for(bound_hash, kv_cache_group_id=group_id)
                 starts.append(start)
                 ends.append(end)
                 keys.append(key)
@@ -971,9 +1149,30 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     len(keys),
                 )
                 return False
-            if current_event is not None:
+            if current_event is not None and not source_ready:
                 current_event.synchronize()
-            put_result = self.m_store.put(keys, addrs, sizes)
+                source_ready = True
+            if self._use_store_jobs:
+                try:
+                    self.m_store.put_checked(keys, addrs, sizes)
+                except StoreCapacityError as exc:
+                    # Preserve per-key event reporting for completed PP shards.
+                    shards_per_key = len(keys) // logical_key_count
+                    if self.enable_kv_event and len(stored_events) == logical_key_count:
+                        self.update_kv_event(
+                            [
+                                event
+                                for index, event in enumerate(stored_events)
+                                if all(
+                                    status == 0
+                                    for status in exc.results[index * shards_per_key : (index + 1) * shards_per_key]
+                                )
+                            ]
+                        )
+                    raise
+                put_result = None
+            else:
+                put_result = self.m_store.put(keys, addrs, sizes)
             if isinstance(put_result, list):
                 if len(put_result) != len(keys):
                     logger.error("KV store backend returned %s results for %s keys", len(put_result), len(keys))
@@ -1023,6 +1222,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         invalid_block_ids_lock: threading.Lock | None = None,
         worker: Any = None,
         record_operation: Callable[[str, float, int], None] | None = None,
+        *,
+        state_store_layouts: dict[int, AcceptedStateStoreLayout] | None = None,
     ):
         super().__init__(
             m_store,
@@ -1038,9 +1239,111 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
         self._record_operation_cb = record_operation
+        self.state_store_layouts = dict(state_store_layouts or {})
+        self._use_state_layouts = state_store_layouts is not None
+
+    def take_receive_results(self) -> tuple[set[str], set[str]]:
+        """One atomic snapshot: a failed receive must also finish its wait."""
+        with self.done_task_lock:
+            finished, failed = self.finished_requests, self.failed_requests
+            self.finished_requests, self.failed_requests = set(), set()
+            return finished, failed
+
+    def _receive_states_and_pages(self, request: ReqMeta) -> None:
+        """Native load_mask + StoreLayout addressing over core-owned targets."""
+        load = request.load_spec
+        if load is None or load.cache_key_hashes is None:
+            raise ValueError("state receive lacks the lookup's bound identities")
+        token_len = load.kvpool_cached_tokens
+        masks = self.token_database.load_mask(request.block_hashes, token_len)
+        keys, addresses, sizes = [], [], []
+        state_destinations: dict[int, list[int]] = {}
+        for group_id in request.kv_cache_group_ids or [0]:
+            group_mask = masks[group_id]
+            if not any(group_mask):
+                continue
+            blocks = request.block_ids_by_group[group_id]
+            block_size = self._get_block_size(group_id)
+            if group_id in self.state_store_layouts:
+                layout = self.state_store_layouts[group_id]
+                chunks, shards = [], []
+                for index, present in enumerate(group_mask):
+                    boundary = (index + 1) * block_size
+                    if not present or boundary <= load.vllm_cached_tokens:
+                        continue
+                    key_hash = load.cache_key_hashes.get(boundary)
+                    if key_hash is None:
+                        raise ValueError("receive boundary was not bound during lookup")
+                    for shard in layout.local_shard_ids:
+                        keys.append(layout.key_for(shard, key_hash))
+                        chunks.append((boundary - block_size, boundary))
+                        shards.append(shard)
+                group_addresses, group_sizes, destinations = layout.prepare_values(chunks, blocks, shards)
+                addresses.extend(group_addresses)
+                sizes.extend(group_sizes)
+                state_destinations[group_id] = destinations
+                continue
+
+            def chunk_filter(start, mask=group_mask, size=block_size):
+                index = start // size
+                return index < len(mask) and mask[index]
+
+            for start, end, key, _, block_id in self.token_database.process_token_key_strings_with_block_ids(
+                token_len,
+                request.block_hashes,
+                blocks,
+                load.vllm_cached_tokens,
+                kv_cache_group_id=group_id,
+                chunk_filter=chunk_filter,
+            ):
+                bound_hash = load.cache_key_hashes.get(end)
+                if bound_hash is None:
+                    raise ValueError("page receive boundary lacks its bound identity")
+                key = self.token_database.key_for(bound_hash, kv_cache_group_id=group_id)
+                addr, size, _ = self._prepare_value(start, end, blocks, kv_cache_group_id=group_id, block_id=block_id)
+                keys.append(key)
+                addresses.append(addr)
+                sizes.append(size)
+        if not keys:
+            raise ValueError("external hit produced no receive descriptors")
+        if request.current_event is None:
+            raise ValueError("receive requires the destination initialization fence")
+        request.current_event.synchronize()
+        started = time.perf_counter() if self._record_operation_cb is not None else 0.0
+        counts = require_aligned_batch_results("get_checked", keys, self.m_store.get_checked(keys, addresses, sizes))
+        if self._record_operation_cb is not None:
+            self._record_operation_cb("load_get", time.perf_counter() - started, len(keys))
+        expected = [sum(parts) for parts in sizes]
+        if any(actual > length for actual, length in zip(counts, expected, strict=True)):
+            raise TransferCompletionUnknown("GET reported more bytes than the registered destination")
+        failed = counts != expected
+        if not failed:
+            device_work = False
+            for group_id, destinations in state_destinations.items():
+                device_work |= self.state_store_layouts[group_id].initialize_received_scratch(destinations)
+            if device_work:
+                torch.npu.current_stream().synchronize()
+        with self.done_task_lock:
+            if failed:
+                self.failed_requests.add(request.req_id)
+            self.finished_requests.add(request.req_id)
+
+    def _discard_request(self, request: Any) -> None:
+        if self._use_state_layouts and isinstance(request, ReqMeta):
+            with self.done_task_lock:
+                self.failed_requests.add(request.req_id)
+                self.finished_requests.add(request.req_id)
+
+    def _handle_request_exception(self, request_data: Any):
+        self._discard_queued_requests()
 
     def _handle_request(self, req_meta: ReqMeta):
         try:
+            if self._use_state_layouts:
+                self._inflight_request = req_meta
+                self._receive_states_and_pages(req_meta)
+                self._inflight_request = None
+                return
             load_spec = req_meta.load_spec
             req_id = req_meta.req_id
             if load_spec is None:

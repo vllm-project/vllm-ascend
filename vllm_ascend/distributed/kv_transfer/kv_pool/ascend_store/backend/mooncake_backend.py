@@ -4,6 +4,7 @@ import json
 import os
 import threading
 from dataclasses import dataclass
+from numbers import Integral
 from typing import Any, NamedTuple
 
 import regex as re
@@ -22,6 +23,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     QOS_VALUE_MIN,
     Backend,
     BatchResultShapeError,
+    StoreCapacityError,
+    TransferCompletionUnknown,
     parse_qos_from_extra_config,
     require_aligned_batch_results,
     set_scheduler_device,
@@ -403,12 +406,33 @@ class MooncakeBackend(Backend):
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
         self._prefetch_conf = SsdPrefetchConf.disabled()
+        self._shared_te_registered_ptrs: set[int] = set()
+        self._closed = False
+        self._completion_unknown = False
 
         if not self._lazy_init:
             self.store = self._setup_store()
             self._store_initialized = True
 
+    def close(self) -> None:
+        if self._completion_unknown:
+            raise TransferCompletionUnknown("Cannot unregister buffers while DMA completion is unknown")
+        if self.store is not None:
+            self.set_device()
+            # The worker drains transfers before close. Keep the Store handle
+            # and remaining registrations on failure so close can be retried.
+            for pointer in tuple(self._shared_te_registered_ptrs):
+                status = self.store.unregister_buffer(pointer)
+                if status != 0:
+                    raise RuntimeError(f"Failed to unregister shared TE buffer {pointer}: {status}")
+                self._shared_te_registered_ptrs.remove(pointer)
+            self.store.close()
+            self.store = None
+        self._closed = True
+
     def ensure_initialized(self):
+        if self._closed:
+            raise RuntimeError("Mooncake backend is closed")
         if self._store_initialized:
             return
 
@@ -689,6 +713,82 @@ class MooncakeBackend(Backend):
         if not callable(method):
             raise RuntimeError("Mooncake client does not support batch_get_session_end")
         return int(method(keys))
+
+    def register_buffer_checked(self, ptrs: list[int], lengths: list[int]) -> None:
+        self.ensure_initialized()
+        if len(ptrs) != len(lengths):
+            raise ValueError("registration addresses and lengths must align")
+        if self._use_fabric_mem:
+            # Match register_buffer: FabricMem does not preregister device KV.
+            return
+        if self.store is None or not callable(getattr(self.store, "register_buffer", None)):
+            raise RuntimeError("Mooncake client lacks checked buffer registration")
+        for pointer, length in zip(ptrs, lengths):
+            try:
+                status = self.store.register_buffer(pointer, length)
+            except Exception as exc:
+                self._completion_unknown = True
+                raise TransferCompletionUnknown("registration completion is unknown") from exc
+            if isinstance(status, bool) or not isinstance(status, Integral) or status != 0:
+                self._completion_unknown = True
+                raise TransferCompletionUnknown(f"registration returned {status}")
+            if not self._use_store_independent_te and not self._prefetch_conf.use_dict_setup:
+                self._shared_te_registered_ptrs.add(pointer)
+
+    def put_checked(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> None:
+        self.ensure_initialized()
+        if not keys:
+            return
+        if len(keys) != len(addrs) or len(keys) != len(sizes):
+            raise ValueError("PUT descriptors must align with keys")
+        if self.store is None:
+            raise RuntimeError("Mooncake store is not initialized")
+        config = self._build_replicate_config()
+        try:
+            statuses = require_aligned_batch_results(
+                "batch_put_from_multi_buffers",
+                keys,
+                self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config),
+            )
+        except Exception as exc:
+            self._completion_unknown = True
+            raise TransferCompletionUnknown("PUT completion is unknown") from exc
+        if any(status not in (0, -200) for status in statuses):
+            # In particular, a transfer timeout need not mean DMA has stopped.
+            self._completion_unknown = True
+            raise TransferCompletionUnknown(f"PUT did not complete successfully: {statuses}")
+        if -200 in statuses:
+            # NO_AVAILABLE_HANDLE is a BatchPutStart allocation rejection.
+            # The SDK skips submission for those rows; rows with status 0 completed.
+            raise StoreCapacityError(statuses)
+
+    def get_checked(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[int]:
+        self.ensure_initialized()
+        if not keys:
+            return []
+        if len(keys) != len(addrs) or len(keys) != len(sizes):
+            raise ValueError("GET descriptors must align with keys")
+        if self.store is None:
+            raise RuntimeError("Mooncake store is not initialized")
+        try:
+            counts = require_aligned_batch_results(
+                "batch_get_into_multi_buffers",
+                keys,
+                self.store.batch_get_into_multi_buffers(keys, addrs, sizes),
+            )
+        except Exception as exc:
+            self._completion_unknown = True
+            raise TransferCompletionUnknown("GET completion is unknown") from exc
+        # OBJECT_NOT_FOUND (-704) is a metadata miss before transfer submission.
+        # Preserve it for the receiver's normal failed-completion path; other
+        # errors may leave DMA in flight and must retain the destination.
+        if any(count < 0 and count != -704 for count in counts):
+            self._completion_unknown = True
+            raise TransferCompletionUnknown(f"GET has unconfirmed completion: {counts}")
+        if any(count > sum(parts) for count, parts in zip(counts, sizes, strict=True)):
+            self._completion_unknown = True
+            raise TransferCompletionUnknown("GET reported more bytes than the registered destination")
+        return counts
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[bool] | bool:
         self.ensure_initialized()

@@ -6,11 +6,14 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs
 import zmq
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import MooncakeLookupResult
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (
     LOOKUP_MSG,
     RESET_MSG,
     RESP_ERR,
     RESP_OK,
+    decode_lookup_response,
+    encode_lookup_response,
 )
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
@@ -62,13 +65,18 @@ class LookupKeyClient:
         block_hashes: list[BlockHash],
         kv_cache_group_ids: list[int] | None = None,
         hbm_hit_tokens: int = 0,
-    ) -> int:
+        cache_key_hashes: dict[int, bytes] | None = None,
+    ) -> int | MooncakeLookupResult:
         if self._closed:
-            return 0
+            return 0 if cache_key_hashes is None else MooncakeLookupResult(0)
 
         kv_cache_group_ids = kv_cache_group_ids or [0]
-        hash_strs = [h.hex() for h in block_hashes]
-        hash_frames = self.encoder.encode(hash_strs)
+        payload = (
+            [h.hex() for h in block_hashes]
+            if cache_key_hashes is None
+            else {"block_hashes": block_hashes, "cache_key_hashes": cache_key_hashes}
+        )
+        hash_frames = self.encoder.encode(payload)
         kv_group_frames = self.encoder.encode(kv_cache_group_ids)
         all_frames = [
             LOOKUP_MSG,
@@ -83,8 +91,12 @@ class LookupKeyClient:
         except zmq.ZMQError:  # type: ignore[attr-defined]
             logger.exception("KV pool lookup failed; reporting 0 hit tokens")
             self.close()
-            return 0
+            return 0 if cache_key_hashes is None else MooncakeLookupResult(0)
 
+        if cache_key_hashes is not None:
+            if bytes(resp) == RESP_ERR:
+                return MooncakeLookupResult(0)
+            return decode_lookup_response(resp)
         return int.from_bytes(resp, "big")
 
     def reset(self) -> bool:
@@ -152,13 +164,16 @@ class LookupKeyServer:
                             token_len = int.from_bytes(all_frames[1], byteorder="big")
                             kv_group_ids = self.decoder.decode([all_frames[2]])
                             hbm_hit_tokens = int.from_bytes(all_frames[3], byteorder="big")
-                            hashes_str = self.decoder.decode(all_frames[4:])
+                            payload = self.decoder.decode(all_frames[4:])
+                            state_keys = payload["cache_key_hashes"] if isinstance(payload, dict) else None
+                            hashes = payload["block_hashes"] if isinstance(payload, dict) else payload
                             result = self.pool_worker.lookup_scheduler(
                                 token_len,
-                                hashes_str,
+                                hashes,
                                 kv_group_ids,
                                 use_layerwise=False,
                                 hbm_hit_tokens=hbm_hit_tokens,
+                                cache_key_hashes=state_keys,
                             )
                             logger.debug(
                                 "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
@@ -166,7 +181,11 @@ class LookupKeyServer:
                                 kv_group_ids,
                                 result,
                             )
-                            response = result.to_bytes(4, "big")
+                            response = (
+                                encode_lookup_response(MooncakeLookupResult(result))
+                                if state_keys is not None
+                                else result.to_bytes(4, "big")
+                            )
                         elif msg_type == RESET_MSG:
                             self.pool_worker.reset_store()
                             logger.info("AscendStore reset via remove_all succeeded.")

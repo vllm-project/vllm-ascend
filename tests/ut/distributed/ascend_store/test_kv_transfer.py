@@ -214,6 +214,28 @@ class TestKVTransferThread(unittest.TestCase):
         # Base class _handle_request does nothing
         t._handle_request(MagicMock())
 
+    def test_unknown_completion_logs_before_process_termination(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import kv_transfer
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
+            TransferCompletionUnknown,
+        )
+
+        thread, _ = self._make_thread()
+        thread._handle_request = MagicMock(side_effect=TransferCompletionUnknown("pending DMA"))
+        thread.add_request("request")
+        with patch.object(kv_transfer.logger, "critical") as log:
+
+            def terminate(pid, sig):
+                log.assert_called_once()
+                self.assertTrue(log.call_args.kwargs["exc_info"])
+                self.assertEqual(sig, kv_transfer.signal.SIGKILL)
+                raise SystemExit
+
+            with patch.object(kv_transfer.os, "kill", side_effect=terminate) as kill:
+                with self.assertRaises(SystemExit):
+                    thread.run()
+                kill.assert_called_once()
+
     def test_fatal_error_stops_before_next_queued_task(self):
         t, _ = self._make_thread()
         handled = []

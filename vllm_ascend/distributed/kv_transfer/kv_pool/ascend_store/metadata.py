@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import compress
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import numpy as np
 import torch
@@ -133,6 +133,8 @@ class KeyMetadata:
     cache_role: str = "kv"
     """ Family name for compress-aware hybrid cache layouts """
     cache_family: str = "default"
+    store_namespace: str = ""
+    cache_prefix: str = ""
 
 
 @dataclass(order=True)
@@ -144,6 +146,8 @@ class PoolKey:
         return hash(
             (
                 self.key_metadata.model_name,
+                self.key_metadata.cache_prefix,
+                self.key_metadata.store_namespace,
                 self.key_metadata.head_or_tp_rank,
                 self.key_metadata.dcp_rank,
                 self.key_metadata.pp_rank,
@@ -154,17 +158,22 @@ class PoolKey:
             )
         )
 
-    def to_string(self):
+    @staticmethod
+    def build_prefix(metadata: KeyMetadata, *, include_pp: bool = True) -> str:
+        """Single key-format owner, following upstream Store PoolKey."""
+        pp = f"@pp_rank:{metadata.pp_rank}" if include_pp else ""
+        prefix = f"{metadata.cache_prefix}@" if metadata.cache_prefix else ""
         return (
-            f"{self.key_metadata.model_name}"
-            f"@dcp:{self.key_metadata.dcp_rank}"
-            f"@head_or_tp_rank:{self.key_metadata.head_or_tp_rank}"
-            f"@pp_rank:{self.key_metadata.pp_rank}"
-            f"@group:{self.key_metadata.kv_cache_group_id}"
-            f"@cache_role:{self.key_metadata.cache_role}"
-            f"@cache_family:{self.key_metadata.cache_family}"
-            f"@{self.chunk_hash}"
+            f"{prefix}{metadata.model_name}{metadata.store_namespace}"
+            f"@dcp:{metadata.dcp_rank}"
+            f"@head_or_tp_rank:{metadata.head_or_tp_rank}{pp}"
+            f"@group:{metadata.kv_cache_group_id}"
+            f"@cache_role:{metadata.cache_role}"
+            f"@cache_family:{metadata.cache_family}@"
         )
+
+    def to_string(self):
+        return self.build_prefix(self.key_metadata) + self.chunk_hash
 
     def split_layers(self, num_layers: int, layer_offset: int = 0) -> list[LayerPoolKey]:
         """Split the key into multiple keys for each layer"""
@@ -346,17 +355,22 @@ class ChunkedTokenDatabase:
         prefix = self._key_prefix_cache.get(cache_key)
         if prefix is None:
             group_metadata = self.metadata[kv_cache_group_id]
-            prefix = (
-                f"{group_metadata.model_name}"
-                f"@dcp:{group_metadata.dcp_rank}"
-                f"@head_or_tp_rank:{group_metadata.head_or_tp_rank}"
-                f"@pp_rank:{group_metadata.pp_rank}"
-                f"@group:{kv_cache_group_id}"
-                f"@cache_role:{cache_role}"
-                f"@cache_family:{cache_family}@"
+            prefix = PoolKey.build_prefix(
+                replace(
+                    group_metadata,
+                    kv_cache_group_id=group_metadata.kv_cache_group_id
+                    if group_metadata.store_namespace
+                    else kv_cache_group_id,
+                    cache_role=cache_role,
+                    cache_family=cache_family,
+                )
             )
             self._key_prefix_cache[cache_key] = prefix
         return prefix
+
+    def key_for(self, block_hash: bytes | str, kv_cache_group_id: int = 0) -> str:
+        """Native string key for an explicitly selected content identity."""
+        return self._get_key_prefix(kv_cache_group_id) + block_hash_to_str(block_hash)
 
     def store_mask(
         self,
@@ -401,12 +415,11 @@ class ChunkedTokenDatabase:
             cache_family = self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
         group_metadata = self.metadata[kv_cache_group_id]
         return PoolKey(
-            KeyMetadata(
-                model_name=group_metadata.model_name,
-                head_or_tp_rank=group_metadata.head_or_tp_rank,
-                dcp_rank=group_metadata.dcp_rank,
-                pp_rank=group_metadata.pp_rank,
-                kv_cache_group_id=kv_cache_group_id,
+            replace(
+                group_metadata,
+                kv_cache_group_id=group_metadata.kv_cache_group_id
+                if group_metadata.store_namespace
+                else kv_cache_group_id,
                 cache_role=cache_role,
                 cache_family=cache_family,
             ),
@@ -786,6 +799,7 @@ class LoadSpec:
     layerwise_previous_step: bool = False
     # First block stored under request-scoped keys, including unhashed full blocks.
     layerwise_snapshot_start_block: int | None = None
+    cache_key_hashes: dict[int, bytes] | None = None
 
 
 @dataclass(init=False)
@@ -923,6 +937,14 @@ class RequestTracker:
                 )
 
 
+class BoundaryPut(NamedTuple):
+    """Exact accepted state block offered by core."""
+
+    group_id: int
+    block_id: int
+    num_tokens: int
+
+
 @dataclass(init=False)
 class ReqMeta:
     # Request id
@@ -960,6 +982,8 @@ class ReqMeta:
     # operation cannot update the save progress of a new request generation
     # that happens to reuse the same req_id.
     store_job_id: int | None = None
+    boundary_puts: list[BoundaryPut] | None = None
+    cache_key_hashes: dict[int, bytes] | None = None
 
     def __init__(
         self,
@@ -1001,6 +1025,8 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
+        boundary_puts: list[BoundaryPut] | None = None,
+        cache_key_hashes: dict[int, bytes] | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1024,6 +1050,8 @@ class ReqMeta:
         self.original_block_size = original_block_size
         self.event_id = event_id
         self.store_job_id = store_job_id
+        self.boundary_puts = None if boundary_puts is None else list(boundary_puts)
+        self.cache_key_hashes = None if cache_key_hashes is None else dict(cache_key_hashes)
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
         self.block_ids_np = block_ids_np

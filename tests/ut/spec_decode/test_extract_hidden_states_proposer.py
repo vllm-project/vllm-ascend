@@ -54,6 +54,8 @@ class MockCachedRequestState:
     def __init__(self, req_id: str, token_ids: list[int]):
         self.req_id = req_id
         self.token_ids = token_ids
+        self.num_computed_tokens = 0
+        self.num_tokens = len(token_ids)
 
     def get_token_id(self, position: int) -> int:
         if 0 <= position < len(self.token_ids):
@@ -283,6 +285,10 @@ def test_prepare_next_token_ids_padded():
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={
+                req_id: int(gpu_input_batch.num_tokens_no_spec[i]) - 1
+                for i, req_id in enumerate(gpu_input_batch.req_ids)
+            },
         )
 
         # Verify results
