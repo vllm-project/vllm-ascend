@@ -1505,7 +1505,7 @@ def test_sfa_pcp_forward_selects_mode_and_gathers_weight_for_global_prefill(
         assert owner._parallel_o_proj.mode is expected_mode
         assert owner._parallel_o_proj.uses_full_weight is expected_gather
         owner.o_proj.quant_method.all_gather_weight.assert_not_called()
-        owner._parallel_o_proj.all_gather_weights()
+        owner._start_o_proj_weight_gather()
         return output
 
     hidden = torch.empty(1, 4)
@@ -2449,6 +2449,15 @@ def test_sfa_forward_orders_cache_writes_and_collectives(
         return None, None
 
     impl.exec_kv = Mock(side_effect=exec_kv)
+
+    # This test isolates DCP collectives; PCP exchange has dedicated coverage.
+    def prepare_kv(*args):
+        if pcp_enabled:
+            return lambda: impl.exec_kv(*args)
+        outputs = impl.exec_kv(*args)
+        return lambda: outputs
+
+    impl._prepare_kv = prepare_kv
     impl._q_proj_and_k_up_proj = lambda value: (torch.ones(2, 1, 1), torch.ones(2, 1, 1))
     impl.rope_single = lambda value, cos, sin: value
     impl._prepare_indexer_metadata = Mock()
