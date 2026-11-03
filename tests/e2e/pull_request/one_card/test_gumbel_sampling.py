@@ -11,7 +11,8 @@ import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
-from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
+from vllm_ascend.ops.triton.sample.categorical_sample import categorical_sample
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
@@ -603,7 +604,18 @@ class TestGumbelSampling:
         speculator.temperature = torch.tensor([0.5, 1.5], device=DEVICE)
         speculator.seeds = torch.tensor([3, 7], dtype=torch.int64, device=DEVICE)
         speculator._step_cols = torch.arange(2, dtype=torch.int32, device=DEVICE)
-        speculator.draft_logits = torch.zeros(2, 2, 1031, device=DEVICE)
+        if vllm_version_is("0.32.0"):
+            # The release tree keeps the raw per-step draft-logits tensor.
+            speculator.draft_logits = torch.zeros(2, 2, 1031, device=DEVICE)
+            draft_logits = speculator.draft_logits
+        else:
+            # Main caches the drafts in a DraftLogitsCache instead of a tensor.
+            from vllm.v1.worker.gpu.spec_decode.draft_logits import (  # type: ignore[import-not-found]
+                DraftLogitsCache,
+            )
+
+            speculator.draft_logits = DraftLogitsCache(2, 2, 1031, dtype=torch.float32, fill=0.0, device=DEVICE)
+            draft_logits = speculator.draft_logits.values
         speculator.use_fp64_gumbel = False
         logits = torch.randn(2, 1031, device=DEVICE)
         idx_mapping = torch.tensor([1, 0], dtype=torch.int32, device=DEVICE)
@@ -613,8 +625,8 @@ class TestGumbelSampling:
 
         assert sampled.shape == (2,)
         assert ((sampled >= 0) & (sampled < logits.shape[-1])).all()
-        torch.testing.assert_close(speculator.draft_logits[idx_mapping.long(), 1], logits, rtol=0, atol=0)
-        assert (speculator.draft_logits[:, 0] == 0).all()
+        torch.testing.assert_close(draft_logits[idx_mapping.long(), 1], logits, rtol=0, atol=0)
+        assert (draft_logits[:, 0] == 0).all()
 
     @pytest.mark.parametrize("temp", [0.5, 2.0])
     @pytest.mark.parametrize("vocab_size", [31, 1031])
@@ -650,6 +662,7 @@ class TestGumbelSampling:
             expanded_local_pos=torch.arange(num_steps + 1, dtype=torch.int32, device=DEVICE).repeat(num_reqs),
             seed=seed,
             num_speculative_steps=num_steps,
+            use_entropy_verify=False,
         )
         sampled, counts = rejection_sample(**inputs, draft_logits=cache, temperature=temperature)
         expected, expected_counts = rejection_sample(

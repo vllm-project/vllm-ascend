@@ -9,8 +9,8 @@ import torch_npu  # noqa: F401
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.ops.triton.sample.categorical_sample import categorical_sample
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 
 DEVICE = "npu"
 VOCAB_SIZE = 151936

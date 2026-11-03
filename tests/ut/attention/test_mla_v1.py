@@ -1,3 +1,4 @@
+# mypy: disable-error-code="arg-type, assignment, index, method-assign, type-var, union-attr"
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -287,6 +288,7 @@ def test_mla_fused_preprocess_checks_weight_support(quant_method, device_type, e
 def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, fa_quant_layer, scheme_type):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.use_flashmla = False
+    impl.dcp_q_replicate_enabled = False
     profile = get_hardware_profile(device_type)
     impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
     impl.enable_mlapo = enable_mlapo
@@ -334,6 +336,7 @@ def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, 
 def test_mla_dynamic_int8_weight_whitelist(device_type, scheme_type, expected_enabled):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.use_flashmla = False
+    impl.dcp_q_replicate_enabled = False
     profile = get_hardware_profile(device_type)
     impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
     impl.enable_mlapo = True
@@ -2803,7 +2806,13 @@ class TestAscendMLAImpl(TestBase):
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        if vllm_version_is("0.32.0"):
+            # A re-derived value that no longer fits rebinds the parameter.
+            self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        else:
+            # Main copies a smaller value into the parameter's own storage, so
+            # the address captured by graphs is preserved.
+            self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
         self.assertEqual(
             self.impl.W_UV.shape,
             (self.impl.num_heads, self.impl.kv_lora_rank, self.impl.v_head_dim),
@@ -3098,10 +3107,15 @@ class TestAscendMLAImpl(TestBase):
         with (
             patch.object(mla_v1, "_EXTRA_CTX", SimpleNamespace(num_tokens=2)),
             patch.object(mla_v1, "maybe_save_kv_layer_to_connector"),
+            patch.object(
+                mla_v1,
+                "wait_for_kv_layer_from_connector",
+                side_effect=lambda name: events.append(("connector_wait", name)),
+            ),
         ):
             self.assertIs(self.impl.forward("layer", hidden, (torch.zeros(2, 1, 2),), metadata, output), output)
             self.assertTrue(torch.all(output == 1))
-            self.assertEqual(events, [("wait", "layer"), "fused_cache"])
+            self.assertEqual(events, [("connector_wait", "layer"), ("wait", "layer"), "fused_cache"])
             events.clear()
             self.impl.forward("layer", hidden, (), None, output)
         self.assertEqual(events, [])
@@ -3169,7 +3183,7 @@ class TestAscendMLAImpl(TestBase):
 
     def test_mla_preprocess_prefill_pcp_empty_rank(self):
         self.impl.use_pcp = True
-        self.impl.num_heads = 2
+        self.impl.num_heads = self.impl.q_projection_heads = 2
         self.impl.num_kv_heads = 1
         self.impl.rope_single = MagicMock(side_effect=lambda x, cos, sin: x)
         self.impl.exec_kv_prefill = MagicMock()
@@ -3212,7 +3226,7 @@ class TestAscendMLAImpl(TestBase):
     @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
     def test_mla_preprocess_prefill_without_rope(self, mock_rope_cache, mock_rope, mock_cache):
         self.impl.use_mla_rope = False
-        self.impl.num_heads = self.impl.num_kv_heads = 1
+        self.impl.num_heads = self.impl.num_kv_heads = self.impl.q_projection_heads = 1
         self.impl.qk_nope_head_dim = self.impl.qk_rope_head_dim = 2
         self.impl.qk_head_dim = 4
         self.impl.kv_lora_rank = self.impl.v_head_dim = 2
