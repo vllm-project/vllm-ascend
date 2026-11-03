@@ -32,8 +32,6 @@ jobs:
       vllm_ascend_branch: ${{ github.event.pull_request.base.ref }}
       # base.ref 给 nightly Dockerfile FROM 和 rebase 目标（需要分支名）
       base_image_branch: ${{ github.event.pull_request.base.ref }}
-      # head.sha 只给 checkout、冒烟测试拉取本次PR代码
-      vllm_ref_for_test: ${{ github.event.pull_request.head.sha }}
       should_push: false
       run_presmoke: true
       # 新增标记：presmoke走原始CANN基础镜像从头构建，不依赖nightly预构建镜像
