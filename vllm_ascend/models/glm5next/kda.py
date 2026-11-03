@@ -34,8 +34,8 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.distributed.parallel_state import get_kda_tp_group
-from vllm_ascend.models.glm5next.kda_projection_tp import KDAProjectionTP
+from vllm_ascend.distributed.parallel_state import get_linear_attn_input_proj_tp_group
+from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTP
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
@@ -291,12 +291,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         projection_size = self.head_dim * self.num_heads
         self.local_projection_size = divide(projection_size, self.tp_size)
         projection_tp_size = self.tp_size
-        self.projection_tp: KDAProjectionTP | None = None
-        kda_tp_size = get_ascend_config().finegrained_tp_config.kda_tensor_parallel_size
-        if kda_tp_size > 1:
-            group = get_kda_tp_group()
+        self.projection_tp: KDAInputProjectionTP | None = None
+        linear_attn_input_proj_tp_size = (
+            get_ascend_config().finegrained_tp_config.linear_attn_input_proj_tensor_parallel_size
+        )
+        if linear_attn_input_proj_tp_size > 1:
+            group = get_linear_attn_input_proj_tp_group()
             projection_tp_size = group.world_size
-            self.projection_tp = KDAProjectionTP(group, self.num_heads, self.head_dim)
+            self.projection_tp = KDAInputProjectionTP(group, self.num_heads, self.head_dim)
             merged_linear = partial(PCPGlm5NextMergedColumnParallelLinear, tp_group=group)
 
         # Merge q, k, v, b, f_a, g_a projections into one GEMM (6→1 launches).

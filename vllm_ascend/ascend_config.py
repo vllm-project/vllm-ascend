@@ -1310,7 +1310,7 @@ class FinegrainedTPConfig:
     lmhead_tensor_parallel_size: int = 1
     embedding_tensor_parallel_size: int = 1
     mlp_tensor_parallel_size: int = 1
-    kda_tensor_parallel_size: int = 1
+    linear_attn_input_proj_tensor_parallel_size: int = 1
 
     @model_validator(mode="after")
     def _validate_sizes(self):
@@ -1319,7 +1319,7 @@ class FinegrainedTPConfig:
             "lmhead_tensor_parallel_size",
             "embedding_tensor_parallel_size",
             "mlp_tensor_parallel_size",
-            "kda_tensor_parallel_size",
+            "linear_attn_input_proj_tensor_parallel_size",
         )
         for field_name in size_fields:
             value = getattr(self, field_name)
@@ -1333,22 +1333,24 @@ class FinegrainedTPConfig:
 
         vc = vllm_config
         enabled_configs = []
-        if self.kda_tensor_parallel_size > 1:
+        if self.linear_attn_input_proj_tensor_parallel_size > 1:
             parallel = vc.parallel_config
             if (
                 parallel.tensor_parallel_size != 1
                 or parallel.prefill_context_parallel_size != 1
                 or parallel.pipeline_parallel_size != 1
             ):
-                raise ValueError("KDA projection TP requires TP=1, PCP=1 and PP=1.")
+                raise ValueError("Linear attention input projection TP requires TP=1, PCP=1 and PP=1.")
             if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
-                raise ValueError("KDA projection TP is supported only on a PD decode node.")
+                raise ValueError("Linear attention input projection TP is supported only on a PD decode node.")
             text_config = vc.model_config.hf_text_config
             if getattr(text_config, "model_type", None) not in ("glm5_next", "glm5_next_text"):
-                raise ValueError("KDA projection TP currently supports GLM-5.3-Flash only.")
-            if text_config.linear_num_heads % self.kda_tensor_parallel_size:
-                raise ValueError("kda_tensor_parallel_size must divide the KDA head count.")
-            enabled_configs.append(f"kda_tensor_parallel_size={self.kda_tensor_parallel_size}")
+                raise ValueError("Linear attention input projection TP currently supports GLM-5.3-Flash only.")
+            if text_config.linear_num_heads % self.linear_attn_input_proj_tensor_parallel_size:
+                raise ValueError("linear_attn_input_proj_tensor_parallel_size must divide the KDA head count.")
+            enabled_configs.append(
+                f"linear_attn_input_proj_tensor_parallel_size={self.linear_attn_input_proj_tensor_parallel_size}"
+            )
         if self.oproj_tensor_parallel_size > 1 or self.mlp_tensor_parallel_size > 1:
             # o_proj's _forward_o_proj reshape misaligns under tp > 1; mlp is untested there.
             if vc.parallel_config.tensor_parallel_size > 1:
@@ -1415,7 +1417,7 @@ class FinegrainedTPConfig:
             self.lmhead_tensor_parallel_size,
             self.embedding_tensor_parallel_size,
             self.mlp_tensor_parallel_size,
-            self.kda_tensor_parallel_size,
+            self.linear_attn_input_proj_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
             # If it is a dense model, then expert parallel is not needed,

@@ -19,7 +19,7 @@ def parallel_groups(monkeypatch):
     monkeypatch.setattr(
         model_kda,
         "get_ascend_config",
-        lambda: SimpleNamespace(finegrained_tp_config=SimpleNamespace(kda_tensor_parallel_size=1)),
+        lambda: SimpleNamespace(finegrained_tp_config=SimpleNamespace(linear_attn_input_proj_tensor_parallel_size=1)),
     )
     # Exercise inherited vLLM loaders without Ascend's OOT class replacement.
     for name in ("ColumnParallelLinear", "RowParallelLinear"):
@@ -109,7 +109,7 @@ def test_pcp_output_projection_loads_input_heads_and_reduces_over_pcp(
 
 
 @pytest.mark.parametrize(
-    ("tp_size", "pcp_size", "kda_size"),
+    ("tp_size", "pcp_size", "input_proj_tp_size"),
     [(1, 1, 1), (1, 2, 1), (1, 4, 1), (2, 1, 1), (2, 4, 1), (4, 2, 1), (1, 1, 2), (1, 1, 4), (1, 1, 8)],
 )
 @pytest.mark.parametrize(
@@ -124,7 +124,14 @@ def test_pcp_output_projection_loads_input_heads_and_reduces_over_pcp(
 )
 @pytest.mark.parametrize("static_output_bias", [False, True])
 def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
-    monkeypatch, parallel_groups, tp_size, pcp_size, kda_size, cudagraph_mode, needs_output_buffer, static_output_bias
+    monkeypatch,
+    parallel_groups,
+    tp_size,
+    pcp_size,
+    input_proj_tp_size,
+    cudagraph_mode,
+    needs_output_buffer,
+    static_output_bias,
 ):
     # Construct the complete KDA layer to catch mismatched projection, gate,
     # convolution, and cache dimensions, including the TP>1 fallback.
@@ -132,12 +139,14 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
     monkeypatch.setattr(linear, "get_tensor_model_parallel_rank", lambda: tp_size - 1)
     parallel_groups.world_size = pcp_size
     parallel_groups.rank_in_group = pcp_size - 1
-    kda_group = SimpleNamespace(world_size=kda_size, rank_in_group=kda_size - 1)
-    monkeypatch.setattr(model_kda, "get_kda_tp_group", lambda: kda_group)
+    input_proj_tp_group = SimpleNamespace(world_size=input_proj_tp_size, rank_in_group=input_proj_tp_size - 1)
+    monkeypatch.setattr(model_kda, "get_linear_attn_input_proj_tp_group", lambda: input_proj_tp_group)
     monkeypatch.setattr(
         model_kda,
         "get_ascend_config",
-        lambda: SimpleNamespace(finegrained_tp_config=SimpleNamespace(kda_tensor_parallel_size=kda_size)),
+        lambda: SimpleNamespace(
+            finegrained_tp_config=SimpleNamespace(linear_attn_input_proj_tensor_parallel_size=input_proj_tp_size)
+        ),
     )
     config = SimpleNamespace(
         model_type="glm5_next",
@@ -191,14 +200,14 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
     assert layer.local_projection_size == 1024 // size
     assert layer.use_pcp_head_sharding == (tp_size == 1 and pcp_size > 1)
     assert isinstance(layer.in_proj_qkvbfg_a, model_kda.PCPGlm5NextMergedColumnParallelLinear) == (
-        layer.use_pcp_head_sharding or kda_size > 1
+        layer.use_pcp_head_sharding or input_proj_tp_size > 1
     )
     assert isinstance(layer.o_proj, model_kda.PCPRowParallelLinear) == layer.use_pcp_head_sharding
     for name in ("f_b_proj", "g_b_proj", "q_conv1d", "k_conv1d", "v_conv1d"):
         projection = getattr(layer, name)
         assert isinstance(projection, model_kda.PCPColumnParallelLinear) == layer.use_pcp_head_sharding
         assert projection.weight.shape[0] == 1024 // size
-    projection_size = kda_size if kda_size > 1 else size
+    projection_size = input_proj_tp_size if input_proj_tp_size > 1 else size
     assert layer.in_proj_qkvbfg_a.weight.shape[0] == 3 * 1024 // projection_size + 8 // projection_size + 2 * 128
     assert layer.o_proj.weight.shape == (16, 1024 // size)
     if static_output_bias:

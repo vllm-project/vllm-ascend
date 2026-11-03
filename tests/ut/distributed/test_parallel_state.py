@@ -51,7 +51,7 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config, otp_size)
     mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = otp_size
     mock_ascend_config.finegrained_tp_config.embedding_tensor_parallel_size = 2
     mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 2
-    mock_ascend_config.finegrained_tp_config.kda_tensor_parallel_size = 1
+    mock_ascend_config.finegrained_tp_config.linear_attn_input_proj_tensor_parallel_size = 1
     mock_ascend_config.pd_tp_ratio = 2
     mock_ascend_config.num_head_replica = 0
     mock_ascend_config.pd_head_ratio = 2
@@ -87,13 +87,13 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config, otp_size)
 
 
 @pytest.mark.parametrize("size", [2, 4, 8])
-def test_kda_projection_groups_partition_dp_ranks(mock_distributed, monkeypatch, size):
+def test_linear_attn_input_proj_groups_partition_dp_ranks(mock_distributed, monkeypatch, size):
     config = SimpleNamespace(
         kvpp_config=SimpleNamespace(size=1),
         pd_tp_ratio=1,
         pd_head_ratio=1,
         eplb_config=SimpleNamespace(dynamic_eplb=False),
-        finegrained_tp_config=FinegrainedTPConfig(kda_tensor_parallel_size=size),
+        finegrained_tp_config=FinegrainedTPConfig(linear_attn_input_proj_tensor_parallel_size=size),
     )
     parallel = ParallelConfig(tensor_parallel_size=1, data_parallel_size=8)
     monkeypatch.setattr(parallel_state.torch.distributed, "get_world_size", lambda: 8)
@@ -101,12 +101,16 @@ def test_kda_projection_groups_partition_dp_ranks(mock_distributed, monkeypatch,
     monkeypatch.setattr(parallel_state, "model_parallel_initialized", lambda: False)
     with patch.object(parallel_state, "init_model_parallel_group") as create:
         init_ascend_model_parallel(parallel)
-        call = next(call for call in create.call_args_list if call.kwargs.get("group_name") == "kdatp")
+        call = next(
+            call for call in create.call_args_list if call.kwargs.get("group_name") == "linear_attn_input_proj_tp"
+        )
         assert call.args[0] == [list(range(start, start + size)) for start in range(0, 8, size)]
-        assert parallel_state.get_kda_tp_group() is create.return_value
+        assert parallel_state.get_linear_attn_input_proj_tp_group() is create.return_value
         destroy_ascend_model_parallel()
-        with pytest.raises(AssertionError, match="KDA projection tensor parallel group is not initialized"):
-            parallel_state.get_kda_tp_group()
+        with pytest.raises(
+            AssertionError, match="linear attention input projection tensor parallel group is not initialized"
+        ):
+            parallel_state.get_linear_attn_input_proj_tp_group()
 
 
 def _build_parallel_config(
@@ -191,7 +195,7 @@ def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size, pcp_size):
             lmhead_tensor_parallel_size=0,
             embedding_tensor_parallel_size=0,
             mlp_tensor_parallel_size=0,
-            kda_tensor_parallel_size=1,
+            linear_attn_input_proj_tensor_parallel_size=1,
         ),
     )
     calls, groups = {}, {}
@@ -245,7 +249,7 @@ def test_engram_dp_pcp_group_reuses_upstream_node_partition(monkeypatch, shared,
             lmhead_tensor_parallel_size=0,
             embedding_tensor_parallel_size=0,
             mlp_tensor_parallel_size=0,
-            kda_tensor_parallel_size=1,
+            linear_attn_input_proj_tensor_parallel_size=1,
         ),
     )
     upstream = parallel_state.vllm_parallel_state
