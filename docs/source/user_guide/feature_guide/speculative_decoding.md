@@ -394,14 +394,13 @@ A few important things to consider when using DFlash2 draft models:
    restriction on draft tokens.
 
    The model-level acceptance test uses `VLLM_COMPILE` with
-   `FULL_AND_PIECEWISE` on two NPUs. With `K=7` and capture sizes `[8, 16]`,
-   a single 9-token prompt exercises target PIECEWISE prefill and FULL decode;
-   three such requests exceed the captured range and exercise eager fallback.
-   After initialization and the acceptance run, a test probe records actual
-   dispatch modes on each TP worker, asserting target FULL/PIECEWISE/NONE and
-   draft FULL/NONE. The DFlash2 draft uses FULL decode graphs or eager execution,
-   while PIECEWISE is exercised by the target model. Repeating the single request
-   after eager execution checks graph reuse and identical greedy output:
+   `FULL_AND_PIECEWISE` on two NPUs and initializes the engine once. After the
+   acceptance run, it submits two single-request generations sequentially.
+   With `K=7` and capture sizes `[8, 16]`, the 9-token prompt exercises target
+   PIECEWISE prefill, while the 32-token prompt exceeds the captured range and
+   exercises eager prefill. Both use 8-token FULL decode, and the DFlash2 draft
+   stays within its FULL graph bucket. Fixed token-ID inputs and a sufficient
+   prefill token budget keep the two prefill paths distinct:
 
    ```shell
    pytest -sv tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py -k test_dflash2_v2_acceptance
