@@ -316,7 +316,7 @@ def test_model_cache_layers_publish_source_compatible_specs(dtype):
 
 
 def test_indexer_cache_rejects_unsupported_dtype():
-    with pytest.raises(ValueError, match="BF16, FP8 or INT8"):
+    with pytest.raises(ValueError, match="BF16 or FP8"):
         Glm5NextIndexerCache(
             head_dim=128,
             dtype=torch.float16,

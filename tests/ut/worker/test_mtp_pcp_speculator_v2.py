@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.compilation import backends
 from vllm.config import (
     CUDAGraphMode,
     DeviceConfig,
@@ -1072,3 +1073,26 @@ def test_disable_profiling_chunk_for_draft_rejects_invalid_boolean():
         disable_profiling_chunk_for_draft(config),
     ):
         pass
+
+
+def test_eagle_inherited_loader_keeps_upstream_construction_tag(eplb_worker_config):
+    speculator = object.__new__(AscendEagleSpeculator)
+    speculator.vllm_config = eplb_worker_config
+    original_tag = backends.model_tag
+    seen = []
+
+    def inspect_construction(*, vllm_config, model_config):
+        seen.append(backends.model_tag)
+        assert model_config is eplb_worker_config.speculative_config.draft_model_config
+        assert vllm_config.model_config is eplb_worker_config.model_config
+        assert vllm_config.model_config.runner_type == "generate"
+        raise RuntimeError("observed actual inherited EAGLE loader")
+
+    with (
+        patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=1)),
+        patch.object(eagle_utils, "get_model", side_effect=inspect_construction),
+        pytest.raises(RuntimeError, match="observed actual inherited EAGLE loader"),
+    ):
+        speculator.load_draft_model(torch.nn.Module(), set())
+    assert seen == ["eagle_head"]
+    assert backends.model_tag == original_tag
