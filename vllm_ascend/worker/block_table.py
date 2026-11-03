@@ -15,7 +15,7 @@ from vllm_ascend.core.kv_cache_interface import (
     is_prefix_cacheable,
 )
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
-from vllm_ascend.ops.triton.compute_slot_mapping import (
+from vllm_ascend.ops.triton.v1.compute_slot_mapping import (
     _compute_slot_mapping_kernel,
     _next_power_of_2,
     compute_slot_mapping_fused_groups,

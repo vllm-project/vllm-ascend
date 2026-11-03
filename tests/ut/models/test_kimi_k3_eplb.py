@@ -325,6 +325,9 @@ def test_expert_loading_initializes_every_replica(
     # the effective EP size instead of silently falling back to EP=1.
     routed = RoutedExperts.__new__(RoutedExperts)
     nn.Module.__init__(routed)
+    # Upstream main reads this loader while mapping expert params; a bare
+    # instance skips the constructor that seeds it.
+    routed.shared_expert_online_loader = None
     routed.moe_config = SimpleNamespace(ep_size=ep_size)
     routed._use_v2_model_runner = use_v2
     layer.block_sparse_moe.experts.routed_experts = routed
@@ -392,6 +395,7 @@ def test_eplb_expert_remapping_preserves_weight_metadata():
     model.experts = nn.Module()
     routed = RoutedExperts.__new__(RoutedExperts)
     nn.Module.__init__(routed)
+    routed.shared_expert_online_loader = None
     routed.moe_config = SimpleNamespace(ep_size=2)
     routed._use_v2_model_runner = True
     routed.register_parameter("w13_weight", nn.Parameter(torch.empty((3, 2, 1))))

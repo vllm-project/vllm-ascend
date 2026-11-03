@@ -2288,8 +2288,8 @@ Select the tab that matches the deployment hardware.
     ```
 
     On every Prefill and Decode node, set `MOONCAKE_CONFIG_PATH` to the full path of
-    `mooncake.json` and preload jemalloc. The pooled startup scripts below export both
-    from `MOONCAKE_CONFIG_DIR`.
+    `mooncake.json`. The pooled startup scripts below set this path using
+    `MOONCAKE_CONFIG_DIR`.
 
     Reuse `launch_online_dp.py` from [Section 5.2](#dsv4pro-5-2-a2).
 
@@ -2326,7 +2326,6 @@ Select the tab that matches the deployment hardware.
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake.json"
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
 
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
       --host 0.0.0.0 \
@@ -2441,7 +2440,6 @@ Select the tab that matches the deployment hardware.
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake.json"
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
     export HCCL_HOST_SOCKET_PORT_RANGE=auto
     export HCCL_NPU_SOCKET_PORT_RANGE=auto
 

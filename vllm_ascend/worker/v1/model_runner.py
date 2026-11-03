@@ -185,7 +185,7 @@ from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
-from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
+from vllm_ascend.ops.triton.v1.spec_decode.ngram import triton_ngram_spec_decode
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.utils import (
