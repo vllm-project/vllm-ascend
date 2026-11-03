@@ -120,10 +120,6 @@ Before starting:
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
-    export VLLM_ASCEND_PLE_BACKEND=torch
-    export VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1
-    export VLLM_ASCEND_ENABLE_QSA_E3V=1
-    unset VLLM_ASCEND_FORCE_QSA_REFERENCE
 
     vllm serve /models/Qwen3.8-Flash-Next-w4a8 \
         --host 0.0.0.0 \
@@ -133,8 +129,6 @@ Before starting:
         --quantization ascend \
         --tensor-parallel-size 8 \
         --data-parallel-size 1 \
-        --data-parallel-size-local 1 \
-        --data-parallel-start-rank 0 \
         --enable-expert-parallel \
         --max-model-len 131072 \
         --max-num-seqs 8 \
@@ -154,8 +148,6 @@ Before starting:
 
     **Key parameters:**
 
-    - `VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1` enables the fused QSA Lightning Indexer path.
-    - `VLLM_ASCEND_ENABLE_QSA_E3V=1` enables the fused QSA Expand E3 path.
     - `--quantization ascend` loads the Ascend-compatible W4A8 checkpoint.
     - `--tensor-parallel-size 8` and `--data-parallel-size 1` configure the A2 series / A3 series single-DP TP8 topology.
     - `--max-model-len 131072` caps the maximum context length. Common values: `65536` (64K), `131072` (128K).
@@ -168,7 +160,7 @@ Before starting:
     - `--compilation-config` enables `FULL_DECODE_ONLY` ACLGraph for decode.
     - `--engram-config` enables Engram embedding-table CPU offload with `cpu_offload=true`. This DP1 configuration sets `dp_shared_memory=false`; provide sufficient host memory and use a checkpoint with supported n-gram layers.
     - `fuse_norm_quant=false` disables norm/quantization fusion for this W4A8 deployment.
-    - `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2; `VLLM_ASCEND_PLE_BACKEND=torch` selects the PLE backend.
+    - `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2.
     - `--async-scheduling` enables asynchronous scheduling.
     - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert multistream overlap. Shared expert DP requires expert parallelism and TP > 1. `enable_fused_mc2=0` disables fused MC2 and is compatible with shared expert overlap.
     - `enable_npugraph_ex=true` enables NPU graph extension; static kernels and super kernels remain disabled.
@@ -286,7 +278,6 @@ Select the hardware tab below.
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
-    export VLLM_ASCEND_PLE_BACKEND=torch
     export VLLM_HOST_IP="192.168.0.1"
     export HCCL_IF_IP="192.168.0.1"
     export GLOO_SOCKET_IFNAME="eth0"
@@ -335,7 +326,6 @@ Select the hardware tab below.
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
-    export VLLM_ASCEND_PLE_BACKEND=torch
     export VLLM_HOST_IP="192.168.0.1"
     export HCCL_IF_IP="192.168.0.1"
     export GLOO_SOCKET_IFNAME="eth0"
@@ -413,7 +403,6 @@ Select the hardware tab below.
 
     **Key parameters:**
 
-    - `VLLM_ASCEND_PLE_BACKEND=torch` selects the PLE backend for both roles.
     - Both roles enable Prefix Caching; the current runtime automatically changes the default Mamba cache mode from `none` to `align`.
     - Engram requires a checkpoint with supported n-gram layers. `cpu_offload=true` keeps Engram embedding tables in host memory. `dp_shared_memory=true` shares the corresponding table shards among node-local DP replicas; replicas must share the same host and shared-memory namespace. Both options are booleans. This DP configuration satisfies the DP > 1 requirement; elastic EP is not supported with shared memory.
     - Prefill sets `cudagraph_mode=NONE`, enables `enable_prefill_mc2=true`, and disables fused MC2. Verify MC2 token limits for TP2 × DP4 before increasing the batch token budget.
