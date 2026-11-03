@@ -8,6 +8,10 @@ from importlib import import_module
 from typing import Any, cast
 from weakref import proxy
 
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (
+    MooncakeStoreCoordinator,
+    StoreSpecGroup,
+)
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -17,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheSpec,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -103,6 +108,32 @@ class ExternalCachedBlockPool:
         return None
 
 
+class _AscendHitCoordinator(MooncakeStoreCoordinator):
+    """Use native convergence with Ascend's already-resolved cache groups.
+
+    Only the inherited hit finder is used. Ascend owns mask policy and spec
+    resolution, so the Mooncake constructor must not regroup the original specs.
+    """
+
+    def __init__(self, coordinator: AscendStoreCoordinator) -> None:
+        self.kv_cache_groups = coordinator.kv_cache_groups
+        self.hash_block_size = coordinator.hash_block_size
+        self.attention_groups = [
+            StoreSpecGroup(spec, group_ids, manager_cls, index in coordinator.eagle_attn_group_indices)
+            for index, (spec, group_ids, manager_cls) in enumerate(coordinator.attention_groups)
+        ]
+        # Keep Ascend's existing single-spec alignment and scheduler-aligned
+        # hybrid lookup; enabling native partial-hash hits is a separate policy.
+        self.enable_partial_hash_hits = False
+        self.lcm_block_size = (
+            self.attention_groups[0].spec.block_size if len(self.attention_groups) == 1 else coordinator.lcm_block_size
+        )
+
+    def block_hashes_for_spec(self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec) -> BlockHashList:
+        # Preserve main's lazy HBM terminal-hash markers for native managers.
+        return cast(BlockHashList, block_hashes)
+
+
 class AscendStoreCoordinator:
     """Hybrid cache-hit/mask coordinator for AscendStore external KV Pool.
 
@@ -120,6 +151,7 @@ class AscendStoreCoordinator:
         group_cache_families: list[str],
         use_eagle: bool = False,
         retention_interval: int | None = None,
+        boundary_state_offloads: bool = False,
     ) -> None:
         assert len(kv_cache_groups) == len(group_block_sizes)
         assert len(kv_cache_groups) == len(group_cache_families)
@@ -132,6 +164,7 @@ class AscendStoreCoordinator:
         self.lcm_block_size = scheduler_block_size
         self.use_eagle = use_eagle
         self.retention_interval = retention_interval
+        self.boundary_state_offloads = boundary_state_offloads
         self.group_block_sizes = group_block_sizes
         self.group_cache_families = group_cache_families
         self.group_effective_block_sizes = list(group_block_sizes)
@@ -148,6 +181,7 @@ class AscendStoreCoordinator:
             self.eagle_group_ids = set(range(len(kv_cache_groups)))
 
         self._verify_and_split_kv_cache_groups()
+        self._hit_coordinator = _AscendHitCoordinator(self) if boundary_state_offloads else None
         # Do not keep the coordinator alive through its cache while GC is frozen.
         self._cached_reachable_masks = lru_cache(maxsize=_REACHABLE_MASK_CACHE_SIZE)(
             partial(type(self)._reachable_masks, proxy(self))
@@ -223,6 +257,8 @@ class AscendStoreCoordinator:
         aligned_token_len: int,
         retention_interval: int | None,
         num_prompt_tokens: int | None,
+        *,
+        exclude_mamba: bool = False,
     ) -> list[tuple[int, list[bool] | None]]:
         assert aligned_token_len % self.lcm_block_size == 0, (
             f"aligned_token_len ({aligned_token_len}) must be a multiple of lcm_block_size ({self.lcm_block_size})"
@@ -241,6 +277,9 @@ class AscendStoreCoordinator:
                 masks.append((0, []))
                 continue
             num_chunks = aligned_token_len // self.group_effective_block_sizes[group_id]
+            if exclude_mamba and isinstance(spec, MambaSpec):
+                masks.append((num_chunks, [False] * num_chunks))
+                continue
             if not _uses_reachable_mask(self.group_cache_families[group_id]):
                 masks.append((num_chunks, None))
                 continue
@@ -264,7 +303,12 @@ class AscendStoreCoordinator:
         aligned_token_len: int,
         num_prompt_tokens: int | None = None,
     ) -> tuple[list[bool], ...]:
-        masks = self._cached_reachable_masks(aligned_token_len, self.retention_interval, num_prompt_tokens)
+        masks = self._cached_reachable_masks(
+            aligned_token_len,
+            self.retention_interval,
+            num_prompt_tokens,
+            exclude_mamba=self.boundary_state_offloads,
+        )
         return tuple([True] * num_chunks if mask is None else mask.copy() for num_chunks, mask in masks)
 
     def lookup_mask(
@@ -344,6 +388,13 @@ class AscendStoreCoordinator:
         *,
         apply_eagle: bool = True,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        if self._hit_coordinator is not None:
+            return self._hit_coordinator._find_hit_blocks(
+                block_hashes,
+                max_length,
+                cached_block_pool,
+                apply_eagle=apply_eagle,
+            )
         eagle_indices = self.eagle_attn_group_indices if apply_eagle else set()
         if len(self.attention_groups) == 1:
             spec, group_ids, manager_cls = self.attention_groups[0]

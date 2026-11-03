@@ -5,6 +5,7 @@ import math
 import threading
 import time
 from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, cast
 
 import torch
 import vllm.envs as envs
@@ -70,6 +71,9 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+
+if TYPE_CHECKING:
+    from .state_store.state_store_layout import AcceptedStateStoreLayout
 
 
 class KVPoolWorker:
@@ -157,9 +161,20 @@ class KVPoolWorker:
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
         self._extra_config = extra_config
+        self.enable_state_store_reuse = extra_config.get("enable_state_store_reuse", False)
+        if type(self.enable_state_store_reuse) is not bool:
+            raise ValueError("enable_state_store_reuse must be a boolean")
+        if self.enable_state_store_reuse and vllm_config.kv_transfer_config.kv_load_failure_policy != "fail":
+            raise ValueError("accepted-state reuse requires kv_load_failure_policy=fail")
+        if self.enable_state_store_reuse and use_layerwise:
+            raise ValueError("accepted-state Store layout currently requires bulk transfer")
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = extra_config.get("load_async", False)
+        if self.enable_state_store_reuse and (
+            self.kv_role != "kv_consumer" or extra_config.get("consumer_is_to_load", False)
+        ):
+            self.load_async = True
         self._save_disabled = threading.Event()
         self._closed = False
         self._invalid_block_ids: set[int] = set()
@@ -246,6 +261,7 @@ class KVPoolWorker:
             self.tp_size,
             self.num_kv_head,
             self.use_mla,
+            use_hybrid=self.use_hybrid and self.enable_state_store_reuse,
         )
         self.peer_tp_size = tp_mismatch_info.peer_tp_size
         self.effective_tp_size = tp_mismatch_info.effective_tp_size
@@ -357,6 +373,7 @@ class KVPoolWorker:
         self.kv_recv_thread: KVTransferThread | None = None
         self._previous_save_batch: KVCacheStoreBatch | None = None
         self._transfer_threads_started = False
+        self.state_store_layouts: dict[int, AcceptedStateStoreLayout] = {}
         self.external_slot_release_waiter: Callable[[int], None] | None = None
 
     def _init_cache_layout(self) -> None:
@@ -434,9 +451,11 @@ class KVPoolWorker:
                 self.group_uses_align_state,
                 self.enable_kv_events,
                 worker=self if self.tp_mismatch else None,
+                state_store_layouts=self.state_store_layouts if self.enable_state_store_reuse else None,
             )
             self.kv_send_thread.start()
             ready_event_sending.wait()
+            self.kv_send_thread.raise_if_failed()
         if self.load_async:
             ready_event = threading.Event()
             self.kv_recv_thread = KVCacheStoreRecvingThread(
@@ -450,10 +469,12 @@ class KVPoolWorker:
                 invalid_block_ids=self._invalid_block_ids,
                 invalid_block_ids_lock=self._invalid_block_ids_lock,
                 worker=self if self.tp_mismatch else None,
+                state_store_layouts=self.state_store_layouts if self.enable_state_store_reuse else None,
                 record_operation=self._record_kv_connector_operation,
             )
             self.kv_recv_thread.start()
             ready_event.wait()
+            self.kv_recv_thread.raise_if_failed()
         self._transfer_threads_started = True
 
     def _build_cache_coordinator(self, vllm_config: VllmConfig) -> AscendStoreCoordinator | None:
@@ -473,6 +494,7 @@ class KVPoolWorker:
             group_cache_families=self.kv_cache_group_families,
             use_eagle=use_eagle,
             retention_interval=retention_interval,
+            boundary_state_offloads=self.enable_state_store_reuse,
         )
 
     def _infer_group_uses_align_state(self) -> list[bool]:
@@ -718,7 +740,60 @@ class KVPoolWorker:
     def _register_dspark_prefix_cache(self, draft_caches: dict[str, torch.Tensor]) -> None:
         """Register draft caches when the layerwise worker enables prefix reuse."""
 
+    def _compile_state_store_layouts(self, kv_caches):
+        """Bind model-described state layouts to this worker's real caches."""
+        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import KeyMetadata as StoreKeyMetadata
+
+        from .model_adapters import describe_model_registration
+        from .state_store.state_registration import compile_state_store_layouts, qualify_page_metadata
+
+        if self.kv_cache_config is None:
+            raise ValueError("state registration requires the native cache configuration")
+        if self.use_layerwise or self.use_kvpp or self.pp_size != 1 or self.pcp_size != 1 or self.dcp_size != 1:
+            raise NotImplementedError(
+                "state registration requires bulk transfer with PP=PCP=DCP=1 and TP-only cache ownership"
+            )
+        extra = self.vllm_config.kv_transfer_config.kv_connector_extra_config
+        store_tp_size = extra.get("state_store_tp_size")
+        if type(store_tp_size) is not int or store_tp_size <= 0:
+            raise ValueError("state_store_tp_size must specify the peers' shared logical Store partition")
+        # Match native registration, including NoPE's empty RoPE placeholder.
+        native_caches = {name: self._as_cache_tuple(caches) for name, caches in kv_caches.items()}
+        registered, policy = describe_model_registration(
+            self.vllm_config, self.kv_cache_config, native_caches, self.tp_size, self.tp_rank
+        )
+        for private in registered.private:
+            if (
+                not private.spec.resume_without_history
+                or self.cache_transfer_granularity % private.spec.boundary_multiple
+            ):
+                raise NotImplementedError("private cache lacks an aligned no-history resume contract")
+        layouts = compile_state_store_layouts(
+            registered,
+            metadata=StoreKeyMetadata(
+                self.model_name,
+                self.tp_rank,
+                self.pcp_rank,
+                self.dcp_rank,
+                self.pp_rank,
+                cache_prefix=extra.get("cache_prefix", ""),
+            ),
+            local_tp_size=self.tp_size,
+            store_tp_size=store_tp_size,
+            pp_size=self.pp_size,
+            num_blocks=self.kv_cache_config.num_blocks,
+            hash_block_size=self.hash_block_size,
+            key_policy=policy,
+        )
+        page_metadata = (
+            qualify_page_metadata(self.token_database.metadata, registered, layouts) if registered.pages else None
+        )
+        return layouts, page_metadata
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        state_layouts, page_metadata = (
+            self._compile_state_store_layouts(kv_caches) if self.enable_state_store_reuse else (None, None)
+        )
         draft_names = getattr(self, "_dspark_draft_layer_names", ())
         draft_caches = {name: cache for name, cache in kv_caches.items() if name in draft_names}
         if draft_names:
@@ -782,13 +857,17 @@ class KVPoolWorker:
                 storage_key = self._get_storage_key(cache)
                 start = base_addr
                 end = base_addr + region_len
+                if self.enable_state_store_reuse:
+                    span = 1 + sum((size - 1) * stride for size, stride in zip(cache.shape, cache.stride()))
+                    end = base_addr + span * cache.element_size()
                 if storage_key in registered_regions:
                     old_start, old_end = registered_regions[storage_key]
                     registered_regions[storage_key] = (min(old_start, start), max(old_end, end))
                 else:
                     registered_regions[storage_key] = (start, end)
 
-        self._align_kv_ptrs(registered_regions)
+        if not first_kv_cache.is_cpu:
+            self._align_kv_ptrs(registered_regions)
         ptrs = [start for start, _ in registered_regions.values()]
         lengths = [end - start for start, end in registered_regions.values()]
 
@@ -843,7 +922,15 @@ class KVPoolWorker:
             )
 
         # Register buffers before starting the transfer threads.
-        self.m_store.register_buffer(ptrs, lengths)
+        if self.enable_state_store_reuse:
+            self.m_store.register_buffer_checked(ptrs, lengths)
+            if page_metadata is not None:
+                self.metadata = page_metadata
+                self.token_database.metadata = page_metadata
+                self.token_database._key_prefix_cache.clear()
+            self.state_store_layouts = state_layouts
+        else:
+            self.m_store.register_buffer(ptrs, lengths)
         self._start_kv_transfer_threads()
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
@@ -881,6 +968,10 @@ class KVPoolWorker:
                 load_group_ids,
                 self.load_async,
             )
+            if self.enable_state_store_reuse:
+                request.block_ids_by_group = [list(group) for group in request.block_ids_by_group]
+                request.current_event = torch.npu.Event()
+                request.current_event.record()
             if self.load_async:
                 self.kv_recv_thread.add_request(  # type: ignore[union-attr]
                     request,
@@ -1064,8 +1155,47 @@ class KVPoolWorker:
             return
         send_thread.raise_if_failed()
         if isinstance(send_thread, KVCacheStoreSendingThread):
-            send_thread.wait_for_requests_saved(released_req_ids)
+            if self.enable_state_store_reuse:
+                for req_id in released_req_ids or ():
+                    send_thread.delete_finished_stored_request(req_id)
+                    # Retired job IDs can no longer update request progress.
+                    send_thread.reset_saved_request(req_id)
+                    self._retired_store_req_ids.discard(req_id)
+            else:
+                send_thread.wait_for_requests_saved(released_req_ids)
         # Layerwise saves are already synchronized at each step's final layer.
+
+    def lookup_boundary_states(self, group_id: int, boundary_hashes: dict[int, bytes]) -> set[int]:
+        """Confirm every logical Store shard, not just this reader's shards.
+
+        The caller supplies already-bound dependency hashes. Returned boundaries
+        are group presence evidence, not permission to skip model computation;
+        the native hybrid coordinator and receive completion own that decision.
+        """
+        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import PoolKey as StorePoolKey
+
+        from .backend.base import require_aligned_batch_results
+
+        if not self.enable_state_store_reuse:
+            raise RuntimeError("boundary-state lookup is not enabled")
+        layout = self.state_store_layouts[group_id]
+        prefixes = layout.lookup_key_prefixes(((0, 0, 0, self.pp_rank),))
+        boundaries = list(boundary_hashes)
+        keys: list[str] = []
+        for boundary in boundaries:
+            key_hash = boundary_hashes[boundary]
+            if type(boundary) is not int or boundary <= 0 or not isinstance(key_hash, bytes) or not key_hash:
+                raise ValueError("state lookup requires explicit boundaries and bound hashes")
+            keys.extend(StorePoolKey.build_key_string(prefix, key_hash.hex()) for prefix in prefixes)
+        if not keys:
+            return set()
+        values = require_aligned_batch_results("state exists", keys, self.m_store.exists(keys))
+        width = len(prefixes)
+        return {
+            boundary
+            for index, boundary in enumerate(boundaries)
+            if all(value == 1 for value in values[index * width : (index + 1) * width])
+        }
 
     def wait_for_save(self, connector_metadata: AscendConnectorMetadata) -> None:
         current_event = None
@@ -1354,6 +1484,37 @@ class KVPoolWorker:
             return False
         return True
 
+    def _retire_finished_store_requests(self, finished_req_ids: set[str]) -> None:
+        send_thread = self.kv_send_thread
+        if not isinstance(send_thread, KVCacheStoreSendingThread):
+            return
+        for req_id in finished_req_ids:
+            if send_thread.is_stored_request(req_id):
+                self._retired_store_req_ids.add(req_id)
+            else:
+                send_thread.reset_saved_request(req_id)
+                self._retired_store_req_ids.discard(req_id)
+        for req_id in self._retired_store_req_ids.copy():
+            if not send_thread.is_stored_request(req_id):
+                send_thread.reset_saved_request(req_id)
+                self._retired_store_req_ids.discard(req_id)
+
+    def get_transfer_results(self, finished_req_ids: set[str], meta: AscendConnectorMetadata):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
+
+        if not self.enable_state_store_reuse:
+            sending, receiving = self.get_finished(finished_req_ids, meta)
+            return KVConnectorTransferResults(finished_sending=sending, finished_recving=receiving)
+        if self.kv_send_thread is not None:
+            self.kv_send_thread.raise_if_failed()
+            self._retire_finished_store_requests(finished_req_ids)
+            self.kv_send_thread.get_and_clear_finished_requests()
+        if self.kv_recv_thread is None:
+            return KVConnectorTransferResults()
+        self.kv_recv_thread.raise_if_failed()
+        receiving, failed = cast(KVCacheStoreRecvingThread, self.kv_recv_thread).take_receive_results()
+        return KVConnectorTransferResults(finished_recving=receiving, failed_recving=failed)
+
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
         if self.kv_send_thread is not None:
             send_thread = self.kv_send_thread
@@ -1364,16 +1525,7 @@ class KVPoolWorker:
                     send_thread.reset_saved_request(req_id)
                     self._retired_store_req_ids.discard(req_id)
             if isinstance(send_thread, KVCacheStoreSendingThread):
-                for req_id in finished_req_ids:
-                    if send_thread.is_stored_request(req_id):
-                        self._retired_store_req_ids.add(req_id)
-                    else:
-                        send_thread.reset_saved_request(req_id)
-                        self._retired_store_req_ids.discard(req_id)
-                for req_id in self._retired_store_req_ids.copy():
-                    if not send_thread.is_stored_request(req_id):
-                        send_thread.reset_saved_request(req_id)
-                        self._retired_store_req_ids.discard(req_id)
+                self._retire_finished_store_requests(finished_req_ids)
             self.kv_send_thread.discard_finished_requests(meta.preempted_req_ids)
             # Saves complete synchronously in wait_for_save(), so the scheduler
             # never waits for a request-level finished_sending notification.
@@ -1507,6 +1659,8 @@ class KVPoolWorker:
         return self.num_kv_head
 
     def get_group_tp_size(self, kv_cache_group_id: int):
+        if self.enable_state_store_reuse and self.token_database.metadata[kv_cache_group_id].store_namespace:
+            return 1
         if self.use_kvpp:
             return self.tp_size * self.pcp_size
         if self.tp_mismatch:
@@ -1554,6 +1708,7 @@ class KVPoolWorker:
         kv_cache_group_ids: list[int],
         include_all_ranks: bool,
         hbm_hit_tokens: int = 0,
+        cache_key_hashes: dict[int, bytes] | None = None,
     ) -> int | None:
         if self.cache_coordinator is None:
             return None
@@ -1569,17 +1724,34 @@ class KVPoolWorker:
             group_block_size = coordinator.group_effective_block_sizes[group_id]
             present: list[BlockHash | str] = []
             lookup_start = hbm_hit_tokens // group_block_size * group_block_size
+            if cache_key_hashes is not None and group_id in self.state_store_layouts:
+                candidates = {
+                    (index + 1) * group_block_size: chunk_hash
+                    for index, chunk_hash in enumerate(group_block_hashes)
+                    if hbm_hit_tokens < (index + 1) * group_block_size <= token_len
+                    and (lookup_mask is None or (index < len(lookup_mask) and lookup_mask[index]))
+                }
+                bound = {
+                    boundary: cache_key_hashes[boundary] for boundary in candidates if boundary in cache_key_hashes
+                }
+                found = self.lookup_boundary_states(group_id, bound)
+                return [candidates[boundary] for boundary in candidates if boundary in found]
 
             keys: list[str] = []
             chunk_hashes: list[BlockHash | str] = []
             variant_counts: list[int] = []
-            for _, _, key_string, chunk_hash in self.token_database.process_token_key_strings(
+            for _, end, key_string, chunk_hash in self.token_database.process_token_key_strings(
                 token_len,
                 block_hashes,
                 mask_num=lookup_start,
                 kv_cache_group_id=group_id,
                 chunk_mask=lookup_mask,
             ):
+                if cache_key_hashes is not None:
+                    bound_hash = cache_key_hashes.get(end)
+                    if bound_hash is None:
+                        continue
+                    key_string = self.token_database.key_for(bound_hash, kv_cache_group_id=group_id)
                 variants = self._expand_lookup_key_variants(key_string, group_id, include_all_ranks)
                 keys.extend(variants)
                 chunk_hashes.append(chunk_hash)
@@ -1587,6 +1759,10 @@ class KVPoolWorker:
 
             if keys:
                 res = self.m_store.exists(keys)  # type: ignore[assignment]
+                if cache_key_hashes is not None:
+                    from .backend.base import require_aligned_batch_results
+
+                    res = require_aligned_batch_results("hybrid exists", keys, res)
                 offset = 0
                 for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
                     values = res[offset : offset + count]  # type: ignore[index]
@@ -1619,6 +1795,7 @@ class KVPoolWorker:
         kv_cache_group_ids: list[int] | None = None,
         use_layerwise: bool = False,
         hbm_hit_tokens: int = 0,
+        cache_key_hashes: dict[int, bytes] | None = None,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
@@ -1626,6 +1803,8 @@ class KVPoolWorker:
         :return: An int indicating how many prefix tokens are cached.
         """
         try:
+            if cache_key_hashes is not None and (not self.enable_state_store_reuse or not self.state_store_layouts):
+                raise ValueError("accepted-state lookup requires registered state layouts")
             hits: list[list[int]] = []
             max_hit_position = self.max_model_len
             kv_cache_group_ids = kv_cache_group_ids or [0]
@@ -1638,10 +1817,13 @@ class KVPoolWorker:
                     kv_cache_group_ids,
                     include_all_ranks=True,
                     hbm_hit_tokens=hbm_hit_tokens,
+                    cache_key_hashes=cache_key_hashes,
                 )
             )
             if coordinator_hit is not None:
                 return coordinator_hit
+            if cache_key_hashes is not None:
+                raise ValueError("state lookup requires the native hybrid coordinator")
             for group_id in kv_cache_group_ids:
                 keys, starts, ends = self._build_lookup_keys(token_len, block_hashes, group_id)
 
@@ -1773,6 +1955,8 @@ class KVPoolWorker:
         return []
 
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
+        if self.enable_state_store_reuse and self.kv_send_thread is not None:
+            self.kv_send_thread.raise_if_failed()
         if isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
             if ce := self.kv_send_thread.get_completed_events():
                 return AscendStoreKVConnectorWorkerMetadata(ce)

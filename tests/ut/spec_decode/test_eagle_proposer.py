@@ -1771,6 +1771,8 @@ class MockCachedRequestState:
     def __init__(self, req_id, token_ids):
         self.req_id = req_id
         self.token_ids = token_ids
+        self.num_computed_tokens = 0
+        self.num_tokens = len(token_ids)
 
     def get_token_id(self, position):
         if position < len(self.token_ids):
@@ -1881,6 +1883,10 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={
+                req_id: int(gpu_input_batch.num_tokens_no_spec[i]) - 1
+                for i, req_id in enumerate(gpu_input_batch.req_ids)
+            },
         )
 
         self.assertEqual(next_token_ids.shape[0], num_reqs)
@@ -1928,6 +1934,10 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={
+                req_id: int(gpu_input_batch.num_tokens_no_spec[i]) - 1
+                for i, req_id in enumerate(gpu_input_batch.req_ids)
+            },
         )
 
         expected_valid_counts = torch.tensor([2, 4, 5], dtype=torch.int64)
@@ -1972,6 +1982,10 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={
+                req_id: int(gpu_input_batch.num_tokens_no_spec[i]) - 1
+                for i, req_id in enumerate(gpu_input_batch.req_ids)
+            },
         )
 
         expected_valid_counts = torch.tensor([0, 0, 5], dtype=torch.int64)
@@ -2018,6 +2032,10 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={
+                req_id: int(gpu_input_batch.num_tokens_no_spec[i]) - 1
+                for i, req_id in enumerate(gpu_input_batch.req_ids)
+            },
         )
 
         expected_valid_counts = torch.tensor([0, 5, 0], dtype=torch.int64)
@@ -2066,6 +2084,10 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={
+                req_id: int(gpu_input_batch.num_tokens_no_spec[i]) - 1
+                for i, req_id in enumerate(gpu_input_batch.req_ids)
+            },
         )
 
         expected_valid_counts = torch.tensor([2, 0, 5, 3], dtype=torch.int64)
@@ -2102,6 +2124,10 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={
+                req_id: int(gpu_input_batch.num_tokens_no_spec[i]) - 1
+                for i, req_id in enumerate(gpu_input_batch.req_ids)
+            },
         )
 
         expected_valid_counts = torch.tensor([5], dtype=torch.int64)
@@ -2144,6 +2170,10 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={
+                req_id: int(gpu_input_batch.num_tokens_no_spec[i]) - 1
+                for i, req_id in enumerate(gpu_input_batch.req_ids)
+            },
         )
 
         # Token 100 and 101 are >= vocab_size (100), so they are invalid
@@ -2178,8 +2208,11 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             num_reqs=num_reqs,
             req_ids=["req_0", "req_1"],
             vocab_size=vocab_size,
-            num_tokens_no_spec=[11, 16],  # seq_len = num_tokens_no_spec - 1 = [10, 15]
+            num_tokens_no_spec=[15, 20],  # Full sequence lengths exceed this scheduled prefix.
         )
+
+        requests["req_0"].num_computed_tokens = 2
+        requests["req_1"].num_computed_tokens = 2
 
         discard_request_indices = torch.tensor([], dtype=torch.int64)
         num_discarded_requests = 0
@@ -2190,6 +2223,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
+            num_scheduled_tokens={"req_0": 8, "req_1": 13},
         )
 
         # Verify return values

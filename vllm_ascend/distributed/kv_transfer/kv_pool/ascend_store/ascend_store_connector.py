@@ -127,6 +127,19 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        if extra_config.get("enable_state_store_reuse", False) and vllm_config.use_v2_model_runner:
+            raise NotImplementedError(
+                "enable_state_store_reuse requires the V1 model runner; "
+                "accepted-state fences are not implemented in the V2 model runner."
+            )
+        if (
+            extra_config.get("enable_state_store_reuse", False)
+            and vllm_config.attention_config.indexer_kv_dtype == "fp8"
+        ):
+            raise NotImplementedError(
+                "accepted-state Store reuse currently requires a BF16 pooled indexer cache; "
+                "FP8 K/scale checkpoint framing is not supported."
+            )
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
@@ -469,15 +482,22 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         metadata = self._get_connector_metadata()
         if self._current_step_has_real_forward:
             try:
-                self.connector_worker.m_store.ensure_initialized()
+                self.connector_worker.ensure_store_initialized()
             finally:
                 self._current_step_has_real_forward = False
         done_sending, done_recving = self.connector_worker.get_finished(finished_req_ids, metadata)
         return done_sending, done_recving
 
     def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
-        done_sending, done_recving = self.get_finished(finished_req_ids)
         assert self.connector_worker is not None
+        if self.connector_worker.enable_state_store_reuse:
+            if self._current_step_has_real_forward:
+                try:
+                    self.connector_worker.ensure_store_initialized()
+                finally:
+                    self._current_step_has_real_forward = False
+            return self.connector_worker.get_transfer_results(finished_req_ids, self._get_connector_metadata())
+        done_sending, done_recving = self.get_finished(finished_req_ids)
         failed = self.connector_worker.get_failed_requests()
         if self.connector_worker.load_async and not self.use_layerwise:
             done_recving |= failed

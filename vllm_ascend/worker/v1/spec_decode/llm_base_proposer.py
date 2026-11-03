@@ -2203,6 +2203,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         gpu_input_batch: InputBatch,
         discard_request_indices: torch.Tensor,
         num_discarded_requests: int,
+        num_scheduled_tokens: dict[str, int],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding.
@@ -2217,9 +2218,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
-        seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
+        # Match the native CPU path for partial prefill. Other rows still
+        # need an in-range backup before the device selects their sampled token.
+        backup_token_indices = [
+            min(
+                requests[req_id].num_computed_tokens + num_scheduled_tokens[req_id],
+                requests[req_id].num_tokens - 1,
+            )
+            for req_id in gpu_input_batch.req_ids[:num_reqs]
+        ]
         self.backup_next_token_ids.np[:num_reqs] = np.array(
-            [requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i]) for i in range(num_reqs)]
+            [requests[gpu_input_batch.req_ids[i]].get_token_id(backup_token_indices[i]) for i in range(num_reqs)]
         )
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
 

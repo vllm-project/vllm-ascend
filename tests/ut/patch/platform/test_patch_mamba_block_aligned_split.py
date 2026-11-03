@@ -14,6 +14,7 @@
 
 import inspect
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import vllm.v1.core.sched.scheduler as scheduler_module
@@ -76,133 +77,48 @@ def _request(
     )
 
 
-def test_pd_consumer_preserves_complete_speculative_window():
+@pytest.mark.parametrize(
+    ("is_kv_consumer", "is_kv_producer", "computed", "prompt", "new_tokens", "local", "external", "sparse"),
+    [
+        (True, False, 379, 380, 8, 0, 0, False),
+        (None, None, 0, 380, 8, 379, 0, False),
+        (True, False, 0, 380, 8, 0, 379, False),
+        (True, True, 0, 4800, 4800, 0, 0, False),
+        (False, True, 128, 500, 200, 16, 32, True),
+    ],
+    ids=["consumer_verifier", "standalone_local_hit", "consumer_external_hit", "kv_both_cold", "producer_sparse"],
+)
+def test_delegates_boundary_selection_and_arguments_to_native(
+    monkeypatch, is_kv_consumer, is_kv_producer, computed, prompt, new_tokens, local, external, sparse
+):
+    original = Mock(wraps=_original_mamba_block_aligned_split)
+    monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", original)
+    scheduler = _scheduler(
+        is_kv_consumer=is_kv_consumer,
+        is_kv_producer=is_kv_producer,
+        uses_sparse_index_kpool=sparse,
+    )
+    request = _request(num_computed_tokens=computed, num_prompt_tokens=prompt, num_tokens=prompt)
+
     result = _mamba_block_aligned_split(
-        _scheduler(is_kv_consumer=True),
-        _request(),
-        num_new_tokens=8,
+        scheduler,
+        request,
+        num_new_tokens=new_tokens,
+        num_new_local_computed_tokens=local,
+        num_external_computed_tokens=external,
     )
 
-    assert result == 8
-
-
-def test_producer_retains_upstream_mamba_boundary_split():
-    result = _mamba_block_aligned_split(
-        _scheduler(is_kv_consumer=False),
-        _request(),
-        num_new_tokens=8,
+    original.assert_called_once_with(scheduler, request, new_tokens, local, external)
+    native_scheduler = _scheduler(
+        is_kv_consumer=is_kv_consumer,
+        is_kv_producer=is_kv_producer,
+        uses_sparse_index_kpool=sparse,
     )
-
-    assert result == 5
-
-
-def test_non_pd_request_retains_upstream_mamba_boundary_split():
-    result = _mamba_block_aligned_split(
-        _scheduler(is_kv_consumer=None),
-        _request(),
-        num_new_tokens=8,
-    )
-
-    assert result == 5
-
-
-def test_pd_consumer_preserves_window_after_external_cache_hit():
-    result = _mamba_block_aligned_split(
-        _scheduler(is_kv_consumer=True),
-        _request(num_computed_tokens=0),
-        num_new_tokens=8,
-        num_external_computed_tokens=379,
-    )
-
-    assert result == 8
-
-
-def test_kv_both_cold_prefill_retains_mamba_boundary_split():
-    result = _mamba_block_aligned_split(
-        _scheduler(is_kv_consumer=True),
-        _request(
-            num_computed_tokens=0,
-            num_prompt_tokens=4800,
-            num_tokens=4800,
-        ),
-        num_new_tokens=4800,
-    )
-
-    # 4800 rounds down to 4608; EAGLE keeps one 384-token verifier block.
-    assert result == 4224
-
-
-def test_producer_splits_window_after_external_cache_hit():
-    result = _mamba_block_aligned_split(
-        _scheduler(is_kv_consumer=False),
-        _request(num_computed_tokens=0),
-        num_new_tokens=8,
-        num_external_computed_tokens=379,
-    )
-
-    assert result == 5
-
-
-def test_producer_decode_fast_path_remains_unsplit():
-    result = _mamba_block_aligned_split(
-        _scheduler(is_kv_consumer=False),
-        _request(num_computed_tokens=380),
-        num_new_tokens=8,
-    )
-
-    assert result == 8
-
-
-def test_sparse_index_kpool_prefill_uses_resolved_common_block_size():
-    result = _mamba_block_aligned_split(
-        _scheduler(is_kv_consumer=False, uses_sparse_index_kpool=True),
-        _request(
-            num_computed_tokens=128,
-            num_prompt_tokens=500,
-            num_tokens=500,
-        ),
-        num_new_tokens=200,
-    )
-
-    assert result == 128
-
-
-def test_sparse_index_kpool_stops_at_last_cacheable_boundary():
-    result = _mamba_block_aligned_split(
-        _scheduler(is_kv_consumer=False, uses_sparse_index_kpool=True),
-        _request(
-            num_computed_tokens=220,
-            num_prompt_tokens=500,
-            num_tokens=500,
-        ),
-        num_new_tokens=100,
-    )
-
-    assert result == 36
-
-
-def test_sparse_index_kpool_does_not_round_small_chunk_to_zero():
-    result = _mamba_block_aligned_split(
-        _scheduler(is_kv_consumer=False, uses_sparse_index_kpool=True),
-        _request(
-            num_computed_tokens=128,
-            num_prompt_tokens=500,
-            num_tokens=500,
-        ),
-        num_new_tokens=64,
-    )
-
-    assert result == 64
-
-
-def test_sparse_index_kpool_pd_consumer_still_preserves_verifier_window():
-    result = _mamba_block_aligned_split(
-        _scheduler(is_kv_consumer=True, uses_sparse_index_kpool=True),
-        _request(),
-        num_new_tokens=8,
-    )
-
-    assert result == 8
+    if is_kv_consumer is None or (is_kv_producer and not is_kv_consumer):
+        native_scheduler.use_eagle = False
+        native_scheduler.use_eagle_block_drop = False
+    expected = _original_mamba_block_aligned_split(native_scheduler, request, new_tokens, local, external)
+    assert result == expected
 
 
 def test_patch_is_registered_with_upstream_signature():
@@ -256,12 +172,13 @@ def test_standalone_clears_drop_knobs_around_upstream_call(monkeypatch):
 def test_consumer_keeps_drop_knobs_around_upstream_call(monkeypatch):
     observed: dict[str, bool | None] = {}
     monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
-    # Decode consumer with a computed prefix: the verifier window is preserved
-    # by the early return, the original is never reached.
+    # A consumer with a computed prefix delegates verifier padding to vLLM.
     scheduler = _scheduler(is_kv_consumer=True)
     result = _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
-    assert result == 8
-    assert observed == {}
+    assert result == 42
+    assert observed == {"use_eagle": True, "use_eagle_block_drop": True}
+    assert scheduler.use_eagle is True
+    assert scheduler.use_eagle_block_drop is True
 
     # Cold kv_both prefill reaches the original with the knobs untouched.
     scheduler = _scheduler(is_kv_consumer=True, is_kv_producer=True)
@@ -272,6 +189,8 @@ def test_consumer_keeps_drop_knobs_around_upstream_call(monkeypatch):
     )
     assert result == 42
     assert observed == {"use_eagle": True, "use_eagle_block_drop": True}
+    assert scheduler.use_eagle is True
+    assert scheduler.use_eagle_block_drop is True
 
 
 def test_producer_restores_drop_knobs_on_exception(monkeypatch):

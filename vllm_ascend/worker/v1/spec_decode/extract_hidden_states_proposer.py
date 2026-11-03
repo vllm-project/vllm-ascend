@@ -161,6 +161,7 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
         gpu_input_batch,
         discard_request_indices: torch.Tensor,
         num_discarded_requests: int,
+        num_scheduled_tokens: dict[str, int],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Prepare next token IDs for speculative decoding.
 
@@ -175,9 +176,17 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
         device = sampled_token_ids.device
 
         # Compute backup tokens for discarded / invalid requests
-        seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
+        # Match the native CPU path for partial prefill. Other rows still
+        # need an in-range backup before the device selects their sampled token.
+        backup_token_indices = [
+            min(
+                requests[req_id].num_computed_tokens + num_scheduled_tokens[req_id],
+                requests[req_id].num_tokens - 1,
+            )
+            for req_id in gpu_input_batch.req_ids[:num_reqs]
+        ]
         backup_tokens = torch.tensor(
-            [requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i]) for i in range(num_reqs)],
+            [requests[gpu_input_batch.req_ids[i]].get_token_id(backup_token_indices[i]) for i in range(num_reqs)],
             dtype=torch.int32,
             device=device,
         )

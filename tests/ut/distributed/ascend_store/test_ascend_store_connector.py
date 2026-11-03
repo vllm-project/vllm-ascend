@@ -166,7 +166,7 @@ class TestAscendStoreConnector(unittest.TestCase):
             with self.subTest(layerwise=layerwise):
                 connector = AscendStoreConnector.__new__(AscendStoreConnector)
                 connector.use_layerwise = layerwise
-                connector.connector_worker = MagicMock(load_async=True)
+                connector.connector_worker = MagicMock(load_async=True, enable_state_store_reuse=False)
                 connector.connector_worker.get_failed_requests.return_value = {"r1"}
                 connector.get_finished = MagicMock(return_value=(set(), set()))
                 with patch(

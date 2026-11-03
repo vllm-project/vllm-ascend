@@ -1595,8 +1595,46 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `prefill_pp_size` | int | 1 | Required when Prefill PP + consumer writes | Positive integer | Prefill PP size. |
 | `prefill_pp_layer_partition` | str | No default | No | Comma-separated layer numbers, e.g., "30,31" | Prefill PP layer partition. If not configured, layers are evenly divided by `prefill_pp_size`. |
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | KV Pool transfer QoS priority. |
+| `enable_state_store_reuse` | bool | false | No | true / false | Enable joint accepted-state checkpoints. Requires bulk Mooncake transfer and `kv_load_failure_policy=fail`. |
+| `state_store_tp_size` | int | No default | When state reuse is enabled | Positive integer | Shared logical Store partition count on writers and readers. |
+| `max_state_save_jobs` | int | No default | When state reuse is enabled | Positive integer | Maximum outstanding checkpoint save jobs. |
+| `max_state_save_blocks` | int | No default | When state reuse is enabled | Positive integer | Maximum source blocks retained by checkpoint saves. |
+| `cache_prefix` | str | Empty string | No | Shared namespace | State checkpoint namespace; change it when checkpoint framing changes. |
 
 **NOTE:** When using `AscendStoreConnector` together with `MooncakeConnector` (V1) or `MooncakeConnectorV2`, the current TCP port allocations may still overlap ports reserved by other workers or components. This includes V1 worker handshake ports and V2 scheduler control ports. Distinct DP indices do not guarantee disjoint TCP port ranges; check these allocations against worker and component port reservations before deployment. `lookup_rpc_port` only identifies the local IPC endpoint and does not resolve these TCP port conflicts.
+
+### Accepted-state checkpoints for hybrid GLM models
+
+The bulk Store path can jointly reuse attention pages and accepted recurrent
+states from a committed decode checkpoint. Enable `enable_state_store_reuse`
+in the `AscendStoreConnector` extra configuration and set
+`state_store_tp_size` to the same logical Store partition count on both peers.
+Set positive `max_state_save_jobs` and `max_state_save_blocks` limits for
+outstanding save jobs and pinned source blocks. Use the existing
+`save_decode_cache` option on the writer to include checkpoints
+created during decoding; the option does not create a checkpoint unless the
+native scheduler offers one.
+
+This mode currently supports GLM-5.3-Flash (`glm5_next`) with the V1 model runner, bulk transfer,
+TP-only cache ownership (`pipeline_parallel_size=1`, PCP=1 and DCP=1),
+a BF16 pooled indexer cache, and
+`kv_load_failure_policy="fail"`. INT8-packed MLA pages remain supported; FP8
+pooled-indexer K/scale checkpoint framing is not supported. It requires the
+Mooncake backend's checked buffer-transfer APIs. Do not enable it with
+layerwise transfer, KVPP, pipeline parallelism, PCP/DCP, or the V2 model runner. MTP uses a single
+predictor layer; its state identity includes the committed next input token.
+Writers and readers must share checkpoint/page framing and `cache_prefix`;
+use a fresh prefix when layouts change. TP sizes may differ only where the
+registered state and replicated-page layouts support that mapping.
+
+Loading roles use native asynchronous admission (`load_async` is enabled
+by the connector). A missing or short read fails the request. These layout
+and runner constraints are checked during initialization.
+
+The connector retains native scheduling, model kernels and sampling. It waits
+for accepted-state copies before export and checked transfer completion before
+publishing the checkpoint. Reuse changes the recomputation interval, so assess
+answer quality and latency with matched requests and actual external hits.
 
 ### ASCEND_GLOBAL_RESOURCE_CONFIG
 

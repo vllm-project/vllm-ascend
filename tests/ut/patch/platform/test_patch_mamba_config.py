@@ -124,6 +124,7 @@ def test_kpool_page_alignment_preserves_packed_and_regular_geometry(cache_dtype,
     config = _config(prefix_caching=True, mamba_cache_mode="align")
     config.cache_config.cache_dtype = cache_dtype
     config.cache_config.block_size = block_size
+    config.cache_config.user_specified_block_size = block_size is not None
     config.cache_config.mamba_page_size_padded = None
     config.parallel_config = SimpleNamespace(tensor_parallel_size=1)
     config.model_config = SimpleNamespace(
@@ -152,7 +153,7 @@ def test_kpool_page_alignment_preserves_packed_and_regular_geometry(cache_dtype,
     resolve.assert_called_once_with(config.model_config.architecture, model_config=config.model_config)
     if use_mla and cache_dtype in ("fp8", "int8"):
         expected_token_page_size = packed_token_page_size
-        expected_block_size = 640
+        expected_block_size = max(block_size or 0, 640)
     else:
         expected_token_page_size = 1152 if use_mla else 1024 if cache_dtype == "auto" else 512
         minimum_block_size = 384 if cache_dtype == "auto" else 768

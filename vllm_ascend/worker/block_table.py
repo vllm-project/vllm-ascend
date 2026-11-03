@@ -163,9 +163,6 @@ class BlockTable:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
-        if self.is_circular_group:
-            self.slot_mapping.gpu.fill_(PAD_SLOT_ID)
-            return
         num_tokens = positions.shape[0]
         total_cp_world_size = self.dcp_world_size
         total_cp_rank = self.dcp_rank
@@ -214,9 +211,6 @@ class BlockTable:
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
 
-        if self.is_circular_group:
-            self.slot_mapping.gpu.fill_(PAD_SLOT_ID)
-            return
         if self.dcp_world_size > 1:
             if not isinstance(req_indices, torch.Tensor):
                 req_indices = torch.from_numpy(req_indices)

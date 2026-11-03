@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import RequestStatus
 from zmq.constants import RCVTIMEO, REP
 from zmq.error import ZMQError
 from zmq.sugar.context import Context
@@ -1072,6 +1073,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 )
 def test_connector_metadata_preserves_unscheduled_request_order(unfinished_ids, new_ids, cached_ids, expected_ids):
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.enable_state_store_reuse = False
     scheduler.kv_role = "kv_both"
     scheduler.consumer_is_to_put = scheduler.can_put = False
     scheduler._request_trackers = {}
@@ -1102,10 +1104,12 @@ def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cl
             raise AssertionError("No cached-ID scan is needed without unfinished requests")
 
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.enable_state_store_reuse = False
     scheduler.kv_role = "kv_both"
     scheduler.consumer_is_to_put = scheduler.can_put = False
     scheduler._request_trackers = {}
-    scheduler._unfinished_requests = {} if cleared_by == "already-empty" else {"retired": (None, [])}
+    request = SimpleNamespace(status=RequestStatus.PREEMPTED)
+    scheduler._unfinished_requests = {} if cleared_by == "already-empty" else {"retired": (request, [])}
     scheduler._preempted_req_ids = set()
     scheduler._loading_req_ids = set()
     scheduler._process_new_request = MagicMock(return_value=None)
@@ -1120,7 +1124,7 @@ def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cl
     metadata = scheduler.build_connector_meta(output)
 
     assert metadata.requests == []
-    assert scheduler._unfinished_requests == ({"retired": (None, [])} if cleared_by == "scheduled-new" else {})
+    assert scheduler._unfinished_requests == ({"retired": (request, [])} if cleared_by == "scheduled-new" else {})
     scheduler._process_async_load_request.assert_not_called()
     assert metadata.released_req_ids == output.finished_req_ids | output.preempted_req_ids
 
@@ -1143,6 +1147,7 @@ def test_connector_metadata_filter_has_linear_key_lookup_work():
     cached_ids = [CountedRequestId(f"request-{index}") for index in range(count)]
     pending_ids = ["pending-b", "pending-a"]
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.enable_state_store_reuse = False
     scheduler.kv_role = "kv_both"
     scheduler.consumer_is_to_put = scheduler.can_put = False
     scheduler._request_trackers = {}
@@ -1484,23 +1489,26 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         scheduler._block_pool.free_blocks.assert_not_called()
 
     def test_finished_request_keeps_receive_registration_until_completion(self):
-        scheduler = self._make_scheduler()
-        scheduler._block_pool = None
-        scheduler._loading_req_ids = {"r1", "other"}
-        request = SimpleNamespace(request_id="r1")
-        self.assertEqual(scheduler.request_finished(request, [1]), (False, None))
-        output = SimpleNamespace(
-            finished_req_ids={"r1"},
-            preempted_req_ids=set(),
-            scheduled_new_reqs=[],
-            scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
-        )
+        for state_reuse in (False, True):
+            scheduler = self._make_scheduler()
+            scheduler.enable_state_store_reuse = state_reuse
+            scheduler.can_put = False
+            scheduler._block_pool = None
+            scheduler._loading_req_ids = {"r1", "other"}
+            request = SimpleNamespace(request_id="r1")
+            self.assertEqual(scheduler.request_finished(request, [1]), (False, None))
+            output = SimpleNamespace(
+                finished_req_ids={"r1"},
+                preempted_req_ids=set(),
+                scheduled_new_reqs=[],
+                scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+            )
 
-        metadata = scheduler.build_connector_meta(output)
-        self.assertEqual(metadata.loading_req_ids, {"r1", "other"})
-        scheduler.update_connector_output(KVConnectorOutput(finished_recving={"r1"}))
-        output.finished_req_ids.clear()
-        self.assertEqual(scheduler.build_connector_meta(output).loading_req_ids, {"other"})
+            metadata = scheduler.build_connector_meta(output)
+            self.assertEqual(metadata.loading_req_ids, {"r1", "other"})
+            scheduler.update_connector_output(KVConnectorOutput(finished_recving={"r1"}))
+            output.finished_req_ids.clear()
+            self.assertEqual(scheduler.build_connector_meta(output).loading_req_ids, {"other"})
 
     def test_receive_completion_cleans_only_reported_registrations(self):
         for completed in (None, set(), {"r1"}, {"r1", "r2"}):
