@@ -12,7 +12,6 @@ from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 
 import vllm_ascend.attention.sfa_v1 as sfa
 import vllm_ascend.attention.sfa_v1 as sparse_mla
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPMetadataBuilder
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
 
 
@@ -84,77 +83,6 @@ def _common(block_size):
     )
 
 
-@pytest.mark.parametrize("dummy_request", [False, True])
-def test_dsacp_nope_plan_uses_local_queries_and_full_heads(monkeypatch, dummy_request):
-    group = SimpleNamespace(world_size=2, rank_in_group=1)
-    monkeypatch.setattr("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", lambda: group)
-    plans = []
-
-    def plan(**kwargs):
-        plans.append(kwargs)
-        return torch.zeros(1024, dtype=torch.int32)
-
-    monkeypatch.setattr(sfa, "sparse_flash_mla_metadata", plan)
-    builder = _builder(128, True, monkeypatch, builder_cls=AscendSFADSACPMetadataBuilder, tp_size=2)
-    common = _common(128)
-    if dummy_request:
-        common.num_reqs = 3
-        common.query_start_loc = torch.tensor([0, 2, 3, 4], dtype=torch.int32)
-        common.query_start_loc_cpu = common.query_start_loc.clone()
-        common.seq_lens = torch.cat((common.seq_lens, torch.tensor([0], dtype=torch.int32)))
-        common.block_table_tensor = torch.cat(
-            (common.block_table_tensor, torch.zeros_like(common.block_table_tensor[:1]))
-        )
-    metadata = builder.build(0, common)
-    local = metadata.nope_metadata
-    assert local is not None
-    assert metadata.num_actual_tokens == 3 and local.num_actual_tokens == 1
-    assert local.positions.data_ptr() == common.positions[2:].data_ptr()
-    assert metadata.query_start_loc.data_ptr() == common.query_start_loc.data_ptr()
-    torch.testing.assert_close(
-        local.query_start_loc, torch.tensor([0, 0, 1, 2] if dummy_request else [0, 0, 1], dtype=torch.int32)
-    )
-    torch.testing.assert_close(local.seq_lens, torch.tensor([0, 1, 0] if dummy_request else [0, 1], dtype=torch.int32))
-    assert not plans  # Planning runs after token-local indices are selected.
-    monkeypatch.setattr(sfa, "sparse_flash_mla", lambda q, **kwargs: (q,))
-    sfa.sparse_mla(torch.ones(2, 4, 8), torch.zeros(8, 128, 1, 8), torch.zeros(2, 1, 4, dtype=torch.int32), local, 0.5)
-    torch.testing.assert_close(local.smla_topk_length, torch.tensor([[4], [0]], dtype=torch.int32))
-    assert plans[0]["num_heads_q"] == 4
-    assert plans[0]["cu_seqlens_q"] is local.query_start_loc
-    second = builder.build(0, common).nope_metadata
-    assert second.query_start_loc.data_ptr() == local.query_start_loc.data_ptr()
-    assert second.smla_metadata.data_ptr() == local.smla_metadata.data_ptr()
-    assert second.smla_topk_length.data_ptr() == local.smla_topk_length.data_ptr()
-    assert second.smla_valid_mask.data_ptr() == local.smla_valid_mask.data_ptr()
-
-
-@pytest.mark.parametrize("flag", [None, "enable_sparse_sfa_c8", "enable_sparse_sfa_turboquant"])
-def test_dsacp_draft_buffers_cover_full_graph_bucket(monkeypatch, flag):
-    group = SimpleNamespace(world_size=2, rank_in_group=0)
-    monkeypatch.setattr("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", lambda: group)
-    builder = _builder(128, True, monkeypatch, builder_cls=AscendSFADSACPMetadataBuilder, tp_size=2, speculative=True)
-    if flag:
-        setattr(sfa.get_ascend_config(), flag, True)
-    common = _common(128)
-    common.num_reqs = common.num_input_tokens = 32
-    common.num_actual_tokens = 2
-    common.max_query_len = 1
-    common.query_start_loc = torch.arange(33, dtype=torch.int32)
-    common.query_start_loc_cpu = common.query_start_loc.clone()
-    common.seq_lens = torch.cat((common.seq_lens, torch.zeros(30, dtype=torch.int32)))
-    common.slot_mapping = torch.cat((common.slot_mapping[:2], torch.full((30,), -1)))
-    common.positions = torch.zeros(32, dtype=torch.int64)
-    common.block_table_tensor = torch.cat((common.block_table_tensor, torch.zeros(30, 2, dtype=torch.int32)))
-    metadata = builder.build_for_drafting(common, 4)
-    assert (metadata.nope_metadata.smla_metadata is None) is bool(flag)
-    assert builder.nope_states[4].block_table_buffer.shape[0] == 32
-    assert builder.dsa_cp_spec_actual_seq_lengths_query[3].numel() == 33
-    assert builder.dsa_cp_spec_actual_seq_lengths_key[3].numel() == 33
-    again = builder.build_for_drafting(_common(128), 4)
-    assert again.dsa_cp_context.query_start_loc.data_ptr() == metadata.dsa_cp_context.query_start_loc.data_ptr()
-    assert again.nope_metadata.block_table.data_ptr() == metadata.nope_metadata.block_table.data_ptr()
-
-
 @pytest.mark.parametrize("block_size", [128, 384, 640, 2304, 4352])
 @pytest.mark.parametrize("a5", [False, True])
 def test_shared_sfa_nope_metadata_pages_and_draft_buffers(monkeypatch, block_size, a5):
@@ -209,6 +137,31 @@ def test_shared_sfa_nope_metadata_pages_and_draft_buffers(monkeypatch, block_siz
         assert smaller.smla_valid_mask.data_ptr() == first.smla_valid_mask.data_ptr()
         torch.testing.assert_close(smaller.smla_valid_mask[:, 0], torch.tensor([True, False, False, False]))
         torch.testing.assert_close(draft.smla_valid_mask[:, 0], torch.tensor([True, True, True, False]))
+
+
+@pytest.mark.parametrize("pcp_size", [1, 8])
+@pytest.mark.parametrize("a5", [False, True])
+@pytest.mark.parametrize("graph", [False, True])
+def test_nope_metadata_preserves_all_pcp_request_chunks(monkeypatch, pcp_size, a5, graph):
+    builder = _builder(128, a5, monkeypatch, speculative=graph)
+    config = builder.vllm_config
+    config.scheduler_config.max_num_seqs = 8
+    config.scheduler_config.max_num_batched_tokens = 32
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    state = sparse_mla.SparseMLAMetadataState(SimpleNamespace(block_size=128), config, torch.device("cpu"))
+    address = state.block_table_buffer.data_ptr()
+    rows = 17 if pcp_size > 1 else 9
+    width = state.block_table_buffer.shape[1]
+    for num_rows in ([10] if pcp_size > 1 else []) + [rows, 3, rows]:
+        table = torch.arange(num_rows * width, dtype=torch.int32).reshape(num_rows, width)
+        metadata = SimpleNamespace(
+            block_table=table,
+            positions=torch.zeros(num_rows, dtype=torch.int64),
+            num_actual_tokens=num_rows - 1,
+        )
+        state.prepare(metadata)
+        torch.testing.assert_close(metadata.block_table, table)
+        assert metadata.block_table.data_ptr() == address
 
 
 def test_a3_sparse_mla_preserves_storage_addresses(monkeypatch):
@@ -689,3 +642,19 @@ def test_sparse_mla_rejects_missing_sinks():
             _smla_metadata_stub(None),
             0.5,
         )
+
+
+def test_nope_c8_output_returns_kernel_buffer_without_python_mask(monkeypatch):
+    """NoPE c8 returns the operator output unmodified: the fork kernel defines its
+    own padding rows (TND tail zero-init), so no Python masked_fill remains."""
+    impl = object.__new__(sfa.AscendSFAImpl)
+    impl.qk_rope_head_dim = 0
+    impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
+    cache = torch.empty(8, 2, 1, 12, dtype=torch.int8)
+    metadata = SimpleNamespace(block_size=2)
+    with patch.object(sfa.DeviceOperator, "execute_sparse_flash_attention_process") as dispatch:
+        result = impl._execute_sparse_flash_attention_process(
+            torch.empty(4, 2, 8), None, (cache,), None, metadata, None, None
+        )
+    assert result is dispatch.return_value

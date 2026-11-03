@@ -9,6 +9,7 @@ import pytest
 import torch
 import vllm.v1.worker.gpu.cp_utils as _cp_utils
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -184,8 +185,42 @@ def _make_defer_state(kv_cache_config):
     state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
     state._layerwise_mamba_copy = None
     state._layer_state_ranges = None
+    state._mamba_state_copy_funcs = {
+        group.kv_cache_spec.mamba_type: tuple(MagicMock() for _ in group.kv_cache_spec.shapes)
+        for group in kv_cache_config.kv_cache_groups
+    }
     state._layer_state_ranges = state._get_layer_state_ranges(kv_cache_config)
     return state
+
+
+@pytest.mark.parametrize("ple_first", [False, True])
+def test_layerwise_copy_rows_follow_each_groups_state_types(ple_first):
+    gdn = replace(_mamba_spec(), mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
+    ple = replace(
+        gdn,
+        shapes=((9, 4),),
+        dtypes=(torch.float16,),
+        mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+    )
+    groups = [
+        KVCacheGroupSpec(
+            layer_names=["layers.0.linear_attn", "layers.1.linear_attn"],
+            kv_cache_spec=gdn,
+        ),
+        KVCacheGroupSpec(layer_names=["layers.1.ple"], kv_cache_spec=ple),
+    ]
+    if ple_first:
+        groups.reverse()
+    config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=groups)
+    state = _make_defer_state(config)
+    state._mamba_group_ids = [0, 1]
+    state._layer_state_ranges = None
+    ranges = state._get_layer_state_ranges(config)
+    offset = 1 if ple_first else 0
+    assert ranges["layers.0.linear_attn"] == (offset, offset + 2)
+    assert ranges["layers.1.linear_attn"] == (offset + 2, offset + 4)
+    assert ranges["layers.1.ple"] == ((0, 1) if ple_first else (4, 5))
+    assert max(end for _, end in ranges.values()) == 5
 
 
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.preprocess_mamba_align_fused_kernel")
@@ -905,6 +940,9 @@ def test_mamba_spec_follows_aligned_attention_spec(
         def get_kv_cache_spec(self, _vllm_config):
             return attention_spec
 
+        def get_attn_backend(self):
+            return SimpleNamespace(uses_descriptor_cache_view=False)
+
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
     mamba_layer.get_kv_cache_spec.return_value = mamba_spec
@@ -956,6 +994,9 @@ def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
 
         def get_kv_cache_spec(self, _vllm_config):
             return self.spec
+
+        def get_attn_backend(self):
+            return SimpleNamespace(uses_descriptor_cache_view=False)
 
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
@@ -1013,7 +1054,10 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
         additional_config={},
     )
     layers = {
-        name: SimpleNamespace(get_kv_cache_spec=lambda _config, spec=spec: spec)
+        name: SimpleNamespace(
+            get_kv_cache_spec=lambda _config, spec=spec: spec,
+            get_attn_backend=lambda: SimpleNamespace(uses_descriptor_cache_view=False),
+        )
         for name, spec in original_specs.items()
     }
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
@@ -1115,6 +1159,95 @@ def test_hybrid_model_selects_mamba_model_state(mock_mamba_state):
         encoder_cache,
         device,
     )
+
+
+@patch(
+    "vllm_ascend.worker.v2.model_states._has_encoder_only_layers",
+    return_value=True,
+)
+@patch("vllm_ascend.worker.v2.model_states.hybrid_encoder.AscendHybridEncoderModelState")
+def test_hybrid_encoder_model_selects_combined_model_state(mock_state, _mock_has_encoder_only):
+    """A hybrid model with ENCODER_ONLY layers needs mamba + encoder metadata."""
+    vllm_config = MagicMock()
+    vllm_config.model_config.is_hybrid = True
+    model = torch.nn.Module()
+    encoder_cache = MagicMock()
+    device = torch.device("cpu")
+
+    with patch(
+        "vllm_ascend.worker.v2.model_states.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A2),
+    ):
+        state = init_asecnd_model_state(vllm_config, model, encoder_cache, device)
+
+    assert state is mock_state.return_value
+    mock_state.assert_called_once_with(
+        vllm_config,
+        model,
+        encoder_cache,
+        device,
+    )
+
+
+def test_hybrid_encoder_state_merges_encoder_attn_metadata():
+    """Encoder-only layers must find their own metadata next to the mamba one."""
+    from vllm_ascend.worker.v2.model_states.hybrid_encoder import (
+        AscendHybridEncoderModelState,
+    )
+    from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
+        AscendMambaHybridModelState,
+    )
+
+    state = object.__new__(AscendHybridEncoderModelState)
+    input_batch = SimpleNamespace()
+
+    with (
+        patch.object(
+            AscendMambaHybridModelState,
+            "prepare_attn",
+            return_value={"language_model.model.layers.2.linear_attn": "gdn"},
+        ),
+        patch.object(
+            AscendHybridEncoderModelState,
+            "_build_encoder_attn_metadata",
+            return_value={"language_model.model.layers.3.self_attn.attn": "encoder"},
+        ),
+    ):
+        attn_metadata = AscendHybridEncoderModelState.prepare_attn(
+            state,
+            input_batch,
+            CUDAGraphMode.PIECEWISE,
+            (),
+            None,
+            [],
+            MagicMock(),
+        )
+
+    assert attn_metadata == {
+        "language_model.model.layers.2.linear_attn": "gdn",
+        "language_model.model.layers.3.self_attn.attn": "encoder",
+    }
+
+
+@patch(
+    "vllm_ascend.worker.v2.model_states._has_encoder_only_layers",
+    return_value=True,
+)
+def test_prompt_embeds_rejected_for_encoder_only_state(_mock_has_encoder_only):
+    """``init_asecnd_model_state`` replaces upstream ``init_model_state``, so it
+    has to repeat the ``--enable-prompt-embeds`` guard."""
+    vllm_config = MagicMock()
+    vllm_config.model_config.is_hybrid = False
+    vllm_config.model_config.enable_prompt_embeds = True
+
+    with (
+        patch(
+            "vllm_ascend.worker.v2.model_states.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A2),
+        ),
+        pytest.raises(ValueError, match="--enable-prompt-embeds not supported with AscendEncoderOnlyModelState"),
+    ):
+        init_asecnd_model_state(vllm_config, torch.nn.Module(), None, torch.device("cpu"))
 
 
 def test_init_model_state_uses_override_then_default():

@@ -10,7 +10,6 @@ import torch_npu
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPMetadataBuilder
 from vllm_ascend.attention.indexer import (
     AscendSFAIndexerBackend,
     AscendSFAIndexerMetadata,
@@ -25,7 +24,6 @@ _KERNEL_BLOCK_SIZE = 128
 def _make_builder(
     pcp_size: int = 1,
     dcp_size: int = 1,
-    dsa_cp: bool = False,
     num_speculative_tokens: int | None = None,
 ) -> AscendSFAIndexerMetadataBuilder:
     kv_cache_spec = FullAttentionSpec(
@@ -44,7 +42,7 @@ def _make_builder(
     vllm_config.parallel_config = SimpleNamespace(
         prefill_context_parallel_size=pcp_size,
         decode_context_parallel_size=dcp_size,
-        tensor_parallel_size=4,
+        tensor_parallel_size=max(4, dcp_size),
     )
     vllm_config.scheduler_config = SimpleNamespace(
         max_num_seqs=4,
@@ -58,7 +56,6 @@ def _make_builder(
             "vllm_ascend.attention.indexer.select_common_block_size",
             return_value=_KERNEL_BLOCK_SIZE,
         ),
-        patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=dsa_cp),
     ):
         return AscendSFAIndexerMetadataBuilder(
             kv_cache_spec,
@@ -94,50 +91,6 @@ def _make_common_metadata() -> SimpleNamespace:
 
     metadata.replace = replace
     return metadata
-
-
-@pytest.mark.parametrize("world_size", [1, 2, 4, 8])
-@pytest.mark.parametrize(
-    "query_starts,seq_lens,num_actual_tokens",
-    [([0, 3, 5], [13, 15], 5), ([0, 4, 8, 12], [12, 13, 0], 8), ([0], [], 0)],
-)
-def test_sfa_indexer_dsa_cp_matches_sfa_with_independent_buffers(world_size, query_starts, seq_lens, num_actual_tokens):
-    common = _make_common_metadata()
-    common.query_start_loc = torch.tensor(query_starts, dtype=torch.int32)
-    common.seq_lens = torch.tensor(seq_lens, dtype=torch.int32)
-    common.num_reqs = len(seq_lens)
-    common.num_input_tokens = query_starts[-1]
-    common.num_actual_tokens = num_actual_tokens
-    cos = torch.arange(common.num_input_tokens * 2, dtype=torch.float32).view(-1, 1, 1, 2)
-    sin = cos + 100
-    slots = torch.arange(common.num_input_tokens, dtype=torch.int32)
-    for rank in range(world_size):
-        sfa_builder = AscendSFADSACPMetadataBuilder.__new__(AscendSFADSACPMetadataBuilder)
-        sfa_builder.dsa_cp_actual_seq_lengths_query = torch.zeros(4, dtype=torch.int32)
-        sfa_builder.dsa_cp_actual_seq_lengths_key = torch.zeros(4, dtype=torch.int32)
-        indexer_builder = _make_builder(dsa_cp=True)
-        indexer_builder.dsa_cp_world_size = world_size
-        group = SimpleNamespace(world_size=world_size, rank_in_group=rank)
-        with (
-            patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=group),
-            patch("vllm_ascend.attention.indexer.get_tp_group", return_value=group),
-        ):
-            sfa_cos, sfa_sin, _, extra = sfa_builder._prepare_parallel_metadata(
-                common, cos, sin, slots, common.query_start_loc[1:], common.seq_lens, draft_index=None
-            )
-            local_cos, local_sin, query, key = indexer_builder._build_dsa_cp_parallel_metadata(common, cos, sin, "test")
-        context = extra["dsa_cp_context"]
-        torch.testing.assert_close(local_cos, sfa_cos)
-        torch.testing.assert_close(local_sin, sfa_sin)
-        torch.testing.assert_close(query, context.actual_seq_lengths_query)
-        torch.testing.assert_close(key, context.actual_seq_lengths_key)
-        if common.num_reqs:
-            assert query.data_ptr() != context.actual_seq_lengths_query.data_ptr()
-            assert key.data_ptr() != context.actual_seq_lengths_key.data_ptr()
-            query.fill_(-1)
-            key.fill_(-1)
-            assert torch.all(context.actual_seq_lengths_query >= 0)
-            assert torch.all(context.actual_seq_lengths_key >= 0)
 
 
 def test_sfa_indexer_backend_contract():
@@ -211,11 +164,28 @@ def test_sfa_indexer_metadata_builder_emits_full_slot_mapping_under_pcp(mock_cos
     assert metadata.slot_mapping is common.slot_mapping
 
 
-@pytest.mark.parametrize("dcp_size,expected_decode_tokens", [(1, 1), (2, 1)])
+@pytest.mark.parametrize("capture", [False, True])
+@patch("vllm_ascend.attention.indexer.get_ascend_config")
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+def test_sfa_indexer_native_dcp_decode_boundary(mock_cos_sin, mock_get_ascend_config, capture):
+    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
+    mock_cos_sin.return_value = (torch.zeros(2, 1, 1, 8), torch.zeros(2, 1, 1, 8))
+    common = _make_common_metadata()
+    common.num_actual_tokens = common.num_input_tokens = 2
+    common.query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+    common.query_start_loc_cpu = common.query_start_loc.clone()
+    common.max_query_len = 1
+    common.is_prefilling = torch.tensor([False, False])
+    builder = _make_builder(pcp_size=1, dcp_size=8)
+    metadata = builder.build_for_cudagraph_capture(common) if capture else builder.build(0, common)
+    assert metadata.num_decode_tokens == metadata.num_actual_tokens == 2
+
+
+@pytest.mark.parametrize("pcp_size,dcp_size,expected_decode_tokens", [(2, 1, 1), (2, 2, 1), (1, 8, 1)])
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
 def test_sfa_indexer_metadata_builder_preserves_pcp_decode_boundary(
-    mock_cos_sin, mock_get_ascend_config, dcp_size, expected_decode_tokens
+    mock_cos_sin, mock_get_ascend_config, pcp_size, dcp_size, expected_decode_tokens
 ):
     mock_cos_sin.return_value = (torch.zeros(4, 1, 1, 8), torch.zeros(4, 1, 1, 8))
     common = _make_common_metadata()
@@ -226,18 +196,21 @@ def test_sfa_indexer_metadata_builder_preserves_pcp_decode_boundary(
 
     common.pcp_context = _make_decode_pcp_context()
 
-    metadata = _make_builder(pcp_size=2, dcp_size=dcp_size).build(0, common)
+    metadata = _make_builder(pcp_size=pcp_size, dcp_size=dcp_size).build(0, common)
 
-    # Preserve the leading-decode count for PCP with or without DCP.
+    # Preserve the boundary for PCP gathering and native DCP fused stores.
     assert metadata.num_decode_tokens == expected_decode_tokens
 
 
+@pytest.mark.parametrize("pcp_size,dcp_size", [(2, 2), (1, 8)])
 @pytest.mark.parametrize("pd_decode_recompute,expected_decode_tokens", [(False, 0), (True, 2)])
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
 def test_sfa_indexer_metadata_builder_preserves_rescheduled_prefill_boundary(
     mock_cos_sin,
     mock_get_ascend_config,
+    pcp_size,
+    dcp_size,
     pd_decode_recompute,
     expected_decode_tokens,
 ):
@@ -255,7 +228,7 @@ def test_sfa_indexer_metadata_builder_preserves_rescheduled_prefill_boundary(
         return_value=pd_decode_recompute,
     ):
         common.pcp_context = _make_decode_pcp_context()
-        metadata = _make_builder(pcp_size=2, dcp_size=2).build(0, common)
+        metadata = _make_builder(pcp_size=pcp_size, dcp_size=dcp_size).build(0, common)
 
     # Short rescheduled prefills remain prefills unless the PD decode
     # recompute scheduler intentionally treats them as decode requests.
@@ -287,69 +260,6 @@ def test_sfa_indexer_metadata_builder_owns_replicated_dcp_addresses(
     torch.testing.assert_close(common.block_table_tensor, torch.arange(6).view(3, 2))
 
 
-@pytest.mark.parametrize("dcp_size,expected_slots", [(1, [1, 2, 3, -1]), (2, [0, 1, 512, -1])])
-@patch("vllm_ascend.attention.indexer.get_ascend_config")
-@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
-@patch("vllm_ascend.attention.indexer.get_tp_group")
-def test_sfa_indexer_metadata_builder_pads_dsa_slots(
-    mock_get_tp_group, mock_cos_sin, mock_get_ascend_config, dcp_size, expected_slots
-):
-    mock_get_tp_group.return_value.world_size = 4
-    mock_get_tp_group.return_value.rank_in_group = 0
-    mock_cos_sin.return_value = (torch.zeros(3, 1, 1, 8), torch.zeros(3, 1, 1, 8))
-    common = _make_common_metadata()
-    common.num_actual_tokens = 3
-    common.num_input_tokens = 3
-    common.query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
-    common.query_start_loc_cpu = common.query_start_loc.clone()
-    common.positions = torch.tensor([0, 1, 0], dtype=torch.int64)
-    builder = _make_builder(dcp_size=dcp_size, dsa_cp=True)
-
-    first_metadata = builder.build(0, common)
-    second_metadata = builder.build(0, common)
-
-    torch.testing.assert_close(second_metadata.slot_mapping, torch.tensor(expected_slots, dtype=torch.int32))
-    assert first_metadata.slot_mapping.data_ptr() == second_metadata.slot_mapping.data_ptr()
-    torch.testing.assert_close(second_metadata.actual_seq_lengths_query, torch.tensor([1, 1], dtype=torch.int32))
-    torch.testing.assert_close(second_metadata.actual_seq_lengths_key, torch.tensor([4, 0], dtype=torch.int32))
-
-
-@patch("vllm_ascend.attention.indexer.get_ascend_config")
-@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
-@patch("vllm_ascend.attention.indexer.get_tp_group")
-def test_sfa_indexer_draft_metadata_owns_per_step_dsa_buffers(
-    mock_get_tp_group,
-    mock_cos_sin,
-    mock_get_ascend_config,
-):
-    mock_get_tp_group.return_value.rank_in_group = 0
-    mock_cos_sin.return_value = (
-        torch.zeros(3, 1, 1, 8),
-        torch.zeros(3, 1, 1, 8),
-    )
-    builder = _make_builder(dsa_cp=True, num_speculative_tokens=3)
-    common = _make_common_metadata()
-    common.num_actual_tokens = 3
-    common.num_input_tokens = 3
-    common.query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
-    common.query_start_loc_cpu = common.query_start_loc.clone()
-    common.positions = torch.tensor([0, 1, 0], dtype=torch.int64)
-
-    step_one = builder.build_for_drafting(common, 1)
-    step_one_slots = step_one.slot_mapping.clone()
-    common.slot_mapping = torch.tensor([9, 10, 11], dtype=torch.int32)
-    step_two = builder.build_for_drafting(common, 2)
-
-    assert step_one.slot_mapping.data_ptr() != step_two.slot_mapping.data_ptr()
-    assert step_one.cos.data_ptr() != step_two.cos.data_ptr()
-    assert step_one.actual_seq_lengths_query.data_ptr() != step_two.actual_seq_lengths_query.data_ptr()
-    torch.testing.assert_close(step_one.slot_mapping, step_one_slots)
-    torch.testing.assert_close(
-        step_two.slot_mapping,
-        torch.tensor([9, 10, 11, -1], dtype=torch.int32),
-    )
-
-
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
 def test_sfa_indexer_draft_metadata_owns_per_step_dcp_buffers(
@@ -378,18 +288,13 @@ def test_sfa_indexer_draft_metadata_owns_per_step_dcp_buffers(
     torch.testing.assert_close(step_one.block_table, step_one_blocks)
 
 
-@pytest.mark.parametrize("dsa_cp", [False, True])
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
-@patch("vllm_ascend.attention.indexer.get_tp_group")
-def test_sfa_indexer_graph_capture_owns_stable_per_step_buffers(
-    mock_get_tp_group, mock_cos_sin, mock_get_ascend_config, dsa_cp
-):
-    mock_get_tp_group.return_value.rank_in_group = 0
+def test_sfa_indexer_graph_capture_owns_stable_per_step_buffers(mock_cos_sin, mock_get_ascend_config):
     mock_cos_sin.side_effect = [
         (torch.full((4, 1, 1, 8), value), torch.full((4, 1, 1, 8), -value)) for value in range(4)
     ]
-    builder = _make_builder(dsa_cp=dsa_cp, num_speculative_tokens=3)
+    builder = _make_builder(num_speculative_tokens=3)
     common = _make_common_metadata()
 
     first = builder.build_for_graph_capture(common)
@@ -450,52 +355,6 @@ def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots(
         metadata.slot_mapping,
         torch.tensor([2816, 2560, 2688, -1], dtype=torch.int32),
     )
-
-
-@pytest.mark.parametrize("with_dependency", [False, True])
-@pytest.mark.parametrize("quantized", [False, True])
-def test_indexer_orders_cache_gathers_after_query_dependency(with_dependency, quantized):
-    events = []
-    k = torch.zeros(2, 4)
-    scale = torch.ones(2, 1) if quantized else None
-    slots = torch.arange(2)
-    metadata = SimpleNamespace(cos=None, sin=None, slot_mapping=slots)
-    indexer = SimpleNamespace(
-        use_pcp=False,
-        _dsa_cp_active=True,
-        enable_sparse_li_c8=quantized,
-        enable_sparse_li_quant=quantized,
-    )
-
-    def forward_k(*args):
-        events.append("forward_k")
-        return k, scale, None
-
-    def gather(tensor, group, async_op):
-        label = "scale" if tensor is scale else "k"
-        events.append("gather_" + label)
-        return tensor, SimpleNamespace(wait=lambda: events.append("wait_" + label))
-
-    indexer.forward_k = forward_k
-    indexer._gather_cache_inputs = lambda *args: AscendSFAIndexerBackend._gather_cache_inputs(indexer, *args)
-    indexer.write_cache = lambda *args, **kwargs: events.append("write_cache")
-    dependency = SimpleNamespace(wait=lambda: events.append("wait_q")) if with_dependency else None
-    with (
-        patch("vllm_ascend.attention.indexer.get_tp_group", return_value=object()),
-        patch("vllm_ascend.attention.indexer.all_gather_async", side_effect=gather),
-    ):
-        assert (
-            AscendSFAIndexerBackend.forward(
-                indexer, k, k, k, metadata, compute_topk=False, attn_q_gather_handle=dependency
-            )
-            is None
-        )
-    expected = ["forward_k"] + (["wait_q"] if with_dependency else []) + ["gather_k"]
-    if quantized:
-        expected += ["gather_scale", "wait_k", "wait_scale"]
-    else:
-        expected += ["wait_k"]
-    assert events == expected + ["write_cache"]
 
 
 def test_c4_cache_write_preserves_packed_bytes(monkeypatch):
