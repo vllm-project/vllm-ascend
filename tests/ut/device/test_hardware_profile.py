@@ -62,6 +62,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.MINIMAX_ECOSYSTEM_FA3,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
+        HardwareCapability.POOL_KEY_INDEXER_INT8,
     },
     AscendDeviceType._310P: frozenset(
         {

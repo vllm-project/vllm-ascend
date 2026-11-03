@@ -4,6 +4,17 @@
 
 `docs/source/_templates/Model-Deployment-Tutorial-Template.md` is a template for writing model deployment tutorials. You can copy and modify it to create new docs.
 
+## Guide to Writing Triton Operator Docs
+
+New Model Runner V2 Triton implementations belong under
+`vllm_ascend/ops/triton/`, with their operator documents under
+`vllm_ascend/ops/triton/docs/`. The `v2/` namespace is retired by the operator
+layout refactor.
+
+Use the [operator documentation template](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/docs/triton_description_specification.md)
+for V1/V2 placement rules and the operator inventory before adding or moving an
+operator document.
+
 ## Fullscreen tables
 
 Horizontally overflowing tables have a fullscreen action. In fullscreen view,
