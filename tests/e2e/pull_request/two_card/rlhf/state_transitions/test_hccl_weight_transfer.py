@@ -38,7 +38,6 @@ import pytest
 import requests
 import torch
 import torch_npu  # noqa: F401  # registers the NPU backend
-from tests.e2e.conftest import RemoteOpenAIServer
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
@@ -47,6 +46,7 @@ from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
 from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 from vllm.utils.network_utils import get_ip, get_open_port
 
+from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     FIXED_WEIGHT_SEED,
     PACKED_LANE_SKIP_REASON,

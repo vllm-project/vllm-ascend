@@ -238,7 +238,6 @@ class NPUWorker(WorkerBase):
         self.weight_transfer_engine = None
         self._weight_update_active = False
         self._weight_update_is_draft = False
-        self._draft_lm_head_swaps: list[tuple[nn.Module, str, nn.Module]] = []
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
@@ -411,42 +410,6 @@ class NPUWorker(WorkerBase):
                 "(enabled: true) which disables NZ automatically."
             )
 
-    def _share_source_lm_heads(self, draft_model: nn.Module) -> None:
-        # V2 may hold online-quantized copies of the target head.
-        share_source_lm_heads(draft_model)
-        drafter = getattr(self.model_runner, "drafter", None)
-        if drafter is None or not callable(getattr(drafter, "_maybe_share_lm_head", None)):
-            return
-
-        children = [
-            (module, name, child) for module in draft_model.modules() for name, child in module.named_children()
-        ]
-
-        has_use_cuda_graph = hasattr(drafter, "use_cuda_graph")
-        orig_use_cuda_graph = getattr(drafter, "use_cuda_graph", None)
-        if has_use_cuda_graph:
-            drafter.use_cuda_graph = False
-        try:
-            # Reuse Ascend's model-specific sharing rules without rebuilding the
-            # ACL graph wrapper or clearing its update stream.
-            drafter._maybe_share_lm_head(self.get_model())
-        finally:
-            if has_use_cuda_graph:
-                drafter.use_cuda_graph = orig_use_cuda_graph
-            # Keep the original modules alive: captured graphs still refer to
-            # their tensors. Also record partial swaps if sharing raises.
-            self._draft_lm_head_swaps = [
-                (module, name, child) for module, name, child in children if getattr(module, name) is not child
-            ]
-
-    def restore_source_lm_head(self, refresh: bool = True) -> None:
-        """Restore draft heads and refresh any online-quantized copies in place."""
-        for module, name, head in self._draft_lm_head_swaps:
-            setattr(module, name, head)
-        self._draft_lm_head_swaps = []
-        if (draft_model := self.get_draft_model()) is not None:
-            restore_quantized_lm_heads(draft_model, refresh=refresh)
-
     def _start_weight_update(self, is_draft: bool = False) -> None:
         """Begin a target or draft update; prepare the selected model for reload."""
         self._check_weight_transfer_engine()
@@ -467,12 +430,12 @@ class NPUWorker(WorkerBase):
             if is_draft:
                 self._set_draft_weight_update_target()
             if draft_model is not None:
-                self._share_source_lm_heads(draft_model)
+                share_source_lm_heads(draft_model)
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
             self.weight_transfer_engine.reset_weight_update_target()
             if draft_model is not None:
-                self.restore_source_lm_head(refresh=False)
+                restore_quantized_lm_heads(draft_model, refresh=False)
             raise
         self._weight_update_active = True
         self._weight_update_is_draft = is_draft
@@ -492,31 +455,30 @@ class NPUWorker(WorkerBase):
             except BaseException:
                 self._weight_update_active = False
                 self.weight_transfer_engine.reset_weight_update_target()
-                if self._weight_update_is_draft:
-                    self.restore_source_lm_head(refresh=False)
+                if self._weight_update_is_draft and (draft_model := self.get_draft_model()) is not None:
+                    restore_quantized_lm_heads(draft_model, refresh=False)
                 self._weight_update_is_draft = False
                 raise
 
     def finish_weight_update(self) -> None:
-        """Finish reload and restore the default target and draft head modules."""
+        """Finish reload and restore online-quantized draft heads."""
         self._check_weight_transfer_engine()
-
         if not self._weight_update_active:
             raise RuntimeError("start_weight_update must be called before finish_weight_update.")
-
         assert self.weight_transfer_engine is not None
         is_draft = self._weight_update_is_draft
+        draft_model = self.get_draft_model() if is_draft else None
         with set_current_vllm_config(self.vllm_config):
             try:
                 self.weight_transfer_engine.finish_weight_update()
             except BaseException:
-                if is_draft:
-                    self.restore_source_lm_head(refresh=False)
+                if draft_model is not None:
+                    restore_quantized_lm_heads(draft_model, refresh=False)
                 raise
             else:
-                if is_draft:
-                    self.restore_source_lm_head()
-                else:
+                if draft_model is not None:
+                    restore_quantized_lm_heads(draft_model)
+                if not is_draft:
                     self.model_runner.reset_lora_state()
             finally:
                 self.weight_transfer_engine.reset_weight_update_target()
