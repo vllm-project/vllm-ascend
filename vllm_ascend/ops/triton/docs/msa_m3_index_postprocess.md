@@ -133,10 +133,6 @@ correctness fallback. The A5-specific contract is documented in
 
 ## Performance and compilation validation
 
-```bash
-python benchmarks/msa_decode_index_postprocess.py --device npu:0 --output operator-results.json
-```
-
 Compare legacy postprocessing plus the production valid-prefix normalizer with
 fused ordering; separately compare complete CANN TopK producer paths. Inputs and
 compiler/runtime must match. Exclude compilation, input generation and correctness
@@ -150,12 +146,6 @@ cache misses, completed compilation/load events and distinct specialization keys
 Use a new private cache for cold counts and mark warmup/capture/inference phases.
 Report new keys after warmup; do not equate a filesystem cache-file count with
 actual compilations. Graph replay can bypass Python JIT launches entirely.
-The optional `benchmarks/msa_triton_audit.py` observer bypasses metadata inspection
-and logging during TorchDynamo tracing so they stay out of fullgraph traces;
-compiled replay may therefore produce no Python observations. Symbolic shapes
-and strides are recorded as text without reading tensor values. Synthetic
-fullgraph or symbolic-metadata probes validate the observer only; they do not
-establish real Triton/NPU graph execution or coverage across model workers.
 Shape/compile instrumentation must not contaminate clean performance measurements.
 Do not add `do_not_specialize` solely to hide unexplained variants: verify the
 installed compiler API and measure the effects first.

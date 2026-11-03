@@ -69,7 +69,6 @@ Other TopK helper fixtures are supplementary and are not a model-support claim.
 
 ```bash
 python -m pytest -q tests/e2e/pull_request/one_card/test_minimax_m3_decode_index_sort.py
-python benchmarks/msa_decode_index_postprocess.py --device npu:0 --paths cann a5 --output a5-operator-results.json
 ```
 
 Tests cover heads 1/4; Q=1/4/8; TopK=1/3/16/31/32/64; block/context
