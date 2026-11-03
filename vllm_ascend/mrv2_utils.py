@@ -30,7 +30,6 @@ else:
 _NGRAM_SPEC_METHODS = frozenset({"ngram", "ngram_gpu"})
 _P_EAGLE_SPEC_METHODS = frozenset({"eagle", "eagle3"})
 _DFLASH2_ARCHITECTURES = frozenset({"DFlash2DraftModel"})
-_TRUTHY_STRINGS = frozenset({"1", "true", "yes"})
 
 
 def _is_configured(value: object) -> bool:
@@ -43,16 +42,6 @@ def _additional(vllm_config: VllmConfig, key: str) -> object:
     if not _is_configured(extra):
         return None
     return extra.get(key) if isinstance(extra, dict) else getattr(extra, key, None)
-
-
-def _is_enabled(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in _TRUTHY_STRINGS
-    if isinstance(value, int):
-        return value == 1
-    return False
 
 
 def _architectures(model_config: object) -> list[str]:
@@ -80,26 +69,12 @@ def _is_dflash2_graph(speculative_config: object) -> bool:
 def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
     """Reasons this config is not V2-ready and should default to V1."""
     reasons: list[str] = []
-    model_config = getattr(vllm_config, "model_config", None)
     spec_config = getattr(vllm_config, "speculative_config", None)
-
-    if _is_configured(model_config):
-        if (
-            getattr(model_config, "runner_type", None) == "pooling"
-            or getattr(model_config, "is_pooling_model", False) is True
-        ):
-            reasons.append("pooling KV")
-
     compilation_config = getattr(vllm_config, "compilation_config", None)
     if _is_configured(compilation_config) and getattr(compilation_config, "cudagraph_mm_encoder", False) is True:
         reasons.append("VL encoder graph")
     if _additional(vllm_config, "draft_window_size") is not None:
         reasons.append("draft_window_size")
-    # V2 MTP draft pads the forward to the DP-wide request count, while eager
-    # attention metadata keeps this rank's request count. DSA-CP rejects that
-    # split once the hidden states outgrow the TP-aligned metadata.
-    if _is_enabled(_additional(vllm_config, "enable_dsa_cp")):
-        reasons.append("enable_dsa_cp")
 
     if _is_configured(spec_config):
         method = getattr(spec_config, "method", None)
@@ -127,10 +102,8 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     ``VLLM_USE_V2_MODEL_RUNNER`` wins when set. Otherwise V2 is the default,
     except for these models and features, which fall back to V1:
 
-    * pooling KV (``runner_type="pooling"``)
     * VL encoder graph (``compilation_config.cudagraph_mm_encoder``)
     * draft_window_size
-    * enable_dsa_cp
     * suffix speculative decoding
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
     * draft_model speculative decoding

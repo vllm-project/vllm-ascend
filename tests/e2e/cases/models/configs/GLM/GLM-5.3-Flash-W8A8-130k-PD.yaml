@@ -1,5 +1,5 @@
-# GLM-5.3-Flash W8A8 1010-V1 MooncakeConnectorV2 PD separation testing
-test_name: "GLM-5.3-Flash-W8A8-1010-V1-1M-PD"
+# GLM-5.3-Flash W8A8 1010-V2 MooncakeConnectorV2 PD separation testing
+test_name: "GLM-5.3-Flash-W8A8-1010-V2-1M-PD"
 model: "Eco-Tech/GLM-5.3-Flash-w8a8"
 num_nodes: 2
 npu_per_node: 16
@@ -18,7 +18,8 @@ config:
     dp_size: 2
     dp_size_local: 2
     dp_rank_start: 0
-    tp_size: 8
+    tp_size: 1
+    cp_size: 8
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
@@ -37,7 +38,7 @@ env_common: &env_common
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_USE_V2_MODEL_RUNNER: "0"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   HCCL_BUFFSIZE: "1024"
   ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config.protocol_desc":["hccs:device"]}'
@@ -63,6 +64,8 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
       - --enable-expert-parallel
       - --seed
       - "1024"
@@ -93,9 +96,9 @@ templates:
       - --speculative-config
       - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
       - --additional_config
-      - '{"enable_flashcomm1": true, "enable_dsa_cp": true, "enable_prefill_mc2": true, "enable_fused_mc2": 1, "enable_shared_expert_dp": true, "multistream_overlap_shared_expert": false}'
+      - '{"enable_flashcomm1": true, "enable_prefill_mc2": true, "enable_fused_mc2": 1, "enable_shared_expert_dp": true, "multistream_overlap_shared_expert": false}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "36680", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 2}}}'
+      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "36680", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 2}}}'
 
   - node_index: 1
     envs:
@@ -147,7 +150,7 @@ templates:
       - --additional_config
       - '{"multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": true}, "enable_flashcomm1": true}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "36580", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 2}}}'
+      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "36580", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 2}}}'
 
 benchmarks:
   perf_warmup:
@@ -170,8 +173,8 @@ benchmarks:
     max_out_len: 1024
     batch_size: 128
     request_rate: 0
-    baseline: 2900
-    threshold: 0.97
+    baseline: 4248.503
+    threshold: 0.95
   acc_aime2025:
     case_type: accuracy
     dataset_path: vllm-ascend/aime2025

@@ -33,6 +33,30 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import As
 # isort: on
 
 
+class TestKVPoolWorkerConstruction(unittest.TestCase):
+    def test_factory_passes_only_current_constructor_arguments(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import ascend_store_connector as connector
+
+        config, cache = MagicMock(), MagicMock()
+        for layerwise, name in ((False, "KVPoolWorker"), (True, "LayerwiseKVPoolWorker")):
+            with self.subTest(layerwise=layerwise), patch.object(connector, name, autospec=True) as worker:
+                self.assertIs(connector.create_kv_pool_worker(config, layerwise, cache), worker.return_value)
+                worker.assert_called_once_with(config, layerwise, cache)
+
+    def test_layerwise_constructor_matches_base_signature(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        config, cache = MagicMock(), MagicMock()
+        with (
+            patch.object(KVPoolWorker, "__init__", autospec=True, return_value=None) as initialize,
+            patch.object(LayerwiseKVPoolWorker, "_init_layerwise_config") as configure,
+        ):
+            worker = LayerwiseKVPoolWorker(config, True, cache)
+            initialize.assert_called_once_with(worker, config, True, cache)
+            configure.assert_called_once_with()
+
+
 def _mock_events(num_workers=1):
     events = AscendStoreKVEvents(num_workers=num_workers)
     events._aggregator = MagicMock()
@@ -195,30 +219,6 @@ class TestAscendStoreConnector(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
         config.parallel_config.rank = 0
         return config
-
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
-    def test_memcache_barrier_config_reaches_backend(self, mock_worker_cls, mock_lookup_cls):
-        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
-
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-        for extra, expected in (({}, True), ({"memcache_dp_init_barrier": False}, False)):
-            with self.subTest(extra=extra):
-                config = self._make_vllm_config(extra_config={"backend": "memcache", **extra})
-                AscendStoreConnector(config, KVConnectorRole.WORKER)
-                kwargs = mock_worker_cls.call_args.kwargs
-                self.assertIs(kwargs["memcache_dp_init_barrier"], expected)
-                worker = KVPoolWorker.__new__(KVPoolWorker)
-                worker.backend = worker.backend_name = "memcache"
-                worker.use_compress = False
-                with patch(
-                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib.import_module"
-                ) as importer:
-                    worker._init_backend(
-                        config.parallel_config, config.kv_transfer_config.kv_connector_extra_config, **kwargs
-                    )
-                    self.assertIs(importer.return_value.MemcacheBackend.call_args.kwargs["dp_init_barrier"], expected)
 
     def test_pp_handshake_metadata_is_ignored(self):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
@@ -389,7 +389,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector.connector_worker.handle_released_saves.assert_called_once_with(None)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_worker")
     def test_layerwise_methods_return_early(self, mock_worker_cls, mock_lookup_cls):
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
@@ -421,7 +421,7 @@ class TestAscendStoreConnector(unittest.TestCase):
                 getattr(worker, method_name).assert_not_called()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_worker")
     def test_set_external_slot_release_waiter_worker_gates(self, mock_worker_cls, mock_lookup_cls):
         """Regression guard for the #14465 / #15291 connector flag.
 
@@ -483,7 +483,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         # Should return immediately
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_worker")
     def test_save_kv_layer_consumer(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config(kv_role="kv_consumer", extra_config={"use_layerwise": True})
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
@@ -497,7 +497,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         # Consumer should not save
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_worker")
     def test_save_kv_layer_consumer_with_put_enabled(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config(
             kv_role="kv_consumer",
@@ -636,7 +636,7 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
         with (
-            patch.object(self.connector_mod, "KVPoolWorker") as mock_worker_cls,
+            patch.object(self.connector_mod, "create_kv_pool_worker") as mock_worker_cls,
             patch.object(self.connector_mod, "LookupKeyServer") as _mock_lookup_cls,
         ):
             config = MagicMock()
@@ -670,7 +670,7 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
 
         call_order = []
         with (
-            patch.object(self.connector_mod, "KVPoolWorker") as mock_worker_cls,
+            patch.object(self.connector_mod, "create_kv_pool_worker") as mock_worker_cls,
             patch.object(self.connector_mod, "LookupKeyServer"),
             patch.object(
                 self.connector_mod.mamba_utils,
@@ -717,7 +717,7 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
 
         call_order = []
         with (
-            patch.object(self.connector_mod, "KVPoolWorker") as mock_worker_cls,
+            patch.object(self.connector_mod, "create_kv_pool_worker") as mock_worker_cls,
             patch.object(self.connector_mod, "LookupKeyServer"),
         ):
             config = MagicMock()
@@ -742,11 +742,61 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             self.assertEqual(call_order, ["load", "copy:layers.0.linear_attn"])
             self.assertIsNone(connector._mamba_state)
 
+    def _make_shared_layer_connector(self, mamba_state=True):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+            get_physical_layer_index,
+        )
+
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.use_layerwise = True
+        connector._mamba_copy_bufs = None
+        connector._mamba_state = MagicMock()
+        connector._loaded_layer = None
+        connector.connector_worker = MagicMock()
+        connector.connector_worker._extract_physical_layer_index.side_effect = lambda name: get_physical_layer_index(
+            name, 4
+        )
+        if not mamba_state:
+            connector._mamba_state = None
+        return connector
+
+    def test_ple_and_attention_share_one_load_but_copy_each_owner(self):
+        connector = self._make_shared_layer_connector()
+        worker = connector.connector_worker
+        order = []
+        worker.wait_for_layer_load.side_effect = lambda: order.append("load")
+        connector._mamba_state.do_mamba_copy_for_layer.side_effect = lambda name: order.append(name)
+        connector.wait_for_layer_load("layers.1.ple")
+        connector.wait_for_layer_load("layers.1.linear_attn")
+        self.assertEqual(order, ["load", "layers.1.ple", "layers.1.linear_attn"])
+        self.assertEqual(worker.wait_for_layer_load.call_count, 1)
+        connector.wait_for_layer_load("layers.2.linear_attn")
+        self.assertEqual(worker.wait_for_layer_load.call_count, 2)
+        connector.bind_connector_metadata(AscendConnectorMetadata(set()))
+        connector.wait_for_layer_load("layers.2.linear_attn")
+        self.assertEqual(worker.wait_for_layer_load.call_count, 3)
+
+    def test_layer_index_fallback_is_reused_for_deduplication(self):
+        connector = self._make_shared_layer_connector()
+        worker = connector.connector_worker
+        for name in ("model.layers.0.ple", "attention", "model.layers.0.linear_attn"):
+            connector.wait_for_layer_load(name)
+        self.assertEqual(worker.wait_for_layer_load.call_count, 1)
+        self.assertEqual(connector._mamba_state.do_mamba_copy_for_layer.call_count, 3)
+        self.assertEqual(connector._loaded_layer, 0)
+
+    def test_single_owner_layers_each_wait_once(self):
+        connector = self._make_shared_layer_connector(mamba_state=False)
+        worker = connector.connector_worker
+        for layer in range(3):
+            connector.wait_for_layer_load(f"model.layers.{layer}.self_attn")
+        self.assertEqual(worker.wait_for_layer_load.call_count, 3)
+
     def test_mamba_state_copy_not_deferred_after_finish(self):
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
         with (
-            patch.object(self.connector_mod, "KVPoolWorker") as mock_worker_cls,
+            patch.object(self.connector_mod, "create_kv_pool_worker") as mock_worker_cls,
             patch.object(self.connector_mod, "LookupKeyServer"),
         ):
             config = MagicMock()

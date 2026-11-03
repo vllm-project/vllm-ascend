@@ -41,6 +41,33 @@ constexpr int64_t MRG_BLOCK_2 = 2;
 constexpr int64_t MRG_BLOCK_3 = 3;
 constexpr int64_t MRG_BLOCK_4 = 4;
 
+// Batch full FP32/INT32 vector repeats, then issue an exact masked tail.
+// Level-0 repeats avoid the per-64-element mask-mode transitions of the
+// Level-2 count overload. One instruction may issue at most 255 repeats.
+__aicore__ inline void VecRepeatPlan(int32_t remainEleNum, uint64_t &mask, uint8_t &repeatTimes)
+{
+    if (remainEleNum >= static_cast<int32_t>(B32_VEC_ELM_NUM)) {
+        int32_t repeatNum = remainEleNum / static_cast<int32_t>(B32_VEC_ELM_NUM);
+        mask = static_cast<uint64_t>(B32_VEC_ELM_NUM);
+        repeatTimes = static_cast<uint8_t>(
+            repeatNum < static_cast<int32_t>(VEC_REPEAT_MAX) ? repeatNum : static_cast<int32_t>(VEC_REPEAT_MAX));
+    } else {
+        mask = static_cast<uint64_t>(remainEleNum);
+        repeatTimes = 1;
+    }
+}
+
+__aicore__ inline UnaryRepeatParams B32RepeatParams()
+{
+    return UnaryRepeatParams(1, 1, B32_VEC_REPEAT_STRIDE, B32_VEC_REPEAT_STRIDE);
+}
+
+__aicore__ inline BinaryRepeatParams B32BinaryRepeatParams()
+{
+    return BinaryRepeatParams(1, 1, 1, B32_VEC_REPEAT_STRIDE, B32_VEC_REPEAT_STRIDE, B32_VEC_REPEAT_STRIDE);
+}
+
+
 template <typename T>
 __aicore__ inline void CopyOut(const GlobalTensor<T> &dstGm, const LocalTensor<T> &srcUb, int64_t copyCount)
 {

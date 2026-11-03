@@ -8,6 +8,7 @@ import torch
 import torch_npu
 from torch import nn
 from transformers import Glm5NextTextConfig
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -76,6 +77,8 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+
+from vllm_ascend.utils import pad_sequence_parallel_tokens
 
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention, get_kda_parallel_size
@@ -481,7 +484,7 @@ class Glm5NextDecoderLayer(nn.Module):
         )
 
         if self.is_sequence_parallel:
-            x = sp_reduce_scatter(x)
+            x = sp_reduce_scatter(pad_sequence_parallel_tokens(x))
 
         # Apply post-attention mixing, pre-FFN mixing, then input RMSNorm.
         residual, post, comb, x = self.hc_post_pre(
@@ -573,6 +576,7 @@ class Glm5NextDecoderLayer(nn.Module):
         return residual, post, comb, layer_input
 
 
+@support_torch_compile
 class Glm5NextModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -713,7 +717,7 @@ class Glm5NextModel(nn.Module):
 
         full_num_tokens = positions.shape[0]
         if self.is_sequence_parallel:
-            hidden_states = sp_shard(hidden_states)
+            hidden_states = sp_shard(pad_sequence_parallel_tokens(hidden_states))
 
         for layer in self._active_layers:
             hidden_states, residual, post, comb = layer(positions, hidden_states, residual, post, comb)

@@ -580,6 +580,7 @@ def _wrap_async_worker(original_worker):
             eplb_cpu_group = _async_worker.get_eplb_group().cpu_group
             for model_state in state.model_states.values():
                 model_state.communicator.set_stream(stream)
+                previous_consumed_event = None
                 with stream if stream is not None else nullcontext():
                     old_mapping = model_state.physical_to_logical_map.cpu()
                 new_mapping = _async_worker.run_rebalance_experts(model_state, state, old_mapping, stream)
@@ -628,7 +629,14 @@ def _wrap_async_worker(original_worker):
                         "layer_idx": layer_idx,
                         transfer_stream_parameter: stream,
                     }
-                    metadata = _async_worker.transfer_layer(**transfer_kwargs)
+                    communicator = model_state.communicator
+                    if isinstance(communicator, AscendHixlEplbCommunicator):
+                        communicator.set_consumed_event(previous_consumed_event)
+                    try:
+                        metadata = _async_worker.transfer_layer(**transfer_kwargs)
+                    finally:
+                        if isinstance(communicator, AscendHixlEplbCommunicator):
+                            communicator.set_consumed_event(None)
                     with gpu_sync_allowed():
                         stream.synchronize()
                     consumed_event = _async_worker.CpuGpuEvent()
@@ -643,6 +651,10 @@ def _wrap_async_worker(original_worker):
                     )
                     consumed_event.wait(stream=stream)
                     assert model_state.pending_result is None
+                    if isinstance(communicator, AscendHixlEplbCommunicator):
+                        # record() replaces the underlying event. Capture it only
+                        # after wait() has observed the foreground acknowledgement.
+                        previous_consumed_event = consumed_event._event
                     if index == len(changed_layers) - 1:
                         # On both supported lanes, the last workspace move may
                         # use upstream's helper instead of the wrapped commit

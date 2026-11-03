@@ -50,6 +50,7 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import should_skip_allreduce_across_dp_group
 
 EXPERT_TOKEN_NUMS_TYPE_CUMSUM = 0
@@ -127,6 +128,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
         vllm_config = get_current_vllm_config()
+        self.dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         num_tokens_per_tp_rank = mc2_tokens_capacity // tp_size
@@ -222,6 +224,19 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             )
 
         kwargs_mc2.update(stage1_kwargs)
+        if (
+            quant_mode == 4
+            and token_dispatch_input.quant.quant_type == QuantType.W8A8MXFP
+            and self.dynamic_mx_quant_scale_alg == DynamicMXQuantScaleAlg.CEIL
+        ):
+            quantized, scales = torch_npu.npu_dynamic_mx_quant(
+                hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=self.dynamic_mx_quant_scale_alg
+            )
+            kwargs_mc2.update(
+                x=quantized,
+                scales=scales.reshape(scales.shape[0], -1).view(torch.float8_e8m0fnu),
+                quant_mode=0,
+            )
         return kwargs_mc2
 
     def token_dispatch(
@@ -282,7 +297,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         elif comm_quant_mode is not None:
             quant_mode = comm_quant_mode
         elif quant_type == QuantType.W8A8MXFP:
-            quant_mode = 4
+            # The down projection already produces BF16. Avoid an additional
+            # lossy communication quantizer for models using ceil MX scales.
+            quant_mode = 0 if self.dynamic_mx_quant_scale_alg == DynamicMXQuantScaleAlg.CEIL else 4
         else:
             quant_mode = 0
         kwargs_mc2 = {
@@ -372,6 +389,23 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         )
         global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         restore_shape = hidden_states.shape
+        num_tokens = hidden_states.shape[:-1].numel()
+        apply_router_weight_on_input = token_dispatch_input.routing.apply_router_weight_on_input
+        if apply_router_weight_on_input:
+            assert topk_weights.dim() == 2, "`topk_weights` should be in shape (num_tokens, topk)"
+            _, topk = topk_weights.shape
+            assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
+            hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
+        if (
+            with_quant
+            and dynamic_scale is None
+            and quant_type == QuantType.W8A8MXFP
+            and get_dynamic_mx_quant_scale_alg() == DynamicMXQuantScaleAlg.CEIL
+        ):
+            # init_routing's fused quantizer does not expose scale_alg.
+            hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
+                hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=DynamicMXQuantScaleAlg.CEIL
+            )
         # Fuse the first dynamic quant of moe_mlp into initrouting when
         # dispatch_with_quant is on but got a None dynamic_scale.
         if with_quant and dynamic_scale is None:
@@ -382,13 +416,6 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         else:
             quant_mode = -1
 
-        num_tokens = hidden_states.shape[:-1].numel()
-        apply_router_weight_on_input = token_dispatch_input.routing.apply_router_weight_on_input
-        if apply_router_weight_on_input:
-            assert topk_weights.dim() == 2, "`topk_weights` should be in shape (num_tokens, topk)"
-            _, topk = topk_weights.shape
-            assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
-            hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
         if expert_map is not None:
             global_num_experts = len(expert_map) + global_redundant_expert_num
             mask = expert_map[topk_ids] != -1

@@ -23,7 +23,7 @@ from unittest.mock import MagicMock, patch
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_backend, mooncake_layerwise
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
     LayerwiseSessionTracker,
 )
@@ -45,6 +45,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 # isort: on
@@ -195,7 +196,7 @@ class TestMooncakeLayerSaveSession(unittest.TestCase):
 class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
     @staticmethod
     def _make_worker() -> KVPoolWorker:
-        worker = KVPoolWorker.__new__(KVPoolWorker)
+        worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
         worker.kv_role = "kv_producer"
         worker.consumer_is_to_put = False
         worker.dcp_size = 1
@@ -212,8 +213,8 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker.head_or_tp_rank = 0
         worker.metadata = [KeyMetadata("model", 0, 0, 0)]
         worker.backend_name = "mooncake"
-        worker.layerwise_protocol = mooncake_layerwise
-        worker.layerwise_keys = mooncake_layerwise.bind_layerwise_keys(
+        worker.layerwise_backend = mooncake_backend.MooncakeBackend
+        worker.layerwise_keys = worker.layerwise_backend.bind_layerwise_keys(
             vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=1)),
             kv_cache_config=None,
             model_name=worker.model_name,

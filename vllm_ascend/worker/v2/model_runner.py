@@ -66,6 +66,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     fill_mxfp_v_scale_cache,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
@@ -290,19 +291,14 @@ class NPUModelRunner(GPUModelRunner):
         return AscendPCPManager
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
-        from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
-            join_early_kernel_warmup,
-            start_early_kernel_warmup,
-        )
         from vllm_ascend.model_executor.warmup.nz_warmup import (
             join_nz_warm_thread,
             start_nz_warm_thread,
         )
 
-        # Overlap the one-off NZ cast and Triton compile with weight I/O.
-        # Every model goes through here.
+        # Overlap the one-off NZ cast with weight I/O. Every model goes
+        # through here.
         start_nz_warm_thread("thread")
-        start_early_kernel_warmup()
         try:
             aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
             super().load_model(load_dummy_weights, *args, **kwargs)
@@ -312,7 +308,6 @@ class NPUModelRunner(GPUModelRunner):
             # device and must not outlive this call. Joining here is also before
             # memory profiling.
             join_nz_warm_thread()
-            join_early_kernel_warmup("load_model")
 
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
@@ -425,6 +420,10 @@ class NPUModelRunner(GPUModelRunner):
 
     def _init_kv_zero_meta(self) -> None:
         """Use a tuple-aware zeroer for Ascend V1-compatible cache protocols."""
+        offload_manager = getattr(self, "sparse_kv_offload_manager", None)
+        excluded_cache_components = (
+            offload_manager.get_topk_cache_components() if offload_manager is not None else set()
+        )
         self.kv_block_zeroer = AscendV2KVBlockZeroer(
             self.device,
             attn_groups_iter=(g for groups in self.attn_groups for g in groups),
@@ -432,12 +431,33 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=self.compilation_config.static_forward_context,
             num_blocks=self.kv_cache_config.num_blocks,
             cache_dtype=self.cache_config.cache_dtype,
+            excluded_cache_components=excluded_cache_components,
         )
         if is_c8_mxfp_kv_quant(self.vllm_config):
             # The zeroer skips the static V scales (4th tuple component); the
             # wrapper restores them on pages reassigned from Mamba.
             self.kv_block_zeroer = C8KVBlockZeroer(  # type: ignore[assignment]
                 self.kv_block_zeroer, self._c8_mxfp_v_scale_caches, fill_mxfp_v_scale_cache
+            )
+
+    def _initialize_kv_cache_upstream(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_allocation_context: AbstractContextManager | None,
+    ) -> None:
+        # Upstream initialize_kv_cache builds the attention metadata builders
+        # via init_attn_backend; the DSA builder registers its fused Q-RMS
+        # JIT kernel during construction, so hold a registry window open
+        # around the super() call (v1 parity; the v1 runner wraps its
+        # initialize_metadata_builders instead). Runners built without the
+        # upstream __init__ (tests, partial mocks) have no registry; the
+        # window is optional for them.
+        registry = getattr(self, "jit_warmup_registry", None)
+        window = registry.activate() if registry is not None else nullcontext()
+        with window:
+            super().initialize_kv_cache(
+                kv_cache_config,
+                kv_cache_allocation_context=kv_cache_allocation_context,
             )
 
     def initialize_kv_cache(
@@ -474,10 +494,7 @@ class NPUModelRunner(GPUModelRunner):
                 else set()
             )
         with graph_manager_wrapper(self):
-            super().initialize_kv_cache(
-                kv_cache_config,
-                kv_cache_allocation_context=kv_cache_allocation_context,
-            )
+            self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
             self._uses_flashmla = any(
                 getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
                 for groups in self.attn_groups
@@ -485,7 +502,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
-                self.pcp_manager.vllm_config = self.vllm_config
+                self.pcp_manager.bind_config(self.vllm_config)
                 self.pcp_manager.kv_cache_config = kv_cache_config
                 self.pcp_manager.global_input_buffers = self.input_buffers
                 self.model_state.pcp_manager = self.pcp_manager
@@ -531,6 +548,10 @@ class NPUModelRunner(GPUModelRunner):
             and getattr(get_kv_transfer_group(), "requires_mamba_state_copy_after_load", False)
         ):
             self.kv_connector = MambaCopyKVConnector(self.kv_connector, copy_mamba_state)
+
+        initialize_cpu_lengths = getattr(self.model_state, "initialize_spec_cpu_length_sync", None)
+        if callable(initialize_cpu_lengths):
+            initialize_cpu_lengths(self)
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
@@ -1256,11 +1277,15 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def _can_skip_spec_cpu_length_sync(self) -> bool:
-        """Allow device lengths for GLM-5.3 with a DFlash2 draft."""
+        """Allow device lengths for supported speculative-decoding paths."""
         if self.sync_spec_pp_cpu_counts:
             return False
 
         if is_deepseek_v41(self.model_config.hf_config):
+            return True
+
+        model_can_skip = getattr(getattr(self, "model_state", None), "can_skip_spec_cpu_length_sync", None)
+        if callable(model_can_skip) and model_can_skip() is True:
             return True
 
         spec = self.speculative_config
@@ -1273,7 +1298,37 @@ class NPUModelRunner(GPUModelRunner):
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
         ):
             return True
-        return False
+
+        if (
+            spec is None
+            or self.speculator is None
+            or spec.method != "dspark"
+            or self.model_config.architecture
+            not in (
+                "MiniMaxM3SparseForCausalLM",
+                "MiniMaxM3SparseForConditionalGeneration",
+                "GlmMoeDsaForCausalLM",
+            )
+            or spec.draft_model_config is None
+            or "Qwen3DSparkModel" not in (spec.draft_model_config.architectures or ())
+        ):
+            return False
+
+        # Inspect the initialized draft backends instead of repeating selection
+        # rules for hardware, Q dtype and KV dtype. Before set_attn, keep syncing.
+        draft_backends = getattr(self.speculator, "attn_backends", {})
+        parallel_config = self.parallel_config
+        # Keep parallel, transfer, offload and adaptive paths on host counts.
+        return (
+            bool(draft_backends)
+            and all(backend is AscendFlashAttentionBackend for backend in draft_backends.values())
+            and parallel_config.pipeline_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and parallel_config.decode_context_parallel_size == 1
+            and self.vllm_config.kv_transfer_config is None
+            and not self.ascend_config.sparse_kv_offload_config.enabled
+            and not spec.enable_adaptive_verification
+        )
 
     def postprocess_sampled(
         self,

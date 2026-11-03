@@ -124,10 +124,11 @@ jobs:
           --build-arg PY_VERSION=${{ matrix.python-version }} \
           -t wheel:v1 .
           docker run --rm \
+          --entrypoint /bin/bash \
           -u "$(id -u):$(id -g)" \
           -v "$(pwd):/outpwd" \
           wheel:v1 \
-          bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          -c "cp -r /workspace/vllm-ascend/dist /outpwd"
           ls dist
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -211,10 +212,11 @@ jobs:
           --build-arg PY_VERSION=${{ matrix.python-version }} \
           -t wheel-a3:v1 .
           docker run --rm \
+          --entrypoint /bin/bash \
           -u "$(id -u):$(id -g)" \
           -v "$(pwd):/outpwd" \
           wheel-a3:v1 \
-          bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          -c "cp -r /workspace/vllm-ascend/dist /outpwd"
           ls dist
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -292,10 +294,11 @@ jobs:
           --build-arg PY_VERSION=${{ matrix.python-version }} \
           -t wheel-310p:v1 .
           docker run --rm \
+          --entrypoint /bin/bash \
           -u "$(id -u):$(id -g)" \
           -v "$(pwd):/outpwd" \
           wheel-310p:v1 \
-          bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          -c "cp -r /workspace/vllm-ascend/dist /outpwd"
           ls dist
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -374,10 +377,11 @@ jobs:
           --build-arg MAX_JOBS=2 \
           -t wheel-a5:v1 .
           docker run --rm \
+          --entrypoint /bin/bash \
           -u "$(id -u):$(id -g)" \
           -v "$(pwd):/outpwd" \
           wheel-a5:v1 \
-          bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          -c "cp -r /workspace/vllm-ascend/dist /outpwd"
           ls dist
 
       - name: Set up Python ${{ matrix.python-version }}

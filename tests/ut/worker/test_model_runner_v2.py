@@ -23,6 +23,8 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_paged_cache_views,
     mxfp_v_scale_cache_shape,
 )
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -753,15 +755,11 @@ def test_load_model_starts_dump_before_capture_in_graph_mode(load_dummy_weights)
         patch("vllm_ascend.worker.v2.model_runner.get_pd_dspark_aux_layer_ids", return_value=aux_layers),
         patch("vllm_ascend.model_executor.warmup.nz_warmup.start_nz_warm_thread") as start_nz,
         patch("vllm_ascend.model_executor.warmup.nz_warmup.join_nz_warm_thread") as join_nz,
-        patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.start_early_kernel_warmup") as start_early,
-        patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.join_early_kernel_warmup") as join_early,
     ):
         order = Mock()
         order.attach_mock(start_nz, "start_nz")
-        order.attach_mock(start_early, "start_early")
         order.attach_mock(parent_load_model, "parent_load")
         order.attach_mock(join_nz, "join_nz")
-        order.attach_mock(join_early, "join_early")
         runner.load_model(load_dummy_weights, "load_arg", load_option=True)
 
     parent_load_model.assert_called_once_with(load_dummy_weights, "load_arg", load_option=True)
@@ -770,15 +768,11 @@ def test_load_model_starts_dump_before_capture_in_graph_mode(load_dummy_weights)
     # The warmups must be started before weight I/O and joined before the
     # method returns, which is before memory profiling.
     start_nz.assert_called_once_with("thread")
-    start_early.assert_called_once_with()
     join_nz.assert_called_once_with()
-    join_early.assert_called_once_with("load_model")
     assert [entry[0] for entry in order.mock_calls] == [
         "start_nz",
-        "start_early",
         "parent_load",
         "join_nz",
-        "join_early",
     ]
 
 
@@ -803,16 +797,12 @@ def test_load_model_joins_warmups_when_weight_loading_fails():
         patch("vllm_ascend.worker.v2.model_runner.get_pd_dspark_aux_layer_ids", return_value=()),
         patch("vllm_ascend.model_executor.warmup.nz_warmup.start_nz_warm_thread") as start_nz,
         patch("vllm_ascend.model_executor.warmup.nz_warmup.join_nz_warm_thread") as join_nz,
-        patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.start_early_kernel_warmup") as start_early,
-        patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.join_early_kernel_warmup") as join_early,
         pytest.raises(RuntimeError),
     ):
         runner.load_model()
 
     start_nz.assert_called_once_with("thread")
-    start_early.assert_called_once_with()
     join_nz.assert_called_once_with()
-    join_early.assert_called_once_with("load_model")
 
 
 @pytest.mark.parametrize("with_draft", [False, True])
@@ -870,6 +860,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
         impl.use_flashmla = False
         impl.use_pcp = False
         impl.use_dcp = False
+        impl.dcp_q_replicate_enabled = False
         impl.supports_prolog_v3_writer = lambda: True
         layer.impl = impl
         layer.indexer = None
@@ -1349,7 +1340,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     create_kvpp.assert_called_once()
     assert runner.kvpp == "kvpp"
     assert runner.model_state.kvpp_runtime == "kvpp"
-    assert runner.pcp_manager.vllm_config is runner.vllm_config
+    runner.pcp_manager.bind_config.assert_called_once_with(runner.vllm_config)
     assert runner.model_state.pcp_manager is runner.pcp_manager
 
 
@@ -1947,6 +1938,28 @@ def test_init_kv_zero_meta_uses_tuple_aware_zeroer_without_mxfp8():
     assert not isinstance(runner.kv_block_zeroer, C8KVBlockZeroer)
 
 
+def test_init_kv_zero_meta_excludes_only_registered_topk_components():
+    import vllm_ascend.worker.v2.model_runner as model_runner_mod
+
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="auto"))
+    runner.device = torch.device("cpu")
+    runner.attn_groups = []
+    runner.kernel_block_sizes = [128]
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.kv_cache_config = SimpleNamespace(num_blocks=5856)
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+    exclusions = {("target", 4), ("target", 5), ("draft", 4), ("draft", 5)}
+    runner.sparse_kv_offload_manager = SimpleNamespace(get_topk_cache_components=Mock(return_value=exclusions))
+
+    with patch.object(model_runner_mod, "AscendV2KVBlockZeroer") as cls:
+        runner._init_kv_zero_meta()
+
+    runner.sparse_kv_offload_manager.get_topk_cache_components.assert_called_once_with()
+    assert cls.call_args.kwargs["excluded_cache_components"] == exclusions
+    assert "runner_only_attn_layers" not in cls.call_args.kwargs
+
+
 def test_shutdown_releases_c8_views_and_unwraps_zeroer():
     _, _, _, runner, _ = _c8_packet(ratio=1)
     entries = runner._c8_mxfp_v_scale_caches
@@ -2053,9 +2066,111 @@ def test_pp_exact_counts_override_device_length_exemption(model_type):
     assert runner._can_skip_spec_cpu_length_sync() is False
 
 
+def _m3_device_length_runner():
+    runner, output, batch, _ = _prepare_inputs_runner(speculator=True)
+    runner.speculator = SimpleNamespace(
+        attn_backends={"draft.0": AscendFlashAttentionBackend, "draft.1": AscendFlashAttentionBackend}
+    )
+    runner.model_config.architecture = "MiniMaxM3SparseForConditionalGeneration"
+    runner.model_config.hf_config.model_type = "minimax_m3"
+    runner.model_config.hf_text_config = SimpleNamespace(model_type="minimax_m3")
+    runner.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+    )
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+    runner.speculative_config = SimpleNamespace(
+        method="dspark",
+        draft_model_config=SimpleNamespace(architectures=["Qwen3DSparkModel"], dtype=torch.bfloat16),
+        kv_cache_dtype=None,
+        enable_adaptive_verification=False,
+        enforce_eager=False,
+    )
+    runner.use_fia = True
+    return runner, output, batch
+
+
+@pytest.fixture
+def m3_device_length_runner():
+    return _m3_device_length_runner()
+
+
+@pytest.mark.parametrize(
+    "architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration", "GlmMoeDsaForCausalLM"]
+)
+@pytest.mark.parametrize("eager", [False, True])
+def test_m3_dspark_device_length_policy(m3_device_length_runner, architecture, eager):
+    runner, _, _ = m3_device_length_runner
+    runner.model_config.architecture = architecture
+    runner.speculative_config.enforce_eager = eager
+    assert runner._can_skip_spec_cpu_length_sync() is True
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        "no_spec_config",
+        "no_speculator",
+        "method",
+        "target_arch",
+        "no_draft_config",
+        "draft_arch",
+        "no_backends",
+        "empty_backends",
+        "draft_backend",
+        "mixed_backends",
+        "pipeline_parallel_size",
+        "prefill_context_parallel_size",
+        "decode_context_parallel_size",
+        "kv_transfer",
+        "sparse_offload",
+        "adaptive",
+        "pp_exact_counts",
+    ],
+)
+@pytest.mark.parametrize("architecture", ["MiniMaxM3SparseForCausalLM", "GlmMoeDsaForCausalLM"])
+def test_m3_dspark_device_length_policy_falls_back(m3_device_length_runner, unsupported, architecture):
+    runner, _, _ = m3_device_length_runner
+    runner.model_config.architecture = architecture
+    spec = runner.speculative_config
+    if unsupported == "no_spec_config":
+        runner.speculative_config = None
+    elif unsupported == "no_speculator":
+        runner.speculator = None
+    elif unsupported == "method":
+        spec.method = "eagle3"
+    elif unsupported == "target_arch":
+        runner.model_config.architecture = "OtherModel"
+    elif unsupported == "no_draft_config":
+        spec.draft_model_config = None
+    elif unsupported == "draft_arch":
+        spec.draft_model_config.architectures = ["OtherDraftModel"]
+    elif unsupported == "no_backends":
+        del runner.speculator.attn_backends
+    elif unsupported == "empty_backends":
+        runner.speculator.attn_backends = {}
+    elif unsupported == "draft_backend":
+        runner.speculator.attn_backends = {"draft.0": AscendAttentionBackend}
+    elif unsupported == "mixed_backends":
+        runner.speculator.attn_backends["draft.1"] = AscendAttentionBackend
+    elif unsupported.endswith("parallel_size"):
+        setattr(runner.parallel_config, unsupported, 2)
+    elif unsupported == "kv_transfer":
+        runner.vllm_config.kv_transfer_config = object()
+    elif unsupported == "sparse_offload":
+        runner.ascend_config.sparse_kv_offload_config.enabled = True
+    elif unsupported == "adaptive":
+        spec.enable_adaptive_verification = True
+    elif unsupported == "pp_exact_counts":
+        runner.sync_spec_pp_cpu_counts = True
+    assert runner._can_skip_spec_cpu_length_sync() is False
+
+
 @pytest.mark.parametrize("rejected", [0, 1, 5])
-def test_dflash_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected):
-    runner, output, _ = _device_length_runner()
+@pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark"])
+def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected, draft):
+    runner, output, _ = _device_length_runner() if draft == "dflash" else _m3_device_length_runner()
+    if draft == "glm_dspark":
+        runner.model_config.architecture = "GlmMoeDsaForCausalLM"
     runner.num_computed_tokens_cpu.fill_(-99)  # An old staging snapshot must never be read.
     runner.input_buffers.seq_lens_cpu.fill_(777)
     runner.req_states.num_computed_tokens_cpu[:] = torch.tensor([100, 200, 0, 0])
