@@ -169,8 +169,7 @@ class DetectorManager:
 
         Accepted tokens are recorded once in :meth:`check_after_sample` from
         the engine's validated sampled ids. Appending here as well doubled
-        MTP/Eagle output in reports (same-wave dedupe fails under async
-        scheduling when ``clear_wave_cache`` runs before ``get_output``).
+        MTP/Eagle output in reports.
         """
         if self._gated("after_spec"):
             return []
@@ -219,11 +218,9 @@ class DetectorManager:
     def run_after_sample_cpu(self, snap: AfterSampleCpuSnapshot) -> list[Incident]:
         """``token_repeat`` after hot-path Store append.
 
-        Reads :class:`RequestGuardStore` only. Do **not** re-fold from a frozen
-        sampled chunk: same-wave append dedupe can skip a second Store write
-        while a frozen chunk would still be scored twice (W1-1 / R-04:
-        ``content_tokens_seen`` > ``output_token_count`` on v2 when after-sample
-        ran twice with width-1 identical rows).
+        Reads :class:`RequestGuardStore` only. MR v2 appends each step once in
+        :meth:`after_sample_hot_path`. Passing the sampled rows here would
+        append them again.
         """
         skip = snap.skip_req_ids if snap.skip_req_ids is not None else RequestGuardStore.get().stopped_req_ids()
         return self._token_repeat_det.check_all(
