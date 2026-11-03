@@ -768,52 +768,72 @@ class TestMtpDraftFullTokenLayout:
         assert out.shape[0] == 5
 
 
-class TestQwen35ModelForwardWrap:
-    """The Qwen3_5Model.forward wrap shards the runner-precomputed
-    inputs_embeds (the multimodal merge happens full-token side before the
-    model) so the decoder stack's projections see the rank-local token
-    shard; the self-embedding path is already sharded by the embedding."""
+class TestModelStateInputEmbedsShard:
+    """The runner-precomputed inputs_embeds (multimodal merge done full-token
+    side, only produced for mm-capable / prompt-embeds models) are sharded to
+    the rank-local token chunk at the model-state seam, generically for every
+    dense family; the self-embedding path is already sharded by the
+    embedding's dense_sp_entry gate."""
 
-    def _run(self, monkeypatch, dense_sp_entry, inputs_embeds):
-        from vllm_ascend.patch.worker import patch_qwen3_5
+    def _make_state(self, dense_sp):
+        from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
-        rows_passed: list[int] = []
+        state = AscendModelState.__new__(AscendModelState)
+        state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace())
+        state._dense_sp = dense_sp
+        return state
 
-        def fake_original(self, input_ids, positions, intermediate_tensors, inputs_embeds):
-            rows_passed.append(0 if inputs_embeds is None else inputs_embeds.shape[0])
-            return inputs_embeds
-
-        monkeypatch.setattr(patch_qwen3_5, "_QWEN3_5_MODEL_ORIGINAL_FORWARD", fake_original)
+    def _run(self, monkeypatch, dense_sp, method, *args):
+        import vllm_ascend.worker.v2.model_states.default as state_module
 
         def fake_shard(x):
-            # TP=2: chunk the (aligned) full rows to the rank-local shard.
             return x.chunk(2, dim=0)[0]
 
-        monkeypatch.setattr(patch_qwen3_5, "sp_shard", fake_shard)
-        model = SimpleNamespace(embed_tokens=SimpleNamespace(dense_sp_entry=dense_sp_entry))
-        out = patch_qwen3_5._qwen3_5_model_forward_with_dense_sp(
-            model,
-            input_ids=None,
-            positions=torch.zeros(8, dtype=torch.int64),
-            intermediate_tensors=None,
-            inputs_embeds=inputs_embeds,
-        )
-        return out, rows_passed
-
-    def test_precomputed_embeds_sharded_before_decoder(self, monkeypatch):
+        monkeypatch.setattr(state_module, "sp_shard", fake_shard)
+        monkeypatch.setattr(state_module, "enable_dense_sp", lambda vllm_config=None: dense_sp)
+        state = self._make_state(dense_sp)
         embeds = torch.zeros(8, 2, dtype=torch.float64)
-        out, rows = self._run(monkeypatch, dense_sp_entry=True, inputs_embeds=embeds)
-        assert rows == [4]
+        if method == "prepare_inputs_embeds":
+            return state.prepare_inputs_embeds(None, SimpleNamespace(num_tokens_after_padding=8), None)
+        if method == "dummy_inputs_embeds":
+            return state.dummy_inputs_embeds(8)
+        if method == "super_prepare_inputs":
+            # super().prepare_inputs_embeds path: patch the upstream base.
+            monkeypatch.setattr(
+                "vllm.v1.worker.gpu.model_states.default.DefaultModelState.prepare_inputs_embeds",
+                lambda self, a, b, c: embeds,
+                raising=True,
+            )
+            return state.prepare_inputs_embeds(None, SimpleNamespace(num_tokens_after_padding=8), None)
+        raise ValueError(method)
+
+    def test_prepare_inputs_embeds_shards_under_dense_sp(self, monkeypatch):
+        out = self._run(monkeypatch, dense_sp=True, method="super_prepare_inputs")
         assert out.shape[0] == 4
 
-    def test_stock_layout_without_dense_sp(self, monkeypatch):
-        embeds = torch.zeros(8, 2, dtype=torch.float64)
-        out, rows = self._run(monkeypatch, dense_sp_entry=False, inputs_embeds=embeds)
-        assert rows == [8]
+    def test_prepare_inputs_embeds_stays_full_without_dense_sp(self, monkeypatch):
+        out = self._run(monkeypatch, dense_sp=False, method="super_prepare_inputs")
+        assert out.shape[0] == 8
 
-    def test_self_embedding_path_untouched(self, monkeypatch):
-        out, rows = self._run(monkeypatch, dense_sp_entry=True, inputs_embeds=None)
-        assert rows == [0]
+    def test_dummy_inputs_embeds_shards_under_dense_sp(self, monkeypatch):
+        embeds = torch.zeros(8, 2, dtype=torch.float64)
+        monkeypatch.setattr(
+            "vllm.v1.worker.gpu.model_states.default.DefaultModelState.dummy_inputs_embeds",
+            lambda self, num_tokens: embeds,
+            raising=True,
+        )
+        out = self._run(monkeypatch, dense_sp=True, method="dummy_inputs_embeds")
+        assert out.shape[0] == 4
+
+    def test_dummy_inputs_embeds_stays_full_without_dense_sp(self, monkeypatch):
+        embeds = torch.zeros(8, 2, dtype=torch.float64)
+        monkeypatch.setattr(
+            "vllm.v1.worker.gpu.model_states.default.DefaultModelState.dummy_inputs_embeds",
+            lambda self, num_tokens: embeds,
+            raising=True,
+        )
+        out = self._run(monkeypatch, dense_sp=False, method="dummy_inputs_embeds")
+        assert out.shape[0] == 8
 
 
 class TestCaptureWrapperGather:

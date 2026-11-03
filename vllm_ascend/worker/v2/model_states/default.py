@@ -43,7 +43,8 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_manager,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.utils import should_skip_allreduce_across_dp_group
+from vllm_ascend.models.common.ops.sequence_parallel import sp_shard
+from vllm_ascend.utils import enable_dense_sp, should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -382,7 +383,26 @@ class AscendModelState(DefaultModelState):
         set_embedding_num_tokens_padded = getattr(self.model, "set_embedding_num_tokens_padded", None)
         if set_embedding_num_tokens_padded is not None:
             set_embedding_num_tokens_padded(input_batch.num_tokens_after_padding)
-        return super().prepare_inputs_embeds(scheduled_encoder_inputs, input_batch, req_states)
+        inputs_embeds = super().prepare_inputs_embeds(scheduled_encoder_inputs, input_batch, req_states)
+        if inputs_embeds is not None and enable_dense_sp(self.vllm_config):
+            # Dense sequence parallelism: the runner pre-computes inputs_embeds
+            # (text embed + multimodal merge, full-token side) only for
+            # mm-capable / prompt-embeds models, and the decoder stack's
+            # projections expect the rank-local token shard. Mirror upstream's
+            # SP-MoE entry (sequence_parallel_chunk at the top of the model
+            # forward) for every dense family at this one seam.
+            inputs_embeds = sp_shard(inputs_embeds)
+        return inputs_embeds
+
+    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
+        inputs_embeds = super().dummy_inputs_embeds(num_tokens)
+        if enable_dense_sp(self.vllm_config):
+            # Same boundary as prepare_inputs_embeds for the dummy/capture
+            # forwards; upstream's prepare_dummy_inputs and the execute_model
+            # dummy path both route through this method, so the shard covers
+            # graph capture, warmup and profile runs with one override.
+            inputs_embeds = sp_shard(inputs_embeds)
+        return inputs_embeds
 
     def prepare_inputs(self, input_batch, req_states) -> dict[str, Any]:
         model_inputs = super().prepare_inputs(input_batch, req_states)

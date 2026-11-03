@@ -27,7 +27,6 @@ from vllm.model_executor.models.interfaces import _require_is_multimodal
 from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5DecoderLayer,
     Qwen3_5ForConditionalGeneration,
-    Qwen3_5Model,
 )
 from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 
@@ -41,7 +40,6 @@ except ImportError:
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.models.common.ops.sequence_parallel import sp_shard
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
 
 _GDN_PATCH_TARGET = _GDNBaseCls
@@ -287,30 +285,6 @@ def _qwen3_5_cg_embed_input_ids_full_token(
 
 
 Qwen3_5ForConditionalGeneration.embed_input_ids = _qwen3_5_cg_embed_input_ids_full_token
-
-_QWEN3_5_MODEL_ORIGINAL_FORWARD = Qwen3_5Model.forward
-
-
-def _qwen3_5_model_forward_with_dense_sp(
-    self,
-    input_ids: torch.Tensor | None,
-    positions: torch.Tensor,
-    intermediate_tensors: IntermediateTensors | None = None,
-    inputs_embeds: torch.Tensor | None = None,
-):
-    if inputs_embeds is not None and getattr(self.embed_tokens, "dense_sp_entry", False):
-        # Dense sequence parallelism: the V2 runner pre-computes inputs_embeds
-        # (the multimodal merge happens full-token side, before the model) and
-        # passes them full, while the decoder stack's projections expect the
-        # rank-local token shard. Mirror upstream's SP-MoE entry (the
-        # sequence_parallel_chunk at the top of Qwen3NextModel.forward) for
-        # the dense layout; the self-embedding path is already sharded by the
-        # embedding's dense_sp_entry gate.
-        inputs_embeds = sp_shard(inputs_embeds)
-    return _QWEN3_5_MODEL_ORIGINAL_FORWARD(self, input_ids, positions, intermediate_tensors, inputs_embeds)
-
-
-Qwen3_5Model.forward = _qwen3_5_model_forward_with_dense_sp
 
 
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
