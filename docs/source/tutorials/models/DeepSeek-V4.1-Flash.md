@@ -1347,9 +1347,6 @@ use the matching vLLM revision recorded in
     export HCCL_CONNECT_TIMEOUT=1200
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
-      export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
-    fi
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve "$MODEL_PATH" \
@@ -1458,9 +1455,6 @@ use the matching vLLM revision recorded in
     export HCCL_BUFFSIZE=1800
     export HCCL_CONNECT_TIMEOUT=1200
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
-      export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
-    fi
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve "$MODEL_PATH" \
@@ -2415,9 +2409,6 @@ export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=204
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
-  export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
-fi
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
 # Parameters required by the Mooncake KV Cache Pool.
@@ -2519,9 +2510,6 @@ export HCCL_BUFFSIZE=1800
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=204
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
-  export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
-fi
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
 # Parameters required by the Mooncake KV Cache Pool.
@@ -2644,10 +2632,6 @@ For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool gui
     export VLLM_USE_V2_MODEL_RUNNER=0
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-
-    if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
-      export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
-    fi
 
     HEADLESS_ARGS=()
     if [[ "$NODE_RANK" != "0" ]]; then

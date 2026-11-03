@@ -282,6 +282,8 @@ The A2 capabilities have not changed in this release and remain consistent with 
 
     The 950DT products feature set and service options are the same as A3, except that 950DT products uses TP8 and exposes eight devices per node. Leave `HCCL_OP_EXPANSION_MODE` unset for this mixed Prefill/Decode deployment.
 
+    Kimi K3 on 950DT products does not support jemalloc.
+
     Before starting the service:
 
     - Replace the model path, local IP address, network interface, service port, and DP RPC port with values from the target environment.
@@ -471,7 +473,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
 
     On Atlas 800I A3, a mixed Prefill/Decode deployment follows the Prefill execution mode. HCCL therefore uses AICPU by default; leave `HCCL_OP_EXPANSION_MODE` unset.
 
-    Kimi K3 on Atlas 800I A3 does not support `LD_PRELOAD=/usr/lib64/libjemalloc.so.2`; run `unset LD_PRELOAD` before starting vLLM.
+    Kimi K3 on Atlas 800I A3 does not support jemalloc.
 
     Before starting the service:
 
@@ -498,7 +500,6 @@ The A2 capabilities have not changed in this release and remain consistent with 
         export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
         export GLOO_SOCKET_IFNAME=$NIC_NAME
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
 
         SPECULATIVE_CONFIG="$(
           printf \
@@ -556,7 +557,6 @@ The A2 capabilities have not changed in this release and remain consistent with 
         export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
         export GLOO_SOCKET_IFNAME=$NIC_NAME
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
 
         SPECULATIVE_CONFIG="$(
           printf \
@@ -815,7 +815,7 @@ On 950DT products, use CCU communication on both Prefill and Decode by setting `
 
 This deployment supports DSpark speculative decoding. Select the DSpark checkpoint for your platform from [Section 3.1](#31-model-weight), and configure the same draft-model path and `num_speculative_tokens` on both Prefill and Decode nodes. The configuration uses draft TP8 on 950DT products or draft TP16 on A3, greedy drafting, and seven speculative tokens. On both platforms, Prefill keeps eager execution, while Decode sets the draft model's `enforce_eager` to `false` and retains `FULL_DECODE_ONLY` for the target model. The seventh argument of the engine template is the tensor-parallel size: `8` for 950DT products and `16` for A3.
 
-Kimi K3 on Atlas 800I A3 does not support `LD_PRELOAD=/usr/lib64/libjemalloc.so.2`; run `unset LD_PRELOAD` before starting vLLM.
+Kimi K3 on Atlas 800I A3 and 950DT products does not support jemalloc.
 
 The Prefill and Decode templates below assume equal tensor-parallel sizes on both sides. Both `prefill.tp_size` and `decode.tp_size` are taken from the seventh template argument (`$7`) and must match the engine TP: `8` for 950DT products or `16` for A3.
 
@@ -854,7 +854,6 @@ The basic templates leave DCP disabled (its default size is `1`).
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_HOST_IP=${local_ip}
@@ -937,7 +936,6 @@ The basic templates leave DCP disabled (its default size is `1`).
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export VLLM_USE_V2_MODEL_RUNNER=1
 
         SPECULATIVE_CONFIG="$(
@@ -1025,7 +1023,6 @@ The basic templates leave DCP disabled (its default size is `1`).
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_HOST_IP=${local_ip}
@@ -1109,7 +1106,6 @@ The basic templates leave DCP disabled (its default size is `1`).
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export VLLM_USE_V2_MODEL_RUNNER=1
 
         SPECULATIVE_CONFIG="$(
@@ -1267,7 +1263,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_HOST_IP=${local_ip}
@@ -1350,7 +1345,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export VLLM_USE_V2_MODEL_RUNNER=1
 
         SPECULATIVE_CONFIG="$(
@@ -1439,7 +1433,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_HOST_IP=${local_ip}
@@ -1523,7 +1516,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export VLLM_USE_V2_MODEL_RUNNER=1
 
         SPECULATIVE_CONFIG="$(
@@ -1796,7 +1788,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
         export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export MMC_LOCAL_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-local.conf
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1
@@ -1897,7 +1888,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
         export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export MMC_LOCAL_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-local.conf
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1
@@ -2004,7 +1994,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
         export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export MMC_LOCAL_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-local.conf
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1
@@ -2106,7 +2095,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
         export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export MMC_LOCAL_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-local.conf
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1
