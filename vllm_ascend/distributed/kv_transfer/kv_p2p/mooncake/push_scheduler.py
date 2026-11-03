@@ -11,13 +11,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandsha
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     get_mooncake_bootstrap_addr,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
-    MooncakeBootstrapServer,
-)
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.bootstrap_server import AscendMooncakeBootstrapServer
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
 )
@@ -39,7 +37,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: "KVCacheConfig") -> None:
         super().__init__(vllm_config, engine_id, kv_cache_config)
-        self.bootstrap_server: MooncakeBootstrapServer | None = None
+        self.bootstrap_server: AscendMooncakeBootstrapServer | None = None
         self.start_bootstrap_server()
 
     def _should_launch_bootstrap_server(self) -> bool:
@@ -58,7 +56,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         if not self._should_launch_bootstrap_server() or self.bootstrap_server is not None:
             return
         _, port = get_mooncake_bootstrap_addr(self.vllm_config)
-        server = MooncakeBootstrapServer("0.0.0.0", port)
+        server = AscendMooncakeBootstrapServer("0.0.0.0", port)
         try:
             server.start()
         except Exception:
