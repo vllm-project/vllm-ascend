@@ -1,0 +1,8 @@
+pr: 20821
+entries:
+  - category: bugfix
+    text: >-
+      MRV2 pipeline-parallel sampled-token broadcasts now use Ascend's existing
+      per-group HCCL buffer configuration and initialize their communication
+      buffers during memory profiling, avoiding unexpected memory growth after
+      KV cache planning.
