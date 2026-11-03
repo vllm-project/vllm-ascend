@@ -5,11 +5,11 @@
 
 import pytest
 
-from tests.e2e.rlhf.weight_transfer.cases import (
+from tests.e2e.rlhf.weight_transfer.case import (
     GLM_CASES,
+    WeightUpdateModelCase,
     pytest_model_cases,
 )
-from tests.e2e.rlhf.weight_transfer.model import WeightUpdateModelCase
 from tests.e2e.rlhf.weight_transfer.npu_ipc import (
     run_npu_ipc_weight_transfer_transaction,
 )

@@ -17,7 +17,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 
-from tests.e2e.rlhf.weight_transfer.model import WeightUpdateModelCase
+from tests.e2e.rlhf.weight_transfer.case import WeightUpdateModelCase
 from vllm_ascend.utils import vllm_version_is
 
 

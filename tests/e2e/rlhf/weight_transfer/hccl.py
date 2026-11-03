@@ -18,7 +18,7 @@ from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactor
 from vllm.utils.network_utils import get_ip, get_open_port
 
 from tests.e2e.rlhf.common import post_control, register_engines_once, server_visible_devices
-from tests.e2e.rlhf.weight_transfer.model import WeightUpdateModelCase
+from tests.e2e.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.rlhf.weight_transfer.oracle import (
     UPDATE_ROUNDS,
     assert_weight_update_matches_reference,
