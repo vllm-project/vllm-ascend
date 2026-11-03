@@ -63,3 +63,12 @@ to get specific plans.
     shared backing with `[B, H, N, C]` pages. Hidden-state dumps stay on
     per-layer private buffers so they cannot overlay hybrid Attention/Mamba
     storage, and reshape matches `CacheOnlyAttentionLayer.basic_cache`.
+
+## Sampling memory notes
+
+`sample/apply_top_k_top_p.py` chunks input rows so the **input tile** stays
+under `TOP_K_TOP_P_INPUT_TILE_BYTES` (32 MiB). This bounds — but does not
+hard-cap — the NPU sort scratch (sorted values + int64 indices + native sort
+workspace), which still scales with rows-per-chunk; a single row carries an
+irreducible O(V) requirement. This tile budget is independent of the 1 GiB
+verifier logits cap. It is not a guarantee on total scratch or device memory.
