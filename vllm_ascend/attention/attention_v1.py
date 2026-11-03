@@ -667,22 +667,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self._non_causal_swa_attn_mask = AttentionMaskBuilder(device).get_splitfuse_attn_mask()
             radius = self.sliding_window - 1
             return self._non_causal_swa_attn_mask, 4, radius, radius
-        # Decode-only graphs without a sliding window: every query token
-        # attends to all its cached keys, so causal masking is implicit.
-        # Passing the explicit mask with sparse_mode=3 forces FIA to build a
-        # redundant mask and costs ~10% end-to-end performance (issue #16889,
-        # same pattern as PR #10302). Sliding-window decode keeps the mask.
-        # The max_query_len == 1 guard excludes multi-token batches that carry
-        # a DecodeOnly label: graph capture forces DecodeOnly onto FULL-graph
-        # dummies (including spec-decode verify and mixed batches) and MRV2
-        # speculators label their draft batches DecodeOnly, while those
-        # queries still need the causal mask (review feedback, cf. #17948).
-        if (
-            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-            and attn_metadata.max_query_len == 1
-            and self.sliding_window is None
-        ):
-            return None, 0, SWA_INT_MAX, SWA_INT_MAX
+        # Graph capture must keep the mask + sparse_mode=3 (right-aligned
+        # causal): FULL-graph capture dummies are always DecodeOnly with one
+        # query token per request (AscendInputBatch.make_dummy), but the
+        # captured graphs also replay multi-token batches (speculative-decode
+        # verification, adaptive verification, chunked prefill). FIA graph
+        # replay cannot rebind atten_mask/sparse_mode (FIAParamProvider only
+        # updates lengths/block tables), so capture-time parameters must stay
+        # valid for every replay shape. The mask is only skipped on the eager
+        # path, where the metadata describes the real batch.
         return (
             attn_metadata.attn_mask,
             4 if self.sliding_window else 3,
@@ -1083,12 +1076,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     return self._forward_fia_chunked_prefill_split(
                         query, key, value, key, passed_value, block_size, block_table, attn_metadata, output
                     )
-                # Decode-only batches: causal masking is implicit (each query
-                # token attends to all its cached keys). Skip the explicit
-                # mask and use sparse_mode=0 to avoid redundant mask
+                # Decode-only eager batches: every query token attends to all
+                # its cached keys, so causal masking is implicit. Skip the
+                # explicit mask and use sparse_mode=0 to avoid redundant mask
                 # construction in FIA (issue #16889, same pattern as #10302).
-                # max_query_len == 1 excludes multi-token batches labeled
-                # DecodeOnly (spec-decode draft/verify), cf. #17948.
+                # max_query_len == 1 guarantees every request has a single
+                # query token; multi-token batches labeled DecodeOnly
+                # (spec-decode draft/verify) keep the mask, cf. #17948.
                 is_decode = (
                     attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
                 )
@@ -1143,13 +1137,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # decode part
         if num_decode_tokens > 0:
-            # Each decode query token attends to all its cached keys, so no
-            # explicit mask is needed (issue #16889, same pattern as #10302).
+            # Only skip the explicit mask when every decode request carries
+            # exactly one query token: split_decodes_and_prefills classifies
+            # short extends (query_len <= decode_threshold) and speculative
+            # verification blocks as decodes too, and those multi-token
+            # queries still need the causal mask (issue #16889, cf. #17948).
+            decode_skips_mask = num_decode_tokens == num_decodes
             decode_out, _ = DeviceOperator.npu_fused_infer_attention_score(
                 query=query[:num_decode_tokens],
                 key=key,
                 value=value,
-                atten_mask=None,
+                atten_mask=None if decode_skips_mask else attn_metadata.attn_mask,
                 block_table=block_table[:num_decodes],
                 input_layout="TND",
                 block_size=block_size,
@@ -1166,7 +1164,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 current_value=value,
                 attn_metadata=attn_metadata,
                 is_prefill_no_cache=False,
-                sparse_mode=0,
+                sparse_mode=0 if decode_skips_mask else 3,
             )
             output[:num_decode_tokens] = decode_out.view(num_decode_tokens, self.num_heads, self.head_size)
 
