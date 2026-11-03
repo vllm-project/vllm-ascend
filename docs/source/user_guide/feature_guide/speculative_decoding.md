@@ -1085,13 +1085,33 @@ and devices:
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-RecoverSSM requires speculative decoding and does not support pipeline
-parallelism (PP), prefill context parallelism (PCP), or decode context
-parallelism (DCP). Stochastic rounding must be disabled.
+RecoverSSM requires speculative decoding, PP=1 and DCP=1. PCP is limited to
+eager Prefill producers with TP=1 using the Mooncake connectors below;
+PCP Decode consumers and colocated PCP execution are not supported.
+Stochastic rounding must be disabled.
 
 For prefill/decode separation, use `MooncakeConnectorV2` or
-`MooncakePullConnector` with matching model weights, TP size, speculative window,
-and RecoverSSM settings on both sides.
+`MooncakePullConnector` with matching model weights, speculative window,
+cache dtypes, convolution layout and RecoverSSM settings on both sides.
+PCP producers may use a different KDA head-shard count from Decode consumers:
+Mooncake gathers the producer head shards into each receiving consumer's state.
+
+For example, an eight-device Prefill role and an eight-device Decode role can
+use the following layout with `--use-replayssm` and MTP5 on both sides:
+
+| Setting | Prefill | Decode |
+| --- | --- | --- |
+| Tensor parallel size | 1 | 1 |
+| Prefill context parallel size | 8 | 1 |
+| Data parallel size | 1 | 8 |
+| Expert parallelism | Enabled (EP8) | Enabled (EP8) |
+| KV role | `kv_producer` | `kv_consumer` |
+| Target and draft execution | Eager | `FULL_DECODE_ONLY` |
+
+Set `--enforce-eager` on Prefill and keep its draft eager as well. Each Decode
+DP rank receives all eight KDA head shards for its assigned requests; DP ranks
+do not divide one request's recurrent state. Keep the same prefix-caching
+configuration on both roles.
 
 !!! warning
 
