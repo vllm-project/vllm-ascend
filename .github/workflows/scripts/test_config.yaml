@@ -47,6 +47,8 @@ curated_tests:
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
     - tests/e2e/pull_request/one_card/test_flash_attn_precision.py
+  pr-single-node-ops:
+    - tests/e2e/nightly/single_node/ops/singlecard_ops/
 
 # === Skipped Tests ===
 # Removed from any selection after directory scanning, so they are never
@@ -125,6 +127,8 @@ runner_mapping:
   tests/e2e/pull_request/four_card:
     default: a3-4
     310p: 310p-4
+  tests/e2e/nightly/single_node/ops/singlecard_ops/?:
+    default: a3-4
 
 # === Partition Configuration ===
 # Maps logical test buckets to exact labels from runner_label.json and controls
