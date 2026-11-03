@@ -121,7 +121,7 @@ launch using FP32 keys, then restores trailing `-1`. TopK=16 uses four rows per
 program and 32 internal sort slots; other widths use a general per-row kernel.
 TopK=1 skips sorting because a single selected ID is already ordered.
 `logical_block_count <= FP32_INDEX_SENTINEL` is required. A3/A5 share the single
-definition in `ops/triton/msa/constants.py`: FP32 represents integers through
+definition in `ops/triton/msa/msa_m3_index_postprocess.py`: FP32 represents integers through
 `2**24` exactly; that finite endpoint is reserved for invalid keys, and valid IDs
 are strictly below it. It is supported by the Ascend sort extension and is not
 an attention score. IDs and counts remain int32.

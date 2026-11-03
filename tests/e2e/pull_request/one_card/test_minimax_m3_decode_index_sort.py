@@ -9,9 +9,19 @@ from vllm.triton_utils import triton
 # Initialize the operator registry before importing the model package, as the
 # service does. Importing the model first can create a DeviceOperator cycle.
 import vllm_ascend.ops  # noqa: F401
+from vllm_ascend.device.device_config import check_ascend_device_type, is_950
 from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
     _decode_index_postprocess_sorted,
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def require_a5():
+    if not torch.npu.is_available():
+        pytest.skip("MiniMax M3 A5 decode ordering requires Ascend 950")
+    check_ascend_device_type()
+    if not is_950():
+        pytest.skip("MiniMax M3 A5 decode ordering requires Ascend 950")
 
 
 def _inputs(heads, query_len, topk, lengths):

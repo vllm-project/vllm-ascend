@@ -7,7 +7,10 @@ from __future__ import annotations
 import torch
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.ops.triton.msa.constants import FP32_INDEX_SENTINEL
+# FP32 represents every integer through 2**24 exactly. Reserve that endpoint
+# as the invalid sort key: valid logical block IDs must be in [0, 2**24).
+# Unlike +inf this finite key is supported by the Ascend FP32 sort extension.
+FP32_INDEX_SENTINEL = 1 << 24
 
 _SPARSE_BLOCK_SIZE = 128
 _SCORE_ALIGNMENT = 16

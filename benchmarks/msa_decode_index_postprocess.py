@@ -67,7 +67,7 @@ def build_postprocess_pair(kind, raw, context, query_len, logical_blocks, torch)
     from vllm_ascend.models.minimax_m3.ops import msa_m3_triton_a5 as a5
     from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import _sort_valid_gbsa_prefix
     from vllm_ascend.ops.triton.msa import msa_m3_index_postprocess as cann
-    from vllm_ascend.ops.triton.msa.constants import FP32_INDEX_SENTINEL
+    from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import FP32_INDEX_SENTINEL
 
     heads, tokens, topk = raw.shape
     indices = torch.empty(raw.shape, dtype=torch.int32, device=raw.device)
@@ -242,7 +242,6 @@ def main():
     sources = [
         root / "vllm_ascend" / name
         for name in [
-            "ops/triton/msa/constants.py",
             "ops/triton/msa/msa_m3_index_postprocess.py",
             "models/minimax_m3/ops/msa_m3_triton_a5.py",
         ]

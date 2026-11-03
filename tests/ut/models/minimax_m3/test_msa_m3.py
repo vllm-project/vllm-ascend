@@ -61,7 +61,7 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
 )
 from vllm_ascend.ops.triton.msa import msa_m3_index_postprocess
-from vllm_ascend.ops.triton.msa.constants import FP32_INDEX_SENTINEL
+from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import FP32_INDEX_SENTINEL
 from vllm_ascend.utils import AscendDeviceType
 
 

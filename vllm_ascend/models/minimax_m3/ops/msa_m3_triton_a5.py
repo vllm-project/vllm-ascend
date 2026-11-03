@@ -23,7 +23,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 
-from vllm_ascend.ops.triton.msa.constants import FP32_INDEX_SENTINEL
+from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import FP32_INDEX_SENTINEL
 
 get_aicore_num: Callable[[], Any] | None
 init_device_properties_triton: Callable[[], Any] | None
