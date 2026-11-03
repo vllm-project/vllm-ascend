@@ -616,12 +616,11 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         self._schedule_rare_collect(logits, sampled_token_ids)
 
     def _schedule_rare_collect(self, logits: Any, sampled_token_ids: Any) -> None:
-        """Queue (top1, chosen) on the token-id copy stream. Do not feed rc4 here.
+        """Launch (top1, chosen) on main; defer D2H+feed off the sample path.
 
         Sampled ids stay on device. The v35 kernels read the stashed logits by
-        stride, including when the row order is already ``0..B-1``. Output rank
-        only. Sync and async scheduling both materialize the pair in
-        ``get_output``.
+        stride. Output rank only. Pair copy is issued later on the rare-pair
+        wait queue (or inline when ``VLLM_ASCEND_RARE_PAIR_SYNC=1``).
         """
         from vllm_ascend.observability.runtime_guard.hooks import is_async_output_rank
 
@@ -658,32 +657,49 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             if not isinstance(packed, torch.Tensor):
                 logger.warning("[runtime_guard: rare_chars] collect skipped: kernel did not return a packed tensor")
                 return
-            self._queue_rare_pair_d2h(packed)
+            self._queue_rare_pair_device_only(packed)
         except Exception:
             logger.exception("[runtime_guard: rare_chars] collect failed")
 
-    def _queue_rare_pair_d2h(self, packed: Any) -> None:
-        """Copy ``[rows, 2]`` on ``output_copy_stream`` after the token-id copy."""
+    def _queue_rare_pair_device_only(self, packed: Any) -> None:
+        """Hold device ``[rows, 2]`` and record collect-done on main (no D2H yet)."""
         import torch
-        from vllm.v1.worker.gpu.async_utils import stream as copy_stream_ctx
 
         self._drop_unconsumed_rare_pair()
         runner = self.runner
+        main_stream = getattr(runner, "main_stream", None)
+        collect_ev = torch.cuda.Event(blocking=True)
+        if main_stream is not None:
+            collect_ev.record(main_stream)
+        else:
+            collect_ev.record()
+        runner._rg_rare_pair_hold = packed
+        # Host buffer is materialized in ``_materialize_rare_pair_cpu``.
+        self._pending_rare_pair = (None, collect_ev)
+
+    def _materialize_rare_pair_cpu(self, packed: Any, collect_event: Any) -> Any:
+        """Wait for collect, then D2H ``[rows, 2]`` to pinned host memory."""
+        import torch
+        from vllm.v1.worker.gpu.async_utils import stream as copy_stream_ctx
+
+        if collect_event is not None:
+            collect_event.synchronize()
+        if packed is None:
+            return None
+        runner = self.runner
         copy_stream = getattr(runner, "output_copy_stream", None)
         main_stream = getattr(runner, "main_stream", None)
-        if copy_stream is None or main_stream is None:
-            cpu = packed.detach().float().cpu()
-            self._pending_rare_pair = (cpu, None)
-            runner._rg_rare_pair_hold = packed
-            return
         cpu = torch.empty(packed.shape, dtype=torch.float32, device="cpu", pin_memory=True)
-        event = torch.cuda.Event(blocking=True)
+        if copy_stream is None or main_stream is None:
+            cpu.copy_(packed)
+            return cpu
+        copy_ev = torch.cuda.Event(blocking=True)
         with copy_stream_ctx(copy_stream, main_stream):
-            copy_stream.wait_stream(main_stream)
+            # Collect already synchronized; avoid a second wait_stream(main).
             cpu.copy_(packed, non_blocking=True)
-            event.record(copy_stream)
-        runner._rg_rare_pair_hold = packed
-        self._pending_rare_pair = (cpu, event)
+            copy_ev.record(copy_stream)
+        copy_ev.synchronize()
+        return cpu
 
     def _drop_unconsumed_rare_pair(self) -> None:
         pending = getattr(self, "_pending_rare_pair", None)
@@ -697,11 +713,11 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             self.runner._rg_rare_pair_hold = None
 
     def consume_rare_pairs(self, output: Any) -> None:
-        """After token-id ``get_output``: complete pair D2H and feed rc4.
+        """After token-id ``get_output``: issue pair D2H and feed rc4.
 
-        Default: submit sync+pack+feed to :class:`RarePairWaitQueue` so this
-        path does not block on the pair copy. Set ``VLLM_ASCEND_RARE_PAIR_SYNC=1``
-        to synchronize and feed inline (debug).
+        Default: submit collect-wait + D2H + pack + feed to
+        :class:`RarePairWaitQueue` so this path does not touch the copy stream.
+        Set ``VLLM_ASCEND_RARE_PAIR_SYNC=1`` to materialize and feed inline (debug).
         """
         pending = getattr(self, "_pending_rare_pair", None)
         self._pending_rare_pair = None
@@ -709,7 +725,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         self.runner._rg_rare_pair_hold = None
         if pending is None:
             return
-        cpu, event = pending
+        _cpu_unused, collect_event = pending
         req_ids = [str(rid) for rid in (getattr(output, "req_ids", None) or []) if rid]
         n_req = len(req_ids)
         sampled = getattr(output, "sampled_token_ids", None)
@@ -717,15 +733,16 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         from vllm_ascend import envs as _envs
 
         if n_req <= 0:
-            if event is not None:
-                event.synchronize()
+            if collect_event is not None:
+                collect_event.synchronize()
             del hold
             return
 
         if _envs.VLLM_ASCEND_RARE_PAIR_SYNC:
-            if event is not None:
-                event.synchronize()
+            cpu = self._materialize_rare_pair_cpu(hold, collect_event)
             del hold
+            if cpu is None:
+                return
             self._rare_pair_pack_and_feed(cpu, sampled, req_ids, n_req)
             return
 
@@ -738,8 +755,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
 
         def _finish_pair(
             pair_hold=hold,
-            cpu=cpu,
-            event=event,
+            collect_event=collect_event,
             req_ids=req_ids,
             n_req=n_req,
             sampled=sampled,
@@ -757,10 +773,9 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 self._reap_finished_requests()
 
             try:
-                if event is not None:
-                    event.synchronize()
+                cpu = self._materialize_rare_pair_cpu(pair_hold, collect_event)
                 del pair_hold
-                if n_req <= 0:
+                if cpu is None or n_req <= 0:
                     return
                 self._rare_pair_pack_and_feed(cpu, sampled, req_ids, n_req)
             except Exception:
