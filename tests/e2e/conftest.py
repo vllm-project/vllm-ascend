@@ -526,11 +526,7 @@ class RemotePDServer(RemoteOpenAIServer):
         server_host: str = "127.0.0.1",
         env_dict: dict[str, str] | None = None,
         env_dicts: list[dict[str, str]] | None = None,
-<<<<<<< HEAD
         max_wait_seconds: float | None = 2800,
-=======
-        max_wait_seconds: float | None = 600,
->>>>>>> 5221c4f (update)
     ) -> None:
         self._proc_list = []
 
