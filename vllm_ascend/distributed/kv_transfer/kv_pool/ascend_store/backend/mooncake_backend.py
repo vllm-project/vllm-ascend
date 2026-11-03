@@ -424,7 +424,7 @@ class MooncakeBackend(Backend):
             for pointer in tuple(self._shared_te_registered_ptrs):
                 status = self.store.unregister_buffer(pointer)
                 if status != 0:
-                    raise RuntimeError(f"Failed to unregister shared TE buffer {pointer}: {status}")
+                    raise RuntimeError(f"Failed to unregister shared transfer-engine buffer {pointer}: {status}")
                 self._shared_te_registered_ptrs.remove(pointer)
             self.store.close()
             self.store = None

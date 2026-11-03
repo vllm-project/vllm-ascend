@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from .layout import TensorLayout
 from .pages import PageLayout
@@ -77,7 +77,7 @@ class RegisteredState:
         if self.spec.history_axis is None:
             return self.layout
         shape = list(self.layout.tensor.shape)
-        shape[self.spec.history_axis] = self.spec.history_rows
+        shape[self.spec.history_axis] = cast(int, self.spec.history_rows)
         return ComponentLayout(
             TensorLayout(tuple(shape), self.layout.tensor.strides, self.layout.tensor.itemsize),
             self.layout.dtype,
@@ -216,7 +216,7 @@ def register_cache(
                 if scale * kernel_tokens != native_spec.block_size:
                     raise ValueError("registered pages do not cover native block size")
                 itemsize = tensor.element_size()
-                layout = PageLayout(
+                page_layout = PageLayout(
                     native_spec.block_size,
                     kernel_tokens,
                     ratio,
@@ -225,7 +225,7 @@ def register_cache(
                     tensor.stride(0) * itemsize,
                     scale * tensor.stride(0) * itemsize,
                 )
-                pages.append(RegisteredPage(name, group_id, semantics, tensor, layout))
+                pages.append(RegisteredPage(name, group_id, semantics, tensor, page_layout))
                 continue
             if not isinstance(semantics, tuple) or not semantics or len(semantics) != len(tensors):
                 raise ValueError("state component count differs from native registration")

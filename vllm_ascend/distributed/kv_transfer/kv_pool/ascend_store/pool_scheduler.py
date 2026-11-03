@@ -1,10 +1,11 @@
 import importlib
 import math
-from typing import Any
+from typing import Any, cast
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import MooncakeLookupResult
 from vllm.logger import logger
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -50,6 +51,9 @@ def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
 
 
 class KVPoolScheduler:
+    max_state_save_jobs: int
+    max_state_save_blocks: int
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -681,7 +685,6 @@ class KVPoolScheduler:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._preempted_req_ids.discard(finished_req_id)
-            self._loading_req_ids.discard(finished_req_id)
 
         for req_id in scheduler_output.preempted_req_ids:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
@@ -805,7 +808,7 @@ class KVPoolScheduler:
                             req_meta.block_hashes = list(source.block_hashes)
                             req_meta.can_save = self._try_reference_save(req_meta)
                             if req_meta.can_save:
-                                self._pending_key_saves[req_meta.store_job_id] = req_meta
+                                self._pending_key_saves[cast(int, req_meta.store_job_id)] = req_meta
                             continue
                     req_meta.can_save = self._try_reference_save(req_meta)
             meta.requests = [
@@ -978,7 +981,7 @@ class KVPoolScheduler:
             hbm_hit_tokens=num_computed_tokens,
             cache_key_hashes=keys,
         )
-        hit = result.hit_length
+        hit = cast(MooncakeLookupResult, result).hit_length
         if hit <= num_computed_tokens:
             return 0, False
         if hit > token_limit or hit % self.cache_transfer_granularity:
@@ -1056,7 +1059,7 @@ class KVPoolScheduler:
                     block_hashes=list(request.block_hashes),
                 )
                 if self._try_reference_save(pending):
-                    self._pending_key_saves[pending.store_job_id] = pending
+                    self._pending_key_saves[cast(int, pending.store_job_id)] = pending
             puts = bound_puts
             logger.debug(
                 "State save request=%s offers=%s selected=%s computed=%d hashes=%d prefill=%d",
@@ -1180,7 +1183,8 @@ class KVPoolScheduler:
         self.sending_events.pop(event_id)
         if block_ids:
             logger.debug("event %s free blocks: %s", event_id, block_ids)
-            self._block_pool.free_blocks([self._block_pool.blocks[block_id] for block_id in reversed(block_ids)])
+            block_pool = cast(BlockPool, self._block_pool)
+            block_pool.free_blocks([block_pool.blocks[block_id] for block_id in reversed(block_ids)])
 
     def get_stats(self) -> AscendStoreKVConnectorStats | None:
         return None

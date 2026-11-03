@@ -5,7 +5,7 @@ import math
 import threading
 import time
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 import vllm.envs as envs
@@ -1181,7 +1181,7 @@ class KVPoolWorker:
         layout = self.state_store_layouts[group_id]
         prefixes = layout.lookup_key_prefixes(((0, 0, 0, self.pp_rank),))
         boundaries = list(boundary_hashes)
-        keys = []
+        keys: list[str] = []
         for boundary in boundaries:
             key_hash = boundary_hashes[boundary]
             if type(boundary) is not int or boundary <= 0 or not isinstance(key_hash, bytes) or not key_hash:
@@ -1512,7 +1512,7 @@ class KVPoolWorker:
         if self.kv_recv_thread is None:
             return KVConnectorTransferResults()
         self.kv_recv_thread.raise_if_failed()
-        receiving, failed = self.kv_recv_thread.take_receive_results()
+        receiving, failed = cast(KVCacheStoreRecvingThread, self.kv_recv_thread).take_receive_results()
         return KVConnectorTransferResults(finished_recving=receiving, failed_recving=failed)
 
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:

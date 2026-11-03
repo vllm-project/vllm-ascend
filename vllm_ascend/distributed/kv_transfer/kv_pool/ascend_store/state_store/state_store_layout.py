@@ -131,7 +131,9 @@ class AcceptedStateStoreLayout(TPShardedStoreLayout):
             raise ValueError("registration does not match described state tensors")
         templates = []
         for shard in self.local_shard_ids:
-            bases, strides, sizes = [], [], []
+            bases: list[int] = []
+            strides: list[int] = []
+            sizes: list[int] = []
             for component in self.components:
                 tensor = component.tensor
                 if tensor.shape[0] < num_blocks:
@@ -140,10 +142,10 @@ class AcceptedStateStoreLayout(TPShardedStoreLayout):
                 wire_axis = component.spec.wire_shard_axis
                 shape = list(source.logical_shape[1:])
                 shape.insert(wire_axis, sum(source.projection_sizes) // self.store_tp_size)
-                shape = tuple(shape)
-                wire_strides = tuple(prod(shape[axis + 1 :]) for axis in range(len(shape)))
+                wire_shape = tuple(shape)
+                wire_strides = tuple(prod(wire_shape[axis + 1 :]) for axis in range(len(wire_shape)))
                 wire = ComponentLayout(
-                    TensorLayout(shape, wire_strides, source.tensor.itemsize),
+                    TensorLayout(wire_shape, wire_strides, source.tensor.itemsize),
                     source.dtype,
                     source.projection_sizes,
                     wire_axis,

@@ -19,10 +19,10 @@ from ..state_store.cache_schema import (
 from ..state_store.state_keys import StateKeyPolicy
 
 if TYPE_CHECKING:
+    from transformers import Glm5NextTextConfig
     from vllm.config import SpeculativeConfig
     from vllm.v1.kv_cache_interface import KVCacheSpec
 
-    from vllm_ascend.models.glm5next.config import Glm5NextConfig
     from vllm_ascend.models.glm5next.kda import Glm5NextLinearAttention
 
 
@@ -81,7 +81,7 @@ def describe_glm_caches(
     """
     from vllm.v1.kv_cache_interface import MambaSpec
 
-    components = {}
+    components: dict[str, ComponentSpecs] = {}
     for name, spec in native_specs.items():
         if isinstance(spec, MambaSpec):
             if name not in state_layers:
@@ -93,7 +93,7 @@ def describe_glm_caches(
 
 
 def describe_key_policy(
-    hf_config: Glm5NextConfig,
+    hf_config: Glm5NextTextConfig,
     speculative_config: SpeculativeConfig | None,
 ) -> StateKeyPolicy:
     """GLM's shifted MTP cache consumes token[B] at cache position B-1.

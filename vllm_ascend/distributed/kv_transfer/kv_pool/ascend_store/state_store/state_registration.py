@@ -18,7 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     KeyMetadata,
 )
 
-from .cache_schema import RegisteredCache
+from .cache_schema import RegisteredCache, RegisteredPage, RegisteredState
 from .state_keys import StateKeyPolicy
 from .state_store_layout import AcceptedStateStoreLayout
 
@@ -54,7 +54,7 @@ def compile_state_store_layouts(
     )
     digest = hashlib.sha256(json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     namespace = AcceptedStateStoreLayout.shared_namespace(store_tp_size, pp_size) + f"@cache_schema:{digest}"
-    groups = {}
+    groups: dict[int, list[RegisteredState]] = {}
     for component in states:
         groups.setdefault(component.group_id, []).append(component)
     ordered_groups = sorted(
@@ -101,7 +101,7 @@ def qualify_page_metadata(
     state_layout = next(iter(layouts.values()))
     namespace = state_layout.cache_namespace
     cache_prefix = state_layout.metadata.cache_prefix
-    groups = {}
+    groups: dict[int, list[RegisteredPage]] = {}
     for page in registered.pages:
         groups.setdefault(page.group_id, []).append(page)
     ordered = sorted(groups.items(), key=lambda pair: sorted(p.layer_name for p in pair[1]))

@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -915,7 +915,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
         hashes = request.cache_key_hashes
         if hashes is None:
             raise ValueError("boundary save lacks committed model-dependent keys")
-        keys, addresses, sizes = [], [], []
+        keys: list[str] = []
+        addresses: list[list[int]] = []
+        sizes: list[list[int]] = []
         for put in request.boundary_puts or ():
             layout = self.state_store_layouts.get(put.group_id)
             if layout is None:
@@ -1255,8 +1257,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         if load is None or load.cache_key_hashes is None:
             raise ValueError("state receive lacks the lookup's bound identities")
         token_len = load.kvpool_cached_tokens
-        masks = self.token_database.load_mask(request.block_hashes, token_len)
-        keys, addresses, sizes = [], [], []
+        masks = cast(tuple[list[bool], ...], self.token_database.load_mask(request.block_hashes, token_len))
+        keys: list[str] = []
+        addresses: list[list[int]] = []
+        sizes: list[list[int]] = []
         state_destinations: dict[int, list[int]] = {}
         for group_id in request.kv_cache_group_ids or [0]:
             group_mask = masks[group_id]
