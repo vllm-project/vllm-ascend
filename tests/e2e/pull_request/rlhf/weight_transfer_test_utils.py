@@ -12,64 +12,35 @@ transfer that consistently drops, renames or reshapes parameters would still
 pass. See ``assert_weight_update_matches_reference``.
 """
 
-import contextlib
-import hashlib
 import json
-import math
-import shutil
-import tempfile
-import time
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass
-from functools import cached_property
-from pathlib import Path
 from typing import Any
 
 import regex as re
-import torch
-from transformers import AutoConfig, AutoModelForCausalLM
-from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 
-from vllm_ascend.utils import vllm_version_is
-
-
-@dataclass(frozen=True)
-class WeightUpdateModelCase:
-    """A layer-reduced model whose complete parameter set is reloaded."""
-
-    id: str
-    model: str
-    hf_overrides: dict[str, Any]
-    meta_config_attribute: str | None = None
-    checkpoint_model_prefix: str | None = None
-    checkpoint_name_map: Callable[[str], str] | None = None
-    expert_intermediate_size: int | None = None
-    extra_server_args: tuple[str, ...] = ()
-    skip_reason: str | None = None
-    """Why neither lane can carry this case yet.
-
-    A case whose model is not ready for the transaction is skipped in both lanes
-    instead of being reported as a transfer regression; the reason is attached to
-    the case so the report says which prerequisite is missing.
-    """
-
-    def server_args(self) -> list[str]:
-        # Run the worker out-of-process. With a single-process executor the
-        # worker shares the engine core's ``VllmConfig``, and ``EngineCoreProc``
-        # rewrites ``cache_config.block_size`` to the minimum block size across
-        # the KV cache groups before the worker recomputes the KV cache specs.
-        # DeepSeek-V4's block-size tables are keyed by the user-facing 32/64/128,
-        # so the rewritten value (8/4/2) raises ``KeyError`` on every lookup. An
-        # out-of-process worker gets its own config copy, taken before that
-        # rewrite, and the single-worker topology of these cases is unchanged.
-        return [
-            "--hf-overrides",
-            json.dumps(self.hf_overrides),
-            "--distributed-executor-backend",
-            "mp",
-            *self.extra_server_args,
-        ]
-
+from tests.e2e.rlhf.common import register_engines_once as register_engines_once
+from tests.e2e.rlhf.common import wait_for_free_device_memory as wait_for_free_device_memory
+from tests.e2e.rlhf.weight_transfer.case import WeightUpdateModelCase as WeightUpdateModelCase
+from tests.e2e.rlhf.weight_transfer.weight_source import (
+    FixedRandomWeightSource as FixedRandomWeightSource,
+)
+from tests.e2e.rlhf.weight_transfer.weight_source import (
+    _apply_hf_overrides as _apply_hf_overrides,
+)
+from tests.e2e.rlhf.weight_transfer.weight_source import (
+    _source_metadata as _source_metadata,
+)
+from tests.e2e.rlhf.weight_transfer.weight_source import (
+    expand_fused_expert_params as expand_fused_expert_params,
+)
+from tests.e2e.rlhf.weight_transfer.weight_source import (
+    fixed_startup_checkpoint as fixed_startup_checkpoint,
+)
+from tests.e2e.rlhf.weight_transfer.weight_source import (
+    packed_buffer_size_for as packed_buffer_size_for,
+)
+from tests.e2e.rlhf.weight_transfer.weight_source import (
+    resize_expert_shape as resize_expert_shape,
+)
 
 # Qwen and GLM reduce only layer count. DeepSeek keeps the first four
 # compress-ratio entries and reduces experts to fit the single-NPU IPC path;
@@ -214,55 +185,6 @@ MODEL_CASES = (
 )
 
 
-def expand_fused_expert_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
-    """Map HF fused routed-expert tensors onto checkpoint-facing per-expert names.
-
-    ``GlmMoeDsaForCausalLM`` keeps routed experts fused as
-    ``mlp.experts.gate_up_proj`` ``[E, 2I, H]`` and ``mlp.experts.down_proj``
-    ``[E, H, I]``, while the published checkpoint - and therefore vLLM's
-    ``expert_params_mapping`` - stores one tensor per expert
-    (``mlp.experts.{e}.gate_proj.weight`` etc.).  Without this expansion the
-    fused names reach ``load_weights`` unmatched and raise
-    ``KeyError: 'layers.N.mlp.experts.gate_up_proj'``.
-    """
-    for suffix, kind in ((".mlp.experts.gate_up_proj", "gate_up"), (".mlp.experts.down_proj", "down")):
-        if not name.endswith(suffix):
-            continue
-        prefix = name[: -len(suffix.rsplit(".", 1)[-1])]  # keeps the trailing dot
-        if kind == "gate_up":
-            num_experts, fused_inter, hidden = shape
-            inter = fused_inter // 2
-            out: list[tuple[str, tuple[int, ...]]] = []
-            for expert in range(num_experts):
-                out.append((f"{prefix}{expert}.gate_proj.weight", (inter, hidden)))
-                out.append((f"{prefix}{expert}.up_proj.weight", (inter, hidden)))
-            return out
-        num_experts, hidden, inter = shape
-        return [(f"{prefix}{expert}.down_proj.weight", (hidden, inter)) for expert in range(num_experts)]
-    return [(name, shape)]
-
-
-def resize_expert_shape(name: str, shape: tuple[int, ...], intermediate_size: int | None) -> tuple[int, ...]:
-    """Force expert MLP tensors to the checkpoint's intermediate dimension.
-
-    ``DeepSeek-V4`` builds routed and shared experts from ``intermediate_size``
-    in HF's ``from_config`` path but stores ``moe_intermediate_size`` in the
-    checkpoint, so the payload shape has to be corrected or vLLM's loader trips
-    ``assert args[0].numel() == args[1].numel()`` while copying an expert shard.
-    """
-    if intermediate_size is None:
-        return shape
-    if name.endswith((".mlp.shared_experts.gate_proj.weight", ".mlp.shared_experts.up_proj.weight")):
-        return (intermediate_size, shape[-1])
-    if name.endswith(".mlp.shared_experts.down_proj.weight"):
-        return (shape[0], intermediate_size)
-    if ".mlp.experts." in name and name.endswith((".gate_proj.weight", ".up_proj.weight")):
-        return (intermediate_size, shape[-1])
-    if ".mlp.experts." in name and name.endswith(".down_proj.weight"):
-        return (shape[0], intermediate_size)
-    return shape
-
-
 def pytest_model_cases() -> list[Any]:
     """Return model params with per-checkpoint CI discovery markers."""
     import pytest
@@ -299,231 +221,7 @@ PACKED_LANE_SKIP_REASON = (
 _ENGINES_REGISTERED = False
 
 
-def register_engines_once() -> None:
-    """Register the Ascend weight transfer engines exactly once per process.
-
-    ``register_engine()`` is not idempotent: the underlying factories raise
-    ``ValueError: Weight transfer trainer engine 'hccl' is already registered``
-    when a backend name is registered twice. Every test module that needs the
-    engines must therefore share this process-wide guard instead of keeping a
-    per-module flag, which would raise as soon as two modules run in the same
-    pytest session (e.g. the NPU IPC and HCCL suites).
-    """
-    global _ENGINES_REGISTERED
-    if _ENGINES_REGISTERED:
-        return
-    from vllm_ascend.distributed.weight_transfer import register_engine
-
-    register_engine()
-    _ENGINES_REGISTERED = True
-
-
-def _apply_hf_overrides(config, overrides: dict[str, Any]) -> None:
-    for name, value in overrides.items():
-        current = getattr(config, name, None)
-        if isinstance(value, dict) and current is not None:
-            current.update(value)
-        else:
-            setattr(config, name, value)
-
-
 FIXED_WEIGHT_SEED = 20260915
-
-
-def _source_metadata(func):
-    """vLLM main (#63256) requires a cached property; v0.32.0 still calls it."""
-    return func if vllm_version_is("0.32.0") else cached_property(func)
-
-
-class FixedRandomWeightSource(WeightSource):
-    """Generate every reduced-model parameter deterministically on demand.
-
-    A meta-device Transformers model provides the complete checkpoint-facing
-    name and shape set without allocating model storage. Each iteration derives
-    a stable per-parameter seed and regenerates the same BF16 values, avoiding
-    both checkpoint weight downloads and a persistent second model copy.
-
-    ``write_checkpoint`` turns the same iteration into a normally-loadable
-    checkpoint, which is how the startup-load reference is built: the reference
-    and the transfer must see identical names, shapes, dtypes, values and
-    integer tables, so they cannot be generated by two code paths.
-
-    Passing draft_case adds an independent draft_source with its own seed and
-    checkpoint-facing names. Iterating this object still yields only target
-    weights; write_checkpoint also writes the draft checkpoint under draft/.
-    Existing target-only callers keep their original payload and layout.
-    """
-
-    def __init__(
-        self,
-        case: WeightUpdateModelCase,
-        device: torch.device,
-        *,
-        seed: int = FIXED_WEIGHT_SEED,
-        draft_case: WeightUpdateModelCase | None = None,
-        draft_seed: int | None = None,
-    ) -> None:
-        config = AutoConfig.from_pretrained(case.model, trust_remote_code=True)
-        _apply_hf_overrides(config, case.hf_overrides)
-        self._case = case
-        meta_config = getattr(config, case.meta_config_attribute) if case.meta_config_attribute else config
-        with torch.device("meta"):
-            meta_model = AutoModelForCausalLM.from_config(meta_config, trust_remote_code=True)
-
-        # Two distinct steps: ``_checkpoint_name`` applies the namespace prefix
-        # to the raw meta-model name (once), then the checkpoint rename map runs
-        # on the *expanded* names, because the meta model exposes routed experts
-        # fused and the per-expert names (gate/up/down -> w1/w3/w2) only exist
-        # after ``expand_fused_expert_params`` has split them.
-        parameters = [
-            (
-                self._apply_name_map(expanded_name, case),
-                resize_expert_shape(expanded_name, expanded_shape, case.expert_intermediate_size),
-                torch.bfloat16,
-            )
-            for name, parameter in meta_model.named_parameters()
-            for expanded_name, expanded_shape in expand_fused_expert_params(
-                self._checkpoint_name(name, case), tuple(parameter.shape)
-            )
-        ]
-        # Learned integer tables must travel with the payload too. Some
-        # architectures expose them as HF *buffers* while the served model keeps
-        # them as parameters: DeepSeek-V4's hash router keeps ``tid2eid`` as a
-        # (vocab, topk) token -> expert table, and the real checkpoint ships it
-        # (``model.layers.{0,1,2}.mlp.gate.tid2eid`` in the safetensors index).
-        # Omitting it leaves the table to be re-materialised with ``torch.empty``
-        # during a live update, and the router then indexes experts out of range.
-        parameters += [
-            (
-                self._apply_name_map(self._checkpoint_name(name, case), case),
-                tuple(buffer.shape),
-                buffer.dtype,
-            )
-            for name, buffer in meta_model.named_buffers()
-            if not buffer.dtype.is_floating_point and not buffer.dtype.is_complex
-        ]
-        self._num_experts = int(getattr(meta_config, "n_routed_experts", 0) or 0)
-        del meta_model
-
-        assert parameters, f"{case.id}: reduced meta model contains no parameters"
-        names = [name for name, _, _ in parameters]
-        assert len(set(names)) == len(names), f"{case.id}: generated checkpoint parameter names are not unique"
-        self._parameters = parameters
-        self._device = device
-        self._seed = seed
-        # Keep the two checkpoint namespaces separate. A draft session sends
-        # draft_source, never a target payload with a synthetic "draft." prefix.
-        self.draft_source: FixedRandomWeightSource | None = (
-            FixedRandomWeightSource(draft_case, device, seed=seed + 1 if draft_seed is None else draft_seed)
-            if draft_case is not None
-            else None
-        )
-
-    @staticmethod
-    def _checkpoint_name(name: str, case: WeightUpdateModelCase) -> str:
-        """Apply the case's checkpoint namespace prefix exactly once."""
-        if case.checkpoint_model_prefix is not None and name.startswith("model."):
-            return case.checkpoint_model_prefix + name.removeprefix("model.")
-        return name
-
-    @staticmethod
-    def _apply_name_map(name: str, case: WeightUpdateModelCase) -> str:
-        """Apply the case's checkpoint rename map (idempotent per rule)."""
-        if case.checkpoint_name_map is not None:
-            return case.checkpoint_name_map(name)
-        return name
-
-    @staticmethod
-    def _parameter_seed(name: str, seed: int = FIXED_WEIGHT_SEED) -> int:
-        digest = hashlib.sha256(f"{seed}:{name}".encode()).digest()
-        return int.from_bytes(digest[:8], "little") % (2**63 - 1)
-
-    def _make_tensor(self, name: str, shape: tuple[int, ...], dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
-        seed = self._parameter_seed(name, self._seed)
-        generator = torch.Generator(device=self._device).manual_seed(seed)
-        if not dtype.is_floating_point:
-            # Token -> expert tables (DeepSeek-V4's hash router). Values must
-            # stay inside [0, n_routed_experts) *and* be unique within a row:
-            # the MC2 dispatch/combine kernels assume a token never routes to
-            # the same expert twice, which is also why the served model
-            # initialises this table duplicate-free (#16485). Sampling top-k
-            # over per-expert scores guarantees both invariants while still
-            # differing from the model's own table.
-            assert self._num_experts > 0, f"{name}: integer table needs n_routed_experts"
-            assert len(shape) == 2, f"{name}: expected a (tokens, top_k) integer table, got {shape}"
-            scores = torch.rand(shape[0], self._num_experts, device=self._device, generator=generator)
-            return scores.topk(shape[1], dim=1).indices.to(dtype)
-        tensor = torch.empty(shape, dtype=dtype, device=self._device)
-        if name.endswith("norm.weight"):
-            return tensor.uniform_(0.9, 1.1, generator=generator)
-        return tensor.uniform_(-0.02, 0.02, generator=generator)
-
-    @_source_metadata
-    def metadata(self) -> list[ParamMeta]:
-        return [ParamMeta(name, dtype, shape) for name, shape, dtype in self._parameters]
-
-    def __iter__(self):
-        with torch.no_grad():
-            for name, shape, dtype in self._parameters:
-                yield name, self._make_tensor(name, shape, dtype)
-
-    if not vllm_version_is("0.32.0"):
-
-        def iter_full(self) -> Iterator[tuple[str, torch.Tensor]]:
-            """vLLM main drives updates through `iter_full()` instead of `__iter__`."""
-            yield from self.__iter__()
-
-    @property
-    def case_id(self) -> str:
-        return self._case.id
-
-    def write_checkpoint(self, directory: str | Path) -> None:
-        """Materialize this source's payload as a normally-loadable checkpoint.
-
-        Writes the repository's *own* ``config.json`` (byte for byte) next to one
-        safetensors file holding exactly what iteration yields: the same
-        checkpoint-facing names — including the language-model prefix, the
-        DeepSeek-V4 rename map and the fused-expert expansion — the same
-        corrected expert shapes, and the same integer tables. Nothing is
-        recomputed from the published checkpoint, so a reference server started
-        on this directory holds the same weights a transfer ships.
-
-        The config is copied rather than re-serialized on purpose. The reference
-        server takes the same ``--hf-overrides`` as the live-update lane, so both
-        get the reduced model through vLLM's own override path, and both parse
-        the very same bytes. A re-serialized config would add the derived fields
-        a runtime config object carries (``layer_types`` / ``mlp_layer_types``
-        for the *original* layer count, for example), which neither matches the
-        published file nor survives vLLM's config validation once
-        ``num_hidden_layers`` is reduced.
-        """
-        from huggingface_hub import hf_hub_download
-        from safetensors.torch import save_file
-
-        target = Path(directory)
-        target.mkdir(parents=True, exist_ok=True)
-        config_path = Path(self._case.model) / "config.json"
-        if not config_path.is_file():
-            config_path = Path(hf_hub_download(self._case.model, "config.json"))
-        shutil.copyfile(config_path, target / "config.json")
-        state = {name: tensor.detach().to("cpu").contiguous() for name, tensor in self}
-        save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
-        if self.draft_source is not None:
-            self.draft_source.write_checkpoint(target / "draft")
-
-
-def packed_buffer_size_for(source: FixedRandomWeightSource) -> int:
-    """Size a packed transfer buffer so every single tensor fits.
-
-    Both engines default to 1 GiB, which is smaller than the largest tensor of
-    some reduced cases (GLM-5.1's embedding is ~1.9 GB), and the producer then
-    raises ``ValueError: Tensor ... exceeds buffer_size_bytes``. Keep the 1 GiB
-    floor and add 128 MiB of headroom above the largest tensor.
-    """
-    # `metadata` is a method on v0.32.0 and a cached property on main.
-    metadata = source.metadata() if vllm_version_is("0.32.0") else source.metadata
-    max_tensor_bytes = max(math.prod(meta.shape) * meta.dtype.itemsize for meta in metadata)
-    return max(max_tensor_bytes + 128 * 2**20, 2**30)
 
 
 FULL_DECODE_ONLY_CONFIG = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}'
@@ -619,52 +317,6 @@ def reference_serve_args(
             tensor_parallel_size=tensor_parallel_size,
         ),
     ]
-
-
-@contextlib.contextmanager
-def fixed_startup_checkpoint(source: FixedRandomWeightSource) -> Iterator[str]:
-    """Expose the source's payload as a throwaway startup-load checkpoint."""
-    directory = tempfile.mkdtemp(prefix=f"fixed-startup-{source.case_id}-")
-    try:
-        source.write_checkpoint(directory)
-        yield directory
-    finally:
-        shutil.rmtree(directory, ignore_errors=True)
-
-
-def wait_for_free_device_memory(
-    device_index: int,
-    gpu_memory_utilization: float,
-    *,
-    timeout: float = 300.0,
-    margin_bytes: int = 2 * 2**30,
-) -> None:
-    """Block until a card has enough free HBM for a server at this utilization.
-
-    The reference server and the live-update lane share one card, and a vLLM
-    server reserves ``gpu_memory_utilization`` of whatever HBM is free *when it
-    starts*. The previous server's process tree needs a moment to hand its HBM
-    back after it exits, so a lane started in that window dies in
-    ``init_device`` with "Free memory ... is less than desired GPU memory
-    utilization" — an environment race, not a transfer bug. Waiting here turns
-    that into a short pause. A device that reports no total (stubbed CPU
-    environments) is not gated at all.
-    """
-    required = gpu_memory_utilization
-    deadline = time.monotonic() + timeout
-    while True:
-        free_bytes, total_bytes = torch.npu.mem_get_info(device_index)
-        if total_bytes <= 0:
-            return
-        if free_bytes >= required * total_bytes + margin_bytes:
-            return
-        if time.monotonic() >= deadline:
-            raise RuntimeError(
-                f"device {device_index} did not free enough HBM for "
-                f"gpu_memory_utilization={gpu_memory_utilization}: "
-                f"{free_bytes / 2**30:.1f}/{total_bytes / 2**30:.1f} GiB free after {timeout:.0f}s"
-            )
-        time.sleep(5)
 
 
 # Reference signatures are a property of (model, memory budget, tensor-parallel

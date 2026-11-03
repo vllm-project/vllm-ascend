@@ -32,15 +32,14 @@ import torch
 from safetensors.torch import load_file
 from transformers import Qwen3Config
 
-from tests.e2e.pull_request.rlhf import weight_transfer_test_utils as utils
-from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
-    MODEL_CASES,
-    FixedRandomWeightSource,
-    WeightUpdateModelCase,
+from tests.e2e.rlhf.weight_transfer import oracle as utils
+from tests.e2e.rlhf.weight_transfer.case import MODEL_CASES, WeightUpdateModelCase
+from tests.e2e.rlhf.weight_transfer.oracle import (
     live_update_serve_args,
     reference_serve_args,
     reference_signature,
 )
+from tests.e2e.rlhf.weight_transfer.weight_source import FixedRandomWeightSource
 from vllm_ascend.utils import vllm_version_is
 
 CASE = MODEL_CASES[0]
@@ -288,9 +287,9 @@ def test_target_only_checkpoint_keeps_its_original_layout(random_weight_cases, t
 
 @pytest.mark.parametrize("is_draft", [False, True])
 def test_hccl_client_selects_only_the_start_endpoint(is_draft):
-    from tests.e2e.pull_request.two_card.rlhf.state_transitions import test_hccl_weight_transfer as hccl
+    from tests.e2e.rlhf.weight_transfer import draft_hccl as hccl
 
-    client = hccl._WeightUpdateClient("http://unused")
+    client = hccl.WeightUpdateClient("http://unused")
     client.is_draft = is_draft
     with patch.object(client, "_post") as post:
         client.start_weight_update()
@@ -305,13 +304,13 @@ def test_hccl_client_selects_only_the_start_endpoint(is_draft):
 
 @pytest.mark.parametrize("is_draft", [False, True])
 def test_hccl_send_uses_the_selected_source_and_factory_engine(is_draft):
-    from tests.e2e.pull_request.two_card.rlhf.state_transitions import test_hccl_weight_transfer as hccl
+    from tests.e2e.rlhf.weight_transfer import draft_hccl as hccl
 
     server, engine = MagicMock(), MagicMock()
-    client = hccl._WeightUpdateClient("http://unused")
+    client = hccl.WeightUpdateClient("http://unused")
     source = object()
     with patch.object(hccl, "_post") as post:
-        hccl._send_update(server, engine, client, source, is_draft=is_draft)
+        hccl.send_update(server, engine, client, source, is_draft=is_draft)
     assert client.is_draft is is_draft
     assert engine.source is source
     engine.send_weights.assert_called_once_with()
@@ -319,9 +318,7 @@ def test_hccl_send_uses_the_selected_source_and_factory_engine(is_draft):
 
 
 def test_hccl_send_does_not_resume_after_a_trainer_failure():
-    from tests.e2e.pull_request.two_card.rlhf.state_transitions import (
-        test_hccl_weight_transfer as hccl,
-    )
+    from tests.e2e.rlhf.weight_transfer import draft_hccl as hccl
 
     server, engine = MagicMock(), MagicMock()
     error = RuntimeError("transfer failed")
@@ -331,10 +328,10 @@ def test_hccl_send_does_not_resume_after_a_trainer_failure():
         patch.object(hccl, "_post") as post,
         pytest.raises(RuntimeError, match="transfer failed") as caught,
     ):
-        hccl._send_update(
+        hccl.send_update(
             server,
             engine,
-            hccl._WeightUpdateClient("http://unused"),
+            hccl.WeightUpdateClient("http://unused"),
             object(),
             is_draft=True,
         )
