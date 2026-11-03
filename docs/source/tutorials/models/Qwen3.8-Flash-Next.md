@@ -196,8 +196,6 @@ Before starting:
     export HCCL_BUFFSIZE=1024
     export HCCL_NPU_SOCKET_PORT_RANGE=auto
 
-    mkdir -p "/tmp/qwen38-next-950-dt-profiling"
-
     vllm serve /models/Qwen3.8-Flash-Next-w8a8-mxfp8 \
         --host 0.0.0.0 \
         --port 8087 \
