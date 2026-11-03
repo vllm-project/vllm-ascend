@@ -34,6 +34,8 @@ on:
 jobs:
   collect:
     runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     concurrency:
       group: build-info-obs-publish
       queue: max
@@ -97,9 +99,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "$OBS_BUCKET" ] && [ -n "$OBS_ENDPOINT" ] && [ -n "$OBS_REGION" ]; then
-            python -m pip install esdk-obs-python --quiet
+            python3 -m pip install esdk-obs-python --quiet
           fi
-          python .github/workflows/scripts/collect_build_info.py \
+          python3 .github/workflows/scripts/collect_build_info.py \
             --artifact-dir "$REPORT_DIR" \
             --targets-json "$TARGETS_JSON" \
             --expected-types-json "$EXPECTED_TYPES_JSON" \
