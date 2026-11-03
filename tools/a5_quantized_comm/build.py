@@ -79,6 +79,7 @@ def build(args: argparse.Namespace) -> None:
             "-lnnopbase",
             "-lascendcl",
             "-ltorch_npu",
+            "-ldl",
         ],
         build_directory=str(build_dir),
         is_python_module=False,

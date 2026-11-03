@@ -5,6 +5,8 @@
 #include <c10/core/DeviceGuard.h>
 #include <torch/library.h>
 
+#include <dlfcn.h>
+
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -29,6 +31,15 @@ struct TensorDeleter {
   }
 };
 using AclTensorPtr = std::unique_ptr<aclTensor, TensorDeleter>;
+
+const char* workspace_api_library() {
+  Dl_info info{};
+  if (dladdr(reinterpret_cast<const void*>(&aclnnQuantAllReduceGetWorkspaceSize), &info) != 0 &&
+      info.dli_fname != nullptr) {
+    return info.dli_fname;
+  }
+  return "<unknown>";
+}
 
 AclTensorPtr make_descriptor(const at::Tensor& tensor, aclDataType dtype) {
   // All tensors are contiguous ND. data_ptr() already includes storage_offset.
@@ -58,11 +69,13 @@ at::Tensor quant_all_reduce(const at::Tensor& values, const at::Tensor& scale_by
 
   const c10::DeviceGuard guard(values.device());
   auto stream = c10_npu::getCurrentNPUStream(values.get_device());
+  // A no-op/stub API must leave a visible failure, not allocator-dependent zeros.
+  auto output = at::full(values.sizes(), std::numeric_limits<float>::quiet_NaN(),
+                         values.options().dtype(output_fp32 ? at::kFloat : at::kBFloat16));
   // This diagnostic wrapper is intentionally synchronous and eager-only.
-  // Drain torch_npu's host task queue before issuing ACLNN directly.
+  // Drain the host task queue and complete the sentinel fill before direct ACLNN.
   stream.synchronize();
   const auto acl_stream = stream.stream();
-  auto output = at::empty(values.sizes(), values.options().dtype(output_fp32 ? at::kFloat : at::kBFloat16));
   auto x_desc = make_descriptor(values, ACL_FLOAT8_E4M3FN);
   auto scale_desc = make_descriptor(scale_bytes, ACL_FLOAT8_E8M0);
   auto output_desc = make_descriptor(output, output_fp32 ? ACL_FLOAT : ACL_BF16);
@@ -71,6 +84,11 @@ at::Tensor quant_all_reduce(const at::Tensor& values, const at::Tensor& scale_by
   auto status = aclnnQuantAllReduceGetWorkspaceSize(x_desc.get(), scale_desc.get(), group.c_str(), "sum",
                                                     output_desc.get(), &workspace_size, &executor);
   TORCH_CHECK(status == ACL_SUCCESS, "aclnnQuantAllReduceGetWorkspaceSize failed: ", status);
+  TORCH_CHECK(executor != nullptr,
+              "aclnnQuantAllReduceGetWorkspaceSize returned ACL_SUCCESS but left executor=nullptr; workspace_size=",
+              workspace_size, "; symbol_library=", workspace_api_library(),
+              ". The native execution plan was not created. Check for stub/no-op op-api exports and which shared "
+              "library the loader resolved. Symbol presence and return code 0 alone do not establish support.");
   TORCH_CHECK(workspace_size <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()), "workspace too large");
   auto workspace = at::empty({static_cast<int64_t>(workspace_size)}, values.options().dtype(at::kByte));
   status =

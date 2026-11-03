@@ -117,5 +117,32 @@ python3 -m unittest discover -s tools/a5_quantized_comm -p test_reference.py -v
 
 这只检查 CPU 字节解析的已知编码和边界值，不能证明 C++ 编译或 NPU 执行正确。
 
+## 6. API 返回成功但精度完全错误
+
+`GetWorkspaceSize` 成功后还必须生成非空 executor；封装现在会检查这一点。
+若出现 `ACL_SUCCESS but left executor=nullptr`，先检查实际加载的算子库，
+不能将“导出符号存在且返回码为 0”视为已有可执行的算子实现。
+错误中的 `symbol_library` 会给出 GetWorkspaceSize 符号实际绑定到的库路径，
+它可能因动态库搜索顺序与构建日志中的候选路径不同。
+`workspace_size=0` 单独出现不代表错误，关键是是否生成 executor。
+
+例如对构建日志中选中的库执行以下命令。若改用其他路径，也需检查那个库。
+
+```bash
+LIB=/usr/local/Ascend/cann-9.2.0/lib64/libopapi_transformer.so
+objdump -d --disassemble=aclnnQuantAllReduceGetWorkspaceSize "$LIB"
+objdump -d --disassemble=aclnnQuantAllReduce "$LIB"
+```
+
+如果实际函数只有 `mov w0, #0; ret`（或等价的直接返回 0 指令），
+则该函数是返回成功的空实现，并没有创建执行计划或发起通信。
+仅仅符号间隔小不能证明是空实现；若是跳转指令，还需继续查看跳转目标。
+此时应定位、安装包含真实实现的对应算子包，再重新构建并验证。
+
+输出现在预填 NaN；若 API 没有写入全部输出，会通过非有限值检查暴露。
+精度失败时还会打印各 rank 的前八个实际值和基准值，以及非零/非有限元素数，
+以区分全零、未写入输出与数值计算偏差。非有限结果对应的误差指标记为 `null`。
+不要通过放宽容差掩盖此类失败。
+
 接口及约束依据 [CANN QuantAllReduce 文档](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/API/aolapi/context/ops-transformer/aclnnQuantAllReduce.md)。
 若该文档与本机 9.2.0 SDK 有差异，以本机 SDK 头文件和对应版本的接口约束为准。

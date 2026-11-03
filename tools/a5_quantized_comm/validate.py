@@ -72,6 +72,8 @@ def make_inputs(case: str, rows: int, hidden: int, rank: int, repeat: int, devic
 
 def error_metrics(actual: torch.Tensor, expected: torch.Tensor) -> dict:
     difference = (actual.double() - expected.double()).flatten()
+    if not torch.isfinite(difference).all():
+        return {"max_abs": None, "rmse": None, "nrmse": None}
     denominator = expected.double().norm().item()
     norm = difference.norm().item()
     return {
@@ -95,6 +97,7 @@ def evaluate(gathered: list[dict], case: str, rows: int, hidden: int, repeat: in
         worst_abs = 0.0
         bad_elements = 0
         nonfinite = 0
+        nonzero_finite = 0
         rank_differences = 0
         rtol = args.bf16_comm_rtol if dtype == "bf16" else args.fp32_comm_rtol
         expected = quantized_sum.to(torch.bfloat16).float() if dtype == "bf16" else quantized_sum
@@ -108,6 +111,7 @@ def evaluate(gathered: list[dict], case: str, rows: int, hidden: int, repeat: in
             finite = torch.isfinite(actual)
             difference = (actual - expected).abs()
             nonfinite += (~finite).sum().item()
+            nonzero_finite += (finite & (actual != 0)).sum().item()
             bad_elements += ((difference > tolerance) | ~finite).sum().item()
             worst_abs = max(worst_abs, difference.nan_to_num(nan=math.inf).max().item())
             rank_differences += (actual != gathered[0]["outputs"][dtype]).sum().item()
@@ -120,13 +124,25 @@ def evaluate(gathered: list[dict], case: str, rows: int, hidden: int, repeat: in
             "repeat": repeat,
             "output": dtype,
             "comm_pass": comm_passed,
-            "comm_max_abs": worst_abs,
+            "comm_max_abs": worst_abs if math.isfinite(worst_abs) else None,
             "comm_bad_elements_all_ranks": bad_elements,
+            "output_nonfinite_elements_all_ranks": nonfinite,
+            "output_nonzero_finite_elements_all_ranks": nonzero_finite,
             "rank_difference_elements": rank_differences,
             "quantization_vs_original": quant_error,
             "end_to_end_rank0": error_metrics(gathered[0]["outputs"][dtype], original_sum),
             "quant_quality_pass": quant_passed if args.max_quant_nrmse is not None else "report_only",
         }
+        if not comm_passed:
+            sample_elements = 8
+            actual_samples = []
+            for item in gathered:
+                sample = item["outputs"][dtype].flatten()[:sample_elements].tolist()
+                actual_samples.append([value if math.isfinite(value) else str(value) for value in sample])
+            report["failure_samples"] = {
+                "reference": expected.flatten()[:sample_elements].tolist(),
+                "actual_by_rank": actual_samples,
+            }
         print(json.dumps(report), flush=True)
     return passed
 
