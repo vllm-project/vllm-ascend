@@ -22,15 +22,11 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 
 ### 3.1 Model Weight
 
-Select the checkpoint that matches the deployment configuration:
-
-| Hardware | Deployment | Checkpoint | Device allocation | Download Links |
-| --- | --- | --- | --- | --- |
-| A2 series / A3 series | Not used in the examples below | `Qwen3.8-Flash-Next-w8a8-mtp` | | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
-| A2 series / A3 series | Colocated | `Qwen3.8-Flash-Next-w4a8` | 8 devices, TP8 × DP1 | |
-| A2 series / A3 series | PD separation | `Qwen3.8-Flash-Next-w4a8` | 16 devices, TP2 × DP4 per role | |
-| Ascend 950 DT | Colocated | `Qwen3.8-Flash-Next-w4a8-mxfp` | 4 devices, TP4 × DP1 | |
-| Ascend 950 DT | PD separation | `Qwen3.8-Flash-Next-w4a8-mxfp` | 8 devices, TP2 × DP2 per role | |
+| Weight Version | Hardware | Download Links |
+| --- | --- | --- |
+| `Qwen3.8-Flash-Next-w8a8-mtp` | A2 series / A3 series | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
+| `Qwen3.8-Flash-Next-w4a8` | A2 series / A3 series | |
+| `Qwen3.8-Flash-Next-w4a8-mxfp` | Ascend 950 DT | |
 
 The commands use fixed model directories under `/models`. Mount the corresponding checkpoint at the shown directory or edit that path directly. For PD separation, both roles must load the same checkpoint.
 
