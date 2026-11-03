@@ -1,0 +1,42 @@
+# Case contract metadata. The executable entry is registered separately in nightly_config.yaml.
+status: implemented_pending_target_runtime_validation
+case_name: Kimi-K3-W4A8-EP256-A5
+matrix: a5.single_node.test_config
+runner: linux-aarch64-a5-8
+model_location: null  # CI-accessible pruned checkpoint must be provided.
+dataset_location: null  # Original GSM8K train.jsonl and test.jsonl.
+model:
+  layers: 93
+  routed_experts: 256
+  experts_per_token: 16
+  shared_experts: 2
+execution:
+  tensor_parallel_size: 8
+  expert_parallel: true
+  model_runner: v2
+  enforce_eager: true
+  max_model_len: 6144
+  max_num_seqs: 100
+  max_num_batched_tokens: 2048
+  gpu_memory_utilization: 0.85
+evaluation:
+  dataset: GSM8K
+  test_range: '[0:500]'
+  shots: 4
+  client_concurrency: 60
+  max_out_len: 1024
+  thinking_effort: low
+  temperature: 0
+  top_p: 1
+  seed: 42
+  rounds: 1  # Three historical rounds were used to observe variance.
+  final_answer_only: true
+  truncated_answer_is_incorrect: true
+baseline: null
+threshold_percentage_points: null
+entry: tests/e2e/cases/models/test_kimi_k3_ep256_accuracy.py
+required_runner_variables:
+  - KIMI_EP256_MODEL
+  - KIMI_GSM8K_DATASET
+  - KIMI_EP256_BASELINE
+  - KIMI_EP256_TOLERANCE
