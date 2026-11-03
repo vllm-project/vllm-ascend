@@ -1,0 +1,6 @@
+pr: 20450
+entries:
+  - category: feature
+    text: Eligible GLM-5.3-Flash NoPE layers now automatically use MLA Prolog V3 preprocessing on A2/A3 with dynamic W8A8 projections and INT8 KV cache. Requires a torch_npu/CANN build with native rope_dim=0 support.
+    model: glm-5.3-flash
+    hardware: [A2, A3]

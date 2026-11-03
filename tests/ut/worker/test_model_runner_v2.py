@@ -1339,7 +1339,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     create_kvpp.assert_called_once()
     assert runner.kvpp == "kvpp"
     assert runner.model_state.kvpp_runtime == "kvpp"
-    assert runner.pcp_manager.vllm_config is runner.vllm_config
+    runner.pcp_manager.bind_config.assert_called_once_with(runner.vllm_config)
     assert runner.model_state.pcp_manager is runner.pcp_manager
 
 
@@ -2171,3 +2171,37 @@ def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected,
     runner.num_computed_tokens_event.record.assert_not_called()
     runner.num_computed_tokens_event.synchronize.assert_not_called()
     assert runner.num_computed_tokens_cpu.tolist() == [-99] * 4
+
+
+def test_shutdown_releases_host_tables_after_parent_graph_cleanup():
+    _, _, _, runner, _ = _c8_packet(ratio=1)
+    events = []
+    owner = SimpleNamespace(close_host_offload=lambda: events.append("host"))
+    runner.model = SimpleNamespace(modules=lambda: [owner])
+
+    def shutdown():
+        events.append("graphs")
+        del runner.model
+
+    with patch.object(GPUModelRunner, "shutdown", side_effect=shutdown):
+        runner.shutdown()
+    assert events == ["graphs", "host"]
+
+
+def test_shutdown_retains_failed_host_owner_for_retry():
+    _, _, _, runner, _ = _c8_packet(ratio=1)
+    close = MagicMock(side_effect=[RuntimeError("release failed"), None])
+    owner = SimpleNamespace(close_host_offload=close)
+    runner.model = SimpleNamespace(modules=lambda: [owner])
+
+    def shutdown():
+        runner.model = None
+
+    with patch.object(GPUModelRunner, "shutdown", side_effect=shutdown):
+        with pytest.raises(RuntimeError, match="release failed"):
+            runner.shutdown()
+        assert runner._pending_host_offload == [owner]
+        runner.shutdown()
+        runner.shutdown()
+    assert runner._pending_host_offload == []
+    assert close.call_count == 2

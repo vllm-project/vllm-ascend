@@ -1,19 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Three fused adapters for CANN pooled indexing: inputs, cache writes and indices."""
+"""Fused adapters for CANN pooled indexing: inputs, cache writes and indices."""
 
 from types import SimpleNamespace
 
+import torch
 from vllm.triton_utils import tl, triton
+
+FP8_E4M3_MAX = tl.constexpr(448.0)
 
 
 @triton.jit(do_not_specialize=["tail_rows", "tail_blocks", "cache_blocks", "INPUT_STRIDE", "INPUT_WIDTH"])
 def _write_keypool_caches_kernel(
     tail,
     cache,
+    scale_cache,
     key,
     gate,
     pooled,
+    pooled_scales,
     writes,
     state_rows,
     state,
@@ -26,10 +31,13 @@ def _write_keypool_caches_kernel(
     cache_blocks,
     BLOCK_SIZE: tl.constexpr,
     CACHE_STRIDE: tl.constexpr,
+    SCALE_STRIDE: tl.constexpr,
     POOLED_STRIDE: tl.constexpr,
     INPUT_STRIDE,
     INPUT_WIDTH,
     SPECULATIVE: tl.constexpr,
+    FP8: tl.constexpr,
+    INT8: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -53,22 +61,44 @@ def _write_keypool_caches_kernel(
         slot = tl.load(slots + pool_row).to(tl.int64)
         valid = (slot >= 0) & (slot < cache_blocks * BLOCK_SIZE)
         pool_value = tl.load(pooled + pool_row * POOLED_STRIDE + cols, valid & (cols < HEAD_DIM), other=0)
+        if FP8:
+            pool_value = pool_value.to(tl.float32)
+            maximum = tl.max(tl.abs(pool_value), 0)
+            scale = tl.where(maximum > 0, maximum / FP8_E4M3_MAX, 1.0)
+            pool_value = pool_value / scale
+            tl.store(scale_cache + slot // BLOCK_SIZE * SCALE_STRIDE + slot % BLOCK_SIZE, scale, valid)
         address = cache + slot // BLOCK_SIZE * CACHE_STRIDE + slot % BLOCK_SIZE * HEAD_DIM + cols
         tl.store(address, pool_value, valid & (cols < HEAD_DIM))
+        if INT8:
+            scale = tl.load(pooled_scales + pool_row, valid, other=1.0)
+            scale_address = scale_cache + slot // BLOCK_SIZE * SCALE_STRIDE + slot % BLOCK_SIZE
+            tl.store(scale_address, scale, valid)
 
 
-def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata, state):
+def write_keypool_caches(
+    tail, cache, key, gate, pooled, metadata, tail_metadata, state, scale_cache=None, pooled_scales=None
+):
     inputs = tail_metadata.cann_inputs
     writes = inputs.write_indices
     tail_rows = writes.numel()
     pooled_rows = pooled.shape[0]
+    fp8 = cache.dtype == torch.float8_e4m3fn
+    int8 = cache.dtype == torch.int8
+    if int8 != (pooled_scales is not None):
+        raise ValueError("INT8 KPool keys and scales must be provided together.")
+    if int8 and (
+        scale_cache is None or scale_cache.shape != (*cache.shape[:-1], 1) or pooled_scales.shape != (pooled_rows,)
+    ):
+        raise ValueError("INT8 KPool scales must match physical cache slots and pooled rows.")
     # Each program writes one row: tail rows first, then pooled rows.
     _write_keypool_caches_kernel[(tail_rows + pooled_rows,)](
         tail,
         cache,
+        scale_cache,
         key,
         gate,
         pooled,
+        pooled_scales,
         writes,
         inputs.state_indices,
         state,
@@ -81,10 +111,13 @@ def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata
         cache.shape[0],
         cache.shape[1],
         cache.stride(0),
+        scale_cache.stride(0) if scale_cache is not None else 0,
         pooled.stride(0),
         writes.stride(0),
         writes.shape[1],
         key is not None,
+        fp8,
+        int8,
         triton.next_power_of_2(2 * cache.shape[-1]),
     )
 

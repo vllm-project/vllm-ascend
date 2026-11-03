@@ -211,6 +211,22 @@
 #       a backend-neutral router configuration object or MoE factory extension
 #       hook that carries vision routing metadata into the Ascend runner.
 #
+# ** File: platform/patch_minimax_m3_reasoning.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.reasoning.minimax_m3_reasoning_parser.MiniMaxM3ReasoningParser`
+#    Why:
+#       Prompt instructions and earlier assistant turns can contain </mm:think>.
+#       Treating these as the current turn's reasoning end leaks reasoning into
+#       streamed content and starts structured-output constraints too early.
+#    How:
+#       Scope both reasoning-end checks to tokens after the last ]~b] message
+#       boundary. Keep output-only IDs and non-streaming extraction unchanged.
+#       Skip the backport when the upstream helper already exists.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/63492
+#    Future Plan:
+#       Remove when all supported vLLM versions include the upstream fix.
+#
 # ** File: platform/patch_glm53_reasoning.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.parser.glm47_moe.Glm47MoeParser.__init__`
@@ -620,7 +636,43 @@
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
 #
-# ** 19. File: platform/patch_speculative_config.py**
+# ** 19. File: platform/patch_qwen4_exp_pp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.config.Qwen4ExpForConditionalGenerationConfig.verify_and_update_config`
+#    Why:
+#       Upstream configuration validation rejects Qwen4-Exp models that combine
+#       PLE layers with pipeline parallelism, although the Ascend implementation
+#       assigns PLE state and cache ownership per PP stage and supports this
+#       configuration. The validation therefore prevents a supported PP service
+#       from starting.
+#    How:
+#       For PP configurations with PLE enabled, temporarily hide `ple_layer_ids`
+#       while running the upstream validator, then restore the original layer
+#       IDs in a `finally` block. DBO or micro-batched configurations still use
+#       upstream validation unchanged because that combination is unsupported.
+#    Related PR (if no, explain why):
+#       No upstream PR currently covers the Ascend-specific stage-local PLE
+#       implementation.
+#    Future Plan:
+#       Remove this patch when upstream Qwen4-Exp configuration validation
+#       supports PLE with pipeline-parallel, stage-local ownership.
+#
+# ** 20. File: platform/patch_speculative_config.py**
+# Native MiniMax Flash draft extension:
+#   Targets: SpeculativeConfig.__post_init__ and draft HF configuration loading.
+#   Why: native DSpark exports use a standalone architecture and carry their
+#        own dspark/config.json, while upstream normalizes unknown drafts to
+#        DSparkDraftModel.
+#   How: preserve DSparkMiniMaxDraftModel before Pydantic validation and
+#        normalize the checkpoint's dspark/config.json without changing the
+#        target or checkpoint. The adapter, its checkpoint contract and weight
+#        loading live in models/minimax_m3/minimax_m3_dspark.py; it inherits
+#        DSpark drafting and changes only Flash norms, MLP and loading.
+#   Related PR:
+#        https://github.com/vllm-project/vllm/pull/64111
+#   Future Plan: remove the architecture guard and config/weight normalization
+#        once upstream loads native MiniMax Flash drafts. Retain only required
+#        Ascend quantized projection handling behind the upstream extension points.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:
@@ -681,7 +733,7 @@
 #       parallelism for non-MoE draft models (upstream #56930) or exposes a
 #       backend-safe draft parallel config selection.
 #
-# ** 20. File: platform/patch_structured_output.py**
+# ** 21. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
 #      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
@@ -742,7 +794,7 @@
 #       Remove once xgrammar >= 0.2.9 (which fixes separators handling) is
 #       pinned.
 #
-# ** 20. File: platform/patch_swa_bounded_replay.py (V1 resume)**
+# ** 22. File: platform/patch_swa_bounded_replay.py (V1 resume)**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.sched.output.CachedRequestData` (new field `replay_start`)
 #   2. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
@@ -772,7 +824,7 @@
 #       Remove this patch once upstream carries the replay start on the V1
 #       resume path as well, i.e. once `CachedRequestData` declares the field.
 #
-# ** 21. File: platform/patch_torch_accelerator.py**
+# ** 23. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
 #      `torch.accelerator.reset_peak_memory_stats`, `torch.accelerator.get_memory_info`,
@@ -792,7 +844,7 @@
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
 #
-# ** 22. File: platform/patch_tool_choice_none_content.py**
+# ** 24. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
 #      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`
@@ -808,12 +860,12 @@
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains PR #44105.
 #
-# ** 23. File: platform/patch_use_v2_model_runner.py**
+# ** 25. File: platform/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
 #       Ascend uses the NPU v2 runner by default. Features that are not
-#       V2-ready (pooling KV, draft_window_size, suffix
+#       V2-ready (draft_window_size, suffix
 #       speculative decoding, ngram speculative decoding, draft_model
 #       speculative decoding, dflash2 graph, and p-eagle)
 #       default to v1.
@@ -1840,4 +1892,21 @@
 #    Future Plan:
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
+#
+# ** File: worker/patch_mrope_vit_setup.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.rotary_embedding.mrope_vit_setup`
+#    Why:
+#       Reduce ViT mRoPE setup UB pressure on Ascend A5.
+#    How:
+#       Copy the upstream vit_mrope_setup wrapper and change BLOCK_N from 32
+#       to 16, using the same value for the launch grid divisor. Keep the
+#       upstream kernel unchanged. Rebind the MiniMax vision tower alias if
+#       it is already loaded; subsequent imports use the patched wrapper.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/58526
+#       https://github.com/vllm-project/vllm/pull/58673
+#    Future Plan:
+#       Remove once upstream supports a backend-specific setup block size
+#       suitable for Ascend UB capacity.
 #

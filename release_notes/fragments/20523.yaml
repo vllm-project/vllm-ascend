@@ -1,0 +1,7 @@
+pr: 20523
+entries:
+  - category: dependency
+    text: >-
+      Updated flash-attention-npu in A2/A3 Ubuntu and openEuler images to the
+      main branch snapshot at 2e5320494cb474365bacaf42c94abf0c7de0affc (0.5.0).
+    hardware: [A2, A3]

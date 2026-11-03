@@ -394,7 +394,14 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             )
 
     @staticmethod
-    def get_eplb_weight_views(layer: torch.nn.Module) -> list[torch.Tensor]:
+    def get_eplb_weight_views(layer: torch.nn.Module) -> list:
+        if hasattr(layer, "cann_mega_moe_w13_weight_list"):
+            return [
+                layer.cann_mega_moe_w13_weight_list,
+                layer.cann_mega_moe_w2_weight_list,
+                layer.cann_mega_moe_w13_weight_scale_list,
+                layer.cann_mega_moe_w2_weight_scale_list,
+            ]
         return [
             layer.w13_weight.transpose(1, 2),
             layer.w2_weight.transpose(1, 2),
