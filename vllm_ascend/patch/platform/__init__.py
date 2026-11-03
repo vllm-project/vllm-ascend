@@ -66,6 +66,7 @@ import vllm_ascend.patch.platform.patch_glm5next_config  # noqa
 import vllm_ascend.patch.platform.patch_indexer_kv_dtype  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_dtype  # noqa
 import vllm_ascend.patch.platform.patch_example_connector  # noqa
+import vllm_ascend.patch.platform.patch_swa_bounded_replay  # noqa
 
 if os.getenv("VLLM_ASCEND_TRACE", "0") == "1":
     import vllm_ascend.patch.platform.patch_trace  # noqa
