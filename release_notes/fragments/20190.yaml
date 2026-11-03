@@ -1,0 +1,5 @@
+pr: 20190
+entries:
+  - category: bugfix
+    text: Fixed seeded sampling on Ascend 310P with Model Runner V2 to preserve each request's CPU random generator state across decoding steps and batch changes.
+    hardware: [310P]

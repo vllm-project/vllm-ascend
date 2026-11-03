@@ -34,7 +34,6 @@ from vllm_ascend._310p.worker.v2.sample.penalties import (
     use_penalty,
 )
 from vllm_ascend._310p.worker.v2.sample_utils import (
-    _prepare_cpu_generators_310p,
     _random_sample_310p,
 )
 
@@ -397,7 +396,7 @@ class Ascend310PSampler:
             source = self._source_generators.get(int(req_idx))
             if source is not None:
                 sources[row_idx] = source
-        return _prepare_cpu_generators_310p(sources)
+        return sources
 
     def __call__(self, logits: torch.Tensor, input_batch) -> SamplerOutput:
         self._maybe_bind_vocab_size(logits.shape[-1])
