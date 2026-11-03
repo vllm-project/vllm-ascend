@@ -8,7 +8,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
-PLE_BLOCK_C = 2048
+PLE_BLOCK_C = 512
 PLE_NUM_WARPS = 8
 
 
