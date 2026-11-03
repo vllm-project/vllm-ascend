@@ -398,6 +398,7 @@ class TestAscendFusedMoEMethod(TestBase):
         self.assertIs(result, weight_views)
         self.mock_scheme.get_eplb_weight_views.assert_called_once_with(layer)
 
+
 def test_block_quant_validation_uses_layer_tp_size():
     from vllm_ascend.quantization.method_adapters import _validate_block_quant_shape
 
