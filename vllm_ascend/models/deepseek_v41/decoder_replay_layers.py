@@ -31,6 +31,7 @@ class AscendDecoderReplayLayers:
         self.rows: torch.Tensor | None = None
         self.context_factory: Callable[[], AbstractContextManager[None]] | None = None
         self.num_actual_rows = 0
+        self.num_padded_rows: int | None = None
         self.sequence_parallel = False
 
     def __call__(self, *states: torch.Tensor | None) -> tuple[torch.Tensor, ...]:
@@ -53,6 +54,8 @@ class AscendDecoderReplayLayers:
                     buffer[:replay_tokens].copy_(global_buffer.index_select(0, local_rows))
                 else:
                     buffer[: rows.numel()].copy_(buffer.index_select(0, rows))
+                if self.num_padded_rows is not None:
+                    buffer[rows.numel() : self.num_padded_rows].zero_()
             replay_states: list[torch.Tensor | None] = []
             for index, state in enumerate(states):
                 if state is None:
@@ -64,6 +67,9 @@ class AscendDecoderReplayLayers:
                 state = state.index_select(0, rows)
                 if sharded:
                     state = state.chunk(get_tp_group().world_size)[get_tp_group().rank_in_group]
+                if self.num_padded_rows is not None:
+                    padding = self.num_padded_rows - state.shape[0]
+                    state = torch.cat((state, state.new_zeros((padding, *state.shape[1:]))))
                 replay_states.append(state)
             row_outputs = self.run_layers(*replay_states)
             outputs = []
@@ -94,14 +100,15 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
     cut = max(model.config.kv_source_layer_ids)
     if cut >= model.end_layer - 1:
         return None
-    if (
+    if parallel.prefill_context_parallel_size > 1 and parallel.data_parallel_size > 1:
+        reason = "PCP decoder replay currently requires DP=1"
+    elif (
         (model.use_sequence_parallel and not enable_dsa_cp())
         or parallel.pipeline_parallel_size > 1
-        or parallel.prefill_context_parallel_size > 1
         or parallel.decode_context_parallel_size > 1
         or parallel.use_ubatching
     ):
-        reason = "SP without DSA CP, PP, PCP, DCP and microbatching need a separate replay layout"
+        reason = "SP without DSA CP, PP, DCP and microbatching need a separate replay layout"
     elif config.compilation_config.cudagraph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY):
         reason = "replay prefill requires eager execution; use NONE or FULL_DECODE_ONLY"
     elif any(layer > cut for layer in model.config.engram_layer_ids):
