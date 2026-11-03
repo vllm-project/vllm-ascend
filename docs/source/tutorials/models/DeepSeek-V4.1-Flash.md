@@ -130,6 +130,7 @@ images; the A5 reference requires a matching A5 runtime.
     docker run --rm -it \
       --name deepseek-v41-950dt \
       --net=host \
+      --ulimit nofile=65536:524288 \
       --shm-size=512g \
       --privileged=true \
       --device /dev/davinci0 \
