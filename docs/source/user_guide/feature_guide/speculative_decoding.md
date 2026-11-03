@@ -398,17 +398,24 @@ one (the example below assumes a block size of eight). Shorter lengths down to
 one token are supported, but may reduce acceptance; measure them with your
 checkpoint and workload. Longer lengths are unsupported.
 
-LiLiCorr currently uses Model Runner V2 and eager draft execution on Ascend.
-Set `VLLM_USE_V2_MODEL_RUNNER=1` and set the nested speculative
-`enforce_eager` option to `true`. The target model retains its independently
-configured execution mode.
+LiLiCorr uses Model Runner V2 on Ascend. Set `VLLM_USE_V2_MODEL_RUNNER=1`.
+With nested `speculative_config.enforce_eager=false`, `FULL_DECODE_ONLY`,
+`FULL`, and `FULL_AND_PIECEWISE` capture a full decode ACL graph when the draft
+attention backend supports it. `NONE` and `PIECEWISE` run the draft eagerly;
+unsupported full-graph attention also falls back to eager. Nested
+`enforce_eager=true` disables draft graphs. The target model retains its
+independently configured execution mode. LiLiCorr reuses DFlash2's graph
+manager and candidate sampler while keeping its own trained candidate scoring.
+The scoring head runs without a forward context; its operations participate
+in the outer draft ACL graph capture.
 
 ```shell
 VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <target-model> \
   --tensor-parallel-size 1 \
   --max-model-len 4096 \
   --no-enable-prefix-caching \
-  --speculative-config '{"method":"dflash","model":"<matching-lilicorr-checkpoint>","num_speculative_tokens":7,"enforce_eager":true}'
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":128}' \
+  --speculative-config '{"method":"dflash","model":"<matching-lilicorr-checkpoint>","num_speculative_tokens":7,"enforce_eager":false}'
 ```
 
 Both the plain and convolutional LiLiCorr checkpoint variants are supported.
@@ -422,10 +429,11 @@ VLLM_USE_MODELSCOPE=True VLLM_USE_V2_MODEL_RUNNER=1 pytest -v \
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_8_lilicorr.py
 ```
 
-The test compares greedy output token IDs with target-only decoding for both
-draft sampling modes, exercises nonzero-temperature probabilistic drafting,
-and checks draft/acceptance metric consistency. Acceptance length is recorded
-for calibration; no unmeasured throughput or acceptance-rate threshold is set.
+The test compares eager and graph drafts against target-only greedy token IDs,
+exercises nonzero-temperature probabilistic drafting, checks that graphs replay
+with padded batches and reused request slots, and checks draft/acceptance
+metric consistency. Acceptance length is recorded for calibration; no unmeasured
+throughput or acceptance-rate threshold is set.
 
 Standard tensor parallelism is supported. Fine-grained embedding/LM head TP
 and PCP vocabulary weight sharding are currently unsupported; the candidate
@@ -450,13 +458,15 @@ and with probabilistic drafts. For example:
 VLLM_USE_V2_MODEL_RUNNER=1 vllm bench latency --model <target-model> \
   --batch-size 8 --input-len 1024 --output-len 128 \
   --num-iters-warmup 5 --num-iters 30 --output-json lilicorr-latency.json \
-  --speculative-config '{"method":"dflash","model":"<matching-lilicorr-checkpoint>","num_speculative_tokens":7,"enforce_eager":true,"draft_sample_method":"probabilistic"}'
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":128}' \
+  --speculative-config '{"method":"dflash","model":"<matching-lilicorr-checkpoint>","num_speculative_tokens":7,"enforce_eager":false,"draft_sample_method":"probabilistic"}'
 ```
 
 Repeat at the production batch sizes and context lengths, keeping TP size,
-target execution mode, and prefix caching settings fixed. Measure acceptance
-length and serving throughput alongside latency; synthetic prompts alone do
-not establish the production speedup.
+target execution mode, and prefix caching settings fixed. To compare draft graph
+performance, change only nested `enforce_eager` between `true` and `false`.
+Measure acceptance length and serving throughput alongside latency; synthetic
+prompts alone do not establish the production speedup.
 
 ## Speculating using DSpark
 
