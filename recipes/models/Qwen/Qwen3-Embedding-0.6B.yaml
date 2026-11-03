@@ -1,0 +1,115 @@
+meta:
+  title: "Qwen3-Embedding-0.6B"
+  slug: "Qwen3-Embedding-0.6B"
+  provider: "Qwen"
+  description: "Qwen3-Embedding-0.6B — the smallest Qwen3 Embedding model (0.6B dense), for text embedding and retrieval; single-card pooling deployment on Ascend 910C with vLLM Ascend"
+  date_added: 2026-10-14
+  date_updated: 2026-11-03
+  tasks:
+    - embedding
+  performance_headline: "Single-card pooling serving on Ascend 910C with vLLM Ascend"
+  default_hardware: ascend_910c
+  hardware:
+    ascend_910c: verified
+
+model:
+  model_id: "Qwen/Qwen3-Embedding-0.6B"
+  min_vllm_version: "0.9.2"
+  architecture: dense
+  parameter_count: "0.6B"
+  active_parameters: "0.6B"
+  context_length: 32768
+  base_args:
+    - "--runner"
+    - "pooling"
+  base_env: {}
+  docker_image:
+    ascend_910c: "quay.io/ascend/vllm-ascend:nightly-main-a3"
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 2
+    supported_hardware: [ascend_910c]
+    hardware_overrides:
+      ascend_910c:
+        docker_image: "quay.io/ascend/vllm-ascend:nightly-main-a3"
+        install:
+          pip: false
+        extra_args:
+          - "--max-model-len"
+          - "1024"
+    description: "BF16 checkpoint for single-node Ascend 910C pooling; main compatibility smoke test only"
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+strategy_overrides: {}
+
+dependencies: []
+
+guide: |
+  ## Overview
+
+  Qwen3-Embedding-0.6B is the smallest dense model in the Qwen3 Embedding family, intended
+  for low-cost text embedding and retrieval. This recipe serves the BF16 checkpoint in
+  pooling mode on Ascend 910C.
+
+  ## Validation scope and support status
+
+  The configuration mirrors the last documented v0.23.0 tutorial. The main tutorial marks
+  this model discontinued starting with v0.30.0, so nightly compatibility must not be read
+  as an official support claim. On one Atlas 800T A3 NPU, vLLM Ascend
+  0.19.1rc2.dev3230+g469c6c260 passed health and model-list checks and returned two
+  1024-dimensional embeddings for two inputs. A 100-request benchmark at concurrency 16
+  completed without failures at 219.13 requests/s. Full MTEB accuracy, long-context,
+  and other hardware scenarios remain unverified.
+
+  ## Client Usage
+
+  ```bash
+  curl -X POST http://localhost:8000/v1/embeddings \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "Qwen/Qwen3-Embedding-0.6B",
+      "input": [
+        "The capital of China is Beijing.",
+        "Gravity is a force that attracts two bodies towards each other."
+      ]
+    }'
+  ```
+
+  A successful response contains one 1024-dimensional embedding for each input.
+
+  ## Performance Evaluation
+
+  The generic Bench tab targets text generation. Use the embedding backend and endpoint
+  for this pooling model:
+
+  ```bash
+  vllm bench serve \
+    --model Qwen/Qwen3-Embedding-0.6B \
+    --backend openai-embeddings \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --dataset-name random \
+    --endpoint /v1/embeddings \
+    --random-input 200 \
+    --num-prompts 100 \
+    --max-concurrency 16 \
+    --seed 1234 \
+    --save-result \
+    --result-dir ./
+  ```
+
+  The A3 compatibility run completed 100/100 requests at 219.13 requests/s, with mean
+  end-to-end latency of 68.59 ms and P99 latency of 97.00 ms. These are reproducibility
+  measurements, not official performance baselines.
+
+  ## References
+
+  - [Historical vLLM Ascend tutorial (v0.23.0)](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Qwen3-Embedding.html)
+  - [Main tutorial support status](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/Qwen3-Embedding.md)
+  - [Qwen3-Embedding-0.6B model card](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)
+  - [Qwen3-Embedding-0.6B on ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B)
