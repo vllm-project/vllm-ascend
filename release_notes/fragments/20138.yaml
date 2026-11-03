@@ -7,7 +7,7 @@ entries:
       the token ids, and one rc4 step scores every live request together.
   - category: performance
     text: >-
-      rare_chars pair D2H and rc4 feed run on a dedicated wait queue by default
-      so get_output does not block on the pair copy. Request finish flushes
-      look-ahead only after those jobs drain (set VLLM_ASCEND_RARE_PAIR_SYNC=1
-      to force the old inline path).
+      rare_chars collect-wait, pair D2H, and rc4 feed run on a dedicated wait
+      queue by default so get_output only submits (does not issue the pair
+      copy). Request finish flushes look-ahead only after those jobs drain
+      (set VLLM_ASCEND_RARE_PAIR_SYNC=1 to force the old inline path).
