@@ -687,7 +687,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     P0_IP="<P0_IP>"
     D0_IP="<D0_IP>"
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
