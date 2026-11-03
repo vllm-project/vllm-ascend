@@ -7,7 +7,8 @@ entries:
       the active PCP/DCP layout and original cache preprocessing without fixed
       topology or BF16-only restrictions. Main KV and KPool use one asynchronous
       gather path, including graph capture, with waits at their consumers and
-      no synchronous fallback. End-to-end text equivalence remains under
-      validation.
+      no synchronous fallback. Native preprocessing submits main KV and KPool
+      gathers before O-projection weight communication to reduce exposed waits.
+      End-to-end text equivalence remains under validation.
     model: glm-5.3-flash
     hardware: [A5]

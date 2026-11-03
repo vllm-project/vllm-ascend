@@ -949,6 +949,7 @@ def test_native_pcp_dcp_packed_kv_preserves_gathered_payload_addresses(
     impl.layer_name = "layer"
     impl._compose_sfa_kv_cache = Mock(return_value=(cache,))
     impl._get_indexer_attn_metadata = Mock(return_value=object())
+    impl._start_o_proj_weight_gather = Mock()
     impl._get_parallel_forward_context = Mock(
         side_effect=lambda *_args: SimpleNamespace(
             actual_seq_lengths_query=[len(local)],
@@ -1324,6 +1325,8 @@ def test_sfa_pcp_forward_selects_mode_and_gathers_weight_for_global_prefill(
         assert owner._parallel_o_proj.uses_full_weight is expected_gather
         owner.o_proj.quant_method.all_gather_weight.assert_not_called()
         assert owner._get_parallel_forward_context(metadata, hidden.shape[0], hidden) is base_context
+        owner.o_proj.quant_method.all_gather_weight.assert_not_called()
+        owner._start_o_proj_weight_gather()
         return output
 
     hidden = torch.empty(1, 4)

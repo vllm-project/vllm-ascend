@@ -337,7 +337,14 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(
     indexer.prepare_pcp_hidden = MagicMock(side_effect=prepare_hidden)
     project_query = impl._q_proj_and_k_up_proj
 
+    def start_o_proj_gather():
+        if prefetch:
+            indexer.prepare_pcp_hidden.assert_called_once()
+
+    impl._start_o_proj_weight_gather = MagicMock(side_effect=start_o_proj_gather)
+
     def project_after_launch(q_c):
+        impl._start_o_proj_weight_gather.assert_called_once()
         if prefetch:
             indexer.prepare_pcp_hidden.assert_called_once()
         return project_query(q_c)
@@ -390,6 +397,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(
             output=output,
         )
     assert indexer.prepare_pcp_hidden.call_count == int(prefetch)
+    impl._start_o_proj_weight_gather.assert_called_once()
 
     real_hidden = hidden_states[:num_tokens]
     # Graph mode projects the full padded batch; preserve its FP32 rounding
@@ -473,7 +481,9 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
 ):
     """Run the real forward entry; PCP peers need the same padded row count."""
     impl = impl_cls.__new__(impl_cls)
-    impl._parallel_o_proj = SimpleNamespace(batch=lambda **kwargs: nullcontext(), uses_full_weight=False)
+    impl._parallel_o_proj = SimpleNamespace(
+        batch=lambda **kwargs: nullcontext(), uses_full_weight=False, all_gather_weights=MagicMock()
+    )
     impl.qk_rope_head_dim = 0
     impl.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=2),

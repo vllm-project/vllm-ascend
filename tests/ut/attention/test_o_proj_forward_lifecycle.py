@@ -96,6 +96,8 @@ def _metadata(attn_state, *, global_prefill=False):
 def _prepare_forward(impl, metadata, hidden):
     context = impl._get_parallel_forward_context(metadata, 1, hidden)
     assert not hasattr(context, "gather_full_o_proj")
+    assert all(not state.handles for _, _, state in impl._parallel_o_proj._weight_switch_states or ())
+    impl._start_o_proj_weight_gather()
 
 
 def test_sfa_prefill_decode_and_profile_share_one_mode(sfa_impl, monkeypatch):

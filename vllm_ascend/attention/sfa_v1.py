@@ -1710,6 +1710,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_num_tokens=num_input_tokens or hidden_states.shape[0],
         )
 
+    def _start_o_proj_weight_gather(self) -> None:
+        """Allow parallel backends to prefetch the output projection weights."""
+
     def _finalize_o_proj(
         self,
         attn_output: torch.Tensor,
@@ -1897,6 +1900,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             gate_hidden_states = hidden_states
 
         if fused_type != PreprocessType.NATIVE:
+            self._start_o_proj_weight_gather()
             # Keep the raw hidden states for the indexer's k path: the fused
             # preprocess below returns new tensors and does not modify this
             # one in place.
@@ -1958,10 +1962,11 @@ class AscendSFAImpl(MLAAttentionImpl):
                 parallel_context.kv_slot_mapping,
                 attn_metadata,
             )
-            # Preserve collective order: main KV, KPool hidden, then Q.
+            # Prioritize cache inputs before weights consumed after attention.
             if self.runtime_has_indexer and hasattr(type(self.indexer), "prepare_pcp_hidden"):
                 assert k_hidden_states is not None and indexer_attn_metadata is not None
                 k_hidden_states = self.indexer.prepare_pcp_hidden(k_hidden_states, indexer_attn_metadata)
+            self._start_o_proj_weight_gather()
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
             kv_outputs = finish_main_kv()
             k_pe, k_nope = kv_outputs[:2]
