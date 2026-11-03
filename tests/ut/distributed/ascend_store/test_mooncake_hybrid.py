@@ -687,22 +687,24 @@ class TestMooncakeHybrid(unittest.TestCase):
 
         def synchronize():
             synchronizing.set()
-            if not device_ready.wait(timeout=2):
+            if not device_ready.wait(timeout=10):
                 raise TimeoutError("test device fence")
 
         device_event.synchronize.side_effect = synchronize
         gate = reset_attention_compute_start_gate()
-        job = threading.Thread(target=lambda: transfer_started.set() if gate.wait(timeout=2) else None, daemon=True)
+        job = threading.Thread(target=lambda: transfer_started.set() if gate.wait(timeout=10) else None, daemon=True)
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence.torch.npu.Event",
             return_value=device_event,
         ):
             job.start()
             gate.record()
-            self.assertTrue(synchronizing.wait(timeout=1))
+            # Liveness checks only: on loaded xdist runners the helper thread
+            # may be descheduled well beyond a second, so keep these generous.
+            self.assertTrue(synchronizing.wait(timeout=5))
             self.assertFalse(transfer_started.is_set())
             device_ready.set()
-            job.join(timeout=2)
+            job.join(timeout=10)
         self.assertTrue(transfer_started.is_set())
         self.assertFalse(job.is_alive())
 

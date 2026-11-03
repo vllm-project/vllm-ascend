@@ -224,7 +224,7 @@ def test_async_merged_bus_warns_when_drain_waits():
     group.rank_in_group = 0
 
     def _slow_sync(g, bits, *, wave_idx=None):
-        gate.wait(2.0)
+        gate.wait(5.0)
         return [False, False]
 
     try:
@@ -248,12 +248,30 @@ def test_async_merged_bus_warns_when_drain_waits():
         ):
             assert proc._wave_head_merged_bus(group) is False
 
-            def _release():
-                time.sleep(0.05)
-                gate.set()
+            # Drain in a helper thread and hold the gate until the pending
+            # warning has actually been captured. Releasing the gate on a
+            # fixed sleep races CI scheduling: if the drain arrives after the
+            # worker already finished (slipcover + xdist starve the thread
+            # past the sleep window), no warning fires at all.
+            drain_errors = []
 
-            threading.Thread(target=_release, daemon=True).start()
-            proc._drain_merged_bus(warn_if_pending=True)
+            def _drain():
+                try:
+                    proc._drain_merged_bus(warn_if_pending=True)
+                except Exception as exc:  # pragma: no cover - worker fault path
+                    drain_errors.append(exc)
+
+            drain_thread = threading.Thread(target=_drain, daemon=True)
+            drain_thread.start()
+            deadline = time.monotonic() + 5.0
+            while "merged bus not finished before end-of-wave" not in buf.getvalue():
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+            gate.set()
+            drain_thread.join(10.0)
+            assert not drain_thread.is_alive(), "drain thread did not finish after the gate opened"
+            assert not drain_errors, drain_errors
         assert "merged bus not finished before end-of-wave" in buf.getvalue()
     finally:
         gate.set()

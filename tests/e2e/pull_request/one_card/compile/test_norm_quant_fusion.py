@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+import os
+
 import pytest
 import torch
 import torch.nn as nn
@@ -33,6 +35,22 @@ from vllm_ascend.compilation.passes.norm_quant_fusion_pass import AddRMSNormQuan
 from vllm_ascend.utils import enable_custom_op
 
 from .backend import TestBackend
+
+
+def _worker_port(port: int) -> int:
+    """Offset fixed ports per xdist worker so parallel workers never share ports.
+
+    pytest-xdist sets PYTEST_XDIST_WORKER (e.g. "gw3") in worker processes;
+    without it (serial runs) the base ports are used unchanged.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+    if worker.startswith("gw"):
+        try:
+            return port + int(worker[2:]) * 100
+        except ValueError:
+            pass
+    return port
+
 
 # Cache backend to avoid duplicate pattern registration
 _backend_cache = None
@@ -162,7 +180,7 @@ def test_rmsnorm_quant_fusion(
                 "LOCAL_RANK": "0",
                 "WORLD_SIZE": "1",
                 "MASTER_ADDR": "localhost",
-                "MASTER_PORT": "12345",
+                "MASTER_PORT": str(_worker_port(12345)),
             }
         )
         init_distributed_environment()

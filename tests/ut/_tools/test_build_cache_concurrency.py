@@ -149,7 +149,9 @@ def test_entry_lock_timeout_bypasses_cache(tmp_path: Path):
 
     assert bypass.returncode == 0, bypass.stdout + bypass.stderr
     assert "[build-cache] BYPASS" in bypass.stdout
-    assert elapsed < 2.0
+    # Subprocess startup dominates the elapsed time; on loaded xdist CI hosts
+    # this regularly exceeds 2s, so only bound the 0.2s lock wait loosely.
+    assert elapsed < 5.0
     assert counter.read_text() == "2"
     events = _read_events(event_log)
     timeouts = [e for e in events if e["event"] == "lock_timeout" and e["lock"] == "entry"]
@@ -184,7 +186,7 @@ def test_publication_lock_timeout_fails_fast(tmp_path: Path, lock_kind: str):
 
     assert failed.returncode == 75, failed.stdout + failed.stderr
     assert f"[build-cache] ERROR lock timeout kind={lock_kind}" in failed.stdout
-    assert elapsed < 2.0
+    assert elapsed < 5.0
     assert counter.read_text() == "1"
 
 

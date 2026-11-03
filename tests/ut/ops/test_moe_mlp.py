@@ -448,7 +448,14 @@ class TestApplyMoeMlp(unittest.TestCase):
         mlp_compute_input = _mlp_compute_input()
         stream = MagicMock()
         stream.record_event.return_value = "evt"
-        with patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream):
+        with (
+            # maybe_record_event() records unconditionally only when the
+            # AscendConfig is uninitialized; on xdist workers the global
+            # config state depends on which tests ran first, so pin the
+            # legacy fallback instead of relying on worker history.
+            patch(f"{MOE_MLP}.get_ascend_config", side_effect=RuntimeError("uninitialized config")),
+            patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
+        ):
             out, evt = apply_moe_mlp(mlp_compute_input, quant_method)
 
         self.assertEqual((out, evt), ("final_out", "evt"))
@@ -494,6 +501,10 @@ class TestApplyMoeMlp(unittest.TestCase):
         stream = MagicMock()
         stream.record_event.side_effect = _record_event
         with (
+            # Same rationale as test_fused_path_skips_separate_activation:
+            # the event is recorded unconditionally only when the AscendConfig
+            # is uninitialized, so pin that state on fresh xdist workers.
+            patch(f"{MOE_MLP}.get_ascend_config", side_effect=RuntimeError("uninitialized config")),
             patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
             patch(f"{MOE_MLP}.torch_npu.npu_swiglu", return_value="x", create=True),
         ):
