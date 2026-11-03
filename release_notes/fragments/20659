@@ -1,5 +1,4 @@
-# Replace the filename and pr value with the assigned PR number before submission.
-pr: null
+pr: 20659
 entries:
   - category: bugfix
     text: Fixed DecodeBenchConnector block selection and request-local zero initialization for Ascend circular KV caches, including the GLM-5.3-Flash indexer tail.
