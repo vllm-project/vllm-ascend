@@ -26,12 +26,10 @@ def reference(tensor: torch.Tensor, weight: torch.Tensor, cos_sin: torch.Tensor,
     second = normalized[..., 32:64]
     out = normalized.clone()
     out[..., :32] = (
-        (first.float() * cos[:, None, :]).to(torch.bfloat16)
-        - (second.float() * sin[:, None, :]).to(torch.bfloat16)
+        (first.float() * cos[:, None, :]).to(torch.bfloat16) - (second.float() * sin[:, None, :]).to(torch.bfloat16)
     ).to(torch.bfloat16)
     out[..., 32:64] = (
-        (second.float() * cos[:, None, :]).to(torch.bfloat16)
-        + (first.float() * sin[:, None, :]).to(torch.bfloat16)
+        (second.float() * cos[:, None, :]).to(torch.bfloat16) + (first.float() * sin[:, None, :]).to(torch.bfloat16)
     ).to(torch.bfloat16)
     return out
 
