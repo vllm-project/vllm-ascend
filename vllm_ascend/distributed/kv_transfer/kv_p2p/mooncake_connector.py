@@ -247,7 +247,7 @@ class KVCacheTaskTracker:
                 self.delayed_free_requests.popitem(last=False)
                 self.reqs_to_process.discard(request_id)
                 expired_requests.add(request_id)
-                logger.error(
+                logger.warning(
                     "Force freed expired request: %s. "
                     "Reason: Request exceeded timeout threshold (%s seconds). "
                     "Action: Resources have been forcibly released to prevent memory leak.",

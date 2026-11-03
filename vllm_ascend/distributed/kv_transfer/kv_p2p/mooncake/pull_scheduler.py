@@ -398,8 +398,10 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 break
 
             self._mark_finished_locked(request_id)
-            logger.error(
-                "Force freed expired Mooncake request %s after %s seconds",
+            logger.warning(
+                "Force freed expired request: %s. "
+                "Reason: Request exceeded timeout threshold (%s seconds). "
+                "Action: Resources have been forcibly released to prevent memory leak.",
                 request_id,
                 envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
             )
