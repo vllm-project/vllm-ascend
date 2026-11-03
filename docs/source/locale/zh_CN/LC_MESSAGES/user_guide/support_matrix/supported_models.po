@@ -468,11 +468,11 @@ msgstr ""
 "[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md) |"
 
 msgid ""
-"    | GLM-5.1             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ "
+"    | GLM-5.1             |   ✅    |      |  ✅ |       A2/A3        | ✅ | ✅ "
 "| ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | "
 "[GLM-5.1](../../tutorials/models/GLM5.md) |"
 msgstr ""
-"    | GLM-5.1             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ "
+"    | GLM-5.1             |   ✅    |      |  ✅ |       A2/A3        | ✅ | ✅ "
 "| ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | "
 "[GLM-5.1](../../tutorials/models/GLM5.md) |"
 
