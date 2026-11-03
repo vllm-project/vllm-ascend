@@ -22,16 +22,10 @@ speculative decoding. These designs reduce the global KV cache footprint to
 one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports
 a continuously adjustable reasoning effort from 1 to 100.
 
-vLLM Ascend supports W8A8 deployment on Atlas 800 A3 and A2 servers.
-Section 5.2 also provides a W4A8 A3 configuration using model runner V2. This
-guide provides a single-node colocated A3 configuration and a two-node A3
-Prefill-Decode (PD) disaggregated configuration. It also supports a two-node hybrid A2 configuration and a four-node Prefill-Decode (PD) disaggregated configuration.
-
-DeepSeek-V4.1-Flash is supported in **vLLM Ascend v0.30.0rc1 and later**. This guide uses **vLLM Ascend
-v0.30.0rc2** as its documentation and model-validation baseline, except for
-the A3 1P1D configuration in Section 5.2, which uses a v0.32.0rc-compatible
-build. To use the
-latest features, use the latest supported vLLM Ascend version.
+This guide describes W4A8 deployment with **vLLM Ascend v0.32.0** on Atlas
+800 A3 and A2 servers. It provides a single-node colocated A3 configuration,
+a two-node A3 Prefill-Decode (PD) disaggregated configuration, a two-node
+hybrid A2 configuration, and a four-node A2 PD disaggregated configuration.
 
 Use the matching upstream vLLM revision for the selected vLLM Ascend version.
 For source builds, use the upstream vLLM tag recorded in
@@ -44,7 +38,7 @@ for the complete support matrix and the
 [Feature Guide](../../user_guide/feature_guide/index.md) for feature
 configuration.
 
-The A3 single-node configuration uses W8A8 weights, INT8 Engram storage,
+The A3 single-node configuration uses W4A8 weights, INT8 Engram storage,
 DP4/TP4, and model runner V1. The A3 1P1D configuration in Section 5.2 uses
 W4A8 weights, model runner V2, DP4/PCP4/TP1 on Prefill, DP16/TP1 on Decode,
 SWA bounded replay on Prefill, MegaMoE on Prefill only, DSpark speculative
@@ -59,19 +53,10 @@ The official DeepSeek-V4.1-Flash checkpoint is available from
 [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) and
 [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4.1-Flash).
 
-The Ascend W8A8 checkpoint used by the W8A8 examples in this guide will be published as
-[Eco-Tech/DeepSeek-V4.1-Flash-w8a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-w8a8)
-on ModelScope. It includes the DSpark draft parameters and INT8 Engram tables.
-After the checkpoint is available, download it to the same absolute path on
-every server and replace the checkpoint-path placeholder in each serving
-command.
-
-Alternatively, use [ModelSlim](https://github.com/Ascend/msmodelslim) to
-prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
-
-For the A3 1P1D example in Section 5.2, use the
-`DeepSeek-V4.1-Flash-1017-w4a8` checkpoint, including its DSpark draft
-parameters and Engram tables, at the same absolute path on both nodes.
+Use the Ascend W4A8 checkpoint `DeepSeek-V4.1-Flash-1017-w4a8`, including
+its DSpark draft parameters and Engram tables. Download or copy it to the
+same absolute path on every server and set `MODEL_PATH` in each serving
+command to that checkpoint directory.
 
 Use one of the following hardware configurations:
 
@@ -96,8 +81,8 @@ interfaces, and the service ports must not be blocked.
 
 ### 4.1 Docker Image Installation
 
-Select the tab for the target hardware. A2 and A3 use separate validation
-images.
+Select the tab for the target hardware. A2 and A3 use separate images from
+the v0.32.0 release branch.
 
 === "A3 series"
 
@@ -105,7 +90,7 @@ images.
     server.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-releases-v0.32.0rc-a3
     export MODEL_ROOT="/data/weights"
 
     docker pull "$IMAGE"
@@ -150,7 +135,7 @@ images.
     An A2 server exposes 8 devices. Run this command on all four A2 servers.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-releases-v0.32.0rc
     export MODEL_ROOT="/data/weights"
 
     docker pull "$IMAGE"
@@ -189,8 +174,9 @@ absolute path inside and outside every container.
 
 To build from source, follow the
 [software environment installation guide](../../getting_started/installation.md#installation-software-environment)
-and check out the **v0.30.0rc2** tag of vLLM Ascend. Use the matching upstream
-vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
+and check out the **releases/v0.32.0rc** branch of vLLM Ascend. Use the
+matching upstream vLLM tag recorded in `.github/vllm-release-tag.commit` at
+the selected revision.
 
 ## 5 Online Service Deployment
 
@@ -202,7 +188,9 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     uses DP4/TP4 across all 16 logical devices, expert parallelism, Engram host
     offload, asynchronous scheduling, and `FULL_DECODE_ONLY` ACL Graph.
 
-    Set `MODEL_PATH` to the local checkpoint path.
+    Set `MODEL_PATH` to the local `DeepSeek-V4.1-Flash-1017-w4a8` checkpoint
+    directory described in Section 3.1. The `--quantization ascend` option
+    loads the W4A8 quantization configuration from this checkpoint.
 
     ```shell
     #!/usr/bin/env bash
@@ -261,9 +249,9 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     - `VLLM_ENGINE_READY_TIMEOUT_S=36000` allows up to 36,000 seconds for engine
         processes to finish initialization, including weight loading and graph
         preparation.
-    - `VLLM_USE_V2_MODEL_RUNNER=0` explicitly selects model runner V1. Keep this
-        value at `0` because DeepSeek-V4.1-Flash currently does not support model
-        runner V2 on Ascend.
+    - `VLLM_USE_V2_MODEL_RUNNER=0` explicitly selects model runner V1 for this
+        colocated configuration. The A3 PD configuration in Section 5.2 uses
+        model runner V2.
     - `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
         Engram table in host memory and lets local DP ranks share the host-memory
         allocation. This is required on A3 because the model's 24 Engram heads
@@ -291,12 +279,11 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
     !!! note
 
-        This A3 example requires a v0.32.0rc-compatible build with model runner
-        V2, SWA bounded replay with PCP, and the MegaMoE operator package
-        (`cann_ops_transformer`). Use that build with the Docker command in
-        Section 4.1 instead of its v0.30.0rc2 image, retaining `--net=host` and
-        `--ipc=host`. Set `MODEL_PATH` on both nodes to the W4A8 checkpoint
-        specified in Section 3.1.
+        This A3 example requires model runner V2, SWA bounded replay with
+        PCP, and the MegaMoE operator package (`cann_ops_transformer`). Keep
+        `--net=host` and `--ipc=host` in the Docker command in Section 4.1.
+        Set `MODEL_PATH` on both nodes to the W4A8 checkpoint specified in
+        Section 3.1.
         Check startup logs to confirm that MegaMoE is enabled; requesting
         `enable_fused_mc2: 2` alone does not confirm that the path is active.
 
@@ -1850,7 +1837,7 @@ The values in [Section 5.1](#51-single-node-colocated-deployment) and [Section 5
 optimal settings. Tune `--max-num-seqs`, `--max-num-batched-tokens`, and
 `--gpu-memory-utilization` together for the target input length, image sizes,
 output length, and concurrency. Keep DP4/TP4 for A3 single-node deployment,
-or Prefill DP4/TP4 and Decode DP8/TP2 for A3 PD deployment, until an
+or Prefill DP4/PCP4/TP1 and Decode DP16/TP1 for A3 PD deployment, until an
 alternative configuration has been validated.
 
 ## 10 FAQ
@@ -1872,78 +1859,9 @@ For common environment, installation, and parameter issues, refer to the
 ## 11 Limitations
 
 - The documented A3 deployments use either one server in colocated mode or two
-  servers in 1P1D mode, with an Ascend W8A8 checkpoint and INT8 Engram storage.
-- The A2 configuration is retained unchanged and is not revalidated by this
-  update. Its revised configuration will be documented separately.
+  servers in 1P1D mode, with an Ascend W4A8 checkpoint and INT8 Engram storage.
+- The A2 deployment parameters require separate runtime validation.
 - In the A3 PD example, Prefill runs in eager mode. Decode uses
-  `FULL_DECODE_ONLY` ACL Graph for the target model and eager execution for the
-  DSpark draft model.
+  `FULL_DECODE_ONLY` ACL Graph with DSpark draft graph execution enabled.
 - Production performance qualification and task-level accuracy evaluation are
   not complete.
-
-## 12 Bounded Replay Compatibility for vLLM 0.30.0
-
-For vLLM 0.30.0 images without the upstream replay protocol, the Ascend plugin
-backports configuration, request payloads, and local prefix-hit admission logic.
-Installed vLLM files and compiled operators remain unchanged. The compatibility
-path is disabled by default. Enable it explicitly with:
-
-```shell
---enable-prefix-caching --swa-bounded-replay
-```
-
-Use `--no-swa-bounded-replay` to disable replay explicitly. vLLM builds with
-native replay use the upstream implementation. Compatibility is detected from
-the replay interfaces rather than a version string. Configuration and wire
-fields are registered before use; scheduler and cache behavior is patched only
-when replay is enabled. Unsupported scheduler source bodies fail explicitly.
-The backport supports local prefix caching only; enabling replay with a KV
-connector raises an error. Existing replay restrictions still apply to PCP and
-Ascend modes that use independent scheduler copies.
-
-SWA caches do not participate in prefix reuse. After a hit in another cache
-group, the scheduler recomputes the final SWA window of the cached prefix.
-The worker masks writes to shared cache groups during replay and clamps the
-visible SWA range. Hits no longer than the window are recomputed in full.
-After preemption, readmission recalculates and forwards the replay boundary.
-
-### 12.1 Real-Weight Validation
-
-The following A5 regression configuration uses TP1/DP4/EP4. Use the existing
-CANN environment and compiled Ascend operators before running it:
-
-```shell
-cd /workspace
-VLLM_USE_V2_MODEL_RUNNER=1 vllm serve /home/weights/deepseek-ai--DeepSeek-V4.1-Flash \
-  --tokenizer-mode deepseek_v41 --served-model-name deepseek-v41-accuracy \
-  --host 127.0.0.1 --port 8011 \
-  --tensor-parallel-size 1 --data-parallel-size 4 --data-parallel-size-local 4 \
-  --enable-expert-parallel --quantization deepseek_v4_fp8 \
-  --max-model-len 16384 --max-num-batched-tokens 2048 --max-num-seqs 1 \
-  --block-size 128 --enforce-eager --enable-prefix-caching --swa-bounded-replay \
-  --limit-mm-per-prompt '{"image":0}' \
-  --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
-  --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":16}' \
-  --safetensors-load-strategy lazy --additional-config '{"enable_cpu_binding":false}'
-```
-
-First save a baseline from a replay-disabled service, then send the same
-requests to a replay-enabled service:
-
-```shell
-cd /path/to/vllm-ascend
-python tests/e2e/models/swa_bounded_replay_probe.py \
-  --base-url http://127.0.0.1:8011 --model deepseek-v41-accuracy \
-  --output /tmp/replay-disabled.json
-
-# Restart the service with --swa-bounded-replay before running this command.
-python tests/e2e/models/swa_bounded_replay_probe.py \
-  --base-url http://127.0.0.1:8011 --model deepseek-v41-accuracy \
-  --baseline /tmp/replay-disabled.json --output /tmp/replay-enabled.json
-```
-
-Validation requires successful HTTP requests, outputs matching the baseline,
-and an actual `SWA bounded replay is active` message in the service log.
-Startup success or a true configuration field alone does not prove replay was
-exercised. Cross-chunk regression should also use a token budget smaller than
-the SWA window.
