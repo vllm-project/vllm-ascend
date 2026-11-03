@@ -25,6 +25,8 @@ For step-by-step deployment and configuration, refer to the following guide:
 
 ---
 
+For experimental non-layerwise Push, see [whole-request Mooncake Push](mooncake_push.md).
+
 ## How It Works
 
 ### 1. Design Approach

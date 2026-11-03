@@ -3,7 +3,6 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole, KVConnectorTransferResults
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import connector as connector_module
@@ -122,6 +121,17 @@ def test_pull_connector_selects_implementation_by_role() -> None:
     assert worker_connector.connector_worker is worker_cls.return_value
 
 
-def test_push_connector_is_explicitly_unimplemented() -> None:
-    with pytest.raises(NotImplementedError, match="not implemented"):
-        MooncakePushConnector(MagicMock(), KVConnectorRole.SCHEDULER, MagicMock())
+def test_push_connector_selects_scheduler_and_delegates_liveness() -> None:
+    config = MagicMock()
+    config.kv_transfer_config.engine_id = "engine"
+    with (
+        patch.object(connector_module.MooncakeBaseConnector, "__init__", return_value=None),
+        patch.object(connector_module, "MooncakePushConnectorScheduler") as scheduler_class,
+    ):
+        connector = MooncakePushConnector.__new__(MooncakePushConnector)
+        connector.engine_id = "engine"
+        connector.connector_worker = None
+        connector.__init__(config, KVConnectorRole.SCHEDULER, MagicMock())
+        scheduler_class.return_value.has_pending_push_work.return_value = True
+        assert connector.has_pending_push_work()
+        assert connector.connector_scheduler is scheduler_class.return_value
