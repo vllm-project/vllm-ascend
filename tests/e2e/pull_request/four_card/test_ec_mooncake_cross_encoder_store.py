@@ -71,8 +71,29 @@ class _CapturingEPDServer(RemoteEPDServer):
     """Keep child logs so the Store test can prove that a GET was used."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Clean up sibling services if startup fails before context entry."""
         self.output_lines: list[str] = []
-        super().__init__(*args, **kwargs)
+        self._starting = True
+        try:
+            super().__init__(*args, **kwargs)
+        except BaseException:
+            self._starting = False
+            # __exit__ is not called when the constructor fails. Preserve the
+            # startup exception even if terminating another service also fails.
+            with suppress(Exception):
+                self._terminate_server()
+            raise
+        finally:
+            self._starting = False
+
+    def _poll(self) -> int | None:
+        """Reject any service exit during startup, including exit status zero."""
+        if self._starting:
+            for index, proc in enumerate(self._proc_list):
+                status = proc.poll()
+                if status is not None:
+                    raise RuntimeError(f"[VLLM_{index}] pid={proc.pid} exited during startup with status {status}")
+        return None
 
     def _read_output(self, pipe: Any, prefix: str) -> None:
         with pipe:
