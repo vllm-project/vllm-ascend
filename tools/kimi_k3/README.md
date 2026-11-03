@@ -40,6 +40,26 @@ configuration/entry under `tests/e2e/cases/models`, and unit tests under `tests/
 
 ## 3. Pruning and checkpoint verification
 
+### Source checkpoint version used in this experiment
+
+The pruning input was the **Kimi-K3 W4A8 MXFP QuaRot temporary checkpoint**, locally
+identified as `Kimi-K3-w4a8-mxfp-QuaRot_temp`, with 93 layers and 896 routed experts
+per MoE layer. The recorded input directory was
+`/mnt/share/weights/Kimi-K3-w4a8-mxfp-QuaRot_temp`; the published output was
+`/mnt/share/weights/Kimi-K3-w4a8-mxfp-QuaRot-slim_ep_256xps`.
+
+The pruning manifest records these source identity checksums:
+
+| Source file | SHA256 |
+| --- | --- |
+| `config.json` | `07677f14bc468c16a788fc6517f7fa715701fa1c3ff74b3f7ef3449a5bc8c735` |
+| `model.safetensors.index.json` | `b21a53e0b92c0bb6474be2da74ceb9261ba888f8880a8b8f84fb8b8d6ee6e4e1` |
+
+No upstream repository revision or release tag is recorded for this local checkpoint.
+The directory name and recorded checksums identify the experiment input; the checksums
+cover configuration/index files, not every source weight byte. The vLLM/vllm-ascend
+runtime versions in section 9 are not checkpoint versions.
+
 Start from the original quantized temporary checkpoint. In each of 92 MoE layers,
 select `keep_ids[j] = floor(j * 896 / 256)`, `j=0..255`. Slice router rows and
 correction bias identically and remap retained expert IDs to 0..255.
