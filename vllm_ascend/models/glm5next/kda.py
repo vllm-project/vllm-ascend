@@ -503,11 +503,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             if pcp_context.padded_gather_idx.numel() != self.pcp_size * local_num_tokens:
                 raise RuntimeError("KDA PCP token mapping does not match the rank-local model input.")
         if use_pcp_reduce_scatter:
+            assert pcp_context is not None
             logger.info_once("KDA PCP output uses packed ReduceScatter.")
             output = self.o_proj(core_attn_out, pcp_output_indices=pcp_context.padded_gather_idx)[0]
         else:
             output = self.o_proj(core_attn_out)[0]
             if has_pcp_prefill:
+                assert pcp_context is not None
                 local_start = self.pcp_rank * local_num_tokens
                 local_indices = pcp_context.padded_gather_idx[local_start : local_start + local_num_tokens]
                 if output_buffer is None:

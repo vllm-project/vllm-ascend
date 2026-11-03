@@ -260,8 +260,8 @@ class AscendSFAPCPImpl(AscendSFAImpl):
         assert 0 <= replicated <= local_rows
         inputs = (kv_no_split,) if self.qk_rope_head_dim == 0 else (kv_no_split, cos, sin)
         assert all(value.shape[0] == local_rows for value in inputs)
-        pending = ()
-        sends = ()
+        pending: tuple[tuple[torch.Tensor, torch.distributed.Work | None], ...] = ()
+        sends: tuple[torch.Tensor, ...] = ()
         # Preserve replicated/draft decode writes without submitting a collective.
         if slots.shape[0] <= local_rows or replicated == local_rows:
             inputs = tuple(value[:replicated] for value in inputs)
