@@ -5,8 +5,10 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
 from vllm_ascend.models.deepseek_v41.engram import model_state as deepseek_v41
@@ -139,3 +141,46 @@ def test_eager_hook_forwards_lookup_events(state):
     assert result["engram_pending"] is events
     state.prepare_engram()
     state.model.prepare_engram_inputs.assert_called_once()
+
+
+def test_full_graph_replay_metadata_is_padded_and_inactive_without_replay(monkeypatch):
+    """FULL graph metadata must cover padded rows and skip inactive replay."""
+
+    class Buffer:
+        def __init__(self, size):
+            self.np = np.zeros(size, dtype=np.int32)
+            self.gpu = torch.zeros(size, dtype=torch.int32)
+
+        def copy_to_gpu(self, count):
+            self.gpu[:count].copy_(torch.from_numpy(self.np[:count]))
+
+    captured = {}
+
+    def fake_prepare_attn(self, *args, **kwargs):
+        captured["model_specific_attn_metadata"] = kwargs.get("model_specific_attn_metadata")
+        return {}
+
+    monkeypatch.setattr(AscendModelState, "prepare_attn", fake_prepare_attn)
+    state = object.__new__(deepseek_v41.EngramModelState)
+    state._replay_groups = (128, torch.empty(0, dtype=torch.int32))
+    state._replay_start_np = np.zeros(4, dtype=np.int32)
+    state._replay_start = Buffer(8)
+
+    batch = SimpleNamespace(
+        num_reqs=1,
+        num_reqs_after_padding=8,
+        is_prefilling_np=np.array([True]),
+        idx_mapping_np=np.array([0], dtype=np.int32),
+    )
+    state.prepare_attn(
+        batch,
+        CUDAGraphMode.FULL,
+        (),
+        torch.empty((0, 1), dtype=torch.int32),
+        [],
+        None,
+    )
+
+    assert state._replay_start.gpu.shape == (8,)
+    assert torch.count_nonzero(state._replay_start.gpu) == 0
+    assert captured["model_specific_attn_metadata"] is None
