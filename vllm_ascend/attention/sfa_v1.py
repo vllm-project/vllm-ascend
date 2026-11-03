@@ -1230,6 +1230,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
+    def _prepare_kv(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata) -> Callable[[], tuple]:
+        """Keep local cache writes in place; PCP overrides this to defer its wait."""
+        outputs = self.exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+        return lambda: outputs
+
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
@@ -1945,7 +1950,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 # Wait before the first main or indexer cache access.
                 self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
 
-            kv_outputs = self.exec_kv(
+            finish_main_kv = self._prepare_kv(
                 kv_no_split,
                 cos,
                 sin,
@@ -1953,9 +1958,14 @@ class AscendSFAImpl(MLAAttentionImpl):
                 parallel_context.kv_slot_mapping,
                 attn_metadata,
             )
+            # Preserve collective order: main KV, KPool hidden, then Q.
+            if self.runtime_has_indexer and hasattr(type(self.indexer), "prepare_pcp_hidden"):
+                assert k_hidden_states is not None and indexer_attn_metadata is not None
+                k_hidden_states = self.indexer.prepare_pcp_hidden(k_hidden_states, indexer_attn_metadata)
+            ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
+            kv_outputs = finish_main_kv()
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
-            ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
             if self.qk_rope_head_dim:
                 q_pe = self.rope_single(q_pe, cos, sin)
             self._record_query_gather_context(
@@ -1997,6 +2007,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 indexer_attn_metadata,
                 compute_topk=not self.skip_topk and has_local_query,
             )
+            # Release the pending KPool receive buffer after its consumer.
+            k_hidden_states = None
             if self.skip_topk:
                 topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
             elif self.use_index_cache and has_local_query:

@@ -10,7 +10,6 @@ from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
-from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
@@ -229,7 +228,9 @@ class AscendSFAPCPImpl(AscendSFAImpl):
         main_cache = kv_cache[:1] if self.enable_sparse_sfa_c8 else kv_cache[:2]
         packed = copy_pcp_kv_cache(main_cache, local_slots[num_replicated_tokens:])
         group = get_pcp_group()
-        gathered = group.all_gather(packed, dim=0)
+        gathered, work = all_gather_async(packed, group)
+        if work is not None:
+            work.wait()
         if self.enable_sparse_sfa_c8:
             # Preserve packed K, RoPE and scale bytes, including FP8 storage.
             # The paired scatter writes the same payload to the same cache.
@@ -250,6 +251,65 @@ class AscendSFAPCPImpl(AscendSFAImpl):
         )
         return result
 
+    def _get_pcp_cache_write_slots(self, slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
+        return slots
+
+    def _prepare_kv(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata) -> Callable[[], tuple]:
+        slots = self._get_pcp_cache_write_slots(slots, attn_metadata)
+        if not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
+            return partial(
+                super().exec_kv, kv_no_split, cos, sin, kv_cache, slots[: kv_no_split.shape[0]], attn_metadata
+            )
+        if self.qk_rope_head_dim == 0:
+            # NoPE projects actual tokens, but slots retain the padded rank stride.
+            pad = attn_metadata.num_input_tokens - kv_no_split.shape[0]
+            if pad < 0:
+                raise ValueError("SFA PCP KV exceeds the rank-local padded token count.")
+            if pad:
+                kv_no_split = nn.functional.pad(kv_no_split, (0, 0, 0, pad))
+        local_rows = kv_no_split.shape[0]
+        replicated = get_pcp_num_replicated_tokens(attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded)
+        assert 0 <= replicated <= local_rows
+        inputs = (kv_no_split,) if self.qk_rope_head_dim == 0 else (kv_no_split, cos, sin)
+        assert all(value.shape[0] == local_rows for value in inputs)
+        pending = ()
+        sends = ()
+        # Preserve replicated/draft decode writes without submitting a collective.
+        if slots.shape[0] <= local_rows or replicated == local_rows:
+            inputs = tuple(value[:replicated] for value in inputs)
+            slots = slots[:replicated]
+        else:
+            group = get_pcp_group()
+            sends = tuple(value[replicated:].contiguous() for value in inputs)
+            pending = tuple(all_gather_async(send, group) for send in sends)
+            slots = slots[: group.world_size * local_rows]
+            if replicated:
+                rank_slots = slots.view(group.world_size, local_rows)
+                slots = torch.cat((rank_slots[0, :replicated], rank_slots[:, replicated:].flatten()))
+            logger.info_once("SFA PCP main KV AllGather overlaps MLA Q projection.")
+
+        def finish():
+            # Retain the contiguous sends until HCCL has finished reading them.
+            _ = sends
+            for _, work in pending:
+                if work is not None:
+                    work.wait()
+            values = (
+                tuple(
+                    torch.cat((value[:replicated], gathered), dim=0) if replicated else gathered
+                    for value, (gathered, _) in zip(inputs, pending)
+                )
+                if pending
+                else inputs
+            )
+            assert values[0].shape[0] == slots.numel()
+            gathered_cos, gathered_sin = values[1:] if self.qk_rope_head_dim else (cos, sin)
+            return super(AscendSFAPCPImpl, self).exec_kv(
+                values[0], gathered_cos, gathered_sin, kv_cache, slots, attn_metadata
+            )
+
+        return finish
+
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
@@ -259,31 +319,8 @@ class AscendSFAPCPImpl(AscendSFAImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
-        if not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
-            return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots[: kv_no_split.shape[0]], attn_metadata)
-        num_replicated_tokens = get_pcp_num_replicated_tokens(
-            attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded
-        )
-        if self.qk_rope_head_dim == 0:
-            # NoPE projects only the actual local tokens, while PCP slots keep
-            # the padded rank stride. Keep KV and slots in the same gather
-            # order: scatter writes do not require causal token order.
-            pad_tokens = attn_metadata.num_input_tokens - kv_no_split.shape[0]
-            if pad_tokens < 0:
-                raise ValueError("SFA PCP KV exceeds the rank-local padded token count.")
-            if pad_tokens:
-                kv_no_split = nn.functional.pad(kv_no_split, (0, 0, 0, pad_tokens))
-            (kv_no_split,), slots = _gather_prefill_cache_inputs((kv_no_split,), slots, num_replicated_tokens)
-        else:
-            (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
-                (kv_no_split, cos, sin), slots, num_replicated_tokens
-            )
-        assert slots.numel() == kv_no_split.shape[0], (
-            "SFA PCP cache write requires one slot per gathered token: "
-            f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
-        )
-
-        return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+        # Direct callers use the same asynchronous exchange and consume it here.
+        return self._prepare_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)()
 
     def _store_parallel_kv(
         self,
@@ -1390,27 +1427,12 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
 class AscendSFAPCPDCPImpl(AscendSFADCPImpl, AscendSFAPCPImpl):
     """Composes DCP attention with PCP gathered-token cache writes."""
 
-    def exec_kv(
-        self,
-        kv_no_split: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        kv_cache: tuple,
-        slots: torch.Tensor,
-        attn_metadata: M,
-    ):
+    def _get_pcp_cache_write_slots(self, slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
         if self._has_prefill(attn_metadata):
             assert isinstance(attn_metadata, AscendSFADCPMetadata)
             assert attn_metadata.dcp_context is not None
-            slots = attn_metadata.dcp_context.slot_mapping
-        return super().exec_kv(
-            kv_no_split,
-            cos,
-            sin,
-            kv_cache,
-            slots,
-            attn_metadata,
-        )
+            return attn_metadata.dcp_context.slot_mapping
+        return slots
 
 
 def resolve_sfa_metadata_builder(

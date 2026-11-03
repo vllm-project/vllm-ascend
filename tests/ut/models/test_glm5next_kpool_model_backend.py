@@ -25,6 +25,7 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.glm5next.attention import Indexer
 from vllm_ascend.ops import cann_keypool
+from vllm_ascend.ops.mla import IndexerWrapper
 
 with patch.dict(
     "sys.modules",
@@ -636,11 +637,13 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         op._pack_keypool_indices.assert_not_called()
 
 
-@pytest.mark.parametrize("pcp_local_token_count", [2, 4])
+@pytest.mark.parametrize(("pcp_local_token_count", "query_tokens"), [(2, 0), (2, 2), (4, 2), (4, 4)])
 @pytest.mark.parametrize("actual_tokens", [0, 2])
+@pytest.mark.parametrize("prefetch", [False, True])
 @pytest.mark.parametrize("compute_topk", [False, True])
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
 def test_backend_restores_pcp_keys_before_kpool_cache_write(
-    monkeypatch, pcp_local_token_count, actual_tokens, compute_topk
+    monkeypatch, pcp_local_token_count, query_tokens, actual_tokens, prefetch, compute_topk, graph_mode
 ) -> None:
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
@@ -682,43 +685,89 @@ def test_backend_restores_pcp_keys_before_kpool_cache_write(
     pcp_group = MagicMock()
     pcp_group.all_gather.side_effect = lambda tensor, dim: torch.cat((tensor, tensor + 10), dim=dim)
     monkeypatch.setattr(backend_module, "get_pcp_group", lambda: pcp_group)
+    events = []
+    handle = MagicMock()
+
+    def gather_async(tensor, group):
+        assert group is pcp_group
+        events.append("launch")
+        result = torch.full((tensor.shape[0] * 2, tensor.shape[1]), float("nan"))
+
+        def wait():
+            events.append("wait")
+            result.copy_(torch.cat((tensor, tensor + 10)))
+
+        handle.wait.side_effect = wait
+        return result, handle
+
+    gather = MagicMock(side_effect=gather_async)
+    monkeypatch.setattr(backend_module, "all_gather_async", gather)
+    backend.wq_b.register_forward_hook(lambda *args: events.append("query"))
     monkeypatch.setattr(
         backend_module,
         "get_forward_context",
         lambda: SimpleNamespace(
             attn_metadata={"indexer.tail": tail_metadata},
-            cudagraph_runtime_mode=None,
+            cudagraph_runtime_mode=graph_mode,
             virtual_engine=0,
         ),
     )
 
-    result = backend.forward(
-        torch.ones(pcp_local_token_count, 3),
-        torch.ones(pcp_local_token_count, 2),
-        torch.full((pcp_local_token_count, 3), 2.0),
+    k_hidden = torch.full((query_tokens, 3), 2.0)
+    runner = backend
+    if prefetch:
+        # Exercise the actual model-facing wrapper, not only the backend.
+        runner = IndexerWrapper.__new__(IndexerWrapper)
+        nn.Module.__init__(runner)
+        runner.impl = backend
+        k_hidden = runner.prepare_pcp_hidden(k_hidden, metadata)
+        handle.wait.assert_not_called()
+    result = runner.forward(
+        torch.ones(query_tokens, 3),
+        torch.ones(query_tokens, 2),
+        k_hidden,
         metadata,
         compute_topk=compute_topk,
     )
 
-    pcp_group.all_gather.assert_called_once()
+    gather.assert_called_once()
+    pcp_group.all_gather.assert_not_called()
+    handle.wait.assert_called_once()
+    assert events == (["launch", "query", "wait"] if compute_topk else ["launch", "wait"])
     recorded_args = recorder.args
     recorded_kwargs = recorder.kwargs
     assert recorded_args is not None
     assert recorded_kwargs is not None
-    padded_hidden = torch.full((pcp_local_token_count, 3), 2.0)
+    expected_tokens = query_tokens
+    local_hidden = torch.full((expected_tokens, 3), 2.0)
+    padding = pcp_local_token_count - expected_tokens
+    padded_hidden = torch.nn.functional.pad(local_hidden, (0, 0, 0, padding))
     restore = metadata.pcp_hidden_restore_indices
     assert restore is not None
-    assert pcp_group.all_gather.call_args_list[0].args[0].shape[0] == pcp_local_token_count
+    gather_call = gather.call_args
+    assert gather_call.args[0].shape[0] == pcp_local_token_count
     torch.testing.assert_close(
         recorded_args[0],
         torch.cat((padded_hidden, padded_hidden + 10), dim=0)[restore],
     )
     assert recorded_args[-2] is metadata
     if compute_topk:
-        assert result.shape[0] == recorded_args[1].shape[0] == pcp_local_token_count
+        assert result.shape[0] == recorded_args[1].shape[0] == expected_tokens
     else:
         assert result is None
-        assert recorded_args[1:3] == (None, None)
+
+
+def test_pcp_hidden_prefetch_leaves_non_pcp_layout_unchanged(monkeypatch):
+    monkeypatch.setattr(
+        backend_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE)
+    )
+    backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
+    hidden = torch.ones(2, 3)
+    metadata = _indexer_metadata(2)
+    gather = MagicMock()
+    monkeypatch.setattr(backend_module, "all_gather_async", gather)
+    assert backend.prepare_pcp_hidden(hidden, metadata) is hidden
+    gather.assert_not_called()
 
 
 @pytest.mark.parametrize("quantized", [False, True])
