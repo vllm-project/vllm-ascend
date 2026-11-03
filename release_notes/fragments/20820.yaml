@@ -1,0 +1,6 @@
+pr: 20820
+entries:
+  - category: performance
+    text: >-
+      FULL-graph decode no longer blocks the model-runner thread on a stream synchronization
+      before each replay when the graph re-parameterizes attention ops on a separate stream.
