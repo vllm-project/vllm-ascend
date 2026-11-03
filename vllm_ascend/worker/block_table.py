@@ -150,6 +150,8 @@ class BlockTable:
         self.num_blocks_per_row[row_idx] = 0
 
     def move_row(self, src: int, tgt: int) -> None:
+        if src == tgt:
+            return
         num_blocks = self.num_blocks_per_row[src]
         prev_tgt_num_blocks = self.num_blocks_per_row[tgt]
         self.block_table.np[tgt, :num_blocks] = self.block_table.np[src, :num_blocks]

@@ -476,6 +476,15 @@ class TestBlockTableStaleRows(TestBase):
                 cp_kv_cache_interleave_size=1,
             )
 
+    def test_move_row_self_move_is_noop(self):
+        block_table = self.create_block_table()
+        block_table.add_row([10, 11, 12], 0)
+
+        block_table.move_row(0, 0)
+
+        self.assertEqual(block_table.num_blocks_per_row[0], 3)
+        np.testing.assert_array_equal(block_table.block_table.np[0, :3], [10, 11, 12])
+
     def test_move_row_clears_vacated_source_row(self):
         block_table = self.create_block_table()
         block_table.add_row([10, 11, 12], 0)
