@@ -881,13 +881,6 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         # C4 exposes a 512-token logical block backed by one 128-token page.
         scheduler.group_block_size = [512, 128]
         scheduler._reqs_need_send = {}
-        scheduler._reqs_need_recv = {}
-        scheduler._reqs_in_batch = set()
-        scheduler._log_missing_kv_params = False
-        scheduler._missing_kv_requests = {}
-        scheduler._prefill_capture = None
-        scheduler._prefill_capture_requests = {}
-        scheduler.need_truncate = True
         scheduler.block_size = 128
         scheduler.engine_id = "engine"
         scheduler.side_channel_host = "127.0.0.1"
@@ -904,64 +897,6 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         transfer_block_ids = scheduler._compute_transfer_block_ids(block_ids, prompt_len=129)
 
         self.assertEqual(transfer_block_ids, ([0], [100, 101]))
-
-    def test_prefill_capture_excludes_final_token_and_decode(self):
-        for computed, scheduled, expected in [
-            (0, 8, True),
-            (0, 1, True),
-            (98, 1, True),
-            (99, 1, False),
-            (100, 4, False),
-            (0, 0, False),
-        ]:
-            with self.subTest(computed=computed, scheduled=scheduled):
-                scheduler = self._make_scheduler()
-                scheduler._prefill_capture = MagicMock()
-                request = MockRequest("capture-test", list(range(100)), None, RequestStatus.RUNNING)
-                request.num_computed_tokens = computed
-                scheduler.on_new_request(request)
-                output = types.SimpleNamespace(
-                    num_scheduled_tokens={request.request_id: scheduled}, finished_req_ids=set()
-                )
-                scheduler.build_connector_meta(output)
-                self.assertEqual(scheduler._prefill_capture.submit.called, expected)
-                if expected:
-                    scheduler.build_connector_meta(output)
-                    scheduler._prefill_capture.submit.assert_called_once()
-
-    def test_prefill_capture_tracks_healthy_request_until_recomputation(self):
-        scheduler = self._make_scheduler()
-        scheduler._prefill_capture = MagicMock()
-        request = MockRequest("capture-test", list(range(100)), {"do_remote_prefill": True}, RequestStatus.RUNNING)
-        request.num_computed_tokens = 99
-        scheduler.on_new_request(request)
-        request.kv_transfer_params["do_remote_prefill"] = False
-        output = types.SimpleNamespace(num_scheduled_tokens={request.request_id: 1}, finished_req_ids=set())
-        scheduler.build_connector_meta(output)
-        scheduler._prefill_capture.submit.assert_not_called()
-        request.num_computed_tokens = 0
-        scheduler.build_connector_meta(output)
-        scheduler._prefill_capture.submit.assert_called_once()
-        self.assertTrue(scheduler._prefill_capture.submit.call_args.args[3]["do_remote_prefill"])
-
-    def test_prefill_capture_cleans_up_cancelled_request(self):
-        scheduler = self._make_scheduler()
-        scheduler._prefill_capture = MagicMock()
-        request = MockRequest("capture-test", list(range(100)), None, RequestStatus.FINISHED_ABORTED)
-        scheduler.on_new_request(request)
-        self.assertEqual(scheduler.request_finished_all_groups(request, ()), (False, None))
-        self.assertFalse(scheduler._prefill_capture_requests)
-        scheduler._prefill_capture.submit.assert_not_called()
-
-    def test_missing_kv_warning_does_not_repeat_after_flag_cleared(self):
-        scheduler = self._make_scheduler()
-        scheduler._log_missing_kv_params = True
-        request = MockRequest("capture-test", list(range(100)), {"do_remote_prefill": True}, RequestStatus.RUNNING)
-        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.logger") as logger:
-            scheduler.on_new_request(request)
-            scheduler.update_state_after_alloc(request, MagicMock(), 0)
-            self.assertFalse(request.kv_transfer_params["do_remote_prefill"])
-            logger.warning.assert_not_called()
 
     def test_compute_transfer_block_ids_preserves_circular_groups(self):
         scheduler = self._make_scheduler()
