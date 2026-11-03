@@ -4,6 +4,7 @@ import ctypes
 import queue
 import threading
 import time
+from collections import defaultdict
 from collections.abc import Callable
 from typing import Any
 
@@ -482,6 +483,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # store generation independently.
         self.stored_requests: dict[str, set[int]] = {}
         self._next_local_store_job_id = -1
+        self._save_job_source_blocks: dict[int, set[int]] = {}
+        self._block_to_save_jobs: dict[int, set[int]] = defaultdict(set)
         self.group_uses_align_state = group_uses_align_state or []
         self.enable_kv_event = enable_kv_event
         self.completed_events_lock = threading.Lock()
@@ -545,6 +548,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self._next_local_store_job_id -= 1
             self.finished_requests.discard(req_meta.req_id)
             self.stored_requests.setdefault(req_meta.req_id, set()).add(req_meta.store_job_id)
+            # Register before queue publication. The sender's later key and
+            # store-mask filtering only narrows this conservative source set.
+            source_blocks = {
+                block_id
+                for group_id in req_meta.kv_cache_group_ids or [0]
+                if group_id < len(req_meta.block_ids_by_group)
+                for block_id in req_meta.block_ids_by_group[group_id]
+                if block_id > 0
+            }
+            self._save_job_source_blocks[req_meta.store_job_id] = source_blocks
+            for block_id in source_blocks:
+                self._block_to_save_jobs[block_id].add(req_meta.store_job_id)
 
     def add_save_batch(self, requests: list[ReqMeta]) -> KVCacheStoreBatch:
         """Queue requests followed by a fence that completes after the batch."""
@@ -572,6 +587,20 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.request_queue.put(request)
             self.request_queue.put(save_batch)
         return save_batch
+
+    def wait_for_blocks_saved(self, block_ids: set[int] | None) -> None:
+        """Wait only for saves reading a block assigned in this schedule."""
+        if not block_ids:
+            return
+        with self.done_task_lock:
+            pending = {job_id for block_id in block_ids for job_id in self._block_to_save_jobs.get(block_id, ())}
+        while pending:
+            self.raise_if_failed()
+            with self.done_task_lock:
+                pending.intersection_update(self._save_job_source_blocks)
+            if pending:
+                time.sleep(SAVE_REQUEST_POLL_INTERVAL_S)
+        self.raise_if_failed()
 
     def wait_for_requests_saved(self, req_ids: set[str] | None) -> None:
         """Block until every queued save chunk of these requests completed.
@@ -624,14 +653,24 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if jobs is None or req_meta.store_job_id not in jobs:
                 return None
             jobs.remove(req_meta.store_job_id)
+            self._untrack_source_blocks(req_meta.store_job_id)
             remaining = len(jobs)
             if remaining == 0:
                 del self.stored_requests[req_meta.req_id]
             return remaining
 
+    def _untrack_source_blocks(self, job_id: int) -> None:
+        """Forget a job's source blocks while holding done_task_lock."""
+        for block_id in self._save_job_source_blocks.pop(job_id, ()):
+            readers = self._block_to_save_jobs[block_id]
+            readers.discard(job_id)
+            if not readers:
+                del self._block_to_save_jobs[block_id]
+
     def delete_finished_stored_request(self, req_id: str):
         with self.done_task_lock:
-            self.stored_requests.pop(req_id, None)
+            for job_id in self.stored_requests.pop(req_id, ()):
+                self._untrack_source_blocks(job_id)
 
     def get_saved_offset(self, req_id: str) -> int:
         with self.done_task_lock:

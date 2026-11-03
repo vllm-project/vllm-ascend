@@ -379,13 +379,13 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector.connector_worker = MagicMock()
         meta = AscendConnectorMetadata(preempted_req_ids={"p1"})
         connector.handle_preemptions(meta)
-        connector.connector_worker.handle_released_saves.assert_called_once_with({"p1"})
+        connector.connector_worker.handle_released_saves.assert_called_once_with({"p1"}, set())
 
     def test_handle_preemptions_tolerates_metadata_without_released_ids(self):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
         connector.connector_worker = MagicMock()
         connector.handle_preemptions(types.SimpleNamespace())
-        connector.connector_worker.handle_released_saves.assert_called_once_with(None)
+        connector.connector_worker.handle_released_saves.assert_called_once_with(None, None)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_worker")

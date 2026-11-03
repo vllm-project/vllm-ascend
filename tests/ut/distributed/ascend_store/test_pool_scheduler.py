@@ -1060,6 +1060,24 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
         meta = scheduler.build_connector_meta(sched_output)
         self.assertEqual(meta.released_req_ids, {"f1", "f2", "p1"})
+        self.assertEqual(meta.allocated_block_ids, set())
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_build_connector_meta_tracks_reallocated_blocks_of_running_requests(self, mock_client_cls):
+        scheduler = KVPoolScheduler(self._make_config(), use_layerwise=False)
+        scheduler._process_new_request = MagicMock(return_value=None)
+        sched_output = MagicMock()
+        sched_output.finished_req_ids = set()
+        sched_output.preempted_req_ids = set()
+        sched_output.scheduled_new_reqs = [SimpleNamespace(req_id="new", block_ids=[[0, 623], [44]])]
+        sched_output.scheduled_cached_reqs.req_ids = []
+        sched_output.scheduled_cached_reqs.new_block_ids = [None, [[624], [0]]]
+        sched_output.num_scheduled_tokens = {}
+
+        meta = scheduler.build_connector_meta(sched_output)
+
+        self.assertEqual(meta.released_req_ids, set())
+        self.assertEqual(meta.allocated_block_ids, {623, 624, 44})
 
 
 @pytest.mark.parametrize(

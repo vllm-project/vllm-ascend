@@ -1049,15 +1049,20 @@ class KVPoolWorker:
             self._invalid_block_ids.clear()
         return invalid_blocks
 
-    def handle_released_saves(self, released_req_ids: set[str] | None) -> None:
-        """Fence only the saves of requests whose blocks this step may reuse.
+    def handle_released_saves(
+        self,
+        released_req_ids: set[str] | None,
+        allocated_block_ids: set[int] | None = None,
+    ) -> None:
+        """Fence released requests and saves reading newly assigned blocks.
 
         Finished and preempted requests' blocks are freed immediately by the
         scheduler; before this step's forward can reallocate those blocks,
         every queued save chunk of exactly those requests must have drained.
         Requests whose blocks were already released in earlier steps were
         drained by that step's fence and never queue new puts, so they need
-        no further waiting here.
+        no further waiting here. A running request can release SWA blocks
+        without ending; intersect new allocations with pending save sources.
         """
         send_thread = self.kv_send_thread
         if send_thread is None:
@@ -1065,6 +1070,7 @@ class KVPoolWorker:
         send_thread.raise_if_failed()
         if isinstance(send_thread, KVCacheStoreSendingThread):
             send_thread.wait_for_requests_saved(released_req_ids)
+            send_thread.wait_for_blocks_saved(allocated_block_ids)
         # Layerwise saves are already synchronized at each step's final layer.
 
     def wait_for_save(self, connector_metadata: AscendConnectorMetadata) -> None:
