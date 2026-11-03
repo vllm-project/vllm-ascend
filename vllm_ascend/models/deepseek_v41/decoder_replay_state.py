@@ -24,7 +24,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
-from vllm_ascend.utils import enable_dsa_cp, should_skip_allreduce_across_dp_group
+from vllm_ascend.utils import should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 from .decoder_replay_layers import AscendDecoderReplayLayers
@@ -285,8 +285,6 @@ class DecoderReplayState:
             num_tokens = batch.num_tokens_after_padding
         else:
             num_tokens = int(kept_lens.sum())
-            if enable_dsa_cp():
-                num_tokens = round_up(num_tokens, self.config.parallel_config.tensor_parallel_size)
 
         return _DecoderReplayPlan(
             kept_lens=kept_lens,

@@ -198,7 +198,6 @@ class AscendDSAV41Metadata(AttentionMetadata):
     c2_source_sin: torch.Tensor | None = None
     c2_metadata_group_id: int | None = None
     global_metadata: "AscendDSAV41Metadata | None" = None
-    cp_token_range: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -786,7 +785,7 @@ class AscendDSAV41Impl:
             attention_output = self._forward_attention(attn, q, metadata, compressed_indices)
             AscendDSAV41Impl._apply_rotary(attn, attention_output, cos, sin, inverse=True)
         else:
-            heads = attn.n_heads if getattr(attn, "enable_dsa_cp", False) else attn.n_local_heads
+            heads = attn.n_local_heads
             attention_output = hidden_states.new_empty((0, heads, attn.head_dim))
         self._project_output(attn, attention_output, hidden_states, metadata, projected=output)
         return output

@@ -6,8 +6,8 @@ from vllm.triton_utils import triton
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.ops.triton.v1.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.worker.spec_decode_utils import PREPARE_INPUTS_BLOCK_SIZE as BLOCK_SIZE
 
 

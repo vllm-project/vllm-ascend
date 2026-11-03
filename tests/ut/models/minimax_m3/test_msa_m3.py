@@ -574,21 +574,19 @@ def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
     assert "1.0 + self.q_norm.weight" in source
 
 
-def test_a5_index_score_uses_ascendc_prefill_and_triton_decode() -> None:
+def test_index_score_uses_ascendc_prefill_and_decode_on_all_devices() -> None:
     module_source = inspect.getsource(msa_m3_module)
     a5_branch_start = module_source.index("if get_ascend_device_type() == AscendDeviceType.A5:")
     a5_branch_end = module_source.index("\n\ndef _active_decode_num_reqs", a5_branch_start)
     import_branches = module_source[a5_branch_start:a5_branch_end]
 
     assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL is True
-    assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE is (
-        msa_m3_module.get_ascend_device_type() != AscendDeviceType.A5
-    )
+    assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE is True
     assert import_branches.count("minimax_m3_index_decode") == 1
     assert "msa_m3_triton_a5" in import_branches
     assert "msa_m3_triton" not in import_branches.replace("msa_m3_triton_a5", "")
     assert "_USE_ASCENDC_INDEX_SCORE_PREFILL = True" in module_source
-    assert "_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5" in module_source
+    assert "_USE_ASCENDC_INDEX_SCORE_DECODE = True" in module_source
 
 
 def _make_mrv2_padding_context(
@@ -608,7 +606,8 @@ def _make_mrv2_padding_context(
     )
 
 
-def test_a5_indexer_forward_keeps_original_decode_path() -> None:
+def test_a5_indexer_forward_keeps_triton_decode_branch() -> None:
+    """The A5 Triton decode branch stays patched-reachable as a rollback path."""
     impl = object.__new__(AscendMiniMaxM3IndexerImpl)
     torch.nn.Module.__init__(impl)
     impl.num_index_heads = 1
