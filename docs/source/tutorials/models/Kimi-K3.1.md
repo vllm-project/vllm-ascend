@@ -62,7 +62,7 @@ Registration alone does not validate the required operators or PP transport.
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
-### 5.2 Basic Eight-Node PD Separation Deployment
+### 5.1 Basic Eight-Node PD Separation Deployment
 
 This A5 deployment uses eight nodes with eight devices per node. Four Prefill nodes form **one** DP1/TP8/PP4 instance with layer partition `24,24,24,21`. The other four nodes form a DP4 Decode group, with TP8 and PP1 on each node. Only Prefill rank 0 exposes an HTTP endpoint; each Decode rank exposes its own endpoint.
 
@@ -70,7 +70,7 @@ The following templates provide the complete PD configuration: a 1M context wind
 
 Keep the P/D master addresses, RPC ports, HTTP ports, and KV port ranges independent. Complete the MemCache environment setup in [Section 4.1](#41-docker-image-installation) before starting the engines.
 
-#### 5.2.1 Create the engine templates
+#### 5.1.1 Create the engine templates
 
 Use the same seven template arguments and `run_dp_template.sh` filename as Kimi K3. Replace each node's `local_ip` and `nic_name`, the role's KV base port, and the model and MemCache paths. Both templates use `lookup_rpc_port=0` for one local engine per node; use distinct IPC identifiers if multiple engines share the same local IPC namespace.
 
@@ -311,7 +311,7 @@ Use the same seven template arguments and `run_dp_template.sh` filename as Kimi 
 
         On all four Prefill nodes, pass the same Prefill master IP as the fifth argument (`--master-addr`) and the same master port as the sixth argument (`--master-port`). Keep PP4, TP8, `24,24,24,21`, and checkpoint paths consistent. Start the master before the workers, keeping it running in a separate shell while the group forms.
 
-#### 5.2.2 Start the engines
+#### 5.1.2 Start the engines
 
 Deploy [`launch_online_dp.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py) and save the corresponding Prefill or Decode template as `run_dp_template.sh` on every node. Start MetaService and all standalone MemCache processes before launching the engines.
 
@@ -400,7 +400,7 @@ Follow [Kimi K3 Section 8.2](Kimi-K3.md#82-using-vllm-benchmark), replacing the 
 
 ### 9.1 Recommended Configurations
 
-The following reference values match the engine templates in [Section 5.2](#52-basic-eight-node-pd-separation-deployment). Validate memory capacity and concurrency for the selected checkpoints and workload.
+The following reference values match the engine templates in [Section 5.1](#51-basic-eight-node-pd-separation-deployment). Validate memory capacity and concurrency for the selected checkpoints and workload.
 
 | Setting | 950DT Prefill | 950DT Decode |
 | --- | --- | --- |
