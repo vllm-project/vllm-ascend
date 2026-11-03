@@ -48,6 +48,9 @@ speculative decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode. The
 DeepSeek-V4.1-Flash model currently supports only model runner V1 on Ascend, so
 all A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
 
+For an optional, default-off Decode optimization, see
+[Engram WKV overlap](../../user_guide/feature_guide/engram_wkv_overlap.md).
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weights and Hardware
