@@ -6,7 +6,7 @@
 - **Supported vLLM ABI**: vLLM 0.32.0 `prepare_dflash_inputs`, including
   `cp_rank`, `cp_size`, and `cp_interleave` for rank-local DCP KV slots.
 - **Implementation**:
-    - `vllm_ascend/ops/triton/v2/spec_decode/prepare_dflash_inputs.py` contains
+    - `vllm_ascend/ops/triton/spec_decode/prepare_dflash_inputs.py` contains
       the 2-D Triton kernel and launcher `prepare_dflash_inputs_triton`.
     - `vllm_ascend/worker/v2/spec_decode/dflash/speculator.py` provides the
       vLLM 0.32.0 `prepare_dflash_inputs` wrapper.

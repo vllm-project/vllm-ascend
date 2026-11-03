@@ -2461,6 +2461,133 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertNotIn(201, request.load_block_gvas_by_group_np[0])
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
+    @staticmethod
+    def _make_multi_block_gva_request(block_hashes):
+        block_ids = list(range(7, 7 + len(block_hashes)))
+        return ReqMeta(
+            req_id="indexed-load",
+            token_len_chunk=16 * len(block_hashes),
+            target_token_len=16 * len(block_hashes),
+            block_ids=block_ids,
+            block_ids_by_group=[block_ids],
+            block_ids_np=np.asarray(block_ids, dtype=np.int64),
+            block_ids_by_group_np=[np.asarray(block_ids, dtype=np.int64)],
+            block_hashes=block_hashes,
+            load_spec=LoadSpec(0, 16 * len(block_hashes), True),
+        )
+
+    def test_layerwise_lease_refresh_preserves_first_duplicate_key_index(self):
+        worker = self._make_gva_worker()
+        request = self._make_multi_block_gva_request(["h0", "h1", "h0"])
+        before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in (201, 202, 203)]
+        pinned = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in (301, 302, 303)]
+        worker.m_store.batch_get_key_info.side_effect = [before, pinned]
+        worker.m_store.batch_add_lease.return_value = [0, 0, 0]
+
+        self.assertIsNone(worker._prepare_load_gvas_for_request([request]))
+
+        # Repeated replies update the first matching slot, as keys.index did.
+        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [303, 302, 203])
+        queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
+        self.assertEqual(queried[0], queried[2])
+        self.assertEqual(request.load_keys, queried)
+        self.assertEqual(worker._step_load_keys, set(queried))
+
+    def test_layerwise_lease_refresh_has_linear_key_lookup_work(self):
+        operations = {"eq": 0, "hash": 0}
+
+        class CountedKey(str):
+            def __eq__(self, other: object) -> bool:
+                operations["eq"] += 1
+                return str.__eq__(self, other)
+
+            def __hash__(self) -> int:
+                operations["hash"] += 1
+                return str.__hash__(self)
+
+        count = 128
+        worker = self._make_gva_worker()
+        request = self._make_multi_block_gva_request([f"h{index}" for index in range(count)])
+        worker._make_layerwise_full_key = lambda group, block_hash: CountedKey(f"full@{group}@{block_hash}")
+        before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in range(1000, 1000 + count)]
+        refreshed = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in range(2000, 2000 + count)]
+        worker.m_store.batch_get_key_info.side_effect = [before, refreshed]
+        worker.m_store.batch_add_lease.return_value = [0] * count
+        operations["eq"] = operations["hash"] = 0
+
+        self.assertIsNone(worker._prepare_load_gvas_for_request([request]))
+        lookup_work = sum(operations.values())
+
+        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), list(range(2000, 2000 + count)))
+        self.assertEqual(request.load_keys, [f"full@0@h{index}" for index in range(count)])
+        self.assertEqual(worker._step_load_keys, set(request.load_keys))
+        self.assertEqual(worker.m_store.batch_get_key_info.call_count, 2)
+        worker.m_store.batch_add_lease.assert_called_once()
+        # Bound key operations rather than elapsed time or implementation details;
+        # a separate linear scan for every refreshed block must fail this guard.
+        self.assertLessEqual(lookup_work, 16 * count)
+
+    def test_layerwise_lease_refresh_keeps_sparse_success_indices(self):
+        worker = self._make_gva_worker()
+        request = self._make_multi_block_gva_request(["h0", "h1", "h2"])
+        before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in (201, 202, 203)]
+        pinned = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in (301, 303)]
+        worker.m_store.batch_get_key_info.side_effect = [before, pinned]
+        worker.m_store.batch_add_lease.return_value = [0, -1, 0]
+
+        self.assertFalse(worker._prepare_load_gvas_for_request([request]))
+
+        queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
+        refreshed = worker.m_store.batch_get_key_info.call_args_list[1].args[0]
+        self.assertEqual(refreshed, [queried[0], queried[2]])
+        self.assertEqual(worker._step_load_keys, set(refreshed))
+        self.assertIsNone(request.load_block_gvas_by_group_np)
+
+    def test_layerwise_lease_refresh_rejects_malformed_metadata(self):
+        for stage in ("before_lease", "under_lease"):
+            for malformed in (None, [], [SimpleNamespace(gva_list=lambda: [301])]):
+                with self.subTest(stage=stage, malformed=malformed):
+                    worker = self._make_gva_worker()
+                    request = self._make_multi_block_gva_request(["h0", "h1"])
+                    before = [SimpleNamespace(size=lambda: 64, gva_list=lambda: [201])] * 2
+                    worker.m_store.batch_get_key_info.side_effect = (
+                        [malformed] if stage == "before_lease" else [before, malformed]
+                    )
+                    worker.m_store.batch_add_lease.return_value = [0, 0]
+
+                    self.assertFalse(worker._prepare_load_gvas_for_request([request]))
+
+                    self.assertIsNone(request.load_block_gvas_by_group_np)
+                    if stage == "before_lease":
+                        worker.m_store.batch_add_lease.assert_not_called()
+                        self.assertEqual(worker._step_load_keys, set())
+                    else:
+                        queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
+                        self.assertEqual(worker._step_load_keys, set(queried))
+
+    def test_layerwise_lease_refresh_keeps_partial_retry_index(self):
+        worker = self._make_gva_worker()
+        request = self._make_multi_block_gva_request(["h0", "h1", "unused"])
+        request.block_hashes = ["h0", "h1"]
+        request.target_token_len = 56
+        request.load_spec = LoadSpec(0, 40, True)
+        before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in (201, 202, 203)]
+        pinned = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in (301, 302, 303)]
+        worker.m_store.batch_get_key_info.side_effect = [before, pinned]
+        worker.m_store.batch_add_lease.side_effect = [[0, 0, -3101], [0]]
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.time.sleep"
+        ) as sleep:
+            self.assertIsNone(worker._prepare_load_gvas_for_request([request]))
+
+        queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
+        self.assertEqual(worker.m_store.batch_add_lease.call_args_list[1].args[0], [queried[2]])
+        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [301, 302, 0])
+        self.assertEqual(request.partial_load_gva_per_group, [303])
+        self.assertEqual(worker._step_load_keys, set(queried))
+        sleep.assert_called_once()
+
     def test_full_pool_hit_uses_verified_extent(self):
         worker = self._make_gva_worker()
         worker.independent_layers = [0]
@@ -2906,6 +3033,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         config.parallel_config.data_parallel_rank = 0
         config.parallel_config.rank = 0
         config.parallel_config.pipeline_parallel_size = 1
+        config.parallel_config.prefill_context_parallel_size = 1
         config.kv_transfer_config.kv_role = kv_role
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {"backend": "mooncake"}
         config.cache_config.block_size = 16

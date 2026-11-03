@@ -64,7 +64,7 @@
 ```python
 import torch
 
-from vllm_ascend.ops.triton.v2.metrics.num_nans import (
+from vllm_ascend.ops.triton.metrics.num_nans import (
     _num_nans_kernel,
     get_num_nans,
 )
