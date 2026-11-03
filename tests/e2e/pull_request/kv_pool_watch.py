@@ -78,9 +78,9 @@ class PoolSnapshot:
 def snapshot_metrics(source: Any) -> PoolSnapshot:
     """Read current pool counters from a runner or model exposing ``get_metrics()``.
 
-    ``VllmRunner.get_metrics()`` returns the raw ``PromMetric`` list while
-    ``DPVllmRunner.get_metrics()`` returns ``name -> value`` summed over DP
-    ranks, so both shapes are accepted here.
+    Both ``VllmRunner.get_metrics()`` and ``DPVllmRunner.get_metrics()``
+    return ``name -> value`` (the latter sums over DP ranks); the raw
+    ``PromMetric`` list from ``LLM.get_metrics()`` is also accepted.
 
     ``LLM.get_metrics()`` requires ``disable_log_stats=False``; otherwise it
     raises ``AssertionError: Stat logging disabled``.

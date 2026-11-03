@@ -1206,14 +1206,19 @@ class VllmRunner:
         req_outputs = self.model.score(text_1, text_2, *args, **kwargs)
         return [req_output.outputs.score for req_output in req_outputs]
 
-    def get_metrics(self) -> list[Any]:
-        """Return the engine's raw prometheus metrics.
+    def get_metrics(self) -> dict[str, float]:
+        """Return engine metrics flattened to ``name -> value``.
 
-        Requires ``disable_log_stats=False``; ``LLM.get_metrics()`` asserts on
-        disabled stats. Pool watch helpers read ``external_prefix_cache_*``
-        and ``ascend_store_*`` from this list.
+        PromMetric objects are not picklable and counters/gauges are all the
+        pool watch helpers need, so metrics without a ``value`` attribute
+        (histograms) are dropped. Requires ``disable_log_stats=False``;
+        ``LLM.get_metrics()`` asserts on disabled stats.
         """
-        return self.model.get_metrics()
+        return {
+            metric.name: float(metric.value)
+            for metric in self.model.get_metrics()
+            if getattr(metric, "value", None) is not None
+        }
 
     def __enter__(self):
         return self
