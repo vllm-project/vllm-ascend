@@ -139,6 +139,9 @@ class NPUPlatform(Platform):
         elif model_config and hasattr(model_config.hf_config, "index_topk"):
             vllm_config.cache_config.cache_dtype = str(
                 model_config.dtype).replace("torch.", "")
+        # Opt-in  profile defaults; unrelated models retain platform defaults.
+        from vllm_ascend.quantization.splitquant_runtime import apply_execution_profile
+        apply_execution_profile(vllm_config)
         if model_config is None:
             logger.warning("Model config is missing. This may indicate "
                            "that we are running a test case")
@@ -278,9 +281,10 @@ class NPUPlatform(Platform):
                 origin_block_size = cache_config.block_size
                 cache_config.block_size = 128
                 # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-                if model_config and model_config.hf_config.model_type == "qwen3_next":
+                if model_config and model_config.hf_config.model_type in (
+                        "qwen3_next", "qwen3_5"):
                     logger.warning(
-                        "When running qwen3-next model, block_size needs to be restored to its original value."
+                        "When running Qwen3 hybrid models, block_size needs to be restored to its original value."
                     )
                     cache_config.block_size = origin_block_size
 

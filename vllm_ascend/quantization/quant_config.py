@@ -64,6 +64,32 @@ class AscendQuantConfig(QuantizationConfig):
                 new_k = k.replace(".shared_head.", ".")
                 extra_quant_dict[new_k] = self.quant_description[k]
         self.quant_description.update(extra_quant_dict)
+        # Qwen3.5 exports the text tower below ``model.language_model`` while
+        # vLLM's Qwen3Next implementation exposes it as ``model``.  Preserve
+        # the original entries and add aliases for quantization lookup.
+        for key, value in list(self.quant_description.items()):
+            if key.startswith("model.language_model."):
+                self.quant_description.setdefault(
+                    "model." + key[len("model.language_model."):], value)
+        # Runtime fuses these BF16 checkpoints into single vLLM parameters.
+        # The source entries are separate, unquantized tensors.
+        for key, value in list(self.quant_description.items()):
+            if ".self_attn.q_proj.weight" in key:
+                self.quant_description.setdefault(
+                    key.replace("q_proj.weight", "qkv_proj.weight"), value)
+            if ".linear_attn.in_proj_qkv.weight" in key:
+                self.quant_description.setdefault(
+                    key.replace("in_proj_qkv.weight", "in_proj.weight"), value)
+        # Qwen3Next fuses the four GDN projections at runtime.  They are
+        # explicitly FLOAT in this export; add metadata for the fused names so
+        # the quantizer does not attempt to apply W4A4 to them.
+        for key, value in list(self.quant_description.items()):
+            if ".linear_attn.in_proj_qkv.weight" in key:
+                self.quant_description.setdefault(
+                    key.replace("in_proj_qkv", "in_proj_qkvz"), value)
+            if ".linear_attn.in_proj_b.weight" in key:
+                self.quant_description.setdefault(
+                    key.replace("in_proj_b", "in_proj_ba"), value)
 
     def __repr__(self) -> str:
         return "AscendQuantConfig:\n" + super().__repr__()
@@ -164,7 +190,9 @@ class AscendQuantConfig(QuantizationConfig):
                 self.quant_description[layer]
                 for layer in self.quant_description if prefix in layer
             ]
-            is_skipped = any(quantization == "FLOAT"
+            if not experts_quant_description:
+                raise KeyError(f"No quantization description for {prefix}")
+            is_skipped = all(quantization == "FLOAT"
                              for quantization in experts_quant_description)
         else:
             is_skipped = self.quant_description[prefix + '.weight'] == "FLOAT"
@@ -177,6 +205,18 @@ class AscendQuantConfig(QuantizationConfig):
 
 
 packed_modules_model_mapping = {
+    # SplitQuant quantizes Q/K/V and gate/up independently. Its checkpoint
+    # therefore cannot be loaded into vLLM's fused qkv_proj/gate_up_proj.
+    "qwen3_5": {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "in_proj": ["in_proj_qkvz", "in_proj_ba"],
+    },
+    "qwen3_5_text": {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "in_proj": ["in_proj_qkvz", "in_proj_ba"],
+    },
+    "qwen3_5_moe": {},
+    "qwen3_5_moe_text": {},
     "qwen3_moe": {
         "qkv_proj": [
             "q_proj",
@@ -268,6 +308,8 @@ class AscendLinearMethod(LinearMethodBase):
         self.quant_method = get_quant_method(quant_config.quant_description,
                                              prefix, "linear",
                                              packed_modules_mapping)
+        self.prefix = prefix
+        self.quant_method.prefix = prefix
 
     def create_weights(
         self,
@@ -334,12 +376,38 @@ class AscendLinearMethod(LinearMethodBase):
             layer_type=layer_type)
         for pergroup_name, pergroup_param in pergroup_dict.items():
             param = torch.nn.Parameter(pergroup_param, requires_grad=False)
-            set_weight_attrs(param, {"output_dim": 0})
+            if isinstance(layer, RowParallelLinear):
+                # Per-K-group scale/offset follows the row-parallel input
+                # partition: [output, groups] -> shard groups on dim 1.
+                set_weight_attrs(param, {"input_dim": 1})
+            else:
+                set_weight_attrs(param, {"output_dim": 0})
             layer.register_parameter(pergroup_name, param)
             set_weight_attrs(param, extra_weight_attrs)
             if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name:
                 setattr(param, "input_dim", 1)
                 param.input_dim = 1
+
+        extra_param_getter = getattr(self.quant_method, "get_extra_param", None)
+        if extra_param_getter is not None:
+            extra_params = extra_param_getter(
+                input_size_per_partition, output_size_per_partition,
+                params_dtype, self.prefix,
+                ("activation_clip_max", "activation_clip_min", "group_trans",
+                 "right_trans", "left_trans"))
+            for name, tensor in extra_params.items():
+                param = torch.nn.Parameter(tensor, requires_grad=False)
+                layer.register_parameter(name, param)
+                # These tensors are indexed by the linear input channel
+                # groups.  Row parallel layers therefore receive the same
+                # input-dimension shard as the weight (e.g. 136 -> 34
+                # groups for Qwen3.5 down_proj at TP=4).
+                attrs = dict(extra_weight_attrs)
+                if (isinstance(layer, RowParallelLinear)
+                        and name in ("activation_clip_max",
+                                     "activation_clip_min", "group_trans")):
+                    attrs["input_dim"] = 0
+                set_weight_attrs(param, attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
