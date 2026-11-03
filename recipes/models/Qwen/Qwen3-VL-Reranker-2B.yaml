@@ -1,0 +1,89 @@
+meta:
+  title: "Qwen3-VL-Reranker-2B"
+  slug: "Qwen3-VL-Reranker-2B"
+  provider: "Qwen"
+  description: "Qwen3-VL-Reranker-2B — a 2B vision-language reranker producing relevance scores for query-document pairs across text and multimodal inputs; single-card pooling serving on Ascend 910C with vLLM Ascend"
+  date_added: 2026-10-14
+  date_updated: 2026-11-03
+  tasks:
+    - embedding
+    - multimodal
+  performance_headline: "Single-card pooling serving on Ascend 910C with vLLM Ascend"
+  default_hardware: ascend_910c
+  hardware:
+    ascend_910c: verified
+
+model:
+  model_id: "Qwen/Qwen3-VL-Reranker-2B"
+  min_vllm_version: "0.11.0"
+  architecture: dense
+  parameter_count: "2B"
+  active_parameters: "2B"
+  context_length: 32768
+  base_args:
+    - "--runner"
+    - "pooling"
+    - "--hf_overrides"
+    - '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
+    - "--chat-template"
+    - "/vllm-workspace/vllm/examples/pooling/score/template/qwen3_vl_reranker.jinja"
+  base_env: {}
+  docker_image:
+    ascend_910c: "quay.io/ascend/vllm-ascend:nightly-main-a3"
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 5
+    supported_hardware: [ascend_910c]
+    hardware_overrides:
+      ascend_910c:
+        docker_image: "quay.io/ascend/vllm-ascend:nightly-main-a3"
+        install:
+          pip: false
+        extra_args:
+          - "--max-model-len"
+          - "1024"
+    description: "BF16 checkpoint for single-node Ascend 910C pooling with the official chat template; Ascend 910C main/nightly serving and rerank benchmark validated"
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+strategy_overrides: {}
+
+dependencies: []
+
+guide: |
+  ## Overview
+
+  Qwen3-VL-Reranker-2B produces relevance scores for text and multimodal query-document
+  pairs. This recipe uses the required sequence-classification overrides and the official
+  Qwen3 VL reranker chat template for pooling serving on Ascend 910C.
+
+  ## Validation scope and support status
+
+  The configuration mirrors the last documented v0.23.0 tutorial. The main tutorial marks
+  this model discontinued starting with v0.30.0, so nightly compatibility must not be read
+  as an official support claim. The checkpoint config exposes 262144 positions while the
+  model card lists a 32K context; the runtime validation below used `--max-model-len 1024`.
+  On one Atlas 800T A3 NPU, vLLM 0.32.0+empty and vLLM Ascend
+  0.19.1rc2.dev3230+g469c6c260 passed health and model-list checks with the official chat
+  template. The tutorial query returned 181 prompt tokens and relevance scores of 0.877913
+  for the capital-of-China document and 0.096828 for the gravity document. Two independent
+  100-request benchmarks at concurrency 16 each completed all requests without failures,
+  with request throughput of 180.45 and 189.12 requests/s and mean end-to-end latency of
+  79.70 and 76.28 ms. These are reproducibility measurements, not official performance
+  baselines. Full MTEB accuracy, multimodal, long-context, and other hardware scenarios
+  remain unverified.
+
+  The `--chat-template` path above points at the official vLLM Ascend image layout. If vLLM
+  is installed differently, copy `examples/pooling/score/template/qwen3_vl_reranker.jinja`
+  from the vLLM source tree and pass its absolute path instead.
+
+  ## References
+
+  - [Historical vLLM Ascend tutorial (v0.23.0)](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Qwen3-VL-Reranker.html)
+  - [Main tutorial support status](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/Qwen3-VL-Reranker.md)
+  - [Qwen3-VL-Reranker-2B model card](https://huggingface.co/Qwen/Qwen3-VL-Reranker-2B)
+  - [Qwen3-VL-Reranker-2B on ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B)
