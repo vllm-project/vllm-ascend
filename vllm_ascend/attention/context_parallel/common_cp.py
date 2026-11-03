@@ -4,11 +4,33 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch_npu
+from vllm import envs
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
+from vllm.logger import logger
 
 import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
-from vllm_ascend.utils import model_uses_kpool_indexer
+from vllm_ascend.utils import enable_sfa, model_uses_kpool_indexer
+
+
+def use_dcp_q_replicate(vllm_config) -> bool:
+    """Resolve dense MLA Q replication before creating Q projections."""
+    parallel = vllm_config.parallel_config
+    requested = (
+        envs.VLLM_DCP_Q_REPLICATE
+        if envs.is_set("VLLM_DCP_Q_REPLICATE")
+        else bool(getattr(parallel, "dcp_q_replicate", False))
+    )
+    if not requested or parallel.decode_context_parallel_size <= 1 or parallel.prefill_context_parallel_size > 1:
+        return False
+    if enable_sfa(vllm_config):
+        logger.warning_once("Ascend dcp_q_replicate is not supported for SFA; disabling Q replication.")
+        return False
+    # LoRA wrappers do not implement the replicated-Q projection layout.
+    if vllm_config.lora_config is not None:
+        logger.warning_once("Ascend dcp_q_replicate is not supported for LoRA adapters; disabling Q replication.")
+        return False
+    return True
 
 
 def is_pcp_decode_sharding_enabled(vllm_config) -> bool:

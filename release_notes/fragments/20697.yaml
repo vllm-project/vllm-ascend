@@ -1,0 +1,6 @@
+pr: 20697
+entries:
+  - category: bugfix
+    text: Use a 512-channel Triton tile for Qwen4Exp PLE prefill on Ascend devices to avoid the A3 oversized-UB compilation failure.
+    model: qwen4exp
+    hardware: [A3, A5]

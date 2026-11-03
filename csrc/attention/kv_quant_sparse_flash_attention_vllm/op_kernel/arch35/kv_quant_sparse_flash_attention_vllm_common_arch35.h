@@ -18,23 +18,32 @@
 #include "qsfa_a5_address_precompute.h"
 #include "kernel_tiling/kernel_tiling.h"
 
-#if __has_include("../../sparse_flash_attention/arch35/common/util_regbase.h")
+// The installed AscendC package flattens each dependency's op_kernel directory.
+#if __has_include("../../sparse_flash_attention/arch35/util_regbase.h")
+#include "../../sparse_flash_attention/arch35/util_regbase.h"
+#elif __has_include("../../sparse_flash_attention/arch35/common/util_regbase.h")
 #include "../../sparse_flash_attention/arch35/common/util_regbase.h"
 #else
 #include "../../../sparse_flash_attention/op_kernel/arch35/util_regbase.h"
 #endif
 
-#if __has_include("../../common/op_kernel/buffer.h")
+#if __has_include("../../common/buffer.h")
+#include "../../common/buffer.h"
+#elif __has_include("../../common/op_kernel/buffer.h")
 #include "../../common/op_kernel/buffer.h"
 #else
 #include "../../../common/op_kernel/buffer.h"
 #endif
-#if __has_include("../../common/op_kernel/buffer_manager.h")
+#if __has_include("../../common/buffer_manager.h")
+#include "../../common/buffer_manager.h"
+#elif __has_include("../../common/op_kernel/buffer_manager.h")
 #include "../../common/op_kernel/buffer_manager.h"
 #else
 #include "../../../common/op_kernel/buffer_manager.h"
 #endif
-#if __has_include("../../common/op_kernel/buffers_policy.h")
+#if __has_include("../../common/buffers_policy.h")
+#include "../../common/buffers_policy.h"
+#elif __has_include("../../common/op_kernel/buffers_policy.h")
 #include "../../common/op_kernel/buffers_policy.h"
 #else
 #include "../../../common/op_kernel/buffers_policy.h"
