@@ -53,7 +53,7 @@ def config():
                 "method": "dspark",
                 "physical_k": {"min_k": 3},
             }
-        }
+        },
     )
 
 
@@ -68,9 +68,7 @@ def test_tp16_keeps_upstream_adaptive_manager_unmodified():
 
 def test_noop_minimum_keeps_upstream_adaptive_manager_unmodified():
     no_op_config = config()
-    no_op_config.additional_config["dynamic_spec_config"]["physical_k"] = {
-        "min_k": 4
-    }
+    no_op_config.additional_config["dynamic_spec_config"]["physical_k"] = {"min_k": 4}
     manager = FakeManager()
 
     assert configure_physical_k_profiling(manager, no_op_config) is manager
@@ -117,11 +115,7 @@ def test_small_config_profiles_all_non_empty_batch_buckets():
     manager = configure_physical_k_profiling(FakeManager(), config())
     cases = list(manager.batches_to_profile([8]))
     buckets_by_k = {
-        physical_k: {
-            case["num_tokens"]
-            for case in cases
-            if case["profile_physical_k"] == physical_k
-        }
+        physical_k: {case["num_tokens"] for case in cases if case["profile_physical_k"] == physical_k}
         for physical_k in (3, 4)
     }
     assert buckets_by_k == {3: {1, 2, 4, 8}, 4: {1, 2, 4, 8}}
@@ -149,11 +143,7 @@ def test_profile_interleaves_widths_without_reordering_upstream_samples():
     manager = configure_physical_k_profiling(FakeManager(), config())
     cases = list(manager.batches_to_profile([8]))
     assert [case["profile_physical_k"] for case in cases[:6]] == [3, 4, 3, 4, 3, 4]
-    upstream = [
-        case
-        for case, is_upstream in zip(cases, manager._physical_k_profile_is_upstream)
-        if is_upstream
-    ]
+    upstream = [case for case, is_upstream in zip(cases, manager._physical_k_profile_is_upstream) if is_upstream]
     assert [case["num_tokens"] for case in upstream] == [8, 8]
 
 
@@ -163,11 +153,7 @@ def test_lower_k_profile_median_ignores_one_cold_replay():
     slow_replay_seen = False
     samples = []
     for case in cases:
-        slow_replay = (
-            case["profile_physical_k"] == 3
-            and case["num_tokens"] == 1
-            and not slow_replay_seen
-        )
+        slow_replay = case["profile_physical_k"] == 3 and case["num_tokens"] == 1 and not slow_replay_seen
         if slow_replay:
             slow_replay_seen = True
         samples.append(
@@ -188,11 +174,7 @@ def test_profile_grid_extends_through_large_rl_batch_buckets():
     manager = configure_physical_k_profiling(manager, config())
     cases = list(manager.batches_to_profile([8]))
     by_k = {
-        physical_k: {
-            case["num_tokens"]
-            for case in cases
-            if case["profile_physical_k"] == physical_k
-        }
+        physical_k: {case["num_tokens"] for case in cases if case["profile_physical_k"] == physical_k}
         for physical_k in (3, 4)
     }
     expected = {1, 2, 4, 8, 16, 32, 64}

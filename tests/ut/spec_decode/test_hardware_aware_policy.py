@@ -120,9 +120,7 @@ def test_missing_profile_uses_acceptance_fallback():
 
 
 def test_adaptive_verification_waits_for_cost_profile_before_downshift():
-    controller = AdaptiveDraftKController(
-        max_k=5, min_k=3, require_profile_for_downshift=True
-    )
+    controller = AdaptiveDraftKController(max_k=5, min_k=3, require_profile_for_downshift=True)
     controller.cap(5, 16)
     for _ in range(8):
         controller.observe([5] * 16, [[0]] * 16)
@@ -137,9 +135,7 @@ def test_adaptive_verification_waits_for_cost_profile_before_downshift():
 
 def test_output_recommendation_drives_controller():
     controller = AdaptiveDraftKController(max_k=5, min_k=3)
-    scheduler_output = SimpleNamespace(
-        scheduled_spec_decode_tokens={str(i): [1] * 5 for i in range(16)}
-    )
+    scheduler_output = SimpleNamespace(scheduled_spec_decode_tokens={str(i): [1] * 5 for i in range(16)})
     model_output = SimpleNamespace(
         physical_k_recommendation=(16, 3),
         req_ids=[str(i) for i in range(16)],
@@ -188,9 +184,7 @@ def test_full_k_profile_is_a_runtime_noop():
 
 def test_worker_recommendation_is_not_applied_to_a_different_batch_bucket():
     controller = AdaptiveDraftKController(max_k=5, min_k=3)
-    scheduler_output = SimpleNamespace(
-        scheduled_spec_decode_tokens={str(i): [1] * 5 for i in range(8)}
-    )
+    scheduler_output = SimpleNamespace(scheduled_spec_decode_tokens={str(i): [1] * 5 for i in range(8)})
     model_output = SimpleNamespace(
         physical_k_recommendation=(1, 3),
         req_ids=[str(i) for i in range(8)],
@@ -210,9 +204,7 @@ def test_small_batch_updates_controller_observation():
             super().observe(scheduled_widths, sampled_token_ids)
 
     controller = CountingController(max_k=5, min_k=3)
-    scheduler_output = SimpleNamespace(
-        scheduled_spec_decode_tokens={str(i): [1] * 5 for i in range(8)}
-    )
+    scheduler_output = SimpleNamespace(scheduled_spec_decode_tokens={str(i): [1] * 5 for i in range(8)})
     model_output = SimpleNamespace(
         physical_k_recommendation=None,
         req_ids=[str(i) for i in range(8)],
@@ -256,9 +248,7 @@ def test_create_controller_and_opt_out():
     config = SimpleNamespace(
         use_v2_model_runner=True,
         additional_config={"dynamic_spec_config": compact(min_k=4)},
-        speculative_config=SimpleNamespace(
-            num_speculative_tokens=5, enable_adaptive_verification=True
-        ),
+        speculative_config=SimpleNamespace(num_speculative_tokens=5, enable_adaptive_verification=True),
     )
     assert _create_controller(config).auto_tune
     assert _create_controller(config).require_profile_for_downshift

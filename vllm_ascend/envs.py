@@ -22,6 +22,14 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+
+def _strict_binary_env(name: str, default: str = "0") -> bool:
+    value = os.getenv(name, default)
+    if value not in {"0", "1"}:
+        raise ValueError(f"{name} must be either '0' or '1', got {value!r}")
+    return value == "1"
+
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 

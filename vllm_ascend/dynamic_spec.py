@@ -20,7 +20,6 @@ from vllm.logger import logger
 
 from vllm_ascend import envs
 
-
 _ACCEPTANCE_EMA_ALPHA = 0.2
 _BUCKET_SWITCH_STEPS = 2
 _MIN_K_DWELL_STEPS = 8
@@ -39,7 +38,7 @@ _ACCEPTED_TAIL_THRESHOLD = 0.25
 
 def _trace_physical_k(message: str, *args: Any) -> None:
     if envs.VLLM_ASCEND_PHYSICAL_K_TRACE:
-        logger.info("ASCEND_AV_PHYSICAL_K_TRACE " + message, *args)
+        logger.info("ASCEND_AV_PHYSICAL_K_TRACE %s", message % args if args else message)
 
 
 def resolve_physical_k(dynamic_config: dict[str, Any]) -> dict[str, Any] | None:
@@ -72,9 +71,7 @@ def physical_k_runtime_enabled(vllm_config: Any) -> bool:
     the ordinary adaptive path without its controller overhead.
     """
 
-    dynamic = (getattr(vllm_config, "additional_config", None) or {}).get(
-        "dynamic_spec_config", {}
-    )
+    dynamic = (getattr(vllm_config, "additional_config", None) or {}).get("dynamic_spec_config", {})
     if not isinstance(dynamic, dict) or (params := resolve_physical_k(dynamic)) is None:
         return False
     parallel_config = getattr(vllm_config, "parallel_config", None)
@@ -225,9 +222,7 @@ class AdaptiveDraftKController:
         state = self._state(self._batch_bucket(batch_size))
         state.profile_k = physical_k
         state.economic_k = (
-            max(self.min_k, min(int(cost_saving_k), self.max_k - 1))
-            if cost_saving_k is not None
-            else None
+            max(self.min_k, min(int(cost_saving_k), self.max_k - 1)) if cost_saving_k is not None else None
         )
 
     def advance_profile(self, batch_size: int) -> None:
@@ -255,7 +250,12 @@ class AdaptiveDraftKController:
                 if self._last_traced_cap.get(bucket) != result:
                     _trace_physical_k(
                         "cap bucket=%d batch=%d configured=%d profile=%s stable=%d result=%d",
-                        bucket, batch_size, configured_k, state.profile_k, state.stable_k, result,
+                        bucket,
+                        batch_size,
+                        configured_k,
+                        state.profile_k,
+                        state.stable_k,
+                        result,
                     )
                     self._last_traced_cap[bucket] = result
                 return result
@@ -264,9 +264,7 @@ class AdaptiveDraftKController:
             if (
                 _PROBE_INTERVAL
                 and state.observations
-                and state.observations
-                % (16 if state.economic_k is not None else _PROBE_INTERVAL)
-                == 0
+                and state.observations % (16 if state.economic_k is not None else _PROBE_INTERVAL) == 0
                 and state.last_probe_observation != state.observations
             ):
                 state.last_probe_observation = state.observations
@@ -275,7 +273,12 @@ class AdaptiveDraftKController:
             if self._last_traced_cap.get(bucket) != result:
                 _trace_physical_k(
                     "cap bucket=%d batch=%d configured=%d profile=%s stable=%d result=%d",
-                    bucket, batch_size, configured_k, state.profile_k, state.stable_k, result,
+                    bucket,
+                    batch_size,
+                    configured_k,
+                    state.profile_k,
+                    state.stable_k,
+                    result,
                 )
                 self._last_traced_cap[bucket] = result
             return result
@@ -377,12 +380,12 @@ def _update_controller(controller, scheduler_output, model_runner_output) -> Non
         cost_saving_k = getattr(model_runner_output, "physical_k_cost_saving", None)
         _trace_physical_k(
             "recommend worker_batch=%d scheduler_batch=%d physical_k=%d",
-            recommended_batch_size, scheduler_batch_size, physical_k,
+            recommended_batch_size,
+            scheduler_batch_size,
+            physical_k,
         )
-        if (
+        if scheduler_batch_size and controller._batch_bucket(recommended_batch_size) != controller._batch_bucket(
             scheduler_batch_size
-            and controller._batch_bucket(recommended_batch_size)
-            != controller._batch_bucket(scheduler_batch_size)
         ):
             # The AV worker may only have fresh draft rows for a subset of
             # scheduled requests. Never apply a K priced for that smaller
@@ -416,6 +419,7 @@ def install_scheduler_policy() -> None:
 
     original_init = Scheduler.__init__
     if not getattr(original_init, "_vllm_ascend_physical_k_patched", False):
+
         @wraps(original_init)
         def patched_init(self, *args, **kwargs):
             original_init(self, *args, **kwargs)
@@ -427,6 +431,7 @@ def install_scheduler_policy() -> None:
 
     original_after = Scheduler._update_after_schedule
     if not getattr(original_after, "_vllm_ascend_physical_k_patched", False):
+
         @wraps(original_after)
         def patched_after(self, scheduler_output):
             controller = getattr(self, "_ascend_physical_k_controller", None)
@@ -442,6 +447,7 @@ def install_scheduler_policy() -> None:
 
     original_output = Scheduler.update_from_output
     if not getattr(original_output, "_vllm_ascend_physical_k_patched", False):
+
         @wraps(original_output)
         def patched_output(self, scheduler_output, model_runner_output):
             outputs = original_output(self, scheduler_output, model_runner_output)

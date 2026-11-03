@@ -123,9 +123,7 @@ def _extend_profile_batches(
 def configure_physical_k_profiling(manager: Any, vllm_config: Any):
     """Add physical-K samples and recommendations to an upstream AV manager."""
 
-    dynamic = (getattr(vllm_config, "additional_config", None) or {}).get(
-        "dynamic_spec_config", {}
-    )
+    dynamic = (getattr(vllm_config, "additional_config", None) or {}).get("dynamic_spec_config", {})
     params = resolve_physical_k(dynamic)
     if params is not None and not physical_k_runtime_enabled(vllm_config):
         tp_size = int(
@@ -137,15 +135,13 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         )
         if tp_size > PHYSICAL_K_MAX_TP_SIZE:
             logger.info(
-                "ASCEND_AV_PHYSICAL_K_FALLBACK tensor_parallel_size=%d "
-                "max_supported_tp=%d mode=adaptive_verification",
+                "ASCEND_AV_PHYSICAL_K_FALLBACK tensor_parallel_size=%d max_supported_tp=%d mode=adaptive_verification",
                 tp_size,
                 PHYSICAL_K_MAX_TP_SIZE,
             )
         else:
             logger.info(
-                "ASCEND_AV_PHYSICAL_K_NOOP min_k=%d configured_k=%d "
-                "mode=adaptive_verification",
+                "ASCEND_AV_PHYSICAL_K_NOOP min_k=%d configured_k=%d mode=adaptive_verification",
                 params["min_k"],
                 int(
                     getattr(
@@ -182,9 +178,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
             int(getattr(self.req_states, "max_num_reqs", 0)),
             min_batch_size,
         )
-        sparse = _sparse_profile_batches(
-            [case for case in covered if case["num_tokens"] >= min_batch_size]
-        )
+        sparse = _sparse_profile_batches([case for case in covered if case["num_tokens"] >= min_batch_size])
         self._physical_k_profile_cases.clear()
         self._physical_k_profile_is_upstream.clear()
         per_width_cases: dict[int, list[tuple[dict[str, int], bool]]] = {}
@@ -193,11 +187,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
             # curves are unchanged. Lower physical widths only need robust
             # medians for each distinct graph shape.
             batches = covered if physical_k == max_k else sparse
-            upstream_flags = (
-                covered_is_upstream
-                if physical_k == max_k
-                else [False] * len(batches)
-            )
+            upstream_flags = covered_is_upstream if physical_k == max_k else [False] * len(batches)
             per_width_cases[physical_k] = list(zip(batches, upstream_flags))
         # A sequential K sweep confounds width with device warmup/clock drift.
         # Interleave nearby candidate timings while keeping the max-K samples
@@ -244,9 +234,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
 
             tp_group = get_tp_group()
             if tp_group.world_size > 1:
-                gathered: list[dict[int, dict[int, float]] | None] = [
-                    None
-                ] * tp_group.world_size
+                gathered: list[dict[int, dict[int, float]] | None] = [None] * tp_group.world_size
                 dist.all_gather_object(
                     gathered,
                     dict(costs),
@@ -337,20 +325,12 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         cost difference as equivalent to avoid selecting a noisy micro-win.
         """
 
-        measured = {
-            k: cost
-            for k in candidates
-            if (cost := lookup_cost(self, k, batch_size)) is not None
-        }
+        measured = {k: cost for k in candidates if (cost := lookup_cost(self, k, batch_size)) is not None}
         if len(measured) != len(candidates):
             return None
         for physical_k in candidates:
             cost = measured[physical_k]
-            if not any(
-                measured[wider_k] <= cost * 1.02
-                for wider_k in candidates
-                if wider_k > physical_k
-            ):
+            if not any(measured[wider_k] <= cost * 1.02 for wider_k in candidates if wider_k > physical_k):
                 return physical_k
         return max_k
 
@@ -391,10 +371,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         confidence = self._stale_confidences[self._stale_idx].np[slots].astype(np.float64)
         survival = np.cumprod(confidence, axis=1)
         num_non_draft = np.fromiter(
-            (
-                num_tokens_per_req[req_id] - len(draft_tokens.get(req_id, ()))
-                for req_id in req_ids
-            ),
+            (num_tokens_per_req[req_id] - len(draft_tokens.get(req_id, ())) for req_id in req_ids),
             dtype=np.int32,
             count=num_reqs,
         )
@@ -478,11 +455,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
             self._physical_k_score_steps[bucket] = steps + 1
             probe_due = False
             if self._physical_k_last_logged.get(bucket, max_k) < max_k:
-                active_widths = [
-                    len(draft_tokens[req_id])
-                    for req_id in num_tokens_per_req
-                    if draft_tokens.get(req_id)
-                ]
+                active_widths = [len(draft_tokens[req_id]) for req_id in num_tokens_per_req if draft_tokens.get(req_id)]
                 if active_widths:
                     if min(active_widths) < max_k:
                         self._physical_k_seen_narrow_draft[bucket] = True
@@ -502,10 +475,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
                 self._physical_k_recommendation = recommend(self, num_tokens_per_req, draft_tokens)
                 if self._physical_k_recommendation is not None:
                     self._physical_k_score_new_request = False
-                if (
-                    self._physical_k_recommendation is not None
-                    and self._physical_k_recommendation[1] == max_k
-                ):
+                if self._physical_k_recommendation is not None and self._physical_k_recommendation[1] == max_k:
                     self._physical_k_seen_narrow_draft[bucket] = False
             else:
                 self._physical_k_recommendation = None

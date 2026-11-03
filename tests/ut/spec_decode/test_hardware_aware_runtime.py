@@ -28,7 +28,7 @@ def make_speculator():
                     "method": "dspark",
                     "physical_k": {"min_k": 2},
                 }
-            }
+            },
         ),
         num_speculative_steps=5,
         num_query_per_req=5,
@@ -60,12 +60,8 @@ def test_full_mode_temporarily_installs_physical_k_profile_factory():
     def original_factory(**kwargs):
         return kwargs
 
-    runner_module = SimpleNamespace(
-        maybe_create_adaptive_verification_manager=original_factory
-    )
-    with adaptive_verification_gate_wrapper(
-        runner_module, CUDAGraphMode.FULL, make_speculator().vllm_config
-    ):
+    runner_module = SimpleNamespace(maybe_create_adaptive_verification_manager=original_factory)
+    with adaptive_verification_gate_wrapper(runner_module, CUDAGraphMode.FULL, make_speculator().vllm_config):
         assert runner_module.maybe_create_adaptive_verification_manager is not original_factory
     assert runner_module.maybe_create_adaptive_verification_manager is original_factory
 
@@ -74,12 +70,8 @@ def test_piecewise_mode_temporarily_installs_ascend_adapter():
     def original_factory(**kwargs):
         return kwargs
 
-    runner_module = SimpleNamespace(
-        maybe_create_adaptive_verification_manager=original_factory
-    )
-    with adaptive_verification_gate_wrapper(
-        runner_module, CUDAGraphMode.PIECEWISE, make_speculator().vllm_config
-    ):
+    runner_module = SimpleNamespace(maybe_create_adaptive_verification_manager=original_factory)
+    with adaptive_verification_gate_wrapper(runner_module, CUDAGraphMode.PIECEWISE, make_speculator().vllm_config):
         assert runner_module.maybe_create_adaptive_verification_manager is not original_factory
     assert runner_module.maybe_create_adaptive_verification_manager is original_factory
 
@@ -101,9 +93,7 @@ def test_physical_k_scope_updates_and_restores_query_layout():
 
 def test_noop_minimum_uses_ordinary_full_width_path():
     speculator = make_speculator()
-    speculator.vllm_config.additional_config["dynamic_spec_config"]["physical_k"] = {
-        "min_k": 5
-    }
+    speculator.vllm_config.additional_config["dynamic_spec_config"]["physical_k"] = {"min_k": 5}
     batch = SimpleNamespace(_vllm_ascend_physical_draft_k=2)
     with physical_k_scope(speculator, batch) as active_k:
         assert active_k == 5

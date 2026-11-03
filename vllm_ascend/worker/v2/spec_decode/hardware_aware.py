@@ -661,15 +661,12 @@ def adaptive_verification_gate_wrapper(
                 max_total_logits=max_total_logits,
                 **factory_kwargs,
             )
+
         if not enable_adaptive_verification:
             return create_manager()
         if cudagraph_mode != CUDAGraphMode.PIECEWISE:
             manager = create_manager()
-            return (
-                configure_physical_k_profiling(manager, vllm_config)
-                if manager is not None
-                else None
-            )
+            return configure_physical_k_profiling(manager, vllm_config) if manager is not None else None
         try:
             manager = create_manager()
         except ValueError as exc:
