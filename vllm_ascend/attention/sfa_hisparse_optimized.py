@@ -275,6 +275,28 @@ class AscendHiSparseImpl(AscendSFAImpl):
 
         return current_workspace_manager().get_persistent_resource(key, allocate)
 
+    def _resident_prolog_slots_i64(self, mapping):
+        # Core creates a fresh ForwardContext for each Target/draft forward.
+        # Slot production precedes the model and slots are read-only throughout
+        # that forward. Capture records one current cast before all consumers;
+        # replay executes it again, even when values change at the same address.
+        context = get_forward_context()
+        scope = getattr(context, "_ascend_hisparse_resident_i64", None)
+        if scope is None:
+            scope = context._ascend_hisparse_resident_i64 = {}
+        source = self.hisparse_cache.slot_mapping
+        # Core binds a distinct Tensor view per layer over shared group slots.
+        # Exact address/layout aliases contain the same read-only current rows.
+        layout = (source.data_ptr(), tuple(source.shape), tuple(source.stride()), source.dtype, source.device)
+        key = (layout, mapping.numel(), torch.npu.current_stream().npu_stream)
+        cached = scope.get(key)
+        if cached is None:
+            # Retain the storage too: even set_ on the original Tensor cannot
+            # free/recycle its old address while this forward's scope is alive.
+            cached = (source, source.untyped_storage(), mapping.to(torch.int64))
+            scope[key] = cached
+        return cached[2]
+
     def _sfa_preprocess_prolog_v3(
         self,
         hidden_states,
@@ -292,6 +314,35 @@ class AscendHiSparseImpl(AscendSFAImpl):
         rows = hidden_states.shape[0]
         if rows > self._kv_staging_capacity:
             raise ValueError("HiSparse Prolog exceeds its profiled token capacity")
+        cache = self.hisparse_cache
+        destination, mapping, count = cache.write_target(rows, slot_mapping.numel())
+        # Resident slots have a different owner from ordinary Attention slots.
+        # Consume the current Resident table, including its -1 padding, rather
+        # than the caller's ordinary-cache indices. Share the current int64
+        # conversion below before passing indices to the native Prolog ABI.
+        direct = (
+            attn_metadata.num_prefills == 0
+            and count == rows
+            and mapping.ndim == 1
+            and mapping.numel() == rows
+            and mapping.stride(0) == 1
+            and destination.ndim == 3
+            and destination.shape[1:] == (128, 656)
+            and destination.dtype in (torch.uint8, torch.float8_e4m3fn)
+            and destination.stride(1) == 656
+            and destination.stride(2) == 1
+        )
+        if direct:
+            result = super()._sfa_preprocess_prolog_v3(
+                hidden_states,
+                (destination.view(torch.float8_e4m3fn).unsqueeze(2),),
+                cos,
+                sin,
+                self._resident_prolog_slots_i64(mapping),
+                attn_metadata=attn_metadata,
+            )
+            finish_hisparse_kv_update(cache, attn_metadata)
+            return result
         staging, local_slots = self._prolog_c8_workspace()
         result = super()._sfa_preprocess_prolog_v3(
             hidden_states,
@@ -306,8 +357,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # layer's strided Resident destination. Device valid_rows masks graph
         # padding at replay; local Prolog indices are always safe scratch rows.
         payload = staging.view(torch.uint8).view(-1, 656)
-        cache = self.hisparse_cache
-        destination, mapping, count = cache.write_target(rows, slot_mapping.numel())
         scatter_packed_kv(
             payload[:count, :512],
             payload[:count, 512:],

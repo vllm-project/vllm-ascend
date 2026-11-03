@@ -398,3 +398,48 @@ the real `HiSparseHostPool.allocate` entry, including the actual 128 GiB pool,
 registered-owner retention, byte-exact native/AIV writes and mapped graph
 replay. This closes the component integration gap; full-model requests and
 performance still require their own results.
+
+## Matched zero-miss result on November 4
+
+The native Prolog V3 wrapper can write the current opaque C8 payload directly
+to the strided Resident cache. Prefill and unsupported shapes retain staging
+and masked scatter. Padding uses the current Resident slot table, whose producer
+writes -1 for invalid rows; ordinary Attention slots are a different owner.
+The Host mirror completion point and native Attention arithmetic are unchanged.
+
+Within a fresh Core ForwardContext, exact Resident address/layout/row/stream
+aliases share one int64 conversion. Each later forward performs a fresh copy;
+captured replay executes that copy with current values. Strong Tensor and storage
+owners prevent address recycling during the scope. Actual eight-rank capture
+showed 78 Target consumers and 20 conversions, including distinct Core views
+over the same group slots.
+
+The recorded private runtime `95d1e7fb543865ab8178bd50895ddbb176b78025`
+used merged Core `5c8ae7c74aaa99d1f7fbeea942fd7282e3413810`, the configuration above,
+C4, 32768 input and 8192 actual output tokens/request. EvalScope 1.13.0 ran one
+unscored primer and N2, with no profiler or observation hooks during timing.
+
+| Round | OFF TPOT ms | ON TPOT ms | MTP acceptance, both arms |
+| --- | ---: | ---: | ---: |
+| 1 | 12.128254 | 12.472067 | 59.893611% |
+| 2 | 12.133250 | 12.451795 | 59.893611% |
+
+Mean TPOT increased 2.730074%, within the 3% goal for this shape. All 16 requests
+succeeded, with 8192 actual output IDs each. Input/output hashes, draft/accepted
+counts and per-position MTP counts matched exactly across both arms. Settled
+reported miss/H2D deltas and eight-rank idle tails were zero; these are not
+physical DMA measurements. A small external NPU context was preserved, so this
+is a shared-host result and N2 is not a claim of statistical significance.
+
+The actual wrapper has 21 CPU branch/oracle cases and 21 forward/alias/stream
+scope cases; 40 changing real-NPU graph cases covered five graph owners,
+padding/holes, three alias-view consumers and fresh same-source graph ownership.
+The 3% goal is not established for other lengths, concurrency, A3 or P/D.
+Miss workloads and final integration/accuracy qualification remain separate.
+
+The earlier alias-identity-only preparation was never model-dispatched. A direct
+write without shared conversion produced changed MTP modes and no demonstrated
+isolated gain; those results are retained as investigation evidence, not a win.
+The private runtime also retained an earlier CPU page-preparation experiment;
+that unproven experiment is not added by this commit. The recorded private
+runtime result does not replace a final clean-build qualification of the PR head.
