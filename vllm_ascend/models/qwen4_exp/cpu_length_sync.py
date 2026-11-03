@@ -9,6 +9,8 @@ consumer; rejection-corrected positions and execution lengths stay on device.
 
 from typing import Any
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
     """Return False for consumers that still require exact CPU lengths."""
@@ -19,7 +21,19 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
         # The inventories and these worker-only dependencies exist only after
         # model/KV initialization. Keep CPU-only module imports lightweight.
         from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAMetadataBuilder
-        from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder, QSAStateBackend
+
+        # main renamed the QSA side-cache module and its builder/backend; the
+        # release tree still ships qsa_cache.py.
+        if vllm_version_is("0.32.0"):
+            import vllm.models.qwen4_exp.common.qsa_cache as qsa_cache  # type: ignore[import-not-found]
+
+            QSAIndexerMetadataBuilder = qsa_cache.QSAMetadataBuilder
+            QSAIndexerBackend = qsa_cache.QSAStateBackend
+        else:
+            import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer
+
+            QSAIndexerMetadataBuilder = qsa_indexer.QSAIndexerMetadataBuilder
+            QSAIndexerBackend = qsa_indexer.QSAIndexerBackend
         from vllm.v1.attention.backends.short_conv_attn import (
             PleShortConvAttentionBackend,
             PleShortConvAttentionMetadataBuilder,
@@ -63,13 +77,13 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
             if encoder is None or encoder.is_realtime is not False:
                 return False
 
-        qsa_state_builders: tuple[type, ...] = (QSAMetadataBuilder,)
+        qsa_state_builders: tuple[type, ...] = (QSAIndexerMetadataBuilder,)
         ascend_state_builder = getattr(ascend_qsa, "AscendQSAStateMetadataBuilder", None)
-        if isinstance(ascend_state_builder, type) and issubclass(ascend_state_builder, QSAMetadataBuilder):
+        if isinstance(ascend_state_builder, type) and issubclass(ascend_state_builder, QSAIndexerMetadataBuilder):
             qsa_state_builders += (ascend_state_builder,)
         allowed_builders = {
             AscendQSABackend: (Qwen4ExpQSAMetadataBuilder,),
-            QSAStateBackend: qsa_state_builders,
+            QSAIndexerBackend: qsa_state_builders,
             AscendGDNAttentionBackend: (AscendGDNAttentionMetadataBuilder,),
             AscendGDNHostMetadataBackend: (AscendGDNHostMetadataBuilder,),
             AscendGDNFusedAttentionBackend: (AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder),

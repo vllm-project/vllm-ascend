@@ -2,6 +2,8 @@ import torch
 from torch.overrides import TorchFunctionMode
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def _index_fill(tensor, dim, index, value):
     # Import lazily to avoid circular imports during plugin startup.
@@ -26,12 +28,14 @@ class _IndexFillMode(TorchFunctionMode):
         return func(*args, **kwargs)
 
 
-_original_assign_draft_token_budget = adaptive_verification._assign_draft_token_budget
+# vLLM main (#63421) replaced the torch.compile'd budget assignment with a
+# Triton kernel that no longer calls index_fill_, so the A5 workaround only
+# applies to the v0.32.0 allocator.
+if vllm_version_is("0.32.0"):
+    _original_assign_draft_token_budget = adaptive_verification._assign_draft_token_budget
 
+    def _assign_draft_token_budget_ascend(*args, **kwargs):
+        with _IndexFillMode():
+            return _original_assign_draft_token_budget(*args, **kwargs)
 
-def _assign_draft_token_budget_ascend(*args, **kwargs):
-    with _IndexFillMode():
-        return _original_assign_draft_token_budget(*args, **kwargs)
-
-
-adaptive_verification._assign_draft_token_budget_compiled = _assign_draft_token_budget_ascend
+    adaptive_verification._assign_draft_token_budget_compiled = _assign_draft_token_budget_ascend

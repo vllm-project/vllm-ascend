@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -125,9 +126,16 @@ def test_tainted_endpoint_is_excluded_and_all_tainted_fails_without_leaking_load
 
 
 def test_endpoint_order_and_python_hash_seed_do_not_affect_routes():
+    # Load the proxy module by file path: the child does not get pytest's
+    # sys.path injection, and a regular `examples` package on PYTHONPATH can
+    # otherwise shadow the repo's namespace package.
+    example_path = str(Path(proxy.__file__).resolve())
     code = (
-        "import json; from examples.disaggregated_prefill_v1 import load_balance_proxy_server_example as p; "
-        "s=p.SharedProxyScheduler([('10.0.0.1',n) for n in PORTS], [('10.0.0.2',9000)]); "
+        "import importlib.util, json, sys; "
+        f"spec = importlib.util.spec_from_file_location('lb_proxy', {example_path!r}); "
+        "m = importlib.util.module_from_spec(spec); "
+        "sys.modules['lb_proxy'] = m; spec.loader.exec_module(m); "
+        "s=m.SharedProxyScheduler([('10.0.0.1',n) for n in PORTS], [('10.0.0.2',9000)]); "
         "print(json.dumps([s.reserve_prefill_kv(0,str(i))['key'] for i in range(20)]))"
     )
     routes = []
