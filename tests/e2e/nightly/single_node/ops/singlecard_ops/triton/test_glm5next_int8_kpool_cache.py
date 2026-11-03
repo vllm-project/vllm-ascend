@@ -85,11 +85,13 @@ def test_int8_operator_reads_managed_pages(use_graph):
     ops_transformer = pytest.importorskip("cann_ops_transformer")
     # The CI-bundled ops package follows its versioned CANN install directory.
     ops_transformer_file = getattr(ops_transformer, "__file__", None)
-    if ops_transformer_file is None:
+    if not isinstance(ops_transformer_file, str):
         pytest.skip("Cannot determine ops-transformer installation version")
+        return
     version_match = re.search(r"cann-(\d+)\.(\d+)\.(\d+)", str(Path(ops_transformer_file).resolve()))
     if version_match is None:
         pytest.skip("Cannot determine ops-transformer installation version")
+        return
     if tuple(map(int, version_match.groups())) < (9, 3, 0):
         pytest.skip("INT8 PoolKeyIndexer requires ops-transformer 9.3.0 or later")
     spec = AscendMLAAttentionSpec(
