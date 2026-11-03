@@ -151,7 +151,7 @@ jobs:
     if: ${{ inputs.run_presmoke && needs.build-nightly.result == 'success' }}
     runs-on: ubuntu-latest
     outputs:
-      presmoke_groups_json: ${{ steps.gen_groups.outputs.presmoke_groups_json }}
+      presmoke_groups_json: ${{ steps.gen_groups.outputs.test_groups }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -169,11 +169,8 @@ jobs:
         id: gen_groups
         run: |
           python3 .github/workflows/scripts/select_tests.py \
-            --mode presmoke \
-            --chip ${{ inputs.target }} \
-            --output presmoke_groups.json
-          TEST_GROUPS=$(cat presmoke_groups.json)
-          echo "presmoke_groups_json=${TEST_GROUPS}" >> "$GITHUB_OUTPUT"
+            --all-tests \
+            --skip-cpu-ut
 
   run-presmoke-tests:
     name: Run Presmoke Smoke Tests ${{ inputs.target }}-${{ inputs.os }}
