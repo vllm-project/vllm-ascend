@@ -93,7 +93,7 @@ def test_narrow_collect_formula_matches_log_softmax():
 
 
 def test_rare_chars_consumes_precomputed_pairs(tmp_path: Path):
-    """Sampler-side precomputed (top1, chosen) skips logits collect."""
+    """Production path: feed_precomputed from host (top1, chosen) pairs."""
     from vllm_ascend.observability.runtime_guard.detector.rare.rare_vocab import load as load_rare
 
     T = load_rare("qwen3")
@@ -103,24 +103,22 @@ def test_rare_chars_consumes_precomputed_pairs(tmp_path: Path):
     logits = torch.full((1, V), -20.0)
     logits[0, tid] = 5.0
     top1, chosen = top1_and_chosen_logprobs(logits, torch.tensor([tid]))
+    t1 = float(top1[0])
+    ch = float(chosen[0])
 
     cfg = _cfg(tmp_path, table="qwen3", think_end="none")
     det = RareCharsDetector(runtime_config=cfg, runner=SimpleNamespace(tp_rank=0))
-    # Empty logits would fail without precomputed pairs.
-    empty = torch.empty(0)
-    alerts = det.check_from_logits(
-        logits=empty,
-        sampled_token_ids=[[tid]],
+    alerts = det.feed_precomputed(
         req_ids=["r1"],
-        top1_logprobs=top1,
-        chosen_logprobs=chosen,
+        token_ids=[tid],
+        top1_logprobs=[t1],
+        chosen_logprobs=[ch],
     )
-    alerts2 = det.check_from_logits(
-        logits=empty,
-        sampled_token_ids=[[tid]],
+    alerts2 = det.feed_precomputed(
         req_ids=["r1"],
-        top1_logprobs=top1,
-        chosen_logprobs=chosen,
+        token_ids=[tid],
+        top1_logprobs=[t1],
+        chosen_logprobs=[ch],
     )
     finish = det.finish_request("r1")
     fired = alerts + alerts2 + ([finish] if finish is not None else [])
