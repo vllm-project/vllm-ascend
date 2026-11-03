@@ -281,6 +281,9 @@ are not interchangeable.
 
 | Parameter | Meaning and constraints |
 | --- | --- |
+| `VLLM_USE_V2_MODEL_RUNNER` | Selects the model runner. The 950DT products examples set it to `1` to use Model Runner V2. |
+| `ASCEND_RT_VISIBLE_DEVICES` | Specifies the device IDs visible to the current process. The PD launcher passes this list as `$1` to each role script. |
+| `VLLM_HOST_IP` | Sets the current node's IP address for communication between vLLM processes and KV transfer. Set it to the node IP that peers can reach. |
 | `HCCL_BUFFSIZE` | CANN/HCCL communication buffer size in MB; a positive integer, with a documented default of 200. Larger buffers consume more device memory, multiplied by the number of communication domains. Keep the example's hardware/role-specific value and account for this memory when sizing the KV cache. See the [CANN HCCL reference](https://www.hiascend.com/document/detail/zh/canncommercial/latest/API/hcclug/hcclenvref_07_0005.html) for allocation details and version-specific constraints. |
 | `HCCL_IF_IP` and socket interface variables | Set the current node's communication IP and matching network interface. Peers must be reachable through the selected network. |
 | `--data-parallel-size`, `--tensor-parallel-size`, `--pipeline-parallel-size` | DP is the number of data-parallel ranks; TP and PP partition each model engine across devices and pipeline stages. Follow the topology and placement in the selected tab. |
@@ -334,7 +337,7 @@ are not interchangeable.
       --enable-auto-tool-choice \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-      --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": false}'
+      --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
     ```
 
     A successful startup includes output similar to:
@@ -404,7 +407,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
   The examples use W8A8-MXFP8 weights on 950DT products and W8A8 weights on A3 series, as listed in Section 3.1.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 - `--limit-mm-per-prompt '{"image":1,"video":0}'`: Allows at most one image per prompt and disables video input in all deployment examples.
-- `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. Both single-node examples use five speculative tokens and `enforce_eager: false` for draft graph execution. GLM-5.3-Flash supports MTP draft graphs; the forced-eager restriction for other GLM models does not apply to this model.
+- `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use five speculative tokens. GLM-5.3-Flash supports MTP draft graph execution.
 
 ### 5.2 Multi-Node Colocated Deployment
 
@@ -632,7 +635,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
             export VLLM_USE_V2_MODEL_RUNNER=1
             export VLLM_HOST_IP="$local_ip"
-            export PYTHONHASHSEED=0
             export HCCL_IF_IP=$local_ip
             export GLOO_SOCKET_IFNAME=$nic_name
             export TP_SOCKET_IFNAME=$nic_name
@@ -650,8 +652,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
               --data-parallel-address $5 \
               --data-parallel-rpc-port $6 \
               --tensor-parallel-size $7 \
-              --prefill-context-parallel-size 1 \
-              --decode-context-parallel-size 1 \
               --enable-expert-parallel \
               --seed 1024 \
               --served-model-name glm \
@@ -671,7 +671,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
               --limit-mm-per-prompt '{"image": 1, "video": 0}' \
               --gpu-memory-utilization 0.9 \
               --enforce-eager \
-              --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}' \
+              --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}' \
               --additional-config '{
                 "enable_cpu_binding": true,
                 "enable_flashcomm1": true,
@@ -703,7 +703,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
             export VLLM_USE_V2_MODEL_RUNNER=1
             export VLLM_HOST_IP="$local_ip"
-            export PYTHONHASHSEED=0
             export HCCL_IF_IP=$local_ip
             export GLOO_SOCKET_IFNAME=$nic_name
             export TP_SOCKET_IFNAME=$nic_name
@@ -721,8 +720,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
               --data-parallel-address $5 \
               --data-parallel-rpc-port $6 \
               --tensor-parallel-size $7 \
-              --prefill-context-parallel-size 1 \
-              --decode-context-parallel-size 1 \
               --enable-expert-parallel \
               --seed 1024 \
               --served-model-name glm \
@@ -742,7 +739,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
               --limit-mm-per-prompt '{"image": 1, "video": 0}' \
               --gpu-memory-utilization 0.95 \
               --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-              --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": false}' \
+              --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}' \
               --additional-config '{
                 "multistream_overlap_shared_expert": true,
                 "scheduler_config": {"recompute_scheduler_enable": true}
@@ -837,7 +834,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       scheduling and `FULL_DECODE_ONLY` for target and MTP draft. Prefill
       target and draft are eager. Shared-expert DP requires TP>1 and is
       therefore not enabled on the TP1 Decode engines.
-    - PCP and DCP remain 1. For experimental PCP configuration, refer to
+    - PCP and DCP use their default size of 1. For experimental PCP configuration, refer to
       [Context Parallel](../../user_guide/feature_guide/context_parallel.md).
       The removed `enable_dsa_cp` additional-config key is not accepted.
     - Both roles enable prefix caching and allow one image per prompt,
