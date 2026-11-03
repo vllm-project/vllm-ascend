@@ -99,8 +99,6 @@ async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpen
 
 
 async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
-    import requests
-
     url = f"http://{server.host}:{server.port}"
     prompts = config.prompts if config.prompts else ["Hello!"]
 
@@ -318,7 +316,7 @@ async def _run_benchmarks_and_spec_decode(
 
         chat_url = server.url_for("v1", "chat", "completions")
 
-        def warmup_fn():
+        def warmup_fn() -> None:
             requests.post(
                 chat_url,
                 json={
