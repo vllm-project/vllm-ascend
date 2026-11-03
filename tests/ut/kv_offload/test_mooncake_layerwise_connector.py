@@ -71,7 +71,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector imp
     ensure_zmq_recv,
     ensure_zmq_send,
     group_concurrent_contiguous,
-    order_layer_components,
     select_pcp_sender_rank,
     string_to_int64_hash,
     zmq_ctx,
@@ -1420,10 +1419,20 @@ def test_mooncake_save_records_fallback_event_without_early_hook():
     assert queued_send_task.wait_event is fallback_event
 
 
+def _make_attention_module(*cache_prefixes: str) -> torch.nn.Module:
+    """An attention module holding its layer's cache modules as submodules."""
+    module = torch.nn.Module()
+    for index, prefix in enumerate(cache_prefixes):
+        cache = torch.nn.Module()
+        cache.prefix = prefix
+        setattr(module, f"cache_layer_{index}", cache)
+    return module
+
+
 def _make_worker_for_dsv4_swa_only_layer():
     worker, connector_metadata = _make_worker_for_cache_write_event_test()
     # A DeepSeek-V4 compress_ratio <= 1 layer owns only its SWA cache, while
-    # the attention hooks still report the ``.attn`` module name.
+    # the attention hooks still report the attention module's own name.
     swa_cache = "model.layers.0.self_attn.swa_cache"
     mtp_swa_cache = "mtp.0.self_attn.swa_cache"
     worker.total_layers = 2
@@ -1433,7 +1442,13 @@ def _make_worker_for_dsv4_swa_only_layer():
         mtp_swa_cache: _make_layer_metadata(tensor_group_idx=[0]),
     }
     worker._cache_write_events = [None, None]
-    worker.hook_layer_aliases = build_hook_layer_aliases(worker.index_to_name, worker.layer_metadata)
+    static_forward_context = {
+        "model.layers.0.self_attn.attn": _make_attention_module(swa_cache),
+        "mtp.0.self_attn.attn": _make_attention_module(mtp_swa_cache),
+        # A second MTP module whose cache was never registered.
+        "mtp.1.self_attn.attn": _make_attention_module("mtp.1.self_attn.swa_cache"),
+    }
+    worker.hook_layer_aliases = build_hook_layer_aliases(worker.index_to_name, static_forward_context)
     return worker, connector_metadata
 
 
@@ -1449,7 +1464,8 @@ def test_mooncake_hooks_resolve_cacheless_attention_name_to_layer_cache():
         worker.save_kv_layer("model.layers.0.self_attn.attn", [], MagicMock(), connector_metadata)
         task = worker.kv_send_layer_thread.send_queue.put.call_args.args[0]
         assert task.wait_event is cache_write_event
-        assert task.layer_name == "model.layers.0.self_attn.swa_cache"
+        # Nothing is staged for a single-tensor cache, so no component is named.
+        assert task.layer_name == ""
         assert task.layer_names == ["model.layers.0.self_attn.swa_cache"]
 
         # The MTP module index is 0, so it must resolve through the MTP slot
@@ -1458,7 +1474,7 @@ def test_mooncake_hooks_resolve_cacheless_attention_name_to_layer_cache():
         worker.save_kv_layer("mtp.0.self_attn.attn", [], MagicMock(), connector_metadata)
         task = worker.kv_send_layer_thread.send_queue.put.call_args.args[0]
         assert task.layer_idx == 1
-        assert task.layer_name == "mtp.0.self_attn.swa_cache"
+        assert task.layer_names == ["mtp.0.self_attn.swa_cache"]
     assert worker.current_layer == 2
 
 
@@ -1482,15 +1498,33 @@ def test_build_hook_layer_aliases_only_maps_cacheless_attention_modules():
         1: ["model.layers.1.self_attn.attn", "model.layers.1.self_attn.swa_cache"],
         2: ["mtp.0.self_attn.swa_cache"],
     }
-    kv_cache_names = [name for names in index_to_name.values() for name in names]
+    static_forward_context = {
+        # Owns no cache: resolved through the cache module it holds.
+        "model.layers.0.self_attn.attn": _make_attention_module("model.layers.0.self_attn.swa_cache"),
+        "mtp.0.self_attn.attn": _make_attention_module("mtp.0.self_attn.swa_cache"),
+        # Owns its own cache, so it needs no alias.
+        "model.layers.1.self_attn.attn": _make_attention_module("model.layers.1.self_attn.swa_cache"),
+        # Its cache was never registered, so it stays unresolvable.
+        "mtp.1.self_attn.attn": _make_attention_module("mtp.1.self_attn.swa_cache"),
+        # A cache module itself is never an alias source.
+        "model.layers.0.self_attn.swa_cache": _make_attention_module(),
+    }
 
-    assert build_hook_layer_aliases(index_to_name, kv_cache_names) == {
+    assert build_hook_layer_aliases(index_to_name, static_forward_context) == {
         "model.layers.0.self_attn.attn": 0,
         "mtp.0.self_attn.attn": 2,
     }
 
 
-def test_order_layer_components_puts_dsv4_main_cache_first():
+def test_build_hook_layer_aliases_ignores_non_module_entries():
+    """The forward context can hold entries that are not modules."""
+    index_to_name = {0: ["model.layers.0.self_attn.swa_cache"]}
+
+    assert build_hook_layer_aliases(index_to_name, {"something.else": object()}) == {}
+
+
+def test_components_keep_registration_order_without_a_privileged_primary():
+    """Nothing reads ``layer_names[0]``, so the registration order stands."""
     prefix = "model.layers.2.self_attn"
     registered = [
         f"{prefix}.swa_cache",
@@ -1499,14 +1533,12 @@ def test_order_layer_components_puts_dsv4_main_cache_first():
         f"{prefix}.attn",
         f"{prefix}.indexer.k_cache",
     ]
+    worker = _make_worker_for_cache_write_event_test()[0]
+    worker.index_to_name = {2: list(registered)}
+    worker.layer_metadata = {name: _make_layer_metadata(tensor_group_idx=[0]) for name in registered}
 
-    assert order_layer_components(registered) == [
-        f"{prefix}.attn",
-        f"{prefix}.swa_cache",
-        f"{prefix}.compressor.state_cache",
-        f"{prefix}.indexer.k_cache",
-        f"{prefix}.indexer.compressor.state_cache",
-    ]
+    assert worker.index_to_name[2] == registered
+    assert worker._select_staging_component(registered, SendTask()) is None
 
 
 def test_tensor_block_stride_follows_runtime_layout():
@@ -1947,7 +1979,9 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
                 self.assertEqual(worker.attn_resharding_group_idx, set())
                 self.assertEqual(len(worker.layer_metadata[layer_name].block_len), 1)
                 self.assertEqual(len(worker.layer_metadata[indexer_name].block_len), 2)
-                self.assertEqual(worker.index_to_name[0], [layer_name, indexer_name])
+                # Registration order: the indexer was registered first and is
+                # no longer promoted to the front.
+                self.assertEqual(worker.index_to_name[0], [indexer_name, layer_name])
                 if producer:
                     # Legacy quant flags must not access an absent staging buffer.
                     worker.prepare_layerwise_step(MooncakeLayerwiseConnectorMetadata())

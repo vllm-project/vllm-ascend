@@ -99,38 +99,27 @@ class LayerMetadata:
     kv_caches_base_addr: list[int]
     block_len: list[int]
     block_size_scale: list[int]
-    # Physical bytes between consecutive blocks of each registered tensor. Equals
-    # ``block_len`` for every unpadded cache, but DeepSeek-V4's compressor state
-    # caches carry ``page_size_padded`` pages whose stride is larger than their
-    # logical content (e.g. 32768 vs 16384 at --block-size 32). Addressing such a
-    # cache with ``block_len`` lands one block short from block 1 onward, so the
-    # stride has to travel with the metadata rather than be re-derived.
+    # Physical bytes between consecutive blocks. Exceeds ``block_len`` for a
+    # page_size_padded cache, where addressing by ``block_len`` would land
+    # short from block 1 onward.
     block_stride: list[int] = field(default_factory=list)
 
     def strides(self) -> list[int]:
         """Per-tensor block stride, falling back to ``block_len``.
 
-        The fallback keeps compatibility with a peer that predates the field:
-        msgspec leaves it empty and every unpadded cache is unaffected.
+        A peer predating the field sends it empty; unpadded caches are
+        unaffected either way.
         """
         if len(self.block_stride) == len(self.block_len):
             return self.block_stride
         return self.block_len
 
 
-_INDEXER_K_SUFFIX = ".indexer.k_cache"
-_ATTN_SUFFIX = ".attn"
-_SWA_CACHE_SUFFIX = ".swa_cache"
-_PRIMARY_SUFFIXES = (_ATTN_SUFFIX,)
-
-
 def _spec_sliding_window(spec: KVCacheSpec) -> int | None:
     """Retained window of a group in tokens, or None if it keeps every block.
 
-    A ``UniformTypeKVCacheSpecs`` group holds one spec per layer and is only
-    window-limited when every member is. ``extra_retained_tokens`` widens the
-    retained tail below the window so multi-module MTP can re-prefill from it,
-    so it counts toward what the consumer still needs.
+    A uniform-type group is window-limited only when every member is.
+    ``extra_retained_tokens`` counts: the consumer still needs that tail.
     """
     if isinstance(spec, UniformTypeKVCacheSpecs):
         windows = [_spec_sliding_window(sub) for sub in spec.kv_cache_specs.values()]
@@ -159,24 +148,38 @@ def _tensor_block_stride(kv_cache: torch.Tensor, block_len: int) -> int:
     return stride if stride >= block_len else block_len
 
 
-def build_hook_layer_aliases(index_to_name: dict[int, list[str]], kv_cache_names: Iterable[str]) -> dict[str, int]:
-    """Map attention hook names that own no KV cache to their physical layer.
+def build_hook_layer_aliases(
+    index_to_name: dict[int, list[str]],
+    static_forward_context: dict[str, Any],
+) -> dict[str, int]:
+    """Map an attention module that owns no KV cache to its physical layer.
 
-    The attention hooks report the ``.attn`` module name. A DeepSeek-V4 SWA-only
-    layer (compress_ratio <= 1) keeps its only cache in the sibling
-    ``.swa_cache`` module, so its ``.attn`` name never appears in
-    ``index_to_name``. Only registered layers get an alias, so a hook from an
-    MTP module whose cache was not registered still fails the layer check.
+    A DeepSeek-V4 ``compress_ratio <= 1`` layer allocates no cache from its
+    attention module, so the hook's own name never reaches ``index_to_name``.
+    Resolved through the cache modules the layer holds: every cache module sets
+    ``prefix`` and registers itself under that name. A module whose caches were
+    never registered gets no alias and still fails the drift check.
     """
-    registered = set(kv_cache_names)
+    cache_to_layer = {name: layer_idx for layer_idx, names in index_to_name.items() for name in names}
     aliases: dict[str, int] = {}
-    for layer_idx, layer_names in index_to_name.items():
-        for layer_name in layer_names:
-            if not layer_name.endswith(_SWA_CACHE_SUFFIX):
-                continue
-            hook_name = layer_name.removesuffix(_SWA_CACHE_SUFFIX) + _ATTN_SUFFIX
-            if hook_name not in registered:
-                aliases[hook_name] = layer_idx
+    for module_name, module in static_forward_context.items():
+        if module_name in cache_to_layer:
+            continue  # owns its cache; no translation needed
+        if not isinstance(module, torch.nn.Module):
+            continue
+        for child in module.modules():
+            # Registration name: ``prefix`` on caches, ``layer_name`` on attention.
+            layer_idx = next(
+                (
+                    cache_to_layer[name]
+                    for name in (getattr(child, "prefix", None), getattr(child, "layer_name", None))
+                    if name in cache_to_layer
+                ),
+                None,
+            )
+            if layer_idx is not None:
+                aliases[module_name] = layer_idx
+                break
     return aliases
 
 
@@ -195,35 +198,6 @@ def select_pcp_sender_rank(req_id: str, pcp_size: int) -> int:
     if pcp_size == 1:
         return 0
     return random.Random(string_to_int64_hash(f"pcp:{req_id}")).randrange(pcp_size)
-
-
-def order_layer_components(layer_names: list[str]) -> list[str]:
-    """Order one physical layer's caches, main attention cache first.
-
-    ``layer_names[0]`` is the layer's identity for the step counter and for the
-    resharding/quantisation decision in ``save_kv_layer``, so it has to be the
-    main cache deterministically. ``kv_caches`` is a dict ordered by module
-    registration, which does not put ``.attn`` first.
-
-    This replaces ``sort(key=lambda n: "indexer" in n.lower())``, which only
-    partitioned into two buckets. That was a total order for a main+indexer
-    pair but not for DeepSeek-V4's five caches, where it also classified
-    ``.indexer.compressor.state_cache`` as an indexer component. Original order
-    is preserved within each bucket, so two-component models are unaffected.
-    """
-
-    def rank(item: tuple[int, str]) -> tuple[int, int]:
-        index, name = item
-        lowered = name.lower()
-        if name.endswith(_PRIMARY_SUFFIXES):
-            return (0, index)
-        if lowered.endswith(_INDEXER_K_SUFFIX):
-            return (2, index)
-        if "indexer" in lowered:
-            return (3, index)
-        return (1, index)
-
-    return [name for _, name in sorted(enumerate(layer_names), key=rank)]
 
 
 class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
@@ -1360,6 +1334,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.kv_cache_config = kv_cache_config
         self.num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
         self.kv_cache_specs: list[KVCacheSpec] = [spec.kv_cache_spec for spec in self.kv_cache_config.kv_cache_groups]
+        self._build_kv_cache_spec_mappings()
         self.local_engine_id: str = " "
         self.engine_id = engine_id
         self.dp_rank: int = vllm_config.parallel_config.data_parallel_rank
@@ -1450,6 +1425,82 @@ class MooncakeLayerwiseConnectorWorker:
         self._invalid_block_ids: set[int] = set()
         self._recving_metadata: dict[str, ReqMeta] = {}
 
+    def _build_kv_cache_spec_mappings(self) -> None:
+        """Map each layer to its KV cache group and to its own spec.
+
+        Mirrors ``MooncakeBaseConnectorWorker._build_kv_cache_spec_mappings``.
+        Spec uniqueness is scoped to a group: different groups have different
+        block tables even when their specs compare equal.
+
+        ``self.kv_cache_specs`` stays group-indexed, since block IDs, block
+        sizes and the sliding-window filter are all per group.
+        """
+        self.layer_specs: list[KVCacheSpec] = []
+        self.layer_name_to_group_index: dict[str, int] = {}
+        self.layer_name_to_spec_index: dict[str, int] = {}
+
+        for group_index, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            group_spec = group.kv_cache_spec
+            group_spec_indices: list[int] = []
+
+            for layer_name in group.layer_names:
+                if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                    layer_spec = group_spec.kv_cache_specs[layer_name]
+                else:
+                    layer_spec = group_spec
+                spec_index = next(
+                    (index for index in group_spec_indices if self.layer_specs[index] == layer_spec),
+                    -1,
+                )
+                if spec_index < 0:
+                    spec_index = len(self.layer_specs)
+                    self.layer_specs.append(layer_spec)
+                    group_spec_indices.append(spec_index)
+
+                self.layer_name_to_group_index[layer_name] = group_index
+                self.layer_name_to_spec_index[layer_name] = spec_index
+
+    def layer_spec(self, layer_name: str) -> KVCacheSpec:
+        """A layer's own cache spec, unwrapped from its uniform-type group."""
+        return self.layer_specs[self.layer_name_to_spec_index[layer_name]]
+
+    def _select_staging_component(self, layer_names: list[str], send_task: SendTask) -> str | None:
+        """The component the resharding/quantisation path stages, if any.
+
+        Selected from each component's spec and registered geometry rather
+        than its module name: staging gathers a key/value pair through
+        ``npu_gather_pa_kv_cache``, so the component must be two tensors.
+
+        ``None`` means the caches are transferred in place -- the common case,
+        and the only correct answer for DeepSeek-V4, whose components are
+        registered separately and are never a K/V pair.
+        """
+        for name in layer_names:
+            if name in self.sparse_sfa_c8_layers:
+                continue
+            layer_meta = self.layer_metadata.get(name)
+            if layer_meta is None or len(layer_meta.block_len) != 2:
+                continue
+            group_idx = layer_meta.tensor_group_idx[0]
+            if (
+                self.pd_head_ratio != 1
+                and isinstance(self.layer_spec(name), (FullAttentionSpec, SlidingWindowSpec))
+                and send_task.group_num_blocks is not None
+                and send_task.group_num_blocks[group_idx] > 0
+            ):
+                return name
+            # Read the quant config only behind a flag: some configs lack these fields.
+            if self.enable_c8_quant and self.current_layer in self._quant_layer_indices("c8_quant_layers"):
+                return name
+            if self.enable_kv_quant and self.current_layer in self._quant_layer_indices("kvcache_quant_layers"):
+                return name
+        return None
+
+    def _quant_layer_indices(self, attr_name: str) -> Iterable[int]:
+        """Layer indices a quantisation scheme applies to, empty when absent."""
+        quant_config = getattr(self.vllm_config, "quant_config", None)
+        return getattr(quant_config, attr_name, ()) or ()
+
     def _init_layerwise_reuse_state(self) -> None:
         slot_by_addr: dict[int, int] = {}
         layer_storage_slots: dict[int, tuple[int, ...]] = {}
@@ -1535,17 +1586,11 @@ class MooncakeLayerwiseConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
-        layer2group_ids: dict[str, int] = {}
-        kv_cache_groups = self.kv_cache_config.kv_cache_groups
-        for i, kv_cache_group_spec in enumerate(kv_cache_groups):
-            for layer_name in kv_cache_group_spec.layer_names:
-                layer2group_ids[layer_name] = i
-
         use_mamba, use_attn = False, False
         conv_total_padding_size = 0
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
-                layer_kv_cache_spec = self.kv_cache_specs[layer2group_ids[layer_name]]
+                layer_kv_cache_spec = self.kv_cache_specs[self.layer_name_to_group_index[layer_name]]
                 if isinstance(layer_kv_cache_spec, MambaSpec):
                     use_mamba = True
                     conv_shape, conv_dtype = layer_kv_cache_spec.shapes[0], layer_kv_cache_spec.dtypes[0]
@@ -1565,10 +1610,8 @@ class MooncakeLayerwiseConnectorWorker:
         for layer_name, kv_cache_tuple in kv_caches.items():
             if isinstance(kv_cache_tuple, (list, tuple)) is False:
                 kv_cache_tuple = [kv_cache_tuple]
-            layer_kv_group_id = layer2group_ids[layer_name]
-            layer_kv_cache_spec = kv_cache_groups[layer_kv_group_id].kv_cache_spec
-            if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+            layer_kv_group_id = self.layer_name_to_group_index[layer_name]
+            layer_kv_cache_spec = self.layer_spec(layer_name)
             # Read the layout flags directly: some Ascend versions expose the
             # cache spec flags without the corresponding utils helpers.
             is_mla = isinstance(layer_kv_cache_spec, MLAAttentionSpec)
@@ -1624,7 +1667,7 @@ class MooncakeLayerwiseConnectorWorker:
                 single_layer_meta.block_len.append(block_len)
                 single_layer_meta.block_size_scale.append(block_size_scale)
                 single_layer_meta.block_stride.append(_tensor_block_stride(single_kv_cache, block_len))
-                self.kernel_block_size_scale[layer2group_ids[layer_name]] = block_size_scale
+                self.kernel_block_size_scale[layer_kv_group_id] = block_size_scale
                 if single_kv_cache.data_ptr() not in ptrs and not self.use_attn_mamba_hybrid:
                     ptrs.append(single_kv_cache.data_ptr())
                     lengths.append(
@@ -1669,13 +1712,12 @@ class MooncakeLayerwiseConnectorWorker:
         for layer_idx, layer_names in self.index_to_name.items():
             # Components of one physical layer may live in different KV cache
             # groups: DeepSeek-V4 spreads a layer's five caches over at least
-            # three. Each component is therefore addressed in its own group's
-            # block-ID space (see _transfer_kv_cache) rather than in a single
-            # group resolved from the primary. Only the ordering is fixed here,
-            # so that layer_names[0] is deterministically the main cache.
-            layer_names[:] = order_layer_components(layer_names)
+            # three. Each component is addressed in its own group's block-ID
+            # space (_transfer_kv_cache) and the staging path picks its own
+            # component from the specs (_select_staging_component), so no
+            # component is privileged and the registration order stands.
             logger.debug(
-                "Mooncake layerwise physical layer %d components (primary first): %s",
+                "Mooncake layerwise physical layer %d components: %s",
                 layer_idx,
                 [(name, self.layer_metadata[name].tensor_group_idx[0]) for name in layer_names],
             )
@@ -1683,7 +1725,10 @@ class MooncakeLayerwiseConnectorWorker:
             self.index_to_name[max(self.index_to_name.keys()) + 1].append(mtp_layer_name)
         if self.index_to_name:
             self.total_layers = max(self.total_layers, max(self.index_to_name) + 1)
-        self.hook_layer_aliases = build_hook_layer_aliases(self.index_to_name, kv_caches)
+        self.hook_layer_aliases = build_hook_layer_aliases(
+            self.index_to_name,
+            self.vllm_config.compilation_config.static_forward_context,
+        )
 
         self._init_layerwise_reuse_state()
 
@@ -1781,15 +1826,11 @@ class MooncakeLayerwiseConnectorWorker:
         Returns 0 for groups that retain every block, and for prompts no longer
         than the retained window.
 
-        One block is added to the window to cover the block straddling its
-        leading edge, matching ``MooncakeHybridConnector``'s ``+ 1`` in
-        ``num_swa_blocks``. Under-sending here leaves the consumer attending to
-        uninitialised KV, so the term is deliberately generous: when the window
-        edge is block-aligned it includes one block the consumer has already
-        replaced with its null block. That block carries real producer KV and
-        is outside every window, and before this filter every out-of-window
-        block was pushed the same way, so the extra block is accepted rather
-        than risking an off-by-one under-send.
+        One block is added for the block straddling the window's leading edge,
+        as ``MooncakeHybridConnector``'s ``num_swa_blocks`` does. Deliberately
+        generous: a block-aligned edge includes one block the consumer has
+        already nulled, which is preferred to an off-by-one under-send that
+        would leave it attending to uninitialised KV.
         """
         window = self.group_sliding_window[group_idx]
         if window is None or prompt_len <= 0:
@@ -1804,12 +1845,10 @@ class MooncakeLayerwiseConnectorWorker:
     def _clamp_to_sliding_window(self, transed_idx: int, prompt_len: int, group_idx: int) -> int:
         """Raise the push floor to the first block the consumer still holds.
 
-        A sliding-window group keeps only the final ``window`` tokens. Earlier
-        blocks have already been freed and replaced by the shared null sentinel
-        on both sides, so pushing them ships bytes the consumer discards and
-        collapses several logical blocks onto that one sentinel. The set the
-        consumer needs is fixed once ``prompt_len`` is known, so this is a
-        floor rather than per-step window tracking.
+        Earlier blocks are freed and backed by the shared null sentinel on both
+        sides, so pushing them wastes bandwidth and collapses several logical
+        blocks onto that one block. The set is fixed once ``prompt_len`` is
+        known, hence a floor rather than per-step window tracking.
         """
         first_live = self.sliding_window_first_live_block(prompt_len, group_idx)
         if first_live <= transed_idx:
@@ -2090,26 +2129,20 @@ class MooncakeLayerwiseConnectorWorker:
                     )
                     send_task.group_seq_start_tensor[i] = torch.tensor([0], dtype=torch.int32, device=device)
 
-    def _resolve_hook_layer_name(self, layer_name: str, layer_names: list[str]) -> str:
-        """Map an attention hook's layer name onto a cache of the current physical layer.
+    def _resolve_hook_layer_name(self, layer_name: str, layer_names: list[str]) -> None:
+        """Check that an attention hook belongs to the current physical layer.
 
-        The hook reports the attention module's name, which does not always own
-        a KV cache: a DeepSeek-V4 SWA-only layer (compress_ratio <= 1) keeps its
-        only cache in ``.swa_cache`` while the hook still reports ``.attn``.
-        Such a name stands for the primary component when its alias points at
-        the current physical layer. Any other name raises, since that means the
-        per-step layer counter has drifted.
+        A hook whose module owns no KV cache is accepted when its alias points
+        at the current layer (see ``build_hook_layer_aliases``). Any other name
+        means the per-step layer counter has drifted.
         """
-        if not layer_name:
-            return layer_names[0]
-        if layer_name in layer_names:
-            return layer_name
+        if not layer_name or layer_name in layer_names:
+            return
         if self.hook_layer_aliases.get(layer_name) != self.current_layer:
             raise RuntimeError(
                 f"Mooncake layer hook {layer_name!r} does not belong to physical layer {self.current_layer}: "
                 f"{layer_names}"
             )
-        return layer_names[0]
 
     def on_kv_cache_written(self, layer_name: str) -> None:
         if self.current_layer >= self.total_layers:
@@ -2141,32 +2174,25 @@ class MooncakeLayerwiseConnectorWorker:
             # Use the scatter-time event recorded by on_kv_cache_written.
             # The fallback preserves correctness for attention paths that do
             # not call the early hook, but gives up transfer/compute overlap.
-            layer_name = self._resolve_hook_layer_name(layer_name, layer_names)
+            self._resolve_hook_layer_name(layer_name, layer_names)
             cache_write_event = self._cache_write_events[self.current_layer]
             self._cache_write_events[self.current_layer] = None
             if cache_write_event is None:
                 cache_write_event = torch.npu.Event()
                 cache_write_event.record()
             send_task = connector_metadata.send_task
-            layer_group_idx = self.layer_metadata[layer_name].tensor_group_idx[0]
             # Components of one physical layer can sit in groups with different
             # block sizes, so one group having nothing to push this step says
             # nothing about the others. A request is sent for the layer when any
             # component has blocks; each component then filters its own group.
             component_group_idxs = {self.layer_metadata[name].tensor_group_idx[0] for name in layer_names}
+            layer_name = self._select_staging_component(layer_names, send_task)
             keys = None
             values = None
             quant_keys = None
             quant_values = None
-            if layer_name not in self.sparse_sfa_c8_layers and (
-                (
-                    self.pd_head_ratio != 1
-                    and (isinstance(self.kv_cache_specs[layer_group_idx], (FullAttentionSpec, SlidingWindowSpec)))
-                    and send_task.group_num_blocks[layer_group_idx] > 0
-                )
-                or (self.enable_c8_quant and self.current_layer in self.vllm_config.quant_config.c8_quant_layers)
-                or (self.enable_kv_quant and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers)
-            ):
+            if layer_name is not None:
+                layer_group_idx = self.layer_metadata[layer_name].tensor_group_idx[0]
                 assert self.resharding_stream is not None
                 with npu_stream_switch(self.resharding_stream):
                     cache_write_event.wait()
@@ -2247,7 +2273,8 @@ class MooncakeLayerwiseConnectorWorker:
                 k_quant_cache=quant_keys,
                 v_quant_cache=quant_values,
                 layer_idx=self.current_layer,
-                layer_name=layer_name,
+                # Empty unless a component was staged; see get_transfer_meta.
+                layer_name=layer_name or "",
                 layer_names=layer_names,
                 group_rearrange_block_ids=send_task.group_rearrange_block_ids,
             )
