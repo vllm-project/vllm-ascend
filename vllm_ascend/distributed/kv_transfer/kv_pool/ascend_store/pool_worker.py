@@ -3305,6 +3305,7 @@ class KVPoolWorker:
                 f"Non-layerwise KV save requires KVCacheStoreSendingThread, but got {type(send_thread).__name__}"
             )
         self._previous_save_batch = send_thread.add_save_batch(requests)
+        send_thread.request_queue.join()
 
     def retrieve_layer(
         self,
