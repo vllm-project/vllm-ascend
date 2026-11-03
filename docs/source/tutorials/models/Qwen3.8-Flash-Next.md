@@ -47,10 +47,7 @@ The following example uses the AArch64 image and exposes 16 devices on an Atlas 
 
 === "A3 Series"
 
-    Start the docker image on each node.
-
     ```bash
-
     docker pull quay.io/ascend/vllm-ascend:qwen3.8-next-a3
 
     docker run --rm \
@@ -88,15 +85,13 @@ The following example uses the AArch64 image and exposes 16 devices on an Atlas 
 
 After entering the container, verify that vLLM and vLLM-Ascend can be imported:
 
-```shell
+```bash
 python -c "import vllm, vllm_ascend; print('vllm and vllm-ascend are ready')"
 ```
 
 ### 4.2 Source Code Installation
 
-If you don't want to use the docker image as above, you can also build all from source:
-
-- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md#installation-existing-cann-install).
+To install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md#installation-existing-cann-install).
 
 If you want to deploy a multi-node environment, you need to set up the environment on each node.
 
@@ -114,7 +109,7 @@ Before starting:
 
 === "A3 Series"
 
-    Run the following command to serve the W8A8 model with TP8 × DP1 and a maximum context length of 131072 tokens.
+    This W8A8 deployment uses TP8 × DP1, a maximum context length of 131072 tokens, and up to 8 active sequences.
 
     ```bash
     unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
@@ -176,7 +171,7 @@ Before starting:
 
 === "950 DT"
 
-    The W8A8-MXFP8 example uses TP4 × DP1, Model Runner V2, async scheduling, FlashComm1, shared expert DP, shared expert multistream overlap, and MTP. Static kernels and super kernels are disabled.
+    This W8A8-MXFP8 deployment uses TP4 × DP1, a maximum context length of 141312 tokens, and up to 32 active sequences.
 
     ```bash
     unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
@@ -229,10 +224,15 @@ Before starting:
     **Key parameters:**
 
     - `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3` selects the four devices for TP4.
+    - `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2.
+    - `--quantization ascend` loads the Ascend-compatible W8A8-MXFP8 checkpoint.
     - `--max-model-len 141312` and `--max-num-seqs 32` set context and concurrency limits; verify memory capacity before increasing them.
-    - `enable_fused_mc2=0` preserves shared expert multistream overlap.
+    - `--async-scheduling` enables asynchronous scheduling; `--enable-expert-parallel` enables expert parallelism for MoE layers.
+    - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert multistream overlap. Shared expert DP requires expert parallelism and TP > 1. Keep `enable_fused_mc2=0` when using shared expert overlap.
+    - NPU graph extension is enabled; static kernels, super kernels, and norm/quantization fusion are disabled.
     - `FULL_DECODE_ONLY` enables decode graph capture. The MTP configuration uses three draft tokens without explicitly forcing eager execution.
     - Prefix caching is enabled without an explicit Mamba cache mode. Confirm cache behavior with the installed runtime.
+    - `--enable-auto-tool-choice --tool-call-parser qwen3_xml` enables Function Calling; `--reasoning-parser qwen3` separates reasoning from the final answer.
     - `--profiler-config` sets the trace output directory; it does not start profiling by itself.
 
 **Service Verification:**
@@ -263,9 +263,11 @@ Before starting:
 
 - Expose devices 0–15 and mount the same W4A8 checkpoint for both roles.
 - Install compatible vLLM, vLLM-Ascend, and Mooncake in the active Python environment.
-- The scripts use `192.168.0.1`, `eth0`, and `/models/Qwen3.8-Flash-Next-w4a8`. Replace these literals consistently for the target host. Logs and profiling traces are written to `/tmp/qwen38-a3-pd`. Provide sufficient host memory for Engram CPU offload.
+- The commands use `192.168.0.1`, `eth0`, and `/models/Qwen3.8-Flash-Next-w4a8`. Replace these literals consistently for the target host. Logs and profiling traces are written to `/tmp/qwen38-a3-pd`. Provide sufficient host memory for Engram CPU offload.
 - Place the compatible `PD_proxy_server.py` at `/opt/qwen38/PD_proxy_server.py`. The proxy must support Mooncake PD request routing and the options shown below; its implementation is not included in this guide.
 - The examples use the Mooncake library directory from the Python 3.12.16 environment. Edit the literal library path if Mooncake is installed elsewhere.
+
+Run Prefill and Decode in separate terminals. Start Proxy after both model APIs are ready.
 
 **Prefill:**
 
@@ -387,12 +389,7 @@ exec python /opt/qwen38/PD_proxy_server.py \
     > "/tmp/qwen38-a3-pd/proxy.log" 2>&1
 ```
 
-Start prefill and decode:
-
-```bash
-nohup bash P.sh > p.launcher.log 2>&1 &
-nohup bash D.sh > d.launcher.log 2>&1 &
-```
+**Service Verification:**
 
 Wait for both services to finish loading. On the serving host, check that both APIs respond successfully and list `qwen38-flash-next-a3-pd`:
 
@@ -401,11 +398,7 @@ curl --fail http://127.0.0.1:25568/v1/models
 curl --fail http://127.0.0.1:25569/v1/models
 ```
 
-After both checks succeed, start the proxy:
-
-```bash
-nohup bash proxy.sh > proxy.launcher.log 2>&1 &
-```
+After both checks succeed, run the Proxy command in a separate terminal.
 
 Once the proxy is listening, verify the complete PD path:
 
@@ -604,9 +597,7 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 
 ### 7.1 Using AISBench
 
-1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for evaluation setup and usage.
-
-2. After execution, you can get the result. Here are the results of `Qwen3.8-Flash-Next` in `vllm-ascend:v0.26.0rc` for reference only.
+Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for evaluation setup and usage. The result below is for reference only.
 
 The following result was recorded for the original A3 W8A8 TP8 × DP1 configuration, before adding Model Runner V2, the explicit torch PLE backend, async scheduling, and MoE communication optimizations to the command in [Section 5.1](#51-single-node-online-deployment). It does not establish the accuracy of the updated command or the 950 DT and W4A8 PD configurations.
 
@@ -638,8 +629,6 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | A3 | Decode | 8–15 | 2 × 4 | 141312 | 32 | 4096 |
 
 ### 9.2 Tuning Guidelines
-
-#### 9.2.1 General Tuning Reference
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
