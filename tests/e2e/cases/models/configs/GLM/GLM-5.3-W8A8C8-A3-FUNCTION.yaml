@@ -21,8 +21,8 @@ config:
   dp_size: 1
   dp_size_local: 1
   dp_rank_start: 0
-  tp_size: 8
-  cp_size: 1
+  tp_size: 1
+  cp_size: 8
   pp_size: 2
   nnodes: 2
   node_rank: 0
@@ -36,8 +36,8 @@ config:
   dp_size: 1
   dp_size_local: 1
   dp_rank_start: 0
-  tp_size: 8
-  cp_size: 1
+  tp_size: 1
+  cp_size: 8
   pp_size: 2
   nnodes: 2
   node_rank: 1
@@ -68,7 +68,7 @@ env_common:
   HCCL_OP_EXPANSION_MODE: AIV
   HCCL_BUFFSIZE: '1024'
   TASK_QUEUE_ENABLE: '1'
-  VLLM_USE_V2_MODEL_RUNNER: '0'
+  VLLM_USE_V2_MODEL_RUNNER: '1'
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
   HCCL_EXEC_TIMEOUT: '1800'
   HCCL_CONNECT_TIMEOUT: '1800'
@@ -117,7 +117,7 @@ templates:
     HCCL_OP_EXPANSION_MODE: AIV
     HCCL_BUFFSIZE: '2560'
     TASK_QUEUE_ENABLE: '1'
-    VLLM_USE_V2_MODEL_RUNNER: '0'
+    VLLM_USE_V2_MODEL_RUNNER: '1'
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
     HCCL_EXEC_TIMEOUT: '1800'
     HCCL_CONNECT_TIMEOUT: '1800'
@@ -132,6 +132,8 @@ templates:
   - $SERVER_PORT
   - --tensor-parallel-size
   - ${TP_SIZE}
+  - --prefill-context-parallel-size
+  - ${CP_SIZE}
   - --pipeline-parallel-size
   - ${PP_SIZE}
   - --distributed-executor-backend
@@ -174,13 +176,13 @@ templates:
   - --attention_config.indexer_kv_dtype
   - int8
   - --additional-config
-  - '{"enable_dsa_cp": true, "enable_fused_mc2": 2, "enable_flashcomm1": true, "enable_shared_expert_dp": true, "enable_sparse_li_c8":
-    true, "enable_sparse_sfa_c8": true}'
+  - '{"enable_fused_mc2": 2, "enable_flashcomm1": true, "enable_shared_expert_dp": true, "enable_sparse_li_c8": true, "enable_sparse_sfa_c8":
+    true}'
   - --speculative-config
   - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
   - --kv-transfer-config
   - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config":
-    {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 8, "pp_layer_partition": "42,36"}, "decode":
+    {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode":
     {"dp_size": 8, "tp_size": 2}}}'
 - node_index: 1
   envs:
@@ -190,7 +192,7 @@ templates:
     HCCL_OP_EXPANSION_MODE: AIV
     HCCL_BUFFSIZE: '2560'
     TASK_QUEUE_ENABLE: '1'
-    VLLM_USE_V2_MODEL_RUNNER: '0'
+    VLLM_USE_V2_MODEL_RUNNER: '1'
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
     HCCL_EXEC_TIMEOUT: '1800'
     HCCL_CONNECT_TIMEOUT: '1800'
@@ -205,6 +207,8 @@ templates:
   - $SERVER_PORT
   - --tensor-parallel-size
   - ${TP_SIZE}
+  - --prefill-context-parallel-size
+  - ${CP_SIZE}
   - --pipeline-parallel-size
   - ${PP_SIZE}
   - --distributed-executor-backend
@@ -248,13 +252,13 @@ templates:
   - --attention_config.indexer_kv_dtype
   - int8
   - --additional-config
-  - '{"enable_dsa_cp": true, "enable_fused_mc2": 2, "enable_flashcomm1": true, "enable_shared_expert_dp": true, "enable_sparse_li_c8":
-    true, "enable_sparse_sfa_c8": true}'
+  - '{"enable_fused_mc2": 2, "enable_flashcomm1": true, "enable_shared_expert_dp": true, "enable_sparse_li_c8": true, "enable_sparse_sfa_c8":
+    true}'
   - --speculative-config
   - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
   - --kv-transfer-config
   - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config":
-    {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 8, "pp_layer_partition": "42,36"}, "decode":
+    {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode":
     {"dp_size": 8, "tp_size": 2}}}'
 - node_index: 2
   envs:
@@ -264,7 +268,7 @@ templates:
     HCCL_OP_EXPANSION_MODE: AIV
     HCCL_BUFFSIZE: '1024'
     TASK_QUEUE_ENABLE: '1'
-    VLLM_USE_V2_MODEL_RUNNER: '0'
+    VLLM_USE_V2_MODEL_RUNNER: '1'
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
     HCCL_EXEC_TIMEOUT: '1800'
     HCCL_CONNECT_TIMEOUT: '1800'
@@ -324,7 +328,7 @@ templates:
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - --kv-transfer-config
   - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config":
-    {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 8, "pp_layer_partition": "42,36"}, "decode":
+    {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode":
     {"dp_size": 8, "tp_size": 2}}}'
 - node_index: 3
   envs:
@@ -334,7 +338,7 @@ templates:
     HCCL_OP_EXPANSION_MODE: AIV
     HCCL_BUFFSIZE: '1024'
     TASK_QUEUE_ENABLE: '1'
-    VLLM_USE_V2_MODEL_RUNNER: '0'
+    VLLM_USE_V2_MODEL_RUNNER: '1'
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
     HCCL_EXEC_TIMEOUT: '1800'
     HCCL_CONNECT_TIMEOUT: '1800'
@@ -394,7 +398,7 @@ templates:
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - --kv-transfer-config
   - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config":
-    {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 8, "pp_layer_partition": "42,36"}, "decode":
+    {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode":
     {"dp_size": 8, "tp_size": 2}}}'
 benchmarks: {}
 test_content:
