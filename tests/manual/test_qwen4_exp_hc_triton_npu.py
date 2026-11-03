@@ -8,10 +8,12 @@ import argparse
 import time
 
 import torch
+import torch.nn.functional as F
 import torch_npu  # noqa: F401
 from vllm.models.qwen4_exp.amd import hyperconnection as upstream_hc
 
 import vllm_ascend.models.qwen4_exp.model  # noqa: F401
+from vllm_ascend.models.qwen4_exp.hc_dual_stream import AscendGatedResidual
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
@@ -31,6 +33,8 @@ RTOL = 3e-2
 
 
 def verify_model_binding() -> None:
+    if upstream_hc.GatedResidual is not AscendGatedResidual:
+        raise AssertionError("Qwen4Exp model did not bind AscendGatedResidual")
     functions = {
         "grouped_gemma_rmsnorm": grouped_gemma_rmsnorm,
         "hc_silu": hc_silu,
@@ -246,6 +250,40 @@ def verify_fullgraph_capture() -> None:
     print("PASS torch.compile fullgraph captured all five Ascend HC custom ops")
 
 
+def verify_dual_stream_projection() -> None:
+    """Check split projection, its consumer join, and changed graph inputs."""
+    rows = 48
+    x = make_input(rows, HYPER_HIDDEN_SIZE)
+    residual = make_input(rows, HYPER_HIDDEN_SIZE)
+    block_output = make_input(rows, HIDDEN_SIZE)
+    norm_weight = make_input(1, HYPER_HIDDEN_SIZE).flatten()
+    weight = make_input(LOWRANK_SIZE + HC_COUNT + 12, HYPER_HIDDEN_SIZE)
+
+    def dual_path(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        lowrank, injection = torch.ops.vllm.qwen4_exp_hc_split_down_projection(x, weight, LOWRANK_SIZE, HC_COUNT)
+        # Keep useful gate-side work between launch and first injection read.
+        activated = hc_silu(lowrank, HC_COUNT)
+        combined, normalized = torch.ops.vllm.qwen4_exp_hc_combine_norm_after_injection(
+            residual, block_output, injection, norm_weight, EPS, HC_COUNT
+        )
+        return activated, combined, normalized
+
+    def reference(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        projected = F.linear(x, weight)
+        lowrank = projected[:, :LOWRANK_SIZE]
+        injection = projected[:, LOWRANK_SIZE : LOWRANK_SIZE + HC_COUNT]
+        combined, normalized = hc_combine_norm(residual, block_output, injection, norm_weight, EPS, HC_COUNT)
+        return hc_silu(lowrank, HC_COUNT), combined, normalized
+
+    compiled = torch.compile(dual_path, backend="eager", fullgraph=True)
+    for changed_input in (x, x + 0.25):
+        for name, actual, expected in zip(
+            ("gate", "combined", "normalized"), compiled(changed_input), reference(changed_input)
+        ):
+            assert_close(f"dual_stream/{name}", actual, expected)
+    print("PASS dual-stream projection and consumer join under fullgraph compilation")
+
+
 def benchmark() -> None:
     rows = 32
     residual = make_input(rows, HYPER_HIDDEN_SIZE)
@@ -296,6 +334,7 @@ def main() -> None:
     for rows, padded in ((1, False), (17, False), (7, True), (257, False)):
         run_correctness(rows, padded_input=padded)
     verify_fullgraph_capture()
+    verify_dual_stream_projection()
     if args.benchmark:
         benchmark()
     print("ALL QWEN4_EXP HC TRITON NPU CHECKS PASSED")

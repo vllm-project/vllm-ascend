@@ -158,6 +158,20 @@ Before starting the service:
     - `--compilation-config` enables `FULL_DECODE_ONLY` ACLGraph for decode.
     - `fuse_norm_quant=false` selects the validated norm and quantization path for this W8A8 deployment.
 
+### Experimental HC projection overlap
+
+`--additional-config '{"multistream_qwen4_exp_hc":true}'` enables an optional
+HyperConnection projection split. The injection rows run on a second NPU stream
+while the low-rank gate path prepares the next block input. The implementation
+records an input-ready event before the second stream reads the normalized HC
+state and joins that stream immediately before injection is consumed by HC
+combine. It preserves the original merged projection when the option is absent.
+
+This option is intended for controlled A/B tests. Splitting one GEMM into two
+adds launch and event costs, so a throughput benefit is not assumed. Validate
+model output, FULL_DECODE_ONLY graph replay, and latency on the target checkpoint
+and concurrency before using it for serving.
+
     Verify the service is ready: the log should show `Application startup complete`.
 
 ## 6 Functional Verification
