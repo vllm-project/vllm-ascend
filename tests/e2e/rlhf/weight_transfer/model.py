@@ -20,10 +20,6 @@ class WeightUpdateModelCase:
     checkpoint_model_prefix: str | None = None
     checkpoint_name_map: Callable[[str], str] | None = None
     expert_intermediate_size: int | None = None
-    # HF config/meta-model enumeration only; vLLM server loading is configured
-    # independently in _common_serve_args.
-    trust_remote_code: bool = True
-    split_fused_mlp: bool = False
     extra_server_args: tuple[str, ...] = ()
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False

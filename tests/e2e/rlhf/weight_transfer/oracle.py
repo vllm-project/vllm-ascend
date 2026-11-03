@@ -8,9 +8,9 @@ from contextlib import contextmanager
 
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.pull_request.rlhf.common import rlhf_server, wait_for_free_device_memory
-from tests.e2e.pull_request.rlhf.weight_transfer.model import WeightUpdateModelCase
-from tests.e2e.pull_request.rlhf.weight_transfer.weight_source import (
+from tests.e2e.rlhf.common import rlhf_server, wait_for_free_device_memory
+from tests.e2e.rlhf.weight_transfer.model import WeightUpdateModelCase
+from tests.e2e.rlhf.weight_transfer.weight_source import (
     FixedRandomWeightSource,
     fixed_startup_checkpoint,
 )
@@ -56,9 +56,6 @@ def _common_serve_args(
         str(tensor_parallel_size),
         "--port",
         str(port),
-        # Independent of case.trust_remote_code, which controls HF meta-model
-        # enumeration. Both vLLM servers allow repository config/tokenizer code;
-        # the case's checkpoint adapter supplies the runtime loader's names.
         "--trust-remote-code",
         "--additional-config",
         '{"weight_nz_mode": 0}',

@@ -5,9 +5,8 @@
 
 from typing import Any
 
-from tests.e2e.pull_request.rlhf.weight_transfer.adapters.deepseek import deepseek_v4_checkpoint_name
-from tests.e2e.pull_request.rlhf.weight_transfer.adapters.minimax import minimax_m3_checkpoint_name
-from tests.e2e.pull_request.rlhf.weight_transfer.model import WeightUpdateModelCase
+from tests.e2e.rlhf.weight_transfer.adapters.deepseek import deepseek_v4_checkpoint_name
+from tests.e2e.rlhf.weight_transfer.model import WeightUpdateModelCase
 
 QWEN35_CASE = WeightUpdateModelCase(
     id="qwen3.5-35b-a3b-moe-layout",
@@ -74,43 +73,6 @@ GLM51_CASE = WeightUpdateModelCase(
 GLM_CASES = (GLM51_CASE,)
 
 
-# Reserve HBM for M3's FIA graph workspace rather than sizing the KV cache
-# from the memory-utilization fraction. The four-layer, 1024-token test only
-# needs a small cache; keep startup and live-update servers identical.
-MINIMAX_M3_KV_CACHE_BYTES = 128 * 2**20
-
-
-MINIMAX_M3_CASE = WeightUpdateModelCase(
-    id="minimax-m3-sparse-moe-layout",
-    model="MiniMax/MiniMax-M3",
-    hf_overrides={
-        "architectures": ["MiniMaxM3SparseForCausalLM"],
-        "text_config": {
-            "num_hidden_layers": 4,
-            "num_local_experts": 8,
-            # Explicit schedules for the fixed four-layer test model;
-            # native config derives these before overrides are applied.
-            "layer_types": ["full_attention", "full_attention", "full_attention", "minimax_m3_sparse"],
-            "mlp_layer_types": ["dense", "dense", "dense", "sparse"],
-        },
-    },
-    meta_config_attribute="text_config",
-    checkpoint_model_prefix="language_model.model.",
-    checkpoint_name_map=minimax_m3_checkpoint_name,
-    # Disable the checkpoint's auto_map remote config and use Transformers'
-    # native MiniMaxM3VLConfig, whose text_config is MiniMaxM3VLTextConfig.
-    # AutoModelForCausalLM resolves that text config to MiniMaxM3VLForCausalLM
-    # for meta-model construction. The legacy remote config instead yields
-    # a generic text PreTrainedConfig that AutoModel cannot resolve.
-    trust_remote_code=False,
-    split_fused_mlp=True,
-    extra_server_args=("--block-size", "128", "--kv-cache-memory-bytes", str(MINIMAX_M3_KV_CACHE_BYTES)),
-)
-
-
-MINIMAX_CASES = (MINIMAX_M3_CASE,)
-
-
 # Keep packed lanes skipped until #18763 fixes cross-stream chunk loading.
 # HCCL's second update diverged in #18726 (38570793020, attempts 1/2) and
 # main daily runs 38186343470, 38325024027, 38657430708 and 38679145716;
@@ -123,7 +85,7 @@ PACKED_LANE_SKIP_REASON = (
 )
 
 
-MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *GLM_CASES, *MINIMAX_CASES)
+MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *GLM_CASES)
 
 
 def pytest_model_cases(backend: str, *, model_cases: tuple[WeightUpdateModelCase, ...] = MODEL_CASES) -> list[Any]:

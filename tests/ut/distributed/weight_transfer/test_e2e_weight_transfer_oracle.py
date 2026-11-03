@@ -23,31 +23,30 @@ config overrides. A future edit that touches one builder and not the other would
 silently turn the comparison into apples-to-oranges, so the parity and the
 caching contract are pinned here.
 
-Checkpoint-source checks cover learned router state and fused projection
-expansion, which a shared startup/update data source could otherwise omit.
+Checkpoint-source checks preserve the existing models' buffer metadata
+through the helper migration.
 """
 
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
+from transformers import PretrainedConfig
 
-from tests.e2e.pull_request.rlhf.common import server_visible_devices
-from tests.e2e.pull_request.rlhf.weight_transfer import oracle, weight_source
-from tests.e2e.pull_request.rlhf.weight_transfer.oracle import (
-    live_update_serve_args,
-    reference_serve_args,
-    reference_signature,
-)
 from tests.e2e.pull_request.two_card.rlhf.weight_transfer.cases import (
     DEEPSEEK_CASES,
     GLM_CASES,
-    MINIMAX_CASES,
     MODEL_CASES,
     QWEN_CASES,
     pytest_model_cases,
 )
-from tests.ut.distributed.weight_transfer.weight_transfer_test_helpers import checkpoint_source, router_meta_model
+from tests.e2e.rlhf.common import server_visible_devices
+from tests.e2e.rlhf.weight_transfer import oracle, weight_source
+from tests.e2e.rlhf.weight_transfer.oracle import (
+    live_update_serve_args,
+    reference_serve_args,
+    reference_signature,
+)
 
 CASE = MODEL_CASES[0]
 PORT = 8123
@@ -76,7 +75,7 @@ def test_model_matrix_separates_model_and_transport_coverage(backend):
             assert case.id in skip_marks[0].kwargs["reason"]
             assert ("#18763" if packed else case.skip_reason) in skip_marks[0].kwargs["reason"]
 
-    for family in (QWEN_CASES, GLM_CASES, MINIMAX_CASES, DEEPSEEK_CASES):
+    for family in (QWEN_CASES, GLM_CASES, DEEPSEEK_CASES):
         expected_family = [parameter for parameter in parameters if parameter.values[0] in family]
         assert pytest_model_cases(backend, model_cases=family) == expected_family
 
@@ -108,7 +107,6 @@ def _flag_map(args: list[str]) -> dict[str, str | bool]:
         pytest.param(QWEN_CASES[0], "npu_ipc", 2, id="qwen-ipc-tp2"),
         pytest.param(QWEN_CASES[0], "hccl", 1, id="qwen-hccl-tp1"),
         pytest.param(GLM_CASES[0], "npu_ipc", 2, id="glm-ipc-tp2"),
-        pytest.param(MINIMAX_CASES[0], "npu_ipc", 2, id="minimax-ipc-tp2"),
     ],
 )
 def test_reference_and_lane_differ_only_in_the_load_path(case, tensor_parallel_size, backend):
@@ -153,25 +151,16 @@ def test_reference_and_lane_differ_only_in_the_load_path(case, tensor_parallel_s
 
 
 @pytest.mark.parametrize(
-    ("model_name", "layer_index", "checkpoint_gate", "buffers", "legacy_buffers", "added_buffers"),
+    ("model_name", "layer_index", "checkpoint_gate", "buffers", "expected_buffers"),
     [
-        pytest.param(
-            "Qwen/Qwen3.5-35B-A3B",
-            3,
-            "model.language_model.layers.3.mlp.gate",
-            (),
-            {},
-            {},
-            id="qwen3.5-unchanged",
-        ),
+        pytest.param("Qwen/Qwen3.5-35B-A3B", 3, "model.language_model.layers.3.mlp.gate", (), {}, id="qwen3.5"),
         pytest.param(
             "kylesayrs/DeepSeek-V4-Flash-bf16",
             0,
             "model.layers.0.mlp.gate",
             (("tid2eid", (16, 2), torch.int64, False),),
             {"model.layers.0.mlp.gate.tid2eid": ((16, 2), torch.int64)},
-            {},
-            id="deepseek-v4-integer-table",
+            id="deepseek-v4",
         ),
         pytest.param(
             "zai-org/GLM-5.1",
@@ -179,47 +168,44 @@ def test_reference_and_lane_differ_only_in_the_load_path(case, tensor_parallel_s
             "model.layers.3.mlp.gate",
             (("e_score_correction_bias", (8,), torch.float32, True),),
             {},
-            {"model.layers.3.mlp.gate.e_score_correction_bias": ((8,), torch.float32)},
-            id="glm-5.1-fp32-router-bias",
-        ),
-        pytest.param(
-            "MiniMax/MiniMax-M3",
-            3,
-            "language_model.model.layers.3.block_sparse_moe.gate",
-            (("e_score_correction_bias", (8,), torch.float32, True),),
-            {},
-            {"language_model.model.layers.3.block_sparse_moe.e_score_correction_bias": ((8,), torch.float32)},
-            id="minimax-m3-fp32-router-bias",
+            id="glm-5.1",
         ),
     ],
 )
-def test_checkpoint_source_buffer_metadata(
-    model_name, layer_index, checkpoint_gate, buffers, legacy_buffers, added_buffers
+def test_checkpoint_source_preserves_existing_buffer_metadata(
+    model_name, layer_index, checkpoint_gate, buffers, expected_buffers
 ):
-    """Pin the metadata delta using representative HF state, without downloads.
-
-    Real buffer registration exercises state_dict persistence. The DeepSeek
-    table is deliberately non-persistent to preserve the old integer-buffer
-    contract regardless of how a Transformers version registers it.
-    """
+    """Preserve main's non-floating buffer selection for the existing models."""
     case = next(case for case in MODEL_CASES if case.model == model_name)
-    model, gate = router_meta_model(layer_index)
+    model = torch.nn.Module()
+    parent = model
+    for component in ("model", "layers", str(layer_index), "mlp"):
+        child = torch.nn.Module()
+        parent.add_module(component, child)
+        parent = child
+    gate = torch.nn.Linear(16, 8, bias=False, device="meta")
+    parent.add_module("gate", gate)
     for name, shape, dtype, persistent in buffers:
         gate.register_buffer(name, torch.empty(shape, dtype=dtype, device="meta"), persistent=persistent)
-    # Runtime-only floating/complex buffers must never enter the payload.
     model.register_buffer("inv_freq", torch.empty(8, device="meta"), persistent=False)
     model.register_buffer("complex_runtime", torch.empty(8, dtype=torch.complex64, device="meta"), persistent=False)
-
-    unchanged_baseline_metadata = {f"{checkpoint_gate}.weight": ((8, 16), torch.bfloat16), **legacy_buffers}
-    source = checkpoint_source(model, case)
-    actual = {meta.name: (meta.shape, meta.dtype) for meta in source.metadata()}
-    assert actual == unchanged_baseline_metadata | added_buffers
+    meta_config = PretrainedConfig()
+    config = (
+        PretrainedConfig(**{case.meta_config_attribute: meta_config}) if case.meta_config_attribute else meta_config
+    )
+    with (
+        patch.object(weight_source.AutoConfig, "from_pretrained", return_value=config),
+        patch.object(weight_source.AutoModelForCausalLM, "from_config", return_value=model),
+    ):
+        source = weight_source.FixedRandomWeightSource(case, torch.device("cpu"))
+    expected = {f"{checkpoint_gate}.weight": ((8, 16), torch.bfloat16), **expected_buffers}
+    assert {meta.name: (meta.shape, meta.dtype) for meta in source.metadata()} == expected
     weights = dict(source)
-    assert {name: (tuple(tensor.shape), tensor.dtype) for name, tensor in weights.items()} == actual
-    # Exercise expert-count resolution even for models without integer buffers.
-    table = source._make_tensor("synthetic.tid2eid", (16, 2), torch.int64)
-    assert torch.all((table >= 0) & (table < source._num_experts))
-    assert torch.all(table[:, 0] != table[:, 1])
+    assert {name: (tuple(tensor.shape), tensor.dtype) for name, tensor in weights.items()} == expected
+    for name, tensor in weights.items():
+        if name.endswith(".tid2eid"):
+            assert torch.all((tensor >= 0) & (tensor < source._num_experts))
+            assert torch.all(tensor[:, 0] != tensor[:, 1])
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])

@@ -20,7 +20,7 @@
 
 This module provides the server harness, HTTP helpers, NPU memory query
 utilities, and common fixtures used across all RL test files under
-``tests/e2e/pull_request/rlhf/``.
+``tests/e2e/rlhf/``.
 """
 
 import contextlib

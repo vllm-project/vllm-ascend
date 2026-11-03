@@ -16,17 +16,19 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 
-from tests.e2e.pull_request.rlhf.weight_transfer.model import WeightUpdateModelCase
+from tests.e2e.rlhf.weight_transfer.model import WeightUpdateModelCase
 
 
 def expand_fused_expert_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
-    """Expand fused routed experts by name pattern, independently of model family.
+    """Map HF fused routed-expert tensors onto checkpoint-facing per-expert names.
 
-    Match ``mlp.experts.gate_up_proj`` ``[E, 2I, H]`` and
-    ``mlp.experts.down_proj`` ``[E, H, I]``; emit checkpoint-facing per-expert
-    gate/up/down projections for loaders such as GLM's and MiniMax's.
-    Names that do not match retain their original shapes. Model-specific
-    renaming is applied separately after expansion.
+    ``GlmMoeDsaForCausalLM`` keeps routed experts fused as
+    ``mlp.experts.gate_up_proj`` ``[E, 2I, H]`` and ``mlp.experts.down_proj``
+    ``[E, H, I]``, while the published checkpoint - and therefore vLLM's
+    ``expert_params_mapping`` - stores one tensor per expert
+    (``mlp.experts.{e}.gate_proj.weight`` etc.).  Without this expansion the
+    fused names reach ``load_weights`` unmatched and raise
+    ``KeyError: 'layers.N.mlp.experts.gate_up_proj'``.
     """
     for suffix, kind in ((".mlp.experts.gate_up_proj", "gate_up"), (".mlp.experts.down_proj", "down")):
         if not name.endswith(suffix):
@@ -42,17 +44,6 @@ def expand_fused_expert_params(name: str, shape: tuple[int, ...]) -> list[tuple[
             return out
         num_experts, hidden, inter = shape
         return [(f"{prefix}{expert}.down_proj.weight", (hidden, inter)) for expert in range(num_experts)]
-    return [(name, shape)]
-
-
-def split_fused_mlp_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
-    """Split a fused dense/shared-expert gate-up projection."""
-    if name.endswith(".gate_up_proj.weight"):
-        fused_intermediate, hidden = shape
-        assert fused_intermediate % 2 == 0, f"{name}: odd fused gate/up dimension"
-        shard_shape = (fused_intermediate // 2, hidden)
-        prefix = name.removesuffix(".gate_up_proj.weight")
-        return [(f"{prefix}.{projection}.weight", shard_shape) for projection in ("gate_proj", "up_proj")]
     return [(name, shape)]
 
 
@@ -104,19 +95,18 @@ class FixedRandomWeightSource(WeightSource):
     """
 
     def __init__(self, case: WeightUpdateModelCase, device: torch.device) -> None:
-        config = AutoConfig.from_pretrained(case.model, trust_remote_code=case.trust_remote_code)
+        config = AutoConfig.from_pretrained(case.model, trust_remote_code=True)
         _apply_hf_overrides(config, case.hf_overrides)
         self._case = case
         meta_config = getattr(config, case.meta_config_attribute) if case.meta_config_attribute else config
         with torch.device("meta"):
-            meta_model = AutoModelForCausalLM.from_config(meta_config, trust_remote_code=case.trust_remote_code)
-        persistent_state_names = set(meta_model.state_dict())
+            meta_model = AutoModelForCausalLM.from_config(meta_config, trust_remote_code=True)
 
-        # Apply the namespace prefix before expanding fused tensors, then map
-        # the resulting checkpoint names (including per-expert w1/w2/w3).
-        # Generate parameters in the test's BF16 model dtype, while buffers below
-        # retain their native dtype (including FP32 router correction bias).
-        # This models a BF16 checkpoint rather than preserving HF parameter dtypes.
+        # Two distinct steps: ``_checkpoint_name`` applies the namespace prefix
+        # to the raw meta-model name (once), then the checkpoint rename map runs
+        # on the *expanded* names, because the meta model exposes routed experts
+        # fused and the per-expert names (gate/up/down -> w1/w3/w2) only exist
+        # after ``expand_fused_expert_params`` has split them.
         parameters = [
             (
                 self._apply_name_map(expanded_name, case),
@@ -124,19 +114,17 @@ class FixedRandomWeightSource(WeightSource):
                 torch.bfloat16,
             )
             for name, parameter in meta_model.named_parameters()
-            for expert_name, expert_shape in expand_fused_expert_params(
+            for expanded_name, expanded_shape in expand_fused_expert_params(
                 self._checkpoint_name(name, case), tuple(parameter.shape)
             )
-            for expanded_name, expanded_shape in (
-                split_fused_mlp_params(expert_name, expert_shape)
-                if case.split_fused_mlp
-                else [(expert_name, expert_shape)]
-            )
         ]
-        # Preserve integer buffers such as token-to-expert tables regardless of
-        # persistence, and include persistent floating-point checkpoint state
-        # such as router correction bias. Non-persistent floating-point runtime
-        # buffers such as rotary tables remain excluded.
+        # Learned integer tables must travel with the payload too. Some
+        # architectures expose them as HF *buffers* while the served model keeps
+        # them as parameters: DeepSeek-V4's hash router keeps ``tid2eid`` as a
+        # (vocab, topk) token -> expert table, and the real checkpoint ships it
+        # (``model.layers.{0,1,2}.mlp.gate.tid2eid`` in the safetensors index).
+        # Omitting it leaves the table to be re-materialised with ``torch.empty``
+        # during a live update, and the router then indexes experts out of range.
         parameters += [
             (
                 self._apply_name_map(self._checkpoint_name(name, case), case),
@@ -144,14 +132,9 @@ class FixedRandomWeightSource(WeightSource):
                 buffer.dtype,
             )
             for name, buffer in meta_model.named_buffers()
-            if name in persistent_state_names or (not buffer.dtype.is_floating_point and not buffer.dtype.is_complex)
+            if not buffer.dtype.is_floating_point and not buffer.dtype.is_complex
         ]
-        self._num_experts = int(
-            getattr(meta_config, "n_routed_experts", 0)
-            or getattr(meta_config, "num_local_experts", 0)
-            or getattr(meta_config, "num_experts", 0)
-            or 0
-        )
+        self._num_experts = int(getattr(meta_config, "n_routed_experts", 0) or 0)
         del meta_model
 
         assert parameters, f"{case.id}: reduced meta model contains no parameters"
@@ -185,13 +168,13 @@ class FixedRandomWeightSource(WeightSource):
         torch.npu.manual_seed(seed)
         if not dtype.is_floating_point:
             # Token -> expert tables (DeepSeek-V4's hash router). Values must
-            # stay inside [0, num_experts) *and* be unique within a row:
+            # stay inside [0, n_routed_experts) *and* be unique within a row:
             # the MC2 dispatch/combine kernels assume a token never routes to
             # the same expert twice, which is also why the served model
             # initialises this table duplicate-free (#16485). Sampling top-k
             # over per-expert scores guarantees both invariants while still
             # differing from the model's own table.
-            assert self._num_experts > 0, f"{name}: integer table needs a positive expert count"
+            assert self._num_experts > 0, f"{name}: integer table needs n_routed_experts"
             assert len(shape) == 2, f"{name}: expected a (tokens, top_k) integer table, got {shape}"
             scores = torch.rand(shape[0], self._num_experts, device=self._device)
             return scores.topk(shape[1], dim=1).indices.to(dtype)
