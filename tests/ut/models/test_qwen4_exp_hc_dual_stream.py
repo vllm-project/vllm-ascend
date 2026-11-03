@@ -19,7 +19,7 @@ class _Tensor:
         self.log.append(f"slice:{self.name}:{index.start}:{index.stop}")
         return self
 
-    def record_stream(self, stream: object) -> None:
+    def record_stream(self, stream: "_Stream") -> None:
         self.log.append(f"record_stream:{self.name}:{stream.name}")
 
 
@@ -47,19 +47,23 @@ def test_gate_is_queued_before_injection() -> None:
         use_combine=True,
         dual_stream=True,
         input_mix_weight_down_block_inject=SimpleNamespace(weight=weight),
-        input_mix_weight_up=lambda value: log.append("up") or value,
+        input_mix_weight_up=lambda value: record("up", value),
         hc_lowrank=320,
         hc_count=4,
     )
 
+    def record(name: str, value: object) -> object:
+        log.append(name)
+        return value
+
     with (
-        patch.object(hc.F, "linear", side_effect=lambda *args: log.append("lowrank") or xn),
-        patch.object(hc, "hc_silu", side_effect=lambda *args: log.append("silu") or xn),
-        patch.object(hc, "hc_gate_mix", side_effect=lambda *args: log.append("gate_mix") or xn),
+        patch.object(hc.F, "linear", side_effect=lambda *args: record("lowrank", xn)),
+        patch.object(hc, "hc_silu", side_effect=lambda *args: record("silu", xn)),
+        patch.object(hc, "hc_gate_mix", side_effect=lambda *args: record("gate_mix", xn)),
         patch.object(
             hc.torch.ops.vllm,
             "qwen4_exp_hc_launch_injection_projection",
-            side_effect=lambda *args: log.append("injection") or xn,
+            side_effect=lambda *args: record("injection", xn),
         ),
     ):
         hc.AscendGatedResidual._project_from_normalized(mixer, xn)
