@@ -32,6 +32,8 @@ jobs:
       github.repository == 'vllm-project/vllm-ascend' &&
       vars.RECIPES_PREVIEW_ENABLED == 'true'
     runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
     timeout-minutes: 5
     environment:
       name: recipes-preview
@@ -41,11 +43,16 @@ jobs:
         format('https://vllm-recipes-git-preview-vllm-ascend-pr-{0}-inferact-inc.vercel.app', github.event.pull_request.number) ||
         '') }}
     steps:
+      - name: Install GitHub CLI
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends gh
+
       - name: Create a token for vllm-project/recipes
         id: token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         env:
-          # Enable proxy support for token creation and post-job revocation.
+          # Job containers inherit the runner's proxy settings.
           NODE_USE_ENV_PROXY: '1'
         with:
           app-id: ${{ vars.RECIPES_APP_ID }}
@@ -55,23 +62,18 @@ jobs:
           permission-contents: write
 
       - name: Dispatch to vllm-project/recipes
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          github-token: ${{ steps.token.outputs.token }}
-          script: |
-            const clientPayload = { source: 'vllm-ascend' };
-            let eventType = 'recipes-updated';
-            if (context.eventName !== 'push') {
-              const prNumber = String(context.payload.pull_request?.number ?? '');
-              if (!/^[1-9][0-9]*$/.test(prNumber) || !Number.isSafeInteger(Number(prNumber))) {
-                throw new Error('Invalid PR number.');
-              }
-              eventType = 'preview-pr';
-              clientPayload.pr = Number(prNumber);
-            }
-            await github.rest.repos.createDispatchEvent({
-              owner: 'vllm-project',
-              repo: 'recipes',
-              event_type: eventType,
-              client_payload: clientPayload,
-            });
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "$EVENT" = push ]; then
+            gh api repos/vllm-project/recipes/dispatches \
+              -f event_type=recipes-updated -f 'client_payload[source]=vllm-ascend'
+            exit 0
+          fi
+          [[ "$PR" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid PR number: $PR"; exit 1; }
+          gh api repos/vllm-project/recipes/dispatches \
+            -f event_type=preview-pr -f 'client_payload[source]=vllm-ascend' \
+            -F "client_payload[pr]=${PR}"

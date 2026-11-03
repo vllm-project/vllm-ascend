@@ -25,12 +25,6 @@ permissions:
 
 jobs:
   pr-create:
-    # Labeling and its immediate comment share the lock with all refreshes.
-    # Keep pending label jobs: a refresh must not cancel the job that adds labels.
-    concurrency:
-      group: recipes-preview-comment-${{ github.event.pull_request.number }}
-      cancel-in-progress: false
-      queue: max
     permissions:
       contents: read
       pull-requests: write
@@ -103,46 +97,14 @@ jobs:
           fi
 
       - name: Label the PR
-        id: label
         uses: actions/labeler@v6
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           configuration-path: .github/labeler.yml
           sync-labels: true
 
-      # Match vLLM's label-and-comment behavior without another runner queue.
-      # Only trusted workflow code is loaded; no PR code is checked out.
-      - name: Read the trusted comment helper
-        if: >-
-          github.repository == 'vllm-project/vllm-ascend' &&
-          vars.RECIPES_PREVIEW_ENABLED == 'true' &&
-          github.event.pull_request.base.ref == 'main'
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: vllm-project/vllm-ascend
-          ref: ${{ github.workflow_sha }}
-          path: recipe-preview-helper
-          sparse-checkout: .github/workflows/scripts/recipes-preview-comment.cjs
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-
-      - name: Create or update the recipe preview comment after labeling
-        if: >-
-          github.repository == 'vllm-project/vllm-ascend' &&
-          vars.RECIPES_PREVIEW_ENABLED == 'true' &&
-          github.event.pull_request.base.ref == 'main'
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        with:
-          script: |
-            const updateComment = require('./recipe-preview-helper/.github/workflows/scripts/recipes-preview-comment.cjs');
-            await updateComment({ github, context, pr: process.env.PR_NUMBER });
-
       - name: Remind contributors on PR open
-        if: >-
-          !cancelled() && github.event.action == 'opened' &&
-          steps.label.outcome == 'success'
+        if: github.event.action == 'opened'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
