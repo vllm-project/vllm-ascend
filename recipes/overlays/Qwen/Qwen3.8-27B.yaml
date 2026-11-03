@@ -39,6 +39,9 @@ meta:
     ascend_950pr: verified
 guide_sections:
   ascend: |
+    > Recipe preview smoke test: initial revision (2026-11-03).
+    > This temporary note verifies the preview pipeline, not NPU validation.
+
     ### Huawei Ascend 950PR-w8a8 (vLLM Ascend)
 
     Verified on a single 950PR, TP1, vLLM Ascend 0.23.0 from the
