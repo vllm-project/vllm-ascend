@@ -24,11 +24,11 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 
 Select the checkpoint that matches the deployment configuration:
 
-| Hardware | Deployment | Checkpoint | Device allocation | Weight preparation |
+| Hardware | Deployment | Checkpoint | Device allocation | Download Links |
 | --- | --- | --- | --- | --- |
 | Atlas 800 A3 | Colocated | `Qwen3.8-Flash-Next-w8a8-mtp` | 8 devices, TP8 × DP1 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
-| Atlas 800 A3 | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | Prepare a compatible W4A8 checkpoint separately. |
-| Ascend 950 DT | Colocated | `Qwen3.8-Flash-Next-w8a8-mxfp8` | 4 devices, TP4 × DP1 | Prepare a compatible W8A8-MXFP8 checkpoint separately. |
+| Atlas 800 A3 | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | |
+| Ascend 950 DT | Colocated | `Qwen3.8-Flash-Next-w8a8-mxfp8` | 4 devices, TP4 × DP1 | |
 
 The commands use fixed model directories under `/models`. Mount the corresponding checkpoint at the shown directory or edit that path directly. For PD separation, both roles must load the same checkpoint.
 
