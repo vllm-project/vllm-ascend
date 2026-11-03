@@ -1010,7 +1010,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
         additional_config={},
         kv_transfer_config=None,
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(compress_ratios=[1]),
+            hf_config=SimpleNamespace(model_type="deepseek_v4"),
         ),
     )
     monkeypatch.setattr(

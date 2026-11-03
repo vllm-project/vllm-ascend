@@ -739,7 +739,7 @@ def _get_layer_kv_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCac
 def _is_dsv4_model(vllm_config: VllmConfig) -> bool:
     model_config = getattr(vllm_config, "model_config", None)
     hf_config = getattr(model_config, "hf_config", None) if model_config else None
-    return hf_config is not None and hasattr(hf_config, "compress_ratios")
+    return getattr(hf_config, "model_type", None) == "deepseek_v4"
 
 
 def _get_attention_kv_cache_dims(
@@ -1248,11 +1248,9 @@ def _allocate_kv_cache(
                 kv_cache_raw_tensors[cache_owner.layer_name] = backing
         return kv_cache_raw_tensors
 
-    # The restored DeepSeek-V4 planner on main computes capacity for one
-    # shared-tuple backing and emits every KVCacheTensor as a view into it.
+    # DeepSeek-V4 descriptors describe views into one shared tuple backing.
     # Validate all descriptors before allocating so an unsupported geometry
     # cannot partially materialize and then fall back to duplicate buffers.
-    dsv4_backing: torch.Tensor | None = None
     if is_dsv4_model:
         tensor_sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
         if len(tensor_sizes) != 1:
@@ -1290,6 +1288,12 @@ def _allocate_kv_cache(
         for layer_name, start, layer_size in dsv4_regions:
             kv_cache_raw_tensors[layer_name] = dsv4_backing[start : start + layer_size]
 
+        layer_names = {name for group in kv_cache_config.kv_cache_groups for name in group.layer_names}
+        assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
+            "Some layers are not correctly initialized"
+        )
+        return kv_cache_raw_tensors
+
     # vLLM #51718 changed every KVCacheTensor to describe a view into one
     # common backing allocation. Hybrid groups overlay that backing from byte
     # zero because a block ID belongs to only one group at a time. Allocate it
@@ -1297,7 +1301,7 @@ def _allocate_kv_cache(
     # full cache pool and can OOM before the second tensor is initialized.
     hybrid_backing: torch.Tensor | None = None
     step_backing: torch.Tensor | None = None
-    if use_hybrid_layout and not is_dsv4_model:
+    if use_hybrid_layout:
         tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
         if len(tensor_sizes) != 1:
             raise ValueError("Hybrid KV cache tensors must share one backing allocation.")
@@ -1342,28 +1346,10 @@ def _allocate_kv_cache(
             layerwise_aliases.update({name: owner_name for name in shared_names[1:]})
             shared_names = shared_names[:1]
 
-        if dsv4_backing is not None:
-            continue
-
         if any(isinstance(layer_kv_cache_spec[name], AscendIndexerKPoolTailSpec) for name in shared_names):
             # The compressed indexer and request-private tail share a physical
             # small-page slot. Both need the same single backing allocation.
             raw_tensor = _allocate_int8_cache_tensor(kv_cache_tensor.size, alignment, device)
-            for layer_name in shared_names:
-                kv_cache_raw_tensors[layer_name] = raw_tensor
-            continue
-
-        if is_dsv4_model:
-            # DSA reshapes it with its own page-strided layout below.
-            if vllm_config.kv_transfer_config is None:
-                raw_tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
-            else:
-                raw_tensor = torch.zeros(
-                    kv_cache_tensor.size + alignment,
-                    dtype=torch.int8,
-                    device=device,
-                )
-                raw_tensor = _align_memory(raw_tensor, alignment)[: kv_cache_tensor.size]
             for layer_name in shared_names:
                 kv_cache_raw_tensors[layer_name] = raw_tensor
             continue
