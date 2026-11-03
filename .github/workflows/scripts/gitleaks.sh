@@ -33,8 +33,9 @@ if [[ -n "${GITHUB_BASE_REF}" ]]; then
         echo "::error::The secret scan cannot determine which commits to scan."
         exit 1
     fi
-    BASE_SHA="$(git merge-base "${BASE_REF}" HEAD)"
-    if [[ -z "${BASE_SHA}" ]]; then
+    # `set -e` aborts the script when the command substitution fails, so the
+    # failure has to be captured in the condition to keep the error message.
+    if ! BASE_SHA="$(git merge-base "${BASE_REF}" HEAD)"; then
         echo "::error::Cannot compute the merge base of '${BASE_REF}' and HEAD."
         exit 1
     fi
