@@ -146,8 +146,9 @@ Before starting:
         --enable-auto-tool-choice \
         --tool-call-parser qwen3_xml \
         --reasoning-parser qwen3 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
         --compilation-config '{"cudagraph_capture_sizes":[4,8,12,16,20,24,28,32],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
         --additional-config '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}'
     ```
 
@@ -163,8 +164,9 @@ Before starting:
     - The command does not set `--language-model-only`, so the vision encoder remains enabled and the service accepts both text and multimodal requests. For a text-only deployment, you may add `--language-model-only` to skip loading the vision encoder.
     - `--enable-auto-tool-choice --tool-call-parser qwen3_xml` enables automatic Function Calling with the Qwen3 XML parser.
     - `--reasoning-parser qwen3` separates reasoning from the final answer in the OpenAI-compatible response.
-    - `--speculative-config` uses the model's MTP head to draft three tokens. `enforce_eager=true` keeps the MTP proposer in eager mode.
+    - `--speculative-config` uses the model's MTP head to draft three tokens. `enforce_eager=false` allows the MTP proposer to use graph execution, matching the PD decode setting.
     - `--compilation-config` enables `FULL_DECODE_ONLY` ACLGraph for decode.
+    - `--engram-config` enables Engram embedding-table CPU offload with `cpu_offload=true`. This DP1 configuration sets `dp_shared_memory=false`; provide sufficient host memory and use a checkpoint with supported n-gram layers.
     - `fuse_norm_quant=false` disables norm/quantization fusion for this W4A8 deployment.
     - `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2; `VLLM_ASCEND_PLE_BACKEND=torch` selects the PLE backend.
     - `--async-scheduling` enables asynchronous scheduling.
