@@ -227,8 +227,12 @@ def test_compiled_op_rechecks_runtime_reduction(monkeypatch):
         graphs.append(graph)
         return graph.forward
 
-    library = torch.library.Library("vllm", "IMPL", "CPU")
-    library.impl("ascend_moe_hc_post", module._ascend_moe_hc_post)
+    # Recent vLLM CPU registration already installs the production function.
+    # Add a CPU implementation only for versions that register it on NPU alone.
+    library = None
+    if not torch._C._dispatch_has_kernel_for_dispatch_key("vllm::ascend_moe_hc_post", "CPU"):
+        library = torch.library.Library("vllm", "IMPL", "CPU")
+        library.impl("ascend_moe_hc_post", module._ascend_moe_hc_post)
     try:
         compiled = torch.compile(
             lambda s, r, h, p, c: torch.ops.vllm.ascend_moe_hc_post(s, r, h, p, c, "layer", 0),
@@ -243,7 +247,8 @@ def test_compiled_op_rechecks_runtime_reduction(monkeypatch):
         assert torch.equal(fused, _post_reference(inputs[0] + inputs[1], *inputs[2:]))
         assert torch.equal(fallback, _post_reference((inputs[0] + inputs[1]) * 2, *inputs[2:]))
     finally:
-        library._destroy()
+        if library is not None:
+            library._destroy()
 
 
 def test_runner_passes_transformed_outputs_and_explicit_residual(monkeypatch):
