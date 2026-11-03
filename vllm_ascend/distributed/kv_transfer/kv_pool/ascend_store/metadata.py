@@ -264,16 +264,20 @@ def uses_hybrid_kv_cache(scheduler_config: Any, kv_cache_groups: Sequence[Any] |
 def infer_group_block_sizes(
     cache_block_size: int,
     kv_cache_groups: Sequence[Any] | None,
+    dcp_size: int = 1,
 ) -> list[int]:
     if not kv_cache_groups:
-        return [cache_block_size]
+        return [cache_block_size * dcp_size]
 
     block_sizes: list[int] = []
     for group in kv_cache_groups:
         spec = group.kv_cache_spec
         if isinstance(spec, UniformTypeKVCacheSpecs):
             spec = next(iter(spec.kv_cache_specs.values()))
-        block_sizes.append(spec.block_size)
+        # Recurrent state covers the full sequence on each rank; only token
+        # caches marked as DCP-sharded expand their logical page span.
+        scale = dcp_size if dcp_size != 1 and spec.dcp_sharded else 1
+        block_sizes.append(spec.block_size * scale)
     return block_sizes
 
 
@@ -792,6 +796,8 @@ class LoadSpec:
 class RequestTracker:
     # Request id
     req_id: str
+    # Namespace for request-scoped snapshots; renewed after preemption/reuse.
+    layerwise_request_id: str | None = None
 
     token_len: int
 
@@ -927,6 +933,7 @@ class RequestTracker:
 class ReqMeta:
     # Request id
     req_id: str
+    layerwise_request_id: str | None = None
     # End token for full-block KV save.
     save_end_token: int
     # Token length after this scheduled step finishes.
@@ -1001,10 +1008,12 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
+        layerwise_request_id: str | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
         self.req_id = req_id
+        self.layerwise_request_id = layerwise_request_id
         self.token_len_chunk = token_len_chunk
         self.save_end_token = token_len_chunk if save_end_token is None else save_end_token
         self.target_token_len = token_len_chunk if target_token_len is None else target_token_len
@@ -1199,6 +1208,7 @@ class ReqMeta:
         logger.debug("request:%s, meta save spec:%s, meta load spec:%s", tracker.req_id, not skip_save, load_spec)
         return ReqMeta(
             req_id=tracker.req_id,
+            layerwise_request_id=tracker.layerwise_request_id,
             token_len_chunk=num_tokens_to_save,
             save_end_token=num_tokens_to_save,
             target_token_len=target_token_len,
