@@ -471,6 +471,8 @@ The A2 capabilities have not changed in this release and remain consistent with 
 
     On Atlas 800I A3, a mixed Prefill/Decode deployment follows the Prefill execution mode. HCCL therefore uses AICPU by default; leave `HCCL_OP_EXPANSION_MODE` unset.
 
+    Kimi K3 on Atlas 800I A3 does not support jemalloc.
+
     Before starting the service:
 
     - Replace the model path, local IP address, network interface, service port, and DP RPC port with values from the target environment.
@@ -810,6 +812,8 @@ Please refer to the [KV Cache Pool (Ascend Store) Deployment Guide](https://docs
 On 950DT products, use CCU communication on both Prefill and Decode by setting `HCCL_OP_EXPANSION_MODE="CCU_SCHED"`, with `HCCL_BUFFSIZE=800`. On A3, Prefill uses AICPU by default, so leave `HCCL_OP_EXPANSION_MODE` unset in the Prefill command; Decode uses `HCCL_OP_EXPANSION_MODE=AIV`. Both A3 roles use `HCCL_BUFFSIZE=1024`.
 
 This deployment supports DSpark speculative decoding. Select the DSpark checkpoint for your platform from [Section 3.1](#31-model-weight), and configure the same draft-model path and `num_speculative_tokens` on both Prefill and Decode nodes. The configuration uses draft TP8 on 950DT products or draft TP16 on A3, greedy drafting, and seven speculative tokens. On both platforms, Prefill keeps eager execution, while Decode sets the draft model's `enforce_eager` to `false` and retains `FULL_DECODE_ONLY` for the target model. The seventh argument of the engine template is the tensor-parallel size: `8` for 950DT products and `16` for A3.
+
+Kimi K3 on Atlas 800I A3 does not support jemalloc.
 
 The Prefill and Decode templates below assume equal tensor-parallel sizes on both sides. Both `prefill.tp_size` and `decode.tp_size` are taken from the seventh template argument (`$7`) and must match the engine TP: `8` for 950DT products or `16` for A3.
 
