@@ -6,6 +6,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from numbers import Integral
 
+# MemFabric reserves a 64-entry native entity-ID segment for Offload.
+MAX_OFFLOAD_ENTITY_IDS = 64
+
 
 @dataclass(frozen=True, slots=True)
 class OffloadInstanceBinding:
@@ -29,9 +32,9 @@ class OffloadInstanceBinding:
         if not isinstance(self.store_url, str) or not self.store_url.startswith("tcp://"):
             raise ValueError("store_url must be a dedicated tcp:// endpoint")
         if isinstance(self.initialization_order, bool) or not isinstance(self.initialization_order, Integral):
-            raise ValueError("initialization_order must be an integer in [0, 63)")
-        if not 0 <= self.initialization_order < 63:
-            raise ValueError("initialization_order must be an integer in [0, 63)")
+            raise ValueError(f"initialization_order must be an integer in [0, {MAX_OFFLOAD_ENTITY_IDS})")
+        if not 0 <= self.initialization_order < MAX_OFFLOAD_ENTITY_IDS:
+            raise ValueError(f"initialization_order must be an integer in [0, {MAX_OFFLOAD_ENTITY_IDS})")
         object.__setattr__(self, "initialization_order", int(self.initialization_order))
 
 
@@ -44,13 +47,15 @@ def plan_offload_instances(
     owner-to-endpoint metadata to participating ranks. Each rank creates its
     own ``offload.Offload()`` object for each planned owner and initializes
     those objects in ``initialization_order`` on every participating rank; the
-    native library assigns the per-process entity ID. Sorting owners makes the
-    plan independent of input mapping order. ``reserved_instances`` counts
-    entity IDs consumed outside this plan, including the module-level default
-    instance and failed initialization attempts; initialize them first and in
-    the same order on relevant ranks. A rank must not skip an earlier instance
-    and then join a later SHARED instance, because native entity IDs would
-    differ across ranks. Planned ``initialization_order`` values start after
+    native library assigns the per-process entity ID. This helper produces
+    metadata only: it does not initialize instances, discover rank membership,
+    or coordinate lifecycle. Sorting owners makes the plan independent of
+    input mapping order. ``reserved_instances`` counts entity IDs consumed
+    outside this plan, including the module-level default instance and failed
+    initialization attempts; initialize them first and in the same order on
+    relevant ranks. A rank must not skip an earlier instance and then join a
+    later SHARED instance, because native entity IDs would differ across
+    ranks. Planned ``initialization_order`` values start after
     ``reserved_instances``. The default module-level client remains available
     for legacy callers.
 
@@ -66,8 +71,8 @@ def plan_offload_instances(
     if isinstance(reserved_instances, bool) or not isinstance(reserved_instances, Integral) or reserved_instances < 0:
         raise ValueError("reserved_instances must be a non-negative integer")
     reserved_instances = int(reserved_instances)
-    if len(store_urls) + reserved_instances > 63:
-        raise ValueError("at most 63 Offload entity IDs may be consumed per process")
+    if len(store_urls) + reserved_instances > MAX_OFFLOAD_ENTITY_IDS:
+        raise ValueError(f"at most {MAX_OFFLOAD_ENTITY_IDS} Offload entity IDs may be consumed per process")
     if len(set(store_urls.values())) != len(store_urls):
         raise ValueError("each SHARED Offload instance must have a distinct store_url")
 

@@ -44,13 +44,17 @@ def test_instance_plan_rejects_endpoint_conflicts_and_invalid_owner():
 def test_instance_plan_respects_native_instance_limit():
     stores = {f"owner-{i:02}": f"tcp://127.0.0.1:{8500 + i}" for i in range(64)}
 
-    with pytest.raises(ValueError, match="at most 63"):
-        plan_offload_instances(stores)
-    with pytest.raises(ValueError, match="at most 63"):
-        plan_offload_instances({"ple": "tcp://127.0.0.1:8501"}, reserved_instances=63)
-    assert len(plan_offload_instances({"ple": "tcp://127.0.0.1:8501"}, reserved_instances=62)) == 1
+    plan = plan_offload_instances(stores)
+    assert len(plan) == 64
+    assert max(binding.initialization_order for binding in plan.values()) == 63
+
+    with pytest.raises(ValueError, match="at most 64"):
+        plan_offload_instances({**stores, "owner-64": "tcp://127.0.0.1:8564"})
+    with pytest.raises(ValueError, match="at most 64"):
+        plan_offload_instances({"ple": "tcp://127.0.0.1:8501"}, reserved_instances=64)
+    assert len(plan_offload_instances({"ple": "tcp://127.0.0.1:8501"}, reserved_instances=63)) == 1
     assert (
-        plan_offload_instances({"ple": "tcp://127.0.0.1:8501"}, reserved_instances=62)["ple"].initialization_order == 62
+        plan_offload_instances({"ple": "tcp://127.0.0.1:8501"}, reserved_instances=63)["ple"].initialization_order == 63
     )
     with pytest.raises(ValueError, match="reserved_instances"):
         plan_offload_instances({}, reserved_instances=True)
@@ -65,6 +69,6 @@ def test_instance_binding_validates_owner_and_endpoint():
     for invalid in ("", "http://127.0.0.1:8501"):
         with pytest.raises(ValueError):
             OffloadInstanceBinding("ple", invalid, 0)
-    for invalid_order in (True, -1, 1.5, 63):
+    for invalid_order in (True, -1, 1.5, 64):
         with pytest.raises(ValueError, match="initialization_order"):
             OffloadInstanceBinding("ple", "tcp://127.0.0.1:8501", invalid_order)
