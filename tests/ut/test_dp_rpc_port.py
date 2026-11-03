@@ -14,6 +14,8 @@
 
 import os
 import socket
+import sys
+import unittest
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +26,11 @@ from vllm_ascend.dp_rpc_port import (
     check_dp_rpc_port_available,
     find_tcp_listener,
 )
+
+# On Linux the wildcard address covers every address of its family, so a
+# listener on it also keeps the specific addresses of that port busy. Windows
+# keeps the wildcard and the specific addresses apart.
+_WILDCARD_BLOCKS_SPECIFIC = sys.platform != "win32"
 
 
 def _parallel_config(**overrides):
@@ -44,6 +51,18 @@ class TestDpRpcPort(TestBase):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("127.0.0.1", 0))
             return sock.getsockname()[1]
+
+    def _ipv6_listener(self, address, ipv6_only):
+        """Return a listening IPv6 socket bound to ``address``."""
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, int(ipv6_only))
+            sock.bind((address, 0))
+            sock.listen(1)
+        except OSError:
+            sock.close()
+            self.skipTest("IPv6 is not available on this host")
+        return sock
 
     def test_endpoint_skipped_without_data_parallel(self):
         self.assertIsNone(_dp_rpc_endpoint(_parallel_config(data_parallel_size=1)))
@@ -107,6 +126,10 @@ class TestDpRpcPort(TestBase):
                     )
                 )
 
+    @unittest.skipUnless(
+        _WILDCARD_BLOCKS_SPECIFIC,
+        "the wildcard address does not cover the specific addresses on this platform",
+    )
     def test_check_reports_a_wildcard_listener(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("0.0.0.0", 0))
@@ -141,6 +164,48 @@ class TestDpRpcPort(TestBase):
             self.assertIsNotNone(holder)
             assert holder is not None
             self.assertEqual(holder[0], os.getpid())
+
+    def test_check_ignores_an_ipv6_only_listener_for_an_ipv4_endpoint(self):
+        # An IPv6 only listener does not hold the IPv4 port, so the engine
+        # can still bind the IPv4 endpoint of that port.
+        with self._ipv6_listener("::", ipv6_only=True) as sock:
+            port = sock.getsockname()[1]
+            check_dp_rpc_port_available(
+                _parallel_config(
+                    data_parallel_master_ip="127.0.0.1",
+                    data_parallel_rpc_port=port,
+                )
+            )
+
+    @unittest.skipUnless(
+        _WILDCARD_BLOCKS_SPECIFIC,
+        "the wildcard address does not cover the specific addresses on this platform",
+    )
+    def test_check_reports_a_dual_stack_ipv6_listener_for_an_ipv4_endpoint(self):
+        # A dual stack listener holds the IPv4 port as well.
+        with self._ipv6_listener("::", ipv6_only=False) as sock:
+            port = sock.getsockname()[1]
+            with self.assertRaises(RuntimeError):
+                check_dp_rpc_port_available(
+                    _parallel_config(
+                        data_parallel_master_ip="127.0.0.1",
+                        data_parallel_rpc_port=port,
+                    )
+                )
+
+    def test_check_ignores_an_ipv4_listener_for_an_ipv6_endpoint(self):
+        # The IPv4 and the IPv6 address spaces are separate, an IPv4 listener
+        # does not hold the IPv6 endpoint of that port.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(1)
+            port = sock.getsockname()[1]
+            check_dp_rpc_port_available(
+                _parallel_config(
+                    data_parallel_master_ip="::1",
+                    data_parallel_rpc_port=port,
+                )
+            )
 
     def test_find_tcp_listener_returns_none_for_a_free_port(self):
         self.assertIsNone(find_tcp_listener("127.0.0.1", self._free_port()))
