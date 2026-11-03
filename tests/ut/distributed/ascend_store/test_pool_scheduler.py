@@ -1077,7 +1077,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
         meta = scheduler.build_connector_meta(sched_output)
 
-        self.assertEqual(meta.allocated_block_ids, {623, 624, 625, 626, 44})
+        self.assertEqual(meta.allocated_block_ids, {623, 624, 626, 44})
 
 
 @pytest.mark.parametrize(

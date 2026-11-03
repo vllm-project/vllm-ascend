@@ -640,7 +640,6 @@ class BaseKVPoolScheduler(ABC):
                 continue
             for group_blocks in normalize_block_ids_by_group(new_block_ids):
                 meta.allocated_block_ids.update(block_id for block_id in group_blocks if block_id > 0)
-        meta.allocated_block_ids.update(getattr(scheduler_output, "new_block_ids_to_zero", None) or ())
         meta.allocated_block_ids.update(
             copy.dst_block_id for copy in (getattr(scheduler_output, "kv_cache_block_copies", None) or ())
         )
