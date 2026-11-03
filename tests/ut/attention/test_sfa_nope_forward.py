@@ -48,6 +48,7 @@ def test_nope_exec_kv_preserves_padding_and_special_values(block_size, dtype, sl
         kv_a_layernorm=lambda x: x,
         enable_sparse_sfa_c8=False,
     )
+    impl._exec_kv_local = AscendSFAImpl._exec_kv_local.__get__(impl)
     native = sparse_mla.torch_npu.npu_scatter_nd_update_
     with patch.object(sparse_mla.torch_npu, "npu_scatter_nd_update_", wraps=native) as scatter:
         result = AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, None)
@@ -71,6 +72,7 @@ def test_nope_exec_kv_trims_unused_slots_and_converts_values():
         kv_a_layernorm=lambda x: x,
         enable_sparse_sfa_c8=False,
     )
+    impl._exec_kv_local = AscendSFAImpl._exec_kv_local.__get__(impl)
     AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, None)
     expected = torch.zeros_like(cache)
     expected[0, 1, 0] = values[0].to(cache.dtype)
@@ -91,6 +93,7 @@ def test_nope_exec_kv_rejects_unmergeable_pages():
         kv_a_layernorm=lambda x: x,
         enable_sparse_sfa_c8=False,
     )
+    impl._exec_kv_local = AscendSFAImpl._exec_kv_local.__get__(impl)
     with (
         patch.object(sparse_mla.torch_npu, "npu_scatter_nd_update_") as scatter,
         pytest.raises(RuntimeError, match="view size is not compatible"),
@@ -515,6 +518,8 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     impl.fused_qkv_a_proj = MagicMock(return_value=(torch.zeros(4, 4),))
     impl.q_a_layernorm = lambda value: value
     impl.exec_kv = MagicMock(return_value=(None, torch.zeros(4, 2)))
+    # Cache exchange itself is covered by test_pcp_main_kv_overlap.
+    impl._prepare_kv = lambda *args: lambda: impl.exec_kv(*args)
     impl._q_proj_and_k_up_proj = MagicMock(return_value=(torch.zeros(4, 1, 2), None))
     impl._record_dcp_kv_gather_context = MagicMock()
     impl._prepare_indexer_metadata = MagicMock()

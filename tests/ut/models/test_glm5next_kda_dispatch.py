@@ -20,8 +20,9 @@ def test_glm_kda_backend_declares_pcp_support() -> None:
 @pytest.mark.parametrize(("pcp_size", "pcp_rank"), [(1, 0), (2, 0), (2, 1)])
 @pytest.mark.parametrize("has_prefill", [False, True])
 @pytest.mark.parametrize("needs_output_buffer", [False, True])
+@pytest.mark.parametrize("pcp_projection", [False, True])
 def test_kda_pcp_restores_prefill_and_skips_decode_gather(
-    monkeypatch, pcp_size, pcp_rank, has_prefill, needs_output_buffer
+    monkeypatch, pcp_size, pcp_rank, has_prefill, needs_output_buffer, pcp_projection
 ):
     layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
@@ -45,6 +46,21 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(
     # The gated norm runs directly inside the unified custom op.
     layer.o_norm = lambda output, gate: output
     layer.o_proj = lambda x: (x, None)
+    if pcp_projection:
+        projection = model_kda.PCPRowParallelLinear.__new__(model_kda.PCPRowParallelLinear)
+        torch.nn.Module.__init__(projection)
+        projection.input_is_parallel = True
+        projection.tp_rank, projection.tp_size = pcp_rank, pcp_size
+        projection.skip_bias_add = True
+        projection.bias = None
+        projection.reduce_results = True
+        projection.return_bias = True
+        projection.quant_method = SimpleNamespace(apply=lambda _, inputs, bias: inputs)
+        projection.tp_group = SimpleNamespace(
+            all_reduce=lambda values: values,
+            reduce_scatter=lambda values, dim: values.chunk(pcp_size, dim=dim)[pcp_rank],
+        )
+        layer.o_proj = projection
     seen = []
 
     def run_kda(qkv_proj_states, g1, beta, core_attn_out):

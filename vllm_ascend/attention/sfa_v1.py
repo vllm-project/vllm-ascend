@@ -58,6 +58,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_KV_CACHE_TUPLE_LEN,
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
+from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, register_flash_attention_gate_warmup
 from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
@@ -1268,6 +1269,67 @@ class AscendSFAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
+    def _get_pcp_cache_write_slots(self, slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
+        return slots
+
+    def _prepare_kv(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata) -> Callable[[], tuple]:
+        """Launch PCP KV exchange now and finish the local cache write after Q projection."""
+        if not self.pcp_enabled:
+            outputs = self.exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+            return lambda: outputs
+        slots = self._get_pcp_cache_write_slots(slots, attn_metadata)
+        if not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
+            return lambda: self._exec_kv_local(
+                kv_no_split, cos, sin, kv_cache, slots[: kv_no_split.shape[0]], attn_metadata
+            )
+        if self.qk_rope_head_dim == 0:
+            # NoPE projects actual tokens, but slots retain the padded rank stride.
+            pad = attn_metadata.num_input_tokens - kv_no_split.shape[0]
+            if pad < 0:
+                raise ValueError("SFA PCP KV exceeds the rank-local padded token count.")
+            if pad:
+                kv_no_split = nn.functional.pad(kv_no_split, (0, 0, 0, pad))
+        local_rows = kv_no_split.shape[0]
+        replicated = get_pcp_num_replicated_tokens(attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded)
+        assert 0 <= replicated <= local_rows
+        inputs = (kv_no_split,) if self.qk_rope_head_dim == 0 else (kv_no_split, cos, sin)
+        assert all(value.shape[0] == local_rows for value in inputs)
+        pending = ()
+        sends = ()
+        # Preserve replicated/draft decode writes without submitting a collective.
+        if slots.shape[0] <= local_rows or replicated == local_rows:
+            inputs = tuple(value[:replicated] for value in inputs)
+            slots = slots[:replicated]
+        else:
+            group = get_pcp_group()
+            sends = tuple(value[replicated:].contiguous() for value in inputs)
+            pending = tuple(all_gather_async(send, group) for send in sends)
+            slots = slots[: group.world_size * local_rows]
+            if replicated:
+                rank_slots = slots.view(group.world_size, local_rows)
+                slots = torch.cat((rank_slots[0, :replicated], rank_slots[:, replicated:].flatten()))
+            logger.info_once("SFA PCP main KV AllGather overlaps MLA Q projection.")
+
+        def finish():
+            # Retain the contiguous sends until HCCL has finished reading them.
+            _ = sends
+            for _, work in pending:
+                if work is not None:
+                    work.wait()
+            values = (
+                tuple(
+                    torch.cat((value[:replicated], gathered), dim=0) if replicated else gathered
+                    for value, (gathered, _) in zip(inputs, pending)
+                )
+                if pending
+                else inputs
+            )
+            assert values[0].shape[0] == slots.numel()
+            gathered_cos, gathered_sin = values[1:] if self.qk_rope_head_dim else (cos, sin)
+            return self._exec_kv_local(values[0], gathered_cos, gathered_sin, kv_cache, slots, attn_metadata)
+
+        return finish
+
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
@@ -1278,6 +1340,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         attn_metadata: M,
     ):
         if self.pcp_enabled:
+            slots = self._get_pcp_cache_write_slots(slots, attn_metadata)
             if needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
                 num_replicated_tokens = get_pcp_num_replicated_tokens(
                     attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded
@@ -1300,6 +1363,18 @@ class AscendSFAImpl(MLAAttentionImpl):
                 )
             else:
                 slots = slots[: kv_no_split.shape[0]]
+        return self._exec_kv_local(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+
+    def _exec_kv_local(
+        self,
+        kv_no_split: torch.Tensor,
+        cos: torch.Tensor | None,
+        sin: torch.Tensor | None,
+        kv_cache: tuple,
+        slots: torch.Tensor,
+        attn_metadata: M,
+    ):
+        """Process and write KV whose PCP exchange has already completed."""
         if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
             assert self.kv_a_layernorm is not None
             values = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
@@ -2084,7 +2159,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 # Wait before the first main or indexer cache access.
                 self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
 
-            kv_outputs = self.exec_kv(
+            finish_main_kv = self._prepare_kv(
                 kv_no_split,
                 cos,
                 sin,
@@ -2092,9 +2167,14 @@ class AscendSFAImpl(MLAAttentionImpl):
                 slot_mapping_sfa,
                 attn_metadata,
             )
+            # Preserve collective order: main KV, KPool hidden, then Q.
+            if self.runtime_has_indexer and hasattr(type(self.indexer), "prepare_pcp_hidden"):
+                assert k_hidden_states is not None and indexer_attn_metadata is not None
+                k_hidden_states = self.indexer.prepare_pcp_hidden(k_hidden_states, indexer_attn_metadata)
+            ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
+            kv_outputs = finish_main_kv()
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
-            ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
             if self.qk_rope_head_dim:
                 q_pe = self.rope_single(q_pe, cos, sin)
             self._on_query_ready(ql_nope, q_pe, attn_metadata)
@@ -2124,6 +2204,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 indexer_attn_metadata,
                 compute_topk=not self.skip_topk and has_local_query,
             )
+            # Release the pending KPool receive buffer after its consumer.
+            k_hidden_states = None
             if self.skip_topk:
                 topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
             elif self.use_index_cache and has_local_query:
