@@ -34,6 +34,8 @@ class D2DExpertWeightLoader:
         self.comm_op_list = None
         self.updated_expert_map = None
         self.updated_log2phy_map = None
+        self.updated_log2phy_rank_independent_map = None
+        self.updated_replica_routing_table = None
         self.layer_id = -1  # layer id to be updated
         self.state = ExpertWeightUpdateState.WAITING
         self.recv_expert_list = []
@@ -79,8 +81,17 @@ class D2DExpertWeightLoader:
 
         self.state = ExpertWeightUpdateState.READY
 
-    def set_log2phy_map(self, log2phy_map):
+    def set_log2phy_map(self, log2phy_map, log2phy_rank_independent_map=None):
         self.updated_log2phy_map = log2phy_map
+        self.updated_log2phy_rank_independent_map = log2phy_rank_independent_map
+
+    def set_replica_routing_table(self, logical_to_physical_map, logical_replica_count):
+        """Carry the compact ALLGATHER token-row routing payload for this layer.
+
+        ``(logical_to_physical_map, logical_replica_count)`` is group-common;
+        the adaptor expands it into the layer's persistent [1024, N] table.
+        """
+        self.updated_replica_routing_table = (logical_to_physical_map, logical_replica_count)
 
     def asyn_expert_weight_transfer(self, reqs):
         # Only when send/recv tasks are parsed into self.comm_op_list, d2d send/recv tasks can be launched
@@ -111,8 +122,21 @@ class D2DExpertWeightLoader:
         # update expert_map
         self.eplb_adaptor.do_update_expert_map(self.layer_id, self.updated_expert_map)
 
-        # update log2phy_map
-        self.eplb_adaptor.do_update_log2phy_map(self.layer_id, self.updated_log2phy_map)
+        # update log2phy_map (rotated for MC2/ALLTOALL, rank-independent for
+        # ALLGATHER)
+        self.eplb_adaptor.do_update_log2phy_map(
+            self.layer_id,
+            self.updated_log2phy_map,
+            self.updated_log2phy_rank_independent_map,
+        )
+
+        # update the ALLGATHER token-row replica routing table
+        if self.updated_replica_routing_table is not None:
+            logical_to_physical_map, logical_replica_count = self.updated_replica_routing_table
+            self.eplb_adaptor.do_update_replica_routing_table(
+                self.layer_id, logical_to_physical_map, logical_replica_count
+            )
+            self.updated_replica_routing_table = None
 
         # update expert weight
         buffer_tensor_id = 0
@@ -131,6 +155,9 @@ class D2DExpertWeightLoader:
                 "[eplb/d2d_loader] Full expert weight update cycle completed, total_layers=%s",
                 self.eplb_adaptor.num_moe_layers,
             )
+            verify_dump = getattr(self.eplb_adaptor, "maybe_verify_dump", None)
+            if verify_dump is not None:
+                verify_dump()
 
         self.recv_expert_list = []
         self.updated_expert_map = None

@@ -167,7 +167,11 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             local_rank = torch.distributed.get_rank(group=device_group)
             backend = device_group._get_backend(torch.device("npu"))
             self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
-        except AttributeError:
+        except (AttributeError, RuntimeError):
+            # RuntimeError: some stacks (EI0015 on this host) refuse the lazy
+            # >=8-rank MC2 comm init after world collectives. The ALLGATHER
+            # dispatcher path never uses this comm (only MC2 quant ops do), so
+            # fall back to the empty name instead of failing engine init.
             logger.warning_once(
                 "[vllm-ascend/W8A8_DYNAMIC] MC2 group metadata unavailable, "
                 "falling back to empty moe_all_to_all_group_name."

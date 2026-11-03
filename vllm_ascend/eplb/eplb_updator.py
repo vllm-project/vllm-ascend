@@ -15,6 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this updator.
+import queue
+
 import numpy
 import torch
 import torch.distributed as dist
@@ -67,6 +69,9 @@ class EplbUpdator:
 
         self.reqs = []
         self.update_info_all = []
+        # Set when the planner fails to deliver update info in time; the whole
+        # weight-update window of the current EPLB cycle is then skipped.
+        self.eplb_update_degraded = False
 
         self.cur_iterations: torch.int64 = 0
 
@@ -106,14 +111,48 @@ class EplbUpdator:
     def forward_before(self):
         # Batch after eplb process being triggered, get update info provided by eplb process
         if self.get_update_info_flag():
-            self.update_info_all = self.eplb_process.block_update_q.get()
-        if self.update_expert_weight_flag():
-            with record_function_or_nullcontext("EPLB generate p2p task"):
-                (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = (
-                    self.update_info_all.pop(0)
+            try:
+                self.update_info_all = self.eplb_process.block_update_q.get(timeout=300)
+                self.eplb_update_degraded = False
+            except queue.Empty:
+                logger.error(
+                    "[eplb/updator] EPLB planner did not deliver update info within 300s "
+                    "(rank=%s, cur_iterations=%s). Degrading: skipping this EPLB cycle's "
+                    "weight update.",
+                    self.rank_id,
+                    self.cur_iterations,
                 )
+                self.update_info_all = []
+                self.eplb_update_degraded = True
+        if self.update_expert_weight_flag() and not self.eplb_update_degraded:
+            if not self.update_info_all:
+                logger.error(
+                    "[eplb/updator] EPLB weight-update window reached but update info is "
+                    "exhausted (rank=%s, cur_iterations=%s). Degrading: skipping remaining "
+                    "weight updates of this cycle.",
+                    self.rank_id,
+                    self.cur_iterations,
+                )
+                self.eplb_update_degraded = True
+        if self.update_expert_weight_flag() and not self.eplb_update_degraded:
+            with record_function_or_nullcontext("EPLB generate p2p task"):
+                (
+                    expert_send_info,
+                    expert_recv_info,
+                    updated_expert_map,
+                    log2phy_map,
+                    log2phy_rank_independent_map,
+                    replica_routing_map,
+                    layer_id,
+                ) = self.update_info_all.pop(0)
                 log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
-                self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
+                log2phy_rank_independent_this_rank = torch.from_numpy(numpy.array(log2phy_rank_independent_map))
+                self.eplb_loader.set_log2phy_map(log2phy_map_this_rank, log2phy_rank_independent_this_rank)
+                logical_to_physical, replica_count = replica_routing_map
+                self.eplb_loader.set_replica_routing_table(
+                    torch.from_numpy(numpy.array(logical_to_physical)),
+                    torch.from_numpy(numpy.array(replica_count)),
+                )
                 updated_expert_map_this_rank = torch.from_numpy(numpy.array(updated_expert_map))
                 self.eplb_loader.generate_expert_d2d_transfer_task(
                     expert_send_info,
@@ -132,15 +171,23 @@ class EplbUpdator:
                 self.compute_and_set_moe_load()
                 self.wakeup_eplb_worker()
 
-        if self.update_expert_weight_flag() and self.expert_map_record_path is None:
+        if (
+            self.update_expert_weight_flag()
+            and not self.eplb_update_degraded
+            and self.expert_map_record_path is None
+        ):
             self.eplb_loader.update_expert_map_and_weight(self.reqs)
 
-        # One circle of eplb update includes expert_heat_collection_interval + algorithm_execution_interval
-        # + num_moe_layers (for weight update). In expert_heat_collection stage, we only update the counter
-        # when eplb_heat_collection_status is True. In later stages, the counter is always updated.
-        # TODO(Angazenn): Decouple algorithm execution && weight update with heat collection iterations.
-        if self.cur_iterations >= self.expert_heat_collection_interval - 1 or eplb_heat_collection_status:
-            self.update_iteration()
+        # One EPLB update circle = expert_heat_collection_interval + algorithm_execution_interval
+        # + num_moe_layers (for weight update). Fix A1: advance the counter UNCONDITIONALLY on
+        # every executed step, ignoring eplb_heat_collection_status. The status is stage-dependent
+        # (prefill vs decode) and only the step-start DP-pair rendezvous synchronizes the DP
+        # scheduling islands; when the islands' batch compositions diverge (e.g. ARM_STAGE=prefill:
+        # one island prefills while the other decodes), a status-gated counter advances different
+        # counts per island and desynchronizes the periodic world-size EP load all_gather in
+        # compute_and_set_moe_load, permanently wedging the EP group. Making the cycle schedule a
+        # pure function of the rendezvous-locked step count keeps all islands aligned.
+        self.update_iteration()
 
     def compute_and_set_moe_load(self):
         local_load = self.adaptor.get_rank_expert_workload().unsqueeze(1)
@@ -157,6 +204,14 @@ class EplbUpdator:
     def warm_up_eplb(self):
         logger.info("[eplb/updator] Starting EPLB warm-up, rank=%s, world_size=%s", self.rank_id, self.world_size)
         self.shared_dict["expert_maps"] = self.adaptor.get_global_expert_map()
+        # The worker needs the physical -> logical mapping to build
+        # logical-length log2phy maps from physical-length expert maps.
+        # Store a CPU copy: the worker reads it through the Manager proxy, and
+        # torch_npu refuses to re-share NPU tensors that the manager server
+        # received from another process ("Consider cloning before sending").
+        # All values in the shared_dict must be CPU tensors.
+        phys_to_logical = self.adaptor.phys_to_logical
+        self.shared_dict["phys_to_logical"] = phys_to_logical.cpu() if phys_to_logical is not None else None
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1,), device=self.device)

@@ -321,9 +321,24 @@ def _select_capacity_and_expert_density_moe_comm_method(
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
     )
     num_experts_per_device = num_experts // ep_world_size
+    # EP16-CROSS-NODE: MC2 is an intra-node transport. On A2 (8 NPU/node) an
+    # EP group of 16 spans two nodes; selecting MC2 there crashes the HCCL
+    # AICPU server (libccl_kernel.so RunAicpuRpcSrvLaunchV2_batch_send_recv,
+    # "execute kernel param invalid") at the first MoE exchange (profile_run).
+    # Only take MC2 when every EP rank lives in one local_world_size block.
+    intra_node_ep = False
+    try:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        ep_ranks = get_ep_group().ranks
+        local_world_size = getattr(vllm_config.parallel_config, "local_world_size", 0) or ep_world_size
+        intra_node_ep = (max(ep_ranks) - min(ep_ranks)) < local_world_size
+    except Exception:  # noqa: BLE001
+        intra_node_ep = False
     if (
         num_experts_per_device <= 24
         and ep_world_size >= 16
+        and intra_node_ep
         and (num_tokens is None or num_tokens <= mc2_tokens_capacity)
     ):
         return MoECommType.MC2
