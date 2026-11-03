@@ -4,11 +4,13 @@
 
 Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experimental preview of the architecture that will underpin Qwen4. Its language model combines Gated DeltaNet (GDN) and Qwen Sparse Attention (QSA), gated residual connections, Position Learning Enhancement (PLE), and a native Multi-Token Prediction (MTP) head.
 
-This document is validated and written based on `vllm-ascend:v0.26.0rc`. The current model (Qwen3.8-Flash-Next) is first supported in this version.
+This tutorial describes model preparation, installation, online serving, functional verification, and evaluation. It covers single-node colocated deployment on Atlas 800 A3 and Ascend 950 DT, and prefill/decode (PD) separation on Atlas 800 A3.
+
+The A3 W8A8 baseline was validated with text and multimodal input on `vllm-ascend:v0.26.0rc`, the first version supporting this model. The optional performance configuration, 950 DT configuration, and A3 W4A8 PD configuration require separate runtime and accuracy validation.
 
 !!! warning
 
-    Automatic Prefix Caching is experimental for Qwen3.8-Flash-Next. Enable it
+    Automatic Prefix Caching is experimental. On the A3 W8A8 baseline, enable it
     with `--enable-prefix-caching --mamba-cache-mode align` and revalidate NPU
     memory capacity for the target context length and concurrency.
 
@@ -22,24 +24,30 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 
 ### 3.1 Model Weight
 
-The following model weight is available:
+Select the checkpoint that matches the deployment configuration:
 
-- `Qwen3.8-Flash-Next-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 (64GB × 8) node to serve. [https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp)
+| Hardware | Deployment | Checkpoint | Device allocation | Weight preparation |
+| --- | --- | --- | --- | --- |
+| Atlas 800 A3 | Colocated | `Qwen3.8-Flash-Next-w8a8-mtp` | 8 devices, TP8 × DP1 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
+| Atlas 800 A3 | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | Prepare a compatible W4A8 checkpoint separately. |
+| Ascend 950 DT | Colocated | `Qwen3.8-Flash-Next-w8a8-mxfp8` | 4 devices, TP4 × DP1 | Prepare a compatible W8A8-MXFP8 checkpoint separately. |
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as /root/.cache/.
+Set `MODEL_PATH` to the mounted checkpoint directory. For PD separation, both roles must load the same checkpoint. The quantized checkpoints are specific to their hardware and deployment configuration.
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-The pre-built images listed below have been validated for this tutorial.
+The following images apply to the A3 W8A8 baseline. For 950 DT, prepare an
+environment with compatible vLLM and vLLM-Ascend versions; do not use an A3
+image for that deployment.
 
 A pre-built Qwen3.8 A3 image is available in the [vllm-ascend repository](https://quay.io/repository/ascend/vllm-ascend?tab=tags&tag=latest). Select the image that matches the host operating system:
 
 - openEuler: `quay.io/ascend/vllm-ascend:qwen3.8-next-a3-openeuler`
 - Ubuntu: `quay.io/ascend/vllm-ascend:qwen3.8-next-a3`
 
-The following example uses the AArch64 image and exposes 16 devices on an Atlas 800 A3 node. The service command in [Section 5.1](#51-single-node-online-deployment) uses the first eight devices.
+The following example uses the AArch64 image and exposes 16 devices on an Atlas 800 A3 node. The service command in [Section 5.1](#51-single-node-online-deployment) uses the first eight devices; the A3 PD example in Section 5.2 uses all 16.
 
 === "A3 series"
 
@@ -102,16 +110,20 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 ### 5.1 Single-Node Online Deployment
 
-For single-node online deployment on Atlas 800 A3, the following DP1 × TP8 command was validated with an Ascend-compatible W8A8 checkpoint. It enables QSA Lightning Indexer, QSA Expand E3, MTP speculative decoding, Function Calling, and reasoning parsing.
+Prefill and decode run in the same service. Select the hardware tab below.
 
-Before starting the service:
+Before starting:
 
-- Replace `MODEL_PATH` with the directory recorded when downloading the model weight.
-- Revalidate memory capacity (e.g., with `npu-smi info`) before changing the context length, concurrency, or memory utilization.
+- Set `MODEL_PATH` to the matching quantized checkpoint.
+- For 950 DT, set `LOCAL_IP` and `NIC_NAME` to the serving host address and
+  the interface that owns it.
+- Verify available NPU memory before changing context length, concurrency,
+  or memory utilization.
 
 === "A3 series"
 
-    The following example is for Atlas 800 A3.
+    This W8A8 baseline uses TP8 × DP1 and enables QSA acceleration, MTP,
+    Function Calling, and reasoning parsing.
 
     ```bash
     unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
@@ -119,6 +131,10 @@ Before starting the service:
     source /usr/local/Ascend/nnal/atb/set_env.sh
 
     export MODEL_PATH=/models/Qwen3.8-Flash-Next-w8a8-mtp
+    export VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1
+    export VLLM_ASCEND_ENABLE_QSA_E3V=1
+    unset VLLM_ASCEND_FORCE_QSA_REFERENCE
+
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port 8088 \
@@ -146,6 +162,8 @@ Before starting the service:
 
     Key parameter descriptions:
 
+    - `VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1` enables the fused QSA Lightning Indexer path.
+    - `VLLM_ASCEND_ENABLE_QSA_E3V=1` enables the fused QSA Expand E3 path.
     - `--quantization ascend` loads the Ascend-compatible W8A8 checkpoint.
     - `--tensor-parallel-size 8` and `--data-parallel-size 1` configure the A3 single-DP TP8 topology.
     - `--max-model-len 131072` caps the maximum context length. Common values: `65536` (64K), `131072` (128K).
@@ -160,9 +178,409 @@ Before starting the service:
 
     Verify the service is ready: the log should show `Application startup complete`.
 
+    **Optional performance configuration**
+
+    To evaluate async scheduling and MoE communication optimizations, export:
+
+    ```bash
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ASCEND_PLE_BACKEND=torch
+    ```
+
+    Add `--async-scheduling` to the command above and replace its
+    `--additional-config` value with:
+
+    ```json
+    {
+      "enable_cpu_binding": true,
+      "enable_shared_expert_dp": true,
+      "enable_fused_mc2": 0,
+      "enable_flashcomm1": true,
+      "multistream_overlap_shared_expert": true,
+      "ascend_compilation_config": {
+        "fuse_norm_quant": false,
+        "enable_npugraph_ex": true,
+        "enable_static_kernel": false,
+        "enable_super_kernel": false
+      }
+    }
+    ```
+
+    Shared expert DP requires expert parallelism and TP > 1. Keep fused MC2
+    disabled when using shared expert multistream overlap. This optional
+    combination requires accuracy, memory, and performance validation;
+    the baseline's evaluation result does not cover it.
+
+=== "950 DT"
+
+    The W8A8-MXFP8 example uses TP4 × DP1, Model Runner V2, async scheduling,
+    FlashComm1, shared expert DP, shared expert multistream overlap, and MTP.
+    Static kernels and super kernels are disabled.
+
+    ```bash
+    unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+
+    export MODEL_PATH=/models/Qwen3.8-Flash-Next-w8a8-mxfp8
+    export LOCAL_IP="<SERVER_IP>"
+    export NIC_NAME="<NETWORK_INTERFACE>"
+    export VLLM_HOST_IP="$LOCAL_IP"
+    export HCCL_IF_IP="$LOCAL_IP"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export OPENBLAS_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_BUFFSIZE=1024
+    export HCCL_NPU_SOCKET_PORT_RANGE=auto
+
+    export PROFILER_DIR=/tmp/qwen38-next-950-dt-profiling
+    mkdir -p "$PROFILER_DIR"
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port 8087 \
+        --served-model-name qwen3.8-flash-next-950-dt \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 4 \
+        --data-parallel-size 1 \
+        --max-model-len 141312 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 4096 \
+        --gpu-memory-utilization 0.90 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --enable-auto-tool-choice \
+        --tool-call-parser qwen3_xml \
+        --reasoning-parser qwen3 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{
+          "enable_cpu_binding": true,
+          "enable_shared_expert_dp": true,
+          "enable_fused_mc2": 0,
+          "enable_flashcomm1": true,
+          "multistream_overlap_shared_expert": true,
+          "ascend_compilation_config": {
+            "fuse_norm_quant": false,
+            "enable_npugraph_ex": true,
+            "enable_static_kernel": false,
+            "enable_super_kernel": false
+          }
+        }' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
+        --profiler-config '{"profiler":"torch","torch_profiler_dir":"'"$PROFILER_DIR"'","torch_profiler_with_stack":false}'
+    ```
+
+    Key parameter descriptions:
+
+    - `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3` selects the four devices for TP4.
+    - `--max-model-len 141312` and `--max-num-seqs 32` set context and
+      concurrency limits; verify memory capacity before increasing them.
+    - `enable_fused_mc2=0` preserves shared expert multistream overlap.
+    - `FULL_DECODE_ONLY` enables decode graph capture. The MTP configuration
+      uses three draft tokens without explicitly forcing eager execution.
+    - Prefix caching is enabled without an explicit Mamba cache mode.
+      Confirm cache behavior with the installed runtime.
+    - `--profiler-config` sets the trace output directory; it does not start
+      profiling by itself.
+
+### 5.2 PD Separation Deployment
+
+On a single Atlas 800 A3 host, prefill and decode each use eight devices with
+TP2 × DP4. Both roles load the same W4A8 checkpoint and enable expert
+parallelism, async scheduling, and Model Runner V2. MooncakeConnectorV2
+transfers KV cache between them; requests enter the proxy on port 25570.
+
+| Setting | Prefill | Decode |
+| --- | --- | --- |
+| Visible devices | 0–7 | 8–15 |
+| TP × DP | 2 × 4 | 2 × 4 |
+| API port | 25568 | 25569 |
+| Mooncake role / KV port | `kv_producer` / 32600 | `kv_consumer` / 32700 |
+| HCCL socket port range | 61400–61499 | 61500–61599 |
+| HCCL buffer size | 4096 | 512 |
+| Maximum context / sequences / batched tokens | 141312 / 32 / 4096 | 141312 / 32 / 4096 |
+| Memory utilization | 0.90 | 0.90 |
+| Prefix caching | Enabled | Enabled |
+| Engram CPU offload / requested DP shared memory | `true` / `false` | `true` / `false` |
+| Prefill MC2 | Explicitly enabled; fused MC2 disabled | Not explicitly set |
+| Graph mode | Not explicitly set | `FULL_DECODE_ONLY` |
+| Static kernel / super kernel | Not explicitly set | `true` / `false` |
+| MTP draft tokens / eager proposer | 3 / `true` | 3 / `false` |
+| Recompute scheduler | Not set | Enabled |
+
+Before starting:
+
+- Expose devices 0–15 and mount the same W4A8 checkpoint for both roles.
+- Install compatible vLLM, vLLM-Ascend, and Mooncake in the active Python
+  environment.
+- Set the host IP, network interface, model path, and writable log directory
+  in `pd_env.sh`. Provide sufficient host memory for Engram CPU offload.
+- Prepare a compatible `PD_proxy_server.py` that accepts the arguments shown
+  below, and set `PROXY_SCRIPT` to its location. The proxy implementation
+  must support Mooncake PD request routing; it is not included in this guide.
+
+#### 5.2.1 Common Environment
+
+Save this as `pd_env.sh` beside `P.sh` and `D.sh`. Set the serving host IP,
+network interface, model path, and log directory:
+
+```bash
+unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
+unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
+
+export LOCAL_IP="<SERVER_IP>"
+export NIC_NAME="<NETWORK_INTERFACE>"
+export MODEL_PATH=/models/Qwen3.8-Flash-Next-w4a8
+export ROOT=/tmp/qwen38-a3-pd
+export VLLM_SERVER_DEV_MODE=1
+export VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+export VLLM_ENGINE_READY_TIMEOUT_S=2400
+export VLLM_ASCEND_PLE_BACKEND=torch
+export VLLM_HOST_IP="$LOCAL_IP"
+export HCCL_IF_IP="$LOCAL_IP"
+export GLOO_SOCKET_IFNAME="$NIC_NAME"
+export TP_SOCKET_IFNAME="$NIC_NAME"
+export HCCL_SOCKET_IFNAME="$NIC_NAME"
+export no_proxy="localhost,127.0.0.1,$LOCAL_IP"
+export NO_PROXY="$no_proxy"
+mooncake_dir=$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))')
+export LD_LIBRARY_PATH="$mooncake_dir:${LD_LIBRARY_PATH:-}"
+mkdir -p "$ROOT" "$ROOT/profiling/prefill" "$ROOT/profiling/decode"
+```
+
+#### 5.2.2 Prefill Script
+
+Save this as `P.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -eo pipefail
+source "$(dirname "$(readlink -f "$0")")/pd_env.sh"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
+export HCCL_BUFFSIZE=4096
+
+exec vllm serve "$MODEL_PATH" \
+    --host 0.0.0.0 \
+    --port 25568 \
+    --served-model-name qwen38-flash-next-a3-pd \
+    --trust-remote-code \
+    --quantization ascend \
+    --tensor-parallel-size 2 \
+    --data-parallel-size 4 \
+    --max-model-len 141312 \
+    --max-num-seqs 32 \
+    --max-num-batched-tokens 4096 \
+    --gpu-memory-utilization 0.90 \
+    --enable-prefix-caching \
+    --async-scheduling \
+    --enable-expert-parallel \
+    --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+    --additional-config '{
+      "enable_shared_expert_dp": true,
+      "enable_flashcomm1": true,
+      "enable_prefill_mc2": true,
+      "enable_fused_mc2": 0,
+      "enable_cpu_binding": true,
+      "multistream_overlap_shared_expert": true,
+      "ascend_compilation_config": {
+        "fuse_norm_quant": false
+      }
+    }' \
+    --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+    --profiler-config '{"profiler":"torch","torch_profiler_dir":"'"$ROOT"'/profiling/prefill"}' \
+    --kv-transfer-config '{
+      "kv_connector": "MooncakeConnectorV2",
+      "kv_role": "kv_producer",
+      "kv_port": "32600",
+      "kv_connector_extra_config": {
+        "prefill": {
+          "dp_size": 4,
+          "tp_size": 2
+        },
+        "decode": {
+          "dp_size": 4,
+          "tp_size": 2
+        }
+      }
+    }' \
+    > "$ROOT/prefill.log" 2>&1
+```
+
+#### 5.2.3 Decode Script
+
+Save this as `D.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -eo pipefail
+source "$(dirname "$(readlink -f "$0")")/pd_env.sh"
+export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
+export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
+export HCCL_BUFFSIZE=512
+
+exec vllm serve "$MODEL_PATH" \
+    --host 0.0.0.0 \
+    --port 25569 \
+    --served-model-name qwen38-flash-next-a3-pd \
+    --trust-remote-code \
+    --quantization ascend \
+    --tensor-parallel-size 2 \
+    --data-parallel-size 4 \
+    --max-model-len 141312 \
+    --max-num-seqs 32 \
+    --max-num-batched-tokens 4096 \
+    --gpu-memory-utilization 0.90 \
+    --enable-prefix-caching \
+    --async-scheduling \
+    --enable-expert-parallel \
+    --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+    --compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,28,32],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{
+      "enable_flashcomm1": true,
+      "enable_cpu_binding": true,
+      "enable_shared_expert_dp": true,
+      "multistream_overlap_shared_expert": true,
+      "scheduler_config": {
+        "recompute_scheduler_enable": true
+      },
+      "ascend_compilation_config": {
+        "fuse_norm_quant": false,
+        "enable_npugraph_ex": true,
+        "enable_static_kernel": true,
+        "enable_super_kernel": false
+      }
+    }' \
+    --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
+    --profiler-config '{"profiler":"torch","torch_profiler_dir":"'"$ROOT"'/profiling/decode"}' \
+    --kv-transfer-config '{
+      "kv_connector": "MooncakeConnectorV2",
+      "kv_role": "kv_consumer",
+      "kv_port": "32700",
+      "kv_connector_extra_config": {
+        "prefill": {
+          "dp_size": 4,
+          "tp_size": 2
+        },
+        "decode": {
+          "dp_size": 4,
+          "tp_size": 2
+        }
+      }
+    }' \
+    > "$ROOT/decode.log" 2>&1
+```
+
+#### 5.2.4 Proxy and Startup
+
+Save this as `proxy.sh`, setting the same host address used in `pd_env.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -eo pipefail
+LOCAL_IP="<SERVER_IP>"
+ROOT=/tmp/qwen38-a3-pd
+PROXY_SCRIPT=/path/to/PD_proxy_server.py
+mkdir -p "$ROOT"
+unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+export no_proxy="localhost,127.0.0.1,$LOCAL_IP"
+export NO_PROXY="$no_proxy"
+
+exec python "$PROXY_SCRIPT" \
+    --host 0.0.0.0 --port 25570 \
+    --prefiller-host "$LOCAL_IP" --prefiller-port 25568 \
+    --decoder-host "$LOCAL_IP" --decoder-port 25569 \
+    > "$ROOT/proxy.log" 2>&1
+```
+
+Start P and D from the directory containing the saved scripts:
+
+```bash
+nohup bash P.sh > p.launcher.log 2>&1 &
+nohup bash D.sh > d.launcher.log 2>&1 &
+```
+
+Wait for both services to finish loading. On the serving host, check that both
+APIs respond successfully and list `qwen38-flash-next-a3-pd`:
+
+```bash
+curl --fail http://127.0.0.1:25568/v1/models
+curl --fail http://127.0.0.1:25569/v1/models
+```
+
+After both checks succeed, start the proxy:
+
+```bash
+nohup bash proxy.sh > proxy.launcher.log 2>&1 &
+```
+
+Once the proxy is listening, verify the complete PD path:
+
+```bash
+curl --fail http://127.0.0.1:25570/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "qwen38-flash-next-a3-pd",
+        "messages": [{"role": "user", "content": "Who are you?"}],
+        "max_tokens": 1024,
+        "temperature": 0
+    }'
+```
+
+Inspect the prefill, decode, and proxy logs under `ROOT` if the request fails.
+
+#### 5.2.5 Key Parameters
+
+- `VLLM_ASCEND_PLE_BACKEND=torch` selects the PLE backend for both roles.
+- Both roles enable Prefix Caching without an explicit Mamba cache mode.
+- Engram requires a checkpoint with supported n-gram layers. Both roles
+  request `cpu_offload=true` and `dp_shared_memory=false`; Model Runner V2
+  with DP > 1 may enable sharing automatically, depending on the runtime
+  version. Check the resolved configuration in the startup logs.
+- Prefill enables `enable_prefill_mc2=true` and disables fused MC2. Verify
+  MC2 token limits for TP2 × DP4 before increasing the batch token budget.
+- Decode enables `FULL_DECODE_ONLY`, NPU graph extension, static kernels, and
+  recompute scheduling. Super kernels remain disabled.
+- Both roles use three MTP draft tokens. Prefill sets `enforce_eager=true`;
+  decode sets `enforce_eager=false`.
+- Keep fused MC2 disabled when using shared expert multistream overlap.
+  The decode command relies on the runtime's default value of zero.
+- Keep the Mooncake DP4 / TP2 declarations synchronized with both services'
+  parallel settings.
+- For Function Calling and reasoning parsing, add
+  `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3`
+  to both roles and verify proxy forwarding. Multimodal input and thinking
+  control also require validation through the proxy with the W4A8 checkpoint.
+
 ## 6 Functional Verification
 
 After the service is started, the model can be invoked by sending a prompt. The `chat/completions` API is supported. Use the `--served-model-name` you configured (`qwen3.8-flash-next` for `Qwen3.8-Flash-Next`).
+
+The requests below use the A3 colocated baseline. Select the endpoint and model
+name for the deployment being tested:
+
+| Deployment | Port | Model name |
+| --- | --- | --- |
+| A3 colocated | 8088 | `qwen3.8-flash-next` |
+| 950 DT colocated | 8087 | `qwen3.8-flash-next-950-dt` |
+| A3 PD proxy | 25570 | `qwen38-flash-next-a3-pd` |
+
+For PD, first complete the proxy check in Section 5.2.4 and review the feature
+requirements in Section 5.2.5.
 
 ### 6.1 Basic Chat Completion
 
@@ -216,7 +634,7 @@ Expected result: the service returns HTTP 200 OK and describes the supplied imag
 
 ### 6.3 Function Calling
 
-Function Calling requires the following startup options, which are already included in [Section 5](#5-online-service-deployment):
+Function Calling requires the following startup options, which are included in the colocated examples in Section 5; for A3 PD, see Section 5.2.5:
 
 ```text
 --enable-auto-tool-choice --tool-call-parser qwen3_xml
@@ -264,7 +682,7 @@ When the model chooses the function, the parsed result appears in `choices[0].me
 
 ### 6.4 Reasoning Parser and Thinking Control
 
-Reasoning parsing requires the following startup option, which is already included in [Section 5](#5-online-service-deployment):
+Reasoning parsing requires the following startup option, which is included in the colocated examples in Section 5; for A3 PD, see Section 5.2.5:
 
 ```text
 --reasoning-parser qwen3
@@ -344,7 +762,11 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ### 9.1 Recommended Configurations
 
-> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment).
+Start with the matching configuration in [Section 5](#5-online-service-deployment).
+For A3 colocated serving, evaluate the optional async scheduling and MoE
+communication settings independently of the baseline accuracy result.
+For PD serving, tune prefill and decode separately and keep the Mooncake
+parallel-size declarations consistent with the services.
 
 ### 9.2 Tuning Guidelines
 
