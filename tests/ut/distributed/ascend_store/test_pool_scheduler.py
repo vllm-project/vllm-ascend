@@ -1096,7 +1096,7 @@ def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cl
     assert metadata.requests == []
     assert scheduler._unfinished_requests == ({"retired": (None, [])} if cleared_by == "scheduled-new" else {})
     scheduler._process_async_load_request.assert_not_called()
-    assert metadata.released_req_ids == output.finished_req_ids | output.preempted_req_ids
+    assert metadata.preempted_req_ids == output.preempted_req_ids
 
 
 def test_connector_metadata_filter_has_linear_key_lookup_work():
