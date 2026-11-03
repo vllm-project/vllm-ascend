@@ -30,9 +30,16 @@ _MINIMAX_DRAFT_ARCHITECTURE = "DSparkMiniMaxDraftModel"
 def _allow_minimax_draft(post_init):
     # Keep references captured by Ascend's existing __post_init__ wrapper valid.
     # Remove this shim once upstream recognizes this standalone architecture.
-    if _MINIMAX_DRAFT_ARCHITECTURE in post_init.__code__.co_consts:
+    if getattr(post_init, "_ascend_minimax_draft_guard_applied", False):
         return
-    tree = ast.parse(textwrap.dedent(inspect.getsource(post_init)))
+    try:
+        source = inspect.getsource(post_init)
+    except (OSError, TypeError) as exc:
+        raise RuntimeError(
+            "Native MiniMax DSpark requires the supported vLLM Python source "
+            "to extend its architecture guard; install a source-containing build"
+        ) from exc
+    tree = ast.parse(textwrap.dedent(source))
     matches = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.BoolOp) or not isinstance(node.op, ast.And):
@@ -63,9 +70,8 @@ def _allow_minimax_draft(post_init):
         code for code in module_code.co_consts if isinstance(code, CodeType) and code.co_name == post_init.__name__
     )
     post_init.__code__ = method_code
+    post_init._ascend_minimax_draft_guard_applied = True
 
-
-_allow_minimax_draft(_orig_post_init)
 
 # Transformers 5.14 inherited a hidden_size % num_heads check from Llama in
 # DeepseekV2Config. K3 MLA has independent projection/head dimensions (e.g.
@@ -260,6 +266,9 @@ def _dspark_post_init(self):
     original_target = getattr(self, "target_model_config", None)
     draft_root = _minimax_dspark_root(self)
     if draft_root is not None:
+        # Only native MiniMax needs this source-based compatibility shim.
+        # Other models must remain importable with source-less vLLM builds.
+        _allow_minimax_draft(_orig_post_init)
         self.model = str(draft_root)
         assert original_target is not None
         self.target_model_config = copy(original_target)

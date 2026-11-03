@@ -626,7 +626,10 @@
 #   Why: native DSpark exports use a standalone architecture and carry their
 #        own dspark/config.json, while upstream normalizes unknown drafts to
 #        DSparkDraftModel.
-#   How: preserve DSparkMiniMaxDraftModel before Pydantic validation and
+#   How: extend the pinned core guard lazily for native MiniMax DSpark only,
+#        preserving references held by Pydantic. Source-less builds remain
+#        usable for other models; the native path requires Python source.
+#        Preserve DSparkMiniMaxDraftModel and
 #        normalize the checkpoint's dspark/config.json without changing the
 #        target or checkpoint. The adapter, its checkpoint contract and weight
 #        loading live in models/minimax_m3/minimax_m3_dspark.py; it inherits

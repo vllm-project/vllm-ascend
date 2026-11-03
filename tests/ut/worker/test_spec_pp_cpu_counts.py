@@ -180,16 +180,39 @@ def test_deferred_mamba_postprocess_restores_batch_rows(
 
 
 @pytest.mark.parametrize("architecture", ["MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"])
+@pytest.mark.parametrize("backend_kind", ["cann", "ecosystem", "same_name_cpu"])
 @pytest.mark.parametrize("cpu_consumer", [False, True])
 @pytest.mark.parametrize("sync_pp", [False, True])
 def test_minimax_dspark_skips_sync_only_without_cpu_consumers(
-    runner_cls, monkeypatch, architecture, cpu_consumer, sync_pp
+    runner_cls, monkeypatch, architecture, backend_kind, cpu_consumer, sync_pp
 ):
-    flash_backend = type("FlashBackend", (), {})
+    root = Path(__file__).resolve().parents[3]
+    backend_path = "fa_v1.py" if backend_kind == "cann" else "flash_attention_v3.py"
+    tree = ast.parse((root / "vllm_ascend/attention" / backend_path).read_text())
+    backend = next(
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AscendFlashAttentionBackend"
+    )
+    # Read the real backend capability, without importing the optional NPU package.
+    capability = next(
+        ast.literal_eval(node.value)
+        for node in backend.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "uses_device_seq_lens" for target in node.targets)
+    )
+    flash_backend = type(
+        "AscendFlashAttentionBackend",
+        (),
+        {
+            "uses_device_seq_lens": capability if backend_kind != "same_name_cpu" else False,
+            "get_name": staticmethod(lambda: "CUSTOM"),
+        },
+    )
     sparse_backend = type("SparseBackend", (), {"get_name": staticmethod(lambda: "ASCEND_MINIMAX_M3_SPARSE")})
     dense_backend = type("DenseBackend", (), {"get_name": staticmethod(lambda: "ASCEND")})
     monkeypatch.setitem(
-        runner_cls._can_skip_spec_cpu_length_sync.__globals__, "AscendFlashAttentionBackend", flash_backend
+        runner_cls._can_skip_spec_cpu_length_sync.__globals__,
+        "AscendFlashAttentionBackend",
+        flash_backend if backend_kind == "cann" else type("OtherBackend", (), {}),
     )
     runner = runner_cls.__new__(runner_cls)
     runner.sync_spec_pp_cpu_counts = sync_pp
@@ -204,7 +227,9 @@ def test_minimax_dspark_skips_sync_only_without_cpu_consumers(
     runner.attn_groups = [[SimpleNamespace(backend=flash_backend), SimpleNamespace(backend=sparse_backend)]]
     if cpu_consumer:
         runner.attn_groups[0].append(SimpleNamespace(backend=dense_backend))
-    assert runner._can_skip_spec_cpu_length_sync() is (not cpu_consumer and not sync_pp)
+    assert runner._can_skip_spec_cpu_length_sync() is (
+        backend_kind != "same_name_cpu" and not cpu_consumer and not sync_pp
+    )
 
 
 def test_dflash_cpu_sync_policy_is_retained(runner_cls):

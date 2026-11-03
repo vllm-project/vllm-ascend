@@ -38,6 +38,8 @@ def _get_window_size(sliding_window: int | None, causal: bool) -> tuple[int, int
 
 class AscendFlashAttentionBackend(AttentionBackend):
     accept_output_buffer = True
+    # Scheduler tiling reads rejection-adjusted lengths directly on device.
+    uses_device_seq_lens = True
     # Both model runners use the attention layer's cache-update contract.
     # FA3 writes K/V inside forward, before reading the paged cache.
     forward_includes_kv_cache_update = True

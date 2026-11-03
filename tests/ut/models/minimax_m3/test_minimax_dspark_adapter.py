@@ -11,6 +11,7 @@ import json
 import math
 import sys
 import textwrap
+from contextlib import nullcontext
 from pathlib import Path
 from types import CodeType, FunctionType, SimpleNamespace
 from typing import Any
@@ -155,18 +156,22 @@ def _load_draft_guard():
     """
     patch_path = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/platform/patch_speculative_config.py"
     tree = ast.parse(patch_path.read_text())
-    function = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_allow_minimax_draft"
-    )
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in ("_allow_minimax_draft", "_dspark_post_init")
+    ]
     constants = [
         node
         for node in tree.body
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
     ]
     namespace = {"ast": ast, "inspect": inspect, "textwrap": textwrap, "CodeType": CodeType}
-    module = ast.Module(body=[*constants, function], type_ignores=[])
+    module = ast.Module(body=[*constants, *functions], type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), str(patch_path), "exec"), namespace)
-    return SimpleNamespace(_allow_minimax_draft=namespace["_allow_minimax_draft"])
+    return SimpleNamespace(
+        _allow_minimax_draft=namespace["_allow_minimax_draft"], _dspark_post_init=namespace["_dspark_post_init"]
+    )
 
 
 @pytest.fixture
@@ -460,6 +465,57 @@ def test_changed_core_guard_fails_without_modifying_the_method(adapter_modules):
     with pytest.raises(RuntimeError, match="Core version changed"):
         adapter_modules.guard._allow_minimax_draft(unknown_core)
     assert unknown_core.__code__ is before
+
+
+@pytest.mark.parametrize("error", [OSError, TypeError])
+def test_missing_core_source_fails_explicitly_without_mutation(adapter_modules, core_post_init, monkeypatch, error):
+    before = core_post_init.__code__
+    monkeypatch.setattr(inspect, "getsource", Mock(side_effect=error("source unavailable")))
+    with pytest.raises(RuntimeError, match="source-containing build"):
+        adapter_modules.guard._allow_minimax_draft(core_post_init)
+    assert core_post_init.__code__ is before
+
+
+def test_other_models_do_not_require_core_source(adapter_modules, monkeypatch):
+    source = Mock(side_effect=OSError("source unavailable"))
+    monkeypatch.setattr(inspect, "getsource", source)
+    namespace = adapter_modules.guard._dspark_post_init.__globals__
+    original = Mock()
+    monkeypatch.setitem(namespace, "_minimax_dspark_root", lambda self: None)
+    monkeypatch.setitem(namespace, "_temporarily_disable_dspark_dcp", lambda self: nullcontext())
+    monkeypatch.setitem(namespace, "_orig_post_init", original)
+    config = SimpleNamespace(use_dspark=lambda: False)
+    adapter_modules.guard._dspark_post_init(config)
+    original.assert_called_once_with(config)
+    source.assert_not_called()
+
+
+def test_native_path_checks_source_before_changing_target(adapter_modules, core_post_init, monkeypatch):
+    monkeypatch.setattr(inspect, "getsource", Mock(side_effect=OSError("source unavailable")))
+    namespace = adapter_modules.guard._dspark_post_init.__globals__
+    monkeypatch.setitem(namespace, "_minimax_dspark_root", lambda self: Path("checkpoint"))
+    monkeypatch.setitem(namespace, "_orig_post_init", core_post_init)
+    target = object()
+    config = SimpleNamespace(model="original", target_model_config=target)
+    with pytest.raises(RuntimeError, match="source-containing build"):
+        adapter_modules.guard._dspark_post_init(config)
+    assert config.model == "original"
+    assert config.target_model_config is target
+
+
+def test_guard_handles_draft_created_inside_core_initialization(adapter_modules):
+    def constructing_core(self):
+        self.draft_model_config = SimpleNamespace(architectures=["DSparkMiniMaxDraftModel"])
+        if self.method == "dspark" and (
+            "Qwen3DSparkModel" not in self.draft_model_config.architectures
+            and "K3DSparkModel" not in self.draft_model_config.architectures
+        ):
+            self.draft_model_config.architectures = ["DSparkDraftModel"]
+
+    adapter_modules.guard._allow_minimax_draft(constructing_core)
+    config = SimpleNamespace(method="dspark", draft_model_config=None)
+    constructing_core(config)
+    assert config.draft_model_config.architectures == ["DSparkMiniMaxDraftModel"]
 
 
 def test_native_architecture_is_registered_by_the_standard_plugin(adapter_modules, monkeypatch):

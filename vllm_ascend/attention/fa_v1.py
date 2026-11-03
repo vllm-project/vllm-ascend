@@ -53,6 +53,9 @@ class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
 
 
 class AscendFlashAttentionBackend(AscendAttentionBackend):
+    # Rejection-adjusted sequence lengths are read from device tensors.
+    uses_device_seq_lens = True
+
     @staticmethod
     def get_supported_head_sizes():
         # Logical 192-wide heads use zero padding to the native 256-wide kernel.

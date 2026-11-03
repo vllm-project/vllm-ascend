@@ -1312,8 +1312,9 @@ class NPUModelRunner(GPUModelRunner):
             # Flash's sparse target uses device lengths, but a mixed target
             # GQA backend still consumes the shared CPU length mirror.
             backends = [group.backend for groups in self.attn_groups for group in groups]
-            return AscendFlashAttentionBackend in backends and all(
-                backend is AscendFlashAttentionBackend
+            has_device_lengths = any(getattr(backend, "uses_device_seq_lens", False) for backend in backends)
+            return has_device_lengths and all(
+                getattr(backend, "uses_device_seq_lens", False)
                 or backend.get_name() in ("ASCEND_MINIMAX_M3_SPARSE", "ASCEND_MINIMAX_M3_SPARSE_INDEXER")
                 for backend in backends
             )
