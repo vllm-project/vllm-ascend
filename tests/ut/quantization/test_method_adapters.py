@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -174,8 +175,8 @@ class TestAscendLinearMethod(TestBase):
 
     def test_block_quant_rejects_a_column_shard_not_a_multiple_of_block_n(self):
         # A 1536-row output TP-sharded 8 ways gives 192 rows/rank -- not a
-        # multiple of block_n=128 -- the exact shape that silently corrupted
-        # q_a_proj in https://github.com/vllm-project/vllm-ascend/issues/20652.
+        # multiple of block_n=128. This is a hypothetical sharded projection,
+        # not evidence of corruption in a shipped model.
         with (
             patch(f"{MODULE}.get_tensor_model_parallel_world_size", return_value=8),
             self.assertRaisesRegex(ValueError, "output_partition_size"),
@@ -207,11 +208,9 @@ class TestAscendLinearMethod(TestBase):
             )  # must not raise
 
     def test_block_quant_rejects_a_merged_weights_misaligned_sub_shard(self):
-        # A fused q_a_proj (1536) + kv_a_proj (512) at TP=8: the q_a_proj
-        # portion alone is 192 rows, not a multiple of block_n -- even though
-        # the pair is replicated here (tp_size doesn't divide the summed
-        # output), each logical sub-weight still must land on a block
-        # boundary.
+        # Synthetic merged local sizes [192, 512]: the first sub-weight
+        # ends inside a block. This does not represent a replicated
+        # q_a_proj + kv_a_proj pair, whose sizes [1536, 512] are aligned.
         with (
             patch(f"{MODULE}.get_tensor_model_parallel_world_size", return_value=8),
             self.assertRaisesRegex(ValueError, "output_partition_size"),
@@ -398,3 +397,29 @@ class TestAscendFusedMoEMethod(TestBase):
 
         self.assertIs(result, weight_views)
         self.mock_scheme.get_eplb_weight_views.assert_called_once_with(layer)
+
+def test_block_quant_validation_uses_layer_tp_size():
+    from vllm_ascend.quantization.method_adapters import _validate_block_quant_shape
+
+    layer = torch.nn.Module()
+    layer.tp_size = 4
+    with patch(f"{MODULE}.get_tensor_model_parallel_world_size") as global_tp:
+        with pytest.raises(ValueError, match="input_size_per_partition"):
+            _validate_block_quant_shape(layer, 768, 128, 192, [128], 128, 128)
+        with pytest.raises(ValueError, match="output_partition_size"):
+            _validate_block_quant_shape(layer, 256, 768, 256, [192], 128, 128)
+        _validate_block_quant_shape(layer, 256, 2048, 256, [1536, 512], 128, 128)
+        global_tp.assert_not_called()
+
+
+def test_block_quant_moe_validation_uses_layer_tp_size():
+    from vllm_ascend.quantization.method_adapters import _validate_block_quant_shape_moe
+
+    layer = torch.nn.Module()
+    layer.tp_size = 4
+    with patch(f"{MODULE}.get_tensor_model_parallel_world_size") as global_tp:
+        with pytest.raises(ValueError, match="block_k"):
+            _validate_block_quant_shape_moe(layer, 192, 64, 128)
+        layer.tp_size = 1
+        _validate_block_quant_shape_moe(layer, 192, 64, 128)
+        global_tp.assert_not_called()

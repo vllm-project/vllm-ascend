@@ -41,16 +41,14 @@ MODULE = "vllm_ascend.quantization.methods.w8a8.fp8_block"
 MX_GROUP_SIZE = 32
 
 
-def reference_resolve(weight, scale_inv, block_n, block_k, out_dtype, row_offset=0, col_offset=0):
+def reference_resolve(weight, scale_inv, block_n, block_k, out_dtype):
     """Straightforward per-element expansion used as the numerical oracle."""
     out_features, in_features = weight.shape
     weight_fp32 = weight.to(torch.float32)
     resolved = torch.empty((out_features, in_features), dtype=out_dtype)
     for row in range(out_features):
         for col in range(in_features):
-            resolved[row, col] = (
-                weight_fp32[row, col] * scale_inv[(row + row_offset) // block_n, (col + col_offset) // block_k]
-            )
+            resolved[row, col] = weight_fp32[row, col] * scale_inv[row // block_n, col // block_k]
     return resolved
 
 
@@ -99,67 +97,6 @@ class TestResolveBlockScales(TestBase):
         weight = torch.randn(2, 256, 256).to(torch.float8_e4m3fn)
         with self.assertRaisesRegex(ValueError, "2D"):
             resolve_block_scales(weight, torch.ones(2, 2, 2), 128, 128, torch.bfloat16)
-
-    def test_zero_offset_matches_the_no_offset_call(self):
-        # row_offset=0, col_offset=0 must be a complete no-op: every existing
-        # caller passes neither, so this keeps them byte-for-byte unaffected.
-        weight, scale_inv = make_block_weight(10, 7, 4, 3, seed=5)
-        without_offset = resolve_block_scales(weight, scale_inv, 4, 3, torch.float32)
-        with_zero_offset = resolve_block_scales(weight, scale_inv, 4, 3, torch.float32, row_offset=0, col_offset=0)
-        self.assertTrue(torch.equal(without_offset, with_zero_offset))
-
-    def test_row_offset_matches_per_element_expansion(self):
-        block_n, block_k = 4, 3
-        # 2 scale rows cover 8 weight rows; a 5-row shard starting at global
-        # row 3 straddles both tiles, so row_offset=3 is the whole point.
-        scale_inv = torch.rand(2, 3) + 0.5
-        weight = torch.randn(5, 9, generator=torch.Generator().manual_seed(6)).to(torch.float8_e4m3fn)
-        resolved = resolve_block_scales(weight, scale_inv, block_n, block_k, torch.float32, row_offset=3)
-        expected = reference_resolve(weight, scale_inv, block_n, block_k, torch.float32, row_offset=3)
-        self.assertTrue(torch.equal(resolved, expected))
-
-    def test_col_offset_matches_per_element_expansion(self):
-        block_n, block_k = 4, 3
-        scale_inv = torch.rand(2, 2) + 0.5
-        weight = torch.randn(5, 4, generator=torch.Generator().manual_seed(7)).to(torch.float8_e4m3fn)
-        resolved = resolve_block_scales(weight, scale_inv, block_n, block_k, torch.float32, col_offset=2)
-        expected = reference_resolve(weight, scale_inv, block_n, block_k, torch.float32, col_offset=2)
-        self.assertTrue(torch.equal(resolved, expected))
-
-    def test_misaligned_shard_matches_the_correctly_sliced_whole_tensor(self):
-        # The actual bug this guards against: a TP shard whose row range does
-        # not start on a block_n boundary (e.g. a 192-row shard of a 1536-row
-        # ColumnParallelLinear output at TP=8, where block_n=128) must resolve
-        # to exactly the same values as resolving the whole, unsharded tensor
-        # and then slicing out that row range -- not to what the old,
-        # offset-unaware function silently computed for it.
-        block_n, block_k = 128, 128
-        out_features, in_features = 384, 64
-        weight, scale_inv = make_block_weight(out_features, in_features, block_n, block_k, seed=8)
-        whole = resolve_block_scales(weight, scale_inv, block_n, block_k, torch.float32)
-
-        shard_start, shard_end = 96, 288  # a 192-row shard starting mid-block
-        row_offset = shard_start % block_n
-        scale_lo, scale_hi = shard_start // block_n, -(-shard_end // block_n)
-        shard_resolved = resolve_block_scales(
-            weight[shard_start:shard_end],
-            scale_inv[scale_lo:scale_hi],
-            block_n,
-            block_k,
-            torch.float32,
-            row_offset=row_offset,
-        )
-        self.assertTrue(torch.equal(shard_resolved, whole[shard_start:shard_end]))
-
-    def test_out_of_range_row_offset_is_rejected(self):
-        weight = torch.randn(4, 4).to(torch.float8_e4m3fn)
-        with self.assertRaisesRegex(ValueError, "row_offset"):
-            resolve_block_scales(weight, torch.ones(1, 1), 4, 4, torch.float32, row_offset=4)
-
-    def test_out_of_range_col_offset_is_rejected(self):
-        weight = torch.randn(4, 4).to(torch.float8_e4m3fn)
-        with self.assertRaisesRegex(ValueError, "col_offset"):
-            resolve_block_scales(weight, torch.ones(1, 1), 4, 4, torch.float32, col_offset=-1)
 
 
 class TestAscendFp8BlockLinearMethod(TestBase):

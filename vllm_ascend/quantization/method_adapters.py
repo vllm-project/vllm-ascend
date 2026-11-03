@@ -37,6 +37,7 @@ _VLLM_PARAMETER_CTOR_ATTRS = frozenset({"weight_loader", "output_dim", "input_di
 
 
 def _validate_block_quant_shape(
+    layer: torch.nn.Module,
     input_size: int,
     output_size: int,
     input_size_per_partition: int,
@@ -57,7 +58,9 @@ def _validate_block_quant_shape(
     takes the same approach: refuse the configuration outright rather than
     attempt to resolve it.
     """
-    tp_size = get_tensor_model_parallel_world_size()
+    tp_size = getattr(layer, "tp_size", None)
+    if tp_size is None:
+        tp_size = get_tensor_model_parallel_world_size()
 
     # Required for a row-parallel shard: the input dimension is split, and
     # each rank's slice must start and end on a block_k boundary.
@@ -89,7 +92,9 @@ def _validate_block_quant_shape(
                 )
 
 
-def _validate_block_quant_shape_moe(intermediate_size_per_partition: int, block_n: int, block_k: int) -> None:
+def _validate_block_quant_shape_moe(
+    layer: torch.nn.Module, intermediate_size_per_partition: int, block_n: int, block_k: int
+) -> None:
     """The ``AscendFusedMoEMethod`` counterpart of ``_validate_block_quant_shape``.
 
     Mirrors vLLM's own ``validate_fp8_block_shape_moe``. Experts partitioned
@@ -104,7 +109,9 @@ def _validate_block_quant_shape_moe(intermediate_size_per_partition: int, block_
             f"divisible by weight quantization block_n = {block_n}. This would silently "
             "dequantize experts incorrectly; see https://github.com/vllm-project/vllm-ascend/issues/20652."
         )
-    tp_size = get_tensor_model_parallel_world_size()
+    tp_size = getattr(layer, "tp_size", None)
+    if tp_size is None:
+        tp_size = get_tensor_model_parallel_world_size()
     if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
         raise ValueError(
             f"The per-partition intermediate size = {intermediate_size_per_partition} is not "
@@ -178,7 +185,7 @@ class AscendLinearMethod(LinearMethodBase):
         block_k = getattr(self.quant_method, "block_k", None)
         if block_n is not None and block_k is not None:
             _validate_block_quant_shape(
-                input_size, output_size, input_size_per_partition, output_partition_sizes, block_n, block_k
+                layer, input_size, output_size, input_size_per_partition, output_partition_sizes, block_n, block_k
             )
 
         weight_dict = self.quant_method.get_weight(input_size_per_partition, output_size_per_partition, params_dtype)
@@ -380,7 +387,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         block_n = getattr(self.quant_method, "block_n", None)
         block_k = getattr(self.quant_method, "block_k", None)
         if block_n is not None and block_k is not None:
-            _validate_block_quant_shape_moe(intermediate_size_per_partition, block_n, block_k)
+            _validate_block_quant_shape_moe(layer, intermediate_size_per_partition, block_n, block_k)
 
         weight_param = self.quant_method.get_weight(
             num_experts, intermediate_size_per_partition, hidden_size, params_dtype
