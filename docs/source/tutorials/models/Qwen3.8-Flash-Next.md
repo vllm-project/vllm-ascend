@@ -1,5 +1,8 @@
 # Qwen3.8-Flash-Next (Experimental)
 
+For the experimental 910B TP8/EP8 BF16 pure-prefill backend, see
+[A2 MegaMoE prefill](../../user_guide/feature_guide/qwen38_a2_megamoe.md).
+
 ## 1 Introduction
 
 Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experimental preview of the architecture that will underpin Qwen4. Its language model combines Gated DeltaNet (GDN) and Qwen Sparse Attention (QSA), gated residual connections, Position Learning Enhancement (PLE), and a native Multi-Token Prediction (MTP) head.

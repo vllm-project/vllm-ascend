@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
 
+from vllm_ascend.a2_mega_moe import pad_bf16_expert_weights
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, select_moe_comm_method, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -113,12 +114,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
         replace_parameter(layer, "w2_weight", w2_data)
 
-        # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
-        # Therefore, we must cast weights to NZ when fusion is enabled.
-        # Once the underlying dispatch_ffn_combine/mega_moe operator is updated to support
-        # ND format (or other formats), remove this specific 'if' check and the forced
-        # npu_format_cast. At that point, the operator should be able to handle weights
-        # in their native format without explicit casting here.
+        # The legacy fused operator requires NZ. CANN BF16 MegaMoE takes
+        # per-expert ND weights; the A2 prefill path also pads gate/up to 768.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
             use_megamoe = use_cann_megamoe(get_current_vllm_config())
@@ -134,6 +131,16 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                     )
                     layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
                     layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+                elif get_ascend_config().a2_mega_moe_prefill.enabled is True:
+                    if self.moe.has_bias:
+                        raise ValueError("A2 MegaMoE prefill does not support biased BF16 experts")
+                    layer.w13_weight_list, layer.w2_weight_list = pad_bf16_expert_weights(
+                        layer.w13_weight.data, layer.w2_weight.data
+                    )
+                    layer.a2_mega_moe_intermediate_size = layer.w2_weight_list[0].shape[0]
+                    del layer.w13_weight
+                    del layer.w2_weight
+                    torch.npu.empty_cache()
                 else:
                     layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
                     layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]

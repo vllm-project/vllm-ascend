@@ -99,6 +99,10 @@ def get_mrv2_in_profile_run() -> bool:
 
 
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
+    if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY:
+        settings = getattr(get_ascend_config(), "a2_mega_moe_prefill", None)
+        if settings is None or settings.enabled is not True:
+            return False
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
         is_mega_moe_supported()
@@ -169,6 +173,9 @@ def set_ascend_forward_context(
             vllm_config,
             is_draft_model=is_draft_model,
             draft_moe_quant_type=draft_moe_quant_type,
+            attn_metadata=attn_metadata,
+            in_profile_run=in_profile_run,
+            cudagraph_runtime_mode=aclgraph_runtime_mode,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -279,7 +286,8 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     # keep the num_tokens_per_tp_rank less than fused_mc2 (mega_moe) tokens per rank limit
     if ascend_config.enable_fused_mc2:
         if use_mega_moe:
-            num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MEGA_MOE_TOKENS_PER_RANK_LIMIT)
+            if get_current_hardware_profile().moe_comm_policy is not MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY:
+                num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MEGA_MOE_TOKENS_PER_RANK_LIMIT)
         else:
             num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT)
 
@@ -315,7 +323,24 @@ def _select_capacity_and_expert_density_moe_comm_method(
     mc2_tokens_capacity: int,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    *,
+    attn_metadata: Any = None,
+    in_profile_run: bool = False,
+    cudagraph_runtime_mode: CUDAGraphMode | None = None,
 ) -> MoECommType:
+    settings = getattr(get_ascend_config(), "a2_mega_moe_prefill", None)
+    if (
+        settings is not None
+        and settings.enabled is True
+        and use_cann_megamoe(vllm_config)
+        and not is_draft_model
+        and getattr(vllm_config, "speculative_config", None) is None
+        and vllm_config.parallel_config.data_parallel_size == 1
+        and cudagraph_runtime_mode in (None, CUDAGraphMode.NONE)
+        and settings.selects(attn_metadata, in_profile_run=in_profile_run)
+    ):
+        logger.debug("A2 MegaMoE prefill selected: tokens=%s profile=%s", num_tokens, in_profile_run)
+        return MoECommType.FUSED_MC2
     num_experts = vllm_config.model_config.get_num_experts()
     ep_world_size = (
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
@@ -336,6 +361,10 @@ def _select_fused_or_capacity_moe_comm_method(
     mc2_tokens_capacity: int,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    *,
+    attn_metadata: Any = None,
+    in_profile_run: bool = False,
+    cudagraph_runtime_mode: CUDAGraphMode | None = None,
 ) -> MoECommType:
     if use_cann_megamoe(vllm_config):
         return MoECommType.FUSED_MC2
@@ -354,6 +383,10 @@ def _select_capacity_and_world_size_moe_comm_method(
     mc2_tokens_capacity: int,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    *,
+    attn_metadata: Any = None,
+    in_profile_run: bool = False,
+    cudagraph_runtime_mode: CUDAGraphMode | None = None,
 ) -> MoECommType:
     skip_draft_mc2 = False
     if get_ascend_config().enable_fused_mc2 == 1:
@@ -398,6 +431,10 @@ def select_moe_comm_method(
     vllm_config: VllmConfig,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    *,
+    attn_metadata: Any = None,
+    in_profile_run: bool = False,
+    cudagraph_runtime_mode: CUDAGraphMode | None = None,
 ) -> MoECommType | None:
     """Select the MoE communication method from the active hardware policy,
     parallel settings, and token count.
@@ -434,6 +471,9 @@ def select_moe_comm_method(
             mc2_tokens_capacity,
             is_draft_model,
             draft_moe_quant_type,
+            attn_metadata=attn_metadata,
+            in_profile_run=in_profile_run,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
         )
     logger.debug(
         "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s, "

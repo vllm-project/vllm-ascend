@@ -28,9 +28,15 @@ from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend.a2_mega_moe import A2MegaMoEPrefillConfig, validate_a2_prefill_model
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.device_config import is_950
-from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import (
+    DeviceAdaptorFamily,
+    HardwareCapability,
+    MoECommPolicy,
+    get_current_hardware_profile,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -599,7 +605,10 @@ class AscendConfig:
     # count exceeds it, tokens may be truncated, causing precision
     # degradation. Do not set it too large because workspace memory scales
     # linearly with this value. Default 65536.
+    # A2 pure-prefill instead derives an absolute safe receive bound from the scheduler budget.
     mega_moe_max_tokens: int = 65536
+    # Opt-in BF16 TP8/EP8 pure-prefill backend; no token-count selection thresholds.
+    a2_mega_moe_prefill: A2MegaMoEPrefillConfig = dataclasses.field(default_factory=A2MegaMoEPrefillConfig)
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
@@ -671,6 +680,11 @@ class AscendConfig:
         # to enable the megamoe for testing capabilities.
         # These codes will be removed after megamoe is ready.
         global _MEGA_MOE_SUPPORTED
+        if self.a2_mega_moe_prefill.enabled:
+            if self.enable_fused_mc2 != 2:
+                raise ValueError("a2_mega_moe_prefill requires enable_fused_mc2=2")
+            if importlib.util.find_spec("cann_ops_transformer") is None:
+                raise ValueError("a2_mega_moe_prefill requires a compatible cann_ops_transformer installation")
         if self.enable_fused_mc2 in (0, 1):
             # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
             _MEGA_MOE_SUPPORTED = False
@@ -686,6 +700,15 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.a2_mega_moe_prefill.enabled:
+            if get_current_hardware_profile().moe_comm_policy is not MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY:
+                raise ValueError("a2_mega_moe_prefill is supported only on 910B (A2)")
+            validate_a2_prefill_model(
+                vc,
+                dynamic_eplb=self.eplb_config.dynamic_eplb,
+                redundant_experts=self.eplb_config.num_redundant_experts,
+                mix_placement=self.mix_placement,
+            )
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None

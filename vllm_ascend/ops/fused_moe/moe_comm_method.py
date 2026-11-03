@@ -54,7 +54,13 @@ def _moe_config_key(
     moe_comm_type: MoECommType | None, moe_config: FusedMoEConfig | None
 ) -> tuple[MoECommType | None, tuple[int, ...]]:
     """Return the execution shape that owns mutable MoE comm state."""
-    _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts")
+    _CONFIG_KEY_FIELDS = (
+        "num_experts",
+        "num_local_experts",
+        "hidden_dim",
+        "intermediate_size_per_partition",
+        "experts_per_token",
+    )
     return (moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))
 
 
@@ -389,6 +395,7 @@ class FusedMC2CommImpl(MoECommMethod):
         dispatch_quant_out_dtype: torch.dtype | None = None,
         *,
         is_decode_only_node: bool,
+        physical_intermediate_size: int | None = None,
     ):
         # FusedMC2CommImpl always builds a TokenDispatcherWithMC2 (see
         # setup_moe_comm_method), which is where global_bs / ep_world_size live.
@@ -421,7 +428,7 @@ class FusedMC2CommImpl(MoECommMethod):
             num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank),
         )
 
-        if is_decode_only_node:
+        if is_decode_only_node or get_ascend_config().a2_mega_moe_prefill.enabled is True:
             max_recv_token_num = absolute_safe_max_recv_token_num
         else:
             # P nodes and PD-mixed nodes use the configured value. This keeps
@@ -460,7 +467,11 @@ class FusedMC2CommImpl(MoECommMethod):
             num_max_tokens_per_rank,
             num_topk,
             hidden=self.moe_config.hidden_dim,
-            intermediate_hidden=2 * self.moe_config.intermediate_size_per_partition,
+            intermediate_hidden=(
+                physical_intermediate_size
+                if physical_intermediate_size is not None
+                else 2 * self.moe_config.intermediate_size_per_partition
+            ),
             max_recv_token_num=max_recv_token_num,
             dispatch_quant_mode=dispatch_quant_mode,
             dispatch_quant_out_dtype=dispatch_quant_out_dtype,
@@ -506,6 +517,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 dispatch_quant_mode,
                 dispatch_quant_out_dtype,
                 is_decode_only_node=is_decode_only_node,
+                physical_intermediate_size=getattr(fused_experts_input.layer, "a2_mega_moe_intermediate_size", None),
             )
         else:
             self.mega_moe_symm_buffer.dispatch_quant_mode = dispatch_quant_mode
@@ -537,6 +549,8 @@ class FusedMC2CommImpl(MoECommMethod):
         activation_kwargs = getattr(layer, "mega_moe_activation_kwargs", None)
         if activation_kwargs is None:
             activation_kwargs = getattr(self, "mega_moe_activation_kwargs", {}) or {}
+        if get_ascend_config().a2_mega_moe_prefill.enabled is True:
+            logger.debug("A2 MegaMoE executing: local_rows=%d profile=%s", num_tokens, _EXTRA_CTX.in_profile_run)
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             fused_experts_input.topk_ids.to(torch.int32),

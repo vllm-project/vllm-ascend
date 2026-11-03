@@ -1,0 +1,7 @@
+# Replace 0 and the filename with the assigned PR number when opening a PR.
+pr: 0
+entries:
+  - category: feature
+    text: Added opt-in BF16 Qwen3.8-Flash-Next MegaMoE pure-prefill execution on 910B TP8/EP8 through additional_config.a2_mega_moe_prefill. Mixed and decode batches retain the ordinary backend; 640-wide expert weights are padded to 768 and shared with fallback execution.
+    model: qwen3.8-flash-next
+    hardware: [A2]
