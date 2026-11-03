@@ -71,6 +71,9 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         self.allgather_expert_replica_routing_table: torch.Tensor | None = None
         self.allgather_record_tensor: torch.Tensor | None = None
         self.allgather_source_is_padding: torch.Tensor | None = None
+        # One slot per micro-batch, shared with the other layers of this model.
+        # See AscendEplbState._propagate_shared_tensors.
+        self.allgather_source_masks: list[torch.Tensor | None] | None = None
         self.local_expert_start = 0
         self.local_expert_count = 0
 
@@ -125,18 +128,29 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         if all_gather_mask is not None:
             assert self.num_unpadded_tokens_tensors is not None and self.should_record_tensor is not None
             num_unpadded_tokens = self.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
-            is_padding = self.allgather_source_is_padding
-            if is_padding is None:
-                is_padding = getattr(get_forward_context(), "is_padding", None)
-            token_mask = make_allgather_mask(
-                num_source_tokens,
-                num_unpadded_tokens,
-                self.should_record_tensor,
-                is_padding=is_padding,
-                tp_size=get_tensor_model_parallel_world_size() if is_sequence_parallel else 1,
-                tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
-            )
-            token_mask = all_gather_mask(token_mask)
+            # Every MoE layer of this model derives the same mask from the same
+            # per-forward inputs, so gathering it in each one repeats a
+            # collective as many times as the model has MoE layers. The slots
+            # hold it for the rest of the forward and the controller clears them
+            # at the start of the next one.
+            ubatch = dbo_current_ubatch_id()
+            slots = self.allgather_source_masks
+            token_mask = None if slots is None else slots[ubatch]
+            if token_mask is None:
+                is_padding = self.allgather_source_is_padding
+                if is_padding is None:
+                    is_padding = getattr(get_forward_context(), "is_padding", None)
+                token_mask = make_allgather_mask(
+                    num_source_tokens,
+                    num_unpadded_tokens,
+                    self.should_record_tensor,
+                    is_padding=is_padding,
+                    tp_size=get_tensor_model_parallel_world_size() if is_sequence_parallel else 1,
+                    tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
+                )
+                token_mask = all_gather_mask(token_mask)
+                if slots is not None:
+                    slots[ubatch] = token_mask
             local_load = count_allgather_tokens(topk_ids, token_mask, self.local_expert_start, self.local_expert_count)
             assert self.allgather_record_tensor is not None
             torch.maximum(
@@ -255,6 +269,9 @@ class AscendEplbState(_eplb_state.EplbState):
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
         self.allgather_record_tensor: torch.Tensor | None = None
+        # One list of per-micro-batch slots for each registered model, so the
+        # target and the draft never share a gathered mask.
+        self._allgather_source_mask_slots: list[list[torch.Tensor | None]] = []
         self._uses_phase_filter = False
         self._stop_async = threading.Event()
         self._suspended = False
@@ -298,9 +315,40 @@ class AscendEplbState(_eplb_state.EplbState):
             return
         if self.allgather_record_tensor is None:
             self.allgather_record_tensor = torch.full((), -1, dtype=torch.int32, device=self.device)
+        # One list per model, so the draft cannot read a mask the target
+        # gathered. Elastic EP propagates again for the same model when the EP
+        # size changes, so retire the list this one replaces instead of leaving
+        # it for clear_allgather_source_masks to walk every forward.
+        source_masks: list[torch.Tensor | None] = [None] * len(num_unpadded_tokens_tensors)
+        replaced = next(
+            (
+                layer.eplb_state.allgather_source_masks
+                for layer in model.moe_layers
+                if isinstance(layer.eplb_state, AscendEplbLayerState)
+            ),
+            None,
+        )
+        if replaced is not None:
+            self._allgather_source_mask_slots = [
+                slots for slots in self._allgather_source_mask_slots if slots is not replaced
+            ]
+        self._allgather_source_mask_slots.append(source_masks)
         for layer in model.moe_layers:
             if isinstance(layer.eplb_state, AscendEplbLayerState):
                 layer.eplb_state.allgather_record_tensor = self.allgather_record_tensor
+                layer.eplb_state.allgather_source_masks = source_masks
+
+    def clear_allgather_source_masks(self) -> None:
+        """Drop the gathered source masks so the next forward rebuilds them.
+
+        The masks are only valid for the forward that built them. Clearing them
+        where the controller already resets the per-forward recording tensors
+        keeps their lifetime tied to a forward step, so nothing has to describe
+        what they depend on.
+        """
+        for source_masks in self._allgather_source_mask_slots:
+            for index in range(len(source_masks)):
+                source_masks[index] = None
 
     def wait_for_rearrangement(self, stream) -> bool:
         """Allow an idle worker to stop without recording a fake device event."""

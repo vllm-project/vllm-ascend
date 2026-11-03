@@ -102,6 +102,9 @@ class AscendEPLBController(EPLBController):
             state._uses_phase_filter = self.load_collection_phase != "all"
             if state.allgather_record_tensor is not None:
                 state.allgather_record_tensor.fill_(-1)
+            # The gathered source masks belong to one forward, like the
+            # recording tensors reset here.
+            state.clear_allgather_source_masks()
         # AllGather needs source validity; other paths use operator counts.
         if state.should_record_tensor is not None:
             is_sampling = state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)

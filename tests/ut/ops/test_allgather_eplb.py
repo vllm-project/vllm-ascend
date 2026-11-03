@@ -208,6 +208,76 @@ def test_source_mask_preserves_ubatch_padding_and_tp_slice(monkeypatch, padding_
     assert prepare.all_gather_eplb_mask.call_count == 2
 
 
+def _mask_layer_state(source_masks):
+    state = AscendEplbLayerState()
+    state.num_unpadded_tokens_tensors = [torch.tensor(2), torch.tensor(2)]
+    state.should_record_tensor = torch.tensor(True)
+    state.allgather_record_tensor = torch.tensor(-1, dtype=torch.int32)
+    state.allgather_source_masks = source_masks
+    state.expert_load_view = torch.zeros(1, dtype=torch.int32)
+    state.local_expert_start = 0
+    state.local_expert_count = 1
+    return state
+
+
+def _record(state, gather):
+    state.record_load(
+        torch.tensor([2]),
+        1,
+        topk_ids=torch.zeros(2, 1, dtype=torch.int32),
+        num_source_tokens=2,
+        all_gather_mask=gather,
+    )
+
+
+def test_source_mask_is_gathered_once_for_all_layers_of_a_model(monkeypatch):
+    """Every MoE layer of a model derives the same mask, so one gather is enough.
+
+    Gathering per layer repeats the collective as many times as the model has
+    MoE layers, which on A5 lands on the prefill forwards.
+    """
+    monkeypatch.setattr(state_module, "get_forward_context", lambda: SimpleNamespace(is_padding=None))
+    monkeypatch.setattr(state_module, "dbo_current_ubatch_id", lambda: 0)
+    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
+    gather = MagicMock(side_effect=lambda mask: mask)
+    # _propagate_shared_tensors hands one list to every layer of one model.
+    shared = [None, None]
+    layers = [_mask_layer_state(shared) for _ in range(4)]
+
+    for layer in layers:
+        _record(layer, gather)
+
+    assert gather.call_count == 1
+    assert [layer.expert_load_view.item() for layer in layers] == [2, 2, 2, 2]
+
+
+@pytest.mark.parametrize("separated_by", ["model", "ubatch"])
+def test_source_mask_is_not_shared_across_models_or_ubatches(monkeypatch, separated_by):
+    """The slots separate the two dimensions that can hold different masks at once.
+
+    A draft model carries its own padding source, and micro-batches have their
+    own token counts, so neither may read the other's mask.
+    """
+    monkeypatch.setattr(state_module, "get_forward_context", lambda: SimpleNamespace(is_padding=None))
+    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
+    ubatch = 0
+    monkeypatch.setattr(state_module, "dbo_current_ubatch_id", lambda: ubatch)
+    gather = MagicMock(side_effect=lambda mask: mask)
+
+    target_slots = [None, None]
+    first = _mask_layer_state(target_slots)
+    # A separate model gets its own list; the same model keeps one list and
+    # separates micro-batches by index.
+    second = _mask_layer_state([None, None] if separated_by == "model" else target_slots)
+
+    _record(first, gather)
+    if separated_by == "ubatch":
+        ubatch = 1
+    _record(second, gather)
+
+    assert gather.call_count == 2
+
+
 @pytest.mark.parametrize(
     "device,comm_type,dp_size,source_padding,expected_load,expected_record_flag",
     [
