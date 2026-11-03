@@ -789,7 +789,6 @@ class TestModelStateInputEmbedsShard:
 
         state = AscendModelState.__new__(AscendModelState)
         state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace())
-        state._dense_sp = dense_sp
         return state
 
     def _run(self, monkeypatch, dense_sp, method, *args):
@@ -802,10 +801,6 @@ class TestModelStateInputEmbedsShard:
         monkeypatch.setattr(state_module, "enable_dense_sp", lambda vllm_config=None: dense_sp)
         state = self._make_state(dense_sp)
         embeds = torch.zeros(8, 2, dtype=torch.float64)
-        if method == "prepare_inputs_embeds":
-            return state.prepare_inputs_embeds(None, SimpleNamespace(num_tokens_after_padding=8), None)
-        if method == "dummy_inputs_embeds":
-            return state.dummy_inputs_embeds(8)
         if method == "super_prepare_inputs":
             # super().prepare_inputs_embeds path: patch the upstream base.
             monkeypatch.setattr(
@@ -814,6 +809,13 @@ class TestModelStateInputEmbedsShard:
                 raising=True,
             )
             return state.prepare_inputs_embeds(None, SimpleNamespace(num_tokens_after_padding=8), None)
+        if method == "dummy_inputs_embeds":
+            monkeypatch.setattr(
+                "vllm.v1.worker.gpu.model_states.default.DefaultModelState.dummy_inputs_embeds",
+                lambda self, num_tokens: embeds,
+                raising=True,
+            )
+            return state.dummy_inputs_embeds(8)
         raise ValueError(method)
 
     def test_prepare_inputs_embeds_shards_under_dense_sp(self, monkeypatch):
@@ -825,24 +827,66 @@ class TestModelStateInputEmbedsShard:
         assert out.shape[0] == 8
 
     def test_dummy_inputs_embeds_shards_under_dense_sp(self, monkeypatch):
-        embeds = torch.zeros(8, 2, dtype=torch.float64)
-        monkeypatch.setattr(
-            "vllm.v1.worker.gpu.model_states.default.DefaultModelState.dummy_inputs_embeds",
-            lambda self, num_tokens: embeds,
-            raising=True,
-        )
         out = self._run(monkeypatch, dense_sp=True, method="dummy_inputs_embeds")
         assert out.shape[0] == 4
 
     def test_dummy_inputs_embeds_stays_full_without_dense_sp(self, monkeypatch):
-        embeds = torch.zeros(8, 2, dtype=torch.float64)
-        monkeypatch.setattr(
-            "vllm.v1.worker.gpu.model_states.default.DefaultModelState.dummy_inputs_embeds",
-            lambda self, num_tokens: embeds,
-            raising=True,
-        )
         out = self._run(monkeypatch, dense_sp=False, method="dummy_inputs_embeds")
         assert out.shape[0] == 8
+
+
+class TestMmTextEmbeddingInstall:
+    """For mm-capable models under dense SP, the V2 runner always pre-computes
+    inputs_embeds (the multimodal merge happens full-token side), so the
+    language model's self-embedding path is dead and its embed_input_ids only
+    serves the wrapper's merge — the model-state init installs an
+    instance-level gather there, generically for every mm family."""
+
+    def _install(self, monkeypatch, dense_sp_entry, has_language_model=True):
+        import vllm_ascend.worker.v2.model_states.default as state_module
+
+        def fake_gather(x):
+            return torch.cat([x, x], dim=0)
+
+        monkeypatch.setattr(state_module, "sp_all_gather", fake_gather)
+
+        def text_embed(input_ids):
+            # The 3-row shard (TP=2, T=5: ceil(5/2)=3).
+            return torch.arange(3 * 2, dtype=torch.float64).reshape(3, 2)
+
+        language_model = SimpleNamespace(
+            embed_input_ids=text_embed,
+            model=SimpleNamespace(embed_tokens=SimpleNamespace(dense_sp_entry=dense_sp_entry)),
+        )
+        if has_language_model:
+            model = SimpleNamespace(
+                language_model=language_model,
+                get_language_model=lambda: language_model,
+            )
+        else:
+            model = SimpleNamespace()
+        state_module._install_full_token_mm_text_embedding(model)
+        return language_model
+
+    def test_installed_wrap_gathers_and_trims_the_shard(self, monkeypatch):
+        language_model = self._install(monkeypatch, dense_sp_entry=True)
+        input_ids = torch.zeros(5, dtype=torch.int64)
+        embeds = language_model.embed_input_ids(input_ids)
+        # The 3-row shard was gathered to 6 and trimmed to the true 5.
+        assert embeds.shape[0] == 5
+
+    def test_no_wrap_without_sequence_parallel_embedding(self, monkeypatch):
+        language_model = self._install(monkeypatch, dense_sp_entry=False)
+        input_ids = torch.zeros(5, dtype=torch.int64)
+        # The language model's embedding is not the sequence-parallel one:
+        # stock path (no gather), the shard rows flow through.
+        assert language_model.embed_input_ids(input_ids).shape[0] == 3
+
+    def test_no_wrap_without_language_model(self, monkeypatch):
+        import vllm_ascend.worker.v2.model_states.default as state_module
+
+        # A model with no language_model / get_language_model: stock path.
+        state_module._install_full_token_mm_text_embedding(SimpleNamespace())
 
 
 class TestCaptureWrapperGather:

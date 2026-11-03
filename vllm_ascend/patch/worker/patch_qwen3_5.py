@@ -23,12 +23,7 @@ import torch
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
-from vllm.model_executor.models.interfaces import _require_is_multimodal
-from vllm.model_executor.models.qwen3_5 import (
-    Qwen3_5DecoderLayer,
-    Qwen3_5ForConditionalGeneration,
-)
-from vllm.model_executor.models.utils import _merge_multimodal_embeddings
+from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
 
 try:
     from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
@@ -209,41 +204,6 @@ if Qwen3_5MultiTokenPredictor is not None:
         return hidden_states
 
     Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward
-
-
-def _qwen3_5_cg_embed_input_ids_full_token(
-    self,
-    input_ids: torch.Tensor,
-    multimodal_embeddings=None,
-    *,
-    is_multimodal: torch.Tensor | None = None,
-) -> torch.Tensor:
-    inputs_embeds = self._embed_text_input_ids(
-        input_ids,
-        self.language_model.embed_input_ids,
-        is_multimodal=is_multimodal,
-    )
-    if getattr(self.language_model.model.embed_tokens, "dense_sp_entry", False):
-        # Dense sequence parallelism: the language model's embedding arrived
-        # on the rank-local token shard, while the V2 runner's
-        # prepare_inputs_embeds (text embed + multimodal merge, done
-        # full-token side before the model) and the merge below consume
-        # full-token rows. Restore them here; the Qwen3_5Model.forward wrap
-        # below shards the merged embeds back to the token shard before the
-        # decoder stack.
-        inputs_embeds = tensor_model_parallel_all_gather(inputs_embeds, 0)
-        inputs_embeds = inputs_embeds[: input_ids.shape[0]]
-    if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
-        return inputs_embeds
-    is_multimodal = _require_is_multimodal(is_multimodal)
-    return _merge_multimodal_embeddings(
-        inputs_embeds=inputs_embeds,
-        multimodal_embeddings=multimodal_embeddings,
-        is_multimodal=is_multimodal,
-    )
-
-
-Qwen3_5ForConditionalGeneration.embed_input_ids = _qwen3_5_cg_embed_input_ids_full_token
 
 
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward

@@ -19,12 +19,13 @@
 
 from collections.abc import Callable, Collection
 from contextlib import contextmanager, nullcontext
-from functools import partial
+from functools import partial, wraps
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context, set_forward_context
@@ -43,10 +44,49 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_manager,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.models.common.ops.sequence_parallel import sp_shard
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 from vllm_ascend.utils import enable_dense_sp, should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
+
+
+def _install_full_token_mm_text_embedding(model: nn.Module) -> None:
+    """Restore full-token rows at the mm wrapper's text-embedding seam.
+
+    Under dense sequence parallelism the language model's embedding arrives on
+    the rank-local token shard. For mm-capable models the V2 runner always
+    pre-computes inputs_embeds (the multimodal merge happens full-token side,
+    before the model), so the language model's self-embedding path is dead
+    and its ``embed_input_ids`` only serves the wrapper's merge via
+    ``_embed_text_input_ids(input_ids, self.language_model.embed_input_ids,
+    ...)`` — install an instance-level gather there so the merge sees full
+    rows, generically for every mm family. Text-only models keep the stock
+    path (their self-embedding feeds the sequence-parallel decoder and must
+    stay sharded); the shared embedding's ``dense_sp_entry`` flag carries the
+    layout.
+    """
+    language_model = None
+    get_language_model = getattr(model, "get_language_model", None)
+    if callable(get_language_model):
+        language_model = get_language_model()
+    if language_model is None:
+        language_model = getattr(model, "language_model", None)
+    if language_model is None or not hasattr(language_model, "embed_input_ids"):
+        return
+    embed_tokens = getattr(getattr(language_model, "model", None), "embed_tokens", None) or getattr(
+        language_model, "embed_tokens", None
+    )
+    if embed_tokens is None or not getattr(embed_tokens, "dense_sp_entry", False):
+        return
+    original_embed = language_model.embed_input_ids
+
+    @wraps(original_embed)
+    def full_token_embed_input_ids(input_ids, *args, **kwargs):
+        embeds = original_embed(input_ids, *args, **kwargs)
+        embeds = sp_all_gather(embeds)
+        return embeds[: input_ids.shape[0]]
+
+    language_model.embed_input_ids = full_token_embed_input_ids
 
 
 class ReplayAttnMetadata(ModelSpecificAttnMetadata):
@@ -108,7 +148,7 @@ class AscendModelState(DefaultModelState):
                 device=device,
                 pin_memory=pin_memory,
             )
-            if sparse_cfg.use_fused_copy_sfa:
+            if sparse_cfg.use_fused_copy:
                 pool_capacity = vllm_config.scheduler_config.max_num_seqs + 2
                 self._offload_pool_slots = CpuGpuBuffer(
                     pool_capacity, dtype=torch.int32, device=device, pin_memory=pin_memory
@@ -118,6 +158,8 @@ class AscendModelState(DefaultModelState):
                 )
                 self._offload_request_states = CopySfaRequestStates()
         self._initialize_decoder_replay()
+        if self.supports_mm_inputs and enable_dense_sp(self.vllm_config):
+            _install_full_token_mm_text_embedding(model)
 
     def _initialize_decoder_replay(self) -> None:
         self.decoder_replay: AscendDecoderReplayLayers | None = getattr(self.model, "decoder_replay_layers", None)
