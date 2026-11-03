@@ -50,6 +50,7 @@
 #include "attention/fused_lightning_indexer_manage/fused_lightning_indexer_manage_torch_adpt.h"
 #include "attention/fused_scatter_copy_sparse_flash_attention/fused_scatter_copy_sparse_flash_attention_torch_adpt.h"
 #include "attention/fused_quant_lightning_indexer_manage/fused_quant_lightning_indexer_manage_torch_adpt.h"
+#include "attention/lim_copy_descriptors/lim_copy_descriptors_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
 #include "attention/kda_gate_cumsum_vllm/kda_gate_cumsum_vllm_torch_adpt.h"
@@ -3601,6 +3602,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_fused_scatter_copy_sparse_flash_attention", torch::kPrivateUse1,
              &vllm_ascend::npu_fused_scatter_copy_sparse_flash_attention);
+
+    ops.def(
+        "npu_lim_copy_descriptors("
+        "Tensor miss_src_ids, Tensor miss_dst_slots, Tensor miss_counts, "
+        "Tensor source_block_table, Tensor pool_entries, Tensor host_ptrs, "
+        "Tensor dev_ptrs, Tensor params, Tensor active_geometry) -> ()"
+    );
+    ops.impl("npu_lim_copy_descriptors", torch::kPrivateUse1,
+             &vllm_ascend::npu_lim_copy_descriptors);
 
     ops.def(
         "npu_fused_sparse_attention_overlap(Tensor query, Tensor(a!) selection_k_rope, "

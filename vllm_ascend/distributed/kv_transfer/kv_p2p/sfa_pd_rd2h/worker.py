@@ -442,13 +442,14 @@ class SFAPDRD2HConsumerWorker:
             indexer_tensors=self._indexer_tensors,
             indexer_scale_tensors=self._indexer_scale_tensors,
             dest_blocks_by_req=self._dest_blocks_by_req,
-            get_offload_layer_id=self.offload_manager._get_offload_layer_id,
             copy_sfa_tail_by_req=self._copy_sfa_tail_by_req,
             topk_k_bases=self._topk_k_bases,
             topk_v_bases=self._topk_v_bases,
             topk_row_tokens=self._topk_row_tokens,
             topk_hot_tokens=self._topk_hot_tokens,
             block_size=self._copy_sfa_block_size,
+            per_rank_dest=self._per_rank_dest,
+            topk_base_index=self._topk_base_index,
             dspark_draft_kv_metadata=self.dspark_draft_kv_metadata,
             dspark_draft_blocks_by_req=self._dspark_draft_blocks_by_req,
         )
@@ -457,11 +458,23 @@ class SFAPDRD2HConsumerWorker:
         self,
         kv_caches: dict[str, torch.Tensor],
     ) -> None:
-        """Start D pull thread with manager CPU KV and rank-local indexer HBM."""
+        """Start D pull thread with manager KV destinations and rank-local indexer HBM.
+
+        Offloaded (shared-indexer) layers pull into the TP-shared CPU pool;
+        device-resident full layers (offload_shared_indexer_only) pull into
+        their rank-local NPU paged caches instead, so their destination
+        entries carry per-rank HBM bases and are never split across D TP.
+        """
         assert self.offload_manager is not None
         assert self.kv_cache_config is not None
         num_blocks = self.kv_cache_config.num_blocks
-        main_names = list(self.offload_manager.offload_layer_names)
+        offload_names = list(self.offload_manager.offload_layer_names)
+        full_resident_names = list(getattr(self.offload_manager, "full_resident_layer_names", []) or [])
+        # Combined pull list in layer order; destination arrays below follow
+        # the same order so pool_idx indexes them directly.
+        main_names = sorted(offload_names + full_resident_names, key=_layer_idx)
+        offload_pos = {name: idx for idx, name in enumerate(offload_names)}
+        full_pos = {name: idx for idx, name in enumerate(full_resident_names)}
         draft_names = set(self.dspark_draft_layer_names)
         indexer_by_layer = {
             _layer_idx(name): name for name in kv_caches if "indexer" in name.lower() and name not in draft_names
@@ -470,22 +483,48 @@ class SFAPDRD2HConsumerWorker:
             self.dspark_draft_kv_metadata = build_draft_kv_metadata(self.kv_cache_config, kv_caches)
 
         # Store layer info for MembPullReadThread
-        self._main_names = main_names
         self._main_name_to_idx = {n: i for i, n in enumerate(main_names)}
         k_caches_cpu = self.offload_manager.k_caches_cpu
         v_caches_cpu = self.offload_manager.v_caches_cpu
         gvas_k = self.offload_manager.gvas_k_bases
         gvas_v = self.offload_manager.gvas_v_bases
-        if len(gvas_k) != len(main_names) or len(gvas_v) != len(main_names):
+        if len(gvas_k) != len(offload_names) or len(gvas_v) != len(offload_names):
             raise RuntimeError("SparseKVOffloadManager shared CPU GVA/layer count mismatch")
-        self._main_gva_bases = list(zip(gvas_k, gvas_v))
-        self._main_block_lens = self.offload_manager.cpu_block_lens
-        if len(self._main_block_lens) != len(main_names):
+        cpu_block_lens = self.offload_manager.cpu_block_lens
+        if len(cpu_block_lens) != len(offload_names):
             raise RuntimeError("SparseKVOffloadManager shared CPU block-size/layer count mismatch")
+        self._main_gva_bases: list[tuple[int, int] | None] = [None] * len(main_names)
+        self._main_block_lens: list[tuple[int, int] | None] = [None] * len(main_names)
+        self._per_rank_dest: list[bool] = [False] * len(main_names)
+        self._topk_base_index: list[int] = [-1] * len(main_names)
+        for name in offload_names:
+            idx = self._main_name_to_idx[name]
+            offload_id = offload_pos[name]
+            self._main_gva_bases[idx] = (gvas_k[offload_id], gvas_v[offload_id])
+            self._main_block_lens[idx] = cpu_block_lens[offload_id]
+            self._topk_base_index[idx] = offload_id
+        full_k_bases = getattr(self.offload_manager, "full_resident_k_bases", []) or []
+        full_v_bases = getattr(self.offload_manager, "full_resident_v_bases", []) or []
+        full_block_lens = getattr(self.offload_manager, "full_resident_block_lens", []) or []
+        if (
+            len(full_k_bases) != len(full_resident_names)
+            or len(full_v_bases) != len(full_resident_names)
+            or len(full_block_lens) != len(full_resident_names)
+        ):
+            raise RuntimeError("SparseKVOffloadManager full-resident HBM base/layer count mismatch")
+        for name in full_resident_names:
+            idx = self._main_name_to_idx[name]
+            pos = full_pos[name]
+            self._main_gva_bases[idx] = (full_k_bases[pos], full_v_bases[pos])
+            self._main_block_lens[idx] = full_block_lens[pos]
+            self._per_rank_dest[idx] = True
         if self.tp_rank == 0:
-            if len(k_caches_cpu) != len(main_names) or len(v_caches_cpu) != len(main_names):
+            if len(k_caches_cpu) != len(offload_names) or len(v_caches_cpu) != len(offload_names):
                 raise RuntimeError("SparseKVOffloadManager CPU pool/layer count mismatch")
-            self._cpu_pools = list(zip(k_caches_cpu, v_caches_cpu))
+            cpu_pools_by_name = {
+                name: (k_caches_cpu[offload_pos[name]], v_caches_cpu[offload_pos[name]]) for name in offload_names
+            }
+            self._cpu_pools = [cpu_pools_by_name.get(name) for name in main_names]
         else:
             self._cpu_pools = [None] * len(main_names)
         self._indexer_tensors = []
@@ -515,6 +554,14 @@ class SFAPDRD2HConsumerWorker:
                     v_cpu.element_size() * math.prod(v_cpu.shape[1:]),
                 ]
                 scales = [k_cpu.shape[0] // num_blocks, v_cpu.shape[0] // num_blocks]
+            elif self._per_rank_dest[pool_idx]:
+                # Rank-local paged destination: this rank's HBM caches, same
+                # per-block layout as the shared pool (one block per entry).
+                k_base, v_base = self._main_gva_bases[pool_idx]
+                k_len, v_len = self._main_block_lens[pool_idx]
+                addrs = [k_base, v_base]
+                block_lens = [k_len, v_len]
+                scales = [1, 1]
             else:
                 addrs, block_lens, scales = [], [], []
             groups = [main_group_idx] * len(addrs)
@@ -533,7 +580,7 @@ class SFAPDRD2HConsumerWorker:
                 kv_caches_base_addr=addrs,
                 block_len=block_lens,
                 block_size_scale=scales,
-                main_tensor_count=2 if cpu_pool is not None else 0,
+                main_tensor_count=2 if (cpu_pool is not None or self._per_rank_dest[pool_idx]) else 0,
                 has_indexer=indexer_t is not None,
             )
 

@@ -1522,7 +1522,7 @@ def test_register_sparse_kv_caches_binds_fused_target_and_draft_layers():
     with patch("vllm_ascend.attention.sfa_kv_offload.AscendSFAKVOffloadImpl", FakeSFAOffloadImpl):
         runner._register_sparse_kv_caches(caches)
 
-    manager.register_kv_caches.assert_called_once_with(caches)
+    manager.register_kv_caches.assert_called_once_with(caches, full_resident_layer_names=[])
     assert follower.lim_indexer_owner is owner
     owner.bind_copy_sfa_kv_cache.assert_called_once_with(manager, "target.layer")
     follower.bind_copy_sfa_kv_cache.assert_called_once_with(manager, "draft.layer")

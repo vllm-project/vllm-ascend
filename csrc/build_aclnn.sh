@@ -185,6 +185,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "fused_lightning_indexer_manage"
         "fused_quant_lightning_indexer_manage"
         "fused_scatter_copy_sparse_flash_attention"
+        "lim_copy_descriptors"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
