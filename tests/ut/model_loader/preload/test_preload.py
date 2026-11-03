@@ -4,6 +4,7 @@
 import sys
 import weakref
 from collections import OrderedDict
+from collections.abc import Callable
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -117,13 +118,14 @@ def test_cpu_entry_keeps_upstream_behavior():
 def test_npu_entry_retargets_device_without_changing_original_args(monkeypatch):
     module = ModuleType("torch_npu.multiprocessing.reductions")
     tensor = SimpleNamespace(device=SimpleNamespace(type="npu"))
-    module.rebuild_npu_tensor = Mock(return_value=tensor)
+    rebuild_npu_tensor = Mock(return_value=tensor)
+    module.__dict__["rebuild_npu_tensor"] = rebuild_npu_tensor
     monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(transport.torch_npu, "get_npu_format", lambda _: transport.ND_FORMAT, raising=False)
     args = tuple(range(15))
     entry = transport.NPUTensorEntry("param", ipc_args=args)
     assert entry.rebuild(3) is tensor
-    received = module.rebuild_npu_tensor.call_args.args
+    received = rebuild_npu_tensor.call_args.args
     assert received[transport.IPC_DEVICE_INDEX] == 3
     assert entry.ipc_args == args
     assert received[:6] == args[:6] and received[7:] == args[7:]
@@ -272,10 +274,10 @@ def test_failed_constructor_removes_only_its_new_model_hooks(monkeypatch):
         def callback(self):
             pass
 
-    hooks = OrderedDict()
+    hooks: OrderedDict[int, Callable[..., object]] = OrderedDict()
     existing = HookedModel(hooks)
     dynamo = ModuleType("torch._dynamo.convert_frame")
-    dynamo._bytecode_hooks = hooks
+    dynamo.__dict__["_bytecode_hooks"] = hooks
     monkeypatch.setitem(sys.modules, dynamo.__name__, dynamo)
     cfg = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
     with pytest.raises(RuntimeError, match="discard"), _model_construction_state(cfg):
@@ -657,7 +659,7 @@ def test_daemon_copy_release_collects_cycles_and_hooks_before_acknowledging(monk
     model = CyclicModel()
     model.weight = torch.nn.Parameter(torch.ones(4))
     model.weight.weight_loader = model.callback
-    hooks = OrderedDict()
+    hooks: OrderedDict[int, Callable[..., object]] = OrderedDict()
     model._bytecode_hook_handle = RemovableHandle(hooks)
     hooks[model._bytecode_hook_handle.id] = model.callback
     reference = weakref.ref(model)

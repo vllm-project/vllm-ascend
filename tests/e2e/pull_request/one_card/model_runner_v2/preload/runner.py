@@ -6,6 +6,10 @@ import argparse
 import json
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
 def _worker_memory(worker):
@@ -25,6 +29,8 @@ def _worker_memory(worker):
 
 class PreloadValidationWorker:
     """Test-only worker extension; metrics travel as ordinary RPC data."""
+
+    model_runner: "NPUModelRunner"
 
     def preload_memory_stats(self):
         return _worker_memory(self)
@@ -59,7 +65,7 @@ def main():
     import vllm_ascend
 
     started = time.perf_counter()
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     if args.mode != "disk":
         kwargs.update(
             load_format="ipc_cache",
