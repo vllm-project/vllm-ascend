@@ -27,11 +27,9 @@ from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingStates
 from vllm.v1.sample.logits_processor import BatchUpdateBuilder, LogitsProcessors
-from vllm.v1.sample.thinking_budget_state import (
-    maybe_create_thinking_budget_state_holder,
-)
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
+from vllm_ascend.sample.thinking_eos_mask import maybe_create_thinking_eos_mask_holder
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
 
@@ -68,7 +66,7 @@ class NPUInputBatch(InputBatch):
 
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
-        self.thinking_budget_state_holder = maybe_create_thinking_budget_state_holder(
+        self.thinking_budget_state_holder = maybe_create_thinking_eos_mask_holder(
             reasoning_config,
             max_num_reqs,
             num_speculative_tokens,

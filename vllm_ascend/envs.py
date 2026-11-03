@@ -54,6 +54,21 @@ env_variables: dict[str, Callable[[], Any]] = {
     "SOC_VERSION": lambda: os.getenv("SOC_VERSION", None),
     # If set, vllm-ascend will print verbose logs during compilation
     "VERBOSE": lambda: bool(int(os.getenv("VERBOSE", "0"))),
+    # Comma-separated token ids that are masked to -inf while a request is
+    # inside its think block, so an EOS token sampled mid-thought cannot end
+    # generation and leave content empty (upstream vllm#55420). Requires
+    # --reasoning-parser. Unset (default) keeps stock behavior.
+    # Example: "248046,248047"
+    "VLLM_ASCEND_THINKING_MASK_EOS_TOKEN_IDS": lambda: os.getenv(
+        "VLLM_ASCEND_THINKING_MASK_EOS_TOKEN_IDS", None
+    ),
+    # Comma-separated token ids that implicitly end the think block (e.g. the
+    # Qwen3 tool-call start token), so the EOS mask stops applying on a turn
+    # that issues a tool call straight from thinking. Only used when
+    # VLLM_ASCEND_THINKING_MASK_EOS_TOKEN_IDS is set.
+    "VLLM_ASCEND_THINKING_MASK_IMPLICIT_END_TOKEN_IDS": lambda: os.getenv(
+        "VLLM_ASCEND_THINKING_MASK_IMPLICIT_END_TOKEN_IDS", None
+    ),
     # The home path for CANN toolkit. If not set, the default value is
     # /usr/local/Ascend/ascend-toolkit/latest
     "ASCEND_HOME_PATH": lambda: os.getenv("ASCEND_HOME_PATH", None),

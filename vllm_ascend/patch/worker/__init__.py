@@ -35,6 +35,11 @@ import vllm_ascend.patch.worker.patch_kv_cache_dtype  # noqa
 # Apply before model construction on every device, including 310P.
 import vllm_ascend.patch.worker.patch_mm_input_norm  # noqa
 
+# Opt-in EOS mask inside the think block (upstream vllm#55420); no-op unless
+# VLLM_ASCEND_THINKING_MASK_EOS_TOKEN_IDS is set. Must be imported before the
+# V2 sampler constructs its thinking-budget state.
+import vllm_ascend.patch.worker.patch_thinking_eos_mask  # noqa
+
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
