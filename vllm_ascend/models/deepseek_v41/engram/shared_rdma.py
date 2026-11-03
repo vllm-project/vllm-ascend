@@ -293,12 +293,16 @@ class RemoteReader:
         if self._last_use is not None:
             self._last_use.synchronize()
         self.engine.close()
-        _send(self.wire, dict(op="close", generation=self.generation))
-        if _receive(self.wire) != {"closed": True}:
-            raise RuntimeError("owner did not retire remote Engram lease")
-        self.wire.close()
-        self.buffer = None
-        self.closed = True
+        try:
+            _send(self.wire, dict(op="close", generation=self.generation))
+            if _receive(self.wire) != {"closed": True}:
+                raise RuntimeError("owner did not retire remote Engram lease")
+        finally:
+            try:
+                self.wire.close()
+            finally:
+                self.buffer = None
+                self.closed = True
 
 
 def _lookup_plan(request, tables, capacity):

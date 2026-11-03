@@ -119,6 +119,87 @@ def test_close_fences_only_owned_buffer_before_retiring_lease(rdma, monkeypatch)
     assert reader.closed and reader.buffer is None
 
 
+def test_close_drops_local_resources_when_owner_connection_is_lost(rdma):
+    reader = object.__new__(rdma.RemoteReader)
+    reader.closed = False
+    reader._last_use = None
+    engine_closes = []
+    reader.engine = SimpleNamespace(close=lambda: engine_closes.append(True))
+    reader.wire, peer = socket.socketpair()
+    peer.close()
+    reader.generation = "generation"
+    reader.buffer = object()
+
+    with pytest.raises(OSError):
+        reader.close()
+    assert reader.wire.fileno() == -1
+    assert reader.buffer is None and reader.closed
+    reader.close()
+    assert engine_closes == [True]
+
+
+@pytest.mark.parametrize("reply", [None, {"closed": False}])
+def test_close_cleans_local_resources_when_owner_ack_fails(rdma, monkeypatch, reply):
+    reader = object.__new__(rdma.RemoteReader)
+    reader.closed = False
+    reader._last_use = None
+    reader.engine = SimpleNamespace(close=lambda: None)
+    reader.wire, peer = socket.socketpair()
+    reader.generation = "generation"
+    reader.buffer = object()
+    monkeypatch.setattr(rdma, "_send", lambda *_: None)
+
+    def receive(_):
+        if reply is None:
+            raise TimeoutError("owner did not respond")
+        return reply
+
+    monkeypatch.setattr(rdma, "_receive", receive)
+    try:
+        with pytest.raises((TimeoutError, RuntimeError)):
+            reader.close()
+        assert reader.wire.fileno() == -1
+        assert reader.closed and reader.buffer is None
+        reader.close()
+    finally:
+        peer.close()
+
+
+def test_close_retains_resources_when_engine_close_fails(rdma):
+    reader = object.__new__(rdma.RemoteReader)
+    reader.closed = False
+    reader._last_use = None
+    reader.wire, peer = socket.socketpair()
+    reader.buffer = object()
+    reader.engine = SimpleNamespace(close=lambda: (_ for _ in ()).throw(RuntimeError("engine failed")))
+    try:
+        with pytest.raises(RuntimeError, match="engine failed"):
+            reader.close()
+        assert not reader.closed and reader.buffer is not None
+        assert reader.wire.fileno() >= 0
+    finally:
+        reader.wire.close()
+        peer.close()
+
+
+def test_close_retains_resources_when_device_fence_fails(rdma):
+    reader = object.__new__(rdma.RemoteReader)
+    reader.closed = False
+    reader._last_use = SimpleNamespace(synchronize=lambda: (_ for _ in ()).throw(RuntimeError("device fence failed")))
+    reader.wire, peer = socket.socketpair()
+    reader.buffer = object()
+    engine_closes = []
+    reader.engine = SimpleNamespace(close=lambda: engine_closes.append(True))
+    try:
+        with pytest.raises(RuntimeError, match="device fence failed"):
+            reader.close()
+        assert not reader.closed and reader.buffer is not None
+        assert reader.wire.fileno() >= 0 and engine_closes == []
+    finally:
+        reader.wire.close()
+        peer.close()
+
+
 @pytest.mark.parametrize(
     "lookups",
     [
