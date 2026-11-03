@@ -402,6 +402,19 @@ jobs:
           fi
           echo "merged=${MERGED_VARIANT}" >> "$GITHUB_OUTPUT"
 
+      - name: Dispatch cn-north-4 sync
+        if: ${{ steps.merge.outputs.merged == '1' && github.repository == 'vllm-project/vllm-ascend' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'ascend-gha-runners',
+              repo: 'sync-tools',
+              workflow_id: 'sync-vllm-ascend.yml',
+              ref: 'main',
+            });
+
       - name: Download source commits for build information
         if: ${{ steps.merge.outputs.merged == '1' }}
         continue-on-error: true
@@ -493,16 +506,3 @@ jobs:
           path: ${{ runner.temp }}/build-info-image/*.json
           if-no-files-found: error
           retention-days: 30
-
-      - name: Dispatch cn-north-4 sync
-        if: ${{ steps.merge.outputs.merged == '1' && github.repository == 'vllm-project/vllm-ascend' }}
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: 'ascend-gha-runners',
-              repo: 'sync-tools',
-              workflow_id: 'sync-vllm-ascend.yml',
-              ref: 'main',
-            });
