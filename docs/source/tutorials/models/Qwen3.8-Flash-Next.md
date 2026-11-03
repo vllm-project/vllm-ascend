@@ -268,7 +268,7 @@ Select the hardware tab below.
 
     - Expose devices 0–15 and mount the same W4A8 checkpoint for both roles.
     - Install compatible vLLM, vLLM-Ascend, and Mooncake in the active Python environment.
-    - The commands use `192.168.0.1`, `eth0`, and `/models/Qwen3.8-Flash-Next-w4a8`. Replace these literals consistently for the target host. Prefill profiling traces are written to `/tmp/qwen38-a3-pd/profiling/prefill`. Provide sufficient host memory for Engram CPU offload.
+    - The commands use `192.168.0.1`, `eth0`, and `/models/Qwen3.8-Flash-Next-w4a8`. Replace these literals consistently for the target host. Provide sufficient host memory for Engram CPU offload.
     - Place the compatible `PD_proxy_server.py` at `/opt/qwen38/PD_proxy_server.py`. The proxy must support Mooncake PD request routing and the options shown below; its implementation is not included in this guide.
     - The examples use the Mooncake library directory from the Python 3.12.16 environment. Edit the literal library path if Mooncake is installed elsewhere.
 
@@ -316,10 +316,10 @@ Select the hardware tab below.
         --enable-prefix-caching \
         --async-scheduling \
         --enable-expert-parallel \
-        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --compilation-config '{"cudagraph_mode":"NONE"}' \
         --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
-        --profiler-config '{"profiler":"torch","torch_profiler_dir":"/tmp/qwen38-a3-pd/profiling/prefill"}' \
         --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32600","kv_connector_extra_config":{"prefill":{"dp_size":4,"tp_size":2},"decode":{"dp_size":4,"tp_size":2}}}'
     ```
 
@@ -417,8 +417,8 @@ Select the hardware tab below.
 
     - `VLLM_ASCEND_PLE_BACKEND=torch` selects the PLE backend for both roles.
     - Both roles enable Prefix Caching without an explicit Mamba cache mode.
-    - Engram requires a checkpoint with supported n-gram layers. Both roles request `cpu_offload=true`. Decode sets `dp_shared_memory=true`; prefill sets `dp_shared_memory=false`, although Model Runner V2 with DP > 1 may enable sharing automatically, depending on the runtime version. Check the resolved configuration in the startup logs.
-    - Prefill enables `enable_prefill_mc2=true` and disables fused MC2. Verify MC2 token limits for TP2 × DP4 before increasing the batch token budget.
+    - Engram requires a checkpoint with supported n-gram layers. Both roles set `cpu_offload=true` and `dp_shared_memory=true`. Check the resolved configuration in the startup logs.
+    - Prefill sets `cudagraph_mode=NONE`, enables `enable_prefill_mc2=true`, and disables fused MC2. Verify MC2 token limits for TP2 × DP4 before increasing the batch token budget.
     - Decode enables `FULL_DECODE_ONLY`, NPU graph extension, static kernels, and recompute scheduling. Super kernels remain disabled.
     - Both roles use three MTP draft tokens. Prefill sets `enforce_eager=true`; decode sets `enforce_eager=false`.
     - Keep fused MC2 disabled when using shared expert multistream overlap. The decode command relies on the runtime's default value of zero.
