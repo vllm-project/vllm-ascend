@@ -1954,7 +1954,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 # Wait before the first main or indexer cache access.
                 self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
 
-            finish_main_kv = self._prepare_kv(
+            kv_outputs: Callable[[], tuple] | tuple
+            kv_outputs = self._prepare_kv(
                 kv_no_split,
                 cos,
                 sin,
@@ -1968,7 +1969,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 k_hidden_states = self.indexer.prepare_pcp_hidden(k_hidden_states, indexer_attn_metadata)
             self._start_o_proj_weight_gather()
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
-            kv_outputs = finish_main_kv()
+            kv_outputs = kv_outputs()
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
             if self.qk_rope_head_dim:

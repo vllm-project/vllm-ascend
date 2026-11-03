@@ -334,19 +334,19 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(
             assert not torch.equal(kv_cache[0], initial_cache)
         return hidden.clone()
 
-    indexer.prepare_pcp_hidden = MagicMock(side_effect=prepare_hidden)
+    prepare_pcp_hidden = MagicMock(side_effect=prepare_hidden)
     project_query = impl._q_proj_and_k_up_proj
 
     def start_o_proj_gather():
         if prefetch:
-            indexer.prepare_pcp_hidden.assert_called_once()
+            prepare_pcp_hidden.assert_called_once()
 
     impl._start_o_proj_weight_gather = MagicMock(side_effect=start_o_proj_gather)
 
     def project_after_launch(q_c):
         impl._start_o_proj_weight_gather.assert_called_once()
         if prefetch:
-            indexer.prepare_pcp_hidden.assert_called_once()
+            prepare_pcp_hidden.assert_called_once()
         return project_query(q_c)
 
     impl._q_proj_and_k_up_proj = project_after_launch
@@ -354,6 +354,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(
     output = torch.full((padded_tokens, output_dim), 123.0)
 
     with (
+        patch.object(indexer, "prepare_pcp_hidden", prepare_pcp_hidden, create=True),
         patch.object(
             sparse_mla,
             "get_forward_context",
@@ -396,7 +397,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(
             metadata,
             output=output,
         )
-    assert indexer.prepare_pcp_hidden.call_count == int(prefetch)
+    assert prepare_pcp_hidden.call_count == int(prefetch)
     impl._start_o_proj_weight_gather.assert_called_once()
 
     real_hidden = hidden_states[:num_tokens]

@@ -43,7 +43,8 @@ def test_main_kv_matches_synchronous_inputs_and_slots(
     inputs = torch.arange(rows * 3, dtype=dtype).reshape(rows, 3)
     cos, sin = (torch.randn(rows, 2), torch.randn(rows, 2)) if rope else (None, None)
     cache = (torch.zeros(pcp * 4, 3, dtype=torch.int8 if quantized else torch.float32),)
-    events, writes = [], []
+    events: list[str] = []
+    writes: list[tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor]] = []
 
     def gather(value, dim=0):
         return torch.cat([value + rank for rank in range(pcp)], dim=dim)
