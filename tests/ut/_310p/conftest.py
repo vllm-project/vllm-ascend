@@ -27,7 +27,9 @@ def sampling_kernel_overrides():
     try:
         yield
     finally:
-        dispatcher._rebind_kernels([(getattr(module, name), original) for module, name, original in originals])
+        # Restore the original objects, including aliases, without wrapping them again.
+        rebind = getattr(dispatcher, "_rebind_impls", None) or dispatcher._rebind_kernels
+        rebind([(getattr(module, name), original) for module, name, original in originals])
         for module, name, original in originals:
             setattr(module, name, original)
         dispatcher._registry.clear()

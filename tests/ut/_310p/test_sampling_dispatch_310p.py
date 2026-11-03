@@ -83,14 +83,17 @@ def test_dispatcher_skips_lazy_non_mapping_dict_and_rebinds_real_owners(monkeypa
     module = ModuleType("_310p_dispatch_regression")
     namespace = vars(module)
     namespace.update(
+        original=original,
         lazy=LazyForeignLibrary(),
         alias=original,
         owner=SimpleNamespace(kernel=original, _kernel_arg_names=("stale",)),
     )
     monkeypatch.setitem(sys.modules, module.__name__, module)
-    wrapper = dispatcher.KernelOverride(original, lambda value: value + 1)
-    dispatcher._rebind_kernels([(original, wrapper)])
+    with patch.dict(dispatcher._registry):
+        dispatcher.register_kernels({f"{module.__name__}.original": lambda value: value + 1})
+    wrapper = namespace["original"]
     assert _kernel_owner_vars(namespace["lazy"]) == {}
+    assert wrapper is not original
     assert namespace["alias"] is wrapper
     assert namespace["owner"].kernel is wrapper
     assert "_kernel_arg_names" not in vars(namespace["owner"])
