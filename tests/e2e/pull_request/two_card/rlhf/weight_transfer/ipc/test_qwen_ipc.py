@@ -5,14 +5,14 @@
 
 import pytest
 
-from tests.e2e.pull_request.two_card.rlhf.weight_transfer.cases import (
+from tests.e2e.rlhf.weight_transfer.cases import (
     QWEN_CASES,
     pytest_model_cases,
 )
-from tests.e2e.pull_request.two_card.rlhf.weight_transfer.ipc.runner import (
+from tests.e2e.rlhf.weight_transfer.model import WeightUpdateModelCase
+from tests.e2e.rlhf.weight_transfer.npu_ipc import (
     run_npu_ipc_weight_transfer_transaction,
 )
-from tests.e2e.rlhf.weight_transfer.model import WeightUpdateModelCase
 
 
 @pytest.mark.parametrize(("case", "packed"), pytest_model_cases("npu_ipc", model_cases=QWEN_CASES))

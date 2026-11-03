@@ -5,7 +5,7 @@
 
 from typing import Any
 
-from tests.e2e.rlhf.weight_transfer.adapters.deepseek import deepseek_v4_checkpoint_name
+from tests.e2e.rlhf.weight_transfer.checkpoint_adapters import deepseek_v4_checkpoint_name
 from tests.e2e.rlhf.weight_transfer.model import WeightUpdateModelCase
 
 QWEN35_CASE = WeightUpdateModelCase(
