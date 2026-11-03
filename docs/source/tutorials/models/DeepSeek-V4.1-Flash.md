@@ -367,7 +367,8 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     | Decode | 8 / 1 / 8 | 7100–7107 | 12321 | 27010–27017 |
 
     This section follows the DP8/TP1 A5 recipe from v0.30.0, with the
-    bounded-replay switches made explicit for vLLM 0.32.0 or a matching
+    Prefill batch token limit kept at `5120` and bounded-replay switches
+    made explicit for vLLM 0.32.0 or a matching
     native-replay build. Use the vLLM Ascend checkout and upstream revision
     selected in the A5 installation tab. The A2/A3 v0.30.0rc2 baseline and
     the local-only replay backport in Section 12 do not apply to this tab.
@@ -646,7 +647,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         --tensor-parallel-size "$7" \
         --enable-expert-parallel \
         --max-model-len 1048576 \
-        --max-num-batched-tokens 4096 \
+        --max-num-batched-tokens 5120 \
         --max-num-seqs 16 \
         --gpu-memory-utilization 0.90 \
         --block-size 128 \
@@ -760,7 +761,8 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
       disables replay automatically. `--no-swa-bounded-replay` makes that
       choice explicit; disabling replay does not require disabling prefix
       caching.
-    - DP8/TP1/EP8, batch limits (Prefill `4096`, Decode `1024`), sequence
+    - Prefill keeps `--max-num-batched-tokens 5120`.
+      DP8/TP1/EP8, the Decode batch limit (`1024`), sequence
       limits (`16` and `64`), memory utilization (`0.90` and `0.92`), target
       execution modes, and DSpark draft settings follow the v0.30.0 example.
       The API ports remain `7100-7107`, with KV base ports `26010` on Prefill
