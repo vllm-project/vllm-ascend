@@ -160,7 +160,7 @@ def _attn(selected):
 
 @pytest.mark.parametrize("defer_weights_sync", [False, True])
 def test_prepare_indexer_weights_wait_policy(monkeypatch, defer_weights_sync):
-    trace = []
+    trace: list[tuple[str, str, str | None]] = []
 
     class Stream:
         def __init__(self, name):
@@ -229,7 +229,7 @@ def test_index_selection_publishes_shared_output(monkeypatch, empty_cache, quant
     )
     selected = torch.full((TOKENS, 0 if empty_cache else TOPK), 3, dtype=torch.int32)
     attn, shared = _attn(selected)
-    waits = []
+    waits: list[str] = []
     monkeypatch.setattr(torch.npu, "current_stream", lambda: SimpleNamespace(wait_event=waits.append))
     impl = _impl(
         SimpleNamespace(
