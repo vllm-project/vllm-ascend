@@ -24,9 +24,9 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 
 | Weight Version | Hardware Requirements | Download Links |
 | --- | --- | --- |
-| `Qwen3.8-Flash-Next-w8a8-mtp` (quantized version) | 1 A3 series node (16 devices), using 8 devices with TP8 × DP1 in the original validated configuration | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
-| `Qwen3.8-Flash-Next-w4a8` (quantized version) | Colocated: 1 A3 series node or 1 A2 series node, using 8 devices with TP8 × DP1. PD separation: 1 A3 series node (16 devices) or 2 A2 series nodes (8 devices per node), with TP2 × DP4 per role | |
-| `Qwen3.8-Flash-Next-w4a8-mxfp` (quantized version) | 1 Ascend 950 DT node (8 devices). Colocated: 4 devices with TP4 × DP1. PD separation: 8 devices with TP2 × DP2 per role | |
+| `Qwen3.8-Flash-Next-w8a8-mtp` (quantized version) | 1 A3 series node (16 devices) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
+| `Qwen3.8-Flash-Next-w4a8` (quantized version) | 1 A3 series node (16 devices) or 1–2 A2 series nodes (8 devices per node) | |
+| `Qwen3.8-Flash-Next-w4a8-mxfp` (quantized version) | 1 Ascend 950 DT node (8 devices) | |
 
 The commands use fixed model directories under `/models`. Mount the corresponding checkpoint at the shown directory or edit that path directly. For PD separation, both roles must load the same checkpoint.
 
