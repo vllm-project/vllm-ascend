@@ -71,7 +71,7 @@ def packed_broadcast_producer(
     Args:
         iterator: Iterator of model parameters. Returns a tuple of (name, tensor)
         group: Process group (PyHcclCommunicator)
-        src: Source rank (0 in current implementation)
+        src: Source rank in the HCCL transfer group.
         post_iter_func: Function to apply to each (name, tensor) pair before
                        packing. Must return a Tensor with the source dtype and
                        element count, or raises ValueError. Flattened element
@@ -176,7 +176,7 @@ def packed_broadcast_consumer(
     Args:
         iterator: Iterator of parameter metadata. Returns (name, (shape, dtype))
         group: Process group (PyHcclCommunicator)
-        src: Source rank (0 in current implementation)
+        src: Source rank in the HCCL transfer group.
         post_unpack_func: Function to apply to each list of (name, tensor) after
                          unpacking. Tensors own independent storage and may be
                          retained or modified without aliasing the packed buffer.

@@ -27,6 +27,7 @@ caching contract are pinned here.
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 from tests.e2e.pull_request.rlhf import weight_transfer_test_utils as utils
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
@@ -39,6 +40,17 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
 CASE = MODEL_CASES[0]
 PORT = 8123
 GPU_MEMORY_UTILIZATION = 0.75
+
+
+def test_fixed_source_supports_the_paired_metadata_and_full_iteration_contract():
+    source = object.__new__(utils.FixedRandomWeightSource)
+    source._parameters = [("w", (2,), torch.bfloat16)]
+    metadata = source.metadata() if callable(source.metadata) else source.metadata
+    assert [(m.name, m.shape, m.dtype) for m in metadata] == [("w", (2,), torch.bfloat16)]
+    with patch.object(source, "_make_tensor", return_value=torch.ones(2)):
+        pairs = list(source.iter_full())
+    assert [name for name, _ in pairs] == ["w"]
+    torch.testing.assert_close(pairs[0][1], torch.ones(2))
 
 
 def _flag_map(args: list[str]) -> dict[str, str | bool]:
