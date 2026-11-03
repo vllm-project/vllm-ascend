@@ -36,6 +36,9 @@ jobs:
     runs-on: linux-amd64-cpu-2-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    defaults:
+      run:
+        shell: bash
     concurrency:
       group: build-info-obs-publish
       queue: max
@@ -69,27 +72,25 @@ jobs:
         if: ${{ github.run_attempt > 1 }}
         run: |
           set -euo pipefail
-          mkdir -p "${{ runner.temp }}/build-info-images"
-          for bundle in "${{ runner.temp }}"/previous-build-info-bundles/build-info-run-*/reports; do
+          mkdir -p "$RUNNER_TEMP/build-info-images"
+          for bundle in "$RUNNER_TEMP"/previous-build-info-bundles/build-info-run-*/reports; do
             [ -d "$bundle" ] || continue
-            cp -R "$bundle/." "${{ runner.temp }}/build-info-images/"
+            cp -R "$bundle/." "$RUNNER_TEMP/build-info-images/"
           done
       - name: Restore source commits from previous complete attempts
         if: ${{ github.run_attempt > 1 }}
         run: |
           set -euo pipefail
-          mkdir -p "${{ runner.temp }}/build-info-sources"
-          for bundle in "${{ runner.temp }}"/previous-build-info-bundles/build-info-run-*/sources; do
+          mkdir -p "$RUNNER_TEMP/build-info-sources"
+          for bundle in "$RUNNER_TEMP"/previous-build-info-bundles/build-info-run-*/sources; do
             [ -d "$bundle" ] || continue
-            cp -R "$bundle/." "${{ runner.temp }}/build-info-sources/"
+            cp -R "$bundle/." "$RUNNER_TEMP/build-info-sources/"
           done
       - name: Assemble run information
         env:
           TARGETS_JSON: ${{ inputs.targets_json }}
           EXPECTED_TYPES_JSON: ${{ inputs.expected_types_json }}
           SOURCE_BRANCH: ${{ inputs.branch }}
-          REPORT_DIR: ${{ runner.temp }}/build-info-images
-          OUTPUT_FILE: ${{ runner.temp }}/build-info/build-info.json
           OBS_BUCKET: ${{ inputs.obs_bucket }}
           OBS_ENDPOINT: ${{ inputs.obs_endpoint }}
           OBS_REGION: ${{ inputs.obs_region }}
@@ -98,6 +99,8 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.BUILD_INFO_OBS_SK }}
         run: |
           set -euo pipefail
+          REPORT_DIR="$RUNNER_TEMP/build-info-images"
+          OUTPUT_FILE="$RUNNER_TEMP/build-info/build-info.json"
           if [ -n "$OBS_BUCKET" ] && [ -n "$OBS_ENDPOINT" ] && [ -n "$OBS_REGION" ]; then
             python3 -m pip install esdk-obs-python --quiet
           fi
@@ -112,10 +115,10 @@ jobs:
       - name: Bundle run information
         run: |
           set -euo pipefail
-          mkdir -p "${{ runner.temp }}/build-info-bundle/reports" "${{ runner.temp }}/build-info-bundle/sources"
-          cp -R "${{ runner.temp }}/build-info-images/." "${{ runner.temp }}/build-info-bundle/reports/"
-          cp -R "${{ runner.temp }}/build-info-sources/." "${{ runner.temp }}/build-info-bundle/sources/"
-          cp "${{ runner.temp }}/build-info/build-info.json" "${{ runner.temp }}/build-info-bundle/build-info.json"
+          mkdir -p "$RUNNER_TEMP/build-info-bundle/reports" "$RUNNER_TEMP/build-info-bundle/sources"
+          cp -R "$RUNNER_TEMP/build-info-images/." "$RUNNER_TEMP/build-info-bundle/reports/"
+          cp -R "$RUNNER_TEMP/build-info-sources/." "$RUNNER_TEMP/build-info-bundle/sources/"
+          cp "$RUNNER_TEMP/build-info/build-info.json" "$RUNNER_TEMP/build-info-bundle/build-info.json"
       - name: Upload run information
         uses: actions/upload-artifact@v7
         with:
