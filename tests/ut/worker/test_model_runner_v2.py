@@ -56,6 +56,9 @@ def _make_runner(need_timing: bool = True):
     runner.attn_groups = []
     runner._uses_flashmla = False
     runner.adaptive_verification = None
+    # Text-model default in GPUModelRunner.__init__: dummy batches carry
+    # input_ids and run the embedding exchange inside the dummy forward.
+    runner.uses_inputs_embeds = False
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.use_fia = False
@@ -379,6 +382,141 @@ def test_execute_model_skips_dp_coordination_when_safe():
     coordination_context.__enter__.assert_called_once_with()
     coordination_context.__exit__.assert_called_once()
     mock_execute_model.assert_called_once()
+
+
+class _FakeEmbedTpModule:
+    """Stand-in for the embedding that owns the fine-grained exchange group."""
+
+    def __init__(self, capacity: int = 32):
+        self.token_exchange_group = object()
+        self.embedding_tp_capacity = capacity
+        self.join_inputs: list[torch.Tensor] = []
+
+    def __call__(self, input_ids: torch.Tensor) -> None:
+        self.join_inputs.append(input_ids)
+
+
+@pytest.mark.parametrize(
+    ("embedding_tp", "uses_inputs_embeds"),
+    [
+        # Inputs-embeds models (MM / prompt embeds): dummy batches skip the
+        # embedding, so the runner must join the exchange for them.
+        (True, True),
+        # Text models: dummy batches carry input_ids and the dummy forward
+        # runs the exchange itself; a runner-side join would double it.
+        (True, False),
+        # Feature off: never join.
+        (False, True),
+        (False, False),
+    ],
+)
+def test_execute_model_dummy_run_joins_embedding_tp_exchange(embedding_tp, uses_inputs_embeds):
+    runner = _make_runner(need_timing=False)
+    runner.uses_inputs_embeds = uses_inputs_embeds
+    scheduler_output = SimpleNamespace(
+        disable_profiling_timing=True, total_num_scheduled_tokens=0, num_scheduled_tokens={}
+    )
+    embed_tp_module = _FakeEmbedTpModule()
+    model = MagicMock()
+    model.named_modules.return_value = [("language_model.model.embed_tokens", embed_tp_module)]
+    runner.model = model
+    runner.device = "cpu"
+
+    with (
+        patch.object(GPUModelRunner, "execute_model", return_value=None) as mock_execute_model,
+        patch(
+            "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.embedding_tp_enable",
+            return_value=embedding_tp,
+        ),
+        patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding",
+            _FakeEmbedTpModule,
+        ),
+    ):
+        runner.execute_model(scheduler_output, dummy_run=True)
+
+    if embedding_tp and uses_inputs_embeds:
+        # One capacity-sized zero-id join per dummy step, paired across ranks.
+        assert len(embed_tp_module.join_inputs) == 1
+        join_ids = embed_tp_module.join_inputs[0]
+        assert join_ids.shape == (32,)
+        assert join_ids.dtype == torch.int64
+    else:
+        assert embed_tp_module.join_inputs == []
+    mock_execute_model.assert_called_once()
+
+
+def test_execute_model_real_run_skips_embedding_tp_join():
+    """Real batches exchange inside the model forward; no runner-side join."""
+    runner = _make_runner(need_timing=False)
+    runner.uses_inputs_embeds = True
+    scheduler_output = SimpleNamespace(
+        disable_profiling_timing=True, total_num_scheduled_tokens=0, num_scheduled_tokens={}
+    )
+    embed_tp_module = _FakeEmbedTpModule()
+    runner.model = MagicMock()
+    runner.model.named_modules.return_value = [("language_model.model.embed_tokens", embed_tp_module)]
+    runner.device = "cpu"
+
+    with (
+        patch.object(GPUModelRunner, "execute_model", return_value=None),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.embedding_tp_enable",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding",
+            _FakeEmbedTpModule,
+        ),
+    ):
+        runner.execute_model(scheduler_output, dummy_run=False)
+
+    assert embed_tp_module.join_inputs == []
+
+
+@pytest.mark.parametrize("embedding_tp", [True, False])
+def test_load_model_warms_up_embedding_tp_exchange(embedding_tp):
+    """The exchange group's communicator must exist before any request traffic."""
+    runner = _make_runner(need_timing=False)
+    embed_tp_module = _FakeEmbedTpModule()
+    runner.model = MagicMock()
+    runner.model.named_modules.return_value = [("language_model.model.embed_tokens", embed_tp_module)]
+    runner.device = "cpu"
+
+    with (
+        patch.object(GPUModelRunner, "load_model") as mock_load_model,
+        patch("vllm_ascend.worker.v2.model_runner.get_pd_dspark_aux_layer_ids", return_value=[]),
+        patch("vllm_ascend.model_executor.warmup.nz_warmup.start_nz_warm_thread"),
+        patch("vllm_ascend.model_executor.warmup.nz_warmup.join_nz_warm_thread"),
+        patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.start_early_kernel_warmup"),
+        patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.join_early_kernel_warmup"),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.embedding_tp_enable",
+            return_value=embedding_tp,
+        ),
+        patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding",
+            _FakeEmbedTpModule,
+        ),
+    ):
+        runner.load_model()
+
+    mock_load_model.assert_called_once()
+    if embedding_tp:
+        assert len(embed_tp_module.join_inputs) == 1
+        warmup_ids = embed_tp_module.join_inputs[0]
+        assert warmup_ids.shape == (32,)
+        assert warmup_ids.dtype == torch.int64
+    else:
+        assert embed_tp_module.join_inputs == []
 
 
 def test_full_decode_only_keeps_graph_descriptor_request_count():

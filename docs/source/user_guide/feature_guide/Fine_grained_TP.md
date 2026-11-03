@@ -10,7 +10,7 @@ In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved
 
 All four knobs shard weights over a process group built along the DP axis, and every rank of that group joins the exchange on every engine step. The four components fall into two families with different exchange contracts, and the family a knob belongs to determines where it can run:
 
-- **embedding / LM head (fixed-capacity exchanges)**: the exchange always runs at a fixed, deployment-wide capacity regardless of the real per-step token count, and the padding tail is trimmed afterwards. For embedding, the op pads token IDs to `max(potential_max_tokens, max_num_batched_tokens)` before an `all_gather`, looks up its vocabulary shard, and `reduce_scatter`s the embeddings back to the original owners — prefill-sized steps included. For the LM head, the runner pads the sampled hidden-state rows to `max_num_reqs * decode_query_len` before `all_gather → vocab-sharded GEMM → all_to_all`, and idle DP ranks join through a dummy `compute_logits` at the same capacity. Because the collective shapes never depend on the step, these knobs work in eager and graph mode, in both prefill and decode.
+- **embedding / LM head (fixed-capacity exchanges)**: the exchange always runs at a fixed, deployment-wide capacity regardless of the real per-step token count, and the padding tail is trimmed afterwards. For embedding, the op pads token IDs to `max(potential_max_tokens, max_num_batched_tokens)` before an `all_gather`, looks up its vocabulary shard, and `reduce_scatter`s the embeddings back to the original owners — prefill-sized steps included; idle DP ranks join the embedding exchange with a zero-token-id dummy batch at the same capacity, and the exchange group's communicator is warmed up once right after model loading. For the LM head, the runner pads the sampled hidden-state rows to `max_num_reqs * decode_query_len` before `all_gather → vocab-sharded GEMM → all_to_all`, and idle DP ranks join through a dummy `compute_logits` at the same capacity. Because the collective shapes never depend on the step, these knobs work in eager and graph mode, in both prefill and decode.
 - **o_proj / MLP (per-step exchanges that require decode-shaped steps)**: the exchange is sized by the actual step. MLP runs plain `all_gather` (gate_up) / `reduce_scatter` (down) whose shapes follow the real token count, so every rank in the group must forward the same number of tokens on every step. o_proj pads to a static capacity — `potential_max_tokens`, the deployment-wide step bound (the largest cudagraph capture size, and at least the largest decode-shaped step) — and fails explicitly beyond it. These knobs are supported only in graph-dispatched P/D decode deployments, where steps stay decode-shaped and aligned across the DP group — see the [preconditions](#preconditions-for-o_proj--mlp-tp) and the runtime guard against eagerly dispatched steps.
 
 ### Usage Scenarios
@@ -79,6 +79,10 @@ LM head TP works with EAGLE, DFlash, and DSpark draft models. A few combinations
 - `enable_adaptive_verification`.
 
 Prompt logprobs is also not supported with LM head TP: a request asking for prompt logprobs fails with an explicit error at sampling time.
+
+#### Embedding TP and Speculative Decoding
+
+Embedding TP works with speculative decoding; draft-model embeddings never join the fine-grained exchange (drafts are fed `inputs_embeds` during propose replay) and always keep the standard TP layout. With `tensor_parallel_size == 1`, a draft model that owns its full embedding table therefore replicates it on every rank instead of sharding it — the per-rank saving of the embedding knob applies to the main model's table only.
 
 #### Configuration Limit
 
