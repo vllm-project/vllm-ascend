@@ -94,6 +94,44 @@ for staging.
 For startup scripts and a proxy example, see
 [D2RH deployment on Atlas 850E](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#d2rh-deployment-on-atlas-850e-uboe).
 
+#### SFA decode offload with Mooncake pull
+
+`SfaRemoteD2HConnector` also accepts `"transfer_backend": "mooncake"` in
+`kv_connector_extra_config`. Configure the same transport on P and D:
+
+```json
+{
+  "kv_connector": "SfaRemoteD2HConnector",
+  "kv_role": "kv_consumer",
+  "kv_connector_extra_config": {
+    "transfer_backend": "mooncake",
+    "mooncake_staging_bytes": 16777216
+  }
+}
+```
+
+Set `kv_role` to `kv_producer` on P. Keep the existing SFA decode-offload
+configuration on D, including `kv_offload_decode_config.use_fused_copy_sfa`
+when using Copy-SFA. The default transport remains `memfabric`.
+
+Mooncake registers P's HBM source caches and D's HBM destinations. D reads
+host-bound main KV through a bounded HBM staging window, then copies it into
+the TP-shared host pool using the offload manager's local-copy API. Indexer KV,
+short-request dense rows, and long-request hot/tail destinations retain their
+existing device layouts and pull plans. D sends `READ_DONE` only after the
+local host copy completes, before P can reuse its source storage.
+
+`mooncake_staging_bytes` is a positive integer multiple of 2 MiB and defaults
+to 16 MiB per D worker. It limits additional staging HBM, independently of
+the host KV pool size. The MemFabric offload package remains required for
+local shared-pool allocation and copies; its cross-host transfer engine is
+not initialized when `transfer_backend` is `mooncake`.
+
+This transport path requires Ascend hardware validation, including TP-shared
+host writes, multi-chunk transfers, short/long Copy-SFA requests, and read or
+local-copy failure handling. CPU descriptor tests do not establish hardware
+or model correctness.
+
 ### 3. Interface Design
 
 Taking MooncakeConnector as an example, the system is organized into three primary classes:
