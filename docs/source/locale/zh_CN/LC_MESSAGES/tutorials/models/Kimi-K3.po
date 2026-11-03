@@ -980,14 +980,6 @@ msgstr ""
 "A3上，混合Prefill/Decode部署遵循Prefill执行模式。因此HCCL默认使用AICPU；请保持`HCCL_OP_EXPANSION_MODE`未设置。"
 
 msgid ""
-"Kimi K3 on Atlas 800I A3 does not support "
-"`LD_PRELOAD=/usr/lib64/libjemalloc.so.2`; run `unset LD_PRELOAD` before "
-"starting vLLM."
-msgstr ""
-"Atlas 800I A3上的Kimi "
-"K3不支持`LD_PRELOAD=/usr/lib64/libjemalloc.so.2`；请在启动vLLM前执行`unset LD_PRELOAD`。"
-
-msgid ""
 "!!! note\n"
 "        Serving a 1M-token context requires at least eight Atlas 800I A3 (64GB × 16) nodes. Change the following parameters on every node:"
 msgstr ""
@@ -1452,3 +1444,12 @@ msgstr ""
 
 msgid "| `--gpu-memory-utilization` | `0.80` | `0.90` | `0.80` | `0.80` |"
 msgstr "| `--gpu-memory-utilization` | `0.80` | `0.90` | `0.80` | `0.80` |"
+
+msgid "Kimi K3 on 950DT products does not support jemalloc."
+msgstr "Kimi K3 在 Ascend 950DT系列产品上不支持 jemalloc。"
+
+msgid "Kimi K3 on Atlas 800I A3 does not support jemalloc."
+msgstr "Kimi K3 在 Atlas 800I A3 上不支持 jemalloc。"
+
+msgid "Kimi K3 on Atlas 800I A3 and 950DT products does not support jemalloc."
+msgstr "Kimi K3 在 Atlas 800I A3 和 Ascend 950DT系列产品上不支持 jemalloc。"
