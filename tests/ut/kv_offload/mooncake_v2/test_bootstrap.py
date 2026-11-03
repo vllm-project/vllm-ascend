@@ -33,7 +33,7 @@ def scheduler():
 def test_bootstrap_lifecycle_is_scheduler_owned_and_idempotent(scheduler, monkeypatch):
     monkeypatch.setattr(push_scheduler, "get_mooncake_bootstrap_addr", lambda config: ("127.0.0.1", 8998))
     factory = MagicMock()
-    monkeypatch.setattr(push_scheduler, "MooncakeBootstrapServer", factory)
+    monkeypatch.setattr(push_scheduler, "AscendMooncakeBootstrapServer", factory)
     scheduler.start_bootstrap_server()
     scheduler.start_bootstrap_server()
     factory.assert_called_once_with("0.0.0.0", 8998)
@@ -47,7 +47,7 @@ def test_bootstrap_start_failure_cleans_up(scheduler, monkeypatch):
     monkeypatch.setattr(push_scheduler, "get_mooncake_bootstrap_addr", lambda config: ("127.0.0.1", 8998))
     factory = MagicMock()
     factory.return_value.start.side_effect = OSError("port occupied")
-    monkeypatch.setattr(push_scheduler, "MooncakeBootstrapServer", factory)
+    monkeypatch.setattr(push_scheduler, "AscendMooncakeBootstrapServer", factory)
     with pytest.raises(OSError, match="port occupied"):
         scheduler.start_bootstrap_server()
     assert scheduler.bootstrap_server is None
