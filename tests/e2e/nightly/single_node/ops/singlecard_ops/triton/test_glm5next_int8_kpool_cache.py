@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import regex as re
 import torch
 import torch_npu  # noqa: F401
 
@@ -79,21 +77,11 @@ def test_int8_key_scale_write_preserves_padding_and_invalid_slots(use_graph):
     torch.testing.assert_close(raw.cpu(), expected_raw.cpu(), rtol=0, atol=0)
 
 
+@pytest.mark.skip(reason="Pending INT8 KPool ops-transformer dependency alignment")
 @pytest.mark.parametrize("use_graph", [False, True])
 @torch.inference_mode()
 def test_int8_operator_reads_managed_pages(use_graph):
-    ops_transformer = pytest.importorskip("cann_ops_transformer")
-    # The CI-bundled ops package follows its versioned CANN install directory.
-    ops_transformer_file = getattr(ops_transformer, "__file__", None)
-    if not isinstance(ops_transformer_file, str):
-        pytest.skip("Cannot determine ops-transformer installation version")
-        return
-    version_match = re.search(r"cann-(\d+)\.(\d+)\.(\d+)", str(Path(ops_transformer_file).resolve()))
-    if version_match is None:
-        pytest.skip("Cannot determine ops-transformer installation version")
-        return
-    if tuple(map(int, version_match.groups())) < (9, 3, 0):
-        pytest.skip("INT8 PoolKeyIndexer requires ops-transformer 9.3.0 or later")
+    pytest.importorskip("cann_ops_transformer")
     spec = AscendMLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
