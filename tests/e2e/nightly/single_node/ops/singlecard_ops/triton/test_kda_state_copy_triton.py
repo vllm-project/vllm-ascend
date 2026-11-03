@@ -13,15 +13,9 @@ import torch
 import torch_npu  # noqa: F401
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 
-from vllm_ascend.device.device_config import get_ascend_device_type
-from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops import kda_state_copy_plan as production
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
-)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("shape", [(2, 3, 4), (1, 1, 129), (12, 128, 128)])
@@ -64,10 +58,6 @@ def test_kda_state_copy_preserves_gaps_offsets_and_invalid_rows(dtype, index_dty
     torch.testing.assert_close(backing.cpu(), expected_backing, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
-)
 @torch.inference_mode()
 def test_kda_state_copy_graph_replay_changed_indices_and_flags():
     backing = torch.full((12, 12, 128, 128), -23, dtype=torch.float32, device="npu")
@@ -92,10 +82,6 @@ def test_kda_state_copy_graph_replay_changed_indices_and_flags():
     assert torch.all(backing[0::3] == -23) and torch.all(backing[2::3] == -23)
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
-)
 @torch.inference_mode()
 def test_kda_state_copy_address_beyond_four_gib():
     # Only touch small guards and two payloads; no 4 GiB host copy is needed.
@@ -121,10 +107,6 @@ def test_kda_state_copy_address_beyond_four_gib():
     assert torch.all(backing[:offset] == -23) and torch.all(backing[-32:] == -23)
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
-)
 @torch.inference_mode()
 def test_kda_state_copy_empty_selection_and_inner_stride_rejection():
     state = torch.ones((2, 2, 3, 4), device="npu")
@@ -137,10 +119,6 @@ def test_kda_state_copy_empty_selection_and_inner_stride_rejection():
         _copy_state(state.transpose(-1, -2), torch.empty((0, 2, 4, 3), device="npu"), indices, None, False)
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
-)
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 @torch.inference_mode()
 def test_kda_state_copy_noncontiguous_indices_and_flags(index_dtype):
@@ -227,10 +205,6 @@ def prepared_state_copy():
         torch.npu.synchronize()
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
-)
 @pytest.mark.parametrize("selected", [1, 65, 129])
 @torch.inference_mode()
 def test_selected_count_rebinds_a_prepared_grid(selected):

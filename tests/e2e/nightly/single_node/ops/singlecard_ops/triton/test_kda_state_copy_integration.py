@@ -90,10 +90,6 @@ def _forbid_compilation(monkeypatch):
             monkeypatch.setattr(module, "compile", forbidden)
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
-)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("shape", [(2, 3, 4), (1, 1, 8193)])
 @torch.inference_mode()
@@ -159,10 +155,6 @@ def test_worker_plan_deduplication_and_failed_reinitialization(monkeypatch):
     assert all(layer._ascend_kda_state_copy is None for layer in layers)
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
-)
 @torch.inference_mode()
 def test_worker_plan_graph_replay_and_rejections(monkeypatch):
     """Captured gather uses changed device indices/flags without compiler entry."""
@@ -242,10 +234,6 @@ def test_real_prefill_with_native_chunk_matches_existing_path(monkeypatch):
     torch.testing.assert_close(state, reference, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
-)
 @torch.inference_mode()
 def test_int32_fast_path_does_not_convert_or_scan_environment(monkeypatch):
     """Serving uses the caller's aligned INT32 pointer and no config scan/JIT."""
@@ -270,10 +258,6 @@ def test_int32_fast_path_does_not_convert_or_scan_environment(monkeypatch):
     assert len(plan._compile_keys) == 4
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
-)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 @torch.inference_mode()
@@ -395,10 +379,6 @@ def test_fallback_direct_launch_with_constexpr_and_byte_tail(monkeypatch, dtype,
         torch.testing.assert_close(backing.cpu(), initial, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
-)
 @torch.inference_mode()
 def test_scatter_graph_replay_int64_extremes(monkeypatch):
     """Graph replay consumes dynamic INT64 values, including invalid extremes."""
@@ -421,10 +401,6 @@ def test_scatter_graph_replay_int64_extremes(monkeypatch):
     torch.testing.assert_close(state, expected, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
-)
 @torch.inference_mode()
 def test_production_plan_offsets_beyond_four_gib(monkeypatch):
     """The optimized INT32 pointer route still widens cache offsets to INT64."""
@@ -472,10 +448,6 @@ def test_automatic_startup_uses_fused_plan(monkeypatch):
     torch.testing.assert_close(actual, state[ids], rtol=0, atol=0)
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
-)
 @torch.inference_mode()
 def test_prepared_plan_nan_inf_signed_zero_bits(monkeypatch):
     """Copying preserves payload bits, including NaN/Inf/-0, without arithmetic."""
@@ -493,10 +465,6 @@ def test_prepared_plan_nan_inf_signed_zero_bits(monkeypatch):
     torch.testing.assert_close(state[1].view(torch.int32), actual[0].view(torch.int32), rtol=0, atol=0)
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
-)
 @torch.inference_mode()
 def test_plan_current_stream_and_device_guard(monkeypatch):
     """A sealed plan resolves each current stream and restores another device."""
@@ -661,10 +629,6 @@ def test_fullgraph_same_layout_layers_keep_distinct_bindings(dtype, monkeypatch)
         torch.testing.assert_close(state[indices], expected + 1, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Fused KDA state-copy plan tests require Ascend A3/A5",
-)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("state_offset", [0, 1])
 @torch.inference_mode()
