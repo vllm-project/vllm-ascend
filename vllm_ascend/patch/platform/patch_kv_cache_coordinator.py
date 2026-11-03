@@ -33,7 +33,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.utils import (
     is_deepseek_v4_kv_cache_config as _is_deepseek_v4_kv_cache_config,
-    is_deepseek_v4_kv_cache_spec as _is_deepseek_v4_kv_cache_spec,  # noqa: F401
     resolve_deepseek_v4_retention,
 )
 
