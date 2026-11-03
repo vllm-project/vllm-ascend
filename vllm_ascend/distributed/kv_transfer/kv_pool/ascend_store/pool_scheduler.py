@@ -39,6 +39,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mid_step_frees import (
+    activate_mid_step_release_tracking,
+    take_mid_step_released_req_ids,
+)
 
 
 def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
@@ -85,6 +89,12 @@ class KVPoolScheduler:
         self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_put", False
         )
+        # Mid-step block releases (sliding-window advancement, R-SWA gap
+        # eviction) by RUNNING requests only race with queued store puts.
+        # Activate the coordinator-side recorder when this scheduler can
+        # queue puts at all; pure consumers keep upstream behavior.
+        if self.kv_role != "kv_consumer" or self.consumer_is_to_put:
+            activate_mid_step_release_tracking()
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = bool(kv_event_config and kv_event_config.enable_kv_cache_events)
@@ -676,9 +686,15 @@ class KVPoolScheduler:
         )
         # Immediate block free: requests finished in the previous output
         # processing and requests preempted by this schedule released their
-        # blocks; the worker fences their queued saves before reuse.
-        meta.released_req_ids = set(scheduler_output.preempted_req_ids or ()) | set(
-            scheduler_output.finished_req_ids or ()
+        # blocks; the worker fences their queued saves before reuse. The
+        # coordinator also frees blocks of RUNNING requests mid-step
+        # (sliding-window advancement, R-SWA gap eviction); those frees are
+        # invisible in the output, so they arrive through the mid-step
+        # release bridge and join the same fence.
+        meta.released_req_ids = (
+            set(scheduler_output.preempted_req_ids or ())
+            | set(scheduler_output.finished_req_ids or ())
+            | take_mid_step_released_req_ids()
         )
 
         for request in scheduler_output.scheduled_new_reqs:
