@@ -131,8 +131,12 @@ def test_unsupported_config_fails_before_weight_conversion(context, mode):
         item.apply_router_weight_on_input = True
     if mode == "activation":
         item.moe_config.activation = "relu"
-    with pytest.raises(ValueError):
+    with (
+        patch("vllm_ascend.ops.fused_moe.deepgemm_loader.load_deepgemm") as load,
+        pytest.raises(ValueError),
+    ):
         backend.DeepGemmV41Experts(item)
+    load.assert_not_called()
     dependency.transform_weights_for_mega_moe.assert_not_called()
 
 
