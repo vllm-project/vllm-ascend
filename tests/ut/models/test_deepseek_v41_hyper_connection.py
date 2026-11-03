@@ -20,6 +20,7 @@ from vllm_ascend.models.deepseek_v41.model import DeepseekV41DecoderLayer
 def _layer() -> DeepseekV41DecoderLayer:
     layer = DeepseekV41DecoderLayer.__new__(DeepseekV41DecoderLayer)
     torch.nn.Module.__init__(layer)
+    layer._ds41_wheel_ops = None
     layer.hc_mult = 4
     layer.hc_sinkhorn_iters = 3
     layer.norm_eps = 1e-6

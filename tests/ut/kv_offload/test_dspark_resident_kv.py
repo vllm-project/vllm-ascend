@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 

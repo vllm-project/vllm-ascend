@@ -35,8 +35,10 @@ The A3 configurations in this guide use W8A8 weights and INT8 Engram storage.
 The single-node colocated configuration uses DP4/TP4. The PD configuration
 uses DP4/TP4 on the Prefill node, DP8/TP2 on the Decode node, DSpark
 speculative decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode. The
-DeepSeek-V4.1-Flash model currently supports only model runner V1 on Ascend, so
-all A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
+A3 scripts below select model runner V1 with `VLLM_USE_V2_MODEL_RUNNER=0` as
+their documented baseline. For experimental MRV1/MRV2 replay validation on
+this CANN backport, follow the
+[A3 replay guide](../../developer_guide/cann_swa_bounded_replay_backport.md).
 
 ## 3 Prerequisites
 
@@ -841,9 +843,9 @@ For common environment, installation, and parameter issues, refer to the
   servers in 1P1D mode, with an Ascend W8A8 checkpoint and INT8 Engram storage.
 - The A2 configuration is retained unchanged and is not revalidated by this
   update. Its revised configuration will be documented separately.
-- DeepSeek-V4.1-Flash currently supports only model runner V1 on Ascend. Keep
-  `VLLM_USE_V2_MODEL_RUNNER=0` in every A3 serving script. Pipeline parallelism
-  is not covered by this guide.
+- The A3 examples retain `VLLM_USE_V2_MODEL_RUNNER=0` as their baseline.
+  Experimental MRV2 replay validation is described in the separate CANN
+  backport guide. Pipeline parallelism is not covered by these examples.
 - In the A3 PD example, Prefill runs in eager mode. Decode uses
   `FULL_DECODE_ONLY` ACL Graph for the target model and eager execution for the
   DSpark draft model.
@@ -854,8 +856,10 @@ For common environment, installation, and parameter issues, refer to the
 
 For vLLM 0.30.0 images without the upstream replay protocol, the Ascend plugin
 backports configuration, request payloads, and local prefix-hit admission logic.
-Installed vLLM files and compiled operators remain unchanged. The compatibility
-path is disabled by default. Enable it explicitly with:
+Installed upstream vLLM files and extensions remain unchanged. Rebuild the
+Ascend custom operators to include the SWA band visibility changes; see the
+[CANN backport A3 validation guide](../../developer_guide/cann_swa_bounded_replay_backport.md).
+The compatibility path is disabled by default. Enable it explicitly with:
 
 ```shell
 --enable-prefix-caching --swa-bounded-replay

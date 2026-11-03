@@ -3747,6 +3747,8 @@ class TestKVPPExecute(unittest.TestCase):
             with self.subTest(computed=computed):
                 events.clear()
                 runner = NPUModelRunner.__new__(NPUModelRunner)
+                runner.dsa_offload_runtime = None
+                runner.decoder_replay = None
                 runner.ascend_config = SimpleNamespace(
                     scheduler_config=SimpleNamespace(
                         profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False)
@@ -3844,6 +3846,7 @@ class TestC8MXFPVScaleCacheFill(unittest.TestCase):
         runner.kv_cache_config = SimpleNamespace(num_blocks=self.NUM_BLOCKS)
         runner.compilation_config = SimpleNamespace(static_forward_context=layers)
         runner.vllm_config = SimpleNamespace(
+            kv_transfer_config=None,
             cache_config=SimpleNamespace(cache_dtype="mxfp8"),
             compilation_config=runner.compilation_config,
         )

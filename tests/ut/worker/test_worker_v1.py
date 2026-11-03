@@ -770,8 +770,12 @@ class TestNPUWorker(TestBase):
             worker.cache_config.gpu_memory_utilization = 0.5
 
             # Test _init_device
-            with patch("vllm_ascend.worker.worker.setup_ascend_local_comm_res") as setup_endpoint:
+            with (
+                patch("vllm_ascend.worker.worker.setup_ascend_local_comm_res") as setup_endpoint,
+                patch("vllm_ascend.worker.worker.set_random_seed") as seed,
+            ):
                 result = worker._init_device()
+            seed.assert_called_once_with(42)
 
             # Both calls must use the mapped visible ordinal, not local_rank.
             mock_set_device.assert_called_once_with(torch.device("npu:1"))

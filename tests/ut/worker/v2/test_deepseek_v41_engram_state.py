@@ -42,12 +42,15 @@ def state(monkeypatch):
     def init(self, config, model, encoder_cache, device):
         self.model = model
         self.max_num_reqs = 4
+        self.pcp_manager = None
+        self.decoder_replay = None
 
     monkeypatch.setattr(AscendModelState, "__init__", init)
     monkeypatch.setattr(DefaultModelState, "prepare_inputs", lambda *args: {})
     monkeypatch.setattr(DefaultModelState, "prepare_dummy_inputs", lambda *args: {})
     monkeypatch.setattr(deepseek_v41, "ring_state_update_skipped", lambda: False)
-    return deepseek_v41.EngramModelState(None, EngramModel(), None, torch.device("cpu"))
+    config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+    return deepseek_v41.EngramModelState(config, EngramModel(), None, torch.device("cpu"))
 
 
 def batch():
@@ -162,6 +165,7 @@ def test_full_graph_replay_metadata_is_padded_and_inactive_without_replay(monkey
 
     monkeypatch.setattr(AscendModelState, "prepare_attn", fake_prepare_attn)
     state = object.__new__(deepseek_v41.EngramModelState)
+    state.pcp_manager = None
     state._replay_groups = (128, torch.empty(0, dtype=torch.int32))
     state._replay_start_np = np.zeros(4, dtype=np.int32)
     state._replay_start = Buffer(8)

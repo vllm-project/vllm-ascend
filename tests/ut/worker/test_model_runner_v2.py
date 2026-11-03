@@ -147,6 +147,21 @@ def test_recompute_scheduler_reclassifies_pd_tail_in_mixed_decode_batch():
     assert uniform == 1
 
 
+@pytest.mark.parametrize("replay", [False, True])
+def test_cann_pd_tail_preserves_prefill_state_for_replay(replay):
+    runner = _make_runner()
+    runner.decode_query_len = 1
+    runner.vllm_config.cache_config = SimpleNamespace(swa_bounded_replay=replay)
+    batch = _make_batch_state([127, 64], [1, 1], [128, 64])
+    with (
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch, None)),
+        patch("vllm_ascend.worker.v2.model_runner.is_pd_decode_recompute_scheduler_enabled", return_value=True),
+    ):
+        result, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
+    assert result.is_prefilling_np.tolist() == [replay, False]
+    assert uniform == (None if replay else 1)
+
+
 @pytest.mark.parametrize(
     ("computed", "scheduled", "enabled"),
     [(64, 8, True), (127, 1, False)],
@@ -512,6 +527,7 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
         complete_forward=lambda: events.append("complete"),
     )
     state = default.AscendModelState.__new__(default.AscendModelState)
+    state.decoder_replay = None
     state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
     state.max_model_len = 32
     state.kvpp_runtime = runner.kvpp

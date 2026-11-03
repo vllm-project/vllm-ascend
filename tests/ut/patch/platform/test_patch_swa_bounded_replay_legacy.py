@@ -26,7 +26,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import msgspec
 import pytest
 import torch
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, DeviceConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
@@ -70,9 +70,12 @@ def enable_legacy_replay():
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_replay_installation_is_opt_in_and_idempotent_in_fresh_process(enabled):
-    # A fresh interpreter catches import-time mutations that an already-patched
-    # pytest process cannot observe. Exercise the worker wire schema as well.
+    # A fresh interpreter checks opt-in installation after normal plugin
+    # registration. Use the same device-boundary mocks as the parent CPU UT
+    # session; the host may have torch_npu installed without CANN libraries.
+    # The fixtures register wire fields but must not install scheduler replay.
     script = """
+import tests.ut.conftest
 from types import SimpleNamespace
 import msgspec
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -263,6 +266,7 @@ def replay_scheduler(request):
         config = VllmConfig(
             model_config=model,
             cache_config=cache,
+            device_config=DeviceConfig(device="cpu"),
             scheduler_config=SchedulerConfig(
                 max_model_len=256,
                 max_num_seqs=1,

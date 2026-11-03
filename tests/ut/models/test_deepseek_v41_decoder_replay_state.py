@@ -10,7 +10,6 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 
-from vllm_ascend.attention.utils import uses_pcp_sharded_layout
 from vllm_ascend.models.deepseek_v41 import decoder_replay_state as replay_mod
 from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
 from vllm_ascend.models.deepseek_v41.engram.model_state import EngramModelState
@@ -197,12 +196,10 @@ def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actua
     metadata = object()
 
     def build(prefix, common, **kwargs):
-        # Exercise the same layout guard as the real PCP attention builder.
-        # Gathered slots are invalid unless the common metadata owns a context,
-        # including on ranks with no retained suffix queries.
-        assert uses_pcp_sharded_layout(common, True)
-        assert common.pcp_context is state.replay_pcp_context
-        assert common.pcp_cache_group_idx == 1
+        # RFC's real PCP builder receives context through kwargs, including
+        # on ranks that own none of the retained suffix queries.
+        assert kwargs["pcp_context"] is state.replay_pcp_context
+        assert kwargs["pcp_cache_group_idx"] == 1
         assert common.slot_mapping.numel() == 4
         assert common.num_actual_tokens == actual_tokens
         assert common.num_input_tokens == 2

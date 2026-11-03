@@ -14,6 +14,7 @@ pytest.importorskip(
 )
 
 import torch
+from vllm.config import set_current_vllm_config
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -130,9 +131,15 @@ def test_v41_draft_routes_to_v41(cp):
     from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
 
-    config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(static_forward_context={}),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
+    )
     with (
+        set_current_vllm_config(config),
         patch.object(DeepseekV41SWAAttention, "__init__", initialize_base),
+        # Check dispatch and registration without allocating device state.
+        patch.object(AscendDSAV41Impl, "__init__", return_value=None),
         patch("vllm_ascend.attention.context_parallel.dsa_v41_cp.enable_dsa_cp", return_value=cp),
         patch.object(
             deepseek_v41_dspark_module.DeviceOperator,

@@ -107,6 +107,15 @@ def test_switch_is_kept_on_when_nothing_conflicts():
     assert vllm_config.cache_config.swa_bounded_replay
 
 
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_cann_pcp_replay_requires_mrv2(use_v2):
+    config = _vllm_config()
+    config.parallel_config = SimpleNamespace(prefill_context_parallel_size=2)
+    config.use_v2_model_runner = use_v2
+    _downgrade_swa_bounded_replay(config, _ascend_config())
+    assert config.cache_config.swa_bounded_replay is use_v2
+
+
 def test_missing_cache_config_is_not_an_error():
     _downgrade_swa_bounded_replay(SimpleNamespace(cache_config=None), _ascend_config())
 

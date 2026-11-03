@@ -403,6 +403,7 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         )
         vllm_config = MockVllmConfig()
         vllm_config.cache_config.num_gpu_blocks_override = None
+        vllm_config.kv_transfer_config = None
         num_blocks = 10
         allocated_config = get_kv_cache_config_from_groups(
             vllm_config,

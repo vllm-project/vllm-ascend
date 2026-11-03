@@ -162,6 +162,7 @@ def needs_layer_aware_fia_graph_replay() -> bool:
     )
     return any(model_type in {"gemma4", "gemma4_text"} for model_type in model_types)
 
+
 def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     scheduler_config = vllm_config.scheduler_config
     cache_config = vllm_config.cache_config

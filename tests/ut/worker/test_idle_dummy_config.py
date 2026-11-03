@@ -5,15 +5,15 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from vllm.config import VllmConfig, get_current_vllm_config, set_current_vllm_config
+from vllm.config import DeviceConfig, VllmConfig, get_current_vllm_config, set_current_vllm_config
 
 from vllm_ascend.worker.worker import NPUWorker
 
 
 @pytest.mark.parametrize("fails", [False, True])
 def test_idle_dummy_batch_scopes_and_restores_config(fails):
-    config = VllmConfig()
-    outer_config = VllmConfig()
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    outer_config = VllmConfig(device_config=DeviceConfig(device="cpu"))
 
     def dummy(num_tokens, **kwargs):
         assert get_current_vllm_config() is config

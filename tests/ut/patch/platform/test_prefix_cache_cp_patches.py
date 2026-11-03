@@ -894,6 +894,7 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     kv_cache_config = _make_deepseek_v4_kv_cache_config()
     planned_tensor = _make_kv_cache_tensor(4096, ["c4_attn", "c128_attn"])
     vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
         cache_config=SimpleNamespace(prefix_cache_retention_interval=None),
         model_config=SimpleNamespace(max_model_len=4096),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
@@ -998,10 +999,11 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
         )
     ]
     vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=None,
             prefix_cache_retention_interval=None,
-        )
+        ),
     )
 
     ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(kv_cache_groups)

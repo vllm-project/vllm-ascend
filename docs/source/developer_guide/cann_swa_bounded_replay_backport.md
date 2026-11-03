@@ -1,0 +1,149 @@
+# CANN 分支 SWA bounded replay 回移与 A3 验证
+
+本分支以 `rfc/vllm_cann` 的 `7e37e29a7803d6897a7113088e2b771f83205bc0`
+为基线，供 DeepSeek V4.1 在 A3 上验证功能、质量与性能。默认关闭 replay，
+通过同一份代码上的开关对照评估收益。未在本机执行 NPU 实测。
+
+## 回移内容
+
+| 上游 PR | 内容 |
+| --- | --- |
+| [#17742](https://github.com/vllm-project/vllm-ascend/pull/17742) | 前缀命中后的 encoder SWA 窗口重建、slot 屏蔽和算子可见范围 |
+| [#17496](https://github.com/vllm-project/vllm-ascend/pull/17496) | decoder 尾窗口裁剪、token gather/scatter |
+| [#18936](https://github.com/vllm-project/vllm-ascend/pull/18936) | MRV1/MRV2 适配、SWA 索引和相关执行上下文 |
+| [#19321](https://github.com/vllm-project/vllm-ascend/pull/19321) | MRV2 PCP 下的 decoder replay |
+| [#20210](https://github.com/vllm-project/vllm-ascend/pull/20210) | MRV2 PCP＋DP 的执行宽度协调及 idle rank 处理 |
+| [#18322](https://github.com/vllm-project/vllm-ascend/pull/18322) | 必要依赖：vLLM 0.30 的配置、scheduler 和请求协议兼容层 |
+| [#18750](https://github.com/vllm-project/vllm-ascend/pull/18750) | 必要依赖：FULL graph replay 元数据覆盖 padded request rows |
+
+回移保留 RFC 的 A5 wheel 路由、group-cache 字段、layerwise host offload 和连接器注册。
+针对旧接口保留以下适配，而非升级整个仓库：
+
+- 上游 vLLM 继续使用 `v0.30.0`（该 tag 为 `ced6857afa0ea7b2e3f0846a62e1394e90f15607`）。
+- 保留 #18322；#18936 在高版本删除的旧协议在本分支仍然需要。
+- PCP context 通过 RFC builder 的关键字参数传递。
+- packed cache annotation 支持 vLLM 0.30 的旧参数名。
+- replay 开启时保留 prompt 的 prefill 状态，避免旧 P/D 图适配误跳过 replay。
+
+## A3 构建
+
+在当前可正常运行 RFC 分支的 A3 容器中操作，保留已经验证的 CANN、torch、
+torch-npu、量化模型和部署拓扑。先停止旧服务，再切换代码并重新构建。
+
+```bash
+git fetch origin backport/cann-swa-bounded-replay
+git switch --track origin/backport/cann-swa-bounded-replay
+
+python -c 'import vllm; print(vllm.__version__)'
+npu-smi info
+
+# npu-smi 可用时 setup.py 会识别 SoC；如需手动设置，使用机器的实际型号。
+# Dockerfile.a3 的默认示例是 ascend910_9391，部分 A3 型号为 ascend910_9392。
+# export SOC_VERSION=ascend910_9391
+COMPILE_CUSTOM_KERNELS=1 MAX_JOBS=8 python -m pip install -v -e . --no-build-isolation --no-deps
+```
+
+此次修改包含 A2/A3 `arch22` 的 `sparse_flash_mla` band 模式：
+`ori_topk_length` 必须真正限制每个 query 可见的历史 KV。需要重新编译自定义算子，
+并重启服务；保留旧算子二进制无法验证完整回移。这里的 Python 调度逻辑在各硬件间共享，
+算子实现按架构分别编译。
+
+先在 A3 运行小算子回归，确认窗口限制生效后再加载大模型：
+
+```bash
+python -m pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_sparse_flash_mla_band.py
+```
+
+该用例用固定数值区分正确的单行可见窗口与未裁剪的历史读取，并检查错误形状被拒绝。
+
+## 启动与功能验证
+
+复用现有的 DeepSeek V4.1 启动命令、模型和并行参数。第一轮优先使用
+PCP=1、DCP=1、PP=1 的已验证拓扑；MRV1 和 MRV2 分别在两次实验中固定，
+不要在开关对照中同时切换 runner。MRV2 用 `VLLM_USE_V2_MODEL_RUNNER=1`，
+MRV1 用 `VLLM_USE_V2_MODEL_RUNNER=0`。
+
+| 实验 | 两边共同参数 | 唯一区别 |
+| --- | --- | --- |
+| 冷 prefill / decoder 裁剪 | `--no-enable-prefix-caching --enforce-eager` | `--no-swa-bounded-replay` / `--swa-bounded-replay` |
+| 重复前缀 / encoder 重建 | `--enable-prefix-caching --enforce-eager` | 同上 |
+| Decode 图兼容性 | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`，移除 `--enforce-eager` | 同上 |
+
+使用同一分支和同一套新编译的算子做 OFF/ON 对照。另将新分支 OFF 与原始 RFC 基线
+做一次回归对照，检查默认关闭时的行为。性能采集时固定编译缓存策略，完成预热后再计时。
+
+检查服务日志中的两个阶段：
+
+- 启动时 `Ascend decoder bounded replay: layers ... keep ... tokens` 表示已接入 decoder 适配器。
+- 实际长 prefill 后 `SWA decoder bounded replay active (MRV1/MRV2): ...` 表示执行了裁剪。
+- 重复前缀请求后 `SWA bounded replay is active: a local prefix hit is rebuilding its window` 表示命中重建路径。
+
+`--swa-bounded-replay` 被接受、启动成功或 HTTP 返回成功，均不能单独证明裁剪路径执行。
+短于窗口的请求不一定触发裁剪；开启 prompt logprobs 的请求会保留所需行。
+
+可运行已有的小型服务探针，先保存 OFF 结果，再重启服务验证 ON：
+
+```bash
+python tests/e2e/models/swa_bounded_replay_probe.py \
+  --base-url http://127.0.0.1:8000 --model YOUR_SERVED_MODEL_NAME \
+  --output /tmp/swa-off.json
+
+# 重启同配置服务，开启 --swa-bounded-replay。
+python tests/e2e/models/swa_bounded_replay_probe.py \
+  --base-url http://127.0.0.1:8000 --model YOUR_SERVED_MODEL_NAME \
+  --baseline /tmp/swa-off.json --output /tmp/swa-on.json
+```
+
+探针检查短问答、长输入、重复前缀和并发响应，是小范围 smoke 回归；不能代替完整精度评估。
+bounded replay 是近似计算，长文本逐字相同不是通用正确性要求；还需使用目标业务数据或
+AISBench 比较任务指标、异常输出、请求成功率和生成长度。
+
+## 性能对照
+
+冷 prefill 实验先关闭 prefix caching；分别测试 4K、16K、32K 输入和固定输出长度。
+确保 `max-model-len` 覆盖输入加输出长度，并固定 `max-num-batched-tokens`。
+每组 OFF/ON 交替至少三轮，固定随机种子、模型、runner、并行、图模式、batch token
+budget、并发、Engram offload 和采样参数。下例从并发 1 开始：
+
+```bash
+vllm bench serve --backend vllm --base-url http://127.0.0.1:8000 \
+  --model YOUR_SERVED_MODEL_NAME --tokenizer /path/to/checkpoint \
+  --dataset-name random --random-input-len 16384 --random-output-len 128 \
+  --num-prompts 32 --max-concurrency 1 --request-rate inf --seed 42 --ignore-eos \
+  --percentile-metrics ttft,tpot,itl --metric-percentiles 50,95,99 \
+  --save-result --result-dir /tmp/swa-bench --result-filename off-16k-c1-r1.json
+```
+
+开启 replay 并重启、预热后，用相同命令另存 `on-16k-c1-r1.json`。提高并发到实际业务值，
+并对其他输入长度重复。主要关注 TTFT、输入吞吐、输出吞吐、TPOT/ITL、峰值 HBM、
+可用 KV blocks、成功请求数和生成 token 数。重复前缀实验单独测量实际 prefix hit 与
+重建开销，不把 cache 命中率差异当作纯计算优化收益。
+
+## 支持条件与限制
+
+- 目标为 DeepSeek V4.1；DSpark 草稿的窗口必须与 target 适配。
+- decoder 裁剪在 eager prefill 生效；可与 `FULL_DECODE_ONLY` decode 图组合，
+  不提供捕获后的 decoder prefill 图加速。
+- PCP＋DP 的新增路径属于 MRV2。先验证 PCP=1，再使用相同开关测试 MRV2 的 PCP＋DP。
+- PP、DCP、microbatching、LoRA、不兼容的草稿或 replay 边界后的 Engram 会关闭 decoder replay。
+- vLLM 0.30 兼容层目前只允许本地 prefix replay，检测到 KV connector 会明确拒绝该组合。
+  本轮先验证单机 colocated；P/D 和 layerwise transfer 不在本次兼容层验证范围。
+- 自定义 scheduler 若替换了上游调度循环，会关闭 SWA replay 并给出原因；需检查最终日志。
+- 本分支默认 OFF；不把 CPU 回归通过表述为 A3 功能、精度或性能已经通过。
+
+## 本地验证记录
+
+2026-11-03：使用上游 vLLM `v0.30.0` 源码和 CPU 测试夹具，29 个相关测试文件
+共 **1356 passed、23 skipped、465 subtests passed**，包含四进程 Gloo PCP2＋DP2
+协调、实际 scheduler 前缀回放、请求序列化、cache/slot 边界、runner 以及 V4.1 PCP
+元数据回归。CPU 测试使用 Python 3.13、PyTorch 2.14.0+cpu；不是 A3 的
+torch-npu 2.10 实测。数据见
+[验证记录](cann_swa_bounded_replay_validation.json)。
+
+61 个变更 Python 文件的 AST、Ruff lint/format 和 `git diff --check` 通过。
+仓库要求的 `bash format.sh ci` 在 markdownlint 的 nodeenv 环境下载阶段因 SSL
+证书链错误中止，未完成全量检查；单独调用 markdownlint 也被 npm registry 的截断 JSON
+响应阻断。没有把这些失败标为通过。
+
+A3 算子构建、真实权重功能、质量和性能数据仍需实机补齐。CPU 回归没有执行自定义
+AscendC/Triton 算子，也没有验证 NPU 集合通信或建立性能收益结论。

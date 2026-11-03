@@ -135,6 +135,10 @@ from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBui
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.offload_capability import (
+    get_dsa_offload_backends,
+    is_dsa_offload_backend,
+)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
@@ -158,10 +162,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
     get_layerwise_reuse_config,
-)
-from vllm_ascend.attention.offload_capability import (
-    get_dsa_offload_backends,
-    is_dsa_offload_backend,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
     CopySfaRequestStates,
@@ -232,7 +232,6 @@ from vllm_ascend.utils import (
     weak_ref_tensor,
     weak_ref_tensors,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
 from vllm_ascend.worker.dcp_utils import (
     DCPAsyncSpecDecodeRebuildResult,
     DCPDummyRunMetadata,
@@ -592,7 +591,9 @@ class NPUModelRunner(GPUModelRunner):
 
         eplb_config = self.ascend_config.eplb_config
         self.dynamic_eplb = eplb_config.dynamic_eplb
-        self.eplb_enable = self.dynamic_eplb or (eplb_config.expert_map_path is not None) or eplb_config.enable_omni_eplb
+        self.eplb_enable = (
+            self.dynamic_eplb or (eplb_config.expert_map_path is not None) or eplb_config.enable_omni_eplb
+        )
         if self.dynamic_eplb:
             self.is_eplb_warmuped = False
             self.policy_type = eplb_config.eplb_policy_type
@@ -3319,6 +3320,7 @@ class NPUModelRunner(GPUModelRunner):
         self._decoder_replay_builders: list[tuple[int, list[str], AscendDSAV41MetadataBuilder]] = []
         self._decoder_replay_num_tokens = 0
         self._decoder_replay_num_actual_tokens = 0
+        self._decoder_replay_logged = False
         self._decoder_replay_counts: torch.Tensor | None = None
         self._decoder_replay_metadata: dict[str, AscendDSAV41Metadata] | None = None
 
@@ -3421,6 +3423,14 @@ class NPUModelRunner(GPUModelRunner):
         layers.rows = self._decoder_replay_rows[: self._decoder_replay_num_tokens]
         layers.num_actual_rows = self._decoder_replay_num_actual_tokens
         layers.context_factory = self._decoder_replay_context
+        if self._decoder_replay_num_actual_tokens < num_tokens and not getattr(self, "_decoder_replay_logged", False):
+            logger.info(
+                "SWA decoder bounded replay active (MRV1): %d -> %d tokens (%d padded).",
+                num_tokens,
+                self._decoder_replay_num_actual_tokens,
+                self._decoder_replay_num_tokens,
+            )
+            self._decoder_replay_logged = True
         logger.debug(
             "Decoder bounded replay DP%d: %d -> %d tokens (%d padded).",
             get_dp_group().rank_in_group,
@@ -4714,6 +4724,7 @@ class NPUModelRunner(GPUModelRunner):
             if eplb_config.enable_omni_eplb:
                 try:
                     from omni_placement.omni_planner import OmniPlanner
+
                     from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor as _VllmEplbAdaptor
                     num_moe_layers = len(_VllmEplbAdaptor._registered_moe_layers)
                     omni_planner = OmniPlanner()  # get singleton

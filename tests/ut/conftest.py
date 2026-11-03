@@ -132,6 +132,18 @@ if not _npu_available:
     sys.modules["mooncake.engine"] = mooncake_engine
     import torch
 
+    # RFC's force_topk sampler compiles with a torch-npu-only option at import
+    # time. CPU UTs exercise its callers without an NPU compiler; retain normal
+    # torch.compile behavior for functions that do not request that backend.
+    _original_torch_compile = torch.compile
+
+    def _compile_without_npu_backend(model=None, *, options=None, **kwargs):
+        if options is not None and "npu_backend" in options:
+            return model if model is not None else lambda function: function
+        return _original_torch_compile(model, options=options, **kwargs)
+
+    torch.compile = _compile_without_npu_backend
+
     try:  # noqa: SIM105
         torch.utils.rename_privateuse1_backend("npu")
     except RuntimeError:
