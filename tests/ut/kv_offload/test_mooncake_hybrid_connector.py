@@ -472,6 +472,9 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
                             {"do_remote_decode": True},
                             RequestStatus.FINISHED_LENGTH_CAPPED,
                         )
+                        # Admission records the send intent that later seeds the
+                        # sender tracker.
+                        scheduler.update_state_after_alloc(request, MagicMock(), 0)
                         delay_free, params = scheduler.request_finished_all_groups(request, ([10, 11, 12], [30, 31]))
                         self.assertTrue(delay_free)
                         self.assertEqual(params["remote_block_ids"], ([10, 11], [30, 31]))
@@ -505,8 +508,8 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
                         self.assertEqual(len(source_ports), decode_tp_size)
                         self.assertEqual(len({(port - base_port) // prefill_tp_size for port in source_ports}), 1)
 
-                        scheduler._reqs_in_batch.add(request_id)
                         send_metadata = scheduler.build_connector_meta(MagicMock())
+                        self.assertEqual(send_metadata.send_req_ids, {request_id})
                         for port, sender in senders.items():
                             sender.start_load_kv(send_metadata)
                             tracker = sender.kv_send_thread.task_tracker
@@ -519,6 +522,175 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
                             self.assertEqual(tracker.get_and_clear_finished_requests(), set())
                             self.assertFalse(tracker.delayed_free_requests)
                             self.assertFalse(tracker.reqs_to_process)
+
+    def test_seed_task_trackers_routes_each_direction(self):
+        """A mixed P/D batch must not cross-seed the two trackers."""
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.kv_send_thread = MagicMock()
+        worker.kv_recv_thread = MagicMock()
+        metadata = MooncakeConnectorMetadata()
+        metadata.requests = {"recv": MagicMock()}
+        metadata.send_req_ids = {"send"}
+        metadata.requests_to_send = {"late-send": time.time()}
+
+        worker._seed_task_trackers(metadata)
+
+        send_tracker = worker.kv_send_thread.task_tracker
+        recv_tracker = worker.kv_recv_thread.task_tracker
+        self.assertEqual({c.args[0] for c in send_tracker.add_req_to_process.call_args_list}, {"send", "late-send"})
+        self.assertEqual({c.args[0] for c in recv_tracker.add_req_to_process.call_args_list}, {"recv"})
+
+    def test_send_intent_survives_until_request_finishes(self):
+        """Admission seeds the sender; the finishing step can still delay free."""
+        tracker = KVCacheTaskTracker()
+        send_thread = MagicMock()
+        send_thread.task_tracker = tracker
+        send_thread.add_delayed_request.side_effect = tracker.add_delayed_request
+        send_thread.add_not_transfer_request.side_effect = tracker.add_not_transfer_request
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.kv_send_thread = send_thread
+        worker.kv_recv_thread = None
+        worker.tp_rank = 0
+        worker.pcp_rank = 0
+        worker.pcp_size = 1
+        worker.requests_to_send = {}
+        worker._prefill_get_remote_rank = lambda req_id: [0]
+
+        admission = MooncakeConnectorMetadata()
+        admission.send_req_ids = {"req-0"}
+        worker._seed_task_trackers(admission)
+        self.assertIn("req-0", tracker.reqs_to_process)
+
+        finishing = MooncakeConnectorMetadata()
+        finishing.requests_to_send = {"req-0": time.time()}
+        worker.start_load_kv(finishing)
+
+        self.assertIn("req-0", tracker.delayed_free_requests)
+        tracker.update_done_task_count("req-0")
+        self.assertEqual(tracker.get_and_clear_finished_requests(), {"req-0"})
+
+    def test_get_finished_follows_thread_presence(self):
+        cases = [
+            ("kv_producer", True, False),
+            ("kv_consumer", False, True),
+            ("kv_both", True, True),
+        ]
+        for role, has_send, has_recv in cases:
+            with self.subTest(role=role):
+                worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+                worker.kv_role = role
+                worker.tp_rank = 1
+                worker.kv_send_thread = MagicMock() if has_send else None
+                worker.kv_recv_thread = MagicMock() if has_recv else None
+                if has_send:
+                    assert worker.kv_send_thread is not None
+                    worker.kv_send_thread.get_and_clear_finished_requests.return_value = {"sent"}
+                if has_recv:
+                    assert worker.kv_recv_thread is not None
+                    worker.kv_recv_thread.get_and_clear_finished_requests.return_value = {"received"}
+
+                self.assertEqual(
+                    worker.get_finished(),
+                    ({"sent"} if has_send else set(), {"received"} if has_recv else set()),
+                )
+
+    def test_kv_both_rejects_pcp(self):
+        with self.assertRaisesRegex(ValueError, "PCP only on the prefill"):
+            self._make_worker(2, 2, 0, 2, 0, 0, False, "kv_both")
+
+    def test_kv_both_rejects_asymmetric_layout(self):
+        with self.assertRaisesRegex(ValueError, "kv_both requires prefill.tp_size == decode.tp_size"):
+            self._make_worker(4, 2, 0, 1, 0, 0, False, "kv_both")
+
+    def test_kv_both_accepts_symmetric_layout(self):
+        worker = self._make_worker(2, 2, 0, 1, 0, 0, False, "kv_both")
+
+        self.assertEqual(worker.kv_role, "kv_both")
+        self.assertEqual(worker._prefill_tp_size, worker._decode_tp_size)
+        self.assertEqual(worker._prefill_tp_size, worker.tp_size)
+
+    def test_wait_for_transfer_threads_detects_dead_thread(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        dead_thread = MagicMock()
+        dead_thread.is_alive.return_value = False
+
+        with self.assertRaisesRegex(RuntimeError, "sender thread failed to start"):
+            worker._wait_for_transfer_threads([("sender", dead_thread, threading.Event())])
+
+    def test_start_transfer_threads_follows_kv_role(self):
+        import vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector as mod
+
+        created: dict[str, list[Any]] = {"send": [], "recv": []}
+
+        class _FakeThread:
+            def __init__(self, *args, **kwargs):
+                self._ready = next((a for a in args if isinstance(a, threading.Event)), None)
+                self.started = False
+
+            def start(self):
+                self.started = True
+                if self._ready is not None:
+                    self._ready.set()
+
+            def is_alive(self):
+                return True
+
+        class FakeSend(_FakeThread):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created["send"].append(self)
+
+        class FakeRecv(_FakeThread):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created["recv"].append(self)
+
+        cases = [
+            ("kv_producer", True, False),
+            ("kv_consumer", False, True),
+            ("kv_both", True, True),
+        ]
+        for role, expect_send, expect_recv in cases:
+            with self.subTest(role=role):
+                created["send"].clear()
+                created["recv"].clear()
+                worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+                worker.kv_role = role
+                worker.kv_send_thread = None
+                worker.kv_recv_thread = None
+                worker.vllm_config = MagicMock()
+                worker.tp_rank = 0
+                worker._prefill_tp_size = 1
+                worker.engine_id = "engine"
+                worker.side_channel_host = "127.0.0.1"
+                worker.side_channel_port = 6000
+                worker.pcp_rank = 0
+                worker.kv_caches = {}
+                worker.tp_size = 1
+                worker._prefill_pp_size = 1
+                worker.engine = MagicMock()
+                worker.handshake_port = 6000
+                worker.kv_caches_base_addr = []
+                worker.block_len_per_addr = []
+                worker.block_stride_per_addr = []
+                worker.addr_group_idx = []
+                worker._mamba_ssm_size = (0, 0)
+                worker.use_hybrid = False
+                worker.use_mamba = False
+                worker.hma_group_size = 1
+                worker.kv_cache_config = MagicMock()
+                worker._prefill_pp_layer_partition = None
+
+                with (
+                    patch.object(mod, "KVCacheSendingThread", FakeSend),
+                    patch.object(mod, "KVCacheRecvingThread", FakeRecv),
+                ):
+                    worker._start_transfer_threads(MagicMock())
+
+                self.assertEqual(bool(created["send"]), expect_send)
+                self.assertEqual(bool(created["recv"]), expect_recv)
+                self.assertTrue(all(t.started for t in created["send"] + created["recv"]))
 
 
 class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
@@ -890,6 +1062,40 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         scheduler.pcp_size = 1
         scheduler.multi_nodes_meta_mapping = {}
         return scheduler
+
+    def test_send_intent_only_for_remote_decode(self):
+        scheduler = self._make_scheduler()
+        scheduler._reqs_need_recv = {}
+        scheduler._reqs_in_batch = set()
+        scheduler._reqs_send_intent = set()
+
+        decode_req = MockRequest(
+            "send-req",
+            prompt_token_ids=list(range(8)),
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.RUNNING,
+        )
+        prefill_req = MockRequest(
+            "recv-req",
+            prompt_token_ids=list(range(8)),
+            kv_transfer_params={
+                "do_remote_prefill": True,
+                "remote_block_ids": ([1],),
+                "remote_engine_id": "engine",
+                "remote_host": "127.0.0.1",
+                "remote_port": 1,
+                "remote_request_id": "remote-req",
+            },
+            status=RequestStatus.RUNNING,
+        )
+        scheduler.update_state_after_alloc(decode_req, MagicMock(), 0)
+        scheduler.update_state_after_alloc(prefill_req, MagicMock(), 1)
+
+        meta = scheduler.build_connector_meta(MagicMock())
+
+        self.assertEqual(meta.send_req_ids, {"send-req"})
+        self.assertEqual(set(meta.requests), {"recv-req"})
+        self.assertEqual(scheduler._reqs_send_intent, set())
 
     def test_compute_transfer_block_ids_trims_swa_groups(self):
         scheduler = self._make_scheduler()
