@@ -6,7 +6,7 @@ Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experim
 
 This tutorial describes model preparation, installation, online serving, functional verification, and evaluation. It covers colocated deployment and prefill/decode (PD) separation on A2 series, A3 series, and Ascend 950 DT. A2 series and A3 series share the service configuration; PD separation requires 16 devices in total for the shared TP2 × DP4 configuration.
 
-Qwen3.8-Flash-Next was first supported in `vllm-ascend:v0.26.0rc`. The original A3 series W8A8 configuration was validated with text and multimodal input. The deployment examples below include additional performance settings and require separate runtime and accuracy validation.
+Qwen3.8-Flash-Next was first supported in `vllm-ascend:v0.26.0rc`. The original A3 series W8A8 configuration was validated with text and multimodal input. The deployment examples below use W4A8 checkpoints (W4A8-MXFP on Ascend 950 DT) and additional performance settings; they require separate runtime and accuracy validation.
 
 !!! warning
 
@@ -26,9 +26,9 @@ Select the checkpoint that matches the deployment configuration:
 
 | Hardware | Deployment | Checkpoint | Device allocation | Download Links |
 | --- | --- | --- | --- | --- |
-| A2 series / A3 series | Colocated | `Qwen3.8-Flash-Next-w8a8-mtp` | 8 devices, TP8 × DP1 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
-| A2 series / A3 series | PD separation | Ascend-compatible W4A8 | 16 devices, TP2 × DP4 per role | |
-| Ascend 950 DT | Colocated | `Qwen3.8-Flash-Next-w8a8-mxfp8` | 4 devices, TP4 × DP1 | |
+| A2 series / A3 series | Colocated | `Qwen3.8-Flash-Next-w4a8` | 8 devices, TP8 × DP1 |  |
+| A2 series / A3 series | PD separation | `Qwen3.8-Flash-Next-w4a8` | 16 devices, TP2 × DP4 per role | |
+| Ascend 950 DT | Colocated | `Qwen3.8-Flash-Next-w4a8-mxfp` | 4 devices, TP4 × DP1 | |
 | Ascend 950 DT | PD separation | `Qwen3.8-Flash-Next-w4a8-mxfp` | 8 devices, TP2 × DP2 per role | |
 
 The commands use fixed model directories under `/models`. Mount the corresponding checkpoint at the shown directory or edit that path directly. For PD separation, both roles must load the same checkpoint.
@@ -37,7 +37,7 @@ The commands use fixed model directories under `/models`. Mount the correspondin
 
 ### 4.1 Docker Image Installation
 
-The following images apply to the A3 series W8A8 baseline. For A2 series, use a compatible environment as described in Section 4.2. For 950 DT, prepare an environment with compatible vLLM and vLLM-Ascend versions; do not use an A3 series image for that deployment.
+The following images were provided for the original A3 series baseline. Verify that the installed runtime supports the selected W4A8 checkpoint. For A2 series, use a compatible environment as described in Section 4.2. For 950 DT, prepare an environment with compatible vLLM and vLLM-Ascend versions; do not use an A3 series image for that deployment.
 
 A pre-built Qwen3.8 A3 series image is available in the [vllm-ascend repository](https://quay.io/repository/ascend/vllm-ascend?tab=tags&tag=latest). Select the image that matches the host operating system:
 
@@ -110,7 +110,7 @@ Before starting:
 
 === "A2 series / A3 series"
 
-    This W8A8 deployment uses TP8 × DP1, a maximum context length of 131072 tokens, and up to 8 active sequences.
+    This W4A8 deployment uses TP8 × DP1, a maximum context length of 131072 tokens, and up to 8 active sequences.
 
     ```bash
     unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
@@ -124,7 +124,7 @@ Before starting:
     export VLLM_ASCEND_ENABLE_QSA_E3V=1
     unset VLLM_ASCEND_FORCE_QSA_REFERENCE
 
-    vllm serve /models/Qwen3.8-Flash-Next-w8a8-mtp \
+    vllm serve /models/Qwen3.8-Flash-Next-w4a8 \
         --host 0.0.0.0 \
         --port 8088 \
         --served-model-name qwen3.8-flash-next \
@@ -154,7 +154,7 @@ Before starting:
 
     - `VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1` enables the fused QSA Lightning Indexer path.
     - `VLLM_ASCEND_ENABLE_QSA_E3V=1` enables the fused QSA Expand E3 path.
-    - `--quantization ascend` loads the Ascend-compatible W8A8 checkpoint.
+    - `--quantization ascend` loads the Ascend-compatible W4A8 checkpoint.
     - `--tensor-parallel-size 8` and `--data-parallel-size 1` configure the A2 series / A3 series single-DP TP8 topology.
     - `--max-model-len 131072` caps the maximum context length. Common values: `65536` (64K), `131072` (128K).
     - `--enable-expert-parallel` enables expert parallelism for the MoE layers.
@@ -164,7 +164,7 @@ Before starting:
     - `--reasoning-parser qwen3` separates reasoning from the final answer in the OpenAI-compatible response.
     - `--speculative-config` uses the model's MTP head to draft three tokens. `enforce_eager=true` keeps the MTP proposer in eager mode.
     - `--compilation-config` enables `FULL_DECODE_ONLY` ACLGraph for decode.
-    - `fuse_norm_quant=false` disables norm/quantization fusion for this W8A8 deployment.
+    - `fuse_norm_quant=false` disables norm/quantization fusion for this W4A8 deployment.
     - `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2; `VLLM_ASCEND_PLE_BACKEND=torch` selects the PLE backend.
     - `--async-scheduling` enables asynchronous scheduling.
     - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert multistream overlap. Shared expert DP requires expert parallelism and TP > 1. `enable_fused_mc2=0` disables fused MC2 and is compatible with shared expert overlap.
@@ -172,7 +172,7 @@ Before starting:
 
 === "Ascend 950 DT"
 
-    This W8A8-MXFP8 deployment uses TP4 × DP1, a maximum context length of 141312 tokens, and up to 32 active sequences.
+    This W4A8-MXFP deployment uses TP4 × DP1, a maximum context length of 141312 tokens, and up to 32 active sequences.
 
     ```bash
     unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
@@ -196,7 +196,7 @@ Before starting:
     export HCCL_BUFFSIZE=1024
     export HCCL_NPU_SOCKET_PORT_RANGE=auto
 
-    vllm serve /models/Qwen3.8-Flash-Next-w8a8-mxfp8 \
+    vllm serve /models/Qwen3.8-Flash-Next-w4a8-mxfp \
         --host 0.0.0.0 \
         --port 8087 \
         --served-model-name qwen3.8-flash-next-950-dt \
@@ -224,7 +224,7 @@ Before starting:
 
     - `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3` selects the four devices for TP4.
     - `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2.
-    - `--quantization ascend` loads the Ascend-compatible W8A8-MXFP8 checkpoint.
+    - `--quantization ascend` loads the Ascend-compatible W4A8-MXFP checkpoint.
     - `--max-model-len 141312` and `--max-num-seqs 32` set context and concurrency limits; verify memory capacity before increasing them.
     - `--async-scheduling` enables asynchronous scheduling; `--enable-expert-parallel` enables expert parallelism for MoE layers.
     - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert multistream overlap. Shared expert DP requires expert parallelism and TP > 1. `enable_fused_mc2=0` disables fused MC2 and is compatible with shared expert overlap.
@@ -744,7 +744,7 @@ Expected result: the service returns HTTP 200 OK.
 
 ### 6.2 Multimodal Chat Completion
 
-The A3 series W8A8 model supports image-and-text input. Replace `<IMAGE_URL>` with an image URL accessible from the serving environment:
+Use a W4A8 checkpoint that includes the vision encoder to verify image-and-text input. Replace `<IMAGE_URL>` with an image URL accessible from the serving environment:
 
 ```bash
 curl http://127.0.0.1:8088/v1/chat/completions \
@@ -883,7 +883,7 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 
 Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for evaluation setup and usage. The result below is for reference only.
 
-The following result was recorded for the original A3 series W8A8 TP8 × DP1 configuration, before adding Model Runner V2, the explicit torch PLE backend, async scheduling, and MoE communication optimizations to the command in [Section 5.1](#51-single-node-online-deployment). It does not establish the accuracy of the updated command or the A2 series, 950 DT, and W4A8 PD configurations.
+The following result was recorded for the original A3 series W8A8 TP8 × DP1 configuration. It is historical reference data and does not establish the accuracy of any current W4A8 or W4A8-MXFP deployment example in this guide.
 
 | Hardware | Dataset | Metric | Score |
 | --- | --- | --- | --- |
