@@ -22,6 +22,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils.torch_utils import direct_register_custom_op, get_kv_cache_torch_dtype
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.attention.utils import (
@@ -34,6 +35,7 @@ from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
+from vllm_ascend.utils import vllm_version_is
 
 
 class Glm5NextGDNHostMetadataBackend(AscendGDNHostMetadataBackend):
@@ -195,6 +197,9 @@ class PCPGlm5NextMergedColumnParallelLinear(_Glm5NextMergedColumnParallelLinear,
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
     use_contiguous_conv_indices = True
     use_shared_conv_output = True
+    # Ascend RecoverSSM only implements the Triton commit path; the upstream
+    # metadata builder reads this attribute when creating the commit context.
+    recoverssm_backend = "triton"
 
     tp_size: int
     head_dim: int
@@ -212,7 +217,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.cache_config.mamba_ssm_cache_dtype,
         )
         if self.use_recoverssm:
-            return MambaStateDtypeCalculator.append_kda_recoverssm_record(dtypes, self.model_config.dtype)
+            if vllm_version_is("0.32.0"):
+                return MambaStateDtypeCalculator.append_kda_recoverssm_record(dtypes, self.model_config.dtype)
+            # vLLM main moved KDA RecoverSSM records out of the KV cache and
+            # removed the calculator helper, but Ascend still packs the
+            # float32 correction and activation key/gate records into the page.
+            return (*dtypes, torch.float32, get_kv_cache_torch_dtype("auto", self.model_config.dtype))
         return dtypes
 
     def get_state_shape(
@@ -230,8 +240,18 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             num_spec=self.num_spec,
         )
         if self.use_recoverssm:
-            return MambaStateShapeCalculator.append_kda_recoverssm_record(
-                shapes, self.num_heads, self.head_dim, self.tp_size, self.num_spec + 1
+            if vllm_version_is("0.32.0"):
+                return MambaStateShapeCalculator.append_kda_recoverssm_record(
+                    shapes, self.num_heads, self.head_dim, self.tp_size, self.num_spec + 1
+                )
+            # One checkpoint per request plus compact update records, matching
+            # the layout the Ascend commit context allocates from.
+            local_num_heads = divide(self.num_heads, self.tp_size)
+            spec_query_len = self.num_spec + 1
+            return (
+                *shapes,
+                (local_num_heads, spec_query_len, self.head_dim),
+                (local_num_heads, spec_query_len, 2 * self.head_dim),
             )
         return shapes
 
@@ -344,7 +364,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
         self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
         # Lazily-built merged q|k|v conv weight (built on first forward, after
-        # weights are loaded). See _forward.
+        # weights are loaded). See _forward_core.
         self._merged_conv_weight: torch.Tensor | None = None
 
         self.A_log = nn.Parameter(torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32))
@@ -385,8 +405,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.kda_lower_bound = config.linear_lower_bound
         self.gate_lower_bound = self.kda_lower_bound
         # Process-global conv-state layout, resolved once here instead of on
-        # every _forward call (it reads an env-derived flag each time).
+        # every _forward_core call (it reads an env-derived flag each time).
         self._conv_state_dim_first = is_conv_state_dim_first()
+        # Piecewise graph capture needs a graph-owned output address for the
+        # eager KDA op between captured segments. Other modes can return the
+        # op's own output and skip a hidden_size-wide copy per layer.
+        self._needs_output_buffer = compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
 
     def _dt_bias_weight_loader(self, param, loaded_weight):
         shard_size = param.shape[0]
@@ -407,6 +431,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        if self._needs_output_buffer:
+            # Allocate in the compiled graph so downstream captures retain the
+            # same output address when this split op executes on each
+            # invocation.
+            output = torch.empty_like(hidden_states)
+            torch.ops.vllm.glm5next_kda_forward_with_output(hidden_states, output, self.prefix)
+            return output
+        return torch.ops.vllm.glm5next_kda_forward(hidden_states, self.prefix)
+
+    def _forward(self, hidden_states: torch.Tensor, output_buffer: torch.Tensor | None) -> torch.Tensor | None:
         attn_metadata_raw = get_forward_context().attn_metadata
         attn_metadata = attn_metadata_raw.get(self.prefix) if isinstance(attn_metadata_raw, dict) else None
         pcp_context = getattr(attn_metadata, "pcp_context", None)
@@ -434,7 +468,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         # Beta stays raw (bf16) here: the recurrent kernel sigmoids it in fp32
         # at load (SIGMOID_BETA), and only the chunked prefill path needs the
-        # pre-computed fp32 sigmoid — computed lazily in _forward. Pure decode
+        # pre-computed fp32 sigmoid — computed lazily in _forward_core. Pure decode
         # / spec-verify steps then skip the separate sigmoid and its fp32
         # intermediate entirely.
         beta = beta_raw.unsqueeze(0)
@@ -451,7 +485,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
         # Keep the layer's dispatch outside piecewise graph compilation.
-        self._forward(
+        self._forward_core(
             qkv_proj_states=qkv,
             g1=g1,
             beta=beta,
@@ -466,11 +500,18 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 raise RuntimeError("KDA PCP token mapping does not match the rank-local model input.")
             local_start = self.pcp_rank * local_num_tokens
             local_indices = pcp_context.padded_gather_idx[local_start : local_start + local_num_tokens]
-            output = output[local_indices]
-        return output
+            if output_buffer is None:
+                return torch.index_select(output, 0, local_indices)
+            # Restore directly into the graph-owned output rather than
+            # allocating an indexed tensor and then copying it again.
+            torch.index_select(output, 0, local_indices, out=output_buffer)
+            return None
+        if output_buffer is None:
+            return output
+        output_buffer.copy_(output)
+        return None
 
-    @eager_break_during_capture
-    def _forward(
+    def _forward_core(
         self,
         qkv_proj_states: torch.Tensor,
         g1: torch.Tensor,
@@ -714,3 +755,44 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         else:
             core_attn_out[0, : output.shape[1]].copy_(output[0])
         maybe_save_kv_layer_to_connector("", [])
+
+
+@eager_break_during_capture
+def glm5next_kda_forward_with_output(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    layer._forward(hidden_states, output)
+
+
+def glm5next_kda_forward_with_output_fake(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="glm5next_kda_forward_with_output",
+    op_func=glm5next_kda_forward_with_output,
+    mutates_args=["output"],
+    fake_impl=glm5next_kda_forward_with_output_fake,
+)
+
+
+# Returning variant for an unsplit FX graph. No eager_break_during_capture:
+# a freshly returned tensor would change address on each eager replay, which
+# is exactly what the breakable-capture contract forbids. forward() selects
+# this one only when the layer is not a splitting op.
+def glm5next_kda_forward(hidden_states: torch.Tensor, layer_name: str) -> torch.Tensor:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    output = layer._forward(hidden_states, None)
+    assert output is not None
+    return output
+
+
+def glm5next_kda_forward_fake(hidden_states: torch.Tensor, layer_name: str) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="glm5next_kda_forward",
+    op_func=glm5next_kda_forward,
+    mutates_args=[],
+    fake_impl=glm5next_kda_forward_fake,
+)

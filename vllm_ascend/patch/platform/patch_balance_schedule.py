@@ -78,6 +78,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.utils import vllm_version_is
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
@@ -345,6 +346,14 @@ class BalanceScheduler(Scheduler):
                         break
 
             if new_blocks is None:
+                if not vllm_version_is("0.32.0") and (
+                    self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED
+                ):
+                    # The request was the lowest-priority running request and
+                    # preempted itself. The requests after it have higher
+                    # priority and may still fit; it was removed from
+                    # `self.running`, so `req_index` already points at the next.
+                    continue
                 # Cannot schedule this request.
                 break
 
@@ -449,9 +458,11 @@ class BalanceScheduler(Scheduler):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
+                did_prefix_cache_lookup = False
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
+                    did_prefix_cache_lookup = True
                     # Get locally-cached tokens.
                     if (
                         self.connector is not None
@@ -476,13 +487,9 @@ class BalanceScheduler(Scheduler):
                         # the last block) is transferred unconditionally by
                         # _apply_prefix_caching in nixl/worker.py.
                         num_new_local_computed_tokens = max(per_group_hits)
-                        if self.kv_cache_manager.log_stats:
-                            assert self.kv_cache_manager.prefix_cache_stats is not None
-                            self.kv_cache_manager.prefix_cache_stats.record(
-                                num_tokens=request.num_tokens,
-                                num_hits=num_new_local_computed_tokens,
-                                preempted=request.num_preemptions > 0,
-                            )
+                        # Prefix-cache stats for this per-group lookup are
+                        # recorded at admission together with the common path
+                        # below; recording here as well would double count.
                     else:
                         (
                             new_computed_blocks,
@@ -662,6 +669,13 @@ class BalanceScheduler(Scheduler):
                             num_hits=connector_prefix_cache_hits,
                             preempted=request.num_preemptions > 0,
                         )
+
+                # Record at admission so unscheduled lookups are not counted.
+                if did_prefix_cache_lookup:
+                    self.kv_cache_manager.record_prefix_cache_stats(
+                        request,
+                        num_new_local_computed_tokens,
+                    )
 
                 if load_kv_async:
                     # If loading async, allocate memory and put request

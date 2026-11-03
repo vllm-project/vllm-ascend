@@ -126,7 +126,8 @@ class FlashWorker:
 
 @pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
 @pytest.mark.parametrize("use_replayssm", [False, True], ids=["no_recover", "recover"])
-def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm):
+@pytest.mark.parametrize("prefix_caching", [False, True], ids=["no_prefix", "prefix"])
+def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, prefix_caching):
     for name, value in {
         "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
@@ -157,8 +158,8 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm):
         limit_mm_per_prompt={"image": 0, "video": 0},
         block_size=128,
         enable_chunked_prefill=True,
-        enable_prefix_caching=False,
-        mamba_cache_mode="none",
+        enable_prefix_caching=prefix_caching,
+        mamba_cache_mode="align" if prefix_caching else "none",
         gpu_memory_utilization=0.8,
         seed=1024,
         enforce_eager=enforce_eager,
@@ -194,3 +195,12 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm):
                 tokens = list(output.outputs[0].token_ids)
                 assert len(tokens) == OUTPUT_TOKENS
                 assert all(0 <= token < config["text_config"]["vocab_size"] for token in tokens)
+        if prefix_caching:
+            block_size = runner.model.llm_engine.vllm_config.cache_config.block_size
+            prefix_length = 2 * block_size + 17
+            assert prefix_length + OUTPUT_TOKENS < settings["max_model_len"]
+            prompt = [{"prompt_token_ids": [10 + i % 1000 for i in range(prefix_length)]}]
+            cold = runner.model.generate(prompt, params, use_tqdm=False)[0]
+            warm = runner.model.generate(prompt, params, use_tqdm=False)[0]
+            assert warm.num_cached_tokens >= block_size
+            assert warm.outputs[0].token_ids == cold.outputs[0].token_ids

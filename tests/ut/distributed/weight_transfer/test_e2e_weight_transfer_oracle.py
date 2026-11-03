@@ -41,6 +41,7 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     reference_serve_args,
     reference_signature,
 )
+from vllm_ascend.utils import vllm_version_is
 
 CASE = MODEL_CASES[0]
 PORT = 8123
@@ -221,12 +222,15 @@ def test_random_target_payload_is_unchanged_when_draft_is_added(random_weight_ca
     combined = FixedRandomWeightSource(target_case, torch.device("cpu"), draft_case=draft_case)
     assert plain.draft_source is None
     assert combined.draft_source is not None
-    assert plain.metadata() == combined.metadata()
+    plain_metadata = plain.metadata() if vllm_version_is("0.32.0") else plain.metadata
+    combined_metadata = combined.metadata() if vllm_version_is("0.32.0") else combined.metadata
+    draft_metadata = combined.draft_source.metadata() if vllm_version_is("0.32.0") else combined.draft_source.metadata
+    assert plain_metadata == combined_metadata
     for (name, expected), (actual_name, actual) in zip(plain, combined, strict=True):
         assert name == actual_name
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    assert len(combined.draft_source.metadata()) < len(combined.metadata())
-    assert all(not meta.name.startswith("draft.") for meta in combined.draft_source.metadata())
+    assert len(draft_metadata) < len(combined_metadata)
+    assert all(not meta.name.startswith("draft.") for meta in draft_metadata)
 
 
 def test_draft_payload_is_repeatable_independent_and_does_not_reseed_global_rng(random_weight_cases):

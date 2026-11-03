@@ -97,6 +97,10 @@ class HardwareCapability(Enum):
     # Enable the FP8/C8 attention KV-cache ABI and matching attention preprocess paths.
     # This is not a general statement that every FP8 operation is supported.
     FP8_ATTENTION = auto()
+    # CANN PoolKeyIndexer quant_mode=0 with E4M3 query/key and FP32 descales.
+    POOL_KEY_INDEXER_FP8 = auto()
+    # CANN PoolKeyIndexer quant_mode=2 with INT8 query/key and FP16 descales.
+    POOL_KEY_INDEXER_INT8 = auto()
     # Select the compatibility grouped-top-k router used by the fused-MoE path.
     FUSED_MOE_COMPATIBILITY = auto()
     # Use npu_rotary_mul with adjacent pairs (rotary_mode="interleave").
@@ -239,6 +243,9 @@ class HardwareProfile:
     # Independent, additive contracts queried with ``supports``.
     capabilities: frozenset[HardwareCapability]
 
+    # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
+    requires_2d_nz_linear_input: bool = False
+
     def supports(self, capability: HardwareCapability) -> bool:
         """Return whether the exact documented ``capability`` contract is available."""
 
@@ -307,6 +314,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             | {
                 HardwareCapability.CANN_MEGAMOE,
                 HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
+                HardwareCapability.POOL_KEY_INDEXER_INT8,
             },
         ),
         AscendDeviceType._310P: HardwareProfile(
@@ -334,6 +342,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A5: HardwareProfile(
             _device_type=AscendDeviceType.A5,
+            requires_2d_nz_linear_input=True,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.TOPO_AFFINITY,
             default_worker_cls=_DEFAULT_WORKER_CLS,
@@ -362,6 +371,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
                     HardwareCapability.FLA_GDN_PREFILL,
                     HardwareCapability.FP8_ATTENTION,
+                    HardwareCapability.POOL_KEY_INDEXER_FP8,
                     HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
                     HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION,
                     HardwareCapability.GRAPH_MULS_ADD_FUSION,

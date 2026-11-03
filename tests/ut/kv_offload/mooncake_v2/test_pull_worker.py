@@ -1992,3 +1992,61 @@ def test_compute_block_ids_across_unequal_block_size_dcp_matrix(
     )
 
     assert result == expected
+
+
+@pytest.mark.parametrize(("local_tp", "remote_tp"), [(4, 8), (8, 4), (4, 4), (2, 3)])
+@pytest.mark.parametrize("remote_pcp", [1, 2])
+def test_replicated_mamba_selects_one_complete_producer_replica(local_tp: int, remote_tp: int, remote_pcp: int) -> None:
+    spec = replace(make_mamba_spec(), tp_replicated=True)
+    thread = make_thread(tp_size=local_tp, tp_rank=local_tp - 1)
+    groups = thread._get_layer_remote_tp_rank_groups(0, 0, spec, make_pp_metadata(), remote_pcp, remote_tp, 1)
+    assert groups == [list(range(remote_pcp * remote_tp))]
+    transfers = thread._compute_group_block_ids(
+        "request", groups, 1, 0, 16, 16, [2], [2], [3], 15, 15, 0, 1, 1, spec, 1
+    )
+    assert transfers == [(1, [2], [3])]
+
+
+@pytest.mark.parametrize(("local_tp", "remote_tp"), [(4, 8), (8, 4), (4, 4), (2, 3)])
+@pytest.mark.parametrize("mismatch", [None, "shape", "length"])
+def test_replicated_short_conv_copies_complete_state_between_different_ranks(
+    local_tp: int, remote_tp: int, mismatch: str | None
+) -> None:
+    spec = replace(
+        make_mamba_spec(),
+        shapes=((3, 16),),
+        dtypes=(torch.float16,),
+        mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+        tp_replicated=True,
+    )
+    thread = make_thread(
+        tp_size=local_tp,
+        tp_rank=local_tp - 1,
+        kv_caches_base_addr=[[1000]],
+        block_shapes=[[(3, 16)]],
+        block_strides=[[128]],
+        block_lens=[[96]],
+    )
+    remote = make_pp_metadata(
+        block_shapes=[[(6, 8) if mismatch == "shape" else (3, 16)]],
+        block_strides=[[160]],
+        block_lens=[[94 if mismatch == "length" else 96]],
+        tp_base_addrs={0: [[5000]]},
+    )
+    src: list[int] = []
+    dst: list[int] = []
+    lengths: list[int] = []
+
+    def append() -> None:
+        thread._append_mamba_transfer_addresses(
+            spec, 0, 0, remote_tp, {(0, 0): [("request", [1], [2])]}, remote, src, dst, lengths
+        )
+
+    if mismatch is not None:
+        with pytest.raises(ValueError, match="replicated Mamba metadata mismatch"):
+            append()
+    else:
+        append()
+        assert src == [1128]
+        assert dst == [5320]
+        assert lengths == [96]

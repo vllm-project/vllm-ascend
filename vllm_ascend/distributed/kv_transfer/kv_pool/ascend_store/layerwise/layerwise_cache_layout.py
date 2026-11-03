@@ -19,7 +19,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
-    get_layerwise_protocol,
+    get_backend_class,
 )
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
@@ -65,7 +65,7 @@ def allocate_shared_indexer_cache(
     return views
 
 
-def get_layerwise_physical_layer_index(layer_name: str, base_layers: int) -> int:
+def get_physical_layer_index(layer_name: str, base_layers: int) -> int:
     match = re.search(
         r"(?:^|\.)mtp(?:\.layers)?\.(\d+)(?:\.|$)",
         layer_name,
@@ -115,10 +115,7 @@ class LayerwiseReuseLayout:
 def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None:
     """Return the extra config of the layerwise-reuse connector, if any.
 
-    A connector opts into layerwise reuse when its backend carries a
-    layerwise protocol and the protocol accepts the connector's extra
-    config. Both checks resolve through the backend registry — the generic
-    layer never names the protocol or the backend.
+    Layerwise cache reuse requires the GVA backend and an enabled connector.
     """
     if kv_transfer_config is None:
         return None
@@ -146,12 +143,11 @@ def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None
         ):
             continue
         extra_config = connector_config.get("kv_connector_extra_config") or {}
-        protocol = get_layerwise_protocol(str(extra_config.get("backend", "mooncake")))
-        if protocol is None:
+        backend_class = get_backend_class(str(extra_config.get("backend", "mooncake")))
+        if backend_class is None or backend_class.layerwise_data_plane != "gva":
             continue
-        layerwise_config = protocol.extract_layout_config(extra_config)
-        if layerwise_config is not None:
-            return layerwise_config
+        if extra_config.get("use_layerwise", False):
+            return extra_config
     return None
 
 
@@ -254,7 +250,7 @@ def build_layerwise_reuse_layout(
     """Build reusable physical-layer slots by grouping layers on their main cache spec."""
     named_specs_by_layer: dict[int, list[NamedKVCacheSpec]] = {}
     for layer_name, layer_spec in layer_specs.items():
-        physical_layer = get_layerwise_physical_layer_index(layer_name, base_layers)
+        physical_layer = get_physical_layer_index(layer_name, base_layers)
         named_specs_by_layer.setdefault(physical_layer, []).append(NamedKVCacheSpec(layer_name, layer_spec))
 
     physical_layers = sorted(named_specs_by_layer)

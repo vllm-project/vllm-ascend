@@ -72,7 +72,6 @@ from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
-    enable_dsa_cp,
     get_rotation_path,
     normalize_deepseek_v41_config,
 )
@@ -394,10 +393,8 @@ def init_attention_projections(self, config, quant_config, prefix, reduce_result
     self.eps = config.rms_norm_eps
     self.norm_eps = config.rms_norm_eps
     self.scale = self.head_dim**-0.5
-    self.enable_dsa_cp = enable_dsa_cp()
 
-    attn_sink_heads = self.n_heads if self.enable_dsa_cp else self.n_local_heads
-    self.attn_sink = nn.Parameter(torch.empty(attn_sink_heads, dtype=torch.float32))
+    self.attn_sink = nn.Parameter(torch.empty(self.n_local_heads, dtype=torch.float32))
     self.wq_a = ReplicatedLinear(
         self.dim,
         self.q_lora_rank,
@@ -408,8 +405,7 @@ def init_attention_projections(self, config, quant_config, prefix, reduce_result
     )
     self.q_norm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
     self.q_norm_without_weight = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
-    wq_b_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
-    self.wq_b = wq_b_cls(
+    self.wq_b = ColumnParallelLinear(
         self.q_lora_rank,
         self.n_heads * self.head_dim,
         bias=False,
@@ -603,7 +599,6 @@ class DeepseekV41SWAAttention(nn.Module):
         prefix="",
         topk_indices_buffer=None,
         reduce_results=True,
-        need_gather_q_kv=False,
         *,
         use_yarn=False,
     ):
@@ -677,7 +672,6 @@ class DeepseekV41SWAAttention(nn.Module):
             quant_config=quant_config,
             # prefix=f'{prefix}.attn',
             prefix=f"{prefix}",
-            need_gather_q_kv=need_gather_q_kv,
         )
 
 
@@ -696,7 +690,6 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         prefix="",
         topk_indices_buffer=None,
         reduce_results=True,
-        need_gather_q_kv=False,
     ):
         layer_idx = int(prefix.split(".")[-2])
         topology = build_layer_plan(config)
@@ -710,7 +703,6 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
             prefix=prefix,
             topk_indices_buffer=topk_indices_buffer,
             reduce_results=reduce_results,
-            need_gather_q_kv=need_gather_q_kv,
             use_yarn=role.has_long_context,
         )
         block_size = vllm_config.cache_config.block_size
@@ -772,6 +764,10 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         torch.ops.vllm.dsa_v41_forward(hidden_states, output, self.v41_layer_name)
         return output
 
+    def write_kv(self, hidden_states):
+        output = torch.empty(0, dtype=hidden_states.dtype, device=hidden_states.device)
+        torch.ops.vllm.dsa_v41_write_kv(hidden_states, output, self.v41_layer_name)
+
 
 class DeepseekV41DecoderLayer(nn.Module):
     """V4.1 block with the checkpoint's delayed mHC coefficient handoff."""
@@ -793,6 +789,7 @@ class DeepseekV41DecoderLayer(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
+        self.prefill_context_parallel_size = parallel_config.prefill_context_parallel_size
 
         self.hidden_size = config.hidden_size
         max_position_embeddings = config.rope_parameters["original_max_position_embeddings"]
@@ -802,7 +799,6 @@ class DeepseekV41DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
         self.norm_eps = config.rms_norm_eps
         self.use_sequence_parallel_moe = parallel_config.use_sequence_parallel_moe
-        self.enable_dsa_cp = enable_dsa_cp()  # TODO: delete this when enable_dsa_cp is sunset.
 
         attn_cls = self.attention_cls
 
@@ -815,7 +811,6 @@ class DeepseekV41DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
             reduce_results=not self.use_sequence_parallel_moe,
-            need_gather_q_kv=self.use_sequence_parallel_moe and self.enable_dsa_cp,
         )
 
         self.mlp = DeepseekV41MoE(
@@ -885,6 +880,20 @@ class DeepseekV41DecoderLayer(nn.Module):
             post.unsqueeze(0),
             comb.unsqueeze(0),
         ).squeeze(0)
+
+    def write_kv(self, hidden_states, pre_mix, positions, input_ids=None):
+        """Project the attention input and write this layer's cache only."""
+        assert not self.use_sequence_parallel and self.prefill_context_parallel_size == 1
+        del positions, input_ids
+        x, _, _, _ = self.hc_pre(
+            hidden_states,
+            self.hc_attn_fn,
+            self.hc_attn_scale,
+            self.hc_attn_base,
+            pre_mix,
+        )
+        x = self.input_layernorm(x)
+        self.self_attn.write_kv(x)
 
     def forward(
         self,
@@ -1091,19 +1100,29 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         )
         rotation_path = get_rotation_path(vllm_config)
         self.engram_rotated = rotation_path is not None
-        self.register_buffer("engram_rotation", torch.eye(32), persistent=False)
+        engram_rotation = torch.eye(32, device=self.device)
         if self.has_engram:
             if self.engram_rotated and vllm_config.load_config.load_format != "dummy":
                 with torch.device("cpu"):
-                    block = load_engram_rotation_block(self.engram_root, config.hidden_size, rotation_path)
-                self.engram_rotation.copy_(block)
+                    engram_rotation = load_engram_rotation_block(self.engram_root, config.hidden_size, rotation_path)
+                engram_rotation = engram_rotation.to(device=self.device)
             # Upstream owns the n-gram history; the adapter only hands it the
             # Ascend SWA slot metadata (see engram/hash_state.py).
             swa_cache_layer = self.layers[config.engram_layer_ids[0]].self_attn.dsa_attn.swa_cache_layer
             self.engram_hash = create_engram_hash_state(vllm_config, config, swa_cache_layer)
+        self.register_buffer("engram_rotation", engram_rotation, persistent=False)
 
         self.decoder_replay_start = self.end_layer
         self.decoder_replay_layers = make_decoder_replay(self, vllm_config)
+        self.decoder_replay_layer_name: str | None = None
+        if self.decoder_replay_layers is not None:
+            self.decoder_replay_layer_name = f"{prefix}.decoder_replay" if prefix else "decoder_replay"
+            static_forward_context = vllm_config.compilation_config.static_forward_context
+            if self.decoder_replay_layer_name in static_forward_context:
+                raise ValueError(f"Duplicate decoder replay layer name: {self.decoder_replay_layer_name}")
+            # Custom ops resolve the mutable per-forward replay state through
+            # ForwardContext, following the same pattern as Ascend DSA ops.
+            static_forward_context[self.decoder_replay_layer_name] = self.decoder_replay_layers
 
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):
         return IntermediateTensors(
@@ -1577,9 +1596,20 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         aux_hidden_states = []
         for layer in self.layers:
             if self.decoder_replay_layers is not None and layer.layer_idx == self.decoder_replay_start:
-                hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
-                    hidden_states, pre_mix, positions, input_ids
+                assert self.decoder_replay_layer_name is not None
+                num_late_aux = sum(
+                    self.decoder_replay_start < layer_idx <= self.end_layer
+                    for layer_idx in self.aux_hidden_state_layers
                 )
+                replay_outputs = torch.ops.vllm.dsv41_decoder_replay_forward(
+                    hidden_states,
+                    pre_mix,
+                    positions,
+                    input_ids,
+                    num_late_aux,
+                    self.decoder_replay_layer_name,
+                )
+                hidden_states, pre_mix, *late_aux = replay_outputs
                 aux_hidden_states.extend(late_aux)
                 last_layer = self.layers[self.end_layer - 1]
                 break
@@ -1932,12 +1962,9 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                if enable_dsa_cp():
-                    param.data.copy_(loaded_weight)
-                else:
-                    # Handle attention sinks (distributed across ranks)
-                    narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                    param.data.copy_(narrow_weight)
+                # Handle attention sinks (distributed across ranks)
+                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+                param.data.copy_(narrow_weight)
                 loaded_params.add(name)
                 continue
 
