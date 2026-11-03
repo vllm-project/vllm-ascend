@@ -292,7 +292,6 @@ export HCCL_SOCKET_IFNAME="eth0"
 export no_proxy="localhost,127.0.0.1,192.168.0.1"
 export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
 export LD_LIBRARY_PATH="/usr/local/python3.12.16/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
-mkdir -p "/tmp/qwen38-a3-pd" "/tmp/qwen38-a3-pd/profiling/prefill" "/tmp/qwen38-a3-pd/profiling/decode"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
 export HCCL_BUFFSIZE=4096
@@ -343,7 +342,6 @@ export HCCL_SOCKET_IFNAME="eth0"
 export no_proxy="localhost,127.0.0.1,192.168.0.1"
 export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
 export LD_LIBRARY_PATH="/usr/local/python3.12.16/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
-mkdir -p "/tmp/qwen38-a3-pd" "/tmp/qwen38-a3-pd/profiling/prefill" "/tmp/qwen38-a3-pd/profiling/decode"
 export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
 export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
 export HCCL_BUFFSIZE=512
