@@ -1,0 +1,5 @@
+# Set the PR number and rename this file to <PR number>.yaml when opening the PR.
+pr: null
+entries:
+  - category: bugfix
+    text: Fixed standalone compiled modules failing when called without a forward context, including DFlash2 candidate scoring with piecewise graph configurations. Device operations still participate in an active outer ACL graph capture.

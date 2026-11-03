@@ -263,9 +263,11 @@ def test_p_eagle_acceptance(
 
 @pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [7])
+@pytest.mark.parametrize("cudagraph_mode", ["FULL_DECODE_ONLY", "FULL_AND_PIECEWISE"])
 def test_dflash2_v2_acceptance(
     method: str,
     num_speculative_tokens: int,
+    cudagraph_mode: str,
 ):
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     main_model_name = DFLASH2_MODELS[method]["main"]
@@ -279,6 +281,7 @@ def test_dflash2_v2_acceptance(
         temperature=0,
         ignore_eos=False,
         max_tokens=512,
+        seed=42,
     )
 
     prompts = [
@@ -304,12 +307,11 @@ def test_dflash2_v2_acceptance(
         "enforce_eager": False,
     }
 
-    # With max_num_seqs=1, the parallel draft has K + 1 query tokens.
-    # One capture size covers that request without adding padded requests.
+    # Capture both request counts used by the 1 -> 2 -> 1 reuse sequence.
     compilation_config = CompilationConfig(
         mode=CompilationMode.VLLM_COMPILE,
-        cudagraph_mode="FULL_DECODE_ONLY",
-        cudagraph_capture_sizes=[num_speculative_tokens + 1],
+        cudagraph_mode=cudagraph_mode,
+        cudagraph_capture_sizes=[batch_size * (num_speculative_tokens + 1) for batch_size in (1, 2)],
     )
 
     with VllmRunner(
@@ -317,7 +319,7 @@ def test_dflash2_v2_acceptance(
         max_model_len=2048,
         disable_log_stats=False,
         tensor_parallel_size=2,
-        max_num_seqs=1,
+        max_num_seqs=2,
         distributed_executor_backend="mp",
         gpu_memory_utilization=0.9,
         speculative_config=speculative_config,
@@ -328,6 +330,35 @@ def test_dflash2_v2_acceptance(
         assert llm.model.llm_engine.vllm_config.use_v2_model_runner
         outputs = llm.model.generate(prompts, sampling_params)
         metrics = llm.model.get_metrics()
+
+        # Keep the acceptance baseline above unchanged while exercising both
+        # captured buckets and released request slots with short follow-ups.
+        reuse_sampling_params = SamplingParams(temperature=0, ignore_eos=False, max_tokens=48, seed=42)
+        reuse_prompts = [
+            prompts[0],
+            tokenizer.apply_chat_template(
+                [{"role": "user", "content": "Write a short introduction to the city of Paris."}],
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            ),
+        ]
+        batched_outputs = llm.model.generate(reuse_prompts, reuse_sampling_params)
+        assert len(batched_outputs) == 2
+        for output in batched_outputs:
+            assert output.finished
+            completion = output.outputs[0]
+            assert 0 < len(completion.token_ids) <= reuse_sampling_params.max_tokens
+            assert len(completion.token_ids) == reuse_sampling_params.max_tokens or completion.finish_reason == "stop"
+
+        replay_outputs = llm.model.generate(prompts, reuse_sampling_params)
+        assert len(replay_outputs) == 1
+        assert replay_outputs[0].finished
+        # Compare the same batch shape before and after reuse: greedy output
+        # need not be bitwise invariant across different batch sizes.
+        expected_tokens = outputs[0].outputs[0].token_ids[: reuse_sampling_params.max_tokens]
+        assert expected_tokens
+        assert replay_outputs[0].outputs[0].token_ids == expected_tokens
 
     for output in outputs:
         prompt = output.prompt

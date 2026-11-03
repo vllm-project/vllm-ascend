@@ -370,12 +370,17 @@ A few important things to consider when using DFlash2 draft models:
     ```
 
 2. **Model runner V2 draft graphs**: DFlash2 uses full ACL graphs when the
-   target enables `FULL_DECODE_ONLY` and the draft's `enforce_eager` is unset
-   or false. The draft backbone and candidate selector retain the configured
-   Dynamo compilation path. Candidate scoring uses its own request-shaped
-   forward context and compilation cache namespace, while the outer draft ACL
-   graph captures the compiled operations, candidate TopK, path sampling, and
-   proposal-cache updates. Set `"enforce_eager": true`
+   target enables `FULL_DECODE_ONLY` or `FULL_AND_PIECEWISE` and the draft's
+   `enforce_eager` is unset or false. The draft backbone and candidate selector
+   retain the configured Dynamo compilation path, with a separate compilation
+   cache namespace for the selector. Candidate scoring runs without a local
+   forward context. Such calls bypass any internal `ACLGraphWrapper`'s own
+   capture/replay, while device operations still participate in an active outer
+   draft ACL capture, together with candidate TopK, path sampling, and
+   proposal-cache updates. Pure `FULL_DECODE_ONLY` skips the selector's internal
+   graph wrapper; configurations containing piecewise graphs can install it.
+   Calls with a forward context retain the existing graph-mode dispatch. No
+   additional configuration flag is needed. Set `"enforce_eager": true`
    to compare against eager drafting. Validate graph/eager equivalence and
    request reuse on the intended NPU configuration before deployment.
 
@@ -389,7 +394,8 @@ A few important things to consider when using DFlash2 draft models:
    restriction on draft tokens.
 
    The model-level acceptance test exercises DFlash2 draft graphs using
-   `VLLM_COMPILE` with `FULL_DECODE_ONLY` on two NPUs:
+   `VLLM_COMPILE` with both `FULL_DECODE_ONLY` and `FULL_AND_PIECEWISE` on two
+   NPUs, including request reuse across batch sizes `1 -> 2 -> 1`:
 
    ```shell
    pytest -sv tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py -k test_dflash2_v2_acceptance
