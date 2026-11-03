@@ -99,7 +99,6 @@ def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
     assert coordinator.single_type_managers[-1]._record_new_block_ids
 
 
-@pytest.mark.skipif(not hasattr(SlidingWindowMLASpec, "bounded_replay"), reason="vLLM lacks SWA bounded replay")
 @pytest.mark.parametrize("group_count", [1, 2])
 @pytest.mark.parametrize("wrapped", [False, True])
 def test_swa_only_replay_keeps_private_blocks_without_prefix_hits(group_count, wrapped):
