@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import get_pcp_group
+from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
@@ -1002,6 +1002,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.rotary_emb = kwargs["rotary_emb"]
         self.fused_qkv_a_proj = kwargs.get("fused_qkv_a_proj")
         self.q_proj = kwargs["q_proj"] if self.q_lora_rank is None else kwargs["q_b_proj"]
+        self.dcp_q_replicate_enabled = getattr(self.q_proj, "qrep_active", False) is True
+        self.q_projection_heads = num_heads * (self.q_proj.group_size if self.dcp_q_replicate_enabled else 1)
         self.kv_b_proj = kwargs["kv_b_proj"]
         self.o_proj = kwargs["o_proj"]
         self.g_proj = kwargs.get("g_proj")
@@ -1251,7 +1253,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _q_proj_and_k_up_proj(self, x):
         q_nope, q_pe = (
             self.q_proj(x)[0]
-            .view(-1, self.num_heads, self.qk_head_dim)
+            .view(-1, self.q_projection_heads, self.qk_head_dim)
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
 
@@ -1309,6 +1311,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         # raise on a shape mismatch.
         w_uv = W_UV.transpose(0, 1).contiguous()  # (L, N, V) -> (N, L, V)
         w_uk_t = W_UK.permute(1, 2, 0).contiguous()  # (L, N, P) -> (N, P, L)
+        if self.dcp_q_replicate_enabled:
+            w_uk_t = get_dcp_group().all_gather(w_uk_t, dim=0)
         if vllm_version_is("0.32.0"):
             replace_parameter(self, "W_UV", w_uv, prefer_copy=True)
             replace_parameter(self, "W_UK_T", w_uk_t, prefer_copy=True)
@@ -2448,9 +2452,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_result = None
         assert self.layer_name is not None
 
+        # PROLOG_V3 writes decode KV before its prefill sub-branch. Consume the
+        # connector load once before either sub-branch can access the cache.
+        wait_for_kv_layer_from_connector(self.layer_name)
         if self.layerwise_kv_cache_hook is not None:
-            if getattr(self.layerwise_kv_cache_hook, "layerwise", False):
-                wait_for_kv_layer_from_connector(self.layer_name)
             self.layerwise_kv_cache_hook.wait_for_layer(self.layer_name)
 
         if num_decode_tokens > 0:
@@ -2506,8 +2511,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         if num_actual_tokens > num_decode_tokens:
             if attn_metadata.prefill is None or attn_metadata.prefill.cos is None or attn_metadata.prefill.sin is None:
                 raise RuntimeError("PROLOG_V3 prefill requires prefill cos/sin tables.")
-            if self.layerwise_kv_cache_hook is None or not getattr(self.layerwise_kv_cache_hook, "layerwise", False):
-                wait_for_kv_layer_from_connector(self.layer_name)
             prefill_slots = attn_metadata.slot_mapping[num_decode_tokens:num_actual_tokens]
             num_prefill_tokens = num_actual_tokens - num_decode_tokens
             # Metadata can include graph padding beyond the actual prefill rows.
@@ -2927,6 +2930,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                 graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
+        # Release subsequent layer prefetches at the decode attention boundary,
+        # just as prefill and external FlashMLA do.
+        record_attention_compute_start()
         if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
 
@@ -3169,7 +3175,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_prefill_kv_tokens = self._get_num_prefill_kv_tokens(attn_metadata)
         prefill_kv_no_split = kv_no_split[num_decode_tokens : num_decode_tokens + num_prefill_kv_tokens]
         prefill_q_c = q_c[num_decode_tokens:num_actual_tokens]
-        prefill_q = self.q_proj(prefill_q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
+        prefill_q = self.q_proj(prefill_q_c)[0].view(-1, self.q_projection_heads, self.qk_head_dim)
+        if self.dcp_q_replicate_enabled:
+            prefill_q = self.q_proj._local_view(prefill_q)
         prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
         prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
         cos = attn_metadata.prefill.cos
@@ -3325,8 +3333,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         # replicated draft decode keeps its local slots and per-path writes.
         writes_sharded_pcp_kv = self.is_pcp_decode_sharded and attn_metadata.uses_pcp_sharded_layout
         should_write_kv_cache = has_decode or has_prefill or writes_sharded_pcp_kv
-        if has_prefill:
-            wait_for_kv_layer_from_connector(layer_name)
+        # Keep Q/KV projections above overlapped with connector loads. Short
+        # prefills can be classified as decode and still need this layer's KV.
+        wait_for_kv_layer_from_connector(layer_name)
         if self.layerwise_kv_cache_hook is not None and should_write_kv_cache:
             # Q/KV projections above overlap the full-layer KV cache broadcast.
             # Wait for the broadcast before reading or updating the cache.
@@ -3425,6 +3434,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             gate = self.g_proj(hidden_states.contiguous())[0]
 
         # MLA Preprocess
+        preprocess_gate = None
         decode_requires_current_kv = self._decode_requires_current_kv(attn_metadata)
         prefill_requires_current_kv = self._prefill_requires_current_kv(attn_metadata)
         dcp_current_kv_buffers = getattr(self, "_dcp_current_kv_buffers", None)
@@ -3463,7 +3473,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 hidden_states, kv_cache, attn_metadata
             )
         elif self._uses_strided_kv_adapter() and any(not cache.is_contiguous() for cache in kv_cache):
-            decode_preprocess_res, prefill_preprocess_res, gate = self._mla_preprocess(
+            decode_preprocess_res, prefill_preprocess_res, preprocess_gate = self._mla_preprocess(
                 layer_name, hidden_states, kv_cache, attn_metadata
             )
         elif (
@@ -3477,15 +3487,20 @@ class AscendMLAImpl(MLAAttentionImpl):
             and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
             and attn_metadata.num_prefills == 0
         ):
+            wait_for_kv_layer_from_connector(layer_name)
             if self.layerwise_kv_cache_hook is not None:
                 self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
             decode_preprocess_res, prefill_preprocess_res = self.mla_preprocess_only_decode(
                 hidden_states, kv_cache, attn_metadata
             )
         else:
-            decode_preprocess_res, prefill_preprocess_res, gate = self._mla_preprocess(
+            decode_preprocess_res, prefill_preprocess_res, preprocess_gate = self._mla_preprocess(
                 layer_name, hidden_states, kv_cache, attn_metadata
             )
+        # The plain QKV-A layout returns no gate. Keep the standalone g_proj
+        # result unless preprocessing produced a fused output gate.
+        if preprocess_gate is not None:
+            gate = preprocess_gate
         if decode_preprocess_res is not None:
             # MLA Preprocess for decoding
             if attn_metadata.external_flashmla is not None:

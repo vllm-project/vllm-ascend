@@ -359,7 +359,7 @@ def _stored_query(tensor, case):
     return tensor
 
 
-def _make_cpu_case(case, dtype, rope_dim, *, uniform=False, value_sign=1):
+def _make_cpu_case(case, dtype, rope_dim, *, uniform=False, value_sign=1, page_size=PAGE_SIZE):
     generator = torch.Generator().manual_seed(20260915)
     batch = len(case.query_lengths)
     query_seq = max(case.query_lengths)
@@ -397,19 +397,19 @@ def _make_cpu_case(case, dtype, rope_dim, *, uniform=False, value_sign=1):
 
     block_table = None
     if case.kv_layout == "PA_BSND":
-        pages_per_sequence = tuple(math.ceil(length / PAGE_SIZE) for length in case.kv_lengths)
+        pages_per_sequence = tuple(math.ceil(length / page_size) for length in case.kv_lengths)
         page_count = sum(pages_per_sequence)
         physical_pages = torch.randperm(page_count, generator=generator, dtype=torch.int32)
-        block_table = torch.full((batch, math.ceil(kv_seq / PAGE_SIZE)), -1, dtype=torch.int32)
-        packed_storage = torch.zeros((page_count, PAGE_SIZE, 1, packed.shape[-1]), dtype=torch.int8)
-        value_storage = torch.zeros((page_count, PAGE_SIZE, 1, NOPE_DIM), dtype=torch.int8)
+        block_table = torch.full((batch, math.ceil(kv_seq / page_size)), -1, dtype=torch.int32)
+        packed_storage = torch.zeros((page_count, page_size, 1, packed.shape[-1]), dtype=torch.int8)
+        value_storage = torch.zeros((page_count, page_size, 1, NOPE_DIM), dtype=torch.int8)
         page_index = 0
         for batch_index, pages in enumerate(pages_per_sequence):
             for logical_page in range(pages):
                 physical_page = int(physical_pages[page_index])
                 block_table[batch_index, logical_page] = physical_page
-                begin = logical_page * PAGE_SIZE
-                end = min(begin + PAGE_SIZE, case.kv_lengths[batch_index])
+                begin = logical_page * page_size
+                end = min(begin + page_size, case.kv_lengths[batch_index])
                 packed_storage[physical_page, : end - begin] = packed[batch_index, begin:end]
                 value_storage[physical_page, : end - begin] = key[batch_index, begin:end]
                 page_index += 1
@@ -586,6 +586,42 @@ def test_rope_uniform_attention_and_lse(case, dtype, rope_dim, return_lse, recor
     record_property("attention_matches_mean_bitwise", torch.equal(actual[0].cpu(), expected))
 
 
+def _check_a5_uniform_case(case, rope_dim, *, page_size=PAGE_SIZE):
+    cpu = _make_cpu_case(case, torch.bfloat16, rope_dim, uniform=True, page_size=page_size)
+    expected, counts = _uniform_reference(cpu, case)
+    inputs = _to_npu(cpu)
+    actual = _run_custom_op(inputs, return_softmax_lse=False)
+    _check_outputs(actual, inputs, case, return_lse=False)
+    _check_uniform(actual, expected, counts, return_lse=False)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A5, reason="Requires the A5 address preprocessing path."
+)
+@pytest.mark.parametrize("sparse_count", (127, 128, 129, 257))
+@pytest.mark.parametrize("rope_dim", (0, ROPE_DIM))
+@torch.inference_mode()
+def test_a5_address_precompute_sparse_count_boundaries(sparse_count, rope_dim):
+    case = RopeCase("sparse_count_boundary", "TND", "PA_BSND", 8, 1, sparse_count, (1,), (521,))
+    _check_a5_uniform_case(case, rope_dim)
+
+
+@pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A5, reason="Requires the A5 split-G paths.")
+@pytest.mark.parametrize("rope_dim", (0, ROPE_DIM))
+@torch.inference_mode()
+def test_a5_split_g_address_paths(rope_dim):
+    case = RopeCase("split_g", "TND", "PA_BSND", 128, 1, 64, (1,), (257,))
+    _check_a5_uniform_case(case, rope_dim)
+
+
+@pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A5, reason="Requires the A5 scalar gather fallback.")
+@pytest.mark.parametrize("rope_dim", (0, ROPE_DIM))
+@torch.inference_mode()
+def test_a5_address_precompute_non_power_of_two_page_fallback(rope_dim):
+    case = RopeCase("scalar_fallback", "TND", "PA_BSND", 8, 1, 64, (1,), (101,))
+    _check_a5_uniform_case(case, rope_dim, page_size=48)
+
+
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
     reason="C8 rope=0 custom-kernel tests require an A2 or A3 hardware profile.",
@@ -689,13 +725,11 @@ def test_rope0_python_quant_cache_attention_pipeline(dtype):
     packed = torch.cat((quantized.flatten(0, -2), scale_bytes.cpu().flatten(0, -2)), dim=-1)
     expected_cache[0, :valid_kv_tokens, 0] = packed[:valid_kv_tokens]
     slots = torch.cat((torch.arange(valid_kv_tokens), torch.tensor([-1]))).npu()
-    AscendSFAImpl._store_parallel_kv(impl, k_rope, k_nope, scale_bytes, None, [], (cache,), slots, metadata, False)
+    AscendSFAImpl._store_parallel_kv(impl, k_rope, k_nope, scale_bytes, (cache,), slots, metadata)
     # This includes a valid slot zero together with an invalid slot. Every
     # unwritten byte must retain its sentinel, including the end of the cache.
     assert torch.equal(cache.cpu(), expected_cache)
-    AscendSFAImpl._store_parallel_kv(
-        impl, k_rope, k_nope, scale_bytes, None, [], (cache,), torch.full_like(slots, -1), metadata, False
-    )
+    AscendSFAImpl._store_parallel_kv(impl, k_rope, k_nope, scale_bytes, (cache,), torch.full_like(slots, -1), metadata)
     assert torch.equal(cache.cpu(), expected_cache)
 
     query = torch.zeros((query_capacity, heads, NOPE_DIM), dtype=dtype)
@@ -728,3 +762,69 @@ def test_rope0_python_quant_cache_attention_pipeline(dtype):
     assert torch.count_nonzero(actual[valid_query_tokens:]) == 0
     atol, rtol = (BF16_ATOL, BF16_RTOL) if dtype == torch.bfloat16 else (FP16_ATOL, FP16_RTOL)
     torch.testing.assert_close(actual.float(), expected.float(), atol=atol, rtol=rtol)
+
+
+def _make_tnd_tail_inputs(capacity, actual=36, nseq=6, per_seq=6, seed=1006):
+    """TND NoPE (rope_dim=0) inputs: `capacity` query rows, only `actual` valid."""
+    generator = torch.Generator().manual_seed(seed)
+    heads, dim, tile, topk = 64, 512, 128, 1024
+    block_size, block_num = 128, 32
+    q = torch.randn((capacity, heads, dim), generator=generator, dtype=torch.float32).to(torch.bfloat16)
+    q[actual:] = 0
+    q = q.npu()
+    vals = torch.randint(-5, 10, (block_num, block_size, 1, dim), generator=generator, dtype=torch.int8)
+    scales = torch.rand((block_num, block_size, 1, dim // tile), generator=generator, dtype=torch.float32).uniform_(
+        0.1, 1.0
+    )
+    kv = torch.cat((vals, scales.contiguous().view(torch.int8)), dim=-1).contiguous().npu()
+    idx = torch.randint(0, block_num * block_size, (capacity, 1, topk), generator=generator, dtype=torch.int32)
+    idx[actual:] = 0
+    idx = idx.npu()
+    bt = torch.arange(block_num, dtype=torch.int32).reshape(1, block_num).expand(nseq, -1).contiguous().npu()
+    aq = torch.tensor([per_seq * (i + 1) for i in range(nseq)], dtype=torch.int32).npu()
+    akv = torch.full((nseq,), block_num * block_size, dtype=torch.int32).npu()
+    return q, kv, idx, bt, aq, akv
+
+
+@torch.inference_mode()
+def test_tnd_output_tail_zeroed():
+    """TND capacity tail [actual, T) must be zeroed by the kernel, not stale memory.
+
+    Regression: a prior larger-capacity call leaves workspace residue that the
+    unfixed kernel exposed as NaN in the padding rows.
+    """
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        bootstrap_custom_op_env()
+        import_module("vllm_ascend.vllm_ascend_C")
+    dim, actual = 512, 36
+
+    def call(capacity):
+        q, kv, idx, bt, aq, akv = _make_tnd_tail_inputs(capacity)
+        out = torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
+            query=q,
+            key=kv,
+            value=kv,
+            sparse_indices=idx,
+            scale_value=dim**-0.5,
+            sparse_block_size=1,
+            block_table=bt,
+            actual_seq_lengths_query=aq,
+            actual_seq_lengths_kv=akv,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=3,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=128,
+            key_quant_mode=2,
+            value_quant_mode=2,
+            rope_head_dim=0,
+            return_softmax_lse=False,
+        )
+        return out[0] if isinstance(out, tuple) else out
+
+    call(128)  # leave residue from a larger-capacity call
+    out = call(64)
+    valid, tail = out[:actual].cpu().float(), out[actual:].cpu().float()
+    assert torch.isfinite(valid).all(), "valid rows must stay finite"
+    assert (tail == 0).all(), "capacity tail rows must be zeroed by the kernel"

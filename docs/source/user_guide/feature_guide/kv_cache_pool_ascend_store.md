@@ -42,7 +42,7 @@ KV Cache supports the following three external storage backends, choose the stor
 
     | Category | Constraints |
     | :--- | :--- |
-    | Software Dependencies | • Requires `memfabric-hybrid` and `memcache-hybrid` (SSD Cache needs `memcache_hybrid >= 1.2.0`).<br>• Layerwise support requires `memcache_hybrid >= 1.3.0`.<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5. |
+    | Software Dependencies | • Requires `memfabric-hybrid >= 1.3.0` and `memcache-hybrid >= 1.3.0`.<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5. |
     | Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios. [Separated deployment of MemCache and vLLM](#Memcache-and-vLLM-Separated-Deployment) is supported only on A3. |
 
 === "Yuanrong backend"
@@ -134,9 +134,24 @@ This bulk fast path uses physical-page-major object contents instead of the prev
     | `prefer_alloc_in_same_node` | bool | true | No | true / false | Whether to prefer allocating KV on the same node. |
     | `enable_ssd_offload` | bool | false | No | true / false | Whether to enable SSD offload. Environment variables are not supported. |
     | `ssd_offload_path` | str | No default | Required when SSD offload enabled | Absolute path | Absolute path for SSD offload data storage (for example, /nvme/mooncake_offload). The directory must exist and be writable by the vLLM process; create it before startup (`mkdir -p <path>`). Relative paths, symlinks, and paths containing `..` are rejected. |
+    | `enable_ssd_prefetch` | bool | false | No | true / false | Master switch for SSD-to-DRAM prefetch on exist queries. Implemented by [Mooncake PR 4272](https://github.com/kvcache-ai/Mooncake/pull/4272); the idea comes from [RFC 2213](https://github.com/kvcache-ai/Mooncake/issues/2213). When true, `batch_is_exist` passes `ExistOptions(prefetch_to_memory=True)` so Mooncake promotes SSD-only objects into DRAM during the cache probe. Requires `enable_ssd_offload=true` and a Mooncake build that exposes `ExistOptions`. If `ExistOptions` is missing, prefetch is disabled and a warning is logged. |
+    | `ssd_prefetch_cooldown_sec` | int | omitted | No | Integer seconds; 0 disables | DRAM-pressure backoff. After promotion fails with `NO_AVAILABLE_HANDLE`, prefetch pauses for this many seconds so eviction and offload can free DRAM. Mooncake's built-in default is 5 when this field is omitted. vLLM-Ascend forwards it only when `mooncake.json` sets it. |
+    | `ssd_prefetch_dedup_ttl_sec` | int | omitted | No | Integer seconds; 0 disables | Per-key trigger dedup TTL. The same key is prefetched at most once per this period, which suppresses duplicate probes across TP ranks. Mooncake's built-in default is 30 when this field is omitted. Forwarded only when set. |
     | `tenant_id` | str | default | No | String | Mooncake tenant namespace. Missing, `null`, empty, or whitespace-only values use `default`; surrounding whitespace is removed. All Prefill, Decode, scheduler, and replica instances that share KV entries must use the same tenant ID. |
 
     </details>
+
+    SSD offload and SSD prefetch are separate. After `enable_ssd_offload` is true, add the following fields to the same `mooncake.json` to prefetch SSD-only objects back into DRAM on exist. Semantics match [Mooncake SSD prefetch](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/store/ssd-prefetch.md) ([Mooncake PR 4272](https://github.com/kvcache-ai/Mooncake/pull/4272); concept from [RFC 2213](https://github.com/kvcache-ai/Mooncake/issues/2213)):
+
+    ```json
+    {
+        "enable_ssd_prefetch": true,
+        "ssd_prefetch_cooldown_sec": 5,
+        "ssd_prefetch_dedup_ttl_sec": 30
+    }
+    ```
+
+    `ssd_prefetch_cooldown_sec` and `ssd_prefetch_dedup_ttl_sec` are forwarded to `MooncakeDistributedStore.setup()` only when the field is present in `mooncake.json`. Omitting a field leaves Mooncake's default (5 seconds and 30 seconds). When `mooncake.json` sets any prefetch knob, the connector uses the config-dict form of `setup()`; that overload cannot take an engine, so the store creates its own TransferEngine instead of sharing the global one. On a Mooncake build without `ExistOptions`, the knobs are not passed and prefetch stays off.
 
 2. Start `mooncake_master` (only needs to run on one node):
 
@@ -628,15 +643,6 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
 ### Configuration Examples
 
-<details markdown="1">
-<summary>MemCache DP Initialization Synchronization</summary>
-
-For the `memcache` backend, `memcache_dp_init_barrier` defaults to `true`. After successful store initialization, workers in a DP group synchronize through the CPU process group before continuing to NPU work such as graph capture. This keeps earlier workers from proceeding while peers are still initializing MemCache channels. DP size 1, metadata-only scheduler clients, and stores using lazy initialization skip this synchronization.
-
-Set the same value on every rank in the DP group. With `MultiConnector`, place this boolean in the `AscendStoreConnector` child's `kv_connector_extra_config`. To disable it, add `"memcache_dp_init_barrier": false` alongside `"backend": "memcache"`. No environment variable is needed. Lazy initialization can be triggered independently by requests on each DP rank, so it never enters the DP barrier. If a backend cannot honor a lazy initialization request and initializes eagerly instead, the startup barrier still applies.
-
-</details>
-
 #### Environment Preparation
 
 1. Verify that `hccn.conf` exists in the environment. When using Docker, mount it into the container:
@@ -729,9 +735,11 @@ Set the same value on every rank in the DP group. With `MultiConnector`, place t
 
 #### Step 2: Software Installation
 
+The MemCache backend requires both `memcache-hybrid >= 1.3.0` and `memfabric-hybrid >= 1.3.0`.
+
 ```shell
-pip install memfabric-hybrid
-pip install memcache-hybrid
+pip install "memfabric-hybrid>=1.3.0"
+pip install "memcache-hybrid>=1.3.0"
 ```
 
 #### Step 3: Configure Memcache Config File

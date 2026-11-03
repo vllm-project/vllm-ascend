@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 import torch
 import torch_npu
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 from vllm_ascend.device import device_op
@@ -217,33 +216,6 @@ def test_fp8_cache_dispatch_preserves_bytes(monkeypatch, family, dtype, layout):
     torch.testing.assert_close(backing.view(torch.uint8), expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("tokens", [8, 2049])
-@pytest.mark.parametrize("state", list(AscendAttentionState))
-@pytest.mark.parametrize("producer,consumer", [(False, False), (True, False), (False, True), (True, True)])
-def test_main_cache_write_delegates_with_own_slots(tokens, state, producer, consumer):
-    impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
-    impl.qk_rope_head_dim = 128
-    impl.enable_sparse_sfa_c8 = True
-    impl.enable_sparse_sfa_turboquant = False
-    impl.is_kv_producer, impl.is_kv_consumer = producer, consumer
-    key = torch.empty(2056, 656, dtype=torch.int8)
-    cache = torch.empty(32, 128, 1, 656, dtype=torch.int8)
-    slots = torch.arange(2056, dtype=torch.int32) + 512
-    slots[tokens:] = -1
-    meta = metadata(num_actual_tokens=tokens, attn_state=state)
-    with (
-        patch("vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.scatter_cache", return_value=None) as store,
-        patch("torch_npu.npu_scatter_nd_update_", create=True) as scatter,
-    ):
-        impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta, False)
-    store.assert_called_once()
-    target, indices, updates = store.call_args.args
-    assert target.data_ptr() == cache.data_ptr() and target.shape == (32 * 128, 656)
-    assert indices.data_ptr() == slots.data_ptr() and indices.shape == (tokens, 1)
-    assert updates.data_ptr() == key.data_ptr() and updates.shape == (tokens, 656)
-    scatter.assert_not_called()
-
-
 @pytest.mark.parametrize("tokens", [1, 3])
 @pytest.mark.parametrize("fast_available", [False, True])
 def test_native_main_c8_cache_packs_all_rows_and_preserves_padding(monkeypatch, tokens, fast_available):
@@ -273,9 +245,7 @@ def test_native_main_c8_cache_packs_all_rows_and_preserves_padding(monkeypatch, 
     monkeypatch.setattr("vllm_ascend.attention.sfa_v1.DeviceOperator", device_op.BaseDeviceAdaptor)
     monkeypatch.setattr(device_op.BaseDeviceAdaptor, "_scatter_cache", fast)
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", generic, raising=False)
-    result = impl._store_parallel_kv(
-        k_pe, k_nope, scale, None, [], (cache,), slots, metadata(num_actual_tokens=tokens), False
-    )
+    result = impl._store_parallel_kv(k_pe, k_nope, scale, (cache,), slots, metadata(num_actual_tokens=tokens))
     assert result[0] is k_pe and result[1] is k_nope
     reference = torch.full_like(cache, -7)
     reference.view(-1, 656)[slots[:tokens].long()] = packed[:tokens]

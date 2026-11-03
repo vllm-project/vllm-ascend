@@ -39,8 +39,11 @@ from zmq.error import ZMQError
 from zmq.sugar.context import Context
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import get_zmq_rpc_path_lookup
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
@@ -49,7 +52,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
     LookupKeyClient,
-    get_zmq_rpc_path_lookup,
 )
 
 
@@ -69,7 +71,7 @@ def _patch_pool_scheduler_importlib():
 
 @pytest.mark.parametrize("dspark", [False, True])
 def test_joint_prefix_keys_keep_target_keys_and_require_every_final_pp_draft_replica(dspark):
-    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
     target_keys = ["target-pp0-rank0", "target-pp1-rank0"]
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=target_keys.copy()))
     scheduler.tp_size, scheduler.put_step = 4, 4
@@ -94,7 +96,7 @@ def test_joint_prefix_keys_keep_target_keys_and_require_every_final_pp_draft_rep
 
 @pytest.mark.parametrize("draft_only", [False, True])
 def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_target_keys(draft_only):
-    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=["target-group3"]))
     scheduler.tp_size, scheduler.put_step = 4, 4
     scheduler.num_speculative_blocks_by_group = {}
@@ -121,7 +123,7 @@ def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_
 
 @pytest.mark.parametrize("mode", ["dspark", "reuse"])
 def test_prefix_lookup_rechecks_after_save_and_eviction(mode):
-    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
     # A fresh key list per call: _make_layerwise_hit_check_keys extends the
     # returned list in place when dspark joint keys are active, so a shared
     # return_value would accumulate draft keys across lookups.
@@ -237,7 +239,7 @@ def test_mooncake_layerwise_accepts_aligned_recurrent_state(num_speculative_bloc
             )
         )
     kv_cache_config = MagicMock(kv_cache_groups=groups)
-    scheduler = KVPoolScheduler(config, use_layerwise=True, kv_cache_config=kv_cache_config)
+    scheduler = create_kv_pool_scheduler(config, use_layerwise=True, kv_cache_config=kv_cache_config)
     assert scheduler.num_speculative_blocks_by_group == (
         {} if num_speculative_blocks is None else {1: num_speculative_blocks}
     )
@@ -258,7 +260,7 @@ class TestGetZmqRpcPathLookup(unittest.TestCase):
 
     def test_independent_dp_lookup_servers_bind_distinct_paths(self):
         """Two dense engines with compute DP rank zero need separate RPC servers."""
-        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler"
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key"
         with tempfile.TemporaryDirectory(prefix="kv-dp-") as rpc_dir, ExitStack() as stack:
             stack.enter_context(patch(f"{module}.envs.VLLM_RPC_BASE_PATH", rpc_dir))
             context = stack.enter_context(Context())
@@ -279,7 +281,7 @@ class TestKVPoolScheduler(unittest.TestCase):
     def _make_config(self, kv_role="kv_producer", extra_config=None, block_size=16):
         return make_config(kv_role, extra_config, block_size)
 
-    def test_pcp_query_keys_and_worker_count(self):
+    def test_pcp_cache_geometry_and_worker_count(self):
         for pcp_size, dcp_size in ((1, 1), (2, 1), (4, 1), (1, 2)):
             with self.subTest(pcp_size=pcp_size, dcp_size=dcp_size):
                 config = self._make_config()
@@ -292,13 +294,21 @@ class TestKVPoolScheduler(unittest.TestCase):
                 self.assertEqual(scheduler.grouped_block_size, [16 * dcp_size])
                 self.assertEqual(scheduler.hash_block_size, 16 * dcp_size)
                 self.assertEqual(scheduler._expected_worker_count, 2 * pcp_size)
-                keys = scheduler._generate_store_query_keys([b"h0"], False, 0)[0]
-                expected = [
-                    f"llama-7b@dcp:{dcp}@head_or_tp_rank:{tp}@pp_rank:0@group:0@cache_role:kv@cache_family:default@6830"
-                    for dcp in range(dcp_size)
-                    for tp in range(2)
-                ]
-                self.assertEqual(keys, expected)
+
+    def test_layerwise_rejects_unsupported_data_plane_before_backend_init(self):
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store"
+        for backend_name in ("yuanrong", "unknown"):
+            for data_plane in (None, "unsupported"):
+                with self.subTest(backend=backend_name, data_plane=data_plane):
+                    config = self._make_config(extra_config={"backend": backend_name})
+                    backend = SimpleNamespace(layerwise_data_plane=data_plane)
+                    with (
+                        patch(f"{module}.layerwise.pool_scheduler.get_backend_class", return_value=backend),
+                        patch.object(KVPoolScheduler, "__init__", return_value=None) as base_init,
+                        self.assertRaisesRegex(ValueError, "does not support layerwise KV pooling"),
+                    ):
+                        create_kv_pool_scheduler(config, use_layerwise=True)
+                    base_init.assert_not_called()
 
     def test_mooncake_layerwise_rejects_tp_mismatch(self):
         config = self._make_config(
@@ -309,7 +319,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         config.model_config.get_total_num_kv_heads.return_value = 8
 
         with self.assertRaisesRegex(ValueError, "TP mismatch"):
-            KVPoolScheduler(config, use_layerwise=True)
+            create_kv_pool_scheduler(config, use_layerwise=True)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_early_returns(self, mock_client_cls):
@@ -377,7 +387,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         config = self._make_config(extra_config={"backend": "mooncake", "use_layerwise": True})
         config.parallel_config.tensor_parallel_size = 2
         config.model_config.get_total_num_kv_heads.return_value = 2
-        scheduler = KVPoolScheduler(config, use_layerwise=True)
+        scheduler = create_kv_pool_scheduler(config, use_layerwise=True)
         scheduler.store_scheduler.batch_is_readable.return_value = [True, True, True, False, True, True]
         request = MagicMock(request_id="r1", block_hashes=[b"h0", b"h1", b"h2"])
 
@@ -486,7 +496,7 @@ class TestKVPoolScheduler(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_layerwise_mtp_hit_uses_safe_load_extent(self, mock_client_cls):
-        scheduler = KVPoolScheduler(
+        scheduler = create_kv_pool_scheduler(
             self._make_config(block_size=16, extra_config={"backend": "memcache"}),
             use_layerwise=True,
         )
@@ -513,7 +523,7 @@ class TestKVPoolScheduler(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_layerwise_mtp_hit_on_final_block_boundary_not_trimmed(self, mock_client_cls):
-        scheduler = KVPoolScheduler(
+        scheduler = create_kv_pool_scheduler(
             self._make_config(block_size=16, extra_config={"backend": "memcache"}),
             use_layerwise=True,
         )
@@ -903,7 +913,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             },
             num_layers=4,
         )
-        scheduler = KVPoolScheduler(config, use_layerwise=True)
+        scheduler = create_kv_pool_scheduler(config, use_layerwise=True)
         self._set_running_chunk(scheduler)
 
         meta = scheduler.build_connector_meta(self._make_running_chunk_output([]))
@@ -925,7 +935,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             },
             num_layers=4,
         )
-        scheduler = KVPoolScheduler(config, use_layerwise=True)
+        scheduler = create_kv_pool_scheduler(config, use_layerwise=True)
         request = MagicMock()
         request.num_computed_tokens = 32
         request.num_prompt_tokens = 32
@@ -964,7 +974,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             },
             num_layers=4,
         )
-        scheduler = KVPoolScheduler(config, use_layerwise=True)
+        scheduler = create_kv_pool_scheduler(config, use_layerwise=True)
         self._set_running_chunk(scheduler)
 
         meta = scheduler.build_connector_meta(self._make_running_chunk_output([1]))
@@ -1050,10 +1060,119 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertEqual(meta.released_req_ids, {"f1", "f2", "p1"})
 
 
+@pytest.mark.parametrize(
+    ("unfinished_ids", "new_ids", "cached_ids", "expected_ids"),
+    [
+        (["b", "new", "cached", "both", "a"], [], [], ["b", "new", "cached", "both", "a"]),
+        (["b", "new", "cached", "both", "a"], ["new", "new", "both"], ["cached", "cached", "both"], ["b", "a"]),
+        (["b", "new", "cached", "both", "a"], ["a"], [], ["b", "new", "cached", "both"]),
+        (["b", "new", "cached", "both", "a"], [], ["b"], ["new", "cached", "both", "a"]),
+        ([], ["new", "new"], ["cached", "new"], []),
+    ],
+)
+def test_connector_metadata_preserves_unscheduled_request_order(unfinished_ids, new_ids, cached_ids, expected_ids):
+    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.kv_role = "kv_both"
+    scheduler.consumer_is_to_put = scheduler.can_put = False
+    scheduler._request_trackers = {}
+    scheduler._unfinished_requests = {req_id: (SimpleNamespace(request_id=req_id), []) for req_id in unfinished_ids}
+    scheduler._preempted_req_ids = set()
+    scheduler._loading_req_ids = set()
+    scheduler._process_new_request = MagicMock(return_value=None)
+    scheduler._process_async_load_request = MagicMock(side_effect=lambda req_id, *_: SimpleNamespace(req_id=req_id))
+    scheduler.touch_sending_mamba_blocks = MagicMock()
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[SimpleNamespace(req_id=req_id) for req_id in new_ids],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=cached_ids),
+    )
+
+    metadata = scheduler.build_connector_meta(output)
+
+    assert [request.req_id for request in metadata.requests] == expected_ids
+    assert [call.args[0] for call in scheduler._process_async_load_request.call_args_list] == expected_ids
+    assert list(scheduler._unfinished_requests) == unfinished_ids
+
+
+@pytest.mark.parametrize("cleared_by", ["already-empty", "finished", "preempted", "scheduled-new"])
+def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cleared_by):
+    class UnusedCachedIds(list[str]):
+        def __iter__(self):
+            raise AssertionError("No cached-ID scan is needed without unfinished requests")
+
+    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.kv_role = "kv_both"
+    scheduler.consumer_is_to_put = scheduler.can_put = False
+    scheduler._request_trackers = {}
+    scheduler._unfinished_requests = {} if cleared_by == "already-empty" else {"retired": (None, [])}
+    scheduler._preempted_req_ids = set()
+    scheduler._loading_req_ids = set()
+    scheduler._process_new_request = MagicMock(return_value=None)
+    scheduler._process_async_load_request = MagicMock()
+    output = SimpleNamespace(
+        finished_req_ids={"retired"} if cleared_by == "finished" else set(),
+        preempted_req_ids={"retired"} if cleared_by == "preempted" else set(),
+        scheduled_new_reqs=[SimpleNamespace(req_id="retired")] if cleared_by == "scheduled-new" else [],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=UnusedCachedIds(f"cached-{index}" for index in range(512))),
+    )
+
+    metadata = scheduler.build_connector_meta(output)
+
+    assert metadata.requests == []
+    assert scheduler._unfinished_requests == ({"retired": (None, [])} if cleared_by == "scheduled-new" else {})
+    scheduler._process_async_load_request.assert_not_called()
+    assert metadata.released_req_ids == output.finished_req_ids | output.preempted_req_ids
+
+
+def test_connector_metadata_filter_has_linear_key_lookup_work():
+    operations = {"eq": 0, "hash": 0}
+
+    class CountedRequestId(str):
+        def __eq__(self, other: object) -> bool:
+            operations["eq"] += 1
+            return str.__eq__(self, other)
+
+        def __hash__(self) -> int:
+            operations["hash"] += 1
+            return str.__hash__(self)
+
+    count = 128
+    request_ids = [CountedRequestId(f"request-{index}") for index in range(count)]
+    # Equal, distinct strings avoid identity shortcuts during membership checks.
+    cached_ids = [CountedRequestId(f"request-{index}") for index in range(count)]
+    pending_ids = ["pending-b", "pending-a"]
+    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.kv_role = "kv_both"
+    scheduler.consumer_is_to_put = scheduler.can_put = False
+    scheduler._request_trackers = {}
+    scheduler._unfinished_requests = {req_id: (None, []) for req_id in request_ids + pending_ids}
+    scheduler._preempted_req_ids = set()
+    scheduler._loading_req_ids = set()
+    scheduler._process_async_load_request = MagicMock(side_effect=lambda req_id, *_: SimpleNamespace(req_id=req_id))
+    scheduler.touch_sending_mamba_blocks = MagicMock()
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=cached_ids),
+    )
+    operations["eq"] = operations["hash"] = 0
+
+    metadata = scheduler.build_connector_meta(output)
+    lookup_work = sum(operations.values())
+
+    assert [request.req_id for request in metadata.requests] == pending_ids
+    assert [call.args[0] for call in scheduler._process_async_load_request.call_args_list] == pending_ids
+    # Allow incidental linear bookkeeping without relying on a container type
+    # or wall-clock threshold. Repeated prefix scans exceed this generous bound.
+    assert lookup_work <= 16 * (count + len(pending_ids))
+
+
 class TestLookupKeyClient(unittest.TestCase):
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.MsgpackEncoder")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.MsgpackEncoder")
     def test_lookup(self, mock_encoder_cls, mock_context_cls, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
@@ -1074,9 +1193,9 @@ class TestLookupKeyClient(unittest.TestCase):
         self.assertEqual(int.from_bytes(frames[3], "big"), 16)
         client.close()
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.MsgpackEncoder")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.MsgpackEncoder")
     def test_lookup_zmq_error_returns_zero_and_closes_client(
         self, mock_encoder_cls, mock_context_cls, mock_make_socket
     ):
@@ -1096,8 +1215,8 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_socket.close.assert_called_once_with(linger=0)
         client.ctx.term.assert_called_once_with()
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
     def test_socket_sets_receive_timeout(self, mock_context_cls, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
@@ -1134,8 +1253,8 @@ class TestLookupKeyClient(unittest.TestCase):
         self.assertIs(scheduler.client, second_client)
         self.assertEqual(mock_client_cls.call_count, 2)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq.Context")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq.Context")
     def test_close_is_idempotent_and_terminates_context(self, mock_context_cls, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
@@ -1152,8 +1271,8 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_socket.close.assert_called_once_with(linger=0)
         client.ctx.term.assert_called_once_with()
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq")
     def test_reset_ack(self, mock_zmq, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
@@ -1166,8 +1285,8 @@ class TestLookupKeyClient(unittest.TestCase):
         self.assertTrue(client.reset())
         mock_socket.send.assert_called_once_with(b"reset")
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.zmq")
     def test_reset_nack(self, mock_zmq, mock_make_socket):
         config = MagicMock()
         config.parallel_config.data_parallel_rank = 0
@@ -1246,54 +1365,6 @@ class TestKVPoolSchedulerResetStore(unittest.TestCase):
         self.assertIsNone(scheduler._block_pool)
         self.assertFalse(scheduler.reset_store())
         scheduler.client.reset.assert_not_called()
-
-
-class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):
-    """Test _generate_store_query_keys method."""
-
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def _make_scheduler(self, mock_client_cls):
-        return KVPoolScheduler(make_config(), use_layerwise=False)
-
-    def test_generate_store_query_keys(self):
-        cases = [
-            ({}, False, 1),
-            ({"num_layers": 4}, True, 4),
-            ({"tp_size": 2, "put_step": 1}, False, 2),
-        ]
-        for attributes, include_layers, expected_count in cases:
-            with self.subTest(attributes=attributes, include_layers=include_layers):
-                scheduler = self._make_scheduler()
-                for name, value in attributes.items():
-                    setattr(scheduler, name, value)
-                result = scheduler._generate_store_query_keys([b"\xaa\xbb"], include_layers=include_layers)
-                self.assertEqual(len(result), 1)
-                self.assertEqual(len(result[0]), expected_count)
-
-
-class TestKVPoolSchedulerGetStoreLookupHitTokens(unittest.TestCase):
-    """Test _get_store_lookup_hit_tokens method."""
-
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def _make_scheduler(self, mock_client_cls):
-        return KVPoolScheduler(make_config(), use_layerwise=False)
-
-    def test_store_lookup_hit_tokens(self):
-        cases = [
-            (4, [1, 1, 1, 1], 0, 64),
-            (4, [1, 0, 0, 0], 0, 16),
-            (4, [0, 0, 0, 0], 0, 0),
-            (0, [], 0, 0),
-            (4, [1, 1], 32, 64),
-        ]
-        for hash_count, exists, computed_tokens, expected in cases:
-            with self.subTest(hash_count=hash_count, exists=exists, computed_tokens=computed_tokens):
-                scheduler = self._make_scheduler()
-                scheduler.store_scheduler.batch_is_exist.return_value = exists
-                request = MagicMock()
-                request.block_hashes = [b"\xaa"] * hash_count
-                result = scheduler._get_store_lookup_hit_tokens(request, 64, computed_tokens)
-                self.assertEqual(result, expected)
 
 
 class TestKVPoolSchedulerFloorGranularity(unittest.TestCase):
@@ -1559,7 +1630,7 @@ class TestKVPoolSchedulerGetLayerwiseHitTokens(unittest.TestCase):
         # memcache backend makes the constructor resolve the real protocol
         # module and binds the key layout. Disable layerwise after binding so
         # this focused test still exercises the query_start_block offset math.
-        scheduler = KVPoolScheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=True)
+        scheduler = create_kv_pool_scheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=True)
         scheduler.use_layerwise = False
         return scheduler
 
@@ -1730,7 +1801,7 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
         config = make_config(extra_config={"backend": "memcache"})
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
         with patch.object(KVPoolScheduler, "_build_cache_coordinator", return_value=coordinator):
-            scheduler = KVPoolScheduler(
+            scheduler = create_kv_pool_scheduler(
                 config,
                 use_layerwise=True,
                 kv_cache_config=SimpleNamespace(kv_cache_groups=coordinator.kv_cache_groups),
@@ -1873,7 +1944,9 @@ if __name__ == "__main__":
 
 @pytest.mark.parametrize("second_hit", [0, 768])
 def test_layerwise_retry_discards_stale_load_spec(second_hit):
-    scheduler = KVPoolScheduler(make_config(block_size=768, extra_config={"backend": "memcache"}), use_layerwise=True)
+    scheduler = create_kv_pool_scheduler(
+        make_config(block_size=768, extra_config={"backend": "memcache"}), use_layerwise=True
+    )
     scheduler._get_layerwise_hit_tokens = MagicMock(side_effect=[12288, second_hit])
     request = SimpleNamespace(
         request_id="retry", prompt_token_ids=list(range(19000)), num_tokens=19000, block_hashes=[b"h"] * 25
@@ -1920,7 +1993,9 @@ def test_lookup_early_return_discards_stale_load_spec(early_return):
 
 @pytest.mark.parametrize("pool_hit_tokens", [832, 896])
 def test_layerwise_partial_tail_preserves_zero_external_load(pool_hit_tokens):
-    scheduler = KVPoolScheduler(make_config(block_size=256, extra_config={"backend": "memcache"}), use_layerwise=True)
+    scheduler = create_kv_pool_scheduler(
+        make_config(block_size=256, extra_config={"backend": "memcache"}), use_layerwise=True
+    )
     scheduler._get_layerwise_hit_tokens = MagicMock(return_value=pool_hit_tokens)
     request = SimpleNamespace(
         request_id="partial-tail", prompt_token_ids=list(range(2048)), num_tokens=2048, block_hashes=[b"h"] * 8

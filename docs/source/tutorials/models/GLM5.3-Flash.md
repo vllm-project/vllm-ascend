@@ -21,6 +21,20 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
 all deployment scripts on this page set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
 
+### INT8 KPool indexer cache on A3
+
+Set `--attention-config.indexer_kv_dtype int8` to quantize the KPool indexer's
+queries and compressed keys to INT8. This option is independent of
+`--kv-cache-dtype`, which controls the main attention cache. The default `auto`
+and explicit `bf16` retain the BF16 indexer path.
+
+The INT8 path calls `torch.ops.cann_ops_transformer.pool_key_indexer` with
+per-vector FP16 scales and requires an ops-transformer build that supports INT8
+and requests with no completed pools. The 2026-10-31 A3 CANN 9.3.0
+ops-transformer build provides this interface. Keys and scales share managed
+cache pages so cache transport includes both. No separate indexer environment
+variable is required.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
@@ -45,24 +59,15 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ## 4 Installation
 
-You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
-
-**Step 1:** Download the Docker image
-
-```bash
-docker pull quay.io/ascend/vllm-ascend:{tag}
-```
-
-**Step 2:** Start Docker container
-
-Select the `docker run` command for your hardware platform:
+Select an image for your hardware and start a container on each node.
+Refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image) for details.
 
 === "950DT products"
 
     Start the Docker container on each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -100,7 +105,7 @@ Select the `docker run` command for your hardware platform:
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
@@ -145,7 +150,7 @@ Select the `docker run` command for your hardware platform:
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -183,7 +188,7 @@ Select the `docker run` command for your hardware platform:
     If startup reports that Transformers does not recognize `glm5_next`, the failure occurs while
     loading the model configuration, before DP engine initialization. Check
     the active software versions and recreate the containers with a compatible
-    image tag if they still use the legacy `glm-5.3-flash` image or a vLLM
+    image if they still use the legacy `glm-5.3-flash` image or a vLLM
     `0.23.0` environment. For source builds, follow the
     [installation guide](../../getting_started/installation.md) and use the
     matching vLLM, vLLM-Ascend, and Transformers dependencies for the checked-out
@@ -672,13 +677,16 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
     ##### Start the Proxy
 
-    Run on a separate host after the Prefill and Decode endpoints are healthy.
+    Run inside a vLLM-Ascend container on a separate host after the Prefill
+    and Decode endpoints are healthy. The official image includes the proxy
+    at the absolute path below; for a source installation, replace the
+    checkout prefix with the actual source directory.
 
     ```shell
     P0_IP="<P0_IP>"
     D0_IP="<D0_IP>"
 
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
         --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
@@ -1490,7 +1498,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
               "kv_role": "kv_producer",
               "kv_connector_extra_config": {
                 "backend": "memcache",
-                "memcache_dp_init_barrier": true,
                 "use_layerwise": false,
                 "lookup_rpc_port": '"$((37000 + $4))"'
               }
@@ -1523,7 +1530,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
               "kv_role": "kv_consumer",
               "kv_connector_extra_config": {
                 "backend": "memcache",
-                "memcache_dp_init_barrier": true,
                 "use_layerwise": false,
                 "consumer_is_to_load": false,
                 "consumer_is_to_put": false,
@@ -1540,11 +1546,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     Decode lookup values are `37100-37103`. Keep the role-specific Mooncake KV
     base ports from [Section 5.3](#glm53-flash-5-3-a3); its workers and schedulers derive their own
     ports from the topology.
-
-    Keep `memcache_dp_init_barrier` set to `true` on every rank in each DP
-    group. It synchronizes workers after Memcache initialization and before
-    NPU graph capture. Set it in the `AscendStoreConnector` child, as shown
-    above.
 
     ##### Start the Services
 

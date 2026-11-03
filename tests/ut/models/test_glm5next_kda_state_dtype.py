@@ -19,13 +19,14 @@ def make_layer_and_config(ssm_dtype, conv_dtype="auto"):
         mamba_cache_mode="align",
     )
     config = SimpleNamespace(
-        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(model_type="glm5_next")),
         cache_config=cache_config,
         speculative_config=SimpleNamespace(num_speculative_tokens=5),
         num_speculative_tokens=5,
     )
     layer = Glm5NextLinearAttention.__new__(Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
+    layer.use_recoverssm = False
     layer.model_config, layer.cache_config = config.model_config, cache_config
     layer.tp_size, layer.num_heads, layer.head_dim, layer.conv_size, layer.num_spec = 1, 64, 128, 4, 5
     return layer, config

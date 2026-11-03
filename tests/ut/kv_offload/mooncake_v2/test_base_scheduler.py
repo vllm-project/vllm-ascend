@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -192,6 +193,17 @@ def test_base_scheduler_transfer_blocks_handles_empty_and_state_without_speculat
     assert scheduler._get_transfer_block_ids(([10, 11],), prompt_len=32) == ([10, 11],)
 
 
+def test_base_scheduler_keeps_recoverssm_checkpoint_and_trims_native_scratch_blocks() -> None:
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.pcp_size = 1
+    scheduler.dcp_size = 1
+    scheduler.num_speculative_tokens = 5
+    scheduler.group_block_size = [16, 16]
+    scheduler.group_unique_specs = [[make_mamba_spec()], [replace(make_mamba_spec(), num_speculative_blocks=5)]]
+
+    assert scheduler._get_transfer_block_ids(([7], [20, 21, 22, 23, 24, 25]), prompt_len=32) == ([7], [20])
+
+
 def test_base_scheduler_pcp_does_not_shard_attention_blocks() -> None:
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.pcp_size = 2
@@ -260,6 +272,7 @@ def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_tru
         _all_token_ids=[1, 2, 3],
         kv_transfer_params=None if params is None else dict(params),
         max_tokens=8,
+        block_hashes=["full-prompt-hash"],
     )
 
     scheduler.on_new_request(request)
@@ -270,3 +283,9 @@ def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_tru
     assert request._all_token_ids == request.prompt_token_ids
     assert request.num_prompt_tokens == (2 if truncated else 3)
     assert request.max_tokens == (1 if truncated else 8)
+    # Keep the two list literals in separate statements. A conditional
+    # expression would join list[tuple[int, int]] with list[str] and fail mypy.
+    if truncated:
+        assert request.block_hashes == [(1, 2)]
+    else:
+        assert request.block_hashes == ["full-prompt-hash"]
