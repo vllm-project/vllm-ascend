@@ -1,22 +1,4 @@
-# Based on the official A3 ordinary-PD reference:
-# https://docs.vllm.ai/projects/ascend/zh-cn/latest/tutorials/models/GLM5.2.html
-# P topology changed ONLY from DP1/PP2/TP16 to DP2/PP1/TP16 (one local DP rank/node).
-# D topology retained: DP16/TP2 (eight local DP ranks/node, global ranks 0-15).
-# Replaces MooncakeConnectorV2 with MooncakeLayerwiseConnector and its dedicated proxy.
-# Requires the accompanying external-DP loader patch for routing.proxy_script.
-# Requires packed SFA C8 support in MooncakeLayerwiseConnector; PCP/DCP remain 1.
-# All non-topology serving arguments and environment settings follow the saved official baseline.
-# Preserved: max-model-len=200000, P/D max-num-seqs=64, P/D MTP=1/5,
-# P/D max-num-batched-tokens=16384/256, P prefix caching ON, D OFF, async scheduling ON.
-# GLM-5.2 weights are requested by the user; current shared official PD recipe targets GLM-5.3.
-# API served-model-name uses the checkpoint ID rather than glm to match the benchmark runner.
-# NOT NPU validated: replacing PP by DP changes per-rank model/KV memory and EP distribution.
-# The unchanged 200000 context and concurrency limits require startup and workload memory checks.
-# Set PYTHON_LIB_DIR; inherit LD_LIBRARY_PATH. Install fastokens on P nodes.
-# Verify CANN and fabric support the official HCCS-only communication settings.
-# AIME2025 is an added regression benchmark, not an official result for this topology.
-# Its 93.33 +/- 10 target is provisional; rebaseline on NPU before weekly replacement.
-test_name: GLM-5.2-W8A8C8-DP2-layerwise-PD
+test_name: GLM-5.2-W8A8C8-layerwise-PD
 model: Eco-Tech/GLM-5.2-w8a8c8
 num_nodes: 4
 npu_per_node: 16
@@ -126,8 +108,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - int8
       - --additional-config
-      - "{\n                    \"enable_dsa_cp\":true,\n                    \"enable_fused_mc2\": 2,\n                    \"\
-    enable_flashcomm1\": true,\n                    \"enable_shared_expert_dp\": true\n                }"
+      - '{"enable_fused_mc2":2,"enable_flashcomm1":true,"enable_shared_expert_dp":true}'
       - --speculative-config
       - '{"num_speculative_tokens": 1,  "method":"deepseek_mtp","enforce_eager":true}'
       - --kv-transfer-config
@@ -199,8 +180,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - int8
       - --additional-config
-      - "{\n                    \"enable_dsa_cp\":true,\n                    \"enable_fused_mc2\": 2,\n                    \"\
-    enable_flashcomm1\": true,\n                    \"enable_shared_expert_dp\": true\n                }"
+      - '{"enable_fused_mc2":2,"enable_flashcomm1":true,"enable_shared_expert_dp":true}'
       - --speculative-config
       - '{"num_speculative_tokens": 1,  "method":"deepseek_mtp","enforce_eager":true}'
       - --kv-transfer-config
@@ -279,9 +259,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - int8
       - --additional-config
-      - "{\n                    \"recompute_scheduler_enable\": true,\n                    \"ascend_compilation_config\": {\"\
-    enable_npugraph_ex\": true, \"enable_static_kernel\": true},\n                    \"multistream_overlap_shared_expert\"\
-    : true\n                }"
+      - '{"recompute_scheduler_enable":true,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":true},"multistream_overlap_shared_expert":true}'
       - --speculative-config
       - '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}'
       - --compilation-config
@@ -354,9 +332,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - int8
       - --additional-config
-      - "{\n                    \"recompute_scheduler_enable\": true,\n                    \"ascend_compilation_config\": {\"\
-    enable_npugraph_ex\": true, \"enable_static_kernel\": true},\n                    \"multistream_overlap_shared_expert\"\
-    : true\n                }"
+      - '{"recompute_scheduler_enable":true,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":true},"multistream_overlap_shared_expert":true}'
       - --speculative-config
       - '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}'
       - --compilation-config
