@@ -93,6 +93,12 @@ def initialize_kv_cache(
     attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
     # The speculator clears the flag at load time when the checkpoint has
     # no confidence head, so it holds the effective value.
+    # Batch-sharded sampling sizes its all-to-all splits from host counts, so
+    # the manager must copy the admitted draft split back to the host. The
+    # release tree has neither the flag nor the copy.
+    admitted_drafts_kwargs = {}
+    if not vllm_version_is("0.32.0"):
+        admitted_drafts_kwargs["copy_admitted_drafts_to_host"] = self.batch_sharder is not None
     self.adaptive_verification = upstream.maybe_create_adaptive_verification_manager(
         enable_adaptive_verification=getattr(self.speculator, "enable_adaptive_verification", False),
         attn_groups=self.attn_groups,
@@ -103,6 +109,7 @@ def initialize_kv_cache(
         vllm_config=self.vllm_config,
         target_layer_names=target_attn_layer_names,
         additional_attn_cg_support=additional_attn_cg_support,
+        **admitted_drafts_kwargs,
     )
 
     block_tables_kwargs = {}

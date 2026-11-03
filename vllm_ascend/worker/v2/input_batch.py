@@ -82,6 +82,11 @@ class AscendInputBatch(InputBatch):
     attn_state: AscendAttentionState | None = None
     is_dummy: bool = False
     is_cpp_profile: bool = False
+    # Admitted draft split for batch-sharded sampling under adaptive
+    # verification. Declared here too so that the constructor call in the model
+    # runner is identical on the 0.32.0 release tree, which has no such
+    # upstream field.
+    num_admitted_draft_tokens: object | None = None  # type: ignore[assignment, no-redef]
 
     @staticmethod
     def _prepare_cpp_profile_dummy(
