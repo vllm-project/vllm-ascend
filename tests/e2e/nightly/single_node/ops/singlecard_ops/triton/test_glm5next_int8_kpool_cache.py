@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import re
+import regex as re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -83,10 +83,14 @@ def test_int8_key_scale_write_preserves_padding_and_invalid_slots(use_graph):
 @torch.inference_mode()
 def test_int8_operator_reads_managed_pages(use_graph):
     ops_transformer = pytest.importorskip("cann_ops_transformer")
-    # The INT8 PoolKeyIndexer API is available starting with ops-transformer 9.3.0.
-    # The built-in Python package lives under the versioned CANN install directory.
-    version_match = re.search(r"cann-(\d+)\.(\d+)\.(\d+)", str(Path(ops_transformer.__file__).resolve()))
-    if version_match and tuple(map(int, version_match.groups())) < (9, 3, 0):
+    # The CI-bundled ops package follows its versioned CANN install directory.
+    ops_transformer_file = getattr(ops_transformer, "__file__", None)
+    if ops_transformer_file is None:
+        pytest.skip("Cannot determine ops-transformer installation version")
+    version_match = re.search(r"cann-(\d+)\.(\d+)\.(\d+)", str(Path(ops_transformer_file).resolve()))
+    if version_match is None:
+        pytest.skip("Cannot determine ops-transformer installation version")
+    if tuple(map(int, version_match.groups())) < (9, 3, 0):
         pytest.skip("INT8 PoolKeyIndexer requires ops-transformer 9.3.0 or later")
     spec = AscendMLAAttentionSpec(
         block_size=128,
