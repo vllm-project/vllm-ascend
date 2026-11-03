@@ -91,6 +91,11 @@ on:
         type: string
         default: "main"
         description: "vllm commit/tag for _presmoke_tests"
+      build_from_raw_base:
+        type: boolean
+        required: false
+        default: false
+        description: Whether build from raw cann base image instead of nightly layered image
     secrets:
       SWR_USERNAME:
         required: false
