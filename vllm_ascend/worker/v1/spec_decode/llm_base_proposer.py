@@ -658,22 +658,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _maybe_update_metadata(self, att_backend, multi_steps_attn_metadata):
         if use_updatable_graph(att_backend):
             update_params = []
-            for draft_step, per_step_metadata in enumerate(multi_steps_attn_metadata):
-                for layer_name, metadata in per_step_metadata.items():
-                    if self.dcp_size > 1:
-                        # Import lazily: attention backends also import spec-decode utilities.
-                        from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
-
-                        update_params.extend(
-                            build_dcp_fia_params(
-                                layer_name,
-                                metadata,
-                                get_dcp_group().rank_in_group,
-                                is_draft_model=True,
-                                is_draft_model_prefill=draft_step == 0,
-                            )
-                        )
-                        continue
+            for per_step_metadata in multi_steps_attn_metadata:
+                for _, metadata in per_step_metadata.items():
                     update_params.append(
                         {
                             "actual_seq_lengths": metadata.actual_seq_lengths_q,

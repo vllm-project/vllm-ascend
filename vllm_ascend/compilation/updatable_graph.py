@@ -47,7 +47,7 @@ class SharedSource:
         _provider: ParamProvider,
         index: int,
     ) -> Params:
-        # 草稿模型必须连续注册
+        # 草稿模型必须连续
         return self.params[index]
 
 
