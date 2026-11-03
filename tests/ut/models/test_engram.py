@@ -5,6 +5,7 @@
 
 import ctypes
 import json
+import mmap
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.shared_memory import SharedMemory
@@ -339,9 +340,11 @@ def test_loader_applies_mxfp8_checkpoint_scales(tmp_path):
     torch.testing.assert_close(decoded.float(), expected, rtol=0, atol=0.02)
 
 
-def _fake_host_library(device_offset):
+def _fake_host_library(device_offset, register_calls=None):
     class Library:
         def aclrtHostRegisterV2(self, pointer, size, flags):
+            if register_calls is not None:
+                register_calls.append((pointer.value, size, flags))
             return 0
 
         def aclrtHostGetDevicePointer(self, pointer, out, flags):
@@ -359,7 +362,8 @@ def test_shared_uva_uses_one_python_shared_memory_segment(monkeypatch, leader_ra
     name_ready = threading.Event()
     attached = threading.Barrier(2)
     names: list[str] = []
-    monkeypatch.setattr(npu, "_host_library", lambda: _fake_host_library(1 << 40))
+    register_calls: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(npu, "_host_library", lambda: _fake_host_library(1 << 40, register_calls))
     monkeypatch.setattr(npu.dist, "get_global_rank", lambda group, rank: leader_rank)
     monkeypatch.setattr(npu.dist, "barrier", lambda group: attached.wait(timeout=10))
     monkeypatch.setattr(npu.dist, "all_gather_object", lambda errors, error, group: None)
@@ -384,6 +388,8 @@ def test_shared_uva_uses_one_python_shared_memory_segment(monkeypatch, leader_ra
     leader.tensor.fill_(7)
     assert follower.tensor.tolist() == leader.tensor.tolist()
     assert len(names) == 1
+    assert len(register_calls) == 2
+    assert all(size == mmap.PAGESIZE and pointer % mmap.PAGESIZE == 0 for pointer, size, _ in register_calls)
     with pytest.raises(FileNotFoundError):
         SharedMemory(name=names[0])
     leader.close()

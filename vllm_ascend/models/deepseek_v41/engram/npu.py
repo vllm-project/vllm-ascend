@@ -279,6 +279,9 @@ class SharedUvaBuffer:
         row_elements = int(torch.Size(shape[1:]).numel())
         self.row_bytes = row_elements * torch.empty((), dtype=dtype).element_size()
         size = rows * self.row_bytes
+        # Register complete pages, including the final partially filled page.
+        # The tensor below still exposes only the logical table size.
+        registered_size = (size + mmap.PAGESIZE - 1) // mmap.PAGESIZE * mmap.PAGESIZE
         self.shm = None
         self.tensor = None
         self.ptrs = None
@@ -289,7 +292,7 @@ class SharedUvaBuffer:
         payload: list[str | None] = [None]
         if group.rank_in_group == 0:
             try:
-                self.shm = shared_memory.SharedMemory(create=True, size=size)
+                self.shm = shared_memory.SharedMemory(create=True, size=registered_size)
                 payload = [self.shm.name]
             except Exception as exc:  # noqa: BLE001 - reported to the group
                 if self.shm is not None:
@@ -308,12 +311,18 @@ class SharedUvaBuffer:
                 # SharedMemory attach path so only the creator unlinks it.
                 with patch("multiprocessing.resource_tracker.register", lambda *args, **kwargs: None):
                     self.shm = shared_memory.SharedMemory(name=name)
-            assert self.shm.size >= size
-            address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf)))
-            _madvise_hugepage(self.shm, size)
-            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, DeviceOperator.host_register_flags())
+            assert self.shm.size >= registered_size
+            host_address = ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf))
+            address_of_mapping = ctypes.c_void_p(host_address)
+            _madvise_hugepage(self.shm, registered_size)
+            flags = DeviceOperator.host_register_flags()
+            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, registered_size, flags)
             if rc:
-                raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
+                raise RuntimeError(
+                    f"aclrtHostRegisterV2 failed: rc={rc} size={size} registered_size={registered_size} "
+                    f"address_mod_4k={host_address % 4096} flags={flags:#x} "
+                    f"device_adaptor={DeviceOperator.__name__}"
+                )
             # Registration succeeded: from here on the mapping owes exactly one
             # aclrtHostUnregister, and close() must keep the owner until it
             # returns success.  ``pointer`` is therefore set only
