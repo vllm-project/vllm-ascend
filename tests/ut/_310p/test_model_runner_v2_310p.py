@@ -969,7 +969,13 @@ def test_sampler_accepts_warmup_params_with_empty_history() -> None:
 
     assert sampler.sampling_states.temperature.gpu[0].item() == pytest.approx(0.9)
     assert sampler.sampling_states.min_p.gpu[0].item() == pytest.approx(0.1)
-    output = sampler(torch.zeros((1, 64), dtype=torch.float32), _make_sampler_batch())
+    # CPU runners lack the NPU pinned-memory allocator used by random sampling.
+    with patch(
+        "vllm_ascend._310p.worker.v2.sampler._random_sample_310p",
+        side_effect=lambda probs, generators: probs.argmax(dim=-1),
+    ) as random_sample:
+        output = sampler(torch.zeros((1, 64), dtype=torch.float32), _make_sampler_batch())
+    random_sample.assert_called_once()
     assert output.sampled_token_ids.shape == (1, 1)
     assert output.logprobs_tensors is not None
 

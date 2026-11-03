@@ -15,16 +15,6 @@
 # limitations under the License.
 
 # ----------------------------------------------------------------------------------
-# 310P sampling dispatch compatibility (installed lazily by
-# `_310p/worker/v2/sample/dispatch.py`, not by the generic worker patch bundle):
-#   Target: vllm.triton_utils.dispatcher._rebind_kernels owner namespace reads.
-#   Why: dynamic FFI objects can fabricate non-mapping __dict__ values, so
-#        vars(value).get("kernel") raises during platform kernel registration.
-#   How: bind a safe vars helper only in the dispatcher module, preserving
-#        upstream register_kernels and its alias/warmup-owner rebinding.
-#   Related PR: none; compatibility with the supported vLLM dispatcher pins.
-#   Removal: drop when all supported vLLM versions guard real owner mappings.
-#
 # This module manage the patch for vllm. There are two folders in this module:
 # - platform: contains the patches applied before worker starts. It's called by
 #             `vllm_ascend.utils.adapt_patch(is_global_patch=True)` in
