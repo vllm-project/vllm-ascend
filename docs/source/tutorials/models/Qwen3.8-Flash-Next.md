@@ -27,7 +27,7 @@ Select the checkpoint that matches the deployment configuration:
 | Hardware | Deployment | Checkpoint | Device allocation | Download Links |
 | --- | --- | --- | --- | --- |
 | A2 series / A3 series | Not used in the examples below | `Qwen3.8-Flash-Next-w8a8-mtp` | | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp) |
-| A2 series / A3 series | Colocated | `Qwen3.8-Flash-Next-w4a8` | 8 devices, TP8 × DP1 |  |
+| A2 series / A3 series | Colocated | `Qwen3.8-Flash-Next-w4a8` | 8 devices, TP8 × DP1 | |
 | A2 series / A3 series | PD separation | `Qwen3.8-Flash-Next-w4a8` | 16 devices, TP2 × DP4 per role | |
 | Ascend 950 DT | Colocated | `Qwen3.8-Flash-Next-w4a8-mxfp` | 4 devices, TP4 × DP1 | |
 | Ascend 950 DT | PD separation | `Qwen3.8-Flash-Next-w4a8-mxfp` | 8 devices, TP2 × DP2 per role | |
@@ -44,6 +44,8 @@ A pre-built Qwen3.8 A3 series image is available in the [vllm-ascend repository]
 
 - openEuler: `quay.io/ascend/vllm-ascend:qwen3.8-next-a3-openeuler`
 - Ubuntu: `quay.io/ascend/vllm-ascend:qwen3.8-next-a3`
+
+For PD deployment, verify host NPU connectivity and `/etc/hccn.conf` using the [Mooncake communication checks](../features/pd_disaggregation_mooncake_single_node.md#verify-communication-environment).
 
 The following example uses the AArch64 image and exposes 16 devices on an A3 series node. The service command in [Section 5.1](#51-single-node-online-deployment) uses the first eight devices; the A3 series PD example in Section 5.2 uses all 16.
 
@@ -81,6 +83,7 @@ The following example uses the AArch64 image and exposes 16 devices on an A3 ser
         -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64 \
         -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
         -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /etc/hccn.conf:/etc/hccn.conf:ro \
         -v /path/to/models:/models \
         -it quay.io/ascend/vllm-ascend:qwen3.8-next-a3 bash
     ```
@@ -161,7 +164,7 @@ Before starting:
     - `--max-model-len 131072` caps the maximum context length. Common values: `65536` (64K), `131072` (128K).
     - `--enable-expert-parallel` enables expert parallelism for the MoE layers.
     - `--enable-prefix-caching --mamba-cache-mode align` enables Prefix Caching with aligned GDN and PLE state checkpoints.
-    - The command does not set `--language-model-only`, so the vision encoder remains enabled and the service accepts both text and multimodal requests. For a text-only deployment, you may add `--language-model-only` to skip loading the vision encoder.
+    - The command does not set `--language-model-only`. Multimodal requests require a checkpoint that includes the vision encoder; verify them with the selected W4A8 checkpoint. For a text-only deployment, you may add `--language-model-only` to skip loading the vision encoder.
     - `--enable-auto-tool-choice --tool-call-parser qwen3_xml` enables automatic Function Calling with the Qwen3 XML parser.
     - `--reasoning-parser qwen3` separates reasoning from the final answer in the OpenAI-compatible response.
     - `--speculative-config` uses the model's MTP head to draft three tokens. `enforce_eager=false` allows the MTP proposer to use graph execution, matching the PD decode setting.
@@ -272,6 +275,17 @@ Select the hardware tab below.
     - The commands use `192.168.0.1`, `eth0`, and `/models/Qwen3.8-Flash-Next-w4a8`. Replace these literals consistently for the target host. Provide sufficient host memory for Engram CPU offload.
     - Run the proxy command from the vLLM-Ascend repository root. Both hardware examples use the repository-provided load-balancing proxy; this configuration exposes one API endpoint per role, while the 950 DT configuration exposes two per role.
     - The examples use the Mooncake library directory from the Python 3.12.16 environment. Edit the literal library path if Mooncake is installed elsewhere.
+
+    For two eight-device A2 series hosts, run Prefill on `192.168.0.1` and Decode on `192.168.0.2`. Use the commands below with these literal changes; keep each role's four DP replicas on its own host:
+
+    | Setting | Prefill host | Decode host |
+    | --- | --- | --- |
+    | `ASCEND_RT_VISIBLE_DEVICES` | `0,1,2,3,4,5,6,7` | `0,1,2,3,4,5,6,7` |
+    | `VLLM_HOST_IP` / `HCCL_IF_IP` | `192.168.0.1` | `192.168.0.2` |
+    | Proxy backend | `--prefiller-hosts 192.168.0.1` | `--decoder-hosts 192.168.0.2` |
+    | API verification from the proxy host | `http://192.168.0.1:25568/v1/models` | `http://192.168.0.2:25569/v1/models` |
+
+    On both hosts and in the proxy terminal, set `no_proxy` and `NO_PROXY` to `localhost,127.0.0.1,192.168.0.1,192.168.0.2`. Update the three socket-interface variables to each host's interface. Expose devices 0–7 in each container, mount the same checkpoint and `/etc/hccn.conf`, and run the proxy on the prefill host. The same-host A3 series commands below retain Decode devices 8–15.
 
     Run Prefill and Decode in separate terminals. Start Proxy after both model APIs are ready.
 
@@ -715,7 +729,7 @@ Select the hardware tab below.
 
 After the service is started, the model can be invoked by sending a prompt. The `chat/completions` API is supported. Use the `--served-model-name` you configured (`qwen3.8-flash-next` for `Qwen3.8-Flash-Next`).
 
-The requests below use the A2 series / A3 series colocated endpoint. Select the endpoint and model name for the deployment being tested:
+The requests below use the A2 series / A3 series colocated endpoint. Select the endpoint and model name for the deployment being tested. For the 950 DT PD proxy, replace `127.0.0.1` in the requests below with its bound host address, `192.168.0.1`:
 
 | Deployment | Port | Model name |
 | --- | --- | --- |
@@ -913,9 +927,9 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | A2 series | Colocated | 0–7 | 8 × 1 | 131072 | 8 | 4096 |
 | A3 series | Colocated | 0–7 | 8 × 1 | 131072 | 8 | 4096 |
 | Ascend 950 DT | Colocated | 0–3 | 4 × 1 | 141312 | 32 | 4096 |
-| A2 series | Prefill | 0–7 | 2 × 4 | 141312 | 32 | 4096 |
+| A2 series | Prefill | 0–7 on prefill host | 2 × 4 | 141312 | 32 | 4096 |
 | A3 series | Prefill | 0–7 | 2 × 4 | 141312 | 32 | 4096 |
-| A2 series | Decode | 8–15 | 2 × 4 | 141312 | 32 | 4096 |
+| A2 series | Decode | 0–7 on decode host | 2 × 4 | 141312 | 32 | 4096 |
 | A3 series | Decode | 8–15 | 2 × 4 | 141312 | 32 | 4096 |
 | Ascend 950 DT | Prefill | 0–3 | 2 × 2 | 141312 | 64 | 4096 |
 | Ascend 950 DT | Decode | 4–7 | 2 × 2 | 141312 | 64 | 4096 |
