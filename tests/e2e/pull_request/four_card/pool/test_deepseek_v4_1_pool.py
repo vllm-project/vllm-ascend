@@ -6,7 +6,7 @@ PR pool case #2: ``four_card_a5`` + DP4 x TP1 + 16K prompt + non-layerwise
 memcache + DSpark5 + V2 model runner.
 
 The original "output is non-empty" assertion is kept; the only addition is the
-shared R1-R5 pool hit sequence from ``tests.e2e.pull_request.kv_pool_watch``.
+shared R1-R4 pool hit sequence from ``tests.e2e.pull_request.kv_pool_watch``.
 """
 
 import os

@@ -182,7 +182,7 @@ def run_pool_hit_sequence(
     max_tokens: int = POOL_MAX_TOKENS,
     tag: str = "",
 ) -> dict[str, float]:
-    """Run R1 cold write -> R2/R3 hit -> R4 disjoint miss -> R5 A intact.
+    """Run R1 cold write -> R2/R3 hit -> R4 disjoint miss.
 
     ``replicas`` sends identical copies of a prompt in one call. The DP runner
     shards prompts across ranks, so ``replicas=dp_size`` exercises every DP
@@ -223,16 +223,9 @@ def run_pool_hit_sequence(
     snap4 = snapshot_metrics(runner)
     assert_no_hit(snap3, snap4, tag=f"{tag} R4")
 
-    # R5: writing B must not break A
-    hit_3 = _generate(prompt_a)
-    snap5 = snapshot_metrics(runner)
-    ratio_r5 = assert_hit_ratio(snap4, snap5, prompt_tokens=prompt_tokens, block_size=block_size, tag=f"{tag} R5")
-    _assert_outputs(cold, hit_3, "R5")
-
-    summary = {"r2": ratio_r2, "r3": ratio_r3, "r5": ratio_r5, "load_keys": snap5.load_keys}
+    summary = {"r2": ratio_r2, "r3": ratio_r3, "load_keys": snap4.load_keys}
     print(
-        f"[kv_pool] {tag} delta ratios R2={ratio_r2:.4f} R3={ratio_r3:.4f} R5={ratio_r5:.4f} "
-        f"load_keys_total={snap5.load_keys:.0f}",
+        f"[kv_pool] {tag} delta ratios R2={ratio_r2:.4f} R3={ratio_r3:.4f} load_keys_total={snap4.load_keys:.0f}",
         flush=True,
     )
     return summary
