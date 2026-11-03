@@ -712,16 +712,16 @@ Select the hardware tab below.
 
 After the service is started, the model can be invoked by sending a prompt. The `chat/completions` API is supported. Use the `--served-model-name` you configured (`qwen3.8-flash-next` for `Qwen3.8-Flash-Next`).
 
-The requests below use the A2 series / A3 series colocated endpoint. Select the endpoint and model name for the deployment being tested. For the 950 DT PD proxy, replace `127.0.0.1` in the requests below with its bound host address, `192.168.0.1`:
+Use the API address and served model name for your deployment:
 
-| Deployment | Port | Model name |
+| Deployment | API address | Model name |
 | --- | --- | --- |
-| A2 series colocated | 8088 | `qwen3.8-flash-next` |
-| A3 series colocated | 8088 | `qwen3.8-flash-next` |
-| Ascend 950 DT colocated | 8087 | `qwen3.8-flash-next-950-dt` |
-| A2 series PD proxy | 25570 | `qwen38-flash-next-a2-a3-pd` |
-| A3 series PD proxy | 25570 | `qwen38-flash-next-a2-a3-pd` |
-| Ascend 950 DT PD proxy | 8087 | `qwen38-flash-next-950-dt-pd` |
+| A2 series colocated | `http://127.0.0.1:8088` | `qwen3.8-flash-next` |
+| A3 series colocated | `http://127.0.0.1:8088` | `qwen3.8-flash-next` |
+| Ascend 950 DT colocated | `http://127.0.0.1:8087` | `qwen3.8-flash-next-950-dt` |
+| A2 series PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a2-a3-pd` |
+| A3 series PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a2-a3-pd` |
+| Ascend 950 DT PD proxy | `http://192.168.0.1:8087` | `qwen38-flash-next-950-dt-pd` |
 
 For PD, first complete the proxy check and review the key parameters in [Section 5.2](#52-pd-separation-deployment).
 
