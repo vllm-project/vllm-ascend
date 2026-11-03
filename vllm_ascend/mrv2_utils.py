@@ -47,9 +47,6 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
     """Reasons this config is not V2-ready and should default to V1."""
     reasons: list[str] = []
     spec_config = getattr(vllm_config, "speculative_config", None)
-    compilation_config = getattr(vllm_config, "compilation_config", None)
-    if _is_configured(compilation_config) and getattr(compilation_config, "cudagraph_mm_encoder", False) is True:
-        reasons.append("VL encoder graph")
     if _additional(vllm_config, "draft_window_size") is not None:
         reasons.append("draft_window_size")
 
@@ -77,7 +74,6 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     ``VLLM_USE_V2_MODEL_RUNNER`` wins when set. Otherwise V2 is the default,
     except for these models and features, which fall back to V1:
 
-    * VL encoder graph (``compilation_config.cudagraph_mm_encoder``)
     * draft_window_size
     * suffix speculative decoding
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)

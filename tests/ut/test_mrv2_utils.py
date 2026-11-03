@@ -81,6 +81,7 @@ def test_environment_override_wins(monkeypatch, env_value):
                 kv_connector_extra_config={"backend": "memcache"},
             )
         ),
+        SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mm_encoder=True)),
         SimpleNamespace(ec_transfer_config=object()),
         SimpleNamespace(
             model_config=SimpleNamespace(multimodal_config=SimpleNamespace(mm_encoder_only=True)),
@@ -113,6 +114,7 @@ def test_environment_override_wins(monkeypatch, env_value):
         "pooling-model",
         "kv-pool-connector",
         "kv-pool-memcache",
+        "vl-encoder-graph",
         "vl-encoder-disaggregation",
         "vl-encoder-only",
     ],
@@ -142,7 +144,6 @@ def test_dflash2_defaults_to_v2_and_honors_environment(monkeypatch, enforce_eage
 @pytest.mark.parametrize(
     "config",
     [
-        SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mm_encoder=True)),
         SimpleNamespace(additional_config={"draft_window_size": 512}),
         SimpleNamespace(speculative_config=SimpleNamespace(method="suffix")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram")),
@@ -152,7 +153,6 @@ def test_dflash2_defaults_to_v2_and_honors_environment(monkeypatch, enforce_eage
         SimpleNamespace(speculative_config=SimpleNamespace(method="eagle", parallel_drafting=True)),
     ],
     ids=[
-        "vl-encoder-graph",
         "draft-window-size",
         "suffix-speculative-decoding",
         "ngram-speculative-decoding",
