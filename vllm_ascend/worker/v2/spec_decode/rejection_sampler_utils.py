@@ -43,158 +43,6 @@ from vllm_ascend.ops.triton.spec_decode.resample import resample
 from vllm_ascend.utils import vllm_version_is
 
 
-def _current_stream_handle(device: torch.device) -> int:
-    """Best-effort raw handle of the current stream.
-
-    Scratch reuse is bound to a single stream; callers running on another
-    stream fall back to per-call allocations. Returns 0 when the handle
-    cannot be determined (e.g. CPU test runs), which keeps one shared slot
-    per device — the worker enqueues all sampler kernels on its single
-    compute stream.
-    """
-    npu = getattr(torch, "npu", None)
-    cuda = getattr(torch, "cuda", None)
-    try:
-        if npu is not None and device.type == "npu":
-            stream = npu.current_stream(device)
-        elif cuda is not None and device.type == "cuda":
-            stream = cuda.current_stream(device)
-        else:
-            return 0
-    except Exception:
-        return 0
-    return int(getattr(stream, "npu_stream", None) or getattr(stream, "cuda_stream", None) or 0)
-
-
-class _StatsWorkspace:
-    """Single-slot scratch set for the rejection-sampling statistics.
-
-    Bound to one ``(device, stream, vocab_num_blocks)`` layout and reused
-    across steps. Safety contract:
-
-    - Every scratch cell that is read is written earlier in the same step.
-      The stats kernel's grid covers exactly the ``[num_logits,
-      vocab_num_blocks]`` cells it stores unconditionally, the rejection
-      kernel stores both logsumexp cells for every request before any
-      consumer runs, and the resample/finalize kernels mask their block
-      loads with ``blocks < num_blocks`` and never index beyond the live
-      ranges — so residue from a larger previous batch is never read.
-    - All producers and consumers are enqueued on the bound stream, so the
-      next step's overwrites are stream-ordered after this step's reads; no
-      synchronization is required.
-    - Row slicing of the capacity tensors keeps the underlying layout:
-      ``t[:n]`` of a ``(cap, blocks)`` tensor has the same ``(blocks, 1)``
-      strides the kernels expect from a fresh ``(n, blocks)`` allocation.
-    - Growth replaces the tensors instead of accumulating; the caching
-      allocator recycles the released blocks for same-stream allocations
-      only, which the stream binding above guarantees. Capacity is bounded
-      by the runner's batch limits (``max_num_seqs x (num_speculative_steps
-      + 1)`` logits rows).
-    """
-
-    __slots__ = (
-        "device",
-        "stream",
-        "vocab_num_blocks",
-        "logits_cap",
-        "reqs_cap",
-        "_tensors",
-    )
-
-    def __init__(
-        self,
-        device: torch.device,
-        stream: int,
-        vocab_num_blocks: int,
-    ) -> None:
-        self.device = device
-        self.stream = stream
-        self.vocab_num_blocks = vocab_num_blocks
-        self.logits_cap = 0
-        self.reqs_cap = 0
-        self._tensors: tuple[torch.Tensor, ...] | None = None
-
-    def matches(
-        self,
-        device: torch.device,
-        stream: int,
-        vocab_num_blocks: int,
-    ) -> bool:
-        return self.device == device and self.stream == stream and self.vocab_num_blocks == vocab_num_blocks
-
-    def acquire(self, num_logits: int, num_reqs: int) -> tuple[torch.Tensor, ...]:
-        if num_logits > self.logits_cap or num_reqs > self.reqs_cap:
-            cap_l = max(num_logits, self.logits_cap * 2)
-            cap_r = max(num_reqs, self.reqs_cap * 2)
-            device = self.device
-            blocks = self.vocab_num_blocks
-            self._tensors = (
-                torch.empty((cap_l, blocks), dtype=torch.int64, device=device),
-                torch.empty((cap_l, blocks), dtype=torch.float32, device=device),
-                torch.empty((cap_l, blocks), dtype=torch.float32, device=device),
-                torch.empty((cap_l, blocks), dtype=torch.float32, device=device),
-                torch.empty((cap_l, blocks), dtype=torch.float32, device=device),
-                torch.empty((cap_r,), dtype=torch.float32, device=device),
-                torch.empty((cap_r,), dtype=torch.float32, device=device),
-            )
-            self.logits_cap = cap_l
-            self.reqs_cap = cap_r
-        tensors = self._tensors
-        assert tensors is not None
-        return (
-            tensors[0][:num_logits],
-            tensors[1][:num_logits],
-            tensors[2][:num_logits],
-            tensors[3][:num_logits],
-            tensors[4][:num_logits],
-            tensors[5][:num_reqs],
-            tensors[6][:num_reqs],
-        )
-
-
-_STATS_WORKSPACE: _StatsWorkspace | None = None
-
-_DUMMY_DRAFT_LOGITS: tuple[torch.device, torch.dtype, torch.Tensor] | None = None
-
-
-def _get_workspace(
-    target_logits: torch.Tensor,
-    num_logits: int,
-    num_reqs: int,
-    vocab_num_blocks: int,
-) -> tuple[torch.Tensor, ...]:
-    device = target_logits.device
-    stream = _current_stream_handle(device)
-    global _STATS_WORKSPACE
-    workspace = _STATS_WORKSPACE
-    if workspace is not None and not workspace.matches(device, stream, vocab_num_blocks):
-        # Bound to a different device/stream: fall back to an uncached
-        # per-call allocation instead of sharing scratch across streams.
-        return (
-            target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.int64),
-            target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32),
-            target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32),
-            target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32),
-            target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32),
-            target_logits.new_empty(num_reqs, dtype=torch.float32),
-            target_logits.new_empty(num_reqs, dtype=torch.float32),
-        )
-    if workspace is None:
-        workspace = _StatsWorkspace(device, stream, vocab_num_blocks)
-        _STATS_WORKSPACE = workspace
-    return workspace.acquire(num_logits, num_reqs)
-
-
-def _get_dummy_draft_logits(target_logits: torch.Tensor) -> torch.Tensor:
-    """Placeholder pointer for the one-hot draft path; never read."""
-    global _DUMMY_DRAFT_LOGITS
-    cached = _DUMMY_DRAFT_LOGITS
-    if cached is None or cached[0] != target_logits.device or cached[1] != target_logits.dtype:
-        cached = (target_logits.device, target_logits.dtype, target_logits.new_empty(1, 1, 1))
-        _DUMMY_DRAFT_LOGITS = cached
-    return cached[2]
-
-
 @triton.jit
 def _compute_block_stats_kernel(
     # [num_logits, num_blocks]
@@ -689,10 +537,10 @@ def rejection_sample(
     stats_num_logits = num_speculative_steps if vllm_version_is("0.32.0") else num_logits
 
     if draft_logits is None:
-        # When draft_logits is None, pass a cached dummy tensor so that Triton
+        # When draft_logits is None, create a dummy tensor so that Triton
         # kernel signatures receive valid pointers/strides. The kernels
         # will never read from it when HAS_DRAFT_LOGITS=False.
-        draft_logits = _get_dummy_draft_logits(target_logits)
+        draft_logits = target_logits.new_empty(1, 1, 1)
     else:
         # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
         # vocab size is larger than the draft's due to padding.
@@ -704,15 +552,11 @@ def rejection_sample(
     VOCAB_BLOCK_SIZE = 8192
     vocab_num_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK_SIZE)
     padded_vocab_num_blocks = triton.next_power_of_2(vocab_num_blocks)
-    (
-        target_local_argmax,
-        target_local_max,
-        target_local_sumexp,
-        draft_local_max,
-        draft_local_sumexp,
-        target_rejected_logsumexp,
-        draft_rejected_logsumexp,
-    ) = _get_workspace(target_logits, num_logits, num_reqs, vocab_num_blocks)
+    target_local_argmax = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.int64)
+    target_local_max = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
+    target_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
+    draft_local_max = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
+    draft_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
     if vllm_version_is("0.32.0"):
         _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](
             target_local_argmax,
@@ -918,6 +762,8 @@ def rejection_sample(
     # the step.
     sampled = draft_sampled.new_empty(num_reqs, num_speculative_steps + 1, dtype=torch.int64)
     num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
+    target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
+    draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     _probabilistic_rejection_kernel[(num_reqs,)](
         sampled,
         sampled.stride(0),
