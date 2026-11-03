@@ -317,6 +317,28 @@ a3-560t:
         config_base_path: tests/e2e/cases/models/configs/Qwen
 
 a5:
+  multi_node:
+    test_config:
+      - name: glm53-w8a8-a5-logits-disable-megamoe
+        config_file_path: GLM5_3-W8A8-A5-Logits-disable_megamoe.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
+        size: 2
+      - name: glm53-w8a8-a5-logits-disable-pp
+        config_file_path: GLM5_3-W8A8-A5-Logits-disable_pp.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
+        size: 2
+      - name: glm53-w8a8-a5-logits-disable-flashcomm1
+        config_file_path: GLM5_3-W8A8-A5-Logits-disable_flashcomm1.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
+        size: 2
+      - name: glm53-w8a8-a5-logits-disable-lic8
+        config_file_path: GLM5_3-W8A8-A5-Logits-disable_lic8.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
+        size: 2
+      - name: glm53-w8a8-a5-logits-disable-sfac8
+        config_file_path: GLM5_3-W8A8-A5-Logits-disable_sfac8.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
+        size: 2
 #   multi_node:
 #     test_config:
 #       - name: Qwen3-235B-W8A8-EPLB

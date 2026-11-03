@@ -1,0 +1,8 @@
+test_name: glm53-w8a8-a5-logits-disable-sfac8
+model: /root/.cache/models/GLM-5.3-W8A8C8-MXFP8-1D7M1MTP
+num_nodes: 2
+dp_load_balancing: internal
+logits_regression:
+  baseline_path: /root/.cache/glm53-logits-golden/20261102
+  case: disable_sfac8
+  timeout_seconds: 1800
