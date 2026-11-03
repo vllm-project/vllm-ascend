@@ -61,14 +61,12 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     register_engines_once,
     wait_for_free_device_memory,
 )
+from tests.e2e.rlhf.common import server_visible_devices
 
 INFERENCE_WORLD_SIZE = 1
-# Card the inference server runs on, as an absolute device index inside the
-# container: the harness hands the server `ASCEND_RT_VISIBLE_DEVICES` explicitly,
-# so this is a physical chip. The trainer sits next to it. The default is the
-# first card pair CI uses; a shared host can point a lane at idle cards by
-# exporting `VLLM_RL_TEST_DEVICE_INDEX` (leaving `ASCEND_RT_VISIBLE_DEVICES`
-# unset, so the pytest process's logical indices equal the physical ones).
+# Parent-process logical index; the trainer uses the next logical device.
+# Translate only at the child-server boundary through server_visible_devices().
+# With ASCEND_RT_VISIBLE_DEVICES=6,7, the default indices 0/1 select chips 6/7.
 INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
 TRAINER_DEVICE_INDEX = INFERENCE_DEVICE_INDEX + 1
 UPDATE_TIMEOUT = 300
@@ -102,7 +100,7 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
     source = FixedRandomWeightSource(case, torch.device("npu", TRAINER_DEVICE_INDEX))
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
-        "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
+        "ASCEND_RT_VISIBLE_DEVICES": server_visible_devices(INFERENCE_DEVICE_INDEX, INFERENCE_WORLD_SIZE),
     }
 
     # Independent oracle first: a server that loads exactly this payload at
@@ -333,7 +331,7 @@ def test_hccl_draft_then_target_update(tmp_path, monkeypatch, packed: bool, enfo
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-        "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
+        "ASCEND_RT_VISIBLE_DEVICES": server_visible_devices(INFERENCE_DEVICE_INDEX, INFERENCE_WORLD_SIZE),
     }
     references = []
     for name, source in (("draft-reference", draft_updated), ("target-reference", target_updated)):
