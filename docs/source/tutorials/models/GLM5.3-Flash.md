@@ -76,12 +76,10 @@ Download the checkpoint from ModelScope for the hardware shown below. A3 and 950
 | `GLM-5.3-Flash-w8a8` | A3 series (64GB × 16) | 1 node for single-node deployment; 2 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) | Supports a W8A8C8 configuration: C8 is dynamic KV-cache quantization. Set `--kv-cache-dtype int8` in the serving command to enable INT8 KV cache; no separate C8 checkpoint is required. |
 | `GLM-5.3-Flash-w8a8` | A2 series (64GB × 8 per node) | 2 nodes for colocated deployment; 4 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) | / |
 
-For the original model weights, refer to [Hugging Face](https://huggingface.co/zai-org/GLM-5.3-Flash).
-The A5 deployment examples use the quantized weights listed in the table above.
-
-> **Path description**: Download the model weights to a directory of your
-> choice and record it. Replace `<YOUR_MODEL_PATH>` in the A5 deployment
-> commands with this directory. Use the same model weights on all nodes.
+> **Path description**: Download `GLM-5.3-Flash-w8a8-mxfp8` from the ModelScope
+> link above to a directory of your choice and record it. Replace
+> `<YOUR_MODEL_PATH>` in the A5 deployment commands with this directory.
+> Use the same model weights on all nodes.
 
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
