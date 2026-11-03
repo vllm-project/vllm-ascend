@@ -548,6 +548,8 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
 
     **Node1-Node3**
 
+    Run this command on Node1, Node2, and Node3. Set `DP_START_RANK` to a unique value on each node: `1` on Node1, `2` on Node2, and `3` on Node3.
+
     ```bash
     # nic_name is the network interface that owns local_ip on the current node.
     nic_name="xxx"
@@ -555,6 +557,9 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
 
     # node0_ip must be the local_ip of Node0 on every node.
     node0_ip="xxxx"
+
+    # Set to a unique value on each node: Node1=1, Node2=2, Node3=3.
+    DP_START_RANK=<1_TO_3>
 
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
@@ -584,7 +589,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
       --data-parallel-address $node0_ip  \
       --data-parallel-size 4 \
       --data-parallel-size-local 1 \
-      --data-parallel-start-rank 1 \
+      --data-parallel-start-rank $DP_START_RANK \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --served-model-name dsv4 \
