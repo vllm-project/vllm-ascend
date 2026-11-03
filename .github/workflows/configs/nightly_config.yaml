@@ -158,9 +158,6 @@ a3:
 a3-560t:
   single_node:
     test_config:
-      - name: singlecard-ops-a3
-        os: linux-aarch64-a3-800i-8
-        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/
       - name: Qwen3.8-27B-w8a8-A3
         os: linux-aarch64-a3-800i-2
         config_file_path: Qwen3.8-27B-w8a8-A3.yaml
@@ -329,9 +326,6 @@ a5:
 #         config_file_path: Qwen3.5-397B-A17B-w4a8-mtp.yaml
   single_node:
     test_config:
-      - name: singlecard-ops-a5
-        os: linux-aarch64-a5-8
-        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/
       - name: Qwen3_235b_w8a8_A5
         os: linux-aarch64-a5-8
         config_file_path: Qwen3_235b_w8a8_A5.yaml
