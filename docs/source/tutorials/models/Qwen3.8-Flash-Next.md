@@ -253,27 +253,15 @@ Select the hardware tab below.
 
 === "A2 series / A3 series"
 
-    A2 series and A3 series use the same TP2 × DP4 configuration per role: prefill and decode each require eight devices. The commands below show the 16-device single-host layout. An eight-device A2 series host cannot run both roles with this layout; deployment across two hosts requires separate host addresses, device numbering, and proxy endpoints. Both roles load the same W4A8 checkpoint and enable expert parallelism, async scheduling, and Model Runner V2. MooncakeConnectorV2 transfers KV cache between them; requests enter the proxy on port 25570.
-
-    | Setting | Prefill | Decode |
-    | --- | --- | --- |
-    | Visible devices | 0–7 | 8–15 |
-    | TP × DP | 2 × 4 | 2 × 4 |
-    | API port | 25568 | 25569 |
-    | Mooncake role / KV port | `kv_producer` / 32600 | `kv_consumer` / 32700 |
-    | HCCL socket port range | 61400–61499 | 61500–61599 |
-    | HCCL buffer size | 4096 | 512 |
-    | Maximum context / sequences / batched tokens | 141312 / 32 / 4096 | 141312 / 32 / 4096 |
+    Prefill and Decode each use eight devices with TP2 × DP4 and the same W4A8 checkpoint. The commands below use one 16-device A3 series host; for two eight-device A2 series hosts, apply the changes in the table below.
 
     Before starting:
 
-    - Expose devices 0–15 and mount the same W4A8 checkpoint for both roles.
-    - Install compatible vLLM, vLLM-Ascend, and Mooncake in the active Python environment. Follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake), using a Mooncake version compatible with the installed vLLM-Ascend release.
-    - The commands use `192.168.0.1`, `eth0`, and `/models/Qwen3.8-Flash-Next-w4a8`. Replace these literals consistently for the target host. Provide sufficient host memory for Engram CPU offload.
-    - Run the proxy command from the vLLM-Ascend repository root. Both hardware examples use the repository-provided load-balancing proxy; this configuration exposes one API endpoint per role, while the 950 DT configuration exposes two per role.
-    - The examples use the Mooncake library directory from the Python 3.12.16 environment. Edit the literal library path if Mooncake is installed elsewhere.
+    - Install compatible vLLM, vLLM-Ascend, and [Mooncake](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Adjust the Mooncake library path if it differs from the Python 3.12.16 path shown below.
+    - Expose the devices used by each host and mount the same checkpoint and `/etc/hccn.conf`. Replace the example IP addresses, `eth0`, and model path with your environment settings; provide sufficient host memory for Engram CPU offload.
+    - Run P and D in separate terminals. After both APIs are ready, start the proxy from the vLLM-Ascend repository root.
 
-    For two eight-device A2 series hosts, run Prefill on `192.168.0.1` and Decode on `192.168.0.2`. Use the commands below with these literal changes; keep each role's four DP replicas on its own host:
+    For A2 series, run P on `192.168.0.1` and D on `192.168.0.2`, keeping each role's four DP replicas on its own host:
 
     | Setting | Prefill host | Decode host |
     | --- | --- | --- |
@@ -282,9 +270,7 @@ Select the hardware tab below.
     | Proxy backend | `--prefiller-hosts 192.168.0.1` | `--decoder-hosts 192.168.0.2` |
     | API verification from the proxy host | `http://192.168.0.1:25568/v1/models` | `http://192.168.0.2:25569/v1/models` |
 
-    On both hosts and in the proxy terminal, set `no_proxy` and `NO_PROXY` to `localhost,127.0.0.1,192.168.0.1,192.168.0.2`. Update the three socket-interface variables to each host's interface. Expose devices 0–7 in each container, mount the same checkpoint and `/etc/hccn.conf`, and run the proxy on the prefill host. The same-host A3 series commands below retain Decode devices 8–15.
-
-    Run Prefill and Decode in separate terminals. Start Proxy after both model APIs are ready.
+    Run the A2 series proxy on the prefill host. Set `no_proxy` and `NO_PROXY` in all three terminals to `localhost,127.0.0.1,192.168.0.1,192.168.0.2`, and update each host's socket-interface variables.
 
     **Prefill:**
 
