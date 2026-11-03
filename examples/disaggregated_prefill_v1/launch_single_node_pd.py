@@ -265,11 +265,15 @@ def parse_args() -> argparse.Namespace:
 
     # Extra configs
     p.add_argument("--additional-config", default=None, help='JSON string for --additional-config')
-    p.add_argument("--compilation-config", default='{"cudagraph_mode": "FULL_DECODE_ONLY"}',
-                   help="JSON string for --compilation-config (decode engine only)")
+    p.add_argument(
+        "--compilation-config",
+        default='{"cudagraph_mode": "FULL_DECODE_ONLY"}',
+        help="JSON string for --compilation-config (decode engine only)")
     p.add_argument("--hf-overrides", default=None, help="JSON string for --hf-overrides")
-    p.add_argument("--kv-connector", default="MooncakeConnectorV2",
-                   help="KV connector (MooncakeConnectorV2 or MooncakeConnectorV1)")
+    p.add_argument(
+        "--kv-connector",
+        default="MooncakeConnectorV2",
+        help="KV connector (MooncakeConnectorV2 or MooncakeConnectorV1)")
     p.add_argument("--no-trust-remote-code", action="store_true")
 
     # Proxy
@@ -346,8 +350,14 @@ def main() -> int:
         processes.append((launch_process(prefill_cfg.build_command(), prefill_cfg.build_env(),
                                           str(log_dir / "prefill.log"), "prefill"), "prefill"))
         time.sleep(2)
-        processes.append((launch_process(decode_cfg.build_command(), decode_cfg.build_env(),
-                                         str(log_dir / "decode.log"), "decode"), "decode"))
+        processes.append(
+            (
+                launch_process(
+                    decode_cfg.build_command(), decode_cfg.build_env(),str(log_dir / "decode.log"), "decode"
+                ),
+                "decode"
+            )
+        )
 
         print(f"\n[launcher] Waiting for prefill engine on port {args.prefill_port}...")
         if not wait_for_http(f"http://127.0.0.1:{args.prefill_port}/health", timeout=args.startup_timeout):
@@ -363,13 +373,20 @@ def main() -> int:
 
         if not args.no_proxy:
             proxy_cmd = [
-                sys.executable, args.proxy_script,
-                "--host", "0.0.0.0",
-                "--port", str(args.proxy_port),
-                "--prefiller-hosts", "127.0.0.1",
-                "--prefiller-ports", str(args.prefill_port),
-                "--decoder-hosts", "127.0.0.1",
-                "--decoder-ports", str(args.decode_port),
+                sys.executable,
+                args.proxy_script,
+                "--host",
+                "0.0.0.0",
+                "--port",
+                str(args.proxy_port),
+                "--prefiller-hosts",
+                "127.0.0.1",
+                "--prefiller-ports",
+                str(args.prefill_port),
+                "--decoder-hosts",
+                "127.0.0.1",
+                "--decoder-ports",
+                str(args.decode_port),
             ]
             processes.append((launch_process(proxy_cmd, None, str(log_dir / "proxy.log"), "proxy"), "proxy"))
             print(f"[launcher] Waiting for proxy on port {args.proxy_port}...")
@@ -382,7 +399,8 @@ def main() -> int:
         if not args.no_proxy:
             print(f"\n  Proxy endpoint:  http://127.0.0.1:{args.proxy_port}/v1/chat/completions")
             print(f"  Health check:    http://127.0.0.1:{args.proxy_port}/healthcheck")
-            print(f"\n  Quick test:\n\n"
+            print(
+                  f"\n  Quick test:\n\n"
                   f"    curl http://127.0.0.1:{args.proxy_port}/v1/chat/completions \\\n"
                   f"        -H \"Content-Type: application/json\" \\\n"
                   f"        -d '{{\"model\": \"{args.model}\","

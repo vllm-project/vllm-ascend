@@ -521,6 +521,7 @@ class RemotePDServer(RemoteOpenAIServer):
         vllm_serve_args: list[str] | list[list[str]],
         server_host: str = "127.0.0.1",
         env_dict: dict[str, str] | None = None,
+        env_dicts: list[dict[str, str]] | None = None,
         max_wait_seconds: float | None = 600,
     ) -> None:
         self._proc_list = []
@@ -547,6 +548,15 @@ class RemotePDServer(RemoteOpenAIServer):
                 ]
         else:
             raise RuntimeError("vllm_serves_args must be a list")
+        if env_dicts is not None:
+            if not isinstance(env_dicts, list) or not all(isinstance(item, dict) for item in env_dicts):
+                raise TypeError("env_dicts must be a list of dicts")
+            if len(env_dicts) != len(self.vllm_serve_args_list):
+                raise ValueError(
+                    f"env_dicts has {len(env_dicts)} entries, "
+                    f"but there are {len(self.vllm_serve_args_list)} vllm serve instances"
+                )
+        self.env_dicts = env_dicts
         serve_arg_cmd = ["vllm", "serve"]
         start_device_id = 0
         visible_devices = self.env_dict.get(
@@ -563,6 +573,8 @@ class RemotePDServer(RemoteOpenAIServer):
 
             required_devices = _get_pd_server_required_devices(vllm_serve_arg)
             server_env = copy.deepcopy(self.env_dict)
+            if self.env_dicts is not None:
+                server_env.update(self.env_dicts[i])
             end_device_id = start_device_id + required_devices
             if available_device_ids is None:
                 assigned_device_ids = [str(device_id) for device_id in range(start_device_id, end_device_id)]

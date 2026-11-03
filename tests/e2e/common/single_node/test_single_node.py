@@ -679,6 +679,7 @@ async def test_single_node(config: SingleNodeConfig) -> None:
             RemotePDServer(
                 vllm_serve_args=config.pd_server_cmds,
                 env_dict={**config.envs, **kv_pool_manager.server_envs},
+                env_dicts=config.pd_server_envs or None,
             ),
             DisaggPDProxy(
                 port=config.proxy_port,
