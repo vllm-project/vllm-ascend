@@ -741,7 +741,7 @@ class AscendConfig:
             )
 
         # enable_shared_expert_dp = val and ep and tp>1
-        from vllm_ascend.utils import enable_sp
+        from vllm_ascend.utils import enable_dense_sp, enable_sp
 
         self.enable_shared_expert_dp = (
             self.enable_shared_expert_dp
@@ -754,15 +754,29 @@ class AscendConfig:
             "additional_config.enable_flashcomm1",
         ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
 
+        # Dense Qwen3.5-family sequence parallelism: the same FlashComm switch
+        # also drives SP for dense checkpoints (no MoE to shard).
+        # vllm_ascend.utils.enable_dense_sp is the single predicate for
+        # runtime reads that only see a VllmConfig; it is not an AscendConfig
+        # field (not an external interface).
+        dense_sp_enabled = effective_flashcomm and enable_dense_sp(vllm_config=vc)
+
         if not effective_flashcomm:
             vllm_config.parallel_config.all2all_backend = (
                 "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
             )
             logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
-        elif not vc.parallel_config.use_sequence_parallel_moe:
-            logger.warning_once("FlashComm1 is enabled, but the current config does not support sp MoE. Disabling")
-        else:
+        elif vc.parallel_config.use_sequence_parallel_moe:
             logger.info_once("FlashComm1 is enabled.")
+        elif dense_sp_enabled:
+            logger.info_once("FlashComm1 dense sequence parallelism is enabled for the Qwen3.5 dense family.")
+        else:
+            logger.warning_once(
+                "FlashComm1 is enabled, but the current config does not support sequence "
+                "parallelism (requires tensor_parallel_size > 1, pipeline_parallel_size == 1, "
+                "and an SP-capable model family: MoE with expert parallelism or the dense "
+                "Qwen3.5 family). Disabling."
+            )
 
         # Sequence-parallel max_num_batched_tokens divisibility writeback
         if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):
