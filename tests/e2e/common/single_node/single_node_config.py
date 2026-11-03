@@ -41,6 +41,9 @@ class SingleNodeConfig:
     # Each list must start with the model id and carry `--port` plus a
     # `--kv-transfer-config` whose `kv_role` is kv_producer or kv_consumer.
     pd_server_cmds: list[list[str]] = field(default_factory=list)
+    # Optional per-instance env overrides, merged over the shared `envs`;
+    # pd_server_envs[i] applies to pd_server_cmds[i] (entries may be empty).
+    pd_server_envs: list[dict[str, Any]] = field(default_factory=list)
     mm_request: dict[str, Any] = field(default_factory=dict)
     expected_response: dict[str, Any] = field(default_factory=dict)
     kv_pool: KVPoolConfig | None = None
@@ -127,6 +130,7 @@ class SingleNodeConfigLoader:
         "epd_server_cmds",
         "epd_proxy_args",
         "pd_server_cmds",
+        "pd_server_envs",
         "expected_response",
         "mm_request",
         "kv_pool",
@@ -183,6 +187,16 @@ class SingleNodeConfigLoader:
                     raise TypeError("pd_server_cmds must be a non-empty list of command lists")
                 if not all(isinstance(cmd, list) and cmd for cmd in cmds):
                     raise TypeError("each pd_server_cmds entry must be a non-empty command list")
+                per_instance_envs = case.get("pd_server_envs", [])
+                if not isinstance(per_instance_envs, list) or not all(
+                    isinstance(envs, dict) for envs in per_instance_envs
+                ):
+                    raise TypeError("pd_server_envs must be a list of env dicts")
+                if per_instance_envs and len(per_instance_envs) != len(cmds):
+                    raise ValueError(
+                        f"pd_server_envs has {len(per_instance_envs)} entries "
+                        f"but pd_server_cmds has {len(cmds)}"
+                    )
 
     @classmethod
     def _parse_test_cases(cls, cases: list[dict[str, Any]]) -> list[SingleNodeConfig]:
@@ -204,6 +218,7 @@ class SingleNodeConfigLoader:
                     epd_server_cmds=case.get("epd_server_cmds", []),
                     epd_proxy_args=case.get("epd_proxy_args", []),
                     pd_server_cmds=case.get("pd_server_cmds", []),
+                    pd_server_envs=case.get("pd_server_envs", []),
                     benchmarks=case.get("benchmarks", {}),
                     prompts=case.get("prompts", PROMPTS),
                     api_keyword_args=case.get("api_keyword_args", API_KEYWORD_ARGS),
