@@ -425,7 +425,16 @@ class AscendDSAV41Impl:
                 self._write_swa_cache(attn, cache_metadata.swa, kv)
         self._apply_rotary(attn, q, cos, sin)
         # Consume local Query RoPE before compression can reuse source tables.
-        prepared_indexer = self._prepare_indexer_inputs(attn, query_hidden, qr, cos, sin, query_metadata)
+        defer_weights_sync = self.role.is_kv_source and self.role.compress_ratio == 2 and cache_hidden.shape[0] > 0
+        prepared_indexer = self._prepare_indexer_inputs(
+            attn,
+            query_hidden,
+            qr,
+            cos,
+            sin,
+            query_metadata,
+            defer_weights_sync=defer_weights_sync,
+        )
         if self.role.is_kv_source and cache_hidden.shape[0]:
             self._write_compressed_source(
                 attn,
@@ -443,7 +452,7 @@ class AscendDSAV41Impl:
     def _indexer_hidden_states(self, hidden_states, metadata):
         return hidden_states[: metadata.swa.num_actual_tokens]
 
-    def _prepare_indexer_inputs(self, attn, hidden_states, qr, cos, sin, metadata):
+    def _prepare_indexer_inputs(self, attn, hidden_states, qr, cos, sin, metadata, *, defer_weights_sync=False):
         if not self.role.has_long_context or not self.role.is_index_source:
             return None
         indexer = attn.indexer
@@ -457,6 +466,9 @@ class AscendDSAV41Impl:
             weights = indexer.project_weights(hidden_states)
             weights_done = aux_stream.record_event()
         indexer.apply_query_rope(query, cos, sin)
+        if not defer_weights_sync:
+            main_stream.wait_event(weights_done)
+            weights_done = None
         return DeepseekV41PreparedIndexer(query=query, weights=weights, weights_done=weights_done)
 
     @staticmethod
@@ -578,6 +590,12 @@ class AscendDSAV41Impl:
             # Finish the input cast before query quantization starts on the
             # auxiliary stream, so the WKV matmul can overlap that quantization.
             self._quantize_indexer_query(attn, prepared_indexer, metadata)
+            # End the auxiliary weights projection before starting Compressor
+            # Cube work. Quantization follows the projection on the auxiliary
+            # stream and can still overlap the WKV matmul after this wait.
+            if prepared_indexer is not None and prepared_indexer.weights_done is not None:
+                torch.npu.current_stream().wait_event(prepared_indexer.weights_done)
+                prepared_indexer.weights_done = None
             kv = compressor.wkv(hidden_states_fp32)
             score = compressor.wgate(hidden_states_fp32)
             latent = compressor.pool_projected(kv, score, state_metadata)
