@@ -179,7 +179,7 @@ jobs:
       vllm: ${{ inputs.vllm_ref_for_test }}
       test_groups: ${{ needs.gen-presmoke-groups.outputs.presmoke_groups_json }}
       ref: ${{ inputs.vllm_ascend_branch }}
-      base_ref: ${{ inputs.vllm_ascend_branch }}
+      base_ref: ${{ inputs.base_image_branch || 'main' }}
       continue_on_error: false
       timeout-minutes: 60
     secrets:
