@@ -67,12 +67,13 @@ class TestQuantizedAllReduce(unittest.TestCase):
         self.assertEqual(wrapper.min_numel, 12345)
 
     def test_accepted_on_validated_device_families(self):
-        for dt in (AscendDeviceType.A2, AscendDeviceType.A3):
-            wrapper = _make(world_size=4, device_type=dt)
-            self.assertEqual(wrapper.max_q, 31)
+        wrapper = _make(world_size=4, device_type=AscendDeviceType.A2)
+        self.assertEqual(wrapper.max_q, 31)
 
     def test_raises_on_unvalidated_device_families(self):
-        for dt in (AscendDeviceType._310P, AscendDeviceType.A5):
+        # A3 runs the kernels but is a measured net loss there, so it must be
+        # rejected like the other unvalidated families.
+        for dt in (AscendDeviceType.A3, AscendDeviceType._310P, AscendDeviceType.A5):
             with self.assertRaisesRegex(RuntimeError, "only validated on"):
                 _make(world_size=4, device_type=dt)
 

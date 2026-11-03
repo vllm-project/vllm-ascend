@@ -13,10 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""Quantized all-reduce for large bf16 TP collectives on Atlas A2/A3.
+"""Quantized all-reduce for large bf16 TP collectives on Atlas A2.
 
 Halves the all-reduce payload (bf16 -> int8 -> reduce -> bf16). Opt-in, and it
 only pays off for large messages, so it is gated by a payload threshold.
+
+A3 (910C) is rejected. Its bf16 HCCS bandwidth is about 2.6x that of A2 while
+the fixed per-collective cost of the int8 path is unchanged, so the quantized
+path is a net loss at every payload size (measured 5-320 MiB across four
+different groups of 910C cards).
 
 Group scope
 -----------
@@ -62,9 +67,12 @@ from vllm.logger import logger
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 
-# Validated on A2 (910B, measured end to end); A3 (910C) supports the kernels
-# but its int8 reduce behaviour is unmeasured.
-_VALID_DEVICE_TYPES = (AscendDeviceType.A2, AscendDeviceType.A3)
+# Validated on A2 (910B, measured end to end). A3 (910C) runs the kernels, but
+# its bf16 HCCS bandwidth is about 2.6x that of A2, so the fixed per-collective
+# cost of the int8 path (amax sync + quantize + dequantize) exceeds the transfer
+# time it saves at every payload size; A3 is therefore rejected instead of
+# silently regressing throughput.
+_VALID_DEVICE_TYPES = (AscendDeviceType.A2,)
 # Groups larger than 8 ranks leave too few int8 levels (ws=16 -> max_q=7), so
 # they keep bf16 instead of failing. The TP degree is rejected at config time.
 _MAX_VALID_WORLD_SIZE = 8
