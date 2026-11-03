@@ -1,0 +1,14 @@
+# Release note fragment for YOCO mask/compact prefill truncation.
+pr: 19859
+entries:
+  - category: feature
+    text: >
+      Added DeepSeek-V4.1 YOCO mask/compact prefill truncation scaffolding
+      (additional_config yoco_prefill_* plus CPU metadata helpers). Executable
+      mask/compact modes are rejected until runner and attention wiring land;
+      default remains off.
+    model: deepseek-v4.1
+  - category: documentation
+    text: >
+      Documented YOCO mask/compact prefill truncation and how it differs from
+      decoder bounded replay and draft_window_size.
