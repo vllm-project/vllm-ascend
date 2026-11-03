@@ -13,10 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dedicated queue: wait for rare_chars pair D2H, then pack+feed.
+"""Dedicated queue: wait for rare_chars collect, issue pair D2H, then pack+feed.
 
-Separate from ActionQueue so pair sync does not contend with report/dump jobs
-and a short ActionQueue cannot drop rc4 feeds under high concurrency.
+Separate from ActionQueue so pair completion does not contend with report/dump
+jobs and a short ActionQueue cannot drop rc4 feeds under high concurrency.
+The sample / get_output path only submits; this worker owns collect-wait + copy.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ _MAXSIZE = 512
 
 
 class RarePairWaitQueue:
-    """One worker thread. Jobs should sync the pair event then run host work."""
+    """One worker thread. Jobs wait for collect, issue pair D2H, then host work."""
 
     def __init__(self, maxsize: int = _MAXSIZE) -> None:
         self._q: queue.Queue[Callable[[], None] | None] = queue.Queue(maxsize=maxsize)

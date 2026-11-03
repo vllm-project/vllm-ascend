@@ -90,25 +90,36 @@ def test_consume_rare_pairs_async_submits_and_releases_pin(monkeypatch):
 
         p._rare_pair_pack_and_feed = _pack_and_feed  # type: ignore[method-assign]
         p._reap_finished_requests = lambda: None  # type: ignore[method-assign]
+        materialized: list[object] = []
+
+        def _materialize(hold, collect_event):
+            if collect_event is not None:
+                collect_event.synchronize()
+            cpu = object()
+            materialized.append(cpu)
+            return cpu
+
+        p._materialize_rare_pair_cpu = _materialize  # type: ignore[method-assign]
 
         store = RequestGuardStore.get()
         store.get_or_create("a")
         store.mark_finished(["a"], wave=0)
 
-        event = MagicMock()
-        cpu = object()
-        p._pending_rare_pair = (cpu, event)
+        collect_event = MagicMock()
+        # Device hold only; D2H happens inside the wait-queue job.
+        p._pending_rare_pair = (None, collect_event)
         output = SimpleNamespace(req_ids=["a"], sampled_token_ids=None)
         p.consume_rare_pairs(output)
 
-        # Job runs on the waiter thread; drain by stopping the queue.
+        # Job runs on the waiter thread; drain by joining the queue.
         from vllm_ascend.observability.runtime_guard.rare_pair_wait import (
             get_rare_pair_wait_queue,
         )
 
         q = get_rare_pair_wait_queue()
         q._q.join()
-        event.synchronize.assert_called_once()
+        collect_event.synchronize.assert_called_once()
+        assert len(materialized) == 1
         assert fed == [(["a"], 1)]
         assert store.get_state("a") is not None
         assert store.get_state("a").rare_pair_jobs == 0
