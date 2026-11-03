@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Cache metadata and execution backends for the GLM-Next pooled indexer."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from importlib import import_module
@@ -233,21 +234,6 @@ class AscendIndexerKPoolMetadata:
     pcp_local_token_count: int = 0
     # Per-rank contiguous scoring slice, or None for the replicated path.
     indexer_row_shard: AscendIndexerKPoolRowShard | None = None
-
-
-@dataclass
-class KPoolHiddenGather:
-    """One forward's pending PCP input, retaining the send buffer until wait."""
-
-    local_hidden: torch.Tensor
-    gathered_hidden: torch.Tensor
-    restore_indices: torch.Tensor
-    handle: torch.distributed.Work | None
-
-    def wait_and_restore(self) -> torch.Tensor:
-        if self.handle is not None:
-            self.handle.wait()
-        return torch.index_select(self.gathered_hidden, 0, self.restore_indices)
 
 
 @dataclass
@@ -895,8 +881,8 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
     def prepare_pcp_hidden(
         self, k_hidden_states: torch.Tensor, indexer_metadata: AscendIndexerKPoolMetadata
-    ) -> torch.Tensor | KPoolHiddenGather:
-        """Launch ordinary PCP keys before the independent MLA/indexer queries."""
+    ) -> torch.Tensor | Callable[[], torch.Tensor]:
+        """Launch KPool PCP inputs before the independent MLA/indexer queries."""
         restore_indices = indexer_metadata.pcp_hidden_restore_indices
         if restore_indices is None:
             return k_hidden_states
@@ -911,13 +897,21 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         k_hidden = k_hidden.contiguous()
         gathered_hidden, handle = all_gather_async(k_hidden, get_pcp_group())
         logger.info_once("KPool PCP hidden AllGather overlaps query projections.")
-        return KPoolHiddenGather(k_hidden, gathered_hidden, restore_indices, handle)
+
+        def finish() -> torch.Tensor:
+            # Retain the contiguous send until HCCL has finished reading it.
+            _ = k_hidden
+            if handle is not None:
+                handle.wait()
+            return torch.index_select(gathered_hidden, 0, restore_indices)
+
+        return finish
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        k_hidden_states: torch.Tensor | KPoolHiddenGather,
+        k_hidden_states: torch.Tensor | Callable[[], torch.Tensor],
         indexer_metadata: Any,
         compute_topk: bool = True,
     ) -> torch.Tensor | None:
@@ -956,10 +950,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
         indexer_cache, *scale_caches = self._bound_caches(self.k_cache)
         (tail_cache,) = self._bound_caches(self.tail_cache)
-        if isinstance(k_hidden_states, KPoolHiddenGather):
-            k_hidden = k_hidden_states.wait_and_restore()
-        else:
-            k_hidden = k_hidden_states[:num_tokens]
+        k_hidden = k_hidden_states[:num_tokens] if isinstance(k_hidden_states, torch.Tensor) else k_hidden_states()
         return self._forward_cann(
             k_hidden,
             q_values,

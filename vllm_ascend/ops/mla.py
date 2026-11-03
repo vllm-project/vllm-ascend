@@ -20,6 +20,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Callable
+
 import torch
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -32,7 +34,6 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
-from vllm_ascend.attention.indexer_kpool import KPoolHiddenGather
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 
@@ -100,7 +101,7 @@ class IndexerWrapper(nn.Module):
 
     def prepare_pcp_hidden(
         self, hidden_states: torch.Tensor, indexer_metadata: AttentionMetadata
-    ) -> torch.Tensor | KPoolHiddenGather:
+    ) -> torch.Tensor | Callable[[], torch.Tensor]:
         """Let pooled indexers launch key communication before SFA queries."""
         prepare = getattr(self.impl, "prepare_pcp_hidden", None)
         if prepare is None:
@@ -111,7 +112,7 @@ class IndexerWrapper(nn.Module):
         self,
         hidden_states: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        k_hidden_states: torch.Tensor | KPoolHiddenGather,
+        k_hidden_states: torch.Tensor | Callable[[], torch.Tensor],
         indexer_metadata: AttentionMetadata,
         compute_topk: bool = True,
     ) -> torch.Tensor | None:

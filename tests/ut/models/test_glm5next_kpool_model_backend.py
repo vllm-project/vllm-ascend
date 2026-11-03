@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib.util
+import weakref
 from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
@@ -755,6 +756,32 @@ def test_backend_restores_pcp_keys_before_kpool_cache_write(
         assert result.shape[0] == recorded_args[1].shape[0] == expected_tokens
     else:
         assert result is None
+
+
+def test_pending_gather_retains_contiguous_send_until_wait(monkeypatch):
+    value = torch.arange(12).view(3, 4).T
+    assert not value.is_contiguous()
+    group = SimpleNamespace(world_size=2)
+    monkeypatch.setattr(backend_module, "get_pcp_group", lambda: group)
+
+    def launch(send, actual_group):
+        assert actual_group is group and send.is_contiguous()
+        send_ref = weakref.ref(send)
+        result = torch.empty(8, 3, dtype=send.dtype)
+
+        def wait():
+            retained = send_ref()
+            assert retained is not None, "Communication still needs the contiguous send buffer."
+            result.copy_(torch.cat((retained, retained)))
+
+        return result, SimpleNamespace(wait=wait)
+
+    monkeypatch.setattr(backend_module, "all_gather_async", launch)
+    backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
+    metadata = SimpleNamespace(pcp_hidden_restore_indices=torch.arange(8), pcp_local_token_count=4)
+    finish = backend.prepare_pcp_hidden(value, metadata)
+    assert callable(finish)
+    torch.testing.assert_close(finish(), torch.cat((value, value)))
 
 
 def test_pcp_hidden_prefetch_leaves_non_pcp_layout_unchanged(monkeypatch):

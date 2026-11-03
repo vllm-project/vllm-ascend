@@ -1269,15 +1269,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
-    def _get_pcp_cache_write_slots(self, slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
-        return slots
-
     def _prepare_kv(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata) -> Callable[[], tuple]:
         """Launch PCP KV exchange now and finish the local cache write after Q projection."""
         if not self.pcp_enabled:
             outputs = self.exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
             return lambda: outputs
-        slots = self._get_pcp_cache_write_slots(slots, attn_metadata)
         if not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
             return lambda: self._exec_kv_local(
                 kv_no_split, cos, sin, kv_cache, slots[: kv_no_split.shape[0]], attn_metadata
@@ -1340,7 +1336,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         attn_metadata: M,
     ):
         if self.pcp_enabled:
-            slots = self._get_pcp_cache_write_slots(slots, attn_metadata)
             if needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
                 num_replicated_tokens = get_pcp_num_replicated_tokens(
                     attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded
@@ -2163,7 +2158,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 # Wait before the first main or indexer cache access.
                 self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
 
-            finish_main_kv = self._prepare_kv(
+            kv_outputs: Callable[[], tuple] | tuple
+            kv_outputs = self._prepare_kv(
                 kv_no_split,
                 cos,
                 sin,
@@ -2177,7 +2173,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 k_hidden_states = self.indexer.prepare_pcp_hidden(k_hidden_states, indexer_attn_metadata)
             self._start_o_proj_weight_gather()
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
-            kv_outputs = finish_main_kv()
+            kv_outputs = kv_outputs()
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
             if self.qk_rope_head_dim:
@@ -2209,7 +2205,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 indexer_attn_metadata,
                 compute_topk=not self.skip_topk and has_local_query,
             )
-            # Release the pending KPool receive buffer after its consumer.
+            # Release pending indexer receive buffers after their consumer.
             k_hidden_states = None
             if self.skip_topk:
                 topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)

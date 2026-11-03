@@ -1195,6 +1195,11 @@ def test_native_pcp_dcp_packed_kv_preserves_gathered_payload_addresses(
     with (
         patch("vllm.v1.attention.ops.pcp.get_pcp_group", return_value=group),
         patch("vllm_ascend.attention.sfa_v1.get_pcp_group", return_value=group),
+        patch.object(
+            sparse_mla,
+            "all_gather_async",
+            side_effect=lambda values, _: (group.all_gather(values, 0), SimpleNamespace(wait=lambda: None)),
+        ),
         patch("vllm_ascend.attention.sfa_v1.custom_kv_rmsnorm_rope", side_effect=quantize),
         patch("vllm_ascend.attention.sfa_v1.turboquant_kv_rmsnorm_rope", side_effect=quantize),
         patch("vllm_ascend.attention.sfa_v1.DeviceOperator.scatter_cache", side_effect=scatter),
