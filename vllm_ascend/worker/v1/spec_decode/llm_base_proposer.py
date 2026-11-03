@@ -90,6 +90,7 @@ _HIDDEN_STATE_DRAFTER_TYPES: tuple[type, ...] = (
 # sparse_mqa_logits calls tl.constexpr at module scope, crashing the import).
 if HAS_TRITON:
     from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
+    from vllm_ascend.ops.triton.sample.greedy_argmax import greedy_argmax
 
     _HIDDEN_STATE_DRAFTER_TYPES += (DSparkDeepseekV41ForCausalLM,)
 
@@ -1590,7 +1591,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         if probs is not None:
                             dspark_probs_list.append(probs)
                     else:
-                        next_token_ids = logits[:, idx].argmax(dim=-1)
+                        if HAS_TRITON and get_ascend_config().enable_dspark_split_argmax:
+                            next_token_ids = greedy_argmax(logits[:, idx])
+                        else:
+                            next_token_ids = logits[:, idx].argmax(dim=-1)
                         if dspark_has_vocab_mapping:
                             next_token_ids = self.model.map_draft_to_target(next_token_ids)
                         draft_token_ids[:, idx + 1].copy_(next_token_ids)

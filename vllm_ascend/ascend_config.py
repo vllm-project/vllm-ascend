@@ -604,6 +604,9 @@ class AscendConfig:
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
     dump_config_path: str | None = None
+    # Experimental NPU split-vocabulary reduction for DSpark greedy drafting.
+    # Keep disabled until correctness and performance are validated on hardware.
+    enable_dspark_split_argmax: bool = False
     runtime_config_path: str | None = None
     runtime_config_hot_reload: bool = False
     # Runtime object constructed in init_ascend_config (not from additional_config dict).
