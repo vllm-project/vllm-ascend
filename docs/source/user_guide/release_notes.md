@@ -2,7 +2,7 @@
 
 ## v0.32.0rc1 - 2026.11.02
 
-This is the first release candidate of vLLM Ascend v0.32.0, aligned with upstream vLLM v0.32.0. This model-focused release expands **Qwen3.8-Flash-Next** with pipeline and sequence parallelism on Atlas 800 A3, and adds experimental support for **MiniMax-M3.1-Flash** on Atlas 800 A2/A3 and 950DT products. It also advances **DeepSeek V4.1**, **Kimi K3**, **GLM-5.3-Flash**, and **MiniMax-M3**, with improvements to Model Runner V2, context parallelism, speculative decoding, and KV Cache management. Other models and hardware combinations, such as Atlas 800 A2, were not sufficiently validated for this release. Models and hardware combinations outside this declared scope are not part of the v0.32.0rc1 release claim. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/latest/) to get started.
+This is the first release candidate of vLLM Ascend v0.32.0, aligned with upstream vLLM v0.32.0. This model-focused release expands **Qwen3.8-Flash-Next** with pipeline and sequence parallelism on Atlas 800 A3, and adds experimental support for **MiniMax-M3.1-Flash** on Atlas 800 A2/A3 and 950DT products. It also advances **DeepSeek V4.1**, **Kimi K3** and **GLM-5.3-Flash**, with improvements to Model Runner V2, context parallelism, speculative decoding, and KV Cache management. Other models and hardware combinations, such as Atlas 800 A2, were not sufficiently validated for this release. Models and hardware combinations outside this declared scope are not part of the v0.32.0rc1 release claim. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/latest/) to get started.
 
 ### Highlights
 
