@@ -1338,3 +1338,25 @@ def test_a5_noncausal_draft_plan_keeps_actual_window_lengths(builders, monkeypat
     ori, cmp, kw = calls[0]
     assert torch.all(ori == 6) and torch.count_nonzero(cmp) == 0
     assert not kw["has_cmp_kv"]
+
+
+@pytest.mark.parametrize(
+    "ratios,candidate_blocks,candidate_width,error",
+    [([0, 3], 0, 0, "ratios"), ([0, 2, 1], 1, 2, "coverage")],
+)
+def test_a5_async_plans_reject_unsupported_visibility_contract(
+    builders, ratios, candidate_blocks, candidate_width, error
+):
+    builder = builders()["swa"]
+    builder._uses_a5_packed_cache = True
+    builder._a5_smla_metadata = torch.empty(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    builder._a5_smla_length_rows = torch.empty(64, 1, dtype=torch.int32)
+    text = builder.vllm_config.model_config.hf_text_config
+    text.compress_ratios = ratios
+    text.candidate_topk_blocks = candidate_blocks
+    text.candidate_block_size = candidate_width
+    builder._device_backend = Mock()
+    common = _batch(2, 0, "decode").local.replace(pcp_context=None)
+    with pytest.raises(ValueError, match=error):
+        dsa_v41.AscendDSAV41MetadataBuilder.build(builder, 0, common)
+    builder._device_backend.mixed_quant_sparse_flash_mla_metadata.assert_not_called()

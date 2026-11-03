@@ -232,23 +232,6 @@ def run_a5_indexer(
     )
 
 
-def build_smla_metadata(length_rows: torch.Tensor, cu_seqlens_q: torch.Tensor) -> torch.Tensor:
-    """Build the fixed A5 mixed-quant SMLA launch metadata."""
-    return ops.mixed_quant_sparse_flash_mla_metadata(
-        length_rows,
-        length_rows,
-        cu_seqlens_q=cu_seqlens_q,
-        num_heads_q=64,
-        num_heads_kv=1,
-        head_dim=512,
-        quant_mode=1,
-        layout_q="TND",
-        layout_kv="PA_BBND",
-        has_ori_kv=True,
-        has_cmp_kv=True,
-    )
-
-
 def _resolve_window_indices(q, metadata, window_size):
     indices = metadata.swa.ori_sparse_indices
     lengths = metadata.swa.ori_topk_length
@@ -351,7 +334,6 @@ class MixedQuantPackedCacheOps:
 
     build_packed_cache_slot_mapping = staticmethod(build_packed_cache_slot_mapping)
     build_window_indices = staticmethod(build_window_indices_triton)
-    build_smla_metadata = staticmethod(build_smla_metadata)
     qsmla = staticmethod(qsmla)
     run_a5_indexer = staticmethod(run_a5_indexer)
     write_attention_cache = staticmethod(write_attention_cache)

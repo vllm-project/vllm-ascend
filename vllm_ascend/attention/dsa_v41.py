@@ -190,7 +190,6 @@ class AscendDSAV41Metadata(AttentionMetadata):
     replay_cache_offsets: torch.Tensor | None = None
     smla_metadata: torch.Tensor | None = None
     a5_smla_plans: dict[int, torch.Tensor] | None = None
-    a5_smla_plan_lengths: dict[int, tuple[torch.Tensor, torch.Tensor]] | None = None
     qli_metadata: torch.Tensor | None = None
     cmp_residual: torch.Tensor | None = None
     c2_ring_metadata: torch.Tensor | None = None
@@ -1261,7 +1260,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         operator_ratio = 0 if cache_kind == "swa" else ratio
         smla_metadata = None
         a5_smla_plans = None
-        a5_smla_plan_lengths = None
         qli_metadata = None
 
         if (
@@ -1285,7 +1283,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             if candidate_blocks and candidate_blocks * candidate_width - (candidate_width - 1) < index_topk:
                 raise ValueError("A5 shared MLA planning requires candidate coverage >= index_topk")
             a5_smla_plans = {}
-            a5_smla_plan_lengths = {}
             # Noncausal/replay masks may differ even at equal Q shapes.
             mask_key = id(ori_topk_length) if noncausal or replay_visible_lens is not None else 0
             for plan_ratio in ratios:
@@ -1348,10 +1345,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     plan_buffer,
                     DeviceMetadataStage.ATTENTION,
                     build_a5_smla_metadata,
-                )
-                # Publish diagnostics with the same ownership as the plan.
-                a5_smla_plan_lengths[plan_ratio] = batch_shared.setdefault(
-                    plan_key + ":lengths", (plan_ori[:metadata_tokens], plan_cmp[:metadata_tokens])
                 )
             smla_metadata = a5_smla_plans[0]
 
@@ -1614,7 +1607,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             replay_cache_offsets=replay_cache_offsets,
             smla_metadata=smla_metadata,
             a5_smla_plans=a5_smla_plans,
-            a5_smla_plan_lengths=a5_smla_plan_lengths,
             qli_metadata=qli_metadata,
             cmp_residual=cmp_residual_buffer,
             c2_ring_metadata=c2_ring_metadata,
