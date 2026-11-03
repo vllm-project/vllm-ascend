@@ -12,8 +12,8 @@
 
 This document shows the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, Prefill-Decode (PD) disaggregated deployment, multi-node deployment, and accuracy and performance evaluation.
 
-The 950DT products (A5) examples in this guide target **vLLM-Ascend
-v0.32.0rc1** with upstream **vLLM v0.32.0** and Model Runner V2.
+For 950DT products, this document is written based on the vLLM-Ascend
+v0.32.0rc1 release.
 
 ## 2 Supported Features
 
@@ -21,21 +21,21 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-### 950DT Products (A5)
+### 950DT products
 
-The A5 examples use `VLLM_USE_V2_MODEL_RUNNER=1`. The following table
-summarizes their feature configuration and model-specific constraints.
+GLM-5.3-Flash uses Model Runner V2 on 950DT products. Set
+`VLLM_USE_V2_MODEL_RUNNER=1` in the deployment scripts.
 
-| Feature | A5 configuration and constraints |
+| Feature | Configuration |
 | --- | --- |
 | Quantization | W8A8-MXFP8 weights with `--quantization ascend`; FP8 main KV cache with `--kv-cache-dtype fp8`. |
 | KPool indexer cache | BF16 by default; optional [FP8 indexer cache](#a5-fp8-kpool), configured independently of the main KV cache. |
-| MTP and graph mode | Five-token `deepseek_mtp`. Prefill target/draft are eager; colocated and Decode target/draft use `FULL_DECODE_ONLY`. |
+| MTP and graph mode | `deepseek_mtp` with five speculative tokens. Prefill uses eager mode for the target and MTP draft models; single-node deployment and Decode use `FULL_DECODE_ONLY` for both models. |
 | Prefix caching and chunked prefill | Enabled in the examples; keep the hybrid KV cache manager enabled. |
 | PD disaggregation | `MooncakeConnectorV2` with TP8/DP1/EP8 Prefill and TP1/DP8/EP8 Decode. |
 | Context parallelism | Experimental [PCP](../../user_guide/feature_guide/context_parallel.md) uses `--prefill-context-parallel-size`. The examples keep PCP=1 and DCP=1; the KPool indexer does not support DCP>1. |
-| KV Cache Pool | See [A5 pooling constraints](#glm53-flash-5-4-950dt) and the [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). |
-| RecoverSSM | Optional [experimental KDA RecoverSSM](../../user_guide/feature_guide/speculative_decoding.md#experimental-glm-kda-recoverssm); its PP/PCP/DCP and PD compatibility constraints apply. Disabled in these examples. |
+| KV Cache Pool | Refer to [KV Cache Pool Deployment](#glm53-flash-5-4-950dt) for configuration. |
+| RecoverSSM | For experimental KDA RecoverSSM, refer to [Speculative Decoding](../../user_guide/feature_guide/speculative_decoding.md#experimental-glm-kda-recoverssm). |
 
 ### FP8 KPool Indexer Cache on A5 {: #a5-fp8-kpool }
 
@@ -76,15 +76,12 @@ Download the checkpoint from ModelScope for the hardware shown below. A3 and 950
 | `GLM-5.3-Flash-w8a8` | A3 series (64GB × 16) | 1 node for single-node deployment; 2 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) | Supports a W8A8C8 configuration: C8 is dynamic KV-cache quantization. Set `--kv-cache-dtype int8` in the serving command to enable INT8 KV cache; no separate C8 checkpoint is required. |
 | `GLM-5.3-Flash-w8a8` | A2 series (64GB × 8 per node) | 2 nodes for colocated deployment; 4 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) | / |
 
-For A5, the [original model on Hugging Face](https://huggingface.co/zai-org/GLM-5.3-Flash)
-provides the model card and upstream weights. The serving examples use the
-Ascend-quantized ModelScope checkpoint in the table; the original checkpoint
-is not a substitute for that quantization format.
+For the original model weights, refer to [Hugging Face](https://huggingface.co/zai-org/GLM-5.3-Flash).
+The A5 deployment examples use the quantized weights listed in the table above.
 
-> **A5 model path:** Download the quantized checkpoint to a local directory
-> and record its revision. Replace `<YOUR_MODEL_PATH>` in every A5 script
-> with that directory, mounted inside the container. Use the same checkpoint
-> revision on both PD roles.
+> **Path description**: Download the model weights to a directory of your
+> choice and record it. Replace `<YOUR_MODEL_PATH>` in the A5 deployment
+> commands with this directory. Use the same model weights on all nodes.
 
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
@@ -105,9 +102,7 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
 
 === "950DT products"
 
-    Use the A5 image for the vLLM-Ascend release described in Section 1.
-    Follow the [installation guide](../../getting_started/installation.md)
-    for the matching driver, firmware and software dependencies.
+    Start the Docker container on each node.
     Prepare the platform's `/etc/hccl_rootinfo.json`, `/etc/hixlep/` and
     `/lib/route.conf` before starting a container on each node.
 
@@ -145,7 +140,7 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
     -itd $IMAGE bash
     ```
 
-    On the host, verify that the container is running with privileged mode:
+    Run the following commands on the host to check the container status:
 
     ```shell
     docker ps --filter "name=$NAME"
@@ -158,7 +153,7 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
     true
     ```
 
-    Enter the container and verify the active packages and all eight devices:
+    **Check the software stack inside the 950DT products container**
 
     ```shell
     docker exec -it "$NAME" bash
@@ -167,9 +162,9 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
     npu-smi info
     ```
 
-    Expect `imports: OK`, the vLLM version listed in Section 1, and eight
-    healthy Ascend 950DT devices. For package or driver failures, see the
-    [Public FAQs](../../faqs.md).
+    The import check should print `imports: OK`, and `npu-smi info` should
+    show all eight devices. For common environment and installation issues,
+    refer to the [Public FAQs](../../faqs.md).
 
 === "A3 series"
 
@@ -308,9 +303,7 @@ are not interchangeable.
 
     - Quantized model `GLM-5.3-Flash-w8a8-mxfp8` can be deployed on 1 950DT products (96GB × 8).
 
-    This colocated deployment runs Prefill and Decode in the same TP8/DP1
-    engine. It uses the native KDA path, FP8 main KV cache, BF16 indexer,
-    prefix caching, and five-token MTP with target and draft decode graphs.
+    Run the following script to execute online inference.
 
     ```shell
     # Replace <YOUR_MODEL_PATH> with the directory recorded in Section 3.1.
@@ -346,19 +339,16 @@ are not interchangeable.
       --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": false}'
     ```
 
-    Wait for graph capture and API initialization to finish. Successful API
-    startup includes output similar to:
+    The output upon successful startup is:
 
     ```text
     INFO:     Waiting for application startup.
     INFO:     Application startup complete.
     ```
 
-    Check `curl --fail http://127.0.0.1:8000/health` and send the request in
-    [Section 6](#6-functional-verification). A successful health check alone
-    does not verify model answers or target/draft graph replay. For startup
-    failures, check the software stack in Section 4 and the
-    [Public FAQs](../../faqs.md).
+    Send an inference request as described in
+    [Section 6](#6-functional-verification). For common startup issues,
+    refer to the [Public FAQs](../../faqs.md).
 
 === "A3 series"
 
@@ -622,8 +612,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     Use two nodes with eight devices each: Prefill DP1/TP8 and Decode DP8/TP1.
     Both nodes use the same GLM-5.3-Flash W8A8-MXFP8 checkpoint and software build.
     Set the local IP, network interface and checkpoint path in each script.
-    Both roles use Model Runner V2 and the native KDA path. This reference
-    keeps PCP=1 and DCP=1; TP8 alone does not enable context parallelism.
     Start Decode first, then Prefill, and start the proxy after all nine
     API endpoints are healthy.
 
@@ -808,11 +796,9 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     done
     ```
 
-    Each request must return HTTP 200. Each API process should report
-    `Application startup complete.` If an endpoint is unavailable, inspect
-    its worker logs and the [Public FAQs](../../faqs.md) before starting
-    the proxy. Verify graph capture and subsequent replay on both target
-    and MTP draft workers on Decode; Prefill must report eager execution.
+    Each request should return HTTP 200, and each API process should report
+    `Application startup complete.` For startup issues, refer to the
+    [Public FAQs](../../faqs.md).
 
     Run inside a vLLM-Ascend container on a separate host after the Prefill
     and Decode endpoints are healthy. The official image includes the proxy
@@ -1518,21 +1504,18 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     #### 950DT products {: #glm53-flash-5-4-950dt }
 
-    For A5 pooling setup, refer to
-    [Scenario 1: Mooncake Backend](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend).
-    Configure the Store backend and A5 UB/UBOE transport for the target
-    fabric before combining `AscendStoreConnector` with
-    `MooncakeConnectorV2` through `MultiConnector`.
+    Refer to
+    [Scenario 1: Mooncake Backend](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend)
+    for backend installation and A5 UB/UBOE communication configuration.
 
     Keep the indexer in BF16, prefix caching and the hybrid KV cache
     manager enabled, and `mamba_cache_mode=align`. Use non-layerwise
     pooling (`use_layerwise=false`) and PCP=PP=DCP=1. The experimental
     RecoverSSM path does not accept `MultiConnector`.
 
-    For optional SSD storage, follow
+    For SSD Offload configuration, refer to
     [MooncakeStore SSD Offload](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-5-mooncakestore-ssd-offload-embedded-real-client-mode).
-    Confirm Store lookup/load hits when verifying reuse; a local HBM
-    prefix hit does not establish external-pool reuse.
+    Check Store lookup/load hits to verify KV Cache Pool reuse.
 
 === "A3 series"
 
@@ -1992,9 +1975,8 @@ The response is a JSON payload containing the model's generated text in a text_c
 
 ### 6.1 Chat Completions on 950DT Products
 
-For the A5 service, also verify chat-template rendering and reasoning
-parsing through the public API endpoint. Use port `8000` on the single-node
-service or on the separate PD proxy host:
+After the service is started, send the following request to the single-node
+API server or the PD proxy on port `8000`:
 
 ```shell
 curl --fail http://<SERVICE_IP>:8000/v1/chat/completions \
@@ -2013,9 +1995,8 @@ curl --fail http://<SERVICE_IP>:8000/v1/chat/completions \
 
 Expected Result:
 
-The response contains `choices`, token usage and a final answer of `4`.
-The following illustrates the response format; generated reasoning and
-token counts vary between requests.
+The service returns HTTP 200 with a JSON response containing the `choices`
+field. The following is an example response:
 
 ```json
 {
@@ -2031,10 +2012,6 @@ token counts vary between requests.
   "usage": {"prompt_tokens": 22, "completion_tokens": 32, "total_tokens": 54}
 }
 ```
-
-Check for `finish_reason: "stop"` and inspect the complete answer.
-`finish_reason: "length"` means the output budget was reached. This
-functional check does not replace the accuracy evaluation in Section 7.
 
 ## 7 Accuracy Evaluation
 
@@ -2071,24 +2048,21 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 #### 950DT products {: #glm53-flash-a5-tuning }
 
-The following table summarizes the A5 examples in Chapter 5. All three
-use W8A8-MXFP8 weights, FP8 main KV cache, a BF16 indexer, and PCP=DCP=1.
-Adjust scheduler limits and P/D capacity for the target workload.
+The following configurations use W8A8-MXFP8 weights, FP8 main KV cache,
+a BF16 indexer, and PCP=DCP=1. Set `max-model-len` and `max-num-seqs`
+according to the actual usage scenario.
 
-| Deployment | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Tokens | Target / Draft Execution |
+| Deployment | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Tokens | Graph Mode |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Single node | 8 | 8 | 1 | 32 | 8192 | 133120 | 5 | `FULL_DECODE_ONLY` / graph |
-| PD Prefill | 8 | 8 | 1 | 256 | 24576 | 133120 | 5 | eager / eager |
-| PD Decode | 8 | 1 | 8 | 30 | 120 | 133120 | 5 | `FULL_DECODE_ONLY` / graph |
+| Single node | 8 | 8 | 1 | 32 | 8192 | 133120 | 5 | `FULL_DECODE_ONLY` |
+| PD Prefill | 8 | 8 | 1 | 256 | 24576 | 133120 | 5 | Eager |
+| PD Decode | 8 | 1 | 8 | 30 | 120 | 133120 | 5 | `FULL_DECODE_ONLY` |
 
 For complete startup commands and parameter descriptions, refer to
 [Single-Node Deployment](#glm53-flash-5-1-950dt) and
 [PD Disaggregated Deployment](#glm53-flash-5-3-950dt).
 
 #### A3 series
-
-The following subsection retains the A3 reference. For A5, use the
-[A5 configuration table](#glm53-flash-a5-tuning) above.
 
 The following optimizations are already enabled in the reference configuration
 in [Section 5.3](#53-1p1d-pd-disaggregated-deployment). Use the same W8A8 weights
@@ -2108,15 +2082,13 @@ and role-specific settings when reproducing the deployment.
 
 #### 950DT products
 
-- For long prompts, keep the prompt and generated output within
-  `--max-model-len` and the available cache capacity. For experimental
-  PCP, follow the [Context Parallel guide](../../user_guide/feature_guide/context_parallel.md)
-  and validate the complete hybrid-state transfer for the selected layout.
-- For low latency, keep Prefill eager and use target/draft decode graphs
-  on Decode or colocated engines. Warm graphs before measuring latency.
-- For throughput, tune `--max-num-seqs` and `--max-num-batched-tokens`
-  per engine, then adjust P/D capacity using measured TTFT, TPOT and
-  throughput. These limits are not aggregate proxy concurrency limits.
+- Set `--max-model-len` to the required context length and adjust
+  `--gpu-memory-utilization` to the available NPU memory.
+- Tune `--max-num-seqs` and `--max-num-batched-tokens` independently on each
+  role. Measure time to first token, time per output token, and throughput
+  before changing these limits.
+- For experimental PCP configuration, refer to
+  [Context Parallel](../../user_guide/feature_guide/context_parallel.md).
 
 Refer to the [performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md)
 and [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for
