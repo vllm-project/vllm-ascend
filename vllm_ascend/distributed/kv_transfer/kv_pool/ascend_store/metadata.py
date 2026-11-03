@@ -1284,6 +1284,9 @@ class AscendConnectorMetadata(KVConnectorMetadata):
         # Requests whose blocks became reusable since the previous step
         # (finished + preempted); the worker fences their in-flight saves.
         self.released_req_ids: set[str] = set(preempted_req_ids or ())
+        # Physical blocks assigned by this schedule. Saves still reading any
+        # of these blocks must finish before the model writes to them.
+        self.allocated_block_ids: set[int] = set()
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata."""

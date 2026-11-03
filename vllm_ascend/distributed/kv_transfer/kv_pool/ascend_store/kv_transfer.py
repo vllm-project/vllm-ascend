@@ -971,6 +971,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
         self.worker = worker
+        # A save job owns its source blocks until put has returned. Keep the
+        # ReqMeta alive so id(req_meta) cannot be reused by another pending job.
+        self._save_block_jobs: dict[int, tuple[ReqMeta, set[int]]] = {}
+        self._block_to_save_jobs: dict[int, set[int]] = defaultdict(set)
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -991,10 +995,52 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return save_batch
             for request in requests:
                 self.add_stored_request(request.req_id)
+                self._register_save_blocks(request)
             for request in requests:
                 self.request_queue.put(request)
             self.request_queue.put(save_batch)
         return save_batch
+
+    def _register_save_blocks(self, request: ReqMeta) -> None:
+        # Registration precedes queue publication. The sender selects a subset
+        # of these non-null blocks after checking the external store, so this
+        # conservative set cannot miss a block it later reads.
+        blocks = {
+            block_id
+            for group_id in request.kv_cache_group_ids or [0]
+            for block_id in request.block_ids_by_group[group_id]
+            if block_id > 0
+        }
+        job_id = id(request)
+        with self.done_task_lock:
+            self._save_block_jobs[job_id] = (request, blocks)
+            for block in blocks:
+                self._block_to_save_jobs[block].add(job_id)
+
+    def _finish_save_blocks(self, request: ReqMeta) -> None:
+        with self.done_task_lock:
+            job = self._save_block_jobs.pop(id(request), None)
+            if job is None:
+                return
+            for block in job[1]:
+                jobs = self._block_to_save_jobs[block]
+                jobs.discard(id(request))
+                if not jobs:
+                    del self._block_to_save_jobs[block]
+
+    def wait_for_blocks_saved(self, block_ids: set[int] | None) -> None:
+        """Drain only queued saves that read blocks assigned by this step."""
+        if not block_ids:
+            return
+        with self.done_task_lock:
+            pending = {job_id for block in block_ids for job_id in self._block_to_save_jobs.get(block, ())}
+        while pending:
+            self.raise_if_failed()
+            with self.done_task_lock:
+                pending.intersection_update(self._save_block_jobs)
+            if pending:
+                time.sleep(SAVE_REQUEST_POLL_INTERVAL_S)
+        self.raise_if_failed()
 
     def wait_for_requests_saved(self, req_ids: set[str] | None) -> None:
         """Block until every queued save chunk of these requests completed.
@@ -1047,6 +1093,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
     def _handle_request_exception(self, request_data: Any):
         req_id = getattr(request_data, "req_id", None)
         if req_id is not None:
+            self._finish_save_blocks(request_data)
             with self.done_task_lock:
                 tracked_request = req_id in self.stored_requests
             if tracked_request:
@@ -1066,6 +1113,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             except Exception:
                 logger.exception("Failed to store KV cache for TP-mismatch request %s", req_id)
             finally:
+                self._finish_save_blocks(req_meta)
                 remaining = self.get_stored_request_count(req_id)
                 if remaining == 0:
                     self.delete_finished_stored_request(req_id)
@@ -1087,6 +1135,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         except Exception:
             logger.exception("Failed to store KV cache for request %s", req_id)
         finally:
+            self._finish_save_blocks(req_meta)
             remaining = self.dec_stored_request(req_id) if tracked_request else None
             if tracked_request and remaining == 0:
                 self.delete_finished_stored_request(req_id)

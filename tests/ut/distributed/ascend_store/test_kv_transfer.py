@@ -715,6 +715,77 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             t.wait_for_requests_saved({"r1"})
 
+    def test_block_fence_waits_for_running_request_save_only_on_reuse(self):
+        t, _ = self._make_thread()
+        saving_swa = ReqMeta(
+            req_id="running", block_ids_by_group=[[623], [44]], kv_cache_group_ids=[0, 1], can_save=True
+        )
+        unrelated = ReqMeta(req_id="other", block_ids_by_group=[[624], [45]], kv_cache_group_ids=[0, 1], can_save=True)
+        t.add_save_batch([saving_swa, unrelated])
+
+        t.wait_for_blocks_saved({999})
+        entered = threading.Event()
+
+        def wait_for_reuse():
+            entered.set()
+            # The scheduler may assign block 44 to another KV group. The
+            # global block pool still identifies it by the same block id.
+            t.wait_for_blocks_saved({44})
+
+        waiter = threading.Thread(target=wait_for_reuse)
+        waiter.start()
+        self.assertTrue(entered.wait(timeout=5))
+        time.sleep(0.05)
+        self.assertTrue(waiter.is_alive())
+
+        t._finish_save_blocks(unrelated)
+        time.sleep(0.05)
+        self.assertTrue(waiter.is_alive(), "an unrelated completed save cannot release the source block")
+        t._finish_save_blocks(saving_swa)
+        waiter.join(timeout=5)
+        self.assertFalse(waiter.is_alive())
+
+    def test_block_fence_waits_for_all_jobs_reading_same_block(self):
+        t, _ = self._make_thread()
+        first = ReqMeta(req_id="running", block_ids_by_group=[[623]], can_save=True)
+        second = ReqMeta(req_id="running", block_ids_by_group=[[623]], can_save=True)
+        t.add_save_batch([first, second])
+        entered = threading.Event()
+
+        def wait_for_reuse():
+            entered.set()
+            t.wait_for_blocks_saved({623})
+
+        waiter = threading.Thread(target=wait_for_reuse)
+        waiter.start()
+        self.assertTrue(entered.wait(timeout=5))
+        t._finish_save_blocks(first)
+        time.sleep(0.05)
+        self.assertTrue(waiter.is_alive())
+        t._finish_save_blocks(second)
+        waiter.join(timeout=5)
+        self.assertFalse(waiter.is_alive())
+
+    def test_block_fence_raises_on_sender_failure(self):
+        t, _ = self._make_thread()
+        request = ReqMeta(req_id="running", block_ids_by_group=[[623]], can_save=True)
+        t.add_save_batch([request])
+        t._fatal_error = RuntimeError("boom")
+        with self.assertRaises(RuntimeError):
+            t.wait_for_blocks_saved({623})
+
+    def test_save_completion_removes_source_block_registration(self):
+        t, store = self._make_thread([0])
+        request = ReqMeta(req_id="running", token_len_chunk=16, block_ids=[1], block_hashes=["h0"], can_save=True)
+        t.add_save_batch([request])
+        self.assertIn(1, t._block_to_save_jobs)
+
+        t._handle_request(request)
+
+        self.assertEqual(len(store.put_calls), 1)
+        self.assertEqual(t._block_to_save_jobs, {})
+        self.assertEqual(t._save_block_jobs, {})
+
     def test_handle_request_sync_and_dcp(self):
         t, store = self._make_thread([0])
         event = MagicMock()

@@ -1371,6 +1371,16 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.handle_released_saves(released)
         worker.kv_send_thread.raise_if_failed.assert_called_once_with()
         worker.kv_send_thread.wait_for_requests_saved.assert_called_once_with(released)
+        worker.kv_send_thread.wait_for_blocks_saved.assert_called_once_with(None)
+
+    def test_handle_released_saves_waits_for_reallocated_swa_block(self):
+        worker = self._make_worker()
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
+
+        worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        worker.handle_released_saves(set(), {623})
+        worker.kv_send_thread.wait_for_requests_saved.assert_called_once_with(set())
+        worker.kv_send_thread.wait_for_blocks_saved.assert_called_once_with({623})
 
     def test_handle_released_saves_skips_layerwise_thread(self):
         worker = self._make_worker()

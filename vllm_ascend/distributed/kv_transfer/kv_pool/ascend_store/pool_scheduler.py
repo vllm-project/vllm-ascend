@@ -1018,6 +1018,17 @@ class KVPoolScheduler:
         meta.released_req_ids = set(scheduler_output.preempted_req_ids or ()) | set(
             scheduler_output.finished_req_ids or ()
         )
+        # Include allocations of running requests as well: a sliding-window
+        # request can give up an old block without finishing or preempting.
+        # The next forward must not overwrite it while an older put reads it.
+        for new_block_ids in (
+            *(req.block_ids for req in scheduler_output.scheduled_new_reqs),
+            *getattr(scheduler_output.scheduled_cached_reqs, "new_block_ids", ()),
+        ):
+            if new_block_ids is None:
+                continue
+            for group_blocks in normalize_block_ids_by_group(new_block_ids):
+                meta.allocated_block_ids.update(block_id for block_id in group_blocks if block_id > 0)
 
         for request in scheduler_output.scheduled_new_reqs:
             req_meta = self._process_new_request(request, scheduler_output, force_skip_save)
