@@ -658,7 +658,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ) -> tuple[torch.Tensor | None, int, int, int]:
         is_decode = (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-            and attn_metadata.max_query_len == 1
+            and (attn_metadata.max_query_len is None
+                 or attn_metadata.max_query_len == 1)
         )
 
         if not attn_metadata.causal:
