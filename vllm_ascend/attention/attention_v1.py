@@ -949,7 +949,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         is_decode = (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-            and attn_metadata.max_query_len == 1
+            and (attn_metadata.max_query_len is None
+                 or attn_metadata.max_query_len == 1)
         )
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
