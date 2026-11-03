@@ -14,6 +14,7 @@ import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.logger import logger
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
@@ -83,6 +84,7 @@ class MooncakePullRecvingThread(threading.Thread):
         self.engine = engine
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
+        self.recover_kda = vllm_config.cache_config.use_kda_recoverssm
         self.kv_cache_config = kv_cache_config
         self.kv_cache_specs = kv_cache_specs
         self.layer_name_to_group_index = layer_name_to_group_index
@@ -933,6 +935,9 @@ class MooncakePullRecvingThread(threading.Thread):
         length_list: list[int],
     ) -> None:
         """Append a replicated Mamba state or one producer PCP/TP head shard."""
+        recover_kda = self.recover_kda and spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN
+        if recover_kda and is_conv_state_dim_first():
+            raise ValueError("Mooncake RecoverSSM requires SD convolution layout [state_len, conv_dim]")
         tp_replicated = getattr(spec, "tp_replicated", False)
         remote_tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
         local_rank = self.tp_rank * self.pcp_size + self.pcp_rank
@@ -963,17 +968,34 @@ class MooncakePullRecvingThread(threading.Thread):
             local_shapes = self.block_shapes[local_layer_index]
             remote_shapes = remote_metadata.block_shapes[remote_layer_index]
             if not (
-                len(local_base_addrs)
-                == len(remote_base_addrs)
-                == len(local_shapes)
-                == len(remote_shapes)
-                == len(spec.dtypes)
+                len(local_base_addrs) == len(local_shapes) == len(spec.dtypes)
+                and len(remote_base_addrs) == len(remote_shapes)
+                and (
+                    len(local_base_addrs) == 4 and len(remote_base_addrs) in (2, 4)
+                    if recover_kda
+                    else len(local_base_addrs) == len(remote_base_addrs)
+                )
             ):
                 raise ValueError(
                     f"Mooncake Mamba cache metadata count mismatch for layer {self.layer_names[local_layer_index]!r}"
                 )
 
-            for cache_index, (local_base_addr, remote_base_addr) in enumerate(zip(local_base_addrs, remote_base_addrs)):
+            # RecoverSSM records are D-local scratch, overwritten by verify
+            # before commit. Native P has only conv/recurrent state. Reuse
+            # the SD row/projection slices below for those two components.
+            num_transfer_states = 2 if recover_kda else len(local_base_addrs)
+            if recover_kda and (
+                self.layer_block_sizes[local_layer_index] != remote_metadata.layer_block_sizes[remote_layer_index]
+                or len(local_shapes[0]) != 2
+                or len(remote_shapes[0]) != 2
+                or len(local_shapes[1]) != 3
+                or len(remote_shapes[1]) != 3
+                or local_shapes[1][1:] != remote_shapes[1][1:]
+            ):
+                raise ValueError("Mooncake RecoverSSM requires matching state block sizes and base state geometry")
+            for cache_index in range(num_transfer_states):
+                local_base_addr = local_base_addrs[cache_index]
+                remote_base_addr = remote_base_addrs[cache_index]
                 local_block_stride = self.block_strides[local_layer_index][cache_index]
                 remote_block_stride = remote_metadata.block_strides[remote_layer_index][cache_index]
                 local_block_len = self.block_lens[local_layer_index][cache_index]
@@ -990,7 +1012,7 @@ class MooncakePullRecvingThread(threading.Thread):
                         )
                     address_slices = [(0, 0, local_block_len)]
                 elif local_size == remote_size:
-                    if remote_rank != local_rank or local_block_len != remote_block_len:
+                    if remote_rank != local_rank or local_shape != remote_shape or local_block_len != remote_block_len:
                         raise ValueError(
                             f"Mooncake Mamba equal-TP metadata mismatch for layer "
                             f"{self.layer_names[local_layer_index]!r}, cache {cache_index}"

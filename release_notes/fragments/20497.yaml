@@ -1,0 +1,5 @@
+pr: 20497
+entries:
+  - category: feature
+    text: Added native KDA prefill to RecoverSSM decode state transfer through Mooncake using SD convolution layout. Enable --use-replayssm on D only; enabling RecoverSSM on P is not supported for this deployment.
+    model: glm-5.3-flash
