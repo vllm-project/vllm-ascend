@@ -32,8 +32,8 @@ GLM-5.3-Flash uses Model Runner V2 on 950DT products. Set
 | KPool indexer cache | BF16 by default; optional [FP8 indexer cache](#a5-fp8-kpool), configured independently of the main KV cache. |
 | MTP and graph mode | `deepseek_mtp` with five speculative tokens. Prefill uses eager mode for the target and MTP draft models; single-node deployment and Decode use `FULL_DECODE_ONLY` for both models. |
 | Prefix caching and chunked prefill | Enabled in the examples; keep the hybrid KV cache manager enabled. |
-| PD disaggregation | `MooncakeConnectorV2` with TP8/DP1/EP8 Prefill and TP1/DP8/EP8 Decode. |
-| Context parallelism | Experimental [PCP](../../user_guide/feature_guide/context_parallel.md) uses `--prefill-context-parallel-size`. The examples keep PCP=1 and DCP=1; the KPool indexer does not support DCP>1. |
+| PD disaggregation | `MooncakeConnectorV2` with TP1/PCP8/DP1 Prefill and TP1/PCP1/DP8 Decode. Both roles use EP8. |
+| Context parallelism | Experimental [PCP](../../user_guide/feature_guide/context_parallel.md) uses `--prefill-context-parallel-size`. PD Prefill uses PCP8; single-node deployment and Decode use PCP1. DCP remains 1; the KPool indexer does not support DCP>1. |
 | KV Cache Pool | Refer to [KV Cache Pool Deployment](#glm53-flash-5-4-950dt) for configuration. |
 | RecoverSSM | For experimental KDA RecoverSSM, refer to [Speculative Decoding](../../user_guide/feature_guide/speculative_decoding.md#experimental-glm-kda-recoverssm). |
 
@@ -550,6 +550,7 @@ def parse_args():
     parser.add_argument("--template", default="./run_p.sh")
     parser.add_argument("--dp-size", type=int, required=True)
     parser.add_argument("--tp-size", type=int, default=1)
+    parser.add_argument("--pcp-size", type=int, default=1)
     parser.add_argument("--dp-size-local", type=int, default=-1)
     parser.add_argument("--dp-rank-start", type=int, default=0)
     parser.add_argument("--dp-address", required=True)
@@ -573,6 +574,7 @@ def run(args, devices, port, dp_rank):
             args.dp_address,
             args.dp_rpc_port,
             str(args.tp_size),
+            str(args.pcp_size),
         ],
         check=True,
     )
@@ -581,10 +583,11 @@ def run(args, devices, port, dp_rank):
 if __name__ == "__main__":
     args = parse_args()
     processes = []
+    devices_per_dp_rank = args.tp_size * args.pcp_size
     for i in range(args.dp_size_local):
         devices = ",".join(
             str(device)
-            for device in range(i * args.tp_size, (i + 1) * args.tp_size)
+            for device in range(i * devices_per_dp_rank, (i + 1) * devices_per_dp_rank)
         )
         process = multiprocessing.Process(
             target=run,
@@ -602,7 +605,8 @@ if __name__ == "__main__":
 ```
 
 The launcher passes visible devices, engine port, global DP size, DP rank, DP
-address, DP RPC port, and TP size to each role script as `$1` through `$7`.
+address, DP RPC port, TP size, and PCP size to each role script as `$1` through
+`$8`. Each local DP rank uses TP×PCP devices. `--pcp-size` defaults to `1`.
 
 === "950DT products"
 
@@ -610,7 +614,8 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
     ##### Topology and Prerequisites
 
-    Use two nodes with eight devices each: Prefill DP1/TP8 and Decode DP8/TP1.
+    Use two nodes with eight devices each: Prefill TP1/PCP8/DP1 and Decode
+    TP1/PCP1/DP8. Both roles use EP8.
     Both nodes use the same GLM-5.3-Flash W8A8-MXFP8 checkpoint and software build.
     Set the local IP, network interface and checkpoint path in each script.
     Start Decode first, then Prefill, and start the proxy after all nine
@@ -652,6 +657,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
               --data-parallel-address $5 \
               --data-parallel-rpc-port $6 \
               --tensor-parallel-size $7 \
+              --prefill-context-parallel-size $8 \
               --enable-expert-parallel \
               --seed 1024 \
               --served-model-name glm \
@@ -674,9 +680,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
               --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}' \
               --additional-config '{
                 "enable_cpu_binding": true,
-                "enable_flashcomm1": true,
                 "enable_fused_mc2": 0,
-                "enable_shared_expert_dp": true,
                 "multistream_overlap_shared_expert": true
               }' \
               --kv-transfer-config '{
@@ -685,8 +689,8 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
                 "engine_id": "0",
                 "kv_port": "30100",
                 "kv_connector_extra_config": {
-                  "prefill": {"dp_size": 1, "tp_size": 8},
-                  "decode": {"dp_size": 8, "tp_size": 1}
+                  "prefill": {"dp_size": 1, "tp_size": 1, "pcp_size": 8},
+                  "decode": {"dp_size": 8, "tp_size": 1, "pcp_size": 1}
                 }
               }'
             ```
@@ -720,6 +724,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
               --data-parallel-address $5 \
               --data-parallel-rpc-port $6 \
               --tensor-parallel-size $7 \
+              --prefill-context-parallel-size $8 \
               --enable-expert-parallel \
               --seed 1024 \
               --served-model-name glm \
@@ -750,8 +755,8 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
                 "engine_id": "1",
                 "kv_port": "30800",
                 "kv_connector_extra_config": {
-                  "prefill": {"dp_size": 1, "tp_size": 8},
-                  "decode": {"dp_size": 8, "tp_size": 1}
+                  "prefill": {"dp_size": 1, "tp_size": 1, "pcp_size": 8},
+                  "decode": {"dp_size": 8, "tp_size": 1, "pcp_size": 1}
                 }
               }'
             ```
@@ -773,7 +778,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
         ```shell
         P0_IP="<P0_IP>"
         python launch_online_dp.py --template ./run_dp_template.sh \
-            --dp-size 1 --tp-size 8 --dp-size-local 1 \
+            --dp-size 1 --tp-size 1 --pcp-size 8 --dp-size-local 1 \
             --dp-rank-start 0 --dp-address "$P0_IP" --dp-rpc-port 12325 \
             --vllm-start-port 8000
         ```
@@ -814,9 +819,11 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
 
     **Key Parameter Descriptions**
 
-    - `--data-parallel-size` and `--tensor-parallel-size` define DP1/TP8
-      on Prefill and DP8/TP1 on Decode. Each role uses eight devices on
-      one node.
+    - `--data-parallel-size`, `--tensor-parallel-size`, and
+      `--prefill-context-parallel-size` define TP1/PCP8/DP1 on Prefill
+      and TP1/PCP1/DP8 on Decode. Each role uses eight devices on one node.
+      The launcher assigns all eight devices to the single Prefill engine
+      and one device to each Decode engine.
     - `--data-parallel-address` and `--data-parallel-rpc-port` coordinate
       ranks within each role. Prefill and Decode use their respective node
       IPs; RPC port `12325` is reused on the separate hosts.
@@ -828,20 +835,21 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     - Prefill sets `--max-num-seqs 256` and
       `--max-num-batched-tokens 24576`; Decode sets `30` and `120`,
       respectively. Tune these per-engine scheduler limits for the workload.
-    - Prefill enables FlashComm1, shared-expert DP and
-      shared-expert multistream overlap, with `enable_fused_mc2: 0`.
+    - Prefill enables shared-expert multistream overlap, with
+      `enable_fused_mc2: 0`.
       Decode enables shared-expert multistream overlap, recomputation
       scheduling and `FULL_DECODE_ONLY` for target and MTP draft. Prefill
-      target and draft are eager. Shared-expert DP requires TP>1 and is
-      therefore not enabled on the TP1 Decode engines.
-    - PCP and DCP use their default size of 1. For experimental PCP configuration, refer to
+      target and draft are eager. FlashComm1 and shared-expert DP require
+      TP>1 and are therefore not enabled on either role.
+    - Prefill uses PCP8, while Decode keeps the default PCP1. Both roles
+      keep the default DCP1. For PCP configuration, refer to
       [Context Parallel](../../user_guide/feature_guide/context_parallel.md).
       The removed `enable_dsa_cp` additional-config key is not accepted.
     - Both roles enable prefix caching and allow one image per prompt,
       with video input disabled through `--limit-mm-per-prompt`.
     - `MooncakeConnectorV2` uses `kv_producer` on Prefill and `kv_consumer`
       on Decode, with base KV ports `30100` and `30800`, respectively.
-      Both roles declare Prefill DP1/TP8 and Decode DP8/TP1.
+      Both roles declare Prefill TP1/PCP8/DP1 and Decode TP1/PCP1/DP8.
     - `HCCL_IF_IP` and the socket interface variables select each node's
       communication network. `HCCL_BUFFSIZE` is `3072` on Prefill and
       `1024` on Decode. The DP RPC, API, Mooncake and proxy ports must be
@@ -1503,10 +1511,12 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     [Scenario 1: Mooncake Backend](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend)
     for backend installation and A5 UB/UBOE communication configuration.
 
-    Keep the indexer in BF16, prefix caching and the hybrid KV cache
-    manager enabled, and `mamba_cache_mode=align`. Use non-layerwise
-    pooling (`use_layerwise=false`) and PCP=PP=DCP=1. The experimental
-    RecoverSSM path does not accept `MultiConnector`.
+    Use the Prefill TP1/PCP8/DP1 and Decode TP1/PCP1/DP8 topology from
+    [Section 5.3](#glm53-flash-5-3-950dt). Keep the indexer in BF16,
+    prefix caching and the hybrid KV cache manager enabled, and
+    `mamba_cache_mode=align`. Use non-layerwise pooling
+    (`use_layerwise=false`) and PP=DCP=1. The experimental RecoverSSM
+    path requires PCP=PP=DCP=1 and does not accept `MultiConnector`.
 
     For SSD Offload configuration, refer to
     [MooncakeStore SSD Offload](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-5-mooncakestore-ssd-offload-embedded-real-client-mode).
@@ -2044,14 +2054,14 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 #### 950DT products {: #glm53-flash-a5-tuning }
 
 The following configurations use W8A8-MXFP8 weights, FP8 main KV cache,
-a BF16 indexer, and PCP=DCP=1. Set `max-model-len` and `max-num-seqs`
+a BF16 indexer, and DCP1. Set `max-model-len` and `max-num-seqs`
 according to the actual usage scenario.
 
-| Deployment | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Tokens | Graph Mode |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Single node | 8 | 8 | 1 | 32 | 8192 | 133120 | 5 | `FULL_DECODE_ONLY` |
-| PD Prefill | 8 | 8 | 1 | 256 | 24576 | 133120 | 5 | Eager |
-| PD Decode | 8 | 1 | 8 | 30 | 120 | 133120 | 5 | `FULL_DECODE_ONLY` |
+| Deployment | NPUs | TP | PCP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Tokens | Graph Mode |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Single node | 8 | 8 | 1 | 1 | 32 | 8192 | 133120 | 5 | `FULL_DECODE_ONLY` |
+| PD Prefill | 8 | 1 | 8 | 1 | 256 | 24576 | 133120 | 5 | Eager |
+| PD Decode | 8 | 1 | 1 | 8 | 30 | 120 | 133120 | 5 | `FULL_DECODE_ONLY` |
 
 For complete startup commands and parameter descriptions, refer to
 [Single-Node Deployment](#glm53-flash-5-1-950dt) and
