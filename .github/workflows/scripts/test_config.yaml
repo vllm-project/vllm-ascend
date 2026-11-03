@@ -48,6 +48,8 @@ curated_tests:
     - tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
     - tests/e2e/pull_request/one_card/test_flash_attn_precision.py
     - tests/e2e/pull_request/one_card/test_swiglu_mx_quant.py
+    - tests/e2e/pull_request/four_card/pool/test_deepseek_v4_1_pool.py
+    - tests/e2e/pull_request/four_card/pool/test_deepseek_v4_1_pool_mooncake.py
 
 # === Skipped Tests ===
 # Removed from any selection after directory scanning, so they are never
