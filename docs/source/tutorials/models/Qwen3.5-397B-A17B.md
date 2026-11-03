@@ -473,6 +473,8 @@ Prefill and Decode use the same service NIC and IP because they run on the same 
 
 We recommend using Mooncake for deployment. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow. This example uses `MooncakeConnectorV1` with the standard Pull proxy in [Section 5.7](#57-request-forwarding).
 
+Run `unset LD_PRELOAD` before starting the Prefill and Decode services.
+
 #### 5.4.1 Prefill Service Group
 
 Create `run_p.sh` on the A3 host. Set `nic_name`, `local_ip`, and `MODEL_PATH` for the local environment.
@@ -506,9 +508,7 @@ export VLLM_USE_FASTOKENS=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
 
-if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
-    export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:${LD_PRELOAD:-}"
-fi
+unset LD_PRELOAD
 
 vllm serve "${MODEL_PATH}" \
   --host "${local_ip}" \
@@ -618,9 +618,7 @@ export VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
 export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
 export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
 
-if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
-    export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:${LD_PRELOAD:-}"
-fi
+unset LD_PRELOAD
 
 vllm serve "${MODEL_PATH}" \
   --host "${local_ip}" \
@@ -1024,6 +1022,8 @@ For Atlas 800I A2 (64 GB x 8), we recommend deploying 1P1D with 2 nodes for `Qwe
 
 Deploy `run_p.sh` and `run_d.sh` on the corresponding nodes, and deploy a proxy script on the prefill master node to forward requests. For details about how to deploy the agent script, see [Section 5.7](#57-request-forwarding).
 
+Run `unset LD_PRELOAD` before starting the Prefill and Decode services.
+
 #### 5.6.1 Prefill Node
 
 Create `run_p.sh` on the prefill node.
@@ -1054,7 +1054,7 @@ export HCCL_OP_EXPANSION_MODE=AIV
 export VLLM_USE_V2_MODEL_RUNNER=0
 export VLLM_USE_FASTOKENS=1
 export ASCEND_RT_VISIBLE_DEVICES="$1"
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+unset LD_PRELOAD
 
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp \
   --host "${local_ip}" \
@@ -1115,7 +1115,7 @@ export VLLM_USE_V2_MODEL_RUNNER=0
 export VLLM_USE_FASTOKENS=1
 export VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
 export ASCEND_RT_VISIBLE_DEVICES="$1"
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+unset LD_PRELOAD
 
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp \
   --host "${local_ip}" \
