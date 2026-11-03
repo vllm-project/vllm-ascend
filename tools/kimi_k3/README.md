@@ -59,7 +59,7 @@ can be used directly. The pruning manifest records these source identity checksu
 No upstream repository revision or release tag is recorded for this local checkpoint.
 The directory name and recorded checksums identify the experiment input; the checksums
 cover configuration/index files, not every source weight byte. The vLLM/vllm-ascend
-runtime versions in section 9 are not checkpoint versions.
+runtime versions in section 8 are not checkpoint versions.
 
 Start from the original quantized checkpoint. In each of 92 MoE layers,
 select `keep_ids[j] = floor(j * 896 / 256)`, `j=0..255`. Slice router rows and
@@ -197,19 +197,7 @@ python -m ruff check tools/kimi_k3 tests/ut/tools/kimi_k3 \
 Passed: eight pruning, four final-answer and six accuracy-contract tests; Ruff and
 matrix entry resolution. These CPU checks do not establish NPU integration correctness.
 
-## 8. Remaining validation and submission
-
-Provision CI checkpoint/data locations, runtime dependencies and approved thresholds.
-Then perform target-runtime import checks → current-branch service startup → a few
-real-question end-to-end checks → verify the implemented nightly entry/registration →
-accuracy validation with the final configuration. Complete these gaps before submission.
-
-Submit the case, tools, related tests, matrix change and documentation. Attach raw
-predictions/logs/result JSONs and manifests as artifacts. Do not commit model weights,
-datasets, credentials or generated benchmark outputs. Record exact image digest,
-vLLM/Ascend commits, runtime patches and checkpoint identifiers in the final evidence.
-
-## 9. Historical three-round results and conclusions
+## 8. Historical three-round results and conclusions
 
 The remote experiment used the older container: vLLM `0.30.0+empty`, vllm-ascend
 `0.30.0rc2.dev304+geac9c0cf3.d20261031`, torch `2.10.0+cpu`, torch_npu
