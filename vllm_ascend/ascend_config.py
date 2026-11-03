@@ -578,6 +578,9 @@ class AscendConfig:
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
+    # Experimental Qwen4Exp HC projection split: compute injection on a second
+    # NPU stream while the gate path prepares the next block input.
+    multistream_qwen4_exp_hc: bool = False
     enable_kv_nz: bool = False
     kv_pool_range_debug: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
