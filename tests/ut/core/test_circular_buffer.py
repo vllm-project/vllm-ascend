@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -115,12 +114,46 @@ def test_scratch_groups_do_not_reduce_prefix_hits_or_truncation():
     assert KVCacheManager.truncate_computed_blocks(host, SimpleNamespace(blocks=([1, 2], [], [])), 128) == ([1], [], [])
 
 
-@pytest.mark.parametrize("draft", [False, True])
-def test_ring_bypasses_position_to_page_mapping(draft):
-    mapping = torch.zeros(8, dtype=torch.int64)
-    table = SimpleNamespace(is_circular_group=True, slot_mapping=SimpleNamespace(gpu=mapping))
-    if draft:
-        BlockTable.compute_slot_mapping_draft(table, Mock(), Mock())
-    else:
-        BlockTable.compute_slot_mapping(table, 1, Mock(), Mock())
-    assert mapping.tolist() == [-1] * 8
+def test_ring_draft_maps_wrapped_positions_and_padding():
+    mapping = torch.full((8,), -99, dtype=torch.int64)
+    table = SimpleNamespace(
+        is_circular_group=True,
+        is_circular=True,
+        dcp_world_size=1,
+        block_size=32,
+        kernel_sizes=[32],
+        max_num_blocks_per_req=1,
+        blocks_per_phys_block=1,
+        block_table=SimpleNamespace(np=torch.tensor([[4], [7]], dtype=torch.int32).numpy()),
+        slot_mapping=SimpleNamespace(np=mapping.numpy(), gpu=mapping, copy_to_gpu=Mock()),
+    )
+
+    BlockTable.compute_slot_mapping_draft(table, torch.tensor([0, 1, 0, 1]), torch.tensor([0, 31, 32, -1]))
+
+    assert mapping.tolist() == [128, 255, 128, -1, -99, -99, -99, -99]
+    table.slot_mapping.copy_to_gpu.assert_called_once_with(4)
+
+
+def test_ring_prefill_uses_native_circular_mapping_kernel():
+    table = SimpleNamespace(
+        is_circular_group=True,
+        is_circular=True,
+        dcp_world_size=1,
+        dcp_rank=0,
+        block_size=32,
+        physical_block_size=32,
+        blocks_per_phys_block=1,
+        cp_kv_cache_interleave_size=1,
+        max_num_batched_tokens=8,
+        block_table=SimpleNamespace(gpu=torch.tensor([[4]], dtype=torch.int32)),
+        slot_mapping=SimpleNamespace(gpu=torch.full((8,), -99, dtype=torch.int64)),
+    )
+    with patch("vllm_ascend.worker.block_table._compute_slot_mapping_kernel") as kernel:
+        BlockTable.compute_slot_mapping(table, 1, torch.tensor([0, 3]), torch.tensor([0, 32, -1]))
+
+    kernel.__getitem__.assert_called_once_with((2,))
+    launch = kernel.__getitem__.return_value
+    launch.assert_called_once()
+    assert launch.call_args.kwargs["IS_CIRCULAR"] is True
+    assert launch.call_args.args[4] is table.block_table.gpu
+    assert launch.call_args.args[7] is table.slot_mapping.gpu
