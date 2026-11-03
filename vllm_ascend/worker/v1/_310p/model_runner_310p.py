@@ -49,10 +49,8 @@ from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
-from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
-    enable_dense_sp,
     get_kv_cache_tensor_layers,
     is_rc_device,
     lmhead_tp_enable,
@@ -669,11 +667,6 @@ class NPUModelRunner310(NPUModelRunner):
                 num_tokens_padded,
             )
 
-        if enable_dense_sp(self.vllm_config):
-            # Exit of the dense sequence-parallel region: restore the full
-            # token rows before any caller indexes them with full-sequence
-            # coordinates (logits row selection, hidden-state extraction).
-            hidden_states = sp_all_gather(hidden_states)
         return hidden_states
 
     def _check_and_update_cudagraph_mode(

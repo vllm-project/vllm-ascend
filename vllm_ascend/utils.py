@@ -1017,8 +1017,7 @@ def _flashcomm_switch_enabled(vllm_config) -> bool:
 
     Mirrors the ``enable_flashcomm1`` resolution in
     ``AscendConfig.derive_and_validate`` (additional_config first, then the
-    ``VLLM_ASCEND_ENABLE_FLASHCOMM1`` env var) so this predicate and the
-    config-time resolution can never diverge.
+    ``VLLM_ASCEND_ENABLE_FLASHCOMM1`` env var).
     """
     additional_config = getattr(vllm_config, "additional_config", None) or {}
     switch = additional_config.get("enable_flashcomm1", False) if isinstance(additional_config, dict) else False
@@ -1030,13 +1029,13 @@ def _flashcomm_switch_enabled(vllm_config) -> bool:
 
 
 def _building_draft_model() -> bool:
-    """Whether the module currently under construction belongs to a draft head.
+    """Whether the module under construction belongs to a draft head.
 
-    ``load_eagle_model`` builds MTP/eagle draft heads inside the
-    ``set_model_tag("eagle_head")`` context, after the target was built under
-    the default "backbone" tag. Draft heads run the stock full-token layout:
-    their per-step token counts are not runner-padded to the TP multiple, and
-    their embeddings must stay full even when shared with the target.
+    ``load_eagle_model`` builds draft heads inside the
+    ``set_model_tag("eagle_head")`` context. Draft heads run the stock
+    full-token layout: their per-step token counts are not runner-padded to
+    the TP multiple, and their embeddings must stay full even when shared
+    with the target.
     """
     from vllm.compilation.backends import model_tag as _current_model_tag
 
@@ -1046,13 +1045,9 @@ def _building_draft_model() -> bool:
 def _mm_arch_supports_dense_sp(vllm_config) -> bool:
     """Whether the registered model class opted into the dense-SP wiring.
 
-    The multimodal merge happens full-token side (the V2 runner's
-    prepare_inputs_embeds) before the model forward, so an mm-capable
-    checkpoint runs dense SP only when its registered model class wires the
-    boundary: restore the full-token text embeddings around the merge and
-    shard the merged embeds back before the decoder stack (e.g. the Ascend
-    Qwen3.5 wrapper declares ``supports_dense_sp`` for the patch that does
-    this).
+    The multimodal merge happens full-token side before the model forward;
+    an mm-capable checkpoint runs dense SP only when its registered model
+    class wires the boundary (``supports_dense_sp``).
     """
     model_config = getattr(vllm_config, "model_config", None)
     architectures = getattr(model_config, "architectures", None) or []
@@ -1072,10 +1067,13 @@ def dense_sp_unavailable_reason(vllm_config) -> str | None:
     """Name the first structural gate that blocks dense sequence parallelism.
 
     Returns None when the topology allows dense SP (the FlashComm switch may
-    still be off — that is a user choice, not unavailability). Used by the
-    config-time log so a dense deployment sees the precise blocker instead
-    of the SP-MoE message.
+    still be off — that is a user choice, not unavailability).
     """
+    from vllm_ascend.mrv2_utils import use_v2_model_runner
+
+    if not use_v2_model_runner(vllm_config):
+        return "the V1 model runner (dense SP requires the V2 runner)"
+
     parallel_config = vllm_config.parallel_config
     if getattr(parallel_config, "tensor_parallel_size", 1) <= 1:
         return "tensor_parallel_size <= 1"
@@ -1092,10 +1090,6 @@ def dense_sp_unavailable_reason(vllm_config) -> str | None:
         return "enable_dbo is on"
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is not None:
-        from vllm_ascend.mrv2_utils import use_v2_model_runner
-
-        if not use_v2_model_runner(vllm_config):
-            return "speculative decoding on the V1 model runner (dense SP supports MTP under V2 only)"
         method = getattr(speculative_config, "method", None)
         if method != "mtp":
             return f"speculative method {method!r} is not wired for dense SP (only mtp)"
@@ -1104,16 +1098,11 @@ def dense_sp_unavailable_reason(vllm_config) -> str | None:
     model_config = getattr(vllm_config, "model_config", None)
     if model_config is None:
         return "model_config is missing"
-    if is_vl_model(vllm_config):
-        from vllm_ascend.mrv2_utils import use_v2_model_runner
-
-        if not use_v2_model_runner(vllm_config):
-            return "multimodal checkpoint on the V1 model runner (dense SP for mm-capable checkpoints is V2 only)"
-        if not _mm_arch_supports_dense_sp(vllm_config):
-            return (
-                "multimodal checkpoint without a dense-SP-wired model class "
-                "(the multimodal merge needs full-token rows before the model)"
-            )
+    if is_vl_model(vllm_config) and not _mm_arch_supports_dense_sp(vllm_config):
+        return (
+            "multimodal checkpoint without a dense-SP-wired model class "
+            "(the multimodal merge needs full-token rows before the model)"
+        )
     if getattr(model_config, "use_mla", False):
         return "MLA checkpoint (stacked projections break the gather-per-block invariant)"
     if getattr(model_config, "hf_text_config", None) is None:
@@ -1126,37 +1115,13 @@ def dense_sp_unavailable_reason(vllm_config) -> str | None:
 def enable_dense_sp(vllm_config=None) -> bool:
     """Dense-model sequence parallelism driven by the FlashComm switch.
 
-    Upstream vLLM gates sequence parallelism on ``use_sequence_parallel_moe``,
-    which requires an MoE checkpoint with expert parallelism. On Ascend the
-    FlashComm switch additionally covers dense checkpoints through the generic
-    layer-primitive path: the embedding reduce-scatters its output to the
-    rank-local token shard, the decoder-stack projections all-gather before
-    their column-parallel GEMMs and reduce-scatter after their row-parallel
-    GEMMs, and the model runner / sample-time exit all-gathers the final
-    hidden states before any caller indexes them with full-sequence
-    coordinates.
-
-    Structural gates replace a per-family model_type whitelist: any dense
-    checkpoint following the standard ``norm -> (column projection ->
-    core -> row projection) -> norm`` decoder skeleton is covered, regardless
-    of family. Excluded, because their layout is owned elsewhere:
-
-    - MoE checkpoints: the upstream SP-MoE contract (or the in-tree Ascend
-      model implementations) already owns gather/scatter placement.
-    - MLA checkpoints: stacked projections (q_a/q_b/kv_a/kv_b) break the
-      one-gather-per-block invariant.
-    - Multimodal and speculative deployments: entry/exit handoffs
-      (vision feature scatter, draft hidden-state exchange) need per-model
-      wiring that the generic path does not provide.
-    - PCP/DCP topologies, pipeline parallelism, LoRA, finegrained TP groups,
-      DBO microbatching: untested or owning the same projections.
-
-    Both model runners are supported: the V1 runner pads every step's token
-    count to the TP multiple in ``_pad_for_sequence_parallelism``; the V2
-    runner rounds ``num_tokens_after_padding`` in ``_prepare_inputs_impl``
-    (and the dummy-run token count) the same way, so the embedding entry,
-    the projection gather/scatter ops and the sample-time exit all stay
-    aligned to the rank-local token shard.
+    The generic path shards the token dim across TP ranks between the
+    layer projections (embedding reduce-scatter entry, column-projection
+    all-gather, row-projection reduce-scatter, runner/sample-time exit
+    all-gather), so any dense checkpoint sharing the standard decoder
+    skeleton is covered regardless of family. Structural gates replace a
+    model_type whitelist; see ``dense_sp_unavailable_reason`` for the
+    full exclusion list.
     """
     if vllm_config is None:
         try:

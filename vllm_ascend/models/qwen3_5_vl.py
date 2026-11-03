@@ -394,12 +394,7 @@ class _AscendVLPreprocessMixin:
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class AscendQwen3_5ForConditionalGeneration(_AscendVLPreprocessMixin, Qwen3_5ForConditionalGeneration):
-    # Opt-in consumed by the dense-SP mm gate (utils._mm_arch_supports_dense_sp):
-    # this family's mm boundary is validated against the generic seams — the
-    # V2 model state gathers the language model's token-sharded text embeddings
-    # around the full-token-side multimodal merge and shards the merged embeds
-    # back before the decoder stack. Unvalidated mm families keep the stock
-    # layout with a precise reason logged.
+    # Validation opt-in for the dense-SP mm gate (see utils._mm_arch_supports_dense_sp).
     supports_dense_sp = True
 
 
