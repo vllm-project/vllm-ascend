@@ -54,7 +54,7 @@ env_decode: &env_decode
 templates:
   - node_index: 0
     envs:
-      <<: *env_prefill
+      <<: *egnv_prefill
     server_cmd_template:
       - --host
       - "0.0.0.0"
