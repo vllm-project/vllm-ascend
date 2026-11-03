@@ -35,11 +35,11 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.fused_moe import has_lora
+from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
     PreparedSharedExpertInput,
     RoutedMoEMilestones,
 )
-from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, npu_stream_switch, shared_experts_calculation_stream
@@ -196,10 +196,19 @@ class AscendSharedExperts:
                 f"does not match the routed activation {routed_activation} executed by the MegaMoe operator"
             )
             return
-        # Sequence-parallel shared experts rely on split/gather layouts that
-        # the fused operator does not reproduce.
-        if self.is_sequence_parallel:
-            self._megamoe_shared_fusion_disabled = True
+        # The operator accumulates the shared-expert output into the local
+        # token accumulator with no cross-rank reduction, so fusion is only
+        # correct when every rank holds the full shared weights. That holds
+        # when the physical TP group is trivial (weights are inherently full)
+        # or when enable_shared_expert_dp replicates them; sharded layouts —
+        # plain TP, or SP without SEDP — rely on split/gather reductions that
+        # the fused operator does not reproduce. Fall back to the separate
+        # shared-expert forward.
+        if self.moe_config.tp_group.world_size > 1 and not self.weights_replicated:
+            self._disable_megamoe_shared_fusion(
+                "shared-expert weights are sharded across the TP group; set "
+                "enable_shared_expert_dp=true to enable MegaMoe shared-expert fusion"
+            )
             return
 
         for linear, slot in (
@@ -420,9 +429,7 @@ class AscendSharedExperts:
         # dtype ints the MegaMoe wrapper accepts, matching
         # _get_cann_mega_moe_quant_settings.
         shared_quant_type = QuantType.W4A4MXFP if self._megamoe_shared_packed_fp4 else QuantType.W8A8MXFP
-        _, shared_quant_out_dtype, shared_weight_type = moe_utils._get_cann_mega_moe_quant_settings(
-            shared_quant_type
-        )
+        _, shared_quant_out_dtype, shared_weight_type = moe_utils._get_cann_mega_moe_quant_settings(shared_quant_type)
         self.moe_layer.ascend_megamoe_shared_quant_out_dtype = shared_quant_out_dtype
         self.moe_layer.ascend_megamoe_shared_weight_type = shared_weight_type
         if not self.megamoe_shared_weights_ready:
