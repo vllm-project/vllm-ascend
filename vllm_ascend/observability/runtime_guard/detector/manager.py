@@ -37,8 +37,6 @@ from vllm_ascend.observability.runtime_guard.rank_gate import runner_tp_rank
 from vllm_ascend.observability.runtime_guard.state import Incident, RequestGuardStore
 
 if TYPE_CHECKING:
-    import torch
-
     from vllm_ascend.observability.runtime_config.config import RuntimeConfig
 
 logger = init_logger_ascend(__name__)
@@ -173,10 +171,6 @@ class DetectorManager:
             return bool(self._runtime_config.detector_get("rare_chars", "enabled", False))
         return bool(self._rare_chars_det.enabled)
 
-    def needs_pre_sample_logits(self) -> bool:
-        """True when any detector needs Guard-stashed pre-sample logits."""
-        return self.rare_chars_enabled()
-
     def check_after_spec(
         self,
         sampled_tokens: Any,
@@ -286,35 +280,6 @@ class DetectorManager:
             skip_req_ids=skip,
         )
         return []
-
-    def check_rare_chars(
-        self,
-        *,
-        logits: torch.Tensor | None,
-        sampled_token_ids: Any,
-        req_ids: list[str] | None = None,
-        top1_logprobs: Any = None,
-        chosen_logprobs: Any = None,
-    ) -> list[Incident]:
-        """Run rc4 rare_chars from Guard-stashed logits or precomputed (top1, chosen).
-
-        Prefer sampler-side narrow collect (``top1_logprobs`` / ``chosen_logprobs``)
-        so the detector skips a second full-vocab softmax. Falls back to fused
-        LSE+gather on ``logits`` when pairs are not provided.
-        """
-        if self._gated("rare_chars"):
-            return []
-        if logits is None and (top1_logprobs is None or chosen_logprobs is None):
-            return []
-        skip = RequestGuardStore.get().stopped_req_ids()
-        return self._rare_chars_det.check_from_logits(
-            logits=logits,
-            sampled_token_ids=sampled_token_ids,
-            req_ids=req_ids,
-            skip_req_ids=skip,
-            top1_logprobs=top1_logprobs,
-            chosen_logprobs=chosen_logprobs,
-        )
 
     def finish_rare_chars(self, req_ids: list[str] | set[str] | tuple[str, ...]) -> list[Incident]:
         """Flush rc4 look-ahead state when requests finish."""
