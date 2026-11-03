@@ -25,6 +25,7 @@ def _parent_init(
     cudagraph_mode,
     decode_query_len,
     lora_capture_cases=None,
+    varlen_decode=False,
 ):
     """Mock the parent graph manager initialization."""
     self._capture_descs = [object()]
@@ -85,8 +86,8 @@ def test_run_fullgraph_uses_updatable_graph():
         draft_vllm_config=draft_vllm_config,
         build_draft_attn_metadatas=MagicMock(return_value=draft_attn_metadatas),
     )
-    manager._updatable_graph_replay = MagicMock(return_value="result")
-    manager._graph_replay = MagicMock()
+    manager._updatable_graph_replay = MagicMock(return_value="result")  # type: ignore[method-assign]
+    manager._graph_replay = MagicMock()  # type: ignore[method-assign]
     desc = SimpleNamespace(num_tokens=8, num_reqs=2)
     with patch(
         "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.use_updatable_graph",
@@ -115,8 +116,8 @@ def test_run_fullgraph_uses_legacy_graph():
         draft_vllm_config=draft_vllm_config,
         build_draft_attn_metadatas=MagicMock(return_value=draft_attn_metadatas),
     )
-    manager._updatable_graph_replay = MagicMock()
-    manager._graph_replay = MagicMock(return_value="result")
+    manager._updatable_graph_replay = MagicMock()  # type: ignore[method-assign]
+    manager._graph_replay = MagicMock(return_value="result")  # type: ignore[method-assign]
     desc = SimpleNamespace(num_tokens=8, num_reqs=2)
     with patch(
         "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.use_updatable_graph",
@@ -144,7 +145,7 @@ def test_capture_draft_prefill_delegates_to_parent():
     model_state = object()
     input_buffers = object()
     block_tables = object()
-    attn_groups = object()
+    attn_groups: Any = object()
     kv_cache_config = object()
     with (
         patch(
@@ -182,7 +183,7 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
     model_state = object()
     input_buffers = SimpleNamespace(seq_lens_cpu=torch.tensor([10, 20, 30], dtype=torch.int32))
     block_tables = object()
-    attn_groups = object()
+    attn_groups: Any = object()
     kv_cache_config = object()
     desc_fields = {"num_tokens": 4, "num_reqs": None, "cg_mode": CUDAGraphMode.FULL}
     # vLLM main (#58275) reads max_query_len/uniform_token_count off the

@@ -8,7 +8,7 @@ import torch
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.compute_slot_mapping import (
+from vllm_ascend.ops.triton.v1.compute_slot_mapping import (
     _compute_slot_mapping_fused_groups_adaptive_kernel,
     _compute_slot_mapping_fused_groups_kernel,
     compute_slot_mapping_fused_groups,

@@ -42,7 +42,7 @@ def test_mla_constructor_preserves_decode_mask_flag(monkeypatch, non_causal):
     attention = torch.nn.Module()
     patch_deepseek_v2._deepseek_v2_mla_attention_init(
         attention,
-        vllm_config=SimpleNamespace(),
+        vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1)),
         config=_config(rms_norm_eps=1e-5, rope_parameters={"rope_type": "default"}),
         hidden_size=32,
         num_heads=4,

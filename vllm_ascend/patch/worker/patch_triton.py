@@ -105,13 +105,13 @@ from vllm.v1.worker.gpu.spec_decode import rejection_sampler, rejection_sampler_
 from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator  # noqa: E402
 from vllm.v1.worker.gpu.spec_decode.eagle import speculator  # noqa: E402
 
-from vllm_ascend.ops.triton.v2.apply_grammar_bitmask import _apply_grammar_bitmask_kernel  # noqa: E402
-from vllm_ascend.ops.triton.v2.mamba.precopy import precopy_mamba_align_fused_kernel  # noqa: E402
-from vllm_ascend.ops.triton.v2.metrics.num_nans import get_num_nans  # noqa: E402
-from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample  # noqa: E402
-from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel  # noqa: E402
-from vllm_ascend.ops.triton.v2.sample.sampling_mask import sampling_mask_from_logits_npu  # noqa: E402
-from vllm_ascend.ops.triton.v2.sample.thinking_budget import (  # noqa: E402
+from vllm_ascend.ops.triton.apply_grammar_bitmask import _apply_grammar_bitmask_kernel  # noqa: E402
+from vllm_ascend.ops.triton.mamba.precopy import precopy_mamba_align_fused_kernel  # noqa: E402
+from vllm_ascend.ops.triton.metrics.num_nans import get_num_nans  # noqa: E402
+from vllm_ascend.ops.triton.sample.categorical_sample import categorical_sample  # noqa: E402
+from vllm_ascend.ops.triton.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel  # noqa: E402
+from vllm_ascend.ops.triton.sample.sampling_mask import sampling_mask_from_logits_npu  # noqa: E402
+from vllm_ascend.ops.triton.sample.thinking_budget import (  # noqa: E402
     _load_effective_token_ascend,
     _update_committed_marker_cache_kernel_ascend,
 )

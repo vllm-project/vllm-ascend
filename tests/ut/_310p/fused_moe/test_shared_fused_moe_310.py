@@ -100,13 +100,14 @@ def test_routed_experts_310_replaces_only_unquantized_method_after_parent_init(m
         specialized_method_factory.assert_not_called()
 
 
-def test_runner_310_installs_specialized_comm():
+@pytest.mark.parametrize("with_shared_experts", [False, True])
+def test_runner_310_installs_specialized_comm(with_shared_experts):
     runner = _build_runner()
     moe_config = MagicMock()
     runner.moe_config = moe_config
     runner.gate = None
     routed_experts = SimpleNamespace(quant_config=None, quant_method=None)
-    runner.ascend_shared_experts = SimpleNamespace(multistream_overlap=True)
+    runner.ascend_shared_experts = SimpleNamespace(multistream_overlap=True) if with_shared_experts else None
     upstream_forward_entry = object()
     runner._select_forward = MagicMock(return_value=upstream_forward_entry)
     comm_method = object()
@@ -114,6 +115,7 @@ def test_runner_310_installs_specialized_comm():
     with (
         patch.object(AscendMoERunner, "__init__", return_value=None) as parent_init,
         patch.object(fused_moe_310_module, "AllGatherCommImpl310", return_value=comm_method),
+        patch.object(fused_moe_310_module, "configure_shared_experts_310") as configure,
         patch.dict(fused_moe_310_module._MoECommMethods, clear=False),
     ):
         AscendMoERunner310.__init__(
@@ -125,9 +127,13 @@ def test_runner_310_installs_specialized_comm():
         )
 
         assert routed_experts.quant_method is None
-        assert runner.ascend_shared_experts.multistream_overlap is False
-        assert runner._forward_entry is upstream_forward_entry
-        runner._select_forward.assert_called_once_with()
+        if with_shared_experts:
+            assert runner.ascend_shared_experts is not None
+            assert runner.ascend_shared_experts.multistream_overlap is True
+            configure.assert_called_once_with(runner.ascend_shared_experts)
+        else:
+            configure.assert_not_called()
+        runner._select_forward.assert_not_called()
         key = fused_moe_310_module._moe_config_key(MoECommType.ALLGATHER, moe_config)
         assert fused_moe_310_module._MoECommMethods[key] is comm_method
         parent_init.assert_called_once()
