@@ -705,6 +705,32 @@ jobs:
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.select-tests.outputs.test_groups_a5 }}
 
+  upload-pr-context:
+    # Post-coverage-comment context bridge. The workflow_run-triggered
+    # post_fork_coverage_comment.yaml sees an empty pull_requests[] payload
+    # for fork PRs, so the PR number must travel through this run's
+    # artifacts instead. Runs regardless of test outcomes because the
+    # comment workflow fires on any completed run.
+    if: ${{ !cancelled() }}
+    runs-on: linux-amd64-cpu-8-hk
+    steps:
+      - name: Write PR context
+        run: |
+          mkdir -p ./pr-context
+          printf '{"pr_number": %s, "head_sha": "%s"}\n' \
+            "${{ github.event.number }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            > ./pr-context/pr_context.json
+          cat ./pr-context/pr_context.json
+
+      - name: Upload PR context
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-context
+          path: ./pr-context/pr_context.json
+          if-no-files-found: error
+          retention-days: 14
+
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
