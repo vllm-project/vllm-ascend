@@ -62,6 +62,7 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
         with _disable_upstream_graph_staging(self):
             metadata = super().build(common_prefix_len, m, num_accepted_tokens, num_decode_draft_tokens_cpu, fast_build)
         self._build_conv_metadata(m, metadata, num_decode_draft_tokens_cpu)
+        metadata.pcp_context = getattr(common_attn_metadata, "pcp_context", None)
         return metadata
 
     def _normalize_graph_padding(self, m, num_actual_reqs, num_decode_draft_tokens_cpu):
