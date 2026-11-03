@@ -1086,7 +1086,7 @@ and devices:
 ```
 
 RecoverSSM requires speculative decoding, PP=1 and DCP=1. PCP is limited to
-eager Prefill producers with TP=1 using the Mooncake connectors below;
+Prefill producers with TP=1 using the Mooncake connectors below;
 PCP Decode consumers and colocated PCP execution are not supported.
 Stochastic rounding must be disabled.
 
@@ -1110,10 +1110,14 @@ use the following layout with `--use-replayssm` and MTP5 on both sides:
 | KV role | `kv_producer` | `kv_consumer` |
 | Target and draft execution | Eager | `FULL_DECODE_ONLY` |
 
-Set `--enforce-eager` on Prefill and keep its draft eager as well. Each Decode
+In this example, set `--enforce-eager` on Prefill and keep its draft eager as well. Each Decode
 DP rank receives all eight KDA head shards for its assigned requests; DP ranks
 do not divide one request's recurrent state. Keep the same prefix-caching
 configuration on both roles.
+
+PCP does not require `--enforce-eager` for the entire P model. Its KDA path has
+an eager dispatch boundary, allowing the surrounding model to be compiled.
+Validate the selected P graph configuration separately for your deployment.
 
 !!! warning
 

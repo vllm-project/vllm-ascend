@@ -83,12 +83,13 @@ def test_initialization_rejects_unsupported_execution(section, field, value, mes
 
 @pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector"])
 @pytest.mark.parametrize("prefix_caching", [False, True])
-def test_pcp_prefill_producer_and_dp_decode_consumer(connector, prefix_caching):
+@pytest.mark.parametrize("enforce_eager", [False, True])
+def test_pcp_prefill_producer_and_dp_decode_consumer(connector, prefix_caching, enforce_eager):
     for producer in (True, False):
         config = make_config()
         config.cache_config.enable_prefix_caching = prefix_caching
         config.cache_config.mamba_cache_mode = "align" if prefix_caching else "none"
-        config.model_config.enforce_eager = producer
+        config.model_config.enforce_eager = enforce_eager
         config.parallel_config.prefill_context_parallel_size = 8 if producer else 1
         config.parallel_config.data_parallel_size = 1 if producer else 8
         config.kv_transfer_config = SimpleNamespace(
@@ -102,7 +103,6 @@ def test_pcp_prefill_producer_and_dp_decode_consumer(connector, prefix_caching):
     "section,field,value,message",
     [
         ("parallel_config", "tensor_parallel_size", 2, "PCP requires TP=1"),
-        ("model_config", "enforce_eager", False, "PCP requires eager execution"),
         ("kv_transfer_config", "kv_role", "kv_consumer", "PCP requires a Mooncake KV producer"),
         ("kv_transfer_config", "kv_role", "kv_both", "PCP requires a Mooncake KV producer"),
         ("kv_transfer_config", "kv_connector", "AscendStoreConnector", "requires Mooncake"),

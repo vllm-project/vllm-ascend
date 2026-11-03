@@ -44,5 +44,3 @@ def validate_glm_recoverssm(vllm_config: VllmConfig) -> None:
             raise ValueError("GLM RecoverSSM PCP requires TP=1")
         if transfer is None or transfer.kv_role != "kv_producer":
             raise ValueError("GLM RecoverSSM PCP requires a Mooncake KV producer")
-        if vllm_config.model_config is None or not vllm_config.model_config.enforce_eager:
-            raise ValueError("GLM RecoverSSM PCP requires eager execution")
