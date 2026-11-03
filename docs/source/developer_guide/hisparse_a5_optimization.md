@@ -9,9 +9,11 @@ the experimental directory over an installation.
 `VLLM_ASCEND_HISPARSE_PROFILE` is a non-sensitive, startup-only setting:
 
 - `baseline` (default): the existing platform backend, including current-Core ABI support.
-- `a5_c8_62592`: the paired A5 optimization implementation. Exact normalized Core
+- `a5_c8_main`: the merged-main A5 optimization implementation. Exact normalized Core
   source hashes are checked before adapters are installed. Unknown versions fail
   explicitly. Restart workers after changing the profile or source.
+- `a5_c8_62592` records an older pre-merge integration for historical evidence;
+  new reproduction uses merged main only.
 
 The A5 profile includes mapped Host writeback and lifetime ownership, CPU page
 descriptors, Resident updates, grouped/recycled invalidation, lazy MTP and row-map
@@ -28,24 +30,27 @@ Host mirrors are restricted to the recorded consumer policy; producers require
 eager mirrors. CP/PP, multi-DP, A3 and other payload formats are not qualified by
 the historical A5 result.
 
-## Reconstruct the paired Core and build
+## Check out merged Core and build
 
 Use an A5 environment with CANN 9.2, Torch 2.10, torch-npu 2.10.post7 and a
-matching triton-ascend installation. Keep the latest-main checkout separately.
+matching triton-ascend installation. The preparer checks out the upstream-main
+commit `5c8ae7c74aaa99d1f7fbeea942fd7282e3413810` and verifies tree
+`a387331db771f0ad04bbd7bdbbd0e872198b4ed3`. It fetches no PR head and creates no
+local merge. PR62592 and PR60103 are already merged at this revision; unmerged
+vLLM proposals, including the private Host allocation hook, are not dependencies.
 
 ```bash
-python tools/hisparse/prepare_paired_core.py --output /path/to/vllm-paired
-VLLM_TARGET_DEVICE=empty uv pip install --no-deps --no-build-isolation -e /path/to/vllm-paired
+python tools/hisparse/prepare_paired_core.py --output /path/to/vllm-main-pinned
+VLLM_TARGET_DEVICE=empty uv pip install --no-deps --no-build-isolation -e /path/to/vllm-main-pinned
 SOC_VERSION=ascend950dt_9582 uv pip install --no-deps --no-build-isolation -e .
 python csrc/hisparse_runtime/build.py --cann-root "$ASCEND_HOME_PATH" \
+  --npu-arch "$NPU_ARCH" --resolver-ub-bytes "$RESOLVER_UB_BYTES" \
   --output /path/to/new-native-output --install
 ```
 
-The Core preparer merges public main `43111fd1f0c3135ff671e25e2e85238aa05743d0`
-and PR62592 `5b8e00878206c228c6ec888fbd6494d6ffe07a03`, then verifies tree
-`314b378fa399edede28784fdf52d97964b9194a2`. No private merge ref or local
-workstation path is required. LF/CRLF normalization changes no source logic.
-Native libraries are built from source; binaries and weights are not committed.
+Set the two build parameters from the matching SDK's SIMT target and usable UB
+capacity. Both native libraries must be rebuilt for the Tensor ABI. Binaries,
+weights and machine-specific startup scripts are not committed.
 
 ## Repeat the single-D configuration
 
@@ -72,6 +77,52 @@ actual output IDs, success count, MTP position acceptance, settled HiSparse
 counters, TPOT/TTFT distributions and a running8/waiting0 decode window.
 Missing counters do not establish zero misses. These fixed forced-length
 outputs are not dataset accuracy results. P/D requires its own end-to-end test.
+
+## Merged-main qualification checkpoint (2026-11-03)
+
+The Tensor resolver ABI preserves the parallel all-Resident path and releases
+callback-local Tensor owners after submission; allocator stream records retain
+the queued device storage. Dynamic shape, padding, nonzero-offset, lifetime and
+real graph-owner checks passed in the private A5 runtime. This is independent of
+Attention arithmetic and does not change count-copy/MTP submission order.
+
+Current-batch RoPE and request-row prefixes reuse only their certified current
+layout, with per-round values and group-local addresses kept current. Large
+written-slot invalidation sorts exact `(persistent state, Host slot)` keys,
+then probes each group's table. Small Decode writes keep their previous kernel.
+At 8192 writes, 32 states, 22 groups and Hot10240, a paired NPU primitive run
+measured 37.07 ms before and 3.08 ms after, including table reset. This was beside
+an idle owned model, not an exclusive-host model benchmark. Nine changing replay
+cases matched an independent integer oracle. Follower query prepacking retained
+KV readiness and passed three interleaved graph owners across six shapes;
+its separate end-to-end contribution has not been isolated.
+
+A full GLM-5.2 W4A8C8 A5 single-D run used TP8/DP1, MTP3, V2, C4,
+32768 input/8192 output, EvalScope 1.13.0, temperature0, seed42 and no prefix
+cache. Both arms completed two formal rounds without profiler or observers:
+
+| Round | OFF TPOT (ms) | ON TPOT (ms) | OFF/ON MTP acceptance |
+| --- | ---: | ---: | --- |
+| 1 | 12.1283 | 12.5453 | 59.89% / 59.89% |
+| 2 | 12.1332 | 12.0475 | 59.89% / 64.92% |
+
+All 16 requests completed with 8192 actual output IDs each. ON settled reported
+miss/H2D deltas and eight-rank idle miss tails were zero; these are not physical
+DMA byte measurements. ON round1's output IDs and per-position MTP counts matched
+both OFF rounds: TPOT regression remains about **3.42%**. Round2 changed output
+mode and must not be pooled to claim the 3% goal. A small pre-existing external
+NPU context was preserved, so these are shared-host results. Three bounded
+natural controls passed; they are not a dataset accuracy result.
+
+These private runtime results qualify the exercised paths and recorded source
+revisions, not all rebased package combinations, A3, miss workloads or final P/D.
+A subsequent group-preparation/clean-padding candidate completed output- and MTP-matched
+N2 at 12.5430/12.5452 ms, still about 3.41% above OFF. Its local CPU reduction
+did not produce a material model gain, so those changes are excluded from this PR.
+Local resolver CPU contracts passed 11 tests and page-descriptor contracts passed
+32. Focused Ruff/format and whitespace checks passed. Full `bash format.sh ci`
+was attempted but stalled installing actionlint; it was interrupted and is not
+reported as a full CI pass. New checked-in NPU test bodies still require CI.
 
 ## Existing evidence and outstanding checks
 

@@ -246,8 +246,8 @@ class HiSparseNPUOps:
             raise ValueError("HiSparse resolver input exceeds its prepared workspace")
         if region_stride != device_global_indices.size(1) or region_stride != hot_size or hot_size < topk:
             raise ValueError("HiSparse region and LRU widths must match and cover top-k")
-        if topk <= 0 or topk % 8 or hot_size % 16:
-            raise ValueError("Ascend HiSparse requires top-k aligned to 8 and hot capacity aligned to 16")
+        if topk <= 0:
+            raise ValueError("Ascend HiSparse requires positive top-k")
         if workspace.row_keys.device != device:
             raise ValueError("HiSparse resolver workspace must be on the cache device")
         if host_cache.size(0) >= 2**31:
@@ -317,6 +317,8 @@ class HiSparseNPUOps:
 
         if try_resolve(self, locals()):
             return
+        if topk % 8 or hot_size % 16:
+            raise ValueError("The Triton HiSparse fallback requires top-k aligned to 8 and hot capacity aligned to 16")
         row_keys = workspace.row_keys[: rows * topk].view(rows, topk)
         sorted_rows = workspace.sorted_rows[: rows * topk].view(rows, topk)
         row_sort_indices = workspace.row_sort_indices[: rows * topk].view(rows, topk)

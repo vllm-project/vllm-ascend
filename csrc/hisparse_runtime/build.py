@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Build the A5 HiSparse native libraries without initializing an NPU.
+"""Build the HiSparse native libraries for an explicit CANN target.
 
 Run in the matching A5 CANN 9.2 / torch 2.10 / torch-npu 2.10 environment.
 Outputs stay in --output; installing into a serving environment is explicit.
@@ -15,8 +15,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cann-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--npu-arch", required=True, help="SIMT-capable bisheng target architecture")
+    parser.add_argument(
+        "--resolver-ub-bytes", type=int, required=True, help="Usable per-AIV UB bytes, including descriptors"
+    )
     parser.add_argument("--install", action="store_true", help="Install built libraries into this checkout")
     args = parser.parse_args()
+    if args.resolver_ub_bytes <= 512:
+        parser.error("--resolver-ub-bytes must leave space beyond the 512-byte descriptor")
     import torch
 
     spec = importlib.util.find_spec("torch_npu")
@@ -32,7 +38,8 @@ def main():
             str(args.cann_root / "bin/bisheng"),
             "-x",
             "asc",
-            "--npu-arch=dav-3510",
+            f"--npu-arch={args.npu_arch}",
+            f"-DHISPARSE_RESOLVER_UB_BYTES={args.resolver_ub_bytes}",
             "-O2",
             "-shared",
             "-fPIC",

@@ -16,3 +16,10 @@ entries:
       native A5 FP8 operand types separately from byte storage, and isolated
       optional QSA requirements through backend capabilities. Prolog weight
       preparation retains its source Parameters and final NZ operands.
+  - category: performance
+    text: >-
+      Reduced A5 HiSparse resolver submission ownership and current-metadata
+      preparation, added exact large-write slot membership, and pinned
+      reproduction to merged vLLM main. Component gains and matched-output
+      model limitations are documented; the 3% zero-miss TPOT target remains
+      under evaluation. Existing Attention compute kernels are unchanged.

@@ -44,7 +44,7 @@ def main():
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8029)
     parser.add_argument("--host-ip", help="Actual data-network IP for this host, when required")
-    parser.add_argument("--profile", choices=("a5_c8_62592", "a5_c8_main"), default="a5_c8_62592")
+    parser.add_argument("--profile", choices=("a5_c8_main",), default="a5_c8_main")
     parser.add_argument("--print-command", action="store_true")
     args = parser.parse_args()
     config = json.loads(Path(__file__).with_name("reference_configuration.json").read_text())

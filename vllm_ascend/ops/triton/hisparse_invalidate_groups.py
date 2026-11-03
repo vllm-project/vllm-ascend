@@ -63,6 +63,13 @@ def invalidate_written_groups(
     groups = group_tables.numel()
     if not tokens or not groups or not num_state_rows or not region_stride:
         return
+    if tokens >= 256 and num_state_rows <= 32:
+        from vllm_ascend.ops.triton.hisparse_invalidate_large import invalidate_large_written_groups
+
+        invalidate_large_written_groups(
+            group_tables, request_states, request_ids, written_slots, num_state_rows, region_stride
+        )
+        return
     invalidate_groups_kernel[(tokens, groups, triton.cdiv(region_stride, _INVALIDATION_TILE))](
         group_tables,
         request_states,

@@ -662,7 +662,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         pcp_slot_mapping = common_attn_metadata.slot_mapping
         slot_mapping = pcp_slot_mapping[:num_input_tokens]
-        input_positions = common_attn_metadata.positions[:num_input_tokens].long()
 
         block_size = self.kernel_block_size
 
@@ -683,10 +682,35 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         else:
             seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
 
-        if self.nope:
-            cos, sin = None, None
+        # This dictionary is owned by one build_attn_metadata invocation. Only
+        # compatible HiSparse Target groups receive it; no values survive into
+        # the next round, even when positions reuse the same device allocation.
+        shared_rope = getattr(common_attn_metadata, "_sfa_batch_rope_cache", None)
+        entry = None if shared_rope is None else shared_rope.get("mla")
+        if (
+            not self.nope
+            and draft_index is None
+            and entry is not None
+            and entry[0] is common_attn_metadata.positions
+            and entry[1] == num_input_tokens
+            and entry[2] is self.model_config
+        ):
+            _, _, _, input_positions, cos, sin = entry
         else:
-            cos, sin = get_cos_and_sin_mla(input_positions, use_cache=(draft_index is None))
+            input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+            if self.nope:
+                cos, sin = None, None
+            else:
+                cos, sin = get_cos_and_sin_mla(input_positions, use_cache=(draft_index is None))
+                if shared_rope is not None and draft_index is None:
+                    shared_rope["mla"] = (
+                        common_attn_metadata.positions,
+                        num_input_tokens,
+                        self.model_config,
+                        input_positions,
+                        cos,
+                        sin,
+                    )
 
         metadata = self.metadata_cls(  # type: ignore
             num_input_tokens=num_input_tokens,

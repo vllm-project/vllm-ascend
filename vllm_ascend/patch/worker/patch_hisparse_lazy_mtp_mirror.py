@@ -25,7 +25,7 @@ _EXPECTED_RUNTIME_SHA256 = "89b940424066b62bf042bcdade3b7efacf03968d9f449888c12b
 _EXPECTED_WORKER_SHA256 = "1953b3e582502d16df38bba4a5966e0b98492feb67b65cdac7f2b0397ca4b229"
 _EXPECTED_COORDINATOR_SHA256 = "530a488c60c3411e53eab42a8fe0624454de942204da304391a4f1c295b30666"
 _EXPECTED_CONNECTOR_SHA256 = "78610e02ebdd622dc8272a98d75c2a75a41d8b19ce1e72ac582bdedd19d11f13"
-_EXPECTED_METADATA_SHA256 = "d849fad911caac0cf21659acdd6c340473a088fb8df19961daa4475b64386cca"
+_EXPECTED_METADATA_SHA256 = "bb84247bab8c9edfc915de32755d9ac32240e93681c44f24c84e8d88792483f4"
 _PATCH_MARKER = "_ascend_certified_lazy_mtp_mirror_patch"
 _BATCH_FLAG = "_ascend_certified_lazy_mtp_mirror"
 
@@ -44,7 +44,7 @@ def _certificate_source_digest(source: str) -> str:
     return sha256(ast.dump(tree).encode()).hexdigest()
 
 
-def _eligible(metadata: Any | None, max_rows: int) -> bool:
+def _legacy_eligible(metadata: Any | None, max_rows: int) -> bool:
     """Accept only the existing Ascend target graph's CPU layout certificate."""
     if metadata is None:
         return False
@@ -70,6 +70,27 @@ def _eligible(metadata: Any | None, max_rows: int) -> bool:
         and decode_rows == rows
         and query_len == 4
         and rows == 4 * requests
+    )
+
+
+def _eligible(metadata: Any | None, max_rows: int) -> bool:
+    if _legacy_eligible(metadata, max_rows):
+        return True
+    layout = getattr(metadata, "hisparse_lazy_mtp_layout", None)
+    if not isinstance(layout, tuple) or len(layout) != 4 or not all(type(value) is int for value in layout):
+        return False
+    real_requests, requests, rows, input_rows = layout
+    return (
+        0 < real_requests <= requests
+        and rows == 4 * real_requests
+        and 0 < rows <= input_rows <= max_rows
+        and input_rows % 4 == 0
+        and metadata.num_actual_tokens == metadata.num_decode_tokens == rows
+        and metadata.num_reqs == requests
+        and real_requests <= metadata.num_decodes <= requests
+        and metadata.num_prefills == 0
+        and metadata.max_query_len == 4
+        and metadata.hisparse_uniform_query_group_size == 0
     )
 
 
@@ -176,6 +197,9 @@ def install(config: Any) -> None:
             and self.runtime.eager_host_mirror is False
             and not self.decode_batch
             and _eligible(attn_metadata, self.runtime.max_swap_rows)
+            # The new partial/padded scope is restricted to full Resident;
+            # existing qualified C4/C8/C16 behavior is preserved for misses.
+            and (attn_metadata.hisparse_uniform_query_group_size == 4 or self.all_context_pages_resident is True)
         )
         setattr(self, _BATCH_FLAG, enabled)
         if enabled:

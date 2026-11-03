@@ -81,12 +81,52 @@ The prefill staging tests check resident and host rows across shared-layer cache
 
 The KV preprocessing tests include a fixed BF16 activation row that exposes a rounding difference between standalone and fused RMSNorm. They require native fused results to match exactly, including strided packed destinations, invalid slots, padding, and graph replay with changed inputs.
 
-
 ## Platform backend dependency
 
-This draft targets vLLM PR [#62592](https://github.com/vllm-project/vllm/pull/62592),
-commit `d9f25459725c8fd9db07b7d9571a3f5be39db592`. Pin the paired revisions
-when validating the interface.
+The original baseline targets vLLM PR [#62592](https://github.com/vllm-project/vllm/pull/62592),
+commit `d9f25459725c8fd9db07b7d9571a3f5be39db592`. The builder adapter accepts
+the original `head_size` and merged `row_width` keyword. Resolver workspace is
+owned by the group's leader cache operations, without requiring a Core
+`backend_state` field. These interface fixes alone do not qualify a different
+Core revision for serving; pin and validate the complete paired revisions.
+
+The experimental `a5_c8_62592` and `a5_c8_main` profiles still require their
+exact reviewed Core source hashes. Their names do not imply support for an
+arbitrary latest main. Do not bypass the source guards after updating Core.
+
+A proposed Core `allocate_host_backing` hook lets the optimized backend supply
+PTA-pinned storage before Core aligns and registers it. When that hook is
+present, the plugin leaves Core's allocator intact. Historical paired profiles
+retain the exact-source allocator adapter. The new Core hook requires a new
+paired review and NPU validation before use with an optimized profile.
+
+### Native resolver launch contract
+
+The native resolver operates on indices, not KV payload bytes. Its dispatcher
+does not require a particular chip name, C8 dtype, 656-byte row, TopK width,
+hot-cache size or capture mode. TopK and block sizes are runtime arguments.
+Hash and LRU scratch are sized from the configured union and hot capacities.
+The int16 LRU representation and the compiled target's UB budget still apply.
+If the native library is absent or scratch does not fit, the existing resolver
+remains the fallback. Optional non-int32 miss masks also use that fallback.
+
+Build with `csrc/hisparse_runtime/build.py --cann-root <sdk> --output <new-dir>
+--npu-arch <simt-target> --resolver-ub-bytes <usable-ub-bytes>`. Select the target
+and usable UB budget from the matching SDK/device specification; these are
+hardware build parameters, not model-shape settings. Rebuild both the resolver
+and Torch binding for this ABI. Loading an old binding is rejected.
+
+Eager and captured launches use the same Tensor-based C++ entry point. C++
+derives shape/stride geometry and retains Python-free Tensor storage owners
+until queue submission, with allocator stream records protecting asynchronous
+device execution. There is no Python launch object, address-keyed binding cache
+or per-binding limit. Resolved-index and error scratch reuse the existing group
+workspace on its ordered copy stream. Runtime/workspace owners must remain alive
+through graph replay, and graphs must be destroyed before cache owners are
+released or rebound. Launch-planner CPU tests do not establish native compilation
+or NPU correctness. Existing profile pairing guards and the integration's
+documented hardware limits remain until the new native build and full pair are
+validated.
 
 `NPUPlatform.get_hisparse_backend_cls()` selects `AscendHiSparseBackend`.
 The common runtime owns scheduling, TP coordination, allocation rollback and
@@ -116,11 +156,12 @@ Historical integration evidence does not qualify this new pair. Complete test
 collection, standard CI, final-head NPU/model validation and deferred accuracy
 remain outstanding; no performance improvement is claimed.
 
-
 ### Speculative Decode group prefetch
 
-The Ascend backend opts into the common runtime's
-`supports_speculative_group_prefetch` capability. A pure Decode batch may stage
+The Ascend `_resolve_and_stage_group` adapter extends the merged Core's
+`decode_batch` follower-staging condition for certified MTP verification. It
+uses native NPU streams and events without an unmerged Core prefetch PR. A pure
+Decode batch may stage
 the shared index group's missing historical rows for its followers, including
 MTP verification with multiple query tokens. Prefill, mixed batches and batches
 exceeding the resolver row capacity keep the existing staging path.
@@ -129,3 +170,11 @@ This eligibility is separate from the single-token resident-write and Host-mirro
 policy. Each follower retains its own completion event and writes its current
 tentative KV before attention consumes it. This change does not establish a
 measured speedup, complete attention C8 support, or full-model accuracy.
+
+### Current A5 performance qualification
+
+See the [merged-main checkpoint](../../developer_guide/hisparse_a5_optimization.md#merged-main-qualification-checkpoint-2026-11-03)
+for the current source pins, component/model evidence, matched-output TPOT and
+remaining limits. New runs use upstream-main commit `5c8ae7c74aaa99d1f7fbeea942fd7282e3413810`
+with `a5_c8_main`, without stacking unmerged vLLM PRs. Historical results above do
+not establish the final package's full accuracy, A3, miss or P/D qualification.

@@ -23,6 +23,7 @@ def _staged_map_compact(
     CAPACITY: tl.constexpr,
     WIDTH: tl.constexpr,
     TILE: tl.constexpr,
+    PREFIX_FAST: tl.constexpr = False,
 ):
     row = tl.program_id(0)
     column = tl.arange(0, TILE)
@@ -39,11 +40,22 @@ def _staged_map_compact(
     # The old Torch chain stores physical rows as int32 before C8 range checks.
     physical = (page.to(tl.int64) * BLOCK_SIZE + tl.maximum(selected, 0) % BLOCK_SIZE).to(tl.int32)
     valid = readable & (physical >= 0) & (physical < CAPACITY)
-    position = tl.cumsum(valid.to(tl.int32), 0) - 1
     count = tl.sum(valid.to(tl.int32), 0)
     base = output + row.to(tl.int64) * WIDTH
-    tl.store(base + position, physical, valid)
-    tl.store(base + column, -1, (column < WIDTH) & (column >= count))
+    # A valid prefix is already the exact stable packing. Prove this from
+    # current values on device; holes retain the original cumsum path.
+    if PREFIX_FAST:
+        holes_in_prefix = tl.sum(((column < count) & ~valid).to(tl.int32), 0)
+        if holes_in_prefix == 0:
+            tl.store(base + column, tl.where(valid, physical, -1), column < WIDTH)
+        else:
+            position = tl.cumsum(valid.to(tl.int32), 0) - 1
+            tl.store(base + position, physical, valid)
+            tl.store(base + column, -1, (column < WIDTH) & (column >= count))
+    else:
+        position = tl.cumsum(valid.to(tl.int32), 0) - 1
+        tl.store(base + position, physical, valid)
+        tl.store(base + column, -1, (column < WIDTH) & (column >= count))
 
 
 def prepare_staged_c8_indices(logical, tables, requests, cache, block_size):
@@ -99,5 +111,6 @@ def prepare_staged_c8_indices(logical, tables, requests, cache, block_size):
             cache.shape[0] * block_size,
             logical.shape[1],
             triton.next_power_of_2(logical.shape[1]),
+            PREFIX_FAST=logical.shape[0] >= 1024 and logical.shape[1] == 2048,
         )
     return result

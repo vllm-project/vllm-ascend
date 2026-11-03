@@ -81,6 +81,109 @@ def reference(topk, requests, states, source, resident, hot_table, dgi, lru, blo
     return out, counts, sh, sd, sc, dgi, lru, stats
 
 
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize(
+    "topk,hot_size,block,rows,dtype,width",
+    [(7, 31, 4, 6, torch.bfloat16, 16), (4096, 12288, 64, 2, torch.float32, 32), (8, 32768, 64, 2, torch.bfloat16, 16)],
+)
+def test_dynamic_native_resolver_matches_cpu(capture, topk, hot_size, block, rows, dtype, width):
+    """Exercise the native kernel directly so a fallback cannot hide a failure."""
+    from vllm_ascend.ops.hisparse_ascendc import _load_resolver, resolve_tensors, scratch_layout
+
+    native = _load_resolver()
+    if native is None:
+        pytest.skip("Build the dynamic HiSparse native extension first")
+    union = min(rows * topk, hot_size)
+    _, scratch_bytes = scratch_layout(hot_size, union)
+    if scratch_bytes > native.scratch_capacity():
+        pytest.skip("Case exceeds the compiled target's UB budget")
+    columns = (hot_size + block - 1) // block
+    logical = torch.arange(rows * topk, dtype=torch.int32).view(rows, topk) % hot_size
+    requests = torch.zeros(rows, dtype=torch.int32)
+    states = torch.zeros(1, dtype=torch.int32)
+    source = torch.arange(1, columns + 1, dtype=torch.int32)[None]
+    resident = torch.zeros_like(source)
+    resident[0, 0] = 2
+    hot_table = torch.arange(1, columns + 1, dtype=torch.int32)[None]
+    initial_dgi = torch.full((1, hot_size), -1, dtype=torch.int32)
+    if hot_size > block:
+        initial_dgi[0, 0] = 2 * block
+    initial_lru = torch.arange(hot_size, dtype=torch.int32).to(torch.int16)[None]
+    logical_n, requests_n, states_n, source_n, resident_n, table_n, dgi, lru = [
+        tensor.npu() for tensor in (logical, requests, states, source, resident, hot_table, initial_dgi, initial_lru)
+    ]
+    output = torch.empty_like(logical_n)
+    attention = torch.empty_like(output)
+    counts = torch.empty(rows, dtype=torch.int32, device="npu")
+    host_plan, device_plan = torch.full_like(output, -9), torch.full_like(output, -9)
+    swap_counts = torch.empty_like(counts)
+    stats = torch.zeros(2, dtype=torch.int64, device="npu")
+    args = dict(
+        host_cache=torch.empty((columns + 2) * block, 1),
+        hot_cache=torch.empty(1, block, width, dtype=dtype, device="npu"),
+        hot_block_table=table_n,
+        global_indices=logical_n,
+        hot_indices=output,
+        device_global_indices=dgi,
+        lru_slots=lru,
+        request_state_indices=states_n,
+        region_stride=hot_size,
+        max_union_rows=union,
+        miss_mask=None,
+        stats=stats,
+        attention_indices=attention,
+        attention_block_stride=block * 2,
+        request_ids=requests_n,
+        source_block_table=source_n,
+        source_block_size=block,
+        resolved_global_indices=None,
+        valid_counts=counts,
+        swap_host_physical_rows=host_plan,
+        swap_device_physical_rows=device_plan,
+        swap_counts=swap_counts,
+        resident_block_table=resident_n,
+        resident_block_size=block,
+        resident_null_block=0,
+        num_valid_rows=None,
+    )
+    resolved_scratch = torch.empty_like(output)
+    error_scratch = torch.empty(rows, 8, dtype=torch.int32, device="npu")
+
+    def forward():
+        resolve_tensors(native, args, resolved_scratch, error_scratch)
+
+    graph = None
+    if capture:
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            forward()
+    try:
+        for current in (logical, logical.flip(1)):
+            logical_n.copy_(current)
+            dgi.copy_(initial_dgi)
+            lru.copy_(initial_lru)
+            stats.zero_()
+            host_plan.fill_(-9)
+            device_plan.fill_(-9)
+            if graph is None:
+                forward()
+            else:
+                graph.replay()
+            torch.npu.synchronize()
+            expected = reference(
+                current, requests, states, source, resident, hot_table, initial_dgi, initial_lru, block
+            )
+            for actual, golden in zip((output, counts, host_plan, device_plan, swap_counts, dgi, lru, stats), expected):
+                torch.testing.assert_close(actual.cpu(), golden)
+            expected_attention = torch.where(output >= 0, output // block * (block * 2) + output % block, -1)
+            torch.testing.assert_close(attention, expected_attention)
+    finally:
+        torch.npu.synchronize()
+        if graph is not None:
+            graph.reset()
+
+
 def test_resolver_strides_padding_graph():
     torch.npu.set_device(0)
     raw = torch.empty(8192, dtype=torch.uint8)
@@ -552,6 +655,66 @@ def test_invalidate_large_hot_capacity_graph():
             graph.replay()
             torch.npu.synchronize()
             torch.testing.assert_close(dgi.cpu(), expected)
+    finally:
+        torch.npu.synchronize()
+        graph.reset()
+
+
+@pytest.mark.parametrize("tokens,num_states", [(256, 4), (1024, 32), (8192, 32)])
+def test_grouped_large_write_membership_replay(tokens, num_states):
+    """Compare exact rewritten-slot membership after changing captured inputs."""
+    from vllm_ascend.ops.triton.hisparse_invalidate_groups import invalidate_written_groups
+
+    hot, groups = 513, 3
+
+    def inputs(seed):
+        generator = torch.Generator().manual_seed(seed)
+        states = torch.randperm(num_states, generator=generator).int()
+        states[0] = num_states - 1
+        requests = torch.randint(-1, num_states + 2, (tokens,), generator=generator, dtype=torch.int32)
+        written = torch.randint(-2, 8192, (tokens,), generator=generator, dtype=torch.int64)
+        requests[:10] = 0
+        written[:10] = torch.tensor([0, 1, 2147483647, 2147483646, -1, 7, 7, 1, 2**31, 2**40])
+        tables = [
+            torch.randint(-1, 8192, (num_states, hot), generator=generator, dtype=torch.int32) for _ in range(groups)
+        ]
+        for table in tables:
+            table[num_states - 1, :8] = torch.tensor([0, 1, 2147483647, 2147483646, -1, 7, 99, 234])
+        return states, requests, written, tables
+
+    states, requests, written, initial = inputs(42)
+    device_states, device_requests, device_written = states.npu(), requests.npu(), written.npu()
+    tables = [table.npu() for table in initial]
+    pointers = torch.tensor([table.data_ptr() for table in tables], dtype=torch.int64, device="npu")
+
+    def forward():
+        invalidate_written_groups(pointers, device_states, device_requests, device_written, num_states, hot)
+
+    forward()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    try:
+        with torch.npu.graph(graph):
+            forward()
+        for seed in (43, 44, 45):
+            states, requests, written, initial = inputs(seed)
+            expected = [table.clone() for table in initial]
+            selected = [set() for _ in range(num_states)]
+            for request, slot in zip(requests.tolist(), written.tolist()):
+                if 0 <= request < num_states and 0 <= slot < 2**31:
+                    selected[int(states[request])].add(slot)
+            for table in expected:
+                for state, slots in enumerate(selected):
+                    table[state, torch.isin(table[state], torch.tensor(sorted(slots), dtype=torch.int64))] = -1
+            device_states.copy_(states)
+            device_requests.copy_(requests)
+            device_written.copy_(written)
+            for destination, source in zip(tables, initial):
+                destination.copy_(source)
+            graph.replay()
+            torch.npu.synchronize()
+            for actual, wanted in zip(tables, expected):
+                torch.testing.assert_close(actual.cpu(), wanted, rtol=0, atol=0)
     finally:
         torch.npu.synchronize()
         graph.reset()

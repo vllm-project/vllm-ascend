@@ -561,6 +561,17 @@ def build_attn_metadata(
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     common_v41_batch_metadata: dict[str, Any] = {}
+    # Share current-position RoPE gathers only within this Target preparation.
+    # Physical block/slot mappings and all other group metadata remain local.
+    shared_sfa_rope = (
+        {}
+        if full_graph_mode
+        and pcp_context is None
+        and model_specific_attn_metadata is None
+        and not draft_layer_names
+        and copy_sfa_draft_index is None
+        else None
+    )
     kv_cache_groups = kv_cache_config.kv_cache_groups
     batch_tq_slots = uses_turboquant_groups(kv_cache_groups)
     formatted_slot_mappings = None
@@ -651,6 +662,12 @@ def build_attn_metadata(
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_v41_builder = isinstance(attn_metadata_builder, AscendDSAV41MetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
+            if (
+                shared_sfa_rope is not None
+                and is_sfa_builder
+                and attn_metadata_builder.vllm_config.attention_config.hisparse_config is not None
+            ):
+                common_attn_metadata._sfa_batch_rope_cache = shared_sfa_rope
             if getattr(attn_group.backend, "requires_unpadded_cpu_query_lens", False) and num_reqs > num_actual_reqs:
                 # FULL graph padding appends dummy request boundaries to the
                 # shared query_start_loc, while QSA reads the CPU tail as its

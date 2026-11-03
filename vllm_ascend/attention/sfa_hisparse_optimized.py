@@ -33,6 +33,8 @@ def _hisparse_uniform_mtp_group_size(
     ones. Exclude it and non-uniform graph backends rather than transferring
     a device scalar. This fact never includes sequence lengths or KV addresses.
     """
+    metadata.hisparse_lazy_mtp_layout = None
+    metadata.hisparse_uniform_request_rows = False
     spec = vllm_config.speculative_config
     if (
         not uniform_backend
@@ -52,9 +54,12 @@ def _hisparse_uniform_mtp_group_size(
     rows = common_attn_metadata.num_actual_tokens
     bounds = common_attn_metadata.query_start_loc_cpu
     if (
-        rows not in (16, 32, 64)
-        or count * 4 != rows
-        or metadata.num_input_tokens != rows
+        count <= 0
+        or rows <= 0
+        or rows % 4
+        or count * 4 < rows
+        or metadata.num_input_tokens < rows
+        or metadata.num_input_tokens % 4
         or not isinstance(bounds, torch.Tensor)
         or bounds.device.type != "cpu"
         or bounds.dtype not in (torch.int32, torch.int64)
@@ -64,7 +69,46 @@ def _hisparse_uniform_mtp_group_size(
         return 0
     # The device check above is required: this reads an existing CPU mirror.
     values = bounds[: count + 1].tolist()
-    return 4 if all(value == index * 4 for index, value in enumerate(values)) else 0
+    real_requests = rows // 4
+    # Current MRV2 pads uniform query boundaries with additional four-token
+    # requests; older paired runners leave the padded boundaries constant.
+    # Both preserve the real prefix. The remaining rows are model padding,
+    # never additional real requests or a reason to change resolver grouping.
+    constant_tail = all(value == min(index, real_requests) * 4 for index, value in enumerate(values))
+    uniform_tail = metadata.num_input_tokens == count * 4 and all(
+        value == index * 4 for index, value in enumerate(values)
+    )
+    if not (constant_tail or uniform_tail):
+        return 0
+    metadata.hisparse_uniform_request_rows = uniform_tail
+    # This CPU-only fact also covers a padded C1/C2/C3 Target. It does not
+    # change the captured resolver/Attention kernel's existing group choice.
+    metadata.hisparse_lazy_mtp_layout = (real_requests, count, rows, metadata.num_input_tokens)
+    return 4 if rows in (16, 32, 64) and count * 4 == rows and metadata.num_input_tokens == rows else 0
+
+
+def _try_reuse_uniform_request_rows(builder, metadata, draft_index, *, capturing):
+    """Reuse only an immutable row-layout prefix in this builder's same buffer.
+
+    The current CPU certificate is recomputed every proposal. No request-state
+    indices, sequence lengths, or physical cache addresses are retained here.
+    A fallback write/capture or changed allocation invalidates the prefix.
+    """
+    if not metadata.hisparse_uniform_request_rows or capturing:
+        builder._uniform_request_row_prefixes.pop(draft_index, None)
+        return False
+    buffer = builder._request_row_buffers[draft_index]
+    rows = metadata.num_input_tokens
+    if rows > buffer.numel() or rows > builder._uniform_request_rows_template.numel():
+        raise ValueError("Certified request-row layout exceeds its owned buffers")
+    cached = builder._uniform_request_row_prefixes.get(draft_index)
+    initialized = cached[1] if cached is not None and cached[0] is buffer else 0
+    if initialized < rows:
+        # Same destination and submission order as the original dynamic fill.
+        # All entries of this template depend only on a fixed query size of 4.
+        metadata.req_id_per_token.copy_(builder._uniform_request_rows_template[:rows])
+        builder._uniform_request_row_prefixes[draft_index] = (buffer, rows)
+    return True
 
 
 # Bound the temporary D2D packing workspace independently of prefill length.
@@ -83,6 +127,8 @@ class AscendHiSparseMetadata(AscendSFAMetadata):
     hisparse_uniform_query_group_size: int = 0
     prefill: AscendHiSparsePrefillMetadata | None = None
     hisparse_for_capture: bool = False
+    hisparse_lazy_mtp_layout: tuple[int, int, int, int] | None = None
+    hisparse_uniform_request_rows: bool = False
 
 
 class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
@@ -98,6 +144,10 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.compilation_config.max_cudagraph_capture_size or 0,
         )
+        self._uniform_request_rows_template = (
+            torch.arange(self._row_capacity, device=self.device, dtype=torch.int32) // 4
+        )
+        self._uniform_request_row_prefixes: dict[int | None, tuple[torch.Tensor, int]] = {}
 
     def _build(self, common_attn_metadata, draft_index=None, pcp_context=None):
         metadata = super()._build(common_attn_metadata, draft_index, pcp_context)
@@ -114,14 +164,17 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
                 self._row_capacity, device=self.device, dtype=torch.int32
             )
         metadata.req_id_per_token = self._request_row_buffers[draft_index][: metadata.num_input_tokens]
-        from vllm_ascend.ops.triton.hisparse_request_rows import try_build_request_rows
+        if not _try_reuse_uniform_request_rows(
+            self, metadata, draft_index, capturing=torch.npu.is_current_stream_capturing()
+        ):
+            from vllm_ascend.ops.triton.hisparse_request_rows import try_build_request_rows
 
-        if not try_build_request_rows(metadata.query_start_loc, metadata.req_id_per_token, metadata.num_reqs):
-            rows = torch.arange(metadata.num_input_tokens, device=self.device, dtype=torch.int32)
-            metadata.req_id_per_token.copy_(
-                torch.searchsorted(metadata.query_start_loc[1:].contiguous(), rows, right=True)
-            )
-            metadata.req_id_per_token.clamp_(max=max(metadata.num_reqs - 1, 0))
+            if not try_build_request_rows(metadata.query_start_loc, metadata.req_id_per_token, metadata.num_reqs):
+                rows = torch.arange(metadata.num_input_tokens, device=self.device, dtype=torch.int32)
+                metadata.req_id_per_token.copy_(
+                    torch.searchsorted(metadata.query_start_loc[1:].contiguous(), rows, right=True)
+                )
+                metadata.req_id_per_token.clamp_(max=max(metadata.num_reqs - 1, 0))
         if metadata.num_prefills:
             seq_lens_cpu = metadata.seq_lens_cpu
             if seq_lens_cpu is None:
@@ -472,6 +525,34 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # before the same-stream SFA consumer. No additional fills are needed.
         return query_end, key_length
 
+    def _query_before_swap_or_none(self, query, query_rope, metadata):
+        """Pack a captured C8 follower query independently of pending KV DMA.
+
+        TopK readiness has already been published. Preserve the leader's
+        existing fused map+pack, all KV events, and all metadata ownership.
+        The packed query is local to this invocation and consumed on the
+        same compute stream; no value survives into the next forward.
+        """
+        if (
+            not self.enable_sparse_sfa_c8
+            or metadata.num_prefills != 0
+            or self.index_group_index == 0
+            or query.shape[0] not in (8, 16, 32)
+        ):
+            return None
+        from vllm_ascend.ops.hisparse_c8_scope import current_c8_mapping_scope
+
+        scope = current_c8_mapping_scope(self.hisparse_cache.runtime.index_group, get_forward_context())
+        if scope is None or scope.result is None:
+            return None
+        from vllm_ascend.ops.hisparse_c8 import c8_storage_view
+        from vllm_ascend.ops.triton.hisparse_c8_fused import pack_c8_query_lengths
+
+        cache = self.index_group.physical_kv_cache(self.index_group_index)
+        view, _, _, _ = c8_storage_view(cache)
+        query_end, key_length = self._c8_attention_metadata(cache, query.shape[0])
+        return pack_c8_query_lengths(query, query_rope, query_end, key_length, view.shape[0])
+
     def _attention_physical(
         self,
         query,
@@ -482,6 +563,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         use_eager_compaction=False,
         _c8_prepared=False,
         _mapping_scope=None,
+        _prepacked_query=None,
     ):
         if self.enable_sparse_sfa_c8:
             from vllm_ascend.ops.hisparse_c8 import c8_physical_attention
@@ -497,6 +579,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 key_length,
                 _prepared_indices=_c8_prepared,
                 _mapping_scope=_mapping_scope,
+                _prepacked_query=_prepacked_query,
             )
         return self._attention_physical_bridge(query, query_rope, packed_cache, physical_topk)
 
@@ -584,7 +667,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 enforce_eager=self._resident_hisparse_enabled and metadata.num_prefills == 0 and num_decode <= 64,
             )
             mapping_scope = None
+            prepacked_query = None
             if physical is None:
+                prepacked_query = self._query_before_swap_or_none(
+                    ql_nope[:num_decode], q_pe[:num_decode] if q_pe is not None else None, metadata
+                )
                 physical = cache.swap_in(
                     metadata.req_id_per_token[:num_decode],
                     block_table=cache.source_block_table,
@@ -604,6 +691,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
                     physical,
                     use_eager_compaction=metadata.num_prefills == 0,
                     _mapping_scope=mapping_scope,
+                    _prepacked_query=prepacked_query,
                 )
             )
         if metadata.num_prefills:
