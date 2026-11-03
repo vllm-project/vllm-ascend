@@ -1,0 +1,6 @@
+pr: 20788
+entries:
+  - category: bugfix
+    text: >-
+      MooncakeHybridConnector preserves the full prompt for compressed-KV models
+      such as DeepSeek V4, while retaining Mamba's one-token prefill backoff.
