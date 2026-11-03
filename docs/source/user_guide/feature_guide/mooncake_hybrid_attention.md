@@ -80,7 +80,7 @@ The common Mooncake dependency and deployment requirements are listed in the
 | Category | Constraint |
 | --- | --- |
 | Attention backend | Compute/transfer overlap is integrated with Ascend FA, SFA, and DSA paths. Other attention backends need their own integration. |
-| Execution mode | The example uses eager mode. Graph-mode compatibility follows the selected model and attention backend. |
+| Execution mode | Eager and graph-mode compatibility follows the selected model and attention backend. |
 | Recurrent state | Recurrent and linear-attention groups, including GDN and KDA state, require `mamba_cache_mode="align"`. |
 | Parallelism | Use matching TP, PP, PCP, and PP layer partitions on sharing instances. DCP greater than `1` and TP mismatch are not supported. |
 | PP | Uneven partitions and stage-local groups are supported only when every stage owns layers in every required group. Empty stage-local groups are not supported. |
@@ -94,40 +94,56 @@ be checked in the corresponding model deployment guide.
 
 ## Usage
 
-### Start the Inference Service
+### Configure Prefill and Decode Nodes
 
 Prepare the Mooncake Store and client as described in the
 [layerwise pooling guide](mooncake_layerwise_adaptation_and_optimization.md#prepare-mooncake),
-then start the model:
+then follow the **PD Disaggregation Scenario** in the
+[Mooncake deployment guide](kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend).
+Use these Store connector configurations for hybrid models.
 
-```bash
-export MOONCAKE_CONFIG_PATH=/path/to/mooncake.json
-export PYTHONHASHSEED=0
+**Prefill (P) node:**
 
-vllm serve /path/to/hybrid-model \
-  --served-model-name hybrid-model \
-  --tensor-parallel-size 8 \
-  --enforce-eager \
-  --enable-prefix-caching \
-  --enable-chunked-prefill \
-  --max-num-batched-tokens 4096 \
-  --kv-transfer-config '{
+```json
+{
     "kv_connector": "AscendStoreConnector",
-    "kv_role": "kv_both",
+    "kv_role": "kv_producer",
+    "kv_load_failure_policy": "fail",
     "kv_connector_extra_config": {
-      "backend": "mooncake",
-      "lookup_rpc_port": "0",
-      "use_layerwise": true,
-      "load_async": false,
-      "layerwise_prefetch_layers": 2,
-      "layerwise_max_transfer_blocks": 64,
-      "layerwise_max_transfer_bytes": 16777216
+        "lookup_rpc_port": "0",
+        "backend": "mooncake",
+        "use_layerwise": true,
+        "layerwise_prefetch_layers": 2
     }
-  }'
+}
 ```
 
-Choose the model path, TP size, token budget, and any additional model arguments
-for the available hardware. For models with recurrent or linear-attention state,
+**Decode (D) node:**
+
+```json
+{
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "fail",
+    "kv_connector_extra_config": {
+        "lookup_rpc_port": "0",
+        "backend": "mooncake",
+        "use_layerwise": true,
+        "layerwise_prefetch_layers": 2
+    }
+}
+```
+
+Hybrid models require `fail`; `recompute` is not supported. When using
+`MultiConnector`, set this policy on the top-level `kv-transfer-config` and
+update its `AscendStoreConnector` entry with the role and extra configuration
+shown above. Decode pool access is disabled by default; enable
+`consumer_is_to_load` explicitly if Decode needs to load from the pool. See
+[Configure Prefill and Decode Nodes](mooncake_layerwise_adaptation_and_optimization.md#configure-prefill-and-decode-nodes)
+for role behavior and IPC identifier requirements.
+
+Choose model, parallelism, token-budget, and execution-mode options according
+to the model deployment guide. For recurrent or linear-attention state,
 set `--mamba-cache-mode align` unless the model configuration already selects it.
 Use the same model weights and cache configuration on all sharing instances.
 

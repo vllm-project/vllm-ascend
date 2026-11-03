@@ -74,7 +74,7 @@ requests cannot consume an incomplete snapshot.
 | Category | Constraint |
 | --- | --- |
 | Software | Requires a Mooncake NPU client with session and range transfer APIs; use Mooncake 0.3.14 or later. Required interfaces are checked at startup. |
-| Deployment | Layerwise pooling is used on Prefill. Follow the Ascend Store guide for P/D deployment and Decode configuration. |
+| Deployment | Use the corresponding producer/consumer role on each P/D node. Decode pool reads and writes are controlled separately by `consumer_is_to_load` and `consumer_is_to_put`. |
 | Parallelism | Instances sharing layerwise objects must use matching TP, PP, and PCP sizes and the same PP layer partition. DCP greater than `1` and TP mismatch are not supported. |
 | PP | Uneven layer partitions are supported, but each stage must own layers in every cache group. Empty stage-local cache groups are not supported. |
 | Cache layout | Readers and writers must agree on model weights, cache format, block sizes, and transfer mode. Use separate pool namespaces for incompatible configurations. |
@@ -105,48 +105,69 @@ Sharing instances must connect to the same Store and tenant, with compatible
 model and cache configurations. For independently launched services on the same
 host, assign distinct `lookup_rpc_port` identifiers and HTTP ports.
 
-### Start the Inference Service
+### Configure Prefill and Decode Nodes
 
-```bash
-vllm serve /path/to/model \
-  --served-model-name pooled-model \
-  --tensor-parallel-size 2 \
-  --enforce-eager \
-  --enable-prefix-caching \
-  --enable-chunked-prefill \
-  --max-num-batched-tokens 4096 \
-  --kv-transfer-config '{
+Follow the **PD Disaggregation Scenario** in the
+[Mooncake deployment guide](kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend)
+for node startup, P/D transfer, and proxy configuration. Configure the
+`AscendStoreConnector` on each node as follows.
+
+**Prefill (P) node:**
+
+```json
+{
     "kv_connector": "AscendStoreConnector",
-    "kv_role": "kv_both",
+    "kv_role": "kv_producer",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
-      "backend": "mooncake",
-      "lookup_rpc_port": "0",
-      "use_layerwise": true,
-      "load_async": false,
-      "layerwise_prefetch_layers": 2,
-      "layerwise_max_transfer_blocks": 64,
-      "layerwise_max_transfer_bytes": 16777216
+        "lookup_rpc_port": "0",
+        "backend": "mooncake",
+        "use_layerwise": true,
+        "layerwise_prefetch_layers": 2
     }
-  }'
+}
 ```
 
-Replace the model path and adjust TP size and the token budget to the model and
-available NPU memory. The example uses `kv_both` to save and load prefixes through
-the pool. In a P/D deployment, merge the layerwise options into the Prefill
-connector configuration described in the Ascend Store guide.
+**Decode (D) node:**
 
-`--enforce-eager` selects eager execution. Graph-mode compatibility depends on
-the model and attention backend; follow the corresponding model deployment guide.
+```json
+{
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "recompute",
+    "kv_connector_extra_config": {
+        "lookup_rpc_port": "0",
+        "backend": "mooncake",
+        "use_layerwise": true,
+        "layerwise_prefetch_layers": 2
+    }
+}
+```
+
+These examples show the Store connector configuration. In the deployment
+guide's `MultiConnector`, update the `AscendStoreConnector` entry and set
+`kv_load_failure_policy` on the top-level `kv-transfer-config`.
+
+The Prefill node saves and reuses prefixes through the pool. Decode pool reads
+and writes are disabled by default; P/D KV transfer is handled by the other
+connector in `MultiConnector`. To enable Decode pool loading, add
+`"consumer_is_to_load": true` to its `kv_connector_extra_config`. Setting
+`use_layerwise=true` alone does not enable consumer pool access.
+
+The `recompute` policy above applies to non-hybrid models. For hybrid models,
+use `fail` as shown in the [hybrid attention guide](mooncake_hybrid_attention.md#usage).
+Select model, parallelism, token-budget, and execution-mode options according
+to the corresponding model deployment guide.
 
 ### Use Cached Prefixes
 
 Send inference requests through the normal OpenAI-compatible API:
 
 ```bash
-curl http://localhost:8000/v1/completions \
+curl 'http://<proxy-host>:<proxy-port>/v1/completions' \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "pooled-model",
+    "model": "<served-model-name>",
     "prompt": "Explain how KV cache reuse reduces repeated prefill computation.",
     "max_tokens": 64,
     "temperature": 0
@@ -176,9 +197,9 @@ Set these options in `kv_transfer_config.kv_connector_extra_config`.
 | `layerwise_max_transfer_blocks` | int | `0` | Maximum key/block rows per range transfer batch. Also batches session operations and lookup work. `0` adds no block limit. |
 | `layerwise_max_transfer_bytes` | int | `0` | Maximum size in bytes of an individual contiguous transfer segment. Larger segments are split. This is not a limit on total bytes per API call; `0` adds no segment-size limit. |
 
-The example uses a block limit of `64` and a segment limit of `16` MiB. These
-are explicit settings, not defaults. For roles, placement, tenancy, and other
-pool options, see [Ascend Store configuration](kv_cache_pool_ascend_store.md#kv-transfer-config-common-parameters).
+Transfer batch limits are optional and are omitted from the examples. For
+roles, placement, tenancy, and other pool options, see
+[Ascend Store configuration](kv_cache_pool_ascend_store.md#kv-transfer-config-common-parameters).
 
 ## Tuning Suggestions
 
