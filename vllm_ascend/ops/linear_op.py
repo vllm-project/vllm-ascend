@@ -51,7 +51,6 @@ from vllm.logger import logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tp_group,
     get_otp_group,
@@ -332,23 +331,11 @@ class SequenceRowParallelOp(CustomRowParallelOp):
     def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         input_parallel = self.get_input_parallel(input_)
         assert self.quant_method is not None
-        if is_forward_context_available():
-            # _EXTRA_CTX.num_tokens carries the padded token count under both
-            # runners: V1's set_ascend_forward_context sets it directly, V2's
-            # platform hook publishes num_tokens_after_padding into the
-            # context's additional_kwargs. Unset known extras read as None.
-            num_tokens = _EXTRA_CTX.num_tokens
-            if isinstance(num_tokens, int) and num_tokens > 0:
-                # A row projection fed fewer rows than the scheduled token
-                # count means an upstream projection on the residual stream
-                # stayed unwrapped (its name is missing from
-                # _DENSE_SP_COLUMN_PROJECTIONS), so the token layout broke.
-                assert input_parallel.shape[0] == num_tokens, (
-                    f"Sequence-parallel row projection '{self.prefix}' received "
-                    f"{input_parallel.shape[0]} rows but the step schedules {num_tokens} "
-                    "tokens: an upstream residual-stream projection is not running its "
-                    "sequence-parallel wrapper, see enable_dense_sp()."
-                )
+        # No runtime shape check here: comparing input_parallel.shape[0] with a
+        # Python-int num_tokens specializes the dynamic token dim under
+        # torch.compile (ConstraintViolationError). The load-time
+        # _validate_dense_sp_projections already catches the layout-hazard
+        # case this was guarding (unlisted projection names).
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         output_parallel = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
         output = dense_sp_reduce_scatter(output_parallel)

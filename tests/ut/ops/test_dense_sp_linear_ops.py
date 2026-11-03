@@ -628,21 +628,16 @@ class TestDenseSpBlockEquivalence:
         reference = _reference_gdn(_pad_tokens(x, tp_size), weights, tp_size)
         _assert_shards_match_reference(sp_outs, reference, num_tokens, tp_size)
 
-    def test_row_op_asserts_on_short_input(self, monkeypatch):
-        """A missed upstream gather must fail loudly, not compute garbage."""
+    def test_row_op_runs_without_runtime_shape_check(self):
+        """The row op no longer does a runtime shape check (it specialized
+        the dynamic token dim under torch.compile). Load-time validation
+        (_validate_dense_sp_projections) covers the layout hazard."""
         weight = torch.randn(6, 4, dtype=torch.float64)
         op = _make_row_op(weight, "model.layers.0.self_attn.o_proj")
-        monkeypatch.setattr(linear_op, "is_forward_context_available", lambda: True)
-        monkeypatch.setattr(linear_op, "_EXTRA_CTX", SimpleNamespace(num_tokens=8))
-
-        short = torch.randn(4, 4, dtype=torch.float64)  # 4 != 8: the token layout broke upstream
-        with pytest.raises(AssertionError, match="Sequence-parallel row projection"):
-            op.apply(short)
-
         good = torch.randn(8, 4, dtype=torch.float64)
         self.sim.rs_stage = [good, good]
         out, _ = op.apply(good)
-        assert out.shape[0] == 4  # reduce-scatter semantics: 8 / tp(2) rows
+        assert out.shape[0] == 4
 
 
 class TestEmbeddingEntryShard:
