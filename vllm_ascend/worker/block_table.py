@@ -141,7 +141,7 @@ class BlockTable:
         # Clear the tail left by a shrinking rebuild: stale ids beyond the
         # live region can still be dereferenced by consumers indexing rows
         # by request metadata instead of num_blocks_per_row.
-        self.block_table.np[row_idx, self.num_blocks_per_row[row_idx]:prev_num_blocks] = 0
+        self.block_table.np[row_idx, self.num_blocks_per_row[row_idx] : prev_num_blocks] = 0
 
     def clear_row(self, row_idx: int) -> None:
         num_blocks = self.num_blocks_per_row[row_idx]
