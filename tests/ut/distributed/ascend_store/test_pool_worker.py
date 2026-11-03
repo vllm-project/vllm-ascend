@@ -927,6 +927,35 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         self.assertTrue(worker.use_mla)
         self.assertEqual(worker.num_kv_head, 1)
 
+    def test_build_cache_coordinator_uses_gated_retention(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker.__new__(KVPoolWorker)
+        worker.use_hybrid = True
+        worker.cache_transfer_granularity = 128
+        worker.hash_block_size = 128
+        worker.grouped_block_size = [128]
+        worker.kv_cache_group_families = ["default"]
+        cases = [
+            ("deepseek_v41", 8192, 8192),
+            ("deepseek_v4", 0, 0),
+            ("qwen3_next", 8192, None),
+        ]
+        for model_version, configured, expected in cases:
+            with self.subTest(model_version=model_version, configured=configured):
+                worker.kv_cache_config = SimpleNamespace(
+                    kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(model_version=model_version))]
+                )
+                vllm_config = SimpleNamespace(
+                    speculative_config=None,
+                    cache_config=SimpleNamespace(prefix_cache_retention_interval=configured),
+                )
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.AscendStoreCoordinator"
+                ) as coordinator_cls:
+                    worker._build_cache_coordinator(vllm_config)
+                self.assertEqual(coordinator_cls.call_args.kwargs["retention_interval"], expected)
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib")
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_rank"

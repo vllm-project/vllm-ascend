@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
-from collections.abc import Mapping
 from math import lcm
 
 import vllm
@@ -32,6 +31,11 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.utils import (
+    is_deepseek_v4_kv_cache_config as _is_deepseek_v4_kv_cache_config,
+    is_deepseek_v4_kv_cache_spec as _is_deepseek_v4_kv_cache_spec,  # noqa: F401
+    resolve_deepseek_v4_retention,
+)
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
@@ -60,26 +64,6 @@ def _skips_eagle_block_drop(kv_transfer_config) -> bool:
 
 def _select_kv_token_budget(max_model_len: int, max_in_flight_tokens: int | None) -> int:
     return max_in_flight_tokens if max_in_flight_tokens is not None else max_model_len
-
-
-def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
-    if getattr(kv_cache_spec, "model_version", None) in {"deepseek_v4", "deepseek_v41"}:
-        return True
-
-    nested_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
-    if nested_specs is None:
-        return False
-
-    if isinstance(nested_specs, Mapping):
-        nested_specs = nested_specs.values()
-    elif not isinstance(nested_specs, (list, tuple, set)):
-        return False
-
-    return any(getattr(spec, "model_version", None) in {"deepseek_v4", "deepseek_v41"} for spec in nested_specs)
-
-
-def _is_deepseek_v4_kv_cache_config(kv_cache_config: KVCacheConfig) -> bool:
-    return any(_is_deepseek_v4_kv_cache_spec(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
 
 
 def _manager_spec(spec: KVCacheSpec) -> KVCacheSpec:
@@ -134,15 +118,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # behavior. The scheduler always supplies the real value at runtime.
         token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens)
         self.max_in_flight_tokens = token_budget
-        # Honor ``--prefix-cache-retention-interval`` only on DeepSeek-V4/V4.1 (SWA-only hybrids): their SWA
-        # write mask's eagle peek/shift already matches the role-specific lookup, so sparse retention is safe.
-        # Other hybrids (Mamba/GDN + MTP) first need the write/checkpoint boundary alignment and keep the dense
-        # (``None``) default. The legacy ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL`` env lookup never resolved, so
-        # every model previously fell back to ``None`` regardless of the configured value.
-        if _is_deepseek_v4_kv_cache_config(kv_cache_config):
-            self.retention_interval = getattr(kv_cache_config, "prefix_cache_retention_interval", None)
-        else:
-            self.retention_interval = None
+        # Honor ``--prefix-cache-retention-interval`` only on DeepSeek-V4/V4.1; other models keep the dense
+        # (``None``) default. The same resolver is reused by the AscendStore KV pool so both paths resolve
+        # the same gated value instead of the unresolvable legacy env var.
+        self.retention_interval = resolve_deepseek_v4_retention(kv_cache_config, kv_cache_config.kv_cache_groups)
         validate_retention_interval = getattr(
             vllm_kv_cache_coordinator,
             "_validate_prefix_cache_retention_interval",

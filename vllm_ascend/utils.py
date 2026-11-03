@@ -23,6 +23,7 @@ import functools
 import json
 import math
 import os
+from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from pathlib import Path
@@ -149,6 +150,41 @@ def dsv4_skips_indexer_topk(config: Any, layer_idx: int, pp_start_layer: int | N
         # Override only the first local C4, not the rest of the reuse group.
         return any(ratio == 4 for ratio in compress_ratios[pp_start_layer:layer_idx])
     return skip_topk
+
+
+_DEEPSEEK_V4_KV_CACHE_VERSIONS = frozenset({"deepseek_v4", "deepseek_v41"})
+
+
+def is_deepseek_v4_kv_cache_spec(kv_cache_spec: Any) -> bool:
+    """Whether a KV-cache spec (or any of its nested specs) is DeepSeek-V4/V4.1."""
+    if getattr(kv_cache_spec, "model_version", None) in _DEEPSEEK_V4_KV_CACHE_VERSIONS:
+        return True
+    nested_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
+    if isinstance(nested_specs, Mapping):
+        nested_specs = nested_specs.values()
+    elif not isinstance(nested_specs, (list, tuple, set)):
+        return False
+    return any(getattr(spec, "model_version", None) in _DEEPSEEK_V4_KV_CACHE_VERSIONS for spec in nested_specs)
+
+
+def is_deepseek_v4_kv_cache_config(kv_cache_config: Any) -> bool:
+    return any(is_deepseek_v4_kv_cache_spec(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
+
+
+def resolve_deepseek_v4_retention(retention_source: Any, kv_cache_groups: Any) -> int | None:
+    """Resolve the prefix-cache retention interval, gated to DeepSeek-V4/V4.1.
+
+    DeepSeek-V4/V4.1 are SWA-only hybrids whose SWA write mask already matches
+    the role-specific lookup, so honoring a sparse retention interval is safe;
+    other models keep the dense (``None``) default. ``retention_source`` is any
+    config carrying ``prefix_cache_retention_interval`` (``CacheConfig`` or
+    ``KVCacheConfig``), so the HBM coordinator and the AscendStore KV pool
+    resolve the same gated value instead of the unresolvable legacy
+    ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL`` env var.
+    """
+    if not any(is_deepseek_v4_kv_cache_spec(group.kv_cache_spec) for group in (kv_cache_groups or ())):
+        return None
+    return getattr(retention_source, "prefix_cache_retention_interval", None)
 
 
 def is_deepseek_v41(hf_config: Any) -> bool:
