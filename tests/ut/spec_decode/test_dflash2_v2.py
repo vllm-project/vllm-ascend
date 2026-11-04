@@ -26,7 +26,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
-from vllm.forward_context import is_forward_context_available, override_forward_context
+from vllm.forward_context import ForwardContext, is_forward_context_available, override_forward_context
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
@@ -238,9 +238,14 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
             metadata = metadata_by_layer[layer_names[0]]
             query = torch.zeros(padded * num_query, 8, 128, dtype=torch.bfloat16)
             output = torch.empty_like(query)
-            for name in layer_names:
-                assert metadata_by_layer[name] is metadata
-                impl.forward_impl(query, None, None, None, metadata, output)
+            context = ForwardContext(
+                no_compile_layers={}, attn_metadata=metadata_by_layer, slot_mapping={}, additional_kwargs={}
+            )
+            # Production drafting sets the context before entering attention.
+            with override_forward_context(context):
+                for name in layer_names:
+                    assert metadata_by_layer[name] is metadata
+                    impl.forward_impl(query, None, None, None, metadata, output)
         assert metadata is not previous
         previous = metadata
         assert metadata.num_actual_tokens == num_reqs * num_query

@@ -7,15 +7,26 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import AttentionSelectorConfig
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, AscendFlashAttentionImpl
 from vllm_ascend.models.minimax_m3 import msa_m3
 from vllm_ascend.worker.v2 import attn_utils
+
+
+@pytest.fixture(autouse=True)
+def flash_attn_forward_context():
+    # Direct backend calls bypass the model entry point that sets this context.
+    context = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={}, additional_kwargs={})
+    with override_forward_context(context):
+        _EXTRA_CTX.capturing = False
+        yield
 
 
 @pytest.mark.parametrize("head_size", [64, 72, 128, 192, 256])
@@ -527,7 +538,6 @@ def test_graph_plans_are_recaptured_after_warmup_and_shared_only_within_graph(mo
         flash_attn=Mock(side_effect=lambda query, *_args, **_kwargs: (query + 1, None)),
     )
     monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
-    monkeypatch.setattr(module._EXTRA_CTX, "capturing", False)
     metadata = module.AscendFlashAttentionMetadata(
         query_start_loc_gpu=torch.tensor([0, 6, 12, -1], dtype=torch.int32),
         seq_lens_gpu=torch.tensor([256, 254, 0], dtype=torch.int32),
@@ -537,7 +547,7 @@ def test_graph_plans_are_recaptured_after_warmup_and_shared_only_within_graph(mo
     )
     impl.forward_impl(query, None, None, None, metadata, output)
     eager_plan = ops.flash_attn.call_args.kwargs["metadata"]
-    monkeypatch.setattr(module._EXTRA_CTX, "capturing", True)
+    _EXTRA_CTX.capturing = True
 
     # Emulate separate capture resource lifetimes. Reusing the warmup metadata
     # must still record length normalization and tiling in each new graph.
