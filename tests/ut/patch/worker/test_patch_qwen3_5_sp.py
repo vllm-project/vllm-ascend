@@ -91,6 +91,15 @@ class TestEnableDenseSp:
         assert enable_sp(config)
         assert not enable_dense_sp(config)
 
+    def test_disabled_where_standard_worker_patches_do_not_load(self, monkeypatch):
+        # 310P-class profiles never load this patch (patch_idex_310 wires
+        # their GDN stack instead), so the predicate must stay off there.
+        monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
+        profile = SimpleNamespace(supports=lambda capability: False)
+        monkeypatch.setattr(patch_qwen3_5, "get_current_hardware_profile", lambda: profile)
+        assert not enable_dense_sp(_make_vllm_config())
+        assert not enable_sp(_make_vllm_config())
+
 
 def _make_layer(layer_type: str = "full_attention", mlp=None, upstream_sp: bool = False):
     layer = object.__new__(patch_qwen3_5.AscendQwen3_5DecoderLayer)

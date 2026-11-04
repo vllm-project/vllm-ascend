@@ -1219,6 +1219,10 @@
 #       gate_up/down with `sp_all_gather` / `sp_reduce_scatter` (MiniMax-M3 /
 #       DeepSeek-V4 pattern); MoE blocks keep the upstream
 #       `already_sequence_parallel=True` contract.
+#       The module-level patch applications are guarded by
+#       `STANDARD_WORKER_PATCHES` (mirroring `patch/worker/__init__.py`) so
+#       the lazy import from `utils.enable_sp` stays side-effect-free on
+#       devices that exclude this patch (310P).
 #    Related PR (if no, explain why):
 #       No, upstream has no dense-model sequence-parallel switch.
 #    Future Plan:

@@ -1022,19 +1022,10 @@ def enable_sp(vllm_config=None) -> bool:
     if bool(vllm_config.parallel_config.use_sequence_parallel_moe):
         return True
 
-    # Dense-family sequence parallelism: the predicate and the model families
-    # it covers are owned by the Qwen3.5 patch
-    # (``vllm_ascend.patch.worker.patch_qwen3_5.enable_dense_sp``), reached
-    # through a lazy import so this module never pulls the patch module's
-    # import-time monkey patches. The capability gate mirrors
-    # ``vllm_ascend/patch/worker/__init__.py``: devices that never load the
-    # standard worker patches (e.g. 310P) must not import the patch module
-    # here either.
-    from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-
-    if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
-        return False
-
+    # Dense-family sequence parallelism: the predicate is owned by the
+    # Qwen3.5 patch (vllm_ascend.patch.worker.patch_qwen3_5). The lazy import
+    # keeps this module free of the patch module's import-time monkey
+    # patches, which the patch file itself guards by hardware capability.
     from vllm_ascend.patch.worker.patch_qwen3_5 import enable_dense_sp
 
     return enable_dense_sp(vllm_config)

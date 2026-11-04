@@ -79,10 +79,18 @@ def enable_dense_sp(vllm_config=None) -> bool:
     ``additional_config.enable_flashcomm1`` (or the
     ``VLLM_ASCEND_ENABLE_FLASHCOMM1`` env var).
 
-    ``vllm_ascend.utils.enable_sp`` consults this predicate through a lazy,
-    capability-gated import; keep this module importable without a live NPU
-    (its UTs run on CPU).
+    Active only where the standard worker patches load: this module installs
+    the dense-SP decoder layout and ``patch/worker/__init__.py`` imports it
+    exclusively under ``STANDARD_WORKER_PATCHES`` (310P wires its GDN stack
+    through ``patch_idex_310`` instead).
+
+    ``vllm_ascend.utils.enable_sp`` consults this predicate through a lazy
+    import; keep this module importable without a live NPU (its UTs run on
+    CPU).
     """
+    if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+        return False
+
     if vllm_config is None:
         try:
             from vllm.config import get_current_vllm_config
@@ -345,31 +353,36 @@ if Qwen3_5MultiTokenPredictor is not None:
             hidden_states = hidden_states[: positions.shape[-1]]
         return hidden_states
 
-    Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward
+
+@wraps(_GDN_ORIGINAL_INIT)
+def _gdn_init_with_packed_weight(self, *args, **kwargs):
+    _GDN_ORIGINAL_INIT(self, *args, **kwargs)
+    initialize_packed_conv_weight(self)
 
 
-Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
-# Sequence-parallel decoder layout (upstream SP-MoE contract plus the dense
-# Qwen3.5-family FlashComm SP extension) and the dense-SP layer wiring.
-Qwen3_5DecoderLayer.__init__ = _qwen3_5_decoder_layer_init_with_dense_sp
-Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
-_GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
-_GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
-_GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
+# Apply this module's patches only where the standard worker patches load:
+# patch/worker/__init__.py imports this module exclusively under
+# STANDARD_WORKER_PATCHES, and utils.enable_sp reaches enable_dense_sp
+# through a lazy import, so the guard keeps that import side-effect-free on
+# devices that exclude this patch (310P wires its GDN stack through
+# patch_idex_310 instead).
+if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+    if Qwen3_5MultiTokenPredictor is not None:
+        Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward
 
-if get_current_hardware_profile().supports(HardwareCapability.GDN_COMPATIBILITY):
-    from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
-
-    _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention310._forward_core
-    _GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
-else:
+    Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
+    # Sequence-parallel decoder layout (upstream SP-MoE contract plus the dense
+    # Qwen3.5-family FlashComm SP extension) and the dense-SP layer wiring.
+    Qwen3_5DecoderLayer.__init__ = _qwen3_5_decoder_layer_init_with_dense_sp
+    Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
+    _GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
+    _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
+    _GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
+    # STANDARD_WORKER_PATCHES hardware never carries the 310P-only
+    # GDN_COMPATIBILITY capability, so the former 310P branch of the GDN
+    # wiring was dead under this guard and is gone; 310P GDN is wired by
+    # patch_idex_310.py.
     _GDN_PATCH_TARGET._pack_conv_weights = AscendGatedDeltaNetAttention._pack_conv_weights
-
-    @wraps(_GDN_ORIGINAL_INIT)
-    def _gdn_init_with_packed_weight(self, *args, **kwargs):
-        _GDN_ORIGINAL_INIT(self, *args, **kwargs)
-        initialize_packed_conv_weight(self)
-
     _GDN_PATCH_TARGET.__init__ = _gdn_init_with_packed_weight
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention._forward_core
