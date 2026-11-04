@@ -20,6 +20,26 @@ see [Mooncake Layerwise KV Cache Pooling](mooncake_layerwise_adaptation_and_opti
 - Models with compressed KV, indexer caches, and compressor state, such as DeepSeek-V4.
 - Models combining attention with linear or recurrent layers that use aligned state checkpoints.
 
+### Constraints and Limitations
+
+The common Mooncake dependency and deployment requirements are listed in the
+[layerwise pooling guide](mooncake_layerwise_adaptation_and_optimization.md#constraints-and-limitations).
+
+| Category | Constraint |
+| --- | --- |
+| Attention backend | Compute/transfer overlap is integrated with Ascend FA, SFA, and DSA paths. Other attention backends need their own integration. |
+| Execution mode | Eager and graph-mode compatibility follows the selected model and attention backend. |
+| Recurrent state | Recurrent and linear-attention groups, including GDN and KDA state, require `mamba_cache_mode="align"`. |
+| Parallelism | Use matching TP, PP, PCP, and PP layer partitions on sharing instances. DCP greater than `1` and TP mismatch are not supported. |
+| PP | Uneven partitions and stage-local groups are supported only when every stage owns layers in every required group. Empty stage-local groups are not supported. |
+| PCP | Each PCP rank stores its own snapshot. Account for these copies in Store capacity and bandwidth. |
+| KVPP | Hybrid layerwise pooling does not support KVPP. Mooncake layerwise PCP also cannot be combined with `enable_kvpp`. |
+| Cache storage | Partial-block offloading and cross-layer cache-buffer reuse are not supported. |
+| Load failures | Hybrid models do not support `kv_load_failure_policy=recompute`. A load failure must not continue with incomplete state. |
+
+Model-specific quantization, graph mode, and speculative-decoding support should
+be checked in the corresponding model deployment guide.
+
 ## How It Works
 
 ### Independent Cache Groups
@@ -71,26 +91,6 @@ ready at attention entry. Recurrent layers update their state during computation
 so their saves start after those updates finish. Each group commits independently
 after its last participating layer. Failed writes do not publish incomplete
 objects, and failed reads stop computation before incomplete hybrid state is used.
-
-## Constraints and Limitations
-
-The common Mooncake dependency and deployment requirements are listed in the
-[layerwise pooling guide](mooncake_layerwise_adaptation_and_optimization.md#constraints-and-limitations).
-
-| Category | Constraint |
-| --- | --- |
-| Attention backend | Compute/transfer overlap is integrated with Ascend FA, SFA, and DSA paths. Other attention backends need their own integration. |
-| Execution mode | Eager and graph-mode compatibility follows the selected model and attention backend. |
-| Recurrent state | Recurrent and linear-attention groups, including GDN and KDA state, require `mamba_cache_mode="align"`. |
-| Parallelism | Use matching TP, PP, PCP, and PP layer partitions on sharing instances. DCP greater than `1` and TP mismatch are not supported. |
-| PP | Uneven partitions and stage-local groups are supported only when every stage owns layers in every required group. Empty stage-local groups are not supported. |
-| PCP | Each PCP rank stores its own snapshot. Account for these copies in Store capacity and bandwidth. |
-| KVPP | Hybrid layerwise pooling does not support KVPP. Mooncake layerwise PCP also cannot be combined with `enable_kvpp`. |
-| Cache storage | Partial-block offloading and cross-layer cache-buffer reuse are not supported. |
-| Load failures | Hybrid models do not support `kv_load_failure_policy=recompute`. A load failure must not continue with incomplete state. |
-
-Model-specific quantization, graph mode, and speculative-decoding support should
-be checked in the corresponding model deployment guide.
 
 ## Usage
 
