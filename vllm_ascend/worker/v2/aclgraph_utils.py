@@ -17,7 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import torch
@@ -125,7 +125,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         attn_metadata = self.model_runner.model_state.attn_metadata
 
         metadata = getattr(self.model_runner.model_state, "device_metadata", None)
-        try:
+        with metadata.replay() if metadata is not None else nullcontext():
             prepare_engram = getattr(self.model_runner.model_state, "prepare_engram", None)
             if prepare_engram is not None:
                 # Match FULL replay's DP padding before lookup consumes it.
@@ -147,9 +147,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             else:
                 # This will be removed once the refactoring is fully complete.
                 return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
-        finally:
-            if metadata is not None:
-                metadata.finish_replay()
 
     def _graph_relay(self, attn_backend, desc, num_tokens, attn_metadata):
         self.update_stream.wait_stream(torch.npu.current_stream())
@@ -217,26 +214,24 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         metadata = getattr(model_state, "device_metadata", None)
         model = ModelWithContext(model, device_metadata=metadata)
-        try:
-            with communicator_switch():
-                return super().capture(
-                    model,
-                    model_state,
-                    input_buffers,
-                    intermediate_tensors,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    pcp_manager=pcp_manager,
-                    has_lora=has_lora,
-                    use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
-                    lora_capture_hook=lora_capture_hook,
-                    progress_bar_desc=progress_bar_desc,
-                )
-        finally:
-            # Input preparation can fail before ModelWithContext.forward runs.
-            if metadata is not None:
-                metadata.finish()
+        with (
+            metadata.capture() if metadata is not None else nullcontext(),
+            communicator_switch(),
+        ):
+            return super().capture(
+                model,
+                model_state,
+                input_buffers,
+                intermediate_tensors,
+                block_tables,
+                attn_groups,
+                kv_cache_config,
+                pcp_manager=pcp_manager,
+                has_lora=has_lora,
+                use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
+                lora_capture_hook=lora_capture_hook,
+                progress_bar_desc=progress_bar_desc,
+            )
 
 
 class ModelWithContext(nn.Module):
@@ -264,16 +259,9 @@ class ModelWithContext(nn.Module):
         if self.is_draft_model_prefill:
             _EXTRA_CTX.is_draft_model_prefill = True
 
-        try:
-            if self.device_metadata is not None:
-                self.device_metadata.begin_forward()
+        metadata = self.device_metadata
+        with metadata.forward() if metadata is not None else nullcontext():
             return self.original_model(*args, **kwargs)
-        finally:
-            # Warmup and actual capture receive separate prepare_attn calls.
-            # Retire each submission, including unused producers, after its
-            # consumers; do not wait for metadata at graph entry.
-            if self.device_metadata is not None:
-                self.device_metadata.finish()
 
     def get_original_model(self):
         return self.original_model
