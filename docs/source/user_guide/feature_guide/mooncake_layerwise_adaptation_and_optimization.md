@@ -1,287 +1,212 @@
-# Mooncake Layerwise Adaptation and Optimization Analysis
+# Mooncake Layerwise KV Cache Pooling
 
-For the subsequent multi-group attention extension and its validation boundaries,
-see [Mooncake Layerwise Hybrid Attention](mooncake_hybrid_attention.md).
+## Feature Introduction
 
-## 1. Adaptation Baseline and Conclusion
+Mooncake layerwise KV cache pooling transfers KV caches between Ascend NPUs and
+a shared Mooncake Store one layer at a time. It uses `AscendStoreConnector` with
+`backend="mooncake"` and `use_layerwise=true` to reuse cached prefixes across
+requests and vLLM instances.
 
-- Baseline: `Eric-dot/vllm-ascend:mooncake` at local commit `0a023b094e9e88ffaca0b1fda02529cef6277f8e`.
-- Reference implementation: `vllm-project/vllm-ascend#12418`.
-- Local working branch: `eric-mooncake-pr12418-port`.
-- Current status: The core implementation, CPU mock unit tests, and static checks have passed. End-to-end testing
-  on real Ascend NPUs, Mooncake Master/Metadata services, and multiple TP processes has not yet been completed.
+Layerwise transfer allows KV loading and saving to overlap attention computation.
+It also stores the layers of a cache block in one remote object, reducing
+metadata overhead compared with creating a separate object for every layer.
 
-This adaptation does not directly copy the earlier PR. The personal branch already contains an updated
-`metadata.py`, multi-cache-entry/MTP/SFA layouts, Memcache GVA layerwise transfer, asynchronous thread exception
-propagation, and layer-buffer reuse. The Mooncake path therefore reuses these newer structures and adds an
-independent key-major range/session protocol.
+For Mooncake service deployment and general pool configuration, see
+[KV Cache Pool (Ascend Store)](kv_cache_pool_ascend_store.md). For models with
+multiple cache groups, see [Mooncake Layerwise Hybrid Attention](mooncake_hybrid_attention.md).
 
-## 2. Why the Remote Object Count Drops from `block × layer × rank` to `block × rank`
+### Usage Scenarios
 
-The earlier per-layer key scheme treats each layer as a separate remote object:
+- Repeated requests with long shared prefixes, such as system prompts or document contexts.
+- Multiple serving instances that share prefixes through the same Mooncake Store.
+- Prefill workloads where KV transfer can overlap per-layer attention computation.
 
-```text
-model@block_hash@layer_0@rank_0
-model@block_hash@layer_1@rank_0
-...
-```
+### Constraints and Limitations
 
-For `B` blocks, `L` layers, and `R` ranks that actually store data, the approximate object count is:
+| Category | Constraint |
+| --- | --- |
+| Software | Requires a Mooncake NPU client with session and range transfer APIs; use Mooncake 0.3.14 or later. Required interfaces are checked at startup. |
+| Deployment | Use the corresponding producer/consumer role on each P/D node. Decode pool reads and writes are controlled separately by `consumer_is_to_load` and `consumer_is_to_put`. |
+| Parallelism | Instances sharing layerwise objects must use matching TP, PP, and PCP sizes and the same PP layer partition. DCP greater than `1` and TP mismatch are not supported. |
+| PP | Uneven layer partitions are supported, but each stage must own layers in every cache group. Empty stage-local cache groups are not supported. |
+| Cache layout | Readers and writers must agree on model weights, cache format, block sizes, and transfer mode. Use separate pool namespaces for incompatible configurations. |
+| Buffer reuse | Mooncake layerwise transfer does not enable cross-layer reuse of NPU cache buffers. |
+| KVPP | Experimental for non-hybrid MLA/SFA models with `load_async=false`; cannot be combined with Mooncake layerwise PCP. See [KVPP](kvpp.md) for its support scope. |
 
-```text
-B × L × R
-```
+Hybrid models have additional cache-state and execution-mode requirements in the
+[hybrid attention guide](mooncake_hybrid_attention.md#constraints-and-limitations).
 
-Mooncake layerwise transfer creates only one object for each block/rank pair:
+## How It Works
 
-```text
-model@block_hash@rank_0
-```
+### Block Storage and Layerwise Transfer
 
-All layers are placed contiguously inside the object according to the actual cache layout:
-
-```text
-object(block, rank)
-├── layer 0: [cache entry 0][cache entry 1]...
-├── layer 1: [cache entry 0][cache entry 1]...
-└── ...
-```
-
-After each layer finishes computing, only the byte range for that layer is written to the same object. Layerwise
-transfer changes the transfer timing and ranges; it does not require every layer to be a separate object. The object
-count therefore becomes:
+For each cache block and storing rank, Mooncake keeps one object containing the
+cache entries of all layers owned by that rank and pipeline stage:
 
 ```text
-B × R
+Remote object for one cache block
+├── Layer 0: cache entries
+├── Layer 1: cache entries
+└── Layer 2: cache entries
 ```
 
-This reduces the number of Mooncake metadata objects, keys, sessions, and `exists` query items, but not the total KV
-payload size. KV data for every layer must still be stored.
+Saving a layer writes only its byte ranges into this object. Loading a layer
+reads those ranges into the local NPU cache before the layer consumes them.
+Offsets follow the actual cache layout, including multiple entries in one
+physical layer and entries with different sizes.
 
-## 3. Data and Control Flow in the Current Implementation
+For a single cache group and pipeline stage, `B` blocks, `L` layers, and `R`
+storing ranks require approximately `B × R` objects, compared with `B × L × R`
+objects in a per-layer object layout. This reduces metadata and lookup work;
+the total KV payload remains the same.
 
-### 3.1 Saving
+### Computation and Transfer Overlap
 
-1. The scheduler calls `batch_is_exist` with all storing-rank keys for each block.
-2. For missing keys, the worker calls `batch_put_session_start(keys, object_sizes, ReplicateConfig)`.
-3. `LayerBatchBuilder` calculates the following values from the actual cache-entry layout:
-   - The local NPU buffer address.
-   - The size of each cache entry in the layer.
-   - The destination offset of the layer within the remote all-layer object.
-4. After each attention layer finishes, the sending thread calls `batch_put_from_multi_buffer_ranges`.
-5. If a range write fails for one key, only that key is revoked; the remaining keys continue with subsequent layers.
-6. After the last layer succeeds, the worker calls `batch_put_session_end`. It calls `batch_put_session_revoke` for
-   keys that fail to commit.
-7. Only successfully committed keys enter the readable set for subsequent chunked-prefill steps.
+The connector prefetches future layers while the current layer computes
+attention. `layerwise_prefetch_layers` controls how far ahead loads are submitted.
+The current layer waits for its own load to finish before using restored KV.
+Saves start after the corresponding cache updates are ready.
 
-### 3.2 Loading
+Transfers run asynchronously, with device events protecting cache access and
+queue backpressure limiting outstanding work. Transfer may continue into later
+computation or communication. The amount of overlap depends on attention time,
+cache size, and available bandwidth.
 
-1. The scheduler counts only the contiguous prefix starting at block 0 for which every storing rank is `COMPLETE` as
-   a cache hit.
-2. The worker calls `batch_get_session_start` for the deduplicated remote keys.
-3. Before each layer computes, the receiving thread calls `batch_get_into_multi_buffer_ranges` to load that layer's
-   range into the local block.
-4. A failure in one row records the corresponding local block ID and returns it to the scheduler for recomputation,
-   preventing incomplete KV data from being consumed.
-5. The worker calls `batch_get_session_end` after the last layer or when the request terminates. Exceptional paths
-   release owners according to retry or terminal semantics.
+### Complete Snapshots and Prefix Reuse
 
-### 3.3 Chunked Prefill
+A remote object becomes reusable only after all of its layer ranges have been
+written and committed. A prefix hit requires readable objects from every
+required storing rank and pipeline stage. Partially written objects are not
+reported as reusable cache.
 
-`MooncakeSessionTracker` maintains three types of relationships:
+During chunked prefill, later chunks can restore the committed prefix layer by
+layer. Read sessions keep shared objects available while they are in use and
+are released when the reads finish. Failed writes are revoked so that later
+requests cannot consume an incomplete snapshot.
 
-- Put keys that have not yet been committed and their request/block owners.
-- Committed keys that later chunks of the same request can load.
-- Open get-session keys and their request owners.
+## Usage
 
-It guarantees that:
+### Prepare Mooncake
 
-- An object is not considered readable before it is committed.
-- A later chunk renews the lease and restores the previously committed prefix layer by layer, even when it has no new
-  `load_spec`.
-- A retry releases the get session while retaining the key/block relationships required for a subsequent retry.
-- A terminal or preempt event clears request state.
-- When multiple requests share the same remote key, get-end is executed only after the last owner releases it.
+Install the Mooncake NPU client, start `mooncake_master`, and configure the
+Ascend network and `mooncake.json` following the **Mooncake Backend** section of
+[KV Cache Pool (Ascend Store)](kv_cache_pool_ascend_store.md). Select a client
+version that meets the layerwise requirement above rather than the older
+non-layerwise installation example.
 
-## 4. Adaptations and Corrections Relative to the Original PR
-
-### 4.1 Actual Layout Offsets Instead of a Fixed `layer_id × page_size`
-
-The current branch supports multiple cache entries in one physical layer as well as MTP/SFA layouts. Remote offsets
-are calculated from `group_layer_cache_entry_offsets` and prefix sums of the actual `block_len` values:
-
-```text
-layer_object_offset = sum(block_len before this layer)
-entry_offset = layer_object_offset + prefix_sum(entry sizes in this layer)
-```
-
-The remote object size therefore equals the total number of bytes across all cache entries for all layers on the
-current rank. The implementation no longer assumes that every layer has the same size or incorrectly multiplies the
-size by `num_layers` again.
-
-### 4.2 PutStart Inherits the Mooncake Placement Policy
-
-The session-start path in the original PR did not pass `ReplicateConfig`. The current implementation matches the
-whole-key put path and passes:
-
-- `preferred_segment`.
-- `prefer_alloc_in_same_node`.
-
-This prevents layerwise transfer from bypassing the existing local-first and same-node placement policies.
-
-### 4.3 Transfer Throttling for Range Calls
-
-- `layerwise_max_transfer_blocks` limits the number of key/block rows in a single range API call.
-- `layerwise_max_transfer_bytes` splits an oversized contiguous segment into smaller ranges.
-
-PutStart, GetStart, GetEnd, and scheduler `exists` queries are also batched according to the block limit. This avoids
-oversized Python/C++ argument lists and transient metadata spikes for long prompts.
-
-### 4.4 Fail Fast During Startup
-
-Mooncake layerwise transfer checks all required session and range methods during startup. If an interface is missing,
-startup fails immediately and reports that the client must include Mooncake PR #2881, instead of failing in an
-asynchronous thread on the first request.
-
-The initial single-group implementation used only model, block hash and TP/head rank.
-Hybrid attention and topology-matched PP are covered by the
-[hybrid guide](mooncake_hybrid_attention.md).
-The implementation still explicitly rejects:
-
-- Decode context parallel size greater than 1. PCP is supported with topology-matched peers;
-  see the [PCP guide](mooncake_hybrid_attention.md#prefill-context-parallelism-pcp).
-- PP stages with empty projected cache groups.
-- TP mismatch with layerwise transfer.
-
-### 4.5 Exceptions and Fallbacks
-
-- Batch results must align one-to-one with keys. Missing items, Boolean values, and non-integer results are rejected.
-- A range exception publishes invalid-block and abort state before waking the compute thread.
-- A put exception revokes `PROCESSING` objects.
-- A get exception ends the session only after the range call is confirmed to have exited.
-- A consumer-only worker advances the layer cursor in the load hook instead of depending on a save hook that will
-  never be called.
-
-## 5. Running the Feature
-
-### 5.1 Mooncake Version
-
-Install a Mooncake Python client that provides the following methods:
-
-```text
-batch_put_session_start
-batch_put_from_multi_buffer_ranges
-batch_put_session_end
-batch_put_session_revoke
-batch_get_session_start
-batch_get_into_multi_buffer_ranges
-batch_get_session_end
-```
-
-If the currently published wheel does not provide these interfaces, build Mooncake from source after PR #2881 has
-been merged. The interfaces are checked automatically during startup.
-
-### 5.2 Configuration Example
+Set the configuration path and use the same hash seed on all sharing instances:
 
 ```bash
 export MOONCAKE_CONFIG_PATH=/path/to/mooncake.json
+export PYTHONHASHSEED=0
+```
 
-python -m vllm.entrypoints.openai.api_server \
-  --model /path/to/model \
-  --tensor-parallel-size 2 \
-  --enforce-eager \
-  --kv-transfer-config '{
+Sharing instances must connect to the same Store and tenant, with compatible
+model and cache configurations. For independently launched services on the same
+host, assign distinct `lookup_rpc_port` identifiers and HTTP ports.
+
+### Configure Prefill and Decode Nodes
+
+Follow the **PD Disaggregation Scenario** in the
+[Mooncake deployment guide](kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend)
+for node startup, P/D transfer, and proxy configuration. Configure the
+`AscendStoreConnector` on each node as follows.
+
+**Prefill (P) node:**
+
+```json
+{
     "kv_connector": "AscendStoreConnector",
-    "kv_role": "kv_both",
+    "kv_role": "kv_producer",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
-      "backend": "mooncake",
-      "use_layerwise": true,
-      "layerwise_prefetch_layers": 2,
-      "layerwise_max_transfer_blocks": 64,
-      "layerwise_max_transfer_bytes": 16777216
+        "lookup_rpc_port": "0",
+        "backend": "mooncake",
+        "use_layerwise": true,
+        "layerwise_prefetch_layers": 2
     }
+}
+```
+
+**Decode (D) node:**
+
+```json
+{
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "recompute",
+    "kv_connector_extra_config": {
+        "lookup_rpc_port": "0",
+        "backend": "mooncake",
+        "use_layerwise": true,
+        "layerwise_prefetch_layers": 2
+    }
+}
+```
+
+These examples show the Store connector configuration. In the deployment
+guide's `MultiConnector`, update the `AscendStoreConnector` entry and set
+`kv_load_failure_policy` on the top-level `kv-transfer-config`.
+
+The Prefill node saves and reuses prefixes through the pool. Decode pool reads
+and writes are disabled by default; P/D KV transfer is handled by the other
+connector in `MultiConnector`. To enable Decode pool loading, add
+`"consumer_is_to_load": true` to its `kv_connector_extra_config`. Setting
+`use_layerwise=true` alone does not enable consumer pool access.
+
+The `recompute` policy above applies to non-hybrid models. For hybrid models,
+use `fail` as shown in the [hybrid attention guide](mooncake_hybrid_attention.md#usage).
+Select model, parallelism, token-budget, and execution-mode options according
+to the corresponding model deployment guide.
+
+### Use Cached Prefixes
+
+Send inference requests through the normal OpenAI-compatible API:
+
+```bash
+curl 'http://<proxy-host>:<proxy-port>/v1/completions' \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "<served-model-name>",
+    "prompt": "Explain how KV cache reuse reduces repeated prefill computation.",
+    "max_tokens": 64,
+    "temperature": 0
   }'
 ```
 
-For the first hardware validation, start with TP=1, `layerwise_prefetch_layers=1`, and hybrid/CP/PP disabled. Then
-gradually increase the TP size, block count, and prefetch depth.
+The response contains generated text in `choices`. To reuse the pool, submit
+requests with the same tokenized prefix long enough to cover complete cache
+blocks. The first request populates the Store; later requests can load committed
+blocks and compute the remaining tokens. A final partial block is recomputed.
 
-During integration testing, temporarily set `additional_config.kv_pool_range_debug` (bool, default `false`) to `true`
-by adding `--additional-config '{"kv_pool_range_debug": true}'` to the command above to emit JSON audit logs for
-whole-key operations, per-layer ranges, and commits. For offline use, pass `additional_config={"kv_pool_range_debug": True}`
-to `LLM`. Use this configuration instead of the legacy `VLLM_ASCEND_KVPOOL_RANGE_DEBUG` environment variable.
-Keep the default value of `false` during normal operation to avoid per-layer logging overhead.
+To check cross-instance reuse, send a long shared prefix to one instance, wait
+for its request to finish, then send it to another instance connected to the same
+pool. Check external prefix-cache hits in the serving metrics or logs. Requests
+repeated on one instance may instead hit its local prefix cache.
 
-## 6. Follow-up Optimization Recommendations
+## Configuration Parameters
 
-### P0: Required Before Production
+Set these options in `kv_transfer_config.kv_connector_extra_config`.
 
-1. **Pin a minimum Mooncake commit or version**
-   - Checking method availability prevents use of an outdated client but cannot detect incompatible ABI or return-code
-     semantics.
-   - Pin the exact commit containing PR #2881, or the first official release that contains it, in the installation
-     documentation and CI images.
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `backend` | string | `"mooncake"` | Selects the Mooncake Store backend. |
+| `use_layerwise` | bool | `false` | Set to `true` to enable layerwise save and load. |
+| `load_async` | bool | `false` | Keep `false` for layerwise loading. Future-layer prefetch is managed by the layerwise transfer pipeline. |
+| `layerwise_prefetch_layers` | int | `2` | Positive prefetch distance in layers. Larger values submit loads earlier. |
+| `layerwise_max_transfer_blocks` | int | `0` | Maximum key/block rows per range transfer batch. Also batches session operations and lookup work. `0` adds no block limit. |
+| `layerwise_max_transfer_bytes` | int | `0` | Maximum size in bytes of an individual contiguous transfer segment. Larger segments are split. This is not a limit on total bytes per API call; `0` adds no segment-size limit. |
 
-2. **Add a schema/layout fingerprint to the key namespace**
-   - For compatibility with the original PR, the current implementation still uses the model basename.
-   - Different revisions, data types, block sizes, or KV layouts with the same basename can collide.
-   - Add a stable digest of the tenant, model revision, data type, block size, TP layout, and schema version to the key.
+Transfer batch limits are optional and are omitted from the examples. For
+roles, placement, tenancy, and other pool options, see
+[Ascend Store configuration](kv_cache_pool_ascend_store.md#kv-transfer-config-common-parameters).
 
-3. **Add real-NPU E2E tests and fault injection**
-   - Cover at least TP=1/2, `kv_both`, P/D, chunked prefill, request preemption, single-key range failure,
-     commit failure, and Master restart.
-   - Verify that loading KV data produces exactly the same logits and tokens as local computation.
+## Tuning Suggestions
 
-### P1: High-Impact Performance Improvements
-
-1. **Adaptive prefetch depth**
-   - A fixed `layerwise_prefetch_layers` value cannot adapt to different per-layer compute times or network jitter.
-   - Dynamically control the window using the recent `transfer_time / compute_time` ratio, queue depth, and available
-     buffers.
-
-2. **Sliding session window**
-   - The current implementation opens sessions for every block in the batch at once. Long prompts can still create
-     many simultaneously active leases and sessions.
-   - Open sessions only for a future layer or block window, then advance the window after completion to reduce Master
-     state and timeout pressure.
-
-3. **Reduce per-layer Python list construction**
-   - The current implementation still creates `all_buffers`, `all_sizes`, and `all_offsets` for every layer.
-   - Precompute a range template for each layer and apply only vectorized block-ID address offsets. The descriptors
-     could eventually be cached in the C++/pybind layer.
-
-4. **Incremental scheduler hit queries**
-   - The current implementation queries every candidate block before locating the first miss.
-   - Query in windows and stop at the first incomplete block to substantially reduce Master RPCs and key counts for
-     long prompts with low hit rates.
-
-5. **Dynamic batching based on total bytes and backend feedback**
-   - The current block and segment-byte limits are static.
-   - Jointly limit the total ranges and bytes per call, and adjust them automatically according to queue latency,
-     return codes, and bandwidth.
-
-6. **Local fan-out for shared keys**
-   - When multiple requests hit the same remote block, one key can currently produce multiple remote-read rows.
-   - Read into a shared staging buffer first, then copy to multiple target blocks locally. Whether this helps depends
-     on remote bandwidth relative to local H2D bandwidth.
-
-### P2: Further Evolution
-
-1. Support hybrid and multi-group layouts by recording the group layout in the key and object header, with an
-   independent completeness bitmap for each group.
-2. Extend the existing PP/PCP key coordinates and all-rank readability checks to DCP layouts.
-3. Support a per-layer readiness bitmap so consumers can read completed early layers before the entire object becomes
-   `COMPLETE`. This requires visibility and consistency support from Mooncake and introduces substantial complexity.
-4. Record a schema, version, and checksum in the object header and perform an inexpensive compatibility check before
-   loading to prevent silent layout mismatches.
-
-## 7. Validation Record
-
-- `py_compile`: Passed for the core changed files.
-- Ruff lint and format checks: Passed.
-- Relevant CPU mock pytest suite: `285 passed, 106 subtests passed`.
-- Historical strict `0`/`1` validation for `VLLM_ASCEND_KVPOOL_RANGE_DEBUG`: Passed before migration.
-- Migration to `additional_config.kv_pool_range_debug` (bool, default `false`): Not runtime-tested; the historical
-  results above do not validate the migrated configuration.
-- Not yet completed: Tests with real NPUs, a real Mooncake client and Master, multi-node networking, and performance
-  benchmarks.
+- Start with the default prefetch distance of `2`. Increase it if layers wait
+  for remote loads; reduce it if early transfers contend with other communication.
+- Use block and segment limits to control transfer batch size for long prompts.
+  Smaller batches reduce per-call work but increase the number of calls.
+- Evaluate time to first token and throughput with representative prompt lengths
+  and prefix hit rates. Benefits depend on how much transfer the attention
+  computation can hide and on contention with HCCL or expert-parallel traffic.

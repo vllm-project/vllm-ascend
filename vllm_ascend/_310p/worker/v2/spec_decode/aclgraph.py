@@ -159,10 +159,11 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
             "(CPU slot_mapping updated between steps, outside capture)."
         )
 
+        # Graphs bind tensor addresses: retain metadata for their lifetime.
+        self._decode_capture_attn_metadata = {}
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
 
             def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
-                del warmup
                 num_tokens = desc.num_tokens
                 num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
                 num_tokens_across_dp = (
@@ -203,6 +204,8 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                         seq_lens = getattr(meta, "seq_lens", None)
                         if seq_lens is not None and seq_lens.device != device:
                             meta.seq_lens = seq_lens.to(device=device, non_blocking=False)
+                if not warmup:
+                    self._decode_capture_attn_metadata[desc] = attn_metadata
                 torch.npu.current_stream().synchronize()
                 self.speculator.current_draft_step.fill_(1)
                 set_draft_step_host(1)
@@ -260,5 +263,15 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
         # after host-side slot/seq updates (done by the speculator loop).
         pending_attn = getattr(self.speculator, "_pending_draft_attn_metadata", None)
         if pending_attn is not None:
+            capture_attn = self._decode_capture_attn_metadata[desc]
+            if capture_attn is not None:
+                for layer_name, captured in capture_attn.items():
+                    runtime = pending_attn[layer_name]
+                    if captured is None or runtime is None:
+                        continue
+                    # Python metadata replacement does not rebind PA arguments.
+                    captured.seq_lens.copy_(runtime.seq_lens, non_blocking=True)
+                    if captured.block_tables.data_ptr() != runtime.block_tables.data_ptr():
+                        captured.block_tables.copy_(runtime.block_tables, non_blocking=True)
             ms.attn_metadata = pending_attn
         return CudaGraphManager.run_fullgraph(self, desc)
