@@ -110,6 +110,7 @@ vllm_ascend/
     binding.py               # Shared-slab specs and key/scale views
     cache_ops.py             # Residency, refill, invalidation and byte copies
     c8.py                    # C8 packing, views and physical-index helpers
+    prefill.py               # Core prefill plan with scoped NPU index selection
   ops/triton/hisparse.py     # Cache-operation kernels; no Attention arithmetic
 ```
 
@@ -195,17 +196,24 @@ pytest --confcutdir=tests/e2e/pull_request/one_card \
 
 On Ascend 950 with Torch 2.10.0, torch-npu 2.10.0.post7 and CANN 9.2.1,
 the standard CPU module passed all 20 cases. Running the four complete NPU
-modules passed 40 of 41 cases, including BF16/C8 Attention and changing graph
+modules passed all 42 cases, including BF16/C8 Attention and changing graph
 replays. The run reused the compiled Ascend extension and vendor package;
 it was not an independent native rebuild.
 
-The remaining failure is `test_resident_prefill_plan_shared_layers[2-128]`.
-With the paired Core pin unchanged, `res_blocks[:, offsets]` in
-`HiSparsePrefillStagingPlan.ensure_gpu_sources` returned incorrect NPU rows
-for the tested singleton-column input. An isolated CPU/NPU comparison found
-the first difference at that indexing operation; equivalent `index_select`
-matched the CPU result. The failing test remains enabled. This device stack
-therefore has an unresolved mixed Resident/Host prefill correctness issue.
+The original `test_resident_prefill_plan_shared_layers[2-128]` failure was
+traced to NPU advanced column indexing in Core's `ensure_gpu_sources` for a
+singleton-column input. The Ascend plan subclasses Core's plan and runs its
+unchanged source-resolution method inside a local `TorchFunctionMode` that
+uses equivalent `index_select` for NPU column selection. Core still constructs
+the plan and owns representative pages, source-key caching and Resident/Host
+masks. There is no global Torch replacement, copied planner or CPU readback.
+Remove this adapter when the supported device stack fixes advanced indexing.
+
+The original case remains enabled and passes. A small regression also checks
+changing request-state rows. Prefill metadata planning executes outside the
+model graph: this stack's Core `scatter_reduce` path cannot be captured. The
+existing eager/changing-graph payload and Attention cases continue to pass;
+the tests do not claim graph capture of the complete Prefill planner.
 
 Fresh full-model correctness, dataset accuracy, eager/Graph lifecycle and
 same-workload performance remain prerequisites for marking the foundation
