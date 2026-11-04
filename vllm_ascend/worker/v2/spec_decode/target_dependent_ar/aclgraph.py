@@ -19,7 +19,7 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, select_moe_comm_method
 from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     set_draft_graph_prefill_params,
@@ -29,7 +29,7 @@ from vllm_ascend.compilation.updatable_graph import (
     SharedSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph, vllm_version_is
+from vllm_ascend.utils import is_drafter_moe_model, use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
@@ -87,6 +87,22 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                 decode_query_lens = decode_query_len
             query_shapes = decode_query_lens
             decode_query_len = max(decode_query_lens)
+            if (
+                decode_query_len == 1
+                and decode_request_sizes is not None
+                and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+                and is_drafter_moe_model(vllm_config)
+            ):
+                # Main expands this independent draft grid beyond the target
+                # capture bound (#63406). ALLTOALL preprocess synchronizes
+                # dynamic token counts on the host and cannot run in FULL.
+                # Native dispatch keeps larger batches eager, with all their
+                # requests/tokens, when they have no compatible capture size.
+                decode_request_sizes = [
+                    size
+                    for size in decode_request_sizes
+                    if select_moe_comm_method(size, vllm_config) != MoECommType.ALLTOALL
+                ]
             graph_kwargs["decode_request_sizes"] = decode_request_sizes
         assert isinstance(decode_query_len, int)
         if decode_query_len > 1:
