@@ -53,7 +53,7 @@ def make_builder(cls, ratio=0):
     builder.qli_seqused_k = torch.full((4,), -1, dtype=torch.int32)
     builder.qli_cmp_residual_k = torch.full((4,), -1, dtype=torch.int32)
     builder.sas_metadata_buffer = torch.zeros(dsa_v1.SAS_METADATA_BUFFER_SIZE, dtype=torch.int32)
-    builder.qli_metadata_buffer = torch.zeros_like(builder.sas_metadata_buffer)
+    builder.qli_metadata_buffer = torch.zeros(dsa_v1.QLI_METADATA_BUFFER_SIZE, dtype=torch.int32)
     builder.seqused_q = torch.zeros(4, dtype=torch.int32)
     builder.cu_seqlens_ori_kv = torch.zeros(4, dtype=torch.int32)
     builder.cu_seqlens_cmp_kv = torch.zeros(4, dtype=torch.int32)
@@ -108,7 +108,7 @@ class TestDSAMetadataBuilders(TestCase):
                 torch.ops._C_ascend,
                 "npu_quant_lightning_indexer_v2_metadata",
                 create=True,
-                return_value=torch.ones(dsa_v1.SAS_METADATA_BUFFER_SIZE, dtype=torch.int32),
+                return_value=torch.ones(dsa_v1.QLI_METADATA_BUFFER_SIZE, dtype=torch.int32),
             )
         )
         plan = SimpleNamespace(

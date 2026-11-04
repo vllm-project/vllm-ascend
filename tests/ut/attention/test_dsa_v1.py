@@ -570,7 +570,7 @@ def test_qli_lengths_refresh_for_each_builder_when_metadata_is_reused():
     """Packed cache groups share tiling metadata, but own their length buffers."""
     builders = [_make_builder(), _make_builder()]
     addresses = [(b.qli_seqused_k.data_ptr(), b.qli_cmp_residual_k.data_ptr()) for b in builders]
-    generated_metadata = torch.arange(SAS_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    generated_metadata = torch.arange(QLI_METADATA_BUFFER_SIZE, dtype=torch.int32)
 
     with patch.object(
         torch.ops._C_ascend,
@@ -912,7 +912,7 @@ def test_build_req_metadata_preserves_zero_max_sequence_lengths():
         query_start_loc_cpu=query_start_loc,
     )
     builder._build_sas_metadata = MagicMock(return_value=torch.zeros(SAS_METADATA_BUFFER_SIZE, dtype=torch.int32))
-    builder._build_qli_metadata = MagicMock(return_value=torch.zeros(SAS_METADATA_BUFFER_SIZE, dtype=torch.int32))
+    builder._build_qli_metadata = MagicMock(return_value=torch.zeros(QLI_METADATA_BUFFER_SIZE, dtype=torch.int32))
 
     metadata = builder.build_req_metadata(
         common_attn_metadata=common_attn_metadata,
@@ -950,7 +950,7 @@ def test_build_req_metadata_clears_graph_padding_rows():
         query_start_loc_cpu=query_start_loc,
     )
     builder._build_sas_metadata = MagicMock(return_value=torch.zeros(SAS_METADATA_BUFFER_SIZE, dtype=torch.int32))
-    builder._build_qli_metadata = MagicMock(return_value=torch.zeros(SAS_METADATA_BUFFER_SIZE, dtype=torch.int32))
+    builder._build_qli_metadata = MagicMock(return_value=torch.zeros(QLI_METADATA_BUFFER_SIZE, dtype=torch.int32))
 
     metadata = builder.build_req_metadata(
         common_attn_metadata=common_attn_metadata,
