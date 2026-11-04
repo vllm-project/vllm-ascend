@@ -35,6 +35,18 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         kv_cache_config: KVCacheConfig | None = None,
     ) -> None:
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        backend_name = str(extra_config.get("backend", "mooncake")).lower()
+        self.layerwise_backend = get_backend_class(backend_name)
+        self.layerwise_data_plane = (
+            self.layerwise_backend.layerwise_data_plane if self.layerwise_backend is not None else None
+        )
+        if use_layerwise and self.layerwise_data_plane not in ("block_key", "gva"):
+            raise ValueError(
+                f"Backend {backend_name!r} does not support layerwise KV pooling: "
+                f"unsupported layerwise_data_plane={self.layerwise_data_plane!r}"
+            )
+        self.use_block_key_layerwise = use_layerwise and self.layerwise_data_plane == "block_key"
+        self.use_layerwise_transfer = use_layerwise and self.layerwise_data_plane == "gva"
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
@@ -64,19 +76,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             and len(cacheable_block_sizes) != len(self.original_block_size)
         ):
             raise ValueError("AscendStore private KV state requires Mooncake block-key or non-layerwise transfer")
-
-    def _init_layerwise_backend(self) -> None:
-        self.layerwise_backend = get_backend_class(self.backend_name)
-        self.layerwise_data_plane = (
-            self.layerwise_backend.layerwise_data_plane if self.layerwise_backend is not None else None
-        )
-        if self.use_layerwise and self.layerwise_data_plane not in ("block_key", "gva"):
-            raise ValueError(
-                f"Backend {self.backend_name!r} does not support layerwise KV pooling: "
-                f"unsupported layerwise_data_plane={self.layerwise_data_plane!r}"
-            )
-        self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
-        self.use_layerwise_transfer = self.use_layerwise and self.layerwise_data_plane == "gva"
 
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
         return store_skip_tokens > 0
