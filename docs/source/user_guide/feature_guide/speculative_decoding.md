@@ -369,31 +369,9 @@ A few important things to consider when using DFlash2 draft models:
       --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens": 8}'
     ```
 
-2. **Model runner V2 draft graphs**: DFlash2 uses full ACL graphs when the
-   target enables `FULL_DECODE_ONLY` and the draft's `enforce_eager` is unset
-   or false. The draft backbone and candidate selector retain the configured
-   Dynamo compilation path. Candidate scoring uses its own request-shaped
-   forward context and compilation cache namespace, while the outer draft ACL
-   graph captures the compiled operations, candidate TopK, path sampling, and
-   proposal-cache updates. Set `"enforce_eager": true`
-   to compare against eager drafting. Validate graph/eager equivalence and
-   request reuse on the intended NPU configuration before deployment.
-
-   Non-causal draft layers with sliding-window size `W` use FIA band mode
-   (`sparse_mode=4`) with a cached compressed mask and
-   `pre_tokens=next_tokens=W-1`, matching upstream FlashAttention's symmetric
-   window. Both eager execution and graph capture preserve this window;
-   layers without a window retain full attention. This replaces the earlier
-   workaround that ignored non-causal sliding windows, including in eager
-   execution. The compressed mask is a band-mode template, not a causal
-   restriction on draft tokens.
-
-   The model-level acceptance test exercises DFlash2 draft graphs using
-   `VLLM_COMPILE` with `FULL_DECODE_ONLY` on two NPUs:
-
-   ```shell
-   pytest -sv tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py -k test_dflash2_v2_acceptance
-   ```
+2. **Model runner V2 draft graphs**: DFlash2 supports full ACL graphs when the
+   target enables `FULL_DECODE_ONLY` or `FULL_AND_PIECEWISE` and the draft's
+   `enforce_eager` is unset or false.
 
 3. **Graph capture sizes**: each decode step runs `(1 + K)` tokens per
    request, so every capture size must be `n * (num_speculative_tokens + 1)`
