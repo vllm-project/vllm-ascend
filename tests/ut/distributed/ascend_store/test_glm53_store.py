@@ -13,6 +13,8 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import torch
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncCalculator
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
@@ -284,11 +286,38 @@ class TestGLM53Store(unittest.TestCase):
             self.doCleanups()
         self.assertEqual(keys_by_mode[0], keys_by_mode[1])
 
-    def test_recoverssm_registration_rejects_native_state_layout(self):
-        plan = make_glm53_plan()
-        worker = make_worker(self, kv_cache_config=plan, use_mla=True, num_layers=4, use_recoverssm=True)
-        with self.assertRaisesRegex(ValueError, "one checkpoint and two verification records"):
-            worker.register_kv_caches(make_glm53_caches(plan))
+    def test_recoverssm_registration_exports_each_backend_copyable_state_prefix(self):
+        plan = make_glm53_plan(use_recoverssm=True)
+        short_conv = MambaAttentionBackendEnum.SHORT_CONV
+        gdn = MambaAttentionBackendEnum.GDN_ATTN
+        copy_funcs = {
+            short_conv: MambaStateCopyFuncCalculator.short_conv_state_copy_func(),
+            gdn: MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func(),
+        }
+        # One persistent state, two states with extra records, and two states
+        # whose verification records live outside the KV cache.
+        for group, backend, components in zip(plan.kv_cache_groups[2:], (short_conv, gdn, gdn), (1, 5, 2)):
+            spec = group.kv_cache_spec
+            spec = replace(
+                spec,
+                mamba_type=backend,
+                shapes=(*spec.shapes, (1, 6))[:components],
+                dtypes=(*spec.dtypes, torch.float32)[:components],
+            )
+            group.kv_cache_spec = UniformTypeKVCacheSpecs(
+                block_size=spec.block_size, kv_cache_specs=dict.fromkeys(group.layer_names, spec)
+            )
+        caches = make_glm53_caches(plan)
+        worker = make_worker(
+            self, kv_cache_config=plan, use_mla=True, num_layers=4, use_recoverssm=True, mamba_copy_funcs=copy_funcs
+        )
+        worker.register_kv_caches(caches)
+        for group_id, expected_count in enumerate((1, 2, 2), start=2):
+            self.assertEqual(len(worker.group_block_len[group_id]), expected_count)
+            for name in plan.kv_cache_groups[group_id].layer_names:
+                self.assertEqual(len(worker.kv_caches[name]), expected_count)
+                for exported, original in zip(worker.kv_caches[name], caches[name]):
+                    self.assertIs(exported, original)
 
     def test_memcache_layerwise_round_trip_keeps_each_tp_state(self):
         block_hash = bytes([1]) * 32
