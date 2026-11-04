@@ -9,6 +9,7 @@ step. The tracker must stay O(1) for the contiguous-prefix writes and still
 copy scattered writes correctly.
 """
 
+import warnings
 from unittest import mock
 
 import numpy as np
@@ -392,6 +393,126 @@ def test_torch_numpy_bridge_is_read_only():
     assert array.flags.writeable is False
     with pytest.raises(ValueError):
         array[0, 0] = 1
+
+
+def test_torch_array_protocol_is_read_only_but_sticky():
+    # ``np.asarray`` used to return a writable array sharing the mirror, and
+    # nothing marked the buffer dirty. It now hands out a read-only array and
+    # treats the access as an alias, because torch can rewrap even a read-only
+    # array as a writable tensor.
+    buf = _make_uva_buffer(8)
+
+    array = np.asarray(buf.cpu)
+
+    assert array.flags.writeable is False
+    with pytest.raises(ValueError):
+        array[0, 0] = 1
+    # ``copy=True`` is a real copy, so it neither shares nor invalidates.
+    copied = np.asarray(buf.cpu, copy=True)
+    assert copied.flags.writeable is True
+    assert copied.__array_interface__["data"][0] != buf._cpu.data_ptr()
+    assert np.array(buf.cpu).flags.writeable is True
+
+
+def test_torch_array_protocol_write_after_a_sync_reaches_the_shadow():
+    buf = _make_uva_buffer(8)
+    array = np.asarray(buf.cpu)
+    buf.uva(8)
+
+    # torch only warns about the read-only flag; the tensor still shares memory.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        alias = torch.from_numpy(array)
+    alias[0, 0] = 9
+    buf.uva(8)
+
+    assert buf._uva[0, 0].item() == 9
+
+
+def test_torch_dlpack_alias_write_after_a_sync_reaches_the_shadow():
+    buf = _make_uva_buffer(8)
+    alias = torch.from_dlpack(buf.cpu)
+    buf.uva(8)
+
+    alias[1, 0] = 7
+    buf.uva(8)
+
+    assert buf._uva[1, 0].item() == 7
+
+
+def test_torch_as_tensor_of_the_proxy_write_after_a_sync_reaches_the_shadow():
+    buf = _make_uva_buffer(8)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        alias = torch.as_tensor(buf.cpu)
+    buf.uva(8)
+
+    alias[2, 0] = 5
+    buf.uva(8)
+
+    assert buf._uva[2, 0].item() == 5
+
+
+def test_torch_from_numpy_of_the_numpy_bridge_write_after_a_sync_reaches_the_shadow():
+    buf = _make_uva_buffer(8)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        alias = torch.from_numpy(buf.cpu.numpy())
+    buf.uva(8)
+
+    alias[3, 1] = 6
+    buf.uva(8)
+
+    assert buf._uva[3, 1].item() == 6
+
+
+@pytest.mark.parametrize(
+    "make_alias",
+    [
+        lambda cpu: cpu.view(-1),
+        lambda cpu: cpu.detach(),
+        lambda cpu: cpu.T,
+        lambda cpu: cpu.to(torch.int32),
+    ],
+)
+def test_alias_retained_across_a_sync_is_still_published(make_alias, monkeypatch):
+    # Widening at the moment the alias is handed out is not enough: the alias
+    # keeps working after ``uva()`` clears the tracker. Once an alias escapes,
+    # every later sync has to publish the whole buffer.
+    buf = _make_uva_buffer(8)
+    alias = make_alias(buf.cpu)
+    buf.uva(8)
+
+    copied = _count_copied_rows(monkeypatch)
+    alias.fill_(9)
+    buf.uva(8)
+
+    assert torch.equal(buf._uva, buf._cpu)
+    assert copied == [8]
+
+
+def test_uint8_index_is_a_mask_and_publishes_everything():
+    # torch reads uint8 as its Boolean-mask dtype, and a 0-d one broadcasts over
+    # the whole tensor, while NumPy would read the same object as one row.
+    # Publishing everything is the only safe classification.
+    buf = _make_uva_buffer(8)
+
+    buf.cpu[np.array(3, dtype=np.uint8)] = 9
+    buf.uva(8)
+
+    assert torch.equal(buf._uva, buf._cpu)
+
+
+def test_uint8_index_value_out_of_range_does_not_raise_after_the_write():
+    # The mask value only has to be non-zero. Feeding it to the row tracker used
+    # to raise IndexError after torch had already written the whole mirror,
+    # leaving the tracker empty.
+    buf = _make_uva_buffer(8)
+
+    buf.cpu[np.array(44, dtype=np.uint8)] = 9
+    buf.uva(8)
+
+    assert torch.equal(buf._uva, buf._cpu)
 
 
 def test_torch_data_handle_is_refused():

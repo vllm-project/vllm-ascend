@@ -71,9 +71,14 @@ class _DirtyRows:
     The common write pattern is a contiguous prefix (``buf.np[:n] = x``), which
     is tracked in O(1). Anything scattered falls back to a vectorised boolean
     mask, so the per-write cost stays in NumPy instead of Python.
+
+    A write that arrives through a raw alias cannot be observed at all, so once
+    the mirror hands one out the tracker goes "sticky": every later sync
+    publishes the whole buffer. Only rows in [0, _prefix) of a normal tracker
+    can be proven clean, and an alias can change any row at any time.
     """
 
-    __slots__ = ("_size", "_prefix", "_mask", "_mask_pending")
+    __slots__ = ("_size", "_prefix", "_mask", "_mask_pending", "_aliased")
 
     def __init__(self, size: int) -> None:
         self._size = size
@@ -87,6 +92,15 @@ class _DirtyRows:
         # the only reason take() has to look at the mask at all.
         self._mask: np.ndarray | None = None
         self._mask_pending = False
+        self._aliased = False
+
+    def mark_aliased(self) -> None:
+        """Record that a writable alias of the mirror escaped.
+
+        The alias keeps working after ``take()`` clears the tracked rows, so
+        the buffer can no longer be published piecemeal.
+        """
+        self._aliased = True
 
     def mark(self, key) -> None:
         """Record the rows touched by an ``arr[key] = value`` write.
@@ -183,6 +197,10 @@ class _DirtyRows:
 
     def take(self) -> list[tuple[int, int]]:
         """Return the coalesced ``[start, stop)`` runs to copy, then reset."""
+        if self._aliased:
+            # A raw alias was handed out at some point: any row may have
+            # changed since the last sync, and nothing tells us which.
+            self._prefix = self._size
         runs: list[tuple[int, int]] = []
         covered = 0
         if self._prefix:
@@ -269,25 +287,33 @@ class MonitoredTorchTensor:
 
     ``__setitem__`` and the in-place methods (torch's trailing-underscore
     convention) are the writes the tracker can observe. In-place methods mark
-    the whole buffer, which is slower but never stale; delegated calls and
-    attributes that hand back a tensor over the mirror's storage (``to`` with
-    the same dtype, ``detach``, ``view``, ``T``, ``split``, ...) mark it too.
-    ``.numpy()`` returns a read-only array and ``.data`` is refused.
+    the whole buffer, which is slower but never stale.
 
-    torch has no read-only views, so two writes stay outside the tracker: one
-    through a view returned by ``__getitem__`` (``t.cpu[0:2].fill_(9)``), and one
-    through a tensor that ``torch.from_numpy`` built over ``.numpy()`` (torch
-    only warns about the writeable flag). Wrapping ``__getitem__`` would make
-    every read pay for a proxy, and the in-repo callers only read; write through
-    ``.np`` or ``__setitem__`` instead.
+    Everything that hands out a writable alias of the mirror makes the buffer
+    *sticky*: a delegated call or attribute returning a tensor over the same
+    storage (``to`` with the same dtype, ``detach``, ``view``, ``T``,
+    ``split``, ...), a storage handle, and the NumPy / DLPack protocols
+    (``np.asarray(buf.cpu)``, ``torch.as_tensor(buf.cpu)``,
+    ``torch.from_dlpack(buf.cpu)``). From then on every ``uva()`` publishes the
+    whole buffer, because the alias can be written after any number of syncs
+    and nothing reports those writes. Buffers that only use
+    ``buf.cpu[...] = value`` never pay that cost.
+
+    ``.numpy()`` and ``__array__`` hand out a read-only array (but still mark
+    the buffer sticky, since ``torch.from_numpy`` can rewrap it as writable),
+    and ``.data`` is refused. One write still stays outside the tracker: a view
+    returned by ``__getitem__`` (``t.cpu[0:2].fill_(9)``), because wrapping every
+    read would make it pay for a proxy. The in-repo callers only read through
+    it; write through ``.np`` or ``__setitem__`` instead.
     """
 
-    def __init__(self, tensor: torch.Tensor, callback: Callable):
+    def __init__(self, tensor: torch.Tensor, callback: Callable, alias_callback: Callable | None = None):
         self._tensor = tensor
         self._callback = callback
+        self._alias_callback = alias_callback
         self._storage_ptr = tensor.untyped_storage().data_ptr()
 
-    _OWN_FIELDS = ("_tensor", "_callback", "_storage_ptr")
+    _OWN_FIELDS = ("_tensor", "_callback", "_alias_callback", "_storage_ptr")
 
     def __setattr__(self, name, value):
         if name not in self._OWN_FIELDS:
@@ -298,6 +324,13 @@ class MonitoredTorchTensor:
 
     def __setitem__(self, key, value):
         self._tensor[key] = value
+        rows = key[0] if isinstance(key, tuple) and key else key
+        if self._is_uint8_key(rows):
+            # torch's Boolean masks are uint8, and a 0-d one broadcasts over
+            # the whole tensor. The write already happened, and NumPy would
+            # read the same object as a row index, so publish everything.
+            self._callback(slice(None))
+            return
         self._callback(key)
 
     def __len__(self) -> int:
@@ -307,6 +340,23 @@ class MonitoredTorchTensor:
         # See the class docstring: a view write is the one remaining way to
         # reach the mirror unnoticed, and readers need a real tensor here.
         return self._tensor[key]
+
+    def _mark_alias(self) -> None:
+        """A writable alias escaped: publish now and on every later sync."""
+        self._callback(slice(None))
+        if self._alias_callback is not None:
+            self._alias_callback()
+
+    def _array_shares_mirror(self, array: np.ndarray) -> bool:
+        return array.__array_interface__["data"][0] == self._storage_ptr
+
+    @staticmethod
+    def _is_uint8_key(key) -> bool:
+        if isinstance(key, torch.Tensor):
+            return key.dtype == torch.uint8
+        if isinstance(key, np.ndarray):
+            return key.dtype == np.uint8
+        return False
 
     def _is_mirror_alias(self, value) -> bool:
         """Whether ``value`` is a tensor, or a tuple of tensors, over our memory."""
@@ -323,19 +373,44 @@ class MonitoredTorchTensor:
         if name == "numpy":
 
             def _numpy(*args, **kwargs):
+                self._mark_alias()
                 array = attr(*args, **kwargs)
                 array.flags.writeable = False
                 return array
 
             return _numpy
+        if name == "__array__":
+
+            def _array(dtype=None, copy=None):
+                array = self._tensor.__array__(dtype) if dtype is not None else self._tensor.__array__()
+                if copy:
+                    return array.copy()
+                if not self._array_shares_mirror(array):
+                    return array
+                self._mark_alias()
+                array.flags.writeable = False
+                return array
+
+            return _array
+        if name in ("__array_interface__", "__array_struct__"):
+            # NumPy can build a writable array straight from either pointer.
+            self._mark_alias()
+            return attr
+        if name == "__dlpack__":
+
+            def _dlpack(*args, **kwargs):
+                self._mark_alias()
+                return attr(*args, **kwargs)
+
+            return _dlpack
         if name in ("storage", "untyped_storage"):
             # Raw storage access can write any element; publish everything.
-            self._callback(slice(None))
+            self._mark_alias()
             return attr
         if isinstance(attr, torch.Tensor) and self._is_mirror_alias(attr):
             # ``.T``/``.mT``/``.H``/``.real`` hand out a writable view of the
             # mirror, so a write through one has to be published too.
-            self._callback(slice(None))
+            self._mark_alias()
         if not callable(attr):
             return attr
 
@@ -346,10 +421,10 @@ class MonitoredTorchTensor:
                 # the whole buffer is dirty whichever rows it touches.
                 self._callback(slice(None))
             result = attr(*args, **kwargs)
-            if not inplace and self._is_mirror_alias(result):
-                # ``to``/``detach``/``view``/``split``... handed out an alias
-                # of the mirror; a write through it has to be published.
-                self._callback(slice(None))
+            if self._is_mirror_alias(result):
+                # ``to``/``detach``/``view``/``split``/``fill_``... returned the
+                # mirror itself or a view of it; keep publishing every sync.
+                self._mark_alias()
             return result
 
         return _call
@@ -403,7 +478,7 @@ class UvaBufferWrapper:
             self._cpu_view = self._cpu
             self._np_view = self._np
         else:
-            self._cpu_view = MonitoredTorchTensor(self._cpu, self._dirty.mark)
+            self._cpu_view = MonitoredTorchTensor(self._cpu, self._dirty.mark, self._dirty.mark_aliased)
             self._np_view = MonitoredNumPyArray(self._np, self._dirty.mark)
 
     @property
