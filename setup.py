@@ -494,9 +494,11 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
         "Topic :: Scientific/Engineering :: Information Analysis",
     ],
-    packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
+    packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")) + ["vllm_ascend.ops.statetree.kernels"],
+    package_dir={"vllm_ascend.ops.statetree.kernels": "csrc/statetree"},
     package_data={
         "vllm_ascend.observability.ms_metrics": ["config/*.yaml"],
+        "vllm_ascend.ops.statetree.kernels": ["*.asc"],
     },
     python_requires=">=3.10",
     install_requires=get_requirements(),
