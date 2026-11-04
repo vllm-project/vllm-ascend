@@ -222,7 +222,7 @@ def test_sas_metadata_buffers_match_selected_operator(
     plan = MagicMock()
     plan.requires_block_offset_slots = False
     plan.uses_sparse_flash_mla = False
-    plan.sparse_attn_metadata_op = metadata_op
+    plan.get_dsa_sparse_attn_metadata_op.return_value = metadata_op
     with patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan):
         builder = _make_builder(4, num_speculative_tokens=1, use_tokens_per_state=use_tokens_per_state)
 

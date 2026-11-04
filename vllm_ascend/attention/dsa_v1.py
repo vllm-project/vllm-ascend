@@ -863,7 +863,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         sas_plan = get_dsa_attn_kv_plan(vllm_config, self.compressor_ratio)
         self.sas_metadata_buffer_size = (
             MIXED_QUANT_SAS_METADATA_BUFFER_SIZE
-            if sas_plan.sparse_attn_metadata_op
+            if sas_plan.get_dsa_sparse_attn_metadata_op()
             in (
                 mixed_quant_sparse_flash_mla_metadata_fp8,
                 mixed_quant_sparse_flash_mla_metadata_turboquant,
