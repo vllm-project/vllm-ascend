@@ -56,13 +56,9 @@ def _reference(
 def test_qsa_rmsnorm_mrope(num_heads: int) -> None:
     torch.manual_seed(17)
     num_tokens, head_dim, rope_dim = 4096, 128, 64
-    tensor_cpu = torch.randn(
-        num_tokens, num_heads, head_dim, dtype=torch.bfloat16
-    )
+    tensor_cpu = torch.randn(num_tokens, num_heads, head_dim, dtype=torch.bfloat16)
     weight_cpu = torch.randn(head_dim, dtype=torch.bfloat16) * 0.05
-    cos_sin_cpu = torch.randn(
-        3, num_tokens, rope_dim, dtype=torch.bfloat16
-    )
+    cos_sin_cpu = torch.randn(3, num_tokens, rope_dim, dtype=torch.bfloat16)
     expected = _reference(tensor_cpu, weight_cpu, cos_sin_cpu, 1e-6)
 
     actual = triton_qsa_rmsnorm_mrope(
@@ -75,6 +71,4 @@ def test_qsa_rmsnorm_mrope(num_heads: int) -> None:
     )
     torch_npu.npu.synchronize()
 
-    torch.testing.assert_close(
-        actual.cpu(), expected, rtol=2e-2, atol=2e-2
-    )
+    torch.testing.assert_close(actual.cpu(), expected, rtol=2e-2, atol=2e-2)
