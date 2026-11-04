@@ -15,16 +15,16 @@ parameters and a context length of up to one million tokens. It uses a
 layers and 20 decoder layers, activating 8B parameters per token during
 Prefill and 16B during Decode.
 
-For 950DT products (A5), this guide covers single-node deployment, ordinary
-1P1D with SWA bounded replay on Prefill, and 1P1D with a Memcache DRAM pool.
-Section 5.2 also covers experimental PCP8 Prefill and multi-node EP16 Decode.
-
 The model introduces Compressed Sparse Attention 2 (CSA2), FP4 main KV cache,
 SWA Bounded Replay, Single-Pass mHC, Engram conditional memory, and DSpark
 speculative decoding. These designs reduce the global KV cache footprint to
 890 bytes per token and the persistent KV cache footprint to approximately
-one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports
-a continuously adjustable reasoning effort from 1 to 100.
+one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports a
+continuously adjustable reasoning effort from 1 to 100.
+
+For 950DT products (A5), this guide covers single-node deployment, ordinary
+1P1D with SWA bounded replay on Prefill, and 1P1D with a Memcache DRAM pool.
+Section 5.2 also covers experimental PCP8 Prefill and multi-node EP16 Decode.
 
 vLLM Ascend supports W4A8 and W8A8 deployment on A2 products, A3 products,
 and 950DT products. This guide provides a single-node colocated A3
