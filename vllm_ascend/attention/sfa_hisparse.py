@@ -8,10 +8,10 @@ from dataclasses import dataclass
 import torch
 import torch_npu
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup, SparseMLAIndexGroupBuilder
-from vllm.v1.hisparse.runtime import HiSparsePrefillStagingPlan, build_hisparse_prefill_staging_plan
 from vllm.v1.worker.workspace import current_workspace_manager
 
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
+from vllm_ascend.hisparse.prefill import AscendHiSparsePrefillStagingPlan, build_hisparse_prefill_staging_plan
 
 # Bound the temporary D2D packing workspace independently of prefill length.
 _ATTENTION_CHUNK_ROWS = 32
@@ -30,7 +30,7 @@ def finish_hisparse_kv_update(cache, metadata) -> None:
 
 @dataclass
 class AscendHiSparsePrefillMetadata:
-    host_staging_plan: HiSparsePrefillStagingPlan
+    host_staging_plan: AscendHiSparsePrefillStagingPlan
 
 
 @dataclass

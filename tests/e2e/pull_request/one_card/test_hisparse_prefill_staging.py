@@ -7,10 +7,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch_npu  # noqa: F401
-from vllm.v1.hisparse.runtime import HiSparseRuntime, PagedCacheView, build_hisparse_prefill_staging_plan
+from vllm.v1.hisparse.runtime import HiSparseRuntime, PagedCacheView
 
 from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 from vllm_ascend.hisparse.cache_ops import HiSparseNPUOps, allocate_mapped_host, scatter_packed_kv
+from vllm_ascend.hisparse.prefill import build_hisparse_prefill_staging_plan
 
 
 @pytest.mark.parametrize("resident_block_size", [128, 64, 32])
@@ -112,3 +113,33 @@ def test_backend_resident_payload_graph_replay(dtype, width):
         safe = torch.tensor(values).clamp_min(0)
         expected = source.view(torch.uint8).cpu()[safe // 2, safe % 2]
         assert torch.equal(destination.view(torch.uint8).cpu(), expected)
+
+
+def test_prefill_singleton_column_mapping_tracks_current_residency():
+    if not torch.npu.is_available():
+        pytest.skip("HiSparse prefill mapping requires an NPU")
+    torch.npu.set_device(0)
+    block = 128
+    host_table = torch.tensor([[1, 2]], dtype=torch.int32, device="npu:0")
+    lengths = torch.tensor([2 * block - 7], dtype=torch.int32, device="npu:0")
+    resident = torch.tensor([[2, 0], [0, 5]], dtype=torch.int32, device="npu:0")
+    state = torch.tensor([0], dtype=torch.int32, device="npu:0")
+
+    def resolve():
+        plan = build_hisparse_prefill_staging_plan(host_table, lengths, block, 2)
+        plan.ensure_gpu_sources(resident, state, block)
+        return plan.gpu_row_ids, plan.miss_mask
+
+    # FULL_DECODE_ONLY builds Prefill metadata outside graph capture; Core's
+    # representative-page scatter_reduce is not a capturable NPU operation.
+    for state_row, pages in ((0, [2, 0]), (1, [0, 5]), (0, [2, 0])):
+        state.fill_(state_row)
+        gpu_rows, mask = resolve()
+        expected = torch.full((3 * block,), -1, dtype=torch.int32)
+        for logical, physical in enumerate(pages, start=1):
+            if physical:
+                expected[logical * block : (logical + 1) * block] = torch.arange(
+                    physical * block, (physical + 1) * block, dtype=torch.int32
+                )
+        torch.testing.assert_close(gpu_rows.cpu().flatten(), expected, rtol=0, atol=0)
+        torch.testing.assert_close(mask.cpu().flatten(), (expected < 0).int(), rtol=0, atol=0)
