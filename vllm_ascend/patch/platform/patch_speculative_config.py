@@ -8,9 +8,12 @@ import vllm.config.speculative as speculative_config
 from transformers import DeepseekV2Config, PretrainedConfig
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.logger import init_logger
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
 from vllm_ascend.utils import is_deepseek_v41, is_gqa_pcp_dcp_config, vllm_version_is
+
+logger = init_logger(__name__)
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
@@ -83,6 +86,34 @@ def _normalize_kimi_dflash_rope(hf_config: PretrainedConfig) -> None:
     setattr(hf_config, rope_field, {**rope_params, "attention_factor": legacy_attention_factor})
 
 
+# Text-only speculative drafters (DFlash / LiLiCorr families) are trained with a
+# plain 1-D RoPE. Some exported checkpoints nevertheless keep the multimodal
+# ``mrope_section`` annotation of their Qwen3.5-VL target. vLLM then builds an
+# ``MRotaryEmbedding`` instead of a plain ``RotaryEmbedding``; on Ascend that
+# class dispatches to a non-text MRoPE path when the section is not the
+# specialised [16, 24, 24]. A drafter only ever receives text positions, so the
+# annotation cannot help: on the Qwen3.8-27B LiLiCorr draft it drops acceptance
+# from 43% to 4%. Strip it for drafters that never consume multimodal
+# positions; the target model keeps its own mrope configuration untouched.
+def _normalize_text_only_draft_rope(hf_config: PretrainedConfig) -> None:
+    if not isinstance(getattr(hf_config, "dflash_config", None), dict):
+        return
+    architectures = getattr(hf_config, "architectures", None) or ()
+    if not any(name.endswith("DraftModel") for name in architectures):
+        return
+    for field in ("rope_parameters", "rope_scaling"):
+        rope_params = getattr(hf_config, field, None)
+        if not isinstance(rope_params, dict) or "mrope_section" not in rope_params:
+            continue
+        stripped = {key: value for key, value in rope_params.items() if key != "mrope_section"}
+        setattr(hf_config, field, stripped)
+        logger.info(
+            "Dropping inherited mrope_section %s from text-only draft %s rope parameters",
+            rope_params["mrope_section"],
+            architectures,
+        )
+
+
 def _normalize_legacy_qwen3_dspark_config(
     hf_config: PretrainedConfig,
     transformers_mtp_overrides: dict[str, Any] | None = None,
@@ -95,6 +126,7 @@ def _normalize_legacy_qwen3_dspark_config(
         )
     hf_config = _orig_hf_config_override(hf_config)
     _normalize_kimi_dflash_rope(hf_config)
+    _normalize_text_only_draft_rope(hf_config)
     architectures = hf_config.architectures or ()
     if hf_config.model_type == "qwen3" and "DSparkDraftModel" in architectures:
         dflash_config = hf_config.dflash_config
