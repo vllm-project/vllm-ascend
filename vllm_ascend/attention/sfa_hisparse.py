@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ascend SFA execution over upstream HiSparse's resident and hot cache pool."""
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -109,7 +110,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 raise ValueError("Ascend HiSparse requires a model sparse-index group")
             builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
         if self.enable_sparse_sfa_c8:
-            from vllm_ascend.ops.hisparse_c8 import C8_ROW_BYTES
+            from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
 
             row_width = C8_ROW_BYTES
         else:
@@ -200,12 +201,12 @@ class AscendHiSparseImpl(AscendSFAImpl):
         return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
 
     def exec_kv(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata):
-        from vllm_ascend.ops.hisparse import scatter_packed_kv
+        from vllm_ascend.hisparse.cache_ops import scatter_packed_kv
 
         assert self.kv_a_layernorm is not None
         if self.enable_sparse_sfa_c8:
             from vllm_ascend.attention.sfa_v1 import custom_kv_rmsnorm_rope
-            from vllm_ascend.ops.hisparse_c8 import pack_c8_components
+            from vllm_ascend.hisparse.c8 import pack_c8_components
 
             values = kv_no_split.reshape(-1, self.num_kv_heads, 1, self.kv_lora_rank + self.qk_rope_head_dim)
             rope, latent, scales = custom_kv_rmsnorm_rope(
@@ -273,13 +274,65 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # which would duplicate the write and can overwrite unrelated slab rows.
         return k_pe, k_nope
 
+    def _c8_physical_attention(self, query, query_rope, cache, indices):
+        """Adapt native packed rows to the existing quantized SFA operation.
+
+        Keep compaction stable, including duplicates. The two current lengths are
+        device writes captured on the consumer stream; no Host read or stream/event
+        policy is introduced here.
+        """
+        from vllm_ascend.hisparse.c8 import c8_storage_view, compact_c8_indices, map_c8_physical_indices
+
+        query_ends, key_length = self._c8_length_workspace()
+        scale = self.scale
+        view, block, stride_rows, capacity = c8_storage_view(cache)
+        rows = query.shape[0]
+        if query.ndim != 3 or query.dtype != torch.bfloat16 or query.shape[-1] != self.kv_lora_rank or rows <= 0:
+            raise ValueError("HiSparse C8 query must be nonempty BF16 [queries, heads, 512]")
+        if query_rope.shape != (*query.shape[:-1], 64) or query_rope.dtype != query.dtype:
+            raise ValueError("HiSparse C8 requires matching BF16 query RoPE")
+        if indices.ndim != 2 or indices.shape[0] != rows or indices.shape[1] <= 0 or indices.shape[1] % 128:
+            raise ValueError("HiSparse C8 top-k width must be positive and divisible by 128")
+        if query.device.type != "npu" or any(
+            tensor.device != query.device for tensor in (query_rope, cache, indices, query_ends, key_length)
+        ):
+            raise ValueError("HiSparse C8 inputs must share one NPU")
+        if any(tensor.shape != (1,) or tensor.dtype != torch.int32 for tensor in (query_ends, key_length)):
+            raise ValueError("HiSparse C8 lengths must be int32 scalar tensors")
+        if not math.isfinite(scale) or scale <= 0:
+            raise ValueError("HiSparse C8 attention scale must be finite and positive")
+        mapped = compact_c8_indices(map_c8_physical_indices(indices, block, stride_rows, capacity))
+        packed_query = torch.cat((query, query_rope), dim=-1)
+        query_ends.fill_(rows)
+        key_length.fill_(view.shape[0])
+        result = torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
+            query=packed_query,
+            key=view,
+            value=view,
+            sparse_indices=mapped.unsqueeze(1),
+            scale_value=scale,
+            sparse_block_size=1,
+            actual_seq_lengths_query=query_ends,
+            actual_seq_lengths_kv=key_length,
+            layout_query="TND",
+            layout_kv="TND",
+            sparse_mode=0,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=128,
+            key_quant_mode=2,
+            value_quant_mode=2,
+            rope_head_dim=64,
+            return_softmax_lse=True,
+        )
+        if isinstance(result, tuple):
+            result = result[0]
+        return torch.where((mapped >= 0).any(dim=-1)[:, None, None], result, 0)
+
     def _attention_physical(self, query, query_rope, packed_cache, physical_topk):
         if self.enable_sparse_sfa_c8:
-            from vllm_ascend.ops.hisparse_c8 import c8_physical_attention
-
-            lengths = self._c8_length_workspace()
-            return c8_physical_attention(query, query_rope, packed_cache, physical_topk, self.scale, *lengths)
-        from vllm_ascend.ops.hisparse import pack_attention_rows
+            return self._c8_physical_attention(query, query_rope, packed_cache, physical_topk)
+        from vllm_ascend.hisparse.cache_ops import pack_attention_rows
 
         latent, rope, block_table, indices, query_ends, seq_lens = self._workspace(query.dtype)
         positions = indices.view(1, -1).to(torch.float32)

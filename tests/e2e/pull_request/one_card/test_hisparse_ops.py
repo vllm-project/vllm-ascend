@@ -8,7 +8,7 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.ops.hisparse import (
+from vllm_ascend.hisparse.cache_ops import (
     HiSparseNPUOps,
     MappedHostTensor,
     ResolverWorkspace,
@@ -651,7 +651,7 @@ def test_page_strided_indexer_write_preserves_bits_and_padding(capture):
 
     from vllm_ascend.attention.indexer import AscendHiSparseIndexerBackend
     from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-    from vllm_ascend.distributed.kv_transfer.hisparse.binding import _quantized_indexer_views
+    from vllm_ascend.hisparse.binding import _quantized_indexer_views
 
     if not torch.npu.is_available() or not torch.npu.get_device_name(0).startswith("Ascend950"):
         pytest.skip("The native E4M3FN HiSparse format currently targets A5")

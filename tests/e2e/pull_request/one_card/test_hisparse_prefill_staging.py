@@ -9,8 +9,8 @@ import torch
 import torch_npu  # noqa: F401
 from vllm.v1.hisparse.runtime import HiSparseRuntime, PagedCacheView, build_hisparse_prefill_staging_plan
 
-from vllm_ascend.distributed.kv_transfer.hisparse.backend import AscendHiSparseBackend
-from vllm_ascend.ops.hisparse import HiSparseNPUOps, allocate_mapped_host, scatter_packed_kv
+from vllm_ascend.hisparse.backend import AscendHiSparseBackend
+from vllm_ascend.hisparse.cache_ops import HiSparseNPUOps, allocate_mapped_host, scatter_packed_kv
 
 
 @pytest.mark.parametrize("resident_block_size", [128, 64, 32])

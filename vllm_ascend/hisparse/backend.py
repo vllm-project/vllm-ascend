@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""NPU streams, mapped host memory and DMA for the common HiSparse runtime."""
+"""Core HiSparse backend: NPU streams, mapped Host memory and DMA."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class AscendHiSparseBackend(HiSparseBackend):
         from vllm_ascend.utils import bootstrap_custom_op_env
 
         # Import the device kernels before the connector allocates Host storage.
-        importlib.import_module("vllm_ascend.ops.hisparse")
+        importlib.import_module("vllm_ascend.hisparse.cache_ops")
         if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
             # A5 disables the global custom-op selection policy. HiSparse still
             # needs its explicit DMA dependency; load the extension lazily here
@@ -37,7 +37,7 @@ class AscendHiSparseBackend(HiSparseBackend):
                 raise RuntimeError("Ascend HiSparse requires the Ascend swap_blocks_batch operator.")
 
     def pin_tensor(self, tensor: torch.Tensor) -> None:
-        from vllm_ascend.ops.hisparse import MappedHostTensor
+        from vllm_ascend.hisparse.cache_ops import MappedHostTensor
 
         tensor._hisparse_registration = MappedHostTensor(tensor)
 
@@ -47,7 +47,7 @@ class AscendHiSparseBackend(HiSparseBackend):
         del tensor._hisparse_registration
 
     def create_cache_ops(self, runtime: HiSparseRuntime) -> Any:
-        from vllm_ascend.ops.hisparse import HiSparseNPUOps, ResolverWorkspace
+        from vllm_ascend.hisparse.cache_ops import HiSparseNPUOps, ResolverWorkspace
 
         group = runtime.index_group
         if runtime is group.leader:

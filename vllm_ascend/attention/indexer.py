@@ -538,7 +538,7 @@ class AscendHiSparseIndexerBackend(AscendSFAIndexerBackend):
             return super().write_cache(k_li, k_li_scale, slot_mapping)
         if k_li_scale is None:
             raise ValueError("HiSparse Indexer C8 requires FP32 scales")
-        from vllm_ascend.distributed.kv_transfer.hisparse.binding import write_hisparse_indexer_c8
+        from vllm_ascend.hisparse.binding import write_hisparse_indexer_c8
 
         write_hisparse_indexer_c8(
             self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],

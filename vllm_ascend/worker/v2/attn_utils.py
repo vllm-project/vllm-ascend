@@ -277,7 +277,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             # Keep Core's row-packed source spec and actual index-group ownership.
             source_layout = {}
             if getattr(attn_module.impl, "enable_sparse_sfa_c8", False):
-                from vllm_ascend.ops.hisparse_c8 import C8_ROW_BYTES
+                from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
 
                 source_layout.update(head_size=C8_ROW_BYTES, dtype=attn_module.impl.c8_cache_dtype)
             kv_cache_spec[layer_name] = replace(
@@ -432,11 +432,11 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     if vllm_config.attention_config.hisparse_config is not None:
         from vllm.v1.hisparse.binding import resolve_hisparse_specs
 
-        from vllm_ascend.distributed.kv_transfer.hisparse.binding import align_hisparse_indexer_specs
+        from vllm_ascend.hisparse.binding import align_hisparse_indexer_specs
 
         packed_row_bytes = None
         if get_ascend_config().enable_sparse_sfa_c8:
-            from vllm_ascend.ops.hisparse_c8 import C8_ROW_BYTES
+            from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
 
             packed_row_bytes = C8_ROW_BYTES
         return align_hisparse_indexer_specs(

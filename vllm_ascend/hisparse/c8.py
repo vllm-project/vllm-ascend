@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Native C8 payload/layout bridge; quantization and Attention stay in existing ops."""
-
-import math
+"""C8 payload packing, shared-slab views and physical index conversion."""
 
 import torch
 
@@ -85,55 +83,3 @@ def compact_c8_indices(indices: torch.Tensor) -> torch.Tensor:
     keys = positions + (indices < 0).to(torch.float32) * width
     order = torch.argsort(keys, dim=-1)
     return torch.gather(indices, -1, order)
-
-
-def c8_physical_attention(query, query_rope, cache, indices, scale, query_ends, key_length):
-    """Adapt native packed rows to the existing quantized SFA operation.
-
-    Keep compaction stable, including duplicates. The two current lengths are
-    device writes captured on the consumer stream; no Host read or stream/event
-    policy is introduced here.
-    """
-    view, block, stride_rows, capacity = c8_storage_view(cache)
-    rows = query.shape[0]
-    if query.ndim != 3 or query.dtype != torch.bfloat16 or query.shape[-1] != _LATENT or rows <= 0:
-        raise ValueError("HiSparse C8 query must be nonempty BF16 [queries, heads, 512]")
-    if query_rope.shape != (*query.shape[:-1], 64) or query_rope.dtype != query.dtype:
-        raise ValueError("HiSparse C8 requires matching BF16 query RoPE")
-    if indices.ndim != 2 or indices.shape[0] != rows or indices.shape[1] <= 0 or indices.shape[1] % 128:
-        raise ValueError("HiSparse C8 top-k width must be positive and divisible by 128")
-    if query.device.type != "npu" or any(
-        tensor.device != query.device for tensor in (query_rope, cache, indices, query_ends, key_length)
-    ):
-        raise ValueError("HiSparse C8 inputs must share one NPU")
-    if any(tensor.shape != (1,) or tensor.dtype != torch.int32 for tensor in (query_ends, key_length)):
-        raise ValueError("HiSparse C8 lengths must be int32 scalar tensors")
-    if not math.isfinite(scale) or scale <= 0:
-        raise ValueError("HiSparse C8 attention scale must be finite and positive")
-    mapped = compact_c8_indices(map_c8_physical_indices(indices, block, stride_rows, capacity))
-    packed_query = torch.cat((query, query_rope), dim=-1)
-    query_ends.fill_(rows)
-    key_length.fill_(view.shape[0])
-    result = torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
-        query=packed_query,
-        key=view,
-        value=view,
-        sparse_indices=mapped.unsqueeze(1),
-        scale_value=scale,
-        sparse_block_size=1,
-        actual_seq_lengths_query=query_ends,
-        actual_seq_lengths_kv=key_length,
-        layout_query="TND",
-        layout_kv="TND",
-        sparse_mode=0,
-        attention_mode=2,
-        quant_scale_repo_mode=1,
-        tile_size=128,
-        key_quant_mode=2,
-        value_quant_mode=2,
-        rope_head_dim=64,
-        return_softmax_lse=True,
-    )
-    if isinstance(result, tuple):
-        result = result[0]
-    return torch.where((mapped >= 0).any(dim=-1)[:, None, None], result, 0)
