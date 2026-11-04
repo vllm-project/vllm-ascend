@@ -32,6 +32,8 @@ jobs:
       github.repository == 'vllm-project/vllm-ascend' &&
       vars.RECIPES_PREVIEW_ENABLED == 'true'
     runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
     timeout-minutes: 5
     environment:
       name: recipes-preview
@@ -41,9 +43,17 @@ jobs:
         format('https://vllm-recipes-git-preview-vllm-ascend-pr-{0}-inferact-inc.vercel.app', github.event.pull_request.number) ||
         '') }}
     steps:
+      - name: Install GitHub CLI
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends gh
+
       - name: Create a token for vllm-project/recipes
         id: token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        env:
+          # Job containers inherit the runner's proxy settings.
+          NODE_USE_ENV_PROXY: '1'
         with:
           app-id: ${{ vars.RECIPES_APP_ID }}
           private-key: ${{ secrets.RECIPES_APP_PRIVATE_KEY }}
@@ -52,17 +62,20 @@ jobs:
           permission-contents: write
 
       - name: Dispatch to vllm-project/recipes
+        shell: bash
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           EVENT: ${{ github.event_name }}
           PR: ${{ github.event.pull_request.number }}
         run: |
+          # Send JSON directly for older gh versions without nested field support.
           if [ "$EVENT" = push ]; then
-            gh api repos/vllm-project/recipes/dispatches \
-              -f event_type=recipes-updated -f 'client_payload[source]=vllm-ascend'
+            printf '%s\n' '{"event_type":"recipes-updated","client_payload":{"source":"vllm-ascend"}}' |
+              gh api --method POST repos/vllm-project/recipes/dispatches \
+                -H 'Content-Type: application/json' --input -
             exit 0
           fi
           [[ "$PR" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid PR number: $PR"; exit 1; }
-          gh api repos/vllm-project/recipes/dispatches \
-            -f event_type=preview-pr -f 'client_payload[source]=vllm-ascend' \
-            -F "client_payload[pr]=${PR}"
+          printf '{"event_type":"preview-pr","client_payload":{"source":"vllm-ascend","pr":%s}}\n' "$PR" |
+            gh api --method POST repos/vllm-project/recipes/dispatches \
+              -H 'Content-Type: application/json' --input -

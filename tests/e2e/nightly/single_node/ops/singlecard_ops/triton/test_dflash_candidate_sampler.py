@@ -240,6 +240,7 @@ def test_probabilistic_candidate_walk_caches_realized_conditional_distribution(t
         temperature=torch.full((num_reqs,), temperature, device=device),
         seed=torch.arange(num_reqs, dtype=torch.int64, device=device),
         num_speculative_steps=steps,
+        use_entropy_verify=False,
     )
     sampled, num_sampled = sampled.cpu(), num_sampled.cpu()
     assert ((num_sampled >= 1) & (num_sampled <= query_len)).all()
