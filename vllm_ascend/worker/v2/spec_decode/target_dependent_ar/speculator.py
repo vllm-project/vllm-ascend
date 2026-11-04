@@ -35,6 +35,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as core_ar_speculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
     TargetDependentARSpeculator,
 )
@@ -299,12 +300,29 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
             cudagraph_mode = CUDAGraphMode.NONE
-        super().init_cudagraph_manager(cudagraph_mode)
+        if vllm_version_is("0.32.0"):
+            super().init_cudagraph_manager(cudagraph_mode)
+        else:
+            # Core now creates decode managers in AutoRegressiveSpeculator.
+            # Keep both phases on the device-selected factory, including 310P,
+            # without changing Core's shared autoregressive module globally.
+            manager_cls = core_ar_speculator.SpeculatorCudaGraphManager
+            self.prefill_cudagraph_manager = manager_cls(
+                self.vllm_config,
+                self.device,
+                cudagraph_mode,
+                self.num_speculative_steps + 1,
+                varlen_decode=self.enable_adaptive_verification,
+            )
+            decode_mode = (
+                CUDAGraphMode.FULL_DECODE_ONLY
+                if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+                else CUDAGraphMode.NONE
+            )
+            self.decode_cudagraph_manager = manager_cls(self.vllm_config, self.device, decode_mode, decode_query_len=1)
         assert self.prefill_cudagraph_manager is not None
         assert self.decode_cudagraph_manager is not None
-        # The Ascend graph managers are patched onto the upstream module and
-        # created by super().init_cudagraph_manager without a speculator ref.
-        # They need this speculator to update full-graph params, so set it here.
+        # Graph replay needs the speculator's metadata and update stream.
         self.prefill_cudagraph_manager.speculator = self
         self.decode_cudagraph_manager.speculator = self
         self.prefill_cudagraph_manager.update_stream = self.update_stream

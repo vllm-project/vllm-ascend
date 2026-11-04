@@ -102,6 +102,58 @@ def test_lazy_mirror_rejects_changed_core_method_signature(monkeypatch):
         verify(common, worker)
 
 
+@pytest.mark.parametrize("enforce_eager,full_decode", [(False, True), (False, False), (True, True)])
+@pytest.mark.parametrize("family", ["Ascend", "310P"])
+def test_current_core_keeps_both_draft_graphs_on_device_factory(enforce_eager, full_decode, family):
+    path = ROOT / "vllm_ascend/worker/v2/spec_decode/target_dependent_ar/speculator.py"
+    namespace = load_definitions(path, "AscendTargetDependentARSpeculator", {"init_cudagraph_manager"})
+
+    class Mode:
+        def __init__(self, full):
+            self.full = full
+
+        def decode_mode(self):
+            return modes.FULL if self.full else modes.NONE
+
+    modes = types.SimpleNamespace(FULL=object(), FULL_DECODE_ONLY=Mode(True), NONE=Mode(False))
+    original_mode = Mode(full_decode)
+    calls = []
+
+    def factory(*args, **kwargs):
+        manager = types.SimpleNamespace(family=family)
+        calls.append((args, kwargs, manager))
+        return manager
+
+    namespace.update(
+        core_ar_speculator=types.SimpleNamespace(SpeculatorCudaGraphManager=factory),
+        vllm_version_is=lambda version: False,
+        CUDAGraphMode=modes,
+    )
+    owner = types.SimpleNamespace(
+        speculative_config=types.SimpleNamespace(enforce_eager=enforce_eager),
+        vllm_config=object(),
+        device=object(),
+        num_speculative_steps=3,
+        enable_adaptive_verification=False,
+        update_stream=object(),
+    )
+    namespace["init_cudagraph_manager"](owner, original_mode)
+    assert len(calls) == 2
+    prefill, decode = calls
+    assert prefill[0] == (owner.vllm_config, owner.device, modes.NONE if enforce_eager else original_mode, 4)
+    assert prefill[1] == {"varlen_decode": False}
+    assert decode[0] == (
+        owner.vllm_config,
+        owner.device,
+        modes.FULL_DECODE_ONLY if full_decode and not enforce_eager else modes.NONE,
+    )
+    assert decode[1] == {"decode_query_len": 1}
+    assert owner.prefill_cudagraph_manager is prefill[2]
+    assert owner.decode_cudagraph_manager is decode[2]
+    for manager in (owner.prefill_cudagraph_manager, owner.decode_cudagraph_manager):
+        assert manager.family == family and manager.speculator is owner and manager.update_stream is owner.update_stream
+
+
 @pytest.mark.parametrize("resident_block", [1, 2, 4])
 @pytest.mark.parametrize("state_order", [[0, 1], [1, 0]])
 def test_prefill_resident_mapping_matches_common(resident_block, state_order):
