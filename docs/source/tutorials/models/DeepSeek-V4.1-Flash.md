@@ -2,6 +2,12 @@
 
 ## 1 Introduction
 
+!!! note
+
+    The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
+
+    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM Ascend is recommended.**
+
 [DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)
 is a native multimodal Mixture-of-Experts (MoE) model with 552B backbone
 parameters and a context length of up to one million tokens. It uses a
@@ -35,22 +41,25 @@ for the complete support matrix and the
 [Feature Guide](../../user_guide/feature_guide/index.md) for feature
 configuration.
 
-The A3 single-node configuration uses W4A8 weights, INT8 Engram storage,
-DP4/TP4, and model runner V1. The A3 1P1D configuration in Section 5.2 uses
-W4A8 weights, model runner V2, DP4/PCP4/TP1 on Prefill, DP16/TP1 on Decode,
-SWA bounded replay on Prefill, MegaMoE on Prefill only, DSpark speculative
-decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode. Other examples retain
-their explicitly configured model-runner settings.
+The A3 configurations in this guide use W4A8 weights, INT8 Engram storage,
+and model runner V2. The single-node colocated configuration uses DP4/TP4.
+The PD configuration uses DP4/PCP4/TP1 on the Prefill node, DP16/TP1 on the
+Decode node, SWA bounded replay and MegaMoE on Prefill, DSpark speculative
+decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode.
 
 ## 3 Prerequisites
 
 ### 3.1 Model Weights and Hardware
 
-Download the Ascend W4A8 checkpoint
-[DeepSeek-V4.1-Flash-1017-w4a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8), including
-its DSpark draft parameters and Engram tables. Download or copy it to the
-same absolute path on every server and set `MODEL_PATH` in each serving
-command to that checkpoint directory.
+The official DeepSeek-V4.1-Flash checkpoint is available from
+[Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) and
+[ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4.1-Flash).
+
+The Ascend W4A8 checkpoint used by this guide is available as
+[Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8)
+on ModelScope. It includes the DSpark draft parameters and INT8 Engram tables.
+Download it to the same absolute path on every server and replace the
+checkpoint-path placeholder in each serving command.
 
 Use one of the following hardware configurations:
 
@@ -194,7 +203,7 @@ the selected revision.
 
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -246,9 +255,7 @@ the selected revision.
     - `VLLM_ENGINE_READY_TIMEOUT_S=36000` allows up to 36,000 seconds for engine
         processes to finish initialization, including weight loading and graph
         preparation.
-    - `VLLM_USE_V2_MODEL_RUNNER=0` explicitly selects model runner V1 for this
-        colocated configuration. The A3 PD configuration in Section 5.2 uses
-        model runner V2.
+    - `VLLM_USE_V2_MODEL_RUNNER=1` explicitly selects model runner V2.
     - `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
         Engram table in host memory and lets local DP ranks share the host-memory
         allocation. This is required on A3 because the model's 24 Engram heads
@@ -273,20 +280,6 @@ the selected revision.
     DP16/TP1. Both layouts consume all 16 logical devices on their respective
     servers. Mooncake transfers KV cache from the Prefill engines to the Decode
     engines.
-
-    This A3 example requires model runner V2, SWA bounded replay with
-    PCP, and the MegaMoE operator package (`cann_ops_transformer`). Keep
-    `--net=host` and `--ipc=host` in the Docker command in Section 4.1.
-    Set `MODEL_PATH` on both nodes to the W4A8 checkpoint specified in
-    Section 3.1. Check startup logs to confirm that MegaMoE is enabled;
-    requesting `enable_fused_mc2: 2` alone does not confirm that the path is active.
-
-    Set PCP through `--prefill-context-parallel-size` in the launcher. The
-    connector obtains the remote PCP size from request metadata; it does not
-    read a `pcp_size` field in the `prefill` or `decode` extra configuration.
-
-    Start the Prefill and Decode launchers on their respective nodes in parallel.
-    Start the proxy only after all engines are ready.
 
     #### 5.2.1.1 Prepare the DP Launcher
 
@@ -622,8 +615,7 @@ the selected revision.
         `cann_ops_transformer` package and a supported model configuration.
         - `enable_flashcomm1: false` disables FlashComm. The old `enable_dsa_cp`
         option is omitted because this example uses PCP instead of DSA CP.
-        - `enable_shared_expert_dp: true` retains the shared-expert DP setting, but
-        the framework disables it at TP1 because this option requires TP > 1.
+        - `enable_shared_expert_dp: true` uses data parallelism for shared experts.
         - `multistream_overlap_shared_expert: false` explicitly disables shared-
         expert multistream overlap on Prefill for this MegaMoE configuration.
 
