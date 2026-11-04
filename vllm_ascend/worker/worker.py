@@ -32,7 +32,7 @@ import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
 from vllm import envs
-from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config, update_config
+from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
 from vllm.distributed.ec_transfer import (
     ensure_ec_transfer_initialized,
@@ -49,10 +49,8 @@ from vllm.distributed.kv_transfer import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm.logger import logger
-from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.tasks import SupportedTask
 from vllm.utils.gpu_sync_debug import with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
@@ -66,7 +64,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
@@ -1181,9 +1179,6 @@ class NPUWorker(GPUWorker):
         c = torch.rand((4, 4), dtype=torch.float32).npu()
         torch_npu._npu_matmul_add_fp32(x, weight, c)
 
-    def get_model(self) -> nn.Module:
-        return self.model_runner.get_model()
-
     @torch.inference_mode()
     def profile_prefill_latency(self, num_tokens: int) -> float:
         """
@@ -1371,19 +1366,6 @@ class NPUWorker(GPUWorker):
             self.kv_cache_spec = kv_cache_spec
         return kv_cache_spec
 
-    def update_max_model_len(self, max_model_len: int) -> None:
-        """Update max_model_len after auto-fit to NPU memory.
-
-        This is called when max_model_len=-1 is used and the engine
-        automatically determines the maximum context length that fits
-        in GPU memory. Workers need to update their cached max_model_len
-        to match the engine's decision.
-        """
-        self.model_config.max_model_len = max_model_len
-        if self.model_runner is not None:
-            self.model_runner.update_max_model_len(max_model_len)
-        logger.debug("Updated max_model_len to %s", max_model_len)
-
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         """Return the sleep-mode pool for ``tag``, or a no-op context."""
         if self.vllm_config.model_config.enable_sleep_mode:
@@ -1476,21 +1458,6 @@ class NPUWorker(GPUWorker):
                 return
             self.profiler.stop()
 
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_runner.add_lora(lora_request)
-
-    def remove_lora(self, lora_id: int) -> bool:
-        return self.model_runner.remove_lora(lora_id)
-
-    def list_loras(self) -> set[int]:
-        return self.model_runner.list_loras()
-
-    def pin_lora(self, lora_id: int) -> bool:
-        return self.model_runner.pin_lora(lora_id)
-
-    def reset_encoder_cache(self) -> None:
-        self.model_runner.reset_encoder_cache()
-
     def synchronize_device(self) -> None:
         torch.npu.synchronize()
 
@@ -1557,31 +1524,6 @@ class NPUWorker(GPUWorker):
 
     def get_supported_pooling_tasks(self):
         return self.model_runner.get_supported_pooling_tasks()
-
-    def get_supported_tasks(self) -> "tuple[SupportedTask, ...]":
-        return self.model_runner.get_supported_tasks()
-
-    def take_draft_token_ids(self) -> DraftTokenIds | None:
-        return self.model_runner.take_draft_token_ids()
-
-    def update_config(self, overrides: dict[str, Any]) -> None:
-        # Replace each config once, sharing the replacement across all owners.
-        # Both NPU runners inherit GPUModelRunner.update_config; calling it after
-        # replacement would construct a second, different object.
-        allowed_config_names = {"load_config", "model_config"}
-        for config_name, config_overrides in overrides.items():
-            if config_name not in allowed_config_names:
-                allowed = ", ".join(sorted(allowed_config_names))
-                raise ValueError(f"Config override '{config_name}' is not supported. Supported configs: {allowed}")
-            config = getattr(self.vllm_config, config_name)
-            new_config = update_config(config, config_overrides)
-            setattr(self.vllm_config, config_name, new_config)
-            setattr(self.model_runner, config_name, new_config)
-            setattr(self, config_name, new_config)
-
-    def reload_weights(self, *args, **kwargs) -> None:
-        with set_current_vllm_config(self.vllm_config):
-            self.model_runner.reload_weights(*args, **kwargs)
 
     def check_health(self) -> None:
         import subprocess

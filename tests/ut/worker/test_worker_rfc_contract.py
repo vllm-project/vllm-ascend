@@ -7,6 +7,7 @@ integration tests remain in test_worker_v1.py and test_worker_v2.py.
 
 import ast
 import copy
+import importlib.util
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,7 +21,20 @@ WORKER = ROOT / "vllm_ascend/worker/worker.py"
 def worker_method(name, **bindings):
     tree = ast.parse(WORKER.read_text(encoding="utf-8"))
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "NPUWorker")
-    method = copy.deepcopy(next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == name))
+    node = next((node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == name), None)
+    if node is None:
+        # Source-only local validation and the installed pinned vLLM in CI.
+        source = ROOT.parent / "worker-upstream/vllm/v1/worker/gpu_worker.py"
+        if not source.exists():
+            spec = importlib.util.find_spec("vllm")
+            source = Path(next(iter(spec.submodule_search_locations))) / "v1/worker/gpu_worker.py"
+        parent = next(
+            n
+            for n in ast.parse(source.read_text(encoding="utf-8")).body
+            if isinstance(n, ast.ClassDef) and n.name == "Worker"
+        )
+        node = next(n for n in parent.body if isinstance(n, ast.FunctionDef) and n.name == name)
+    method = copy.deepcopy(node)
     method.name = "_contract_method"
     method.decorator_list = []
     module = ast.Module(
@@ -235,6 +249,23 @@ class WorkerAlignmentContract(unittest.TestCase):
                 self.assertEqual(
                     events, ["eplb", "pp", "gc", "kv", "ec", "profiler", "engine", "elastic", "runner", "pools"]
                 )
+
+    def test_forbidden_overrides(self):
+        scope = {}
+        path = ROOT / "vllm_ascend/worker/worker_interfaces.py"
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), scope)
+        for file, class_name in (
+            (WORKER, "NPUWorker"),
+            (ROOT / "vllm_ascend/_310p/worker_310p.py", "NPUWorker310"),
+            (ROOT / "vllm_ascend/xlite/xlite_worker.py", "XliteWorker"),
+        ):
+            cls = next(
+                n
+                for n in ast.parse(file.read_text(encoding="utf-8")).body
+                if isinstance(n, ast.ClassDef) and n.name == class_name
+            )
+            methods = {n.name for n in cls.body if isinstance(n, ast.FunctionDef)}
+            self.assertFalse(methods.intersection(scope["INHERITED_WORKER_METHODS"]), class_name)
 
     def test_execution_decorators(self):
         cls = next(

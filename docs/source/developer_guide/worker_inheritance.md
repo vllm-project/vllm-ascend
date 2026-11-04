@@ -77,3 +77,16 @@ and encoder connectors, profiler, transfer engine, elastic executor, model
 runner, then release existing CaMem pools. An EPLB close failure prevents
 releasing resources it may still be using. No CaMem instance is created during
 shutdown. GPU sentinel and executor resources are never allocated on NPU.
+
+## Forwarding migration (phase 2)
+
+LoRA add/remove/list/pin, get_model, get_supported_tasks, take_draft_token_ids,
+reset_encoder_cache, update_max_model_len, reload_weights and update_config now
+resolve directly to GPUWorker. The V1/V2 runner methods already implement those
+contracts; 310P and Xlite inherit the same forwarding contracts. The Worker,
+shared config and runner receive the same replacement config objects. Reload
+executes inside the parent current-config context.
+
+`INHERITED_WORKER_METHODS` in `worker_interfaces.py` is immutable. Runtime tests
+assert actual method identity for all three Worker classes, and portable tests
+reject reintroduced overrides in any of those classes.

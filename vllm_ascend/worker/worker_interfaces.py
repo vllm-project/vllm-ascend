@@ -11,3 +11,19 @@ class UnsupportedElasticEPExecutor:
     def shutdown(self) -> None:
         # There is deliberately no executor resource to release.
         pass
+
+
+# These methods must continue resolving to vLLM after dependency upgrades.
+INHERITED_WORKER_METHODS = (
+    "get_model",
+    "get_supported_tasks",
+    "take_draft_token_ids",
+    "add_lora",
+    "remove_lora",
+    "list_loras",
+    "pin_lora",
+    "reset_encoder_cache",
+    "update_max_model_len",
+    "reload_weights",
+    "update_config",
+)
