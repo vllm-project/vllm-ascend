@@ -63,6 +63,7 @@ class BaseKVPoolScheduler(ABC):
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         backend_name = str(extra_config.get("backend", "mooncake"))
         self.backend_name = backend_name.lower()
+        self._init_layerwise_backend()
         self.layerwise_offload: bool = False
         hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
         hf_config = getattr(vllm_config.model_config, "hf_config", hf_text_config)
@@ -184,6 +185,10 @@ class BaseKVPoolScheduler(ABC):
         self.model_name = model_config.model.split("/")[-1]
 
         self.client: LookupKeyClient | None = None
+
+    def _init_layerwise_backend(self) -> None:
+        """Initialize optional backend capabilities before hybrid mode selection."""
+        return None
 
     def _use_hybrid(self, vllm_config: VllmConfig, kv_cache_groups: list[Any] | None) -> bool:
         return uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
