@@ -113,8 +113,10 @@ def register_service_profiling():
 
 def register_model():
     from .models import register_model
+    from .tokenizers import register_tokenizers
 
     register_model()
+    register_tokenizers()
 
 
 import vllm_ascend.logger  # noqa: E402, F401

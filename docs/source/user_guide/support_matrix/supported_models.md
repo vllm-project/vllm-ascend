@@ -67,6 +67,16 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Qwen3-Dense | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 20k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
     | Qwen3-30B-A3B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |
 
+#### Community Model Validation
+
+| Model | Verified dtype | Hardware | Parallel topology | Execution | Validated limits | Tutorial |
+| --- | --- | --- | --- | --- | --- | --- |
+| DeepSeek-R1-Distill-Llama-70B | BF16 | 4 × Ascend 910B2C, 64 GiB each (A2) | TP=4, DP=1, PP=1 | ACLGraph | 8192 total tokens; concurrency 1–2 | [Deployment and evaluation](../../tutorials/models/DeepSeek-R1-Distill-Llama-70B.md) |
+
+DeepSeek-R1-Distill-Llama-70B uses `--tokenizer-mode deepseek_r1_distill_llama` with the original BF16 checkpoint.
+The validated topology is one node with four NPUs. Other dtypes, quantization formats, A3 hardware,
+and DP/PP expansion require separate validation. This text-only dense checkpoint has no MTP layers.
+
 ### Pooling Models
 
 === "950PR&950DT Products"

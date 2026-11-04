@@ -1,0 +1,9 @@
+pr: 20966
+entries:
+  - category: bugfix
+    text: >-
+      Added the deepseek_r1_distill_llama tokenizer mode to preserve
+      DeepSeek-R1-Distill-Llama-70B ByteLevel tokenization with Transformers 5,
+      fixing whitespace and Chinese text corruption.
+    model: DeepSeek-R1-Distill-Llama-70B
+    hardware: [A2]
