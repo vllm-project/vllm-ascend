@@ -169,6 +169,7 @@ def torch_cuda_wrapper():
         torch.cuda.CUDAGraph = UpdatableGraph
         torch.cuda.graph = torch_npu_graph_wrapper
         torch.cuda.synchronize = torch.npu.synchronize
+        torch.cuda.ipc_collect = torch.npu.ipc_collect
         torch.cuda.set_stream = torch.npu.set_stream
         torch.cuda.current_device = torch.npu.current_device
         torch.cuda.mem_get_info = torch.npu.mem_get_info
