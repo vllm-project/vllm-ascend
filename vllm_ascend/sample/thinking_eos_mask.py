@@ -30,7 +30,7 @@ tool-calling turn would keep EOS masked until ``max_tokens``.
 """
 
 import torch
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
@@ -42,8 +42,6 @@ from vllm.v1.sample.thinking_budget_state import (
 )
 
 from vllm_ascend import envs
-
-logger = init_logger(__name__)
 
 # Sentinel budget for mask-only tracking: large enough that the inherited
 # countdown can never reach zero, so only the EOS mask applies and the
@@ -106,9 +104,7 @@ class ThinkingEosMaskStateHolder(ThinkingBudgetStateHolder):
             thinking_token_budget = params.thinking_token_budget
             if thinking_token_budget is None:
                 thinking_token_budget = _MASK_ONLY_THINKING_BUDGET
-            self._state[index] = self._init_state_entry(
-                prompt_tok_ids, thinking_token_budget
-            )
+            self._state[index] = self._init_state_entry(prompt_tok_ids, thinking_token_budget)
             self._state[index]["output_tok_ids"] = output_tok_ids
             self._state[index]["spec_token_ids"] = []
 
@@ -165,23 +161,15 @@ class ThinkingEosMaskStateHolder(ThinkingBudgetStateHolder):
         row_indices: list[int] = []
         cumulative_total = 0
         for index in range(n_layout):
-            spec_tokens = (
-                spec_lists[index] if index < len(spec_lists) else []
-            )
+            spec_tokens = spec_lists[index] if index < len(spec_lists) else []
             if self.in_spec_mode:
                 count = len(spec_tokens) if not predict_bonus_token else 1
             else:
                 count = 1
             state = self._state.get(index)
-            if (
-                state is not None
-                and state.get("in_think", False)
-                and not state.get("in_end", False)
-            ):
+            if state is not None and state.get("in_think", False) and not state.get("in_end", False):
                 row_indices.extend(
-                    row
-                    for row in range(cumulative_total, cumulative_total + count)
-                    if row < logits.shape[0]
+                    row for row in range(cumulative_total, cumulative_total + count) if row < logits.shape[0]
                 )
             cumulative_total += count
 
@@ -195,12 +183,8 @@ class ThinkingEosMaskStateHolder(ThinkingBudgetStateHolder):
             for token in self.eos_mask_token_ids:
                 flat_rows.append(row)
                 flat_tokens.append(token)
-        rows_tensor = async_tensor_h2d(
-            flat_rows, dtype=torch.long, device=logits.device
-        )
-        tokens_tensor = async_tensor_h2d(
-            flat_tokens, dtype=torch.long, device=logits.device
-        )
+        rows_tensor = async_tensor_h2d(flat_rows, dtype=torch.long, device=logits.device)
+        tokens_tensor = async_tensor_h2d(flat_tokens, dtype=torch.long, device=logits.device)
         fill = logits.new_full((len(flat_rows),), float("-inf"))
         logits.index_put_((rows_tensor, tokens_tensor), fill)
         return logits
@@ -214,16 +198,12 @@ def maybe_create_thinking_eos_mask_holder(
     is_pin_memory: bool,
 ) -> ThinkingBudgetStateHolder | None:
     """Create the masked holder when configured, the stock one otherwise."""
-    eos_mask_token_ids = _parse_token_ids(
-        envs.VLLM_ASCEND_THINKING_MASK_EOS_TOKEN_IDS or ""
-    )
+    eos_mask_token_ids = _parse_token_ids(envs.VLLM_ASCEND_THINKING_MASK_EOS_TOKEN_IDS or "")
     if not eos_mask_token_ids:
         return maybe_create_thinking_budget_state_holder(
             reasoning_config, max_num_seqs, num_spec_tokens, device, is_pin_memory
         )
-    implicit_end_token_ids = _parse_token_ids(
-        envs.VLLM_ASCEND_THINKING_MASK_IMPLICIT_END_TOKEN_IDS or ""
-    )
+    implicit_end_token_ids = _parse_token_ids(envs.VLLM_ASCEND_THINKING_MASK_IMPLICIT_END_TOKEN_IDS or "")
     logger.info_once(
         "Thinking EOS mask enabled: eos_token_ids=%s, implicit_end_token_ids=%s",
         eos_mask_token_ids,
