@@ -17,11 +17,10 @@ from vllm_ascend.worker.v2.spec_decode.standalone_ar import speculator as module
 @pytest.mark.parametrize("target_bounds", [[7, 31], [63, 64]])
 def test_correction_token_is_counted_once_in_standalone_attention(step, target_bounds):
     speculator = object.__new__(module.AscendStandaloneARSpeculator)
-    speculator.max_model_len = 64
     speculator.expanded_positions = torch.arange(8)
     speculator.input_buffers = SimpleNamespace(positions=torch.arange(2))
     speculator.draft_is_prefilling = torch.tensor([True, False])
-    speculator.vllm_config = SimpleNamespace(parallel_config=object())
+    speculator.vllm_config = SimpleNamespace(parallel_config=object(), model_config=SimpleNamespace(max_model_len=64))
     target = torch.tensor(target_bounds, dtype=torch.int32)
     # #60989's main propose includes the correction before builder dispatch.
     incoming = target.clone() if vllm_version_is("0.33.0") else target + 1
