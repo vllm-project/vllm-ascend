@@ -1,0 +1,6 @@
+pr: 20922
+entries:
+  - category: config
+    text: enable_fused_mc2=3 now emits a warning at startup when the requested MegaMoe shared-expert fusion cannot run (non-A5 device, MegaMoe inactive, TP-sharded shared weights, unsupported quant type or activation), and logs the resolved MoE configuration once so the effective combination is visible.
+  - category: bugfix
+    text: MegaMoe shared-expert fusion now works with sequence parallelism when enable_shared_expert_dp replicates the shared weights, while TP-sharded shared experts keep the standalone forward that performs the required cross-rank reduction.
