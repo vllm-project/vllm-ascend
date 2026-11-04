@@ -29,7 +29,11 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.dsa_v1 import (
+    _aligned_dspark_index_width,
+    build_dspark_swa_indices,
+    dsv4_dsa_overlap_stream,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -877,8 +881,14 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._flat_slot_mapping = torch.full((max_tokens,), -1, dtype=torch.int64, device=device)
         self._seq_lens = torch.zeros(max_reqs, dtype=torch.int32, device=device)
         self._max_tokens = max_tokens
-        self._dspark_swa_indices = None
-        self._dspark_swa_lengths = None
+        self._dspark_swa_indices: torch.Tensor | None = None
+        self._dspark_swa_lengths: torch.Tensor | None = None
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None and speculative_config.method == "dspark":
+            width = _aligned_dspark_index_width(window_size, speculative_config.num_speculative_tokens)
+            # Allocate before graph capture; callers write into active views.
+            self._dspark_swa_indices = torch.empty((max_tokens, 1, width), dtype=torch.int32, device=device)
+            self._dspark_swa_lengths = torch.empty((max_tokens, 1), dtype=torch.int32, device=device)
         self._cache_seq_lens = torch.zeros(max_reqs, dtype=torch.int32, device=device)
         self._cmp_residual = torch.zeros(max_reqs, dtype=torch.int32, device=device)
         self._smla_metadata = torch.zeros(query_metadata_size, dtype=torch.int32, device=device)
@@ -1208,26 +1218,27 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 ).view(num_reqs, blocks_per_req)
         noncausal = not bool(getattr(common, "causal", True))
         if noncausal and ori_sparse_indices is None:
-            # Allocate once before capture, then write directly to these views.
-            spec_tokens = self.vllm_config.speculative_config.num_speculative_tokens
-            width = ((int(window_size) + int(spec_tokens) + 127) // 128) * 128
-            if self._dspark_swa_indices is None:
-                self._dspark_swa_indices = torch.empty(
-                    (self._max_tokens, 1, width), dtype=torch.int32, device=seq_lens.device
-                )
-                self._dspark_swa_lengths = torch.empty(
-                    (self._max_tokens, 1), dtype=torch.int32, device=seq_lens.device
-                )
-            if num_actual_tokens > self._max_tokens or self._dspark_swa_indices.shape[-1] != width:
+            speculative_config = self.vllm_config.speculative_config
+            indices_buffer = self._dspark_swa_indices
+            lengths_buffer = self._dspark_swa_lengths
+            if speculative_config is None or indices_buffer is None or lengths_buffer is None:
+                raise RuntimeError("DSpark SWA buffers must be initialized before building draft metadata")
+            spec_tokens = speculative_config.num_speculative_tokens
+            width = _aligned_dspark_index_width(window_size, spec_tokens)
+            if num_actual_tokens > indices_buffer.shape[0] or indices_buffer.shape[-1] != width:
                 raise ValueError("DSpark metadata capacity changed; rebuild before graph capture")
-            assert self._dspark_swa_lengths is not None
             ori_sparse_indices, ori_topk_length = build_dspark_swa_indices(
-                common.block_table_tensor[:num_reqs], spec_tokens, window_size,
-                storage_block_size, common.query_start_loc[:num_reqs + 1], seq_lens,
-                num_actual_tokens, index_width=width,
-                indices_output=self._dspark_swa_indices[:num_actual_tokens],
+                common.block_table_tensor[:num_reqs],
+                spec_tokens,
+                window_size,
+                storage_block_size,
+                common.query_start_loc[: num_reqs + 1],
+                seq_lens,
+                num_actual_tokens,
+                index_width=width,
+                indices_output=indices_buffer[:num_actual_tokens],
                 use_logical_indices=True,
-                lengths_output=self._dspark_swa_lengths[:num_actual_tokens],
+                lengths_output=lengths_buffer[:num_actual_tokens],
             )
         if (
             not noncausal

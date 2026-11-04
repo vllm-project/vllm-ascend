@@ -2931,3 +2931,117 @@ def test_o_proj_without_sharding_skips_buffers_and_collectives(otp_size):
     get_capacity.assert_not_called()
     all_to_all.assert_not_called()
     reduce_scatter.assert_not_called()
+<<<<<<< HEAD
+=======
+
+
+@pytest.mark.parametrize("logical_indices", [False, True])
+def test_dspark_indices_preserve_physical_fallback(logical_indices):
+    indices_output = torch.empty((3, 1, 8), dtype=torch.int32)
+    lengths_output = torch.empty((3, 1) if logical_indices else (3,), dtype=torch.int32)
+    indices, lengths = build_dspark_swa_indices(
+        block_table=torch.tensor([[5, 2]], dtype=torch.int32),
+        num_speculative_tokens=3,
+        window_size=4,
+        block_size=4,
+        query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+        seq_lens=torch.tensor([6], dtype=torch.int32),
+        num_decode_tokens=3,
+        index_width=8,
+        indices_output=indices_output,
+        use_logical_indices=logical_indices,
+        lengths_output=lengths_output,
+    )
+    assert indices is indices_output
+    assert lengths is lengths_output
+    expected = [0, 1, 2, 3, 4, 5] if logical_indices else [20, 21, 22, 23, 8, 9]
+    assert indices[:, 0].tolist() == [expected + [-1, -1]] * 3
+    if logical_indices:
+        # The top-k interface supplies a persistent [T, 1] length view.
+        assert lengths is lengths_output
+        assert lengths.shape == (3, 1)
+    else:
+        # Physical-slot callers retain the plain [T] lengths.
+        assert lengths.shape == (3,)
+    assert lengths.flatten().tolist() == [6] * 3
+
+
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_sparse_flash_forward_requires_draft_metadata(is_draft):
+    impl = _make_impl()
+    impl.compress_ratio = 1
+    impl.multistream_dsv4_dsa_overlap = False
+    req = _make_req_metadata()
+    req.cos = {"layer": torch.ones(2, 1, 1, 2)}
+    req.sin = {"layer": torch.zeros(2, 1, 1, 2)}
+    req.sas_metadata = torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    req.use_sparse_flash_mla_for_draft = is_draft
+    # Indices alone must not switch the main model's operator.
+    req.dspark_swa_indices = torch.zeros((2, 1, 128), dtype=torch.int32)
+    req.dspark_swa_topk_lengths = torch.ones((2, 1), dtype=torch.int32)
+    metadata = AscendDSAMetadata(2, 1, 2, 0, req_metadata=req)
+    layer = AscendDSALayerMetadata(attention=metadata, swa=metadata)
+    output = torch.ones(2, 1, 2)
+    original_op = MagicMock(return_value=(output,))
+    draft_op = MagicMock(return_value=(output,))
+    plan = _mock_dsa_kv_plan(get_dsa_sparse_attn_op=original_op, get_dsa_sparse_attn_base_kwargs={})
+    with (
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
+        patch("vllm_ascend.attention.dsa_v1.sparse_flash_mla", draft_op),
+        patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=is_draft),
+        patch.object(
+            DeviceOperator, "unpack_dsa_forward_kv_cache", return_value=(None, torch.empty(0), None, None, None, None)
+        ),
+        patch.object(impl, "_mla_prolog_single_stream", return_value=(output, output, None)),
+        patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
+        patch("vllm_ascend.attention.dsa_v1.wait_for_device_metadata"),
+        patch("vllm_ascend.attention.dsa_v1.record_attention_compute_start"),
+    ):
+        assert impl._forward_attention("layer", torch.ones(2, 4), (), layer) is output
+    selected, unused = (draft_op, original_op) if is_draft else (original_op, draft_op)
+    selected.assert_called_once()
+    unused.assert_not_called()
+    kwargs = selected.call_args.kwargs
+    assert kwargs["cmp_ratio"] == 1
+    assert kwargs["ori_mask_mode"] == (0 if is_draft else 4)
+    if is_draft:
+        assert kwargs["cmp_mask_mode"] == 0
+        assert kwargs["ori_topk_length"] is req.dspark_swa_topk_lengths
+        assert kwargs["ori_win_left"] == kwargs["ori_win_right"] == -1
+    else:
+        assert "ori_topk_length" not in kwargs
+
+
+@pytest.mark.parametrize("logical_indices", [False, True])
+def test_dspark_indices_preserve_buffer_destination(logical_indices):
+    indices_output = torch.empty((3, 1, 8), dtype=torch.int32)
+    lengths_output = torch.empty((3, 1) if logical_indices else (3,), dtype=torch.int32)
+    buffer = torch.full((5, 1, 8), -999, dtype=torch.int32)
+    seq_lens = torch.tensor([6], dtype=torch.int32)
+    for seq_len in (6, 7):
+        seq_lens.fill_(seq_len)
+        indices, lengths = build_dspark_swa_indices(
+            block_table=torch.tensor([[5, 2]], dtype=torch.int32),
+            num_speculative_tokens=3,
+            window_size=4,
+            block_size=4,
+            query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+            seq_lens=seq_lens,
+            num_decode_tokens=3,
+            index_width=8,
+            buffer=buffer,
+            indices_output=indices_output,
+            lengths_output=lengths_output,
+            use_logical_indices=logical_indices,
+        )
+        positions = list(range(seq_len))
+        expected = positions if logical_indices else [([5, 2][p // 4] * 4 + p % 4) for p in positions]
+        expected += [-1] * (8 - seq_len)
+        assert indices[:, 0].tolist() == [expected] * 3
+        assert indices.data_ptr() == buffer.data_ptr()
+        assert indices.shape == (3, 1, 8)
+        assert lengths is lengths_output
+        assert lengths.flatten().tolist() == [seq_len] * 3
+        torch.testing.assert_close(indices_output, indices, rtol=0, atol=0)
+        assert torch.all(buffer[3:] == -999)
+>>>>>>> 7346ea292 (build_dspark_swa_indices_persistent)

@@ -51,28 +51,19 @@ def build_dspark_swa_indices_triton(
     index_width: int,
     window_size: int,
     *,
-    indices_output: torch.Tensor | None = None,
-    lengths_output: torch.Tensor | None = None,
+    indices_output: torch.Tensor,
+    lengths_output: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build request-local DSpark SWA indices with one kernel launch."""
-    indices = indices_output if indices_output is not None else torch.empty(
-        (num_tokens, 1, index_width),
-        dtype=torch.int32,
-        device=query_start_loc.device,
-    )
-    lengths = lengths_output if lengths_output is not None else torch.empty(
-        (num_tokens, 1),
-        dtype=torch.int32,
-        device=query_start_loc.device,
-    )
-    for name, tensor, shape in (
-        ("indices", indices, (num_tokens, 1, index_width)),
-        ("lengths", lengths, (num_tokens, 1)),
-    ):
-        if tensor.shape != shape or tensor.dtype != torch.int32:
-            raise ValueError(f"{name} must be int32 with shape {shape}")
-        if tensor.device != query_start_loc.device or not tensor.is_contiguous():
-            raise ValueError(f"{name} must be contiguous on the query device")
+    """Build request-local DSpark SWA indices into caller-owned outputs.
+
+    The caller provides contiguous int32 tensors on query_start_loc.device:
+    indices_output has shape [num_tokens, 1, index_width], and lengths_output
+    has shape [num_tokens, 1]. Inputs and outputs must not overlap. The caller
+    owns capacity checks and keeps output storage stable for graph replay.
+    num_tokens must equal the sum of the per-request query lengths.
+    """
+    indices = indices_output
+    lengths = lengths_output
     if num_tokens == 0:
         return indices, lengths
 
