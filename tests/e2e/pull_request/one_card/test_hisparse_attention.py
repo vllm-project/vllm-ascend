@@ -12,13 +12,17 @@ import torch_npu  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
-def _require_ascend950_sfa():
-    if not torch.npu.is_available() or not torch.npu.get_device_name(0).startswith("Ascend950"):
-        pytest.skip("HiSparse SFA integration currently targets Ascend 950")
+def _require_npu_sfa():
+    if not torch.npu.is_available():
+        pytest.skip("HiSparse SFA tests require an NPU")
+    from vllm_ascend.device.device_config import is_310p
+
+    if is_310p():
+        pytest.skip("The native SFA operation is not registered for Ascend 310P")
     torch.npu.set_device(0)
     from vllm_ascend.utils import bootstrap_custom_op_env
 
-    # Load the required SFA extension without enabling all A5 custom paths.
+    # Load the required SFA extension without changing custom-op selection.
     bootstrap_custom_op_env()
     import vllm_ascend.vllm_ascend_C  # noqa: F401
 
@@ -108,6 +112,10 @@ def test_sparse_attention_reference(num_queries, strided, capture):
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("strided", [False, True])
 def test_c8_attention_uses_existing_native_operator(strided, capture):
+    from vllm_ascend.device.device_config import is_950
+
+    if not is_950():
+        pytest.skip("This case uses the native A5 E4M3FN C8 payload; A2/A3 use an INT8 format")
     from vllm_ascend.attention.sfa_v1 import custom_kv_rmsnorm_rope
     from vllm_ascend.ops.hisparse_c8 import c8_physical_attention, pack_c8_components
 
