@@ -822,7 +822,13 @@ class NPUWorker(WorkerBase):
         # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
         # are, remove this is_step_model exemption: this line and the
         # `or is_step_model` budget gate below.
-        is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
+        is_step_model = self.model_config.hf_text_config.model_type in (
+            "step3p5",
+            "step3p7",
+            "step5",
+            "step5_vl",
+            "step5_mtp",
+        )
         if (
             has_attention
             and (has_mamba or is_step_model or shares_attention_pool)
