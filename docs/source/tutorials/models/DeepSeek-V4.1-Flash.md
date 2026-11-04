@@ -152,7 +152,7 @@ separate images from the v0.32.0 release branch.
     An A2 server exposes 8 devices. Run this command on all four A2 servers.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:nightly-releases-v0.32.0rc
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a2
     export MODEL_ROOT="/data/weights"
 
     docker pull "$IMAGE"
