@@ -2,9 +2,12 @@ pr: 19819
 entries:
   - category: feature
     text: >-
-      Added Muse Spark Open support on Ascend for unquantized checkpoints, under tensor
-      parallelism or expert parallelism. The routed experts run on the ordinary Ascend
-      fused-MoE path, with the per-expert output norm applied on the MLP stage so the fused
-      combine is kept. Requires a vLLM build that ships the upstream model package; nothing
-      is registered on builds without it.
+      Added Muse Spark Open support on Ascend, under tensor parallelism or expert
+      parallelism, for unquantized checkpoints and for ModelSlim-quantized ones. The routed
+      experts run on the ordinary Ascend fused-MoE path, with the per-expert output norm
+      applied on the MLP stage so the fused combine is kept; without expert parallelism the
+      routed rows are summed over tensor parallelism before that norm, since each rank holds
+      only part of every expert. No accuracy number is claimed for either checkpoint kind.
+      Requires a vLLM build that ships the upstream model package; nothing is registered on
+      builds without it.
     model: Muse-Spark-Open
