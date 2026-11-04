@@ -1,6 +1,4 @@
-# Assign the actual PR number and move to fragments/<PR number>.yaml when
-# opening a PR. No PR is created by this local implementation task.
-pr: null
+pr: 20854
 entries:
   - category: feature
     text: >-
