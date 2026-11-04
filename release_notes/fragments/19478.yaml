@@ -1,0 +1,9 @@
+pr: 19478
+entries:
+  - category: performance
+    text: >-
+      Speculative-decoding draft heads (EAGLE, DFlash, DSpark, MTP) now publish
+      head-level dynamic capacity per decode step under LM-head tensor
+      parallelism on Model Runner V2, so draft computation follows the actual
+      request mix instead of the padded batch shape, reducing spec-decode
+      latency with LM-head TP enabled.
