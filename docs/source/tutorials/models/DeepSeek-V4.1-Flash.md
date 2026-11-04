@@ -819,6 +819,7 @@ the selected revision.
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
             "enable_cpu_binding":true,
+            "enable_dsa_cp":true,
             "enable_flashcomm1":true,
             "enable_shared_expert_dp":true
         }' \
@@ -1214,6 +1215,7 @@ vllm serve "$MODEL_PATH" \
     --additional-config '{
         "enable_cpu_binding":true,
         "enable_fused_mc2":1,
+        "enable_dsa_cp":true,
         "enable_flashcomm1":true,
         "enable_shared_expert_dp":true
     }' \
@@ -1492,6 +1494,7 @@ vllm serve "$MODEL_PATH" \
     --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
     --additional-config '{
         "enable_cpu_binding":true,
+        "enable_dsa_cp":true,
         "enable_flashcomm1":true,
         "enable_shared_expert_dp":true
     }' \
@@ -1718,6 +1721,7 @@ For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool gui
               "enable_static_kernel":false
           },
           "enable_cpu_binding":true,
+          "enable_dsa_cp":true,
           "enable_flashcomm1":true,
           "enable_shared_expert_dp":true
       }'
