@@ -1,4 +1,4 @@
-# MiniMax-M3 A5 decode index ordering
+# MiniMax-M3 decode index ordering
 
 ## Description
 
