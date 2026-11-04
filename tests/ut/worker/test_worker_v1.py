@@ -1225,6 +1225,7 @@ class TestNPUWorker(TestBase):
         worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=8192)
         worker.vllm_config = MagicMock(kv_transfer_config=None)
         worker.init_snapshot = SimpleNamespace(free_memory=16384)
+        worker._scale_kv_cache_memory_for_multi_group = MagicMock(return_value=6144)
         worker._apply_kv_offload_decode_memory_constraints = MagicMock(return_value=4096)
 
         # Capture the active vLLM config while profile_run() executes, so we can
@@ -1241,8 +1242,36 @@ class TestNPUWorker(TestBase):
 
         self.assertEqual(result, 4096)
         worker.model_runner.profile_run.assert_called_once_with(randomize_inputs=False)
-        worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(8192)
+        worker._scale_kv_cache_memory_for_multi_group.assert_called_once_with(8192)
+        worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(6144)
         self.assertEqual(profile_run_configs, [worker.vllm_config])
+
+    def test_explicit_kv_cache_memory_converts_kvpp_budget_after_offload(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=8192)
+        worker.vllm_config = MagicMock(kv_transfer_config=None)
+        worker.init_snapshot = SimpleNamespace(free_memory=16384)
+        worker.model_runner = MagicMock()
+        worker._scale_kv_cache_memory_for_multi_group = MagicMock(return_value=6144)
+        worker._apply_kv_offload_decode_memory_constraints = MagicMock(return_value=4096)
+        # The KVPP plan consumes physical bytes and returns a block count;
+        # the worker advertises the corresponding logical cache bytes.
+        plan = SimpleNamespace(
+            get_num_blocks=MagicMock(return_value=8),
+            logical_cache_spec={
+                "layer0": SimpleNamespace(page_size_bytes=64),
+                "layer1": SimpleNamespace(page_size_bytes=32),
+            },
+        )
+        worker._kvpp_cache_allocation_plan = plan
+
+        self.assertEqual(worker.determine_available_memory(), 8 * (64 + 32))
+        self.assertEqual(worker.available_kv_cache_memory_bytes, 4096)
+        worker._scale_kv_cache_memory_for_multi_group.assert_called_once_with(8192)
+        worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(6144)
+        plan.get_num_blocks.assert_called_once_with(4096)
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
