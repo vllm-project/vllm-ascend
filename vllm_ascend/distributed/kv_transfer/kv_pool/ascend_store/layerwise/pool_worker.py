@@ -755,11 +755,6 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             self._masked_runs_cache[key] = runs
         return runs
 
-    def _layerwise_key_rank(self, group_id: int) -> int:
-        if not getattr(self, "use_kvpp", False) and group_id in getattr(self, "layerwise_head_sharded_groups", ()):
-            return self.pcp_rank
-        return self.metadata[group_id].head_or_tp_rank
-
     def _make_layerwise_full_key(self, group_id: int, block_hash_hex: str) -> str:
         """Use the backend-bound layout shared with scheduler hit checks."""
         assert self.layerwise_keys is not None
