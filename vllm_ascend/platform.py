@@ -32,7 +32,13 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-from vllm_ascend.ascend_config import KVPPConfig, StairConfig, get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import (
+    KVPPConfig,
+    StairConfig,
+    get_ascend_config,
+    init_ascend_config,
+    is_draft_config_context,
+)
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
     DeviceAdaptorFamily,
@@ -1117,7 +1123,13 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
                 sorted(_V2_EPLB_CONFIG_FIELDS),
             )
         load_collection_phase = eplb_config.get("load_collection_phase", "all")
-        if load_collection_phase != "all" and not vllm_config.parallel_config.enable_eplb:
+        # Disabled drafts inherit this target-only setting but never collect
+        # EPLB load. Keep target validation strict and preserve other checks.
+        if (
+            load_collection_phase != "all"
+            and not vllm_config.parallel_config.enable_eplb
+            and not is_draft_config_context()
+        ):
             raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
         if vllm_config.parallel_config.enable_eplb:
             upstream_eplb_config = vllm_config.parallel_config.eplb_config
