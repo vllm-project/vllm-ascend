@@ -28,11 +28,13 @@ from __future__ import annotations
 import sys
 import types
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from torch.overrides import TorchFunctionMode
 from vllm.distributed.weight_transfer.packed_tensor import PackedIpcChunk
 
 from vllm_ascend.distributed.weight_transfer import packed_tensor as packed_module
@@ -69,6 +71,34 @@ class _FakeNpuStream:
         return None
 
 
+class _CPUAllocationMode(TorchFunctionMode):
+    """Make valid NPU factory calls run on CPU without rebinding torch.empty."""
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func is torch.empty:
+            device = kwargs.get("device")
+            if getattr(device, "type", None) == "npu" or (isinstance(device, str) and device.split(":", 1)[0] == "npu"):
+                kwargs = {**kwargs, "device": "cpu"}
+        return func(*args, **kwargs)
+
+
+class _ObserveAllocations(TorchFunctionMode):
+    """Record the requested device and execute allocations on CPU."""
+
+    def __init__(self):
+        super().__init__()
+        self.devices = []
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func is torch.empty:
+            device = kwargs.get("device")
+            self.devices.append(None if device is None else str(device))
+            kwargs = {**kwargs, "device": "cpu"}
+        return func(*args, **kwargs)
+
+
 @pytest.fixture(autouse=True)
 def _stub_torch_npu():
     """Patch every ``torch.npu.*`` reference and ``device="npu"`` the module uses.
@@ -77,8 +107,8 @@ def _stub_torch_npu():
     at call time via attribute access on the ``torch.npu`` submodule, and creates
     buffers with ``torch.empty(..., device="npu")``.  On a pure CPU build neither
     ``torch.npu`` nor the ``"npu"`` device exists, so both must be stubbed:
-    ``torch.npu`` is replaced with a fake namespace and ``torch.empty`` is wrapped
-    to redirect ``device="npu"`` to ``device="cpu"`` (the packing logic under test
+    ``torch.npu`` is replaced with a fake namespace and a factory mode redirects
+    ``device="npu"`` to ``device="cpu"`` (the packing logic under test
     is dtype/shape/byte-correctness, which is device-agnostic).
     """
     fake_npu = MagicMock(
@@ -89,18 +119,10 @@ def _stub_torch_npu():
         # already implements ``__enter__``/``__exit__`` so just return it.
         stream=lambda s: s,
     )
-    original_empty = torch.empty
-
-    def _fake_empty(*args, **kwargs):
-        device = kwargs.get("device")
-        if getattr(device, "type", None) == "npu" or (isinstance(device, str) and device.split(":", 1)[0] == "npu"):
-            kwargs["device"] = "cpu"
-        return original_empty(*args, **kwargs)
-
     with (
         patch.object(torch, "npu", fake_npu, create=True),
-        patch.object(torch, "cuda", MagicMock()),
-        patch.object(torch, "empty", _fake_empty),
+        patch.object(torch, "cuda", MagicMock(current_stream=_FakeNpuStream)),
+        _CPUAllocationMode(),
         patch.object(torch.accelerator, "current_stream", _FakeNpuStream, create=True),
         patch.object(torch.accelerator, "current_device_index", return_value=0, create=True),
         patch(
@@ -112,7 +134,7 @@ def _stub_torch_npu():
 
 
 @pytest.mark.parametrize("empty_only", [False, True])
-def test_inherited_packed_sender_roundtrip_through_upstream_producer(empty_only):
+def test_packed_sender_roundtrip_without_global_replacement(empty_only):
     from vllm.distributed.weight_transfer import ipc_engine
 
     from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import NPUIPCTrainerWeightTransferEngine
@@ -150,8 +172,9 @@ def test_inherited_packed_sender_roundtrip_through_upstream_producer(empty_only)
 
     client.update_weights.side_effect = receive
     client.finish_weight_update.side_effect = importer.close
+    original_empty = torch.empty
+    original_producer = ipc_engine.packed_ipc_producer
     with (
-        patch.object(ipc_engine, "packed_ipc_producer"),
         patch("vllm_ascend.distributed.weight_transfer.npu_ipc_engine.npu_generate_uuid", return_value="node-0"),
         patch(f"{_MODULE}.reduce_tensor", side_effect=export),
         _install_fake_rebuild_npu_tensor(torch.empty(0, dtype=torch.uint8)),
@@ -161,9 +184,10 @@ def test_inherited_packed_sender_roundtrip_through_upstream_producer(empty_only)
         engine = NPUIPCTrainerWeightTransferEngine(
             client=client, source=source, packed=True, packed_buffer_size_bytes=8
         )
-        assert type(engine)._send_packed is ipc_engine.IPCTrainerWeightTransferEngine._send_packed
         engine.send_weights()
         assert rebuild.call_count == 1
+        assert torch.empty is original_empty
+        assert ipc_engine.packed_ipc_producer is original_producer
     assert len(buffers) == 1
     assert client.update_weights.call_count == (1 if empty_only else 2)
     assert [name for name, _ in received] == [name for name, _ in tensors]
@@ -174,12 +198,97 @@ def test_inherited_packed_sender_roundtrip_through_upstream_producer(empty_only)
 
 @pytest.mark.parametrize(
     "device",
-    ["npu", "npu:0", types.SimpleNamespace(type="npu")],
+    ["npu", "npu:0", torch.device("npu")],
     ids=["unindexed-string", "indexed-string", "device-type"],
 )
 def test_cpu_fixture_redirects_all_npu_device_forms(device):
     """Guard test infrastructure against indexed/device-object allocations."""
     assert torch.empty(1, device=device).device.type == "cpu"
+
+
+@pytest.mark.parametrize(
+    ("device", "expected"),
+    [
+        ("cuda", "npu"),
+        ("cuda:2", "npu:2"),
+        (torch.device("cuda"), "npu"),
+        (torch.device("cuda:3"), "npu:3"),
+        ("cpu", "cpu"),
+        (torch.device("cpu"), "cpu"),
+        ("meta", "meta"),
+        (None, None),
+    ],
+)
+def test_allocation_mode_is_scoped_and_composes(device, expected):
+    original_empty = torch.empty
+    with _ObserveAllocations() as observer:
+        with packed_module._NPUIPCAllocationMode(), packed_module._NPUIPCAllocationMode():
+            tensor = torch.empty(2, device=device, dtype=torch.uint8)
+            assert tensor.dtype == torch.uint8
+            assert observer.devices[-1] == expected
+            assert torch.empty is original_empty
+        torch.empty(1, device="cuda")
+        assert observer.devices[-1] == "cuda"
+    assert torch.empty is original_empty
+
+
+@pytest.mark.parametrize("termination", ["yield", "close", "error"])
+@pytest.mark.parametrize("empty_only", [False, True])
+def test_producer_mode_does_not_leak_to_caller(termination, empty_only):
+    tensors = [("empty", torch.empty(0))] if empty_only else [("a", torch.ones(2)), ("b", torch.ones(2))]
+
+    def transform(item):
+        if termination == "error":
+            raise RuntimeError("post processing failed")
+        return item[1]
+
+    patcher, _ = _install_fake_reduce_tensor()
+    original_empty = torch.empty
+    with patcher, _ObserveAllocations() as observer:
+        producer = packed_npu_ipc_producer(iter(tensors), "node-0", transform, 8)
+        try:
+            if termination == "error":
+                with pytest.raises(RuntimeError, match="post processing failed"):
+                    next(producer)
+            else:
+                next(producer)
+                if termination == "close":
+                    producer.close()
+            torch.empty(1, device="cuda")
+            assert observer.devices[-1] == "cuda"
+            assert torch.empty is original_empty
+        finally:
+            producer.close()
+
+
+def test_allocation_mode_is_not_inherited_by_other_threads():
+    def allocate():
+        with _ObserveAllocations() as observer:
+            torch.empty(1, device="cuda")
+        return observer.devices
+
+    with packed_module._NPUIPCAllocationMode(), ThreadPoolExecutor(max_workers=1) as executor:
+        assert executor.submit(allocate).result(timeout=5) == ["cuda"]
+
+
+def test_allocation_mode_exits_after_allocator_error():
+    class RejectAllocation(TorchFunctionMode):
+        def __torch_function__(self, func, types, args=(), kwargs=None):
+            if func is torch.empty:
+                raise RuntimeError("allocation failed")
+            return func(*args, **(kwargs or {}))
+
+    original_empty = torch.empty
+    with (
+        pytest.raises(RuntimeError, match="allocation failed"),
+        RejectAllocation(),
+        packed_module._NPUIPCAllocationMode(),
+    ):
+        torch.empty(1, device="cuda")
+    with _ObserveAllocations() as observer:
+        torch.empty(1, device="cuda")
+        assert observer.devices == ["cuda"]
+    assert torch.empty is original_empty
 
 
 # ---------------------------------------------------------------------------

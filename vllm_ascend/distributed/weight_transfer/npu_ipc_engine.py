@@ -9,7 +9,6 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
-from vllm.distributed.weight_transfer import ipc_engine
 from vllm.distributed.weight_transfer.base import (
     TrainerWeightTransferEngine,
 )
@@ -27,6 +26,7 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
+from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -211,8 +211,8 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
     """Trainer-side NPU IPC weight transfer engine.
 
     Inherits the handshake, send lifecycle, unpacked sender and payload
-    construction, collectives, packed sending and cleanup. Device identity
-    and the producer compatibility wrapper remain NPU-specific.
+    construction, collectives and cleanup. Device identity and the small
+    packed-send adapter remain NPU-specific.
     """
 
     init_info_cls = NPUIPCTrainerInitInfo
@@ -233,9 +233,6 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         # Standalone trainers do not initialize an NPU model runner. Apply
         # its persistent CUDA mappings for upstream synchronization and IPC cleanup.
         with torch_cuda_wrapper():
-            # The upstream sender binds its producer at module scope. Remove
-            # this process-wide bridge when upstream provides a producer hook.
-            ipc_engine.packed_ipc_producer = packed_npu_ipc_producer
             TrainerWeightTransferEngine.__init__(
                 self,
                 client=client,
@@ -248,3 +245,23 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         self.npu_uuid = npu_generate_uuid(self.device_index)
         # Upstream's unpacked sender treats gpu_uuid as an opaque wire key.
         self.gpu_uuid = self.npu_uuid
+
+    def _send_packed(self, source: "WeightSource") -> None:
+        """Use the NPU producer without replacing upstream module globals."""
+        iterator = iter(source) if vllm_version_is("0.32.0") else source.iter_full()
+        for chunk in packed_npu_ipc_producer(
+            iterator=iterator,
+            gpu_uuid=self.gpu_uuid,
+            post_iter_func=lambda item: item[1],
+            buffer_size_bytes=self.packed_buffer_size_bytes,
+        ):
+            ipc_handle = self._all_gather_and_merge_handles([chunk.ipc_handle])[0]
+            self._do_send(
+                names=chunk.names,
+                dtype_names=chunk.dtype_names,
+                shapes=chunk.shapes,
+                ipc_handles=ipc_handle,
+                tensor_sizes=chunk.tensor_sizes,
+            )
+            # Every trainer rank must wait before its IPC buffer is reused.
+            self._post_send_sync()

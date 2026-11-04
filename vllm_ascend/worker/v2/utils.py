@@ -1,7 +1,6 @@
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import replace
-from functools import wraps
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -158,29 +157,9 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
-def _wrap_torch_empty() -> None:
-    """Persistently redirect explicit CUDA allocations without stacking wrappers."""
-    if getattr(torch.empty, "_vllm_ascend_npu_empty", False) is True:
-        return
-    original_empty = torch.empty
-
-    @wraps(original_empty)
-    def npu_empty(*args, **kwargs):
-        device = kwargs.get("device")
-        if isinstance(device, str) and (device == "cuda" or device.startswith("cuda:")):
-            kwargs["device"] = device.replace("cuda", "npu", 1)
-        elif isinstance(device, torch.device) and device.type == "cuda":
-            kwargs["device"] = torch.device("npu", device.index)
-        return original_empty(*args, **kwargs)
-
-    npu_empty._vllm_ascend_npu_empty = True  # type: ignore[attr-defined]
-    torch.empty = npu_empty
-
-
 @contextmanager
 def torch_cuda_wrapper():
     try:
-        _wrap_torch_empty()
         torch.cuda.Event = torch.npu.Event
         torch.cuda.Stream = torch.npu.Stream
         torch.cuda.stream = torch.npu.stream

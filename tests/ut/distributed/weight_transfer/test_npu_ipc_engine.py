@@ -57,14 +57,6 @@ from vllm_ascend.worker.v2 import utils as v2_utils
 _MODULE = "vllm_ascend.distributed.weight_transfer.npu_ipc_engine"
 
 
-@pytest.fixture(autouse=True)
-def _restore_upstream_producer():
-    # Trainer construction installs a process-wide producer bridge. Keep each
-    # test independent of whether an earlier test constructed a trainer.
-    with patch("vllm.distributed.weight_transfer.ipc_engine.packed_ipc_producer"):
-        yield
-
-
 def _patch_rebuild_npu_tensor(rebuild_func):
     """Install a fake ``torch_npu.multiprocessing.reductions`` module.
 
@@ -310,7 +302,7 @@ def test_packed_sender_waits_before_reusing_each_chunk(is_sender):
     with (
         patch.object(engine, "_all_gather_and_merge_handles", side_effect=lambda handles: handles),
         patch.object(engine, "_post_send_sync", side_effect=lambda: events.append("sync")),
-        patch("vllm.distributed.weight_transfer.ipc_engine.packed_ipc_producer", side_effect=chunks),
+        patch(f"{_MODULE}.packed_npu_ipc_producer", side_effect=chunks),
     ):
         engine._send_packed(engine.source)
     expected_chunk = ["update", "sync", "reuse"] if is_sender else ["sync", "reuse"]

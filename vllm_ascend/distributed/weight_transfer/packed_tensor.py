@@ -9,6 +9,7 @@ from typing import Any
 
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
+from torch.overrides import TorchFunctionMode
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
@@ -284,6 +285,20 @@ def packed_broadcast_consumer(
 # ── NPU IPC packed transfer ────────────────────────────────────────────
 
 
+class _NPUIPCAllocationMode(TorchFunctionMode):
+    """Redirect CUDA empty allocations only in the current IPC operation."""
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func is torch.empty:
+            device = kwargs.get("device")
+            if isinstance(device, str) and (device == "cuda" or device.startswith("cuda:")):
+                kwargs = {**kwargs, "device": device.replace("cuda", "npu", 1)}
+            elif isinstance(device, torch.device) and device.type == "cuda":
+                kwargs = {**kwargs, "device": torch.device("npu", device.index)}
+        return func(*args, **kwargs)
+
+
 def packed_npu_ipc_producer(
     iterator: Iterator[tuple[str, torch.Tensor]],
     gpu_uuid: str,
@@ -293,11 +308,10 @@ def packed_npu_ipc_producer(
     """Adapt NPU allocation and validation around upstream IPC packing.
 
     ``gpu_uuid`` is the upstream argument name; it carries the NPU wire key.
-    The CUDA compatibility wrapper persists across generator yields. Normal
-    packing, buffer reuse and chunk creation are owned by upstream.
+    Allocation adaptation is active only while preparing or advancing the
+    upstream generator, never while the caller consumes a yielded chunk.
+    The trainer initializes CUDA stream compatibility for vLLM v0.32.0.
     """
-    from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
-
     if buffer_size_bytes <= 0:
         raise ValueError(f"buffer_size_bytes must be positive, got {buffer_size_bytes}")
 
@@ -313,7 +327,8 @@ def packed_npu_ipc_producer(
             )
         return tensor
 
-    with torch_cuda_wrapper():
+    empty_chunk: PackedIpcChunk | None = None
+    with _NPUIPCAllocationMode():
         # Upstream uses total_bytes for its final flush, so an all-empty
         # source needs a metadata-only chunk. Look ahead only until the first
         # nonempty tensor; mixed sources then take the unchanged upstream path.
@@ -330,27 +345,45 @@ def packed_npu_ipc_producer(
                 ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device="npu")
                 _, ipc_args = reduce_tensor(ipc_buffer)
                 torch.npu.current_stream().synchronize()
-                yield PackedIpcChunk(
+                empty_chunk = PackedIpcChunk(
                     names=[name for name, _ in prefix],
                     shapes=[list(tensor.shape) for _, tensor in prefix],
                     dtype_names=[str(tensor.dtype).split(".")[-1] for _, tensor in prefix],
                     tensor_sizes=[0] * len(prefix),
                     ipc_handle={gpu_uuid: ipc_args},
                 )
-            return
+            else:
+                return
 
-        def replay_prefix() -> Iterator[tuple[str, torch.Tensor]]:
-            yield from prefix
-            prefix.clear()
-            yield from iterator
+    if empty_chunk is not None:
+        yield empty_chunk
+        return
 
-        del item
-        yield from packed_ipc_producer(
-            iterator=replay_prefix(),
-            gpu_uuid=gpu_uuid,
-            post_iter_func=checked_post_iter,
-            buffer_size_bytes=buffer_size_bytes,
-        )
+    def replay_prefix() -> Iterator[tuple[str, torch.Tensor]]:
+        yield from prefix
+        prefix.clear()
+        yield from iterator
+
+    del item
+    producer = packed_ipc_producer(
+        iterator=replay_prefix(),
+        gpu_uuid=gpu_uuid,
+        post_iter_func=checked_post_iter,
+        buffer_size_bytes=buffer_size_bytes,
+    )
+    try:
+        while True:
+            with _NPUIPCAllocationMode():
+                try:
+                    chunk = next(producer)
+                except StopIteration:
+                    return
+            yield chunk
+    finally:
+        close = getattr(producer, "close", None)
+        if close is not None:
+            with _NPUIPCAllocationMode():
+                close()
 
 
 class NPUPackedBufferImporter(PackedBufferImporter):
