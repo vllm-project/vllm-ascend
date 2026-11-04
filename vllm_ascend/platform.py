@@ -424,6 +424,7 @@ class NPUPlatform(Platform):
             vllm_config.compilation_config.max_cudagraph_capture_size = reduced_cg_cap
             vllm_config.compilation_config.reduced_cg_cap = reduced_cg_cap
 
+    @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
         """Return the number of Cube Cores on the NPU device.
         This is the NPU equivalent of CUDA's ``multi_processor_count``
