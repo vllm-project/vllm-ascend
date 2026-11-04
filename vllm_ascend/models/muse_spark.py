@@ -58,7 +58,11 @@ from vllm.models.muse_spark.common.layers import (
     MuseSpark1xRMSNorm,
     MuseSpark1xRMSNormWithInputScale,
 )
-from vllm.models.muse_spark.common.moe import MuseSpark1xRouter, needs_pre_norm_all_reduce
+from vllm.models.muse_spark.common.moe import (
+    MuseSpark1xRouter,
+    MuseSparkConsolidatedRoutedExperts,
+    needs_pre_norm_all_reduce,
+)
 from vllm.models.muse_spark.common.omni import (
     OMNI_WEIGHTS_MAPPER,
     MuseSpark1xOmniMixin,
@@ -223,8 +227,19 @@ class AscendMuseSparkFusedMoEMethod(AscendUnquantizedFusedMoEMethod):
         return self.post_expert_norm_fn(routed_rows, out_dtype=routed_rows.dtype)
 
 
-class AscendMuseSparkRoutedExperts(AscendRoutedExperts):
+class AscendMuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts, AscendRoutedExperts):
     """Routed experts whose MLP stage ends in the Muse Spark per-route norm.
+
+    The checkpoint stores each layer's experts as two stacked tensors,
+    ``w13_weight [E, 2I, H]`` and ``w2_weight [E, H, I]``. The generic
+    ``RoutedExperts.load_weights`` only knows ``gate_up_proj`` / ``down_proj``
+    and per-expert names, so it skips these without an error, and the loader's
+    unloaded-weight check exempts MoE parameters: the experts would run on
+    uninitialized memory. ``MuseSparkConsolidatedRoutedExperts`` comes first
+    for its ``load_weights``, which hands each expert's gate, up and down
+    slices to the expert weight loader, as upstream's routed experts do; that
+    loader keeps this rank's experts and TP slice. Everything else is
+    ``AscendRoutedExperts``.
 
     ``AscendRoutedExperts`` installs the stock unquantized method itself, so
     the Muse Spark one replaces it here rather than being passed in.

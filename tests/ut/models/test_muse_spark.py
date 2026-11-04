@@ -533,3 +533,64 @@ def test_moe_hands_its_post_expert_norm_to_the_quant_method():
     # A bound method, not the module: holding the module would register the
     # norm's weight a second time under the quant method.
     assert attached.__self__ is moe.post_expert_norm
+
+
+def _bare_routed_experts(num_experts: int, hidden_size: int, intermediate_size: int):
+    """The routed experts without their constructor, which needs a live vLLM config.
+
+    Each expert parameter records what reaches its weight loader. The real
+    loader is upstream's: it keeps this rank's experts and TP slice.
+    """
+    experts = object.__new__(muse_spark.AscendMuseSparkRoutedExperts)
+    nn.Module.__init__(experts)
+    experts.layer_name = "model.layers.1.feed_forward.experts"
+    calls: list[tuple[str, str, int, torch.Tensor]] = []
+
+    def record(param, loaded_weight, weight_name, shard_id, expert_id):
+        calls.append((weight_name, shard_id, expert_id, loaded_weight))
+
+    shapes = {
+        "w13_weight": (num_experts, 2 * intermediate_size, hidden_size),
+        "w2_weight": (num_experts, hidden_size, intermediate_size),
+    }
+    for name, shape in shapes.items():
+        param = nn.Parameter(torch.empty(shape), requires_grad=False)
+        param.weight_loader = record
+        setattr(experts, name, param)
+    return experts, calls
+
+
+def test_routed_experts_load_the_consolidated_checkpoint_tensors():
+    """The checkpoint stacks every expert into one tensor per projection.
+
+    The generic ``RoutedExperts.load_weights`` matches neither ``w13_weight``
+    nor ``w2_weight`` and skips them without an error, which the loader's
+    unloaded-weight check does not catch for MoE parameters.
+    """
+    num_experts, hidden_size, intermediate_size = 3, 4, 2
+    experts, calls = _bare_routed_experts(num_experts, hidden_size, intermediate_size)
+    w13 = torch.randn(num_experts, 2 * intermediate_size, hidden_size)
+    w2 = torch.randn(num_experts, hidden_size, intermediate_size)
+
+    loaded = list(experts.load_weights([("w13_weight", w13), ("w2_weight", w2)]))
+
+    assert isinstance(experts, muse_spark.AscendRoutedExperts)
+    assert loaded == ["w13_weight", "w2_weight"]
+    # Global expert ids: the expert weight loader maps them to this rank.
+    expected = [
+        *(("w13_weight", "w1", expert, w13[expert, :intermediate_size]) for expert in range(num_experts)),
+        *(("w13_weight", "w3", expert, w13[expert, intermediate_size:]) for expert in range(num_experts)),
+        *(("w2_weight", "w2", expert, w2[expert]) for expert in range(num_experts)),
+    ]
+    assert [call[:3] for call in calls] == [call[:3] for call in expected]
+    for (*_, actual), (*_, wanted) in zip(calls, expected):
+        assert torch.equal(actual, wanted)
+
+
+def test_routed_experts_reject_expert_tensors_they_cannot_place():
+    """An unknown expert tensor fails the load instead of being skipped."""
+    experts, calls = _bare_routed_experts(num_experts=2, hidden_size=4, intermediate_size=2)
+
+    with pytest.raises(AttributeError, match="unexpected expert weight"):
+        list(experts.load_weights([("0.gate_proj.weight", torch.randn(2, 4))]))
+    assert calls == []
