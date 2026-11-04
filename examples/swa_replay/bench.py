@@ -9,10 +9,12 @@ import datetime
 import html
 import json
 import math
+import os
 import shutil
 import statistics
 import string
 import subprocess
+import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
@@ -61,8 +63,27 @@ def server_info(args):
             args.base_url.rstrip("/") + "/server_info?config_format=json", timeout=5
         ) as response:
             info = json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            print(
+                f"INFO: optional server config query returned HTTP {error.code}. "
+                "Continuing benchmark; verify startup flags manually or use --skip-server-info.",
+                flush=True,
+            )
+            return {"status": "unavailable", "http_status": error.code, "error": str(error)}, {}
+        print(
+            "INFO: /server_info is an optional development endpoint and is not exposed (404). "
+            "Continuing benchmark; verify replay and prefix-caching startup flags manually. "
+            "Use --skip-server-info to omit this query.",
+            flush=True,
+        )
+        return {"status": "unavailable", "http_status": 404, "error": "optional endpoint not exposed"}, {}
     except (OSError, ValueError) as error:
-        print(f"Server config unavailable; verify OFF/ON and prefix caching manually: {error}", flush=True)
+        print(
+            f"INFO: server config unavailable; continuing benchmark. "
+            f"Verify OFF/ON and prefix caching manually: {error}",
+            flush=True,
+        )
         return {"status": "unavailable", "error": str(error)}, {}
     if not isinstance(info, dict):
         raise ValueError("Server info is not a JSON object")
@@ -235,8 +256,28 @@ def run(args):
                     manifest["cases"].append(case)
                     save(folder / "manifest.json", manifest)
                     print(f"[{args.mode}] {name}: {args.num_prompts} requests; warmups={args.warmups}", flush=True)
-                    with (folder / case["log"]).open("w") as log:
-                        process = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
+                    print(f"Native bench output (also saved to {folder / case['log']}):", flush=True)
+                    with (
+                        (folder / case["log"]).open("w") as log,
+                        subprocess.Popen(
+                            command,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            bufsize=1,
+                            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                        ) as process,
+                    ):
+                        try:
+                            for line in process.stdout:
+                                log.write(line)
+                                log.flush()
+                                print(line, end="", flush=True)
+                            process.wait()
+                        except BaseException:
+                            process.kill()
+                            process.wait()
+                            raise
                     if process.returncode:
                         raise ValueError(f"vllm bench exited {process.returncode}; see {folder / case['log']}")
                     result = json.loads((folder / case["result"]).read_text())

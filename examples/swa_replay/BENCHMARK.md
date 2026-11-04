@@ -69,6 +69,9 @@ python examples/swa_replay/bench.py run --mode on \
 `--mode` 是实验标签，不会替你切换服务配置。如果 `/server_info` 可读，脚本会核对
 服务端 replay 状态、prefix caching 和最大长度，并记录筛选后的配置；不保存任意系统环境变量。
 接口不可读或没有暴露开关时会明确提示，需要人工检查启动参数。
+在 vLLM 0.30 中 `/server_info` 属于开发接口，普通服务默认不挂载，因此返回404是正常情况，
+不会中止压测，也无需为此重启服务。可以加 `--skip-server-info` 跳过这次可选查询。
+真正的压测请求使用 `/v1/completions`，不是 `/server_info`。
 ON 服务日志应在真实长 prefill 后出现：
 
 ```text
@@ -76,6 +79,17 @@ SWA decoder bounded replay active (MRV1): ...
 ```
 
 每个 worker 只打印首次激活；初始化的层范围日志和一次 HTTP 成功不能证明裁剪已经执行。
+
+原生 benchmark 的启动、tokenizer 初始化、连通性请求、预热和正式测试输出会实时显示在终端，
+同时写入每个 case 的 `.log` 文件。如果暂时停在某个阶段，另开终端读取脚本打印的实际日志路径：
+
+```shell
+tail -f /workspace/swa-bench/off-实际目录名/i16384-c1-r1.log
+```
+
+看到 `Starting initial single prompt test run` 表示开始连通性请求；
+`Warming up with ... requests` 表示预热，随后才进入正式统计。
+原生客户端初始化也需要时间；终端出现 case 名字本身不代表模型推理已经开始。
 
 ## 4 生成报告
 

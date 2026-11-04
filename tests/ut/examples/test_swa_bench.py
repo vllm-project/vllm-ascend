@@ -20,6 +20,10 @@ from pathlib import Path
 if '--version' in sys.argv:
     print('0.30.0')
     sys.exit(0)
+print('native benchmark progress', flush=True)
+if os.environ.get('BENCH_TEST_PROCESS_FAIL'):
+    print('native benchmark error', flush=True)
+    sys.exit(3)
 args = sys.argv[3:]
 def value(flag):
     return args[args.index(flag) + 1]
@@ -93,7 +97,8 @@ def bench(tmp_path):
 
 def test_off_on_report_and_native_parameters(bench):
     root, invoke, run = bench
-    run("off")
+    output = run("off")
+    assert "native benchmark progress" in output.stdout
     run("on", BENCH_TEST_SCALE="0.8")
     invoke("compare", "--results-dir", root)
     comparison = json.loads((root / "comparison/comparison.json").read_text())
@@ -108,6 +113,7 @@ def test_off_on_report_and_native_parameters(bench):
     assert len(manifest["cases"]) == 8
     command = json.loads((off / "i256-c2-r2.command.json").read_text())
     assert command[command.index("--seed") + 1] == "43"
+    assert "native benchmark progress" in (off / "i256-c2-r2.log").read_text()
     assert (root / "comparison/comparison.csv").read_bytes().startswith(b"\xef\xbb\xbf")
 
 
@@ -119,6 +125,16 @@ def test_failed_requests_preserve_data_without_updating_latest(bench):
     folder = next(root.glob("off-*"))
     assert json.loads((folder / "manifest.json").read_text())["status"] == "failed"
     assert list(folder.glob("*.log")) and list(folder.glob("i*.json"))
+
+
+def test_native_process_failure_is_visible_and_preserved(bench):
+    root, _, run = bench
+    output = run("off", expected=1, BENCH_TEST_PROCESS_FAIL="1")
+    assert "native benchmark error" in output.stdout
+    assert "vllm bench exited 3" in output.stderr
+    assert not (root / "latest-off.json").exists()
+    folder = next(root.glob("off-*"))
+    assert "native benchmark error" in (folder / "i256-c1-r1.log").read_text()
 
 
 @pytest.mark.parametrize("mutation", ["workload", "lengths", "missing_case"])
@@ -180,3 +196,19 @@ def test_server_config_checks_and_filtered_provenance(monkeypatch, invalid):
         assert "DO_NOT_PERSIST" not in json.dumps(info)
         assert signature["VLLM_USE_V2_MODEL_RUNNER"] == "0"
         assert signature["parallel_config"]["tensor_parallel_size"] == 4
+
+
+@pytest.mark.parametrize("status", [404, 401])
+def test_optional_server_info_404_is_nonfatal(monkeypatch, capsys, status):
+    spec = importlib.util.spec_from_file_location("swa_bench_tool", TOOL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    args = SimpleNamespace(skip_server_info=False, base_url="http://localhost")
+
+    def unavailable(*a, **kw):
+        raise module.urllib.error.HTTPError("http://localhost/server_info", status, "HTTP error", {}, None)
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", unavailable)
+    info, signature = module.server_info(args)
+    assert info["http_status"] == status and signature == {}
+    assert "Continuing benchmark" in capsys.readouterr().out
