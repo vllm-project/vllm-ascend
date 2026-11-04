@@ -1,8 +1,6 @@
 import pytest
 import torch
 import torch_npu
-from vllm.triton_utils import HAS_TRITON
-
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.linearnorm.qsa_rmsnorm_mrope import (
@@ -14,7 +12,6 @@ pytestmark = [
         get_ascend_device_type() != AscendDeviceType.A3,
         reason="Requires Ascend A3",
     ),
-    pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available"),
 ]
 
 
