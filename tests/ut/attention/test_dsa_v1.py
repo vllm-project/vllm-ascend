@@ -48,6 +48,7 @@ from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
     mixed_quant_sparse_flash_mla_metadata_fp8,
     mixed_quant_sparse_flash_mla_metadata_turboquant,
 )
+from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -209,6 +210,7 @@ def _make_builder(
     ("metadata_op", "expected_sas_size"),
     [
         (None, SAS_METADATA_BUFFER_SIZE),
+        (sparse_flash_mla_metadata, SAS_METADATA_BUFFER_SIZE),
         (mixed_quant_sparse_flash_mla_metadata_fp8, MIXED_QUANT_SAS_METADATA_BUFFER_SIZE),
         (mixed_quant_sparse_flash_mla_metadata_turboquant, MIXED_QUANT_SAS_METADATA_BUFFER_SIZE),
     ],
