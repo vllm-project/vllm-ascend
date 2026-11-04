@@ -2,7 +2,7 @@ pr: 20926
 entries:
   - category: feature
     text: >-
-      Added an experimental Ascend HiSparse backend and unquantized sparse
-      MLA/SFA data path, reusing Core allocation and lifecycle interfaces.
-      Device and full-model qualification of the foundation remains pending.
+      Added experimental Ascend HiSparse BF16 and native C8 sparse MLA/SFA
+      support using existing Attention operators and Core lifecycle interfaces.
+      Full-model qualification of the foundation remains pending.
     hardware: [A5]

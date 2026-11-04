@@ -80,6 +80,32 @@ def test_failed_unregister_retains_host_owner_for_safe_retry(monkeypatch):
     assert events == ["close", "close"]
 
 
+def test_private_host_allocator_keeps_other_backends_on_core_path(monkeypatch):
+    from vllm.v1.hisparse import backend as core_backend
+    from vllm.v1.hisparse import runtime
+
+    from vllm_ascend.patch.worker.patch_hisparse_host_pool import install
+
+    class OtherBackend(core_backend.HiSparseBackend):
+        def pin_tensor(self, tensor):
+            tensor._test_registration = self
+
+    backend = OtherBackend()
+    monkeypatch.setattr(runtime, "get_hisparse_backend", lambda: backend)
+    monkeypatch.setattr(core_backend, "get_hisparse_backend", lambda: backend)
+    # Restore the process-wide binding when this test exits.
+    monkeypatch.setattr(runtime, "allocate_pinned_host_pool", runtime.allocate_pinned_host_pool)
+    install()
+    installed = runtime.allocate_pinned_host_pool
+    install()
+    assert runtime.allocate_pinned_host_pool is installed
+    payload, registered = installed(1001)
+    assert registered._test_registration is backend
+    assert payload.numel() == 1001 and registered.data_ptr() % 4096 == 0
+    payload.fill_(17)
+    torch.testing.assert_close(registered[:1001], payload)
+
+
 def test_mapped_addresses_retain_offsets_and_reject_expired_or_external_views():
     backing = torch.arange(128, dtype=torch.uint8)
     mapping = hisparse_ops.MappedHostTensor.__new__(hisparse_ops.MappedHostTensor)

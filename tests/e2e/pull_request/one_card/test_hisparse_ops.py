@@ -8,6 +8,7 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
+from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 from vllm_ascend.hisparse.cache_ops import (
     HiSparseNPUOps,
     MappedHostTensor,
@@ -23,6 +24,42 @@ def _require_mapped_host_device():
     if not torch.npu.is_available() or not torch.npu.get_device_name(0).startswith("Ascend950"):
         pytest.skip("HiSparse mapped-host operators currently target Ascend 950")
     torch.npu.set_device(0)
+
+
+def test_private_host_pool_retains_pinned_storage_for_dma_writeback():
+    from vllm.v1.hisparse import runtime
+
+    backend = AscendHiSparseBackend()
+    backend.check_available()
+    payload, registered = runtime.allocate_pinned_host_pool(32768)
+    try:
+        assert payload.numel() == 32768
+        assert payload.is_pinned() and registered.is_pinned()
+        assert registered.data_ptr() % 4096 == 0
+        mapping = registered._hisparse_registration
+        assert mapping.address_of(payload[656:1312]) == mapping.device_ptr + 656
+        assert payload.untyped_storage().data_ptr() == registered.untyped_storage().data_ptr()
+        source = torch.arange(32768, dtype=torch.int32, device="npu").to(torch.uint8)
+        stream = torch.npu.Stream()
+        for change in (1, 3, 7):
+            source.bitwise_xor_(change)
+            payload.fill_(-1)
+            src = torch.tensor([source.data_ptr(), source.data_ptr() + 8192], dtype=torch.int64)
+            dst = torch.tensor([payload.data_ptr() + 656, payload.data_ptr() + 16384], dtype=torch.int64)
+            sizes = torch.tensor([656, 1312], dtype=torch.int64)
+            stream.wait_stream(torch.npu.current_stream())
+            with stream:
+                backend.swap_blocks_batch(src, dst, sizes)
+                complete = torch.npu.Event()
+                complete.record()
+            complete.synchronize()
+            expected = torch.full((32768,), 255, dtype=torch.uint8)
+            expected[656:1312] = source[:656].cpu()
+            expected[16384:17696] = source[8192:9504].cpu()
+            torch.testing.assert_close(payload.view(torch.uint8), expected, rtol=0, atol=0)
+    finally:
+        torch.npu.synchronize()
+        backend.unpin_tensor(registered)
 
 
 @pytest.mark.parametrize("capture", [False, True])
