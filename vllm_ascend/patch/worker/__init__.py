@@ -60,7 +60,6 @@ else:
 # is MRv1-only, so MRv2 processes never import vllm_ascend.sample.
 
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
-import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 
 # Re-apply the default-V2 runner selection (with the V2 feature blacklist)

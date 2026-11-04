@@ -258,6 +258,10 @@ class UvaBufferWrapper:
 vllm.v1.worker.gpu.buffer_utils.UvaBuffer = UvaBufferWrapper
 
 
+# v0.32.0 has no UvaBufferPool.copy_chunks_to_uva; newer lanes do, but their
+# implementation writes straight into ``buf.np`` and bypasses
+# UvaBufferWrapper's dirty-row tracking (vLLM #63633). Route it through the
+# wrapper instead.
 if not vllm_version_is("0.32.0"):
 
     def _copy_chunks_to_uva(self, chunks: Sequence, n: int) -> torch.Tensor:
