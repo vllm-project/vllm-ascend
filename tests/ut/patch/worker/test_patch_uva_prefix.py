@@ -45,6 +45,7 @@ def _make_buffer(
 def _assert_idle(buffer: patch_uva.UvaBufferWrapper) -> None:
     """Nothing is left pending, so the next sync copies no row."""
     assert buffer._dirty._prefix == 0
+    assert not buffer._dirty._aliased
     mask = buffer._dirty._mask
     assert mask is None or not mask.any()
 

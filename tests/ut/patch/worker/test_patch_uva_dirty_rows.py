@@ -395,7 +395,7 @@ def test_torch_numpy_bridge_is_read_only():
         array[0, 0] = 1
 
 
-def test_torch_array_protocol_is_read_only_but_sticky():
+def test_torch_array_protocol_hands_out_read_only_arrays():
     # ``np.asarray`` used to return a writable array sharing the mirror, and
     # nothing marked the buffer dirty. It now hands out a read-only array and
     # treats the access as an alias, because torch can rewrap even a read-only
@@ -512,6 +512,84 @@ def test_uint8_index_value_out_of_range_does_not_raise_after_the_write():
     buf.cpu[np.array(44, dtype=np.uint8)] = 9
     buf.uva(8)
 
+    assert torch.equal(buf._uva, buf._cpu)
+
+
+def test_in_place_method_returns_the_proxy_and_stays_tracked(monkeypatch):
+    # torch returns ``self`` from a trailing-underscore method. Returning the raw
+    # mirror there would let a caller keep it and write untracked after a sync,
+    # so the proxy is returned instead - and the buffer is not made sticky.
+    buf = _make_uva_buffer(8)
+
+    result = buf.cpu.fill_(3)
+    buf.uva(8)
+    copied = _count_copied_rows(monkeypatch)
+    result[0, 0] = 9
+    buf.uva(8)
+
+    assert copied == [1]
+    assert buf._uva[0, 0].item() == 9
+    assert not buf._dirty._aliased
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        lambda cpu: cpu.clone(),
+        lambda cpu: cpu.float(),
+        lambda cpu: cpu.sum(),
+    ],
+)
+def test_call_returning_a_copy_does_not_make_the_buffer_sticky(read, monkeypatch):
+    buf = _make_uva_buffer(8)
+    read(buf.cpu)
+    buf.uva(8)
+
+    copied = _count_copied_rows(monkeypatch)
+    buf.np[0] = 1
+    buf.uva(8)
+
+    assert copied == [1]
+    assert not buf._dirty._aliased
+
+
+def test_numpy_copy_does_not_make_the_buffer_sticky(monkeypatch):
+    buf = _make_uva_buffer(8)
+    assert np.asarray(buf.cpu, dtype=np.float64).dtype == np.float64
+    assert np.array(buf.cpu).flags.writeable is True
+    buf.uva(8)
+
+    copied = _count_copied_rows(monkeypatch)
+    buf.np[0] = 1
+    buf.uva(8)
+
+    assert copied == [1]
+    assert not buf._dirty._aliased
+
+
+def test_numpy_copy_false_with_a_conversion_raises():
+    # NumPy 2 asks for ``copy=False`` and expects a ValueError rather than a
+    # silent copy. Requesting a different dtype cannot be honoured in place.
+    buf = _make_uva_buffer(8)
+
+    with pytest.raises(ValueError, match="avoid copy"):
+        np.asarray(buf.cpu, dtype=np.float64, copy=False)
+
+
+def test_sticky_alias_survives_a_failed_copy():
+    buf = _make_uva_buffer(8)
+    _ = buf.cpu.view(-1)
+    buf.uva(8)
+
+    shadow = buf._uva
+    buf._uva = _FailingDevice(shadow, fail_on=1)
+    with pytest.raises(RuntimeError):
+        buf.uva(8)
+
+    buf._uva = shadow
+    buf.uva(8)
+
+    assert buf._dirty._aliased
     assert torch.equal(buf._uva, buf._cpu)
 
 

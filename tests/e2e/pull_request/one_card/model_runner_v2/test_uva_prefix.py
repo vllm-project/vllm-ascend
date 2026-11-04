@@ -13,6 +13,7 @@ from vllm_ascend.patch.worker import patch_uva
 def _assert_idle(buf) -> None:
     """Nothing is left dirty, so reusing the slot copies no stale row."""
     assert buf._dirty._prefix == 0
+    assert not buf._dirty._aliased
     mask = buf._dirty._mask
     assert mask is None or not mask.any()
 

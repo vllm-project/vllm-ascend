@@ -74,8 +74,9 @@ class _DirtyRows:
 
     A write that arrives through a raw alias cannot be observed at all, so once
     the mirror hands one out the tracker goes "sticky": every later sync
-    publishes the whole buffer. Only rows in [0, _prefix) of a normal tracker
-    can be proven clean, and an alias can change any row at any time.
+    publishes the whole buffer. Outside ``[0, _prefix)`` the rows are only
+    *assumed* clean, and an alias can change any row at any time, so that
+    assumption no longer holds.
     """
 
     __slots__ = ("_size", "_prefix", "_mask", "_mask_pending", "_aliased")
@@ -299,12 +300,16 @@ class MonitoredTorchTensor:
     and nothing reports those writes. Buffers that only use
     ``buf.cpu[...] = value`` never pay that cost.
 
-    ``.numpy()`` and ``__array__`` hand out a read-only array (but still mark
-    the buffer sticky, since ``torch.from_numpy`` can rewrap it as writable),
-    and ``.data`` is refused. One write still stays outside the tracker: a view
-    returned by ``__getitem__`` (``t.cpu[0:2].fill_(9)``), because wrapping every
-    read would make it pay for a proxy. The in-repo callers only read through
-    it; write through ``.np`` or ``__setitem__`` instead.
+    ``.numpy()`` and ``__array__`` hand out a read-only array when the result
+    shares the mirror (but still mark the buffer sticky, since
+    ``torch.from_numpy`` can rewrap it as writable); a copy, such as
+    ``np.array(buf.cpu)``, is writable and does not. ``.data`` is refused.
+    In-place methods return this proxy rather than the raw tensor, so a retained
+    result keeps going through the tracker. One write still stays outside the
+    tracker: a view returned by ``__getitem__`` (``t.cpu[0:2].fill_(9)``),
+    because wrapping every read would make it pay for a proxy. The in-repo
+    callers only read through it; write through ``.np`` or ``__setitem__``
+    instead.
     """
 
     def __init__(self, tensor: torch.Tensor, callback: Callable, alias_callback: Callable | None = None):
@@ -348,7 +353,9 @@ class MonitoredTorchTensor:
             self._alias_callback()
 
     def _array_shares_mirror(self, array: np.ndarray) -> bool:
-        return array.__array_interface__["data"][0] == self._storage_ptr
+        # Compare against the tensor's data pointer, not the storage base: a
+        # ``storage_offset`` view would otherwise look like a detached copy.
+        return array.__array_interface__["data"][0] == self._tensor.data_ptr()
 
     @staticmethod
     def _is_uint8_key(key) -> bool:
@@ -383,10 +390,13 @@ class MonitoredTorchTensor:
 
             def _array(dtype=None, copy=None):
                 array = self._tensor.__array__(dtype) if dtype is not None else self._tensor.__array__()
-                if copy:
-                    return array.copy()
-                if not self._array_shares_mirror(array):
-                    return array
+                shares_mirror = self._array_shares_mirror(array)
+                if copy is False and not shares_mirror:
+                    # NumPy 2 asks ``__array__(copy=False)`` and expects a
+                    # ValueError instead of a silent copy.
+                    raise ValueError("Unable to avoid copy while creating an array as requested.")
+                if copy or not shares_mirror:
+                    return array.copy() if copy else array
                 self._mark_alias()
                 array.flags.writeable = False
                 return array
@@ -416,14 +426,17 @@ class MonitoredTorchTensor:
 
         def _call(*args, **kwargs):
             inplace = name.endswith("_") and not name.startswith("__")
-            if inplace:
-                # torch's in-place convention: the receiver always changes, so
-                # the whole buffer is dirty whichever rows it touches.
-                self._callback(slice(None))
             result = attr(*args, **kwargs)
+            if inplace:
+                # The receiver always changes, so the whole buffer is dirty
+                # whichever rows it touches. Return the proxy rather than the
+                # raw tensor: torch returns ``self``, and a caller that keeps
+                # that result could otherwise write through it untracked.
+                self._callback(slice(None))
+                return self
             if self._is_mirror_alias(result):
-                # ``to``/``detach``/``view``/``split``/``fill_``... returned the
-                # mirror itself or a view of it; keep publishing every sync.
+                # ``to``/``detach``/``view``/``split``... returned the mirror
+                # itself or a view of it; keep publishing every sync.
                 self._mark_alias()
             return result
 
