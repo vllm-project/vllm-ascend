@@ -394,6 +394,22 @@ def _make_mm_recompute_scheduler():
     return scheduler
 
 
+def test_waiting_encoder_stall_allows_later_request():
+    scheduler = _make_mm_recompute_scheduler()
+    scheduler.max_num_encoder_input_tokens = 0
+    stalled = make_mm_request("stalled", [("image", [True, True])])
+    ready = create_request(request_id="ready")
+    scheduler.add_request(stalled)
+    scheduler.add_request(ready)
+
+    output = scheduler.schedule()
+
+    assert ready.request_id in output.num_scheduled_tokens
+    assert stalled.request_id not in output.num_scheduled_tokens
+    assert stalled in scheduler.waiting
+    assert stalled in scheduler.deferred_waiting
+
+
 @pytest.mark.skipif(
     not hasattr(Scheduler, "_allocate_encoder_inputs"), reason="Requires the main duplicate-reference API"
 )
