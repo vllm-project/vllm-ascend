@@ -95,7 +95,17 @@ def compact_c8_indices(indices: torch.Tensor) -> torch.Tensor:
 
 
 def c8_physical_attention(
-    query, query_rope, cache, indices, scale, query_ends, key_length, *, _prepared_indices=False, _mapping_scope=None
+    query,
+    query_rope,
+    cache,
+    indices,
+    scale,
+    query_ends,
+    key_length,
+    *,
+    _prepared_indices=False,
+    _physical_row_indices=False,
+    _mapping_scope=None,
 ):
     """Use custom quantized SFA with its LSE-enabled valid-length path.
 
@@ -126,7 +136,15 @@ def c8_physical_attention(
     from vllm_ascend.ops.hisparse_c8_mapping import map_compact_c8_indices
 
     packed_query = None
-    if _prepared_indices:
+    if _physical_row_indices:
+        # The merged Core converter already encodes the Resident block stride
+        # and stably compacts the current selection. Applying our virtual-page
+        # conversion again would address another row. This private producer
+        # contract is limited to the eager, fully Resident prefill path.
+        if _prepared_indices or indices.dtype != torch.int32 or not indices.is_contiguous():
+            raise ValueError("Encoded Resident indices require fresh contiguous int32 rows")
+        mapped = indices
+    elif _prepared_indices:
         if indices.dtype != torch.int32 or stride_rows != block or not indices.is_contiguous():
             raise ValueError("Prepared C8 indices require contiguous int32 rows and an identity staging layout")
         mapped = indices

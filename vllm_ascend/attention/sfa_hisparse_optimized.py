@@ -583,6 +583,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         *,
         use_eager_compaction=False,
         _c8_prepared=False,
+        _c8_physical_rows=False,
         _mapping_scope=None,
     ):
         if self.enable_sparse_sfa_c8:
@@ -598,6 +599,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 query_end,
                 key_length,
                 _prepared_indices=_c8_prepared,
+                _physical_row_indices=_c8_physical_rows,
                 _mapping_scope=_mapping_scope,
             )
         return self._attention_physical_bridge(query, query_rope, packed_cache, physical_topk)
@@ -647,6 +649,65 @@ class AscendHiSparseImpl(AscendSFAImpl):
             outputs.append(result)
         return torch.cat(outputs, dim=0) if len(outputs) > 1 else outputs[0]
 
+    def _try_resident_c8_prefill(self, query, query_rope, logical, metadata):
+        """Read a fully Resident eager batch through Core's existing converter.
+
+        Large prefills use Core's freshly allocated conversion output, without
+        taking ownership of the decode resolver's captured buffers/events.
+        Mixed batches can use one existing native Attention call because its
+        physical-row ABI applies causality through the original TopK entries.
+        Storage, Host durability and lifecycle management keep their owners.
+        """
+        cache = self.hisparse_cache
+        rows = logical.shape[0]
+        if (
+            not self.enable_sparse_sfa_c8
+            or metadata.num_prefills <= 0
+            or metadata.num_actual_tokens != rows
+            or metadata.num_input_tokens != rows
+            or rows <= cache.runtime.max_swap_rows
+            or get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.NONE
+            or torch.npu.is_current_stream_capturing()
+        ):
+            return None
+        transfer = self.vllm_config.kv_transfer_config
+        if transfer is not None and transfer.kv_connector != "HiSparseConnector":
+            return None
+        leader = self.index_group.cache(0)
+        if leader.view is None or leader.block_table is None or leader.runtime.request_state_indices is None:
+            return None
+        for handle in self.index_group.caches:
+            if (
+                not handle.all_context_pages_resident
+                or handle.dummy_batch
+                or handle.view is None
+                or handle.block_table is None
+                or handle.block_table.data_ptr() != leader.block_table.data_ptr()
+                or handle.block_table.shape != leader.block_table.shape
+                or handle.block_table.stride() != leader.block_table.stride()
+                or handle.view.block_size != leader.view.block_size
+                or handle.view.attention_block_stride != leader.view.attention_block_stride
+                or handle.view.cache.shape != leader.view.cache.shape
+            ):
+                return None
+        # Exact real-row coverage above excludes padded request IDs. The
+        # request builder and Core retain current device state indirection;
+        # nothing here caches request order, block values or sequence lengths.
+        physical, _ = self.index_group.convert_logical_to_physical_topk(
+            self.index_group_index,
+            logical,
+            metadata,
+            block_stride_rows=leader.view.attention_block_stride,
+            return_valid_counts=True,
+        )
+        return self._attention_physical(
+            query,
+            query_rope,
+            cache.view.cache,
+            physical,
+            _c8_physical_rows=True,
+        )
+
     def _execute_sparse_flash_attention_process(
         self,
         ql_nope,
@@ -670,6 +731,9 @@ class AscendHiSparseImpl(AscendSFAImpl):
             rows = torch.arange(logical.shape[0], dtype=torch.int32, device=logical.device)
             logical = torch.where(rows[:, None] < metadata.query_start_loc[-1], logical, -1)
         self.index_group.set_logical_topk_ready(self.index_group_index)
+        resident = self._try_resident_c8_prefill(ql_nope, q_pe, logical, metadata)
+        if resident is not None:
+            return resident
         outputs = []
         num_decode = metadata.num_decode_tokens
         if num_decode:
