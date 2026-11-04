@@ -9,18 +9,6 @@ Context Parallel (CP) serves long-context requests by splitting work or KV-cache
 
 For a general introduction to these two strategies, see the upstream [vLLM Context Parallel Deployment](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/) guide.
 
-### MLA prefill workspace
-
-MLA packs cached context into workspace-sized chunks using the upstream vLLM
-planner. Requests that do not fit are processed in subsequent chunks, and a long
-request can span multiple chunks. Increasing `max_num_seqs` does not require
-space for one KV block per request in every chunk.
-
-The base workspace capacity follows vLLM's sizing policy, capped at 64K token
-rows before alignment. DCP aligns chunk boundaries to the KV interleave layout;
-PCP with DCP also reserves capacity for two local fragments per global request.
-Large batches can require more context-attention calls while reusing this buffer.
-
 ## Supported Scenarios
 
 ### Prefill Context Parallel { #prefill-context-parallel }
