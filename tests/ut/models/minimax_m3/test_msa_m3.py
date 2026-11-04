@@ -349,7 +349,7 @@ def test_m3_indexer_cache_spec_follows_resolved_fp8_dtype(mock_get_vllm_config: 
 
 
 def test_a5_decode_topk_keeps_fused_postprocess_fast_path() -> None:
-    source_path = Path(msa_m3_module.__file__).with_name("ops") / "msa_m3_triton_a5.py"
+    source_path = Path(msa_m3_index_postprocess.__file__).with_name("msa_m3_triton_a5.py")
     source = source_path.read_text(encoding="utf-8")
     decode_source = source[source.index("def minimax_m3_index_decode(") :]
 
@@ -363,7 +363,7 @@ def test_a5_decode_topk_keeps_fused_postprocess_fast_path() -> None:
 @pytest.mark.parametrize("sorted_output", [False, True])
 @pytest.mark.parametrize("provided_output", [False, True])
 def test_a5_decode_postprocess_dispatch_preserves_output_buffer(sorted_output, provided_output) -> None:
-    from vllm_ascend.models.minimax_m3.ops import msa_m3_triton_a5 as a5_ops
+    from vllm_ascend.ops.triton.msa import msa_m3_triton_a5 as a5_ops
 
     query_len, heads, topk, requests = 4, 2, 16, 3
     tokens = requests * query_len
@@ -424,7 +424,7 @@ def test_a5_decode_postprocess_dispatch_preserves_output_buffer(sorted_output, p
 
 
 def test_a5_sorted_decode_empty_batch_skips_kernels() -> None:
-    from vllm_ascend.models.minimax_m3.ops import msa_m3_triton_a5 as a5_ops
+    from vllm_ascend.ops.triton.msa import msa_m3_triton_a5 as a5_ops
 
     with patch.object(a5_ops, "_decode_qk_score_kernel") as score:
         indices, counts = a5_ops.minimax_m3_index_decode(
@@ -447,7 +447,7 @@ def test_a5_sorted_decode_empty_batch_skips_kernels() -> None:
 
 @pytest.mark.parametrize("invalid", ["dtype", "capacity", "fp32_range"])
 def test_a5_sorted_decode_rejects_invalid_buffers_before_launch(invalid) -> None:
-    from vllm_ascend.models.minimax_m3.ops import msa_m3_triton_a5 as a5_ops
+    from vllm_ascend.ops.triton.msa import msa_m3_triton_a5 as a5_ops
 
     output = torch.empty(1, 1, 16, dtype=torch.int64 if invalid == "dtype" else torch.int32)
     if invalid == "capacity":

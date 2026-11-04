@@ -156,7 +156,7 @@ def _assert_prepared_gbsa_dense_reference(query, kv, output, lengths, query_len,
 def test_prepared_gbsa_counts_match_a5_indexer(query_len, kv_dtype):
     from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
     from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import _decode_gbsa_block_counts
-    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
+    from vllm_ascend.ops.triton.msa.msa_m3_triton_a5 import (
         minimax_m3_index_decode as a5_index_decode,
     )
 

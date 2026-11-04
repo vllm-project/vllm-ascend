@@ -93,7 +93,7 @@ _USE_ASCENDC_INDEX_SCORE_PREFILL = _CANN_INDEX_SCORE_AVAILABLE
 _USE_ASCENDC_INDEX_SCORE_DECODE = _CANN_INDEX_SCORE_AVAILABLE
 
 if get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED:
-    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
+    from vllm_ascend.ops.triton.msa.msa_m3_triton_a5 import (
         minimax_m3_index_decode,
         minimax_m3_index_score,
         minimax_m3_index_topk,

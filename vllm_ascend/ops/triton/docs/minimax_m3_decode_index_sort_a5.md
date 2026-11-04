@@ -2,6 +2,7 @@
 
 ## Description
 
+- **Implementation**: `vllm_ascend/ops/triton/msa/msa_m3_triton_a5.py`.
 - **Function**: `_decode_index_postprocess_sorted`, used by
   `minimax_m3_index_decode(sort_indices=True)`, fuses valid-ID filtering,
   counts, ascending logical-ID ordering and int32 output into one Triton launch.
