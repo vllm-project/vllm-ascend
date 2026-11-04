@@ -226,9 +226,11 @@ def test_dspark_selects_flash_attn_for_eager_and_graph_drafts(
     assert not select(config, selector, "dspark_head")
 
 
-def test_flash_attn_is_selected_only_for_a5_dflash2_eager_drafts(select_flash_attn, dflash2_config):
+@pytest.mark.parametrize("enforce_eager", [True, False, None])
+def test_flash_attn_is_selected_only_for_a5_dflash2_drafts(select_flash_attn, dflash2_config, enforce_eager):
     select, profile = select_flash_attn
     config = dflash2_config
+    config.speculative_config.enforce_eager = enforce_eager
     selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
     assert select(config, selector)
     profile.supports = lambda _: False
@@ -265,13 +267,11 @@ def test_flash_attn_selection_is_independent_of_draft_sampling(select_flash_attn
     [
         ("method", "eagle3"),
         ("method", "mtp"),
-        ("enforce_eager", False),
-        ("enforce_eager", None),
         ("architectures", ["DFlashDraftModel"]),
         ("architectures", None),
     ],
 )
-def test_other_drafts_and_graph_mode_retain_legacy_backend(select_flash_attn, dflash2_config, field, value):
+def test_other_drafts_retain_legacy_backend(select_flash_attn, dflash2_config, field, value):
     select, _ = select_flash_attn
     spec = dflash2_config.speculative_config
     setattr(spec.draft_model_config if field == "architectures" else spec, field, value)
@@ -512,3 +512,75 @@ def test_only_undersized_draft_swa_pages_drop_inherited_padding(
         assert layer_config is not config
         assert layer_config.cache_config is not config.cache_config
         assert layer_config.cache_config.skip_page_size_padded is None
+
+
+@pytest.mark.parametrize("window", [None, 2048])
+@pytest.mark.parametrize("causal", [False, True])
+def test_graph_plans_are_recaptured_after_warmup_and_shared_only_within_graph(monkeypatch, window, causal):
+    from vllm_ascend.attention import fa_v1 as module
+
+    query = torch.randn(18, 8, 128)
+    impl = make_impl(query, window=window)
+    output = torch.empty_like(query)
+    ops = SimpleNamespace(
+        flash_attn_metadata=Mock(side_effect=lambda *_args, **_kwargs: torch.empty(16)),
+        flash_attn=Mock(side_effect=lambda query, *_args, **_kwargs: (query + 1, None)),
+    )
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
+    monkeypatch.setattr(module._EXTRA_CTX, "capturing", False)
+    metadata = module.AscendFlashAttentionMetadata(
+        query_start_loc_gpu=torch.tensor([0, 6, 12, -1], dtype=torch.int32),
+        seq_lens_gpu=torch.tensor([256, 254, 0], dtype=torch.int32),
+        block_tables=torch.zeros(3, 2, dtype=torch.int32),
+        max_query_len=6,
+        causal=causal,
+    )
+    impl.forward_impl(query, None, None, None, metadata, output)
+    eager_plan = ops.flash_attn.call_args.kwargs["metadata"]
+    monkeypatch.setattr(module._EXTRA_CTX, "capturing", True)
+
+    # Emulate separate capture resource lifetimes. Reusing the warmup metadata
+    # must still record length normalization and tiling in each new graph.
+    for graph_index in range(2):
+        resources = {}
+
+        def capture_resource(key, factory):
+            if key not in resources:
+                resources[key] = factory()
+            return resources[key]
+
+        monkeypatch.setattr(module, "get_capture_resource", capture_resource)
+        metadata.seq_lens_gpu.copy_(torch.tensor([253 - graph_index, 251, 0], dtype=torch.int32))
+        for _ in range(6):
+            assert impl.forward_impl(query, None, None, None, metadata, output) is output
+        assert ops.flash_attn_metadata.call_count == 2 * graph_index + 2
+        args = ops.flash_attn.call_args.kwargs
+        assert args["metadata"] is not eager_plan
+        torch.testing.assert_close(args["seqused_kv"], torch.tensor([253 - graph_index, 251, 1], dtype=torch.int32))
+        torch.testing.assert_close(args["cu_seqlens_q"], torch.tensor([0, 6, 12, 12], dtype=torch.int32))
+        torch.testing.assert_close(output, query + 1)
+        # Equal geometry in another KV group must not consume this group's plan.
+        other = module.AscendFlashAttentionMetadata(
+            query_start_loc_gpu=metadata.query_start_loc_gpu,
+            seq_lens_gpu=metadata.seq_lens_gpu,
+            block_tables=metadata.block_tables,
+            max_query_len=6,
+            causal=causal,
+        )
+        impl.forward_impl(query, None, None, None, other, output)
+        assert ops.flash_attn.call_args.kwargs["metadata"] is not args["metadata"]
+
+
+def test_draft_graph_metadata_update_keeps_persistent_device_inputs():
+    from vllm_ascend.attention.fa_v1 import AscendFlashAttentionMetadata, AscendFlashAttentionMetadataBuilder
+
+    builder = AscendFlashAttentionMetadataBuilder.__new__(AscendFlashAttentionMetadataBuilder)
+    boundaries = torch.tensor([0, 6, 12], dtype=torch.int32)
+    lengths = torch.tensor([256, 254], dtype=torch.int32)
+    metadata = AscendFlashAttentionMetadata(query_start_loc_gpu=boundaries, seq_lens_gpu=lengths)
+    assert builder.supports_draft_decode_metadata_update
+    builder.update_draft_decode_metadata(metadata)
+    assert metadata.query_start_loc_gpu is boundaries
+    assert metadata.seq_lens_gpu is lengths
+    assert metadata.flash_attn_lengths is None
+    assert not metadata.flash_attn_plans

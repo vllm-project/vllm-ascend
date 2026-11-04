@@ -60,7 +60,8 @@ REQUIRES_LILICORR = pytest.mark.skipif(not HAS_LILICORR, reason="LiLiCorr is not
 
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("fail", [False, True])
-def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, causal, fail):
+@pytest.mark.parametrize("enforce_eager", [True, False, None])
+def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, causal, fail, enforce_eager):
     from vllm.compilation import backends
     from vllm.config import AttentionConfig, CacheConfig, set_current_vllm_config
     from vllm.v1.attention import selector as selector_module
@@ -79,7 +80,7 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
         method="dflash",
         target_model_config=target_config,
         draft_model_config=draft_config,
-        enforce_eager=True,
+        enforce_eager=enforce_eager,
         attention_backend=None,
         kv_cache_dtype="auto",
     )
