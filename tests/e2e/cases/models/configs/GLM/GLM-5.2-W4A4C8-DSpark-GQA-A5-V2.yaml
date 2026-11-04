@@ -1,6 +1,6 @@
 test_cases:
   - name: "GLM-5.2-W4A4C8-DSpark-GQA-A5-V2"
-    model: "/mnt/share/w00936111/GLM-5.2-W4A4C8-mxfp4-A5-0731"
+    model: "Eco-Tech/GLM-5.2-W4A4C8-mxfp4-A5-0731"
     envs:
       ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
       ASCEND_GLOBAL_LOG_LEVEL: "3"
@@ -57,8 +57,8 @@ test_cases:
       - '{"num_speculative_tokens":5,"method":"dspark","model":"Eco-Tech/GLM-5.2-DSpark-NPU-0805","enforce_eager":true,"kv_cache_dtype":"auto"}'
       - "--kv-cache-dtype"
       - "fp8"
-      - "--attention_config.indexer_kv_dtype"
-      - "fp8"
+      - "--attention-config"
+      - '{"indexer_kv_dtype":"fp8"}'
       - "--additional-config"
       - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"enable_flashcomm1":true}'
     benchmarks:
