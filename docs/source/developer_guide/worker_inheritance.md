@@ -90,3 +90,26 @@ executes inside the parent current-config context.
 `INHERITED_WORKER_METHODS` in `worker_interfaces.py` is immutable. Runtime tests
 assert actual method identity for all three Worker classes, and portable tests
 reject reintroduced overrides in any of those classes.
+
+## Dynamic weights and sleep (phase 3)
+
+Ordinary start/update/finish, initialization and connection shutdown now resolve
+to GPUWorker. Only `_start_weight_update` adds NZ validation before delegating.
+DP-indexed updates select `data_parallel_index * world_size + rank`; failed
+start/chunk loads reset the transfer target through the parent state machine.
+At this pinned parent version, a failed finish leaves the session active for a
+retry; successful finish resets the target, active flag and LoRA state.
+Draft updates remain explicitly unsupported and advertise False until the HCCL
+engine and every runner variant are qualified together.
+
+`CaMemSleepBackend` implements suspend/resume/discard without CuMem. The default
+`cumem` selection is mapped to CaMem on NPU; other backend names raise. It
+preserves communicator and compiled-artifact identity. Worker-level HCCL extra
+cleanup remains ordered around allocator suspension, saved parameter/buffer
+restore and graph recapture. Generic NCCL communicator suspension is rejected.
+
+NPU sleep/wake overrides are deliberately retained: they include memory
+reporting, persistent buffer policy, Mooncake registration, selective restoration
+and SleepWakeupManager ordering. Level 2 now also retains private draft buffers
+and the inherited parameter retention rules; a KV-only wake does not consume
+saved weights. Runtime CaMem/HCCL qualification remains a merge requirement.

@@ -2267,7 +2267,7 @@ class TestNPUWorker(TestBase):
         from vllm_ascend.worker.worker import NPUWorker
 
         for use_v2 in (False, True):
-            with self.subTest(use_v2=use_v2), patch("vllm_ascend.worker.worker.update_config") as update:
+            with self.subTest(use_v2=use_v2), patch("vllm.v1.worker.gpu_worker.update_config") as update:
                 worker = NPUWorker.__new__(NPUWorker)
                 worker.use_v2_model_runner = use_v2
                 worker.model_runner = MagicMock()
@@ -2306,6 +2306,9 @@ class TestNPUWorkerWeightUpdate(TestBase):
             worker = NPUWorker()
         worker.weight_transfer_engine = engine
         worker._weight_update_active = False
+        worker._weight_update_is_draft = False
+        worker.vllm_config = MagicMock()
+        worker.speculative_config = None
         worker.device = torch.device("cpu")
         worker.model_runner = MagicMock()
         worker.model_runner.model = MagicMock()

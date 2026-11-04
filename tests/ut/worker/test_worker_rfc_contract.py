@@ -46,6 +46,37 @@ def worker_method(name, **bindings):
     return scope["_contract_method"]
 
 
+def contract_class(names, **bindings):
+    source = ROOT.parent / "worker-upstream/vllm/v1/worker/gpu_worker.py"
+    if not source.exists():
+        spec = importlib.util.find_spec("vllm")
+        source = Path(next(iter(spec.submodule_search_locations))) / "v1/worker/gpu_worker.py"
+    parent = next(
+        n
+        for n in ast.parse(source.read_text(encoding="utf-8")).body
+        if isinstance(n, ast.ClassDef) and n.name == "Worker"
+    )
+    local = next(
+        n
+        for n in ast.parse(WORKER.read_text(encoding="utf-8")).body
+        if isinstance(n, ast.ClassDef) and n.name == "NPUWorker"
+    )
+    for cls, base in ((parent, "object"), (local, "Worker")):
+        cls.bases = [ast.Name(id=base, ctx=ast.Load())]
+        cls.body = [copy.deepcopy(n) for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
+        for method in cls.body:
+            method.decorator_list = []
+        if not cls.body:
+            cls.body = [ast.Pass()]
+    module = ast.Module(
+        body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), parent, local],
+        type_ignores=[],
+    )
+    scope = dict(bindings)
+    exec(compile(ast.fix_missing_locations(module), str(WORKER), "exec"), scope)
+    return scope["NPUWorker"]
+
+
 class WorkerAlignmentContract(unittest.TestCase):
     def test_reload_context_and_failure_cleanup(self):
         for fail in (False, True):
@@ -266,6 +297,117 @@ class WorkerAlignmentContract(unittest.TestCase):
             )
             methods = {n.name for n in cls.body if isinstance(n, ast.FunctionDef)}
             self.assertFalse(methods.intersection(scope["INHERITED_WORKER_METHODS"]), class_name)
+
+    def test_inherited_weight_update_state_machine(self):
+        from contextlib import nullcontext
+
+        names = {
+            "_check_weight_transfer_engine",
+            "_check_nz_disabled",
+            "_start_weight_update",
+            "start_weight_update",
+            "update_weights",
+            "finish_weight_update",
+            "shutdown_weight_transfer_engine",
+        }
+        cls = contract_class(
+            names,
+            set_current_vllm_config=lambda _: nullcontext(),
+            get_ascend_config=lambda: SimpleNamespace(weight_nz_mode=0),
+        )
+        worker = cls()
+        worker.weight_transfer_engine = MagicMock()
+        worker._weight_update_active = False
+        worker._weight_update_is_draft = False
+        worker.model_runner = MagicMock()
+        worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_index=1, world_size=2))
+        worker.rank = 1
+        worker.start_weight_update()
+        with self.assertRaisesRegex(RuntimeError, "already active"):
+            worker.start_weight_update()
+        payload = [{"rank": rank} for rank in range(4)]
+        worker.update_weights(payload)
+        worker.weight_transfer_engine.update_weights.assert_called_once_with(payload[3])
+        worker.weight_transfer_engine.finish_weight_update.side_effect = RuntimeError("retryable finish")
+        with self.assertRaisesRegex(RuntimeError, "retryable"):
+            worker.finish_weight_update()
+        self.assertTrue(worker._weight_update_active)
+        worker.weight_transfer_engine.finish_weight_update.side_effect = None
+        worker.finish_weight_update()
+        self.assertFalse(worker._weight_update_active)
+        worker.model_runner.reset_lora_state.assert_called_once_with()
+        worker.weight_transfer_engine.reset_weight_update_target.assert_called_once_with()
+        worker.start_weight_update()
+        worker.weight_transfer_engine.update_weights.side_effect = ValueError("bad chunk")
+        with self.assertRaisesRegex(ValueError, "bad chunk"):
+            worker.update_weights({})
+        self.assertFalse(worker._weight_update_active)
+        self.assertEqual(worker.weight_transfer_engine.reset_weight_update_target.call_count, 2)
+        worker.weight_transfer_engine.start_weight_update.side_effect = RuntimeError("failed start")
+        with self.assertRaisesRegex(RuntimeError, "failed start"):
+            worker.start_weight_update()
+        self.assertFalse(worker._weight_update_active)
+        worker.shutdown_weight_transfer_engine()
+        worker.weight_transfer_engine.shutdown.assert_called_once_with()
+
+    def test_nz_validation_precedes_engine_mutation(self):
+        from contextlib import nullcontext
+
+        cls = contract_class(
+            {"_check_weight_transfer_engine", "_check_nz_disabled", "_start_weight_update", "start_weight_update"},
+            set_current_vllm_config=lambda _: nullcontext(),
+            get_ascend_config=lambda: SimpleNamespace(weight_nz_mode=1),
+        )
+        worker = cls()
+        worker.weight_transfer_engine = MagicMock()
+        worker.vllm_config = object()
+        worker._weight_update_active = False
+        with self.assertRaisesRegex(ValueError, "FRACTAL_NZ"):
+            worker.start_weight_update()
+        worker.weight_transfer_engine.start_weight_update.assert_not_called()
+
+    def test_camem_backend_levels_tags_and_failure_state(self):
+        path = ROOT / "vllm_ascend/device_allocator/sleep_mode_backend.py"
+        cls = next(n for n in ast.parse(path.read_text(encoding="utf-8")).body if isinstance(n, ast.ClassDef))
+
+        class Base:
+            def __init__(self):
+                self._state = "RUNNING"
+
+        allocator, transfer = MagicMock(), MagicMock()
+        allocator.pointer_to_data = {1: SimpleNamespace(is_asleep=True)}
+        scope = {
+            "SleepModeBackend": Base,
+            "CaMemAllocator": SimpleNamespace(get_instance=lambda: allocator),
+            "global_te": transfer,
+        }
+        module = ast.Module(
+            body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), cls],
+            type_ignores=[],
+        )
+        exec(compile(ast.fix_missing_locations(module), str(path), "exec"), scope)
+        backend = scope["CaMemSleepBackend"]()
+        for level in (1, 2):
+            backend.suspend(level)
+            allocator.sleep.assert_called_with(offload_tags=("weights",) if level == 1 else ())
+            self.assertEqual(backend._state, "SUSPENDED")
+        transfer.reset_mock()
+        backend.resume(["weights"])
+        transfer.reregister_buffer.assert_not_called()
+        self.assertEqual(backend._state, "SUSPENDED")
+        allocator.pointer_to_data[1].is_asleep = False
+        backend.resume(["kv_cache"])
+        transfer.reregister_buffer.assert_called_once_with()
+        self.assertEqual(backend._state, "RUNNING")
+        backend.discard(("kv_cache",))
+        allocator.discard.assert_called_once_with(("kv_cache",))
+        self.assertEqual(backend._state, "SUSPENDED")
+        with self.assertRaisesRegex(ValueError, "1 or 2"):
+            backend.suspend(3)
+        allocator.wake_up.side_effect = ValueError("allocation failed")
+        with self.assertRaisesRegex(ValueError, "allocation failed"):
+            backend.resume(None)
+        self.assertEqual(backend._state, "SUSPENDED")
 
     def test_execution_decorators(self):
         cls = next(

@@ -1,0 +1,4 @@
+pr: 6
+entries:
+  - category: bugfix
+    text: Ordinary weight updates now use upstream DP routing and failure cleanup with NZ validation, and NPU sleep uses a CaMem-compatible backend.

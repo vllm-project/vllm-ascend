@@ -21,13 +21,11 @@ import copy
 import gc
 import logging
 from contextlib import AbstractContextManager, nullcontext
-from fnmatch import filter as fnmatch_filter
 from types import NoneType
 from typing import Any
 from unittest.mock import patch
 
 import torch
-import torch.nn as nn
 import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
@@ -101,7 +99,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
 )
-from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
@@ -318,7 +315,22 @@ class NPUWorker(GPUWorker):
 
     @property
     def sleep_mode_backend(self):
-        raise NotImplementedError("Ascend sleep requires the CaMem backend; the GPU backend is unsupported.")
+        from vllm_ascend.device_allocator.sleep_mode_backend import CaMemSleepBackend
+
+        name = getattr(self.model_config, "sleep_mode_backend", "cumem")
+        if name not in ("cumem", "camem"):
+            raise NotImplementedError(f"Ascend does not support sleep backend {name!r}.")
+        if self._sleep_mode_backend is None:
+            self._sleep_mode_backend = CaMemSleepBackend()
+        return self._sleep_mode_backend
+
+    def _start_weight_update(self, is_draft: bool = False) -> None:
+        # Keep NPU validation narrow; the parent owns all state transitions.
+        self._check_weight_transfer_engine()
+        self._check_nz_disabled()
+        if is_draft:
+            raise NotImplementedError("Draft weight transfer is not qualified for Ascend.")
+        super()._start_weight_update(is_draft=is_draft)
 
     def uninstall_static_kernel(self):
         import fcntl
@@ -352,30 +364,11 @@ class NPUWorker(GPUWorker):
                 except Exception:
                     return
 
-    def _save_sleep_parameters(self, model: nn.Module) -> None:
-        # Older supported vLLM versions do not expose the retention option.
-        patterns = getattr(self.model_config, "sleep_preserve_parameter_names", [])
-        if not patterns:
-            self._sleep_saved_parameters = {}
-            return
-        parameters = dict(model.named_parameters())
-        names: set[str] = set()
-        for pattern in patterns:
-            matches = fnmatch_filter(parameters, pattern)
-            if not matches:
-                raise ValueError(f"No parameter matches sleep retention: {pattern}")
-            names.update(matches)
-        self._sleep_saved_parameters = {
-            name: param.detach().to("cpu") for name, param in parameters.items() if name in names and not param.is_cpu
-        }
-
-    @torch.no_grad()
-    def _restore_sleep_parameters(self, model: nn.Module) -> None:
-        for name, value in self._sleep_saved_parameters.items():
-            model.get_parameter(name).copy_(value)
-        self._sleep_saved_parameters.clear()
-
     def sleep(self, level: int = 1) -> None:
+        if level not in (1, 2):
+            raise ValueError("Ascend sleep level must be 1 or 2.")
+        if getattr(self.model_config, "enable_nccl_comm_suspend", False):
+            raise NotImplementedError("Use Ascend RL extra cleanup for HCCL communicator suspension.")
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
@@ -384,11 +377,16 @@ class NPUWorker(GPUWorker):
         if level == 1:
             self._sleep_saved_buffers = {}
             self._sleep_saved_parameters = {}
+            self._sleep_saved_draft_buffers = {}
         else:
             model = self.model_runner.model
             # Level-2 discards the weights pool; retain parameters the sender omits.
             self._save_sleep_parameters(model)
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+            draft = self.get_draft_model()
+            self._sleep_saved_draft_buffers = (
+                {name: buffer.cpu().clone() for name, buffer in draft.named_buffers()} if draft is not None else {}
+            )
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
@@ -396,9 +394,9 @@ class NPUWorker(GPUWorker):
             self.sleep_wakeup_manager.sleep()
         self.synchronize_device()
 
-        allocator = CaMemAllocator.get_instance()
-        global_te.unregister_buffer()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        if has_kv_transfer_group():
+            get_kv_transfer_group().unregister_kv_caches()
+        self.sleep_mode_backend.suspend(level)
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -420,10 +418,9 @@ class NPUWorker(GPUWorker):
                 "or enable additional_config.rl_config (enabled: true) which disables NZ "
                 "automatically."
             )
-        allocator = CaMemAllocator.get_instance()
-        allocator.wake_up(tags=tags)
-        if tags is None or "kv_cache" in tags:
-            global_te.reregister_buffer()
+        self.sleep_mode_backend.resume(tags)
+        if has_kv_transfer_group() and (tags is None or "kv_cache" in tags):
+            get_kv_transfer_group().restore_kv_caches()
 
         # Do not access or consume saved weights when only the KV pool wakes.
         wake_weights = tags is None or "weights" in tags
@@ -436,25 +433,19 @@ class NPUWorker(GPUWorker):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
+        if wake_weights and self._sleep_saved_draft_buffers:
+            draft = self.get_draft_model()
+            if draft is not None:
+                for name, buffer in draft.named_buffers():
+                    if name in self._sleep_saved_draft_buffers:
+                        buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
+            self._sleep_saved_draft_buffers = {}
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
         self.synchronize_device()
-
-    def _check_weight_transfer_engine(self) -> None:
-        if self.weight_transfer_engine is None:
-            raise RuntimeError(
-                "Weight transfer not configured. Please set weight_transfer_config to enable weight transfer."
-            )
-
-    def init_weight_transfer_engine(self, init_info: dict) -> None:
-        """Initialize the HCCL weight transfer process group with the trainer."""
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-        typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
-        self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
     def _check_nz_disabled(self) -> None:
         if get_ascend_config().weight_nz_mode:
@@ -464,48 +455,6 @@ class NPUWorker(GPUWorker):
                 "via --additional-config, or enable additional_config.rl_config "
                 "(enabled: true) which disables NZ automatically."
             )
-
-    def start_weight_update(self) -> None:
-        """Begin a new weight update; prepares the model for layerwise reload."""
-        self._check_weight_transfer_engine()
-
-        if self._weight_update_active:
-            raise RuntimeError(
-                "start_weight_update called while a weight update is already active. Call finish_weight_update first."
-            )
-
-        self._check_nz_disabled()
-
-        assert self.weight_transfer_engine is not None
-        self.weight_transfer_engine.start_weight_update()
-        self._weight_update_active = True
-
-    def update_weights(self, update_info: dict) -> None:
-        """Receive a chunk of weights from the trainer and load them in place."""
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-
-        # state machine driven by start/finish.
-        if not self._weight_update_active:
-            raise RuntimeError("start_weight_update must be called before update_weights.")
-
-        try:
-            self.weight_transfer_engine.update_weights(update_info)
-        except BaseException:
-            self._weight_update_active = False
-            raise
-
-    def finish_weight_update(self) -> None:
-        """Finish the current weight update; runs layerwise postprocessing."""
-        self._check_weight_transfer_engine()
-
-        if not self._weight_update_active:
-            raise RuntimeError("start_weight_update must be called before finish_weight_update.")
-
-        assert self.weight_transfer_engine is not None
-        self.weight_transfer_engine.finish_weight_update()
-        self.model_runner.reset_lora_state()
-        self._weight_update_active = False
 
     def shutdown(self) -> None:
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
