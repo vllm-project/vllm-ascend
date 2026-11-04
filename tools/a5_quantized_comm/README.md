@@ -1,15 +1,55 @@
-# A5 原生 QuantAllReduce：PyTorch 封装与精度验证
+# A5 原生 QuantAllReduce 精度验证
 
-此工具为已安装的 `aclnnQuantAllReduce` 增加独立的 PyTorch 包装，不需要重编 vLLM。
-目标环境为 A5 / Ascend 950、CANN 9.2.0、PyTorch 2.10.0、torch_npu 2.10.0.post7。
-只有在目标环境编译并执行多卡测试后，才能确认该环境的原生算子可用且精度符合预期。
+默认通过官方 `cann_ops_transformer.ops.quant_all_reduce` 做多卡精度验证，
+不需要编译本目录的 C++ 封装或重编 vLLM。用户的 0.32 镜像已在
+CANN 9.2.1 安装目录下发现此入口，Python 为 3.12.16、PyTorch 为 2.10.0、
+torch_npu 为 2.10.0.post7。可调用入口和算子注册不等于已通过硬件执行与精度验证。
 
-当前封装只验证 Eager 下的 MXFP8 E4M3FN AllReduce，输入为 FP8 数据和 E8M0 scale，
-原生算子完成通信、反量化和求和，输出 BF16 或 FP32。
-封装会同步流，以保证输入、workspace 和 ACL tensor 描述符在执行完成前存活。
-因此它是精度诊断工具，不能用其耗时判断生产性能，也不用于入图。
+可选 `--backend cpp` 保留旧 CANN 9.2.0 ACLNN 签名的独立封装，用于诊断旧环境。
+旧镜像的 `libopapi_transformer.so` 两个入口已确认是返回 0 的空实现；
+该路径不能补出真实 kernel，也不应替代新包提供的官方封装。
 
-## 1. 单进程编译
+两种路径都只验证 Eager MXFP8 E4M3FN AllReduce，输入为 FP8 数据和 E8M0 scale，
+输出 BF16 或 FP32。脚本包含 CPU 传输和参考计算，不能用其耗时判断生产性能，也不用于入图。
+
+## 1. 官方入口验证（0.32 镜像）
+
+在已安装 ops-transformer 的 A5 容器中，先运行手工编码用例：
+
+```bash
+cd /path/to/vllm-ascend
+PYTHON=/usr/local/python3.12.16/bin/python3
+
+"$PYTHON" -m torch.distributed.run --standalone --nproc_per_node=2 \
+    tools/a5_quantized_comm/validate.py \
+    --backend ops-transformer \
+    --cases encoded --output-dtypes bf16 \
+    --rows 128 --hidden-sizes 5120 --repeats 1
+```
+
+通过后运行全部七组数据、BF16/FP32 两种输出：
+
+```bash
+set -o pipefail
+"$PYTHON" -m torch.distributed.run --standalone --nproc_per_node=2 \
+    tools/a5_quantized_comm/validate.py \
+    --backend ops-transformer \
+    --rows 128 --hidden-sizes 5120 \
+    --output-dtypes bf16 fp32 --repeats 2 \
+    2>&1 | tee a5_quant_comm_official.log
+```
+
+脚本调用官方 facade，由其创建和管理通信 context 与 buffer，
+不直接构造底层 `torch.ops.cann_ops_transformer` 所需的 context。
+尺度保持 `[T,H/64,2]` 原始字节，显式传 `scales_dtype=293`；
+`x_dtype=292` 表示 E4M3FN，`output_dtype=15/6` 表示 BF16/FP32。
+这些是官方 torch extension 的枚举，不是原始 ACL dtype 编码。
+脚本还会校验实际输出的 shape、dtype、device，记录入口来源与枚举值。
+
+`--backend` 默认为 `ops-transformer`，此模式不读取 `--manifest`。
+官方包缺失或调用失败会直接报错，不会自动切换 C++ 或普通 BF16 通信路径。
+
+## 2. 旧 C++ 路径：单进程编译
 
 先在已有 CANN / PyTorch 环境中执行。需要 CANN 开发头文件、C++ 编译器和 ninja。
 
@@ -34,11 +74,12 @@ python3 tools/a5_quantized_comm/build.py \
 有 `.so` 符号不代表已安装开发头文件；若未找到，需要补齐同版本 CANN SDK。
 如编译器内存不足，可以在构建命令前设置 PyTorch 标准参数 `MAX_JOBS=1`。
 
-## 2. 双卡精度测试
+## 3. 旧 C++ 路径：双卡精度测试
 
 ```bash
 python3 -m torch.distributed.run --standalone --nproc_per_node=2 \
     tools/a5_quantized_comm/validate.py \
+    --backend cpp \
     --manifest /tmp/a5_quant_comm_probe/manifest.json \
     --rows 128 --hidden-sizes 5120
 ```
@@ -53,6 +94,7 @@ python3 -m torch.distributed.run --standalone --nproc_per_node=2 \
 ```bash
 python3 -m torch.distributed.run --standalone --nproc_per_node=2 \
     tools/a5_quantized_comm/validate.py \
+    --backend cpp \
     --rows 2 128 1024 --hidden-sizes 1024 5120 8192
 ```
 
@@ -60,7 +102,7 @@ python3 -m torch.distributed.run --standalone --nproc_per_node=2 \
 大形状需要按 CANN 要求增大 `HCCL_BUFFSIZE`，脚本会检查所需最小空间。
 运行需满足本机 CANN 对 A5 驱动、固件和 UB-Memory 通信引擎的要求。
 
-## 3. 如何判断精度
+## 4. 如何判断精度（两种路径通用）
 
 每个用例输出一行 JSON，区分两条基准：
 
@@ -86,7 +128,7 @@ python3 -m torch.distributed.run --standalone --nproc_per_node=2 \
 `0.05` 只是示例质量门槛。若原始输入之和为零而量化误差非零，NRMSE 为无穷大。
 先确认所有 `comm_pass=true`，再评估量化误差；这一步不能替代模型输出精度验证。
 
-## 4. Python 调用入口
+## 5. 旧 C++ 路径的 Python 调用入口
 
 ```python
 import json
@@ -109,7 +151,7 @@ y = torch.ops.a5_quant_comm_probe.quant_all_reduce(q.contiguous(), scale_bytes, 
 `all_reduce`、`all_gather` 或 `barrier`。所有 rank 必须以相同顺序调用原生算子。
 不要在 graph capture 中调用此同步工具，也不要在原生调用失败后继续复用通信域。
 
-## 5. 不依赖 NPU 的基准解码检查
+## 6. 不依赖 NPU 的基准解码检查
 
 ```bash
 python3 -m unittest discover -s tools/a5_quantized_comm -p test_reference.py -v
@@ -117,7 +159,7 @@ python3 -m unittest discover -s tools/a5_quantized_comm -p test_reference.py -v
 
 这只检查 CPU 字节解析的已知编码和边界值，不能证明 C++ 编译或 NPU 执行正确。
 
-## 6. API 返回成功但精度完全错误
+## 7. 旧 C++ 路径：API 返回成功但精度完全错误
 
 `GetWorkspaceSize` 成功后还必须生成非空 executor；封装现在会检查这一点。
 若出现 `ACL_SUCCESS but left executor=nullptr`，先检查实际加载的算子库，
@@ -146,3 +188,7 @@ objdump -d --disassemble=aclnnQuantAllReduce "$LIB"
 
 接口及约束依据 [CANN QuantAllReduce 文档](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/API/aolapi/context/ops-transformer/aclnnQuantAllReduce.md)。
 若该文档与本机 9.2.0 SDK 有差异，以本机 SDK 头文件和对应版本的接口约束为准。
+官方 Python 路径的参数与 context 管理依据
+[Python 封装源码](https://gitcode.com/cann/ops-transformer/blob/master/mc2/quant_all_reduce/torch_extension/quant_all_reduce.py)
+和 [C++ 绑定源码](https://gitcode.com/cann/ops-transformer/blob/master/mc2/quant_all_reduce/torch_extension/csrc/quant_all_reduce.cpp)。
+上游 master 会更新；目标安装包的实际契约仍需通过输出校验及多卡测试确认。

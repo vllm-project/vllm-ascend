@@ -3,6 +3,7 @@
 """Run with torchrun on 2/4/8 A5 NPUs; use Gloo exclusively for control traffic."""
 
 import argparse
+import importlib
 import json
 import math
 import os
@@ -19,6 +20,12 @@ FP32_COMM_RTOL = 2e-5
 COMM_ATOL = 1e-6
 CASES = ("encoded", "zeros", "rank_constant", "random", "rank_scaled", "cancellation", "outliers")
 OUTPUT_DTYPES = ("bf16", "fp32")
+COMM_BACKENDS = ("ops-transformer", "cpp")
+# Official torch extension enums, NOT raw ACL/GE dtype enums.
+OPS_DTYPE_BF16 = 15
+OPS_DTYPE_FP32 = 6
+OPS_DTYPE_E4M3FN = 292
+OPS_DTYPE_E8M0 = 293
 
 
 def dequantize_cpu(values: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
@@ -159,15 +166,38 @@ def run(args) -> None:
         raise ValueError("Hidden sizes must be in [1024, 8192] and aligned to 128")
     torch.npu.set_device(local_rank)
     device = torch.device("npu", local_rank)
-    manifest = json.loads(args.manifest.read_text())
-    if manifest["torch"] != torch.__version__ or manifest["torch_npu"] != torch_npu.__version__:
-        raise RuntimeError("The extension was built with different torch/torch_npu versions; rebuild it")
-    torch.ops.load_library(manifest["library"])
+    if args.backend == "ops-transformer":
+        # The public facade owns context and buffer setup. Do not bypass it by
+        # calling torch.ops.cann_ops_transformer with a fabricated context.
+        ops = importlib.import_module("cann_ops_transformer.ops")
+        all_reduce = getattr(ops, "quant_all_reduce", None)
+        if not callable(all_reduce):
+            raise RuntimeError(f"{ops.__file__} does not expose callable quant_all_reduce")
+        backend_info = {
+            "backend": args.backend,
+            "package_file": ops.__file__,
+            "operator_module": all_reduce.__module__,
+            "output_dtype_tags": {"bf16": OPS_DTYPE_BF16, "fp32": OPS_DTYPE_FP32},
+            "x_dtype_tag": OPS_DTYPE_E4M3FN,
+            "scales_dtype_tag": OPS_DTYPE_E8M0,
+        }
+    else:
+        manifest = json.loads(args.manifest.read_text())
+        if manifest["torch"] != torch.__version__ or manifest["torch_npu"] != torch_npu.__version__:
+            raise RuntimeError("The extension was built with different torch/torch_npu versions; rebuild it")
+        torch.ops.load_library(manifest["library"])
+        all_reduce = torch.ops.a5_quant_comm_probe.quant_all_reduce
+        backend_info = {"backend": args.backend, "manifest": manifest}
     timeout = timedelta(seconds=args.timeout)
     # Never use ordinary collectives or barrier on the quantized HCCL group.
     dist.init_process_group(backend="gloo", timeout=timeout)
     quant_group = dist.new_group(ranks=list(range(world_size)), backend="hccl", timeout=timeout)
-    hcom = quant_group._get_backend(device).get_hccl_comm_name(rank)
+    backend = quant_group._get_backend(device)
+    if args.backend == "ops-transformer":
+        # Let the official MTE context manager create its communication context.
+        hcom = backend.get_hccl_comm_name(rank, init_comm=False)
+    else:
+        hcom = backend.get_hccl_comm_name(rank)
     if rank == 0:
         print(
             json.dumps(
@@ -176,12 +206,12 @@ def run(args) -> None:
                     "torch_npu": torch_npu.__version__,
                     "device": torch.npu.get_device_name(local_rank),
                     "world_size": world_size,
-                    "manifest": manifest,
+                    "communication": backend_info,
                     "comm_atol": args.comm_atol,
                     "bf16_comm_rtol": args.bf16_comm_rtol,
                     "fp32_comm_rtol": args.fp32_comm_rtol,
                     "max_quant_nrmse": args.max_quant_nrmse,
-                    "note": "Synchronous accuracy probe; timings are not performance measurements",
+                    "note": "Accuracy probe with CPU transfers; timings are not performance measurements",
                 }
             ),
             flush=True,
@@ -189,17 +219,37 @@ def run(args) -> None:
     passed = True
     for rows in args.rows:
         for hidden in args.hidden_sizes:
-            # CANN requires HCCL_BUFFSIZE >= 2*(values_bytes+scales_bytes+1).
-            required_bytes = 2 * (rows * hidden + rows * hidden // MX_BLOCK_SIZE + 1)
-            buffer_bytes = int(os.environ.get("HCCL_BUFFSIZE", "200")) * 1024 * 1024
-            if buffer_bytes < required_bytes:
-                raise ValueError(f"HCCL_BUFFSIZE too small: need at least {math.ceil(required_bytes / 1024**2)} MB")
+            # The official facade manages its own context/buffer. This check
+            # applies only to our legacy direct ACLNN wrapper.
+            if args.backend == "cpp":
+                required_bytes = 2 * (rows * hidden + rows * hidden // MX_BLOCK_SIZE + 1)
+                buffer_bytes = int(os.environ.get("HCCL_BUFFSIZE", "200")) * 1024 * 1024
+                if buffer_bytes < required_bytes:
+                    raise ValueError(f"HCCL_BUFFSIZE too small: need at least {math.ceil(required_bytes / 1024**2)} MB")
             for repeat in range(args.repeats):
                 for case in args.cases:
                     source, values, scales = make_inputs(case, rows, hidden, rank, repeat, device)
                     outputs = {}
                     for dtype in args.output_dtypes:
-                        output = torch.ops.a5_quant_comm_probe.quant_all_reduce(values, scales, hcom, dtype == "fp32")
+                        if args.backend == "ops-transformer":
+                            output = all_reduce(
+                                values,
+                                scales,
+                                hcom,
+                                world_size,
+                                reduce_op="sum",
+                                output_dtype=OPS_DTYPE_FP32 if dtype == "fp32" else OPS_DTYPE_BF16,
+                                x_dtype=OPS_DTYPE_E4M3FN,
+                                scales_dtype=OPS_DTYPE_E8M0,
+                            )
+                        else:
+                            output = all_reduce(values, scales, hcom, dtype == "fp32")
+                        expected_dtype = torch.float32 if dtype == "fp32" else torch.bfloat16
+                        if output.shape != values.shape or output.dtype != expected_dtype or output.device != device:
+                            raise RuntimeError(
+                                f"Unexpected output: shape={output.shape}, dtype={output.dtype}, "
+                                f"device={output.device}; expected {values.shape}, {expected_dtype}, {device}"
+                            )
                         outputs[dtype] = output.float().cpu()
                     payload = {
                         "source": source.cpu(),
@@ -223,6 +273,7 @@ def run(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--backend", choices=COMM_BACKENDS, default="ops-transformer")
     parser.add_argument("--manifest", type=Path, default=Path("/tmp/a5_quant_comm_probe/manifest.json"))
     parser.add_argument("--rows", type=int, nargs="+", default=[128])
     parser.add_argument("--hidden-sizes", type=int, nargs="+", default=[5120])
