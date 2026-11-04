@@ -1771,167 +1771,337 @@ This is a functional long-context configuration with one sequence per Decode rep
 
 Decode reserves `48421142528` bytes (about 45.1 GiB) of KV cache per worker. To retain workspace for the attention operators, it prefetches router and attention-projection weights from CPU using `gate.weight`, `qkv_proj.weight`, and `o_proj.weight`. Other weights remain on NPU. Decode uses `weight_nz_mode=0` so the selected projection weights use ordinary layouts for prefetching. Allow for these CPU-to-NPU transfers when evaluating latency; tune performance separately.
 
-#### 5.5.1 Prepare the Role Script
+#### 5.5.1 Preparation
 
-Complete the communication checks in [Section 3.2](#32-verify-multi-node-communication). All four Decode ranks form one distributed service and must start together. Ensure that the service, DP RPC, and KV handshake ports below are available. On multi-NIC hosts, set `VLLM_HOST_IP` as well as the HCCL/GLOO interfaces so that KV-transfer endpoints advertise the intended communication network.
+Complete the communication checks in [Section 3.2](#32-verify-multi-node-communication), and prepare the containers, W8A8 weights, and Mooncake dependencies from Sections 4 and 5.3. Replace the IP/NIC placeholders with each host's communication-network IP and matching interface. Adjust the CANN environment-script path if needed. The templates set `VLLM_HOST_IP` as well as the HCCL/GLOO interfaces so KV-transfer endpoints advertise the intended network.
 
-Create `/workspace/m31-1m` inside each container. Save the following as `pd_1m.env` in that directory, replacing the host-specific IP and NIC on each node. `DECODE_HEAD_IP` is the first Decode node's communication IP and must match on both Decode nodes.
+Use the same `launch_online_dp.py` as [MiniMax-M3 Section 5.3.1](MiniMax-M3.md#531-prefill-decode-disaggregation): copy that section's complete Python launcher, including its `--pp-size` option. Create separate role directories inside the containers:
 
 ```bash
-export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
-export LOCAL_IP="<CURRENT_NODE_IP>"
-export NIC_NAME="<CURRENT_NODE_NIC>"
-export DECODE_HEAD_IP="<FIRST_DECODE_NODE_IP>"
-export SERVED_MODEL_NAME=minimax-m3.1-flash
+mkdir -p /workspace/m31-1m/prefill /workspace/m31-1m/decode
 ```
 
-Save this common script as `run_1m_rank.sh` on all three nodes. Adjust the CANN environment-script path if needed.
+Save a copy of `launch_online_dp.py` in each role directory that will be used. Save the Prefill template below as `/workspace/m31-1m/prefill/run_dp_template.sh` on P, and the Decode template as `/workspace/m31-1m/decode/run_dp_template.sh` on both D hosts. Keep P and D directories separate even on shared storage: the launcher reads `./run_dp_template.sh` from its working directory.
 
-```bash
-#!/usr/bin/env bash
-set -eo pipefail
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source ./pd_1m.env
+The templates use named environment variables. Set host-specific values in the launch blocks in Section 5.5.3; the launcher supplies each engine's `DP_RANK`, `SERVICE_PORT`, and `VISIBLE_DEVICES`. Each engine occupies `TP_SIZE × PP_SIZE` NPUs. Each Decode engine serves one DP rank with `--data-parallel-size-local 1`; the launcher's `--dp-size-local 2` starts two engines per D host. Both D hosts use the first D host's IP as `DP_ADDRESS` and share one global DP4 group.
 
-ROLE=${1:?Use prefill or decode}
-DP_RANK=${2:-0}
-LOCAL_RANK=${3:-0}
-export VLLM_USE_V2_MODEL_RUNNER=1
-export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=7200
-export VLLM_HOST_IP="$LOCAL_IP"
-export ASCEND_ENABLE_USE_FABRIC_MEM=1
-export HCCL_IF_IP="$LOCAL_IP"
-export HCCL_SOCKET_IFNAME="$NIC_NAME"
-export GLOO_SOCKET_IFNAME="$NIC_NAME"
-export HCCL_OP_EXPANSION_MODE=AIV
-export HCCL_CONNECT_TIMEOUT=120
-export HCCL_EXEC_TIMEOUT=1800
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+#### 5.5.2 Service Scripts
 
-ROLE_ARGS=()
-if [[ "$ROLE" == prefill ]]; then
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-    export VLLM_PP_LAYER_PARTITION=30,30
+=== "Atlas 800I A3 (W8A8)"
+
+    **1. Prefill node: `prefill/run_dp_template.sh`**
+
+    ```bash
+    #!/usr/bin/env bash
+    set -eo pipefail
+
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
+    # Set this host's communication IP, NIC and W8A8 weight path.
+    export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
+    export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
+    export MODEL_PATH="${MODEL_PATH:-/models/MiniMax-M3.1-Flash-W8A8}"
+
+    # The launcher supplies these values for the Prefill engine.
+    export DP_SIZE=${DP_SIZE:-1}
+    export TP_SIZE=${TP_SIZE:-8}
+    export PP_SIZE=${PP_SIZE:-2}
+    export SERVICE_PORT=${SERVICE_PORT:-31050}
+    export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
+
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=7200
+    export VLLM_PP_LAYER_PARTITION="30,30"
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=256
-    DP_SIZE=1
-    PP_SIZE=2
-    SERVICE_PORT=31050
-    KV_PORT=20000
-    KV_ROLE=kv_producer
-    ROLE_ARGS=(--max-num-batched-tokens 8192
-               --long-prefill-token-threshold 8192
-               --gpu-memory-utilization 0.95)
-elif [[ "$ROLE" == decode ]]; then
-    FIRST_DEVICE=$((LOCAL_RANK * 8))
-    export ASCEND_RT_VISIBLE_DEVICES
-    ASCEND_RT_VISIBLE_DEVICES=$(seq -s, "$FIRST_DEVICE" "$((FIRST_DEVICE + 7))")
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_IF_IP="$LOCAL_IP"
+    export VLLM_HOST_IP="$LOCAL_IP"
+    export HCCL_CONNECT_TIMEOUT=120
+    export HCCL_EXEC_TIMEOUT=1800
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_ENABLE_USE_FABRIC_MEM=1
+    export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
+    if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
+        export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
+    fi
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve "$MODEL_PATH" \
+        --enforce-eager \
+        --compilation-config '{"cudagraph_mode":"NONE"}' \
+        --host 0.0.0.0 \
+        --port "$SERVICE_PORT" \
+        --data-parallel-size "$DP_SIZE" \
+        --tensor-parallel-size "$TP_SIZE" \
+        --pipeline-parallel-size "$PP_SIZE" \
+        --distributed-executor-backend mp \
+        --served-model-name minimax-m3.1-flash \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --max-model-len 1050624 \
+        --max-num-seqs 1 \
+        --max-num-batched-tokens 8192 \
+        --long-prefill-token-threshold 8192 \
+        --enable-chunked-prefill \
+        --no-enable-prefix-caching \
+        --no-async-scheduling \
+        --trust-remote-code \
+        --quantization ascend \
+        --dtype bfloat16 \
+        --block-size 128 \
+        --hf-overrides '{"architectures":["MiniMaxM3SparseForCausalLM"]}' \
+        --gpu-memory-utilization 0.95 \
+        --kv-cache-dtype bfloat16 \
+        --language-model-only \
+        --additional-config '{
+        "enable_cpu_binding": true,
+        "ascend_compilation_config": {
+            "enable_static_kernel": false,
+            "fuse_norm_quant": false,
+            "fuse_qknorm_rope": false
+        },
+        "multistream_overlap_shared_expert": true,
+        "weight_nz_mode": 1,
+        "enable_shared_expert_dp": false,
+        "enable_flashcomm1": true
+    }' \
+        --kv-transfer-config '{
+        "kv_connector": "MooncakeConnectorV1",
+        "kv_buffer_device": "npu",
+        "kv_role": "kv_producer",
+        "kv_port": 20000,
+        "engine_id": "m31-1m-prefill-0",
+        "kv_connector_extra_config": {
+            "use_ascend_direct": true,
+            "prefill": {
+                "dp_size": 1,
+                "tp_size": 8,
+                "pp_size": 2,
+                "pp_layer_partition": "30,30"
+            },
+            "decode": {
+                "dp_size": 4,
+                "tp_size": 8,
+                "pp_size": 1
+            }
+        }
+    }'
+    ```
+
+    **2. Decode nodes: `decode/run_dp_template.sh`**
+
+    ```bash
+    #!/usr/bin/env bash
+    set -eo pipefail
+
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
+    # Set this host's communication IP, NIC and W8A8 weight path.
+    export LOCAL_IP="${LOCAL_IP:-<CURRENT_NODE_IP>}"
+    export NIC_NAME="${NIC_NAME:-<CURRENT_NODE_NIC>}"
+    export MODEL_PATH="${MODEL_PATH:-/models/MiniMax-M3.1-Flash-W8A8}"
+
+    # Both D hosts use the first D host's IP as the global DP coordinator.
+    export DP_SIZE=${DP_SIZE:-4}
+    export TP_SIZE=${TP_SIZE:-8}
+    export PP_SIZE=${PP_SIZE:-1}
+    export DP_RANK=${DP_RANK:-0}
+    export DP_ADDRESS="${DP_ADDRESS:-<FIRST_DECODE_NODE_IP>}"
+    export DP_RPC_PORT=${DP_RPC_PORT:-31422}
+    export SERVICE_PORT=${SERVICE_PORT:-31260}
+    export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+
     unset VLLM_PP_LAYER_PARTITION
+
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=7200
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=8
-    DP_SIZE=4
-    PP_SIZE=1
-    SERVICE_PORT=$((31260 + LOCAL_RANK))
+    export HCCL_IF_IP="$LOCAL_IP"
+    export VLLM_HOST_IP="$LOCAL_IP"
+    export HCCL_CONNECT_TIMEOUT=120
+    export HCCL_EXEC_TIMEOUT=1800
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_ENABLE_USE_FABRIC_MEM=1
+    export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
+    if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
+        export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
+    fi
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
     KV_PORT=$((21000 + DP_RANK * 64))
-    KV_ROLE=kv_consumer
-    ROLE_ARGS=(--data-parallel-size-local 1
-               --data-parallel-rank "$DP_RANK"
-               --data-parallel-address "$DECODE_HEAD_IP"
-               --data-parallel-rpc-port 31422
-               --max-num-batched-tokens 1
-               --long-prefill-token-threshold 1
-               --gpu-memory-utilization 0.99
-               --kv-cache-memory-bytes 48421142528
-               --offload-backend prefetch
-               --offload-group-size 1
-               --offload-num-in-group 1
-               --offload-prefetch-step 1
-               --offload-params gate.weight qkv_proj.weight o_proj.weight)
-else
-    echo "Unknown role: $ROLE" >&2
-    exit 1
-fi
 
-KV_CONFIG=$(python3 - "$KV_ROLE" "$KV_PORT" "$ROLE" "$DP_RANK" <<'PYCODE'
-import json
-import sys
-print(json.dumps({
-    "kv_connector": "MooncakeConnectorV1",
-    "kv_buffer_device": "npu",
-    "kv_role": sys.argv[1],
-    "kv_port": int(sys.argv[2]),
-    "engine_id": f"m31-1m-{sys.argv[3]}-{sys.argv[4]}",
-    "kv_connector_extra_config": {
-        "use_ascend_direct": True,
-        "prefill": {"dp_size": 1, "tp_size": 8, "pp_size": 2,
-                    "pp_layer_partition": "30,30"},
-        "decode": {"dp_size": 4, "tp_size": 8, "pp_size": 1},
-    },
-}))
-PYCODE
-)
-ADDITIONAL_CONFIG=$(python3 - "$ROLE" <<'PYCODE'
-import json
-import sys
-prefill = sys.argv[1] == "prefill"
-print(json.dumps({
-    "enable_cpu_binding": True,
-    "ascend_compilation_config": {
-        "enable_static_kernel": False,
-        "fuse_norm_quant": False,
-        "fuse_qknorm_rope": False,
-    },
-    "multistream_overlap_shared_expert": prefill,
-    "weight_nz_mode": 1 if prefill else 0,
-    "enable_shared_expert_dp": False,
-    "enable_flashcomm1": prefill,
-}))
-PYCODE
-)
+    vllm serve "$MODEL_PATH" \
+        --data-parallel-rank "$DP_RANK" \
+        --data-parallel-size-local 1 \
+        --data-parallel-address "$DP_ADDRESS" \
+        --data-parallel-rpc-port "$DP_RPC_PORT" \
+        --enforce-eager \
+        --compilation-config '{"cudagraph_mode":"NONE"}' \
+        --host 0.0.0.0 \
+        --port "$SERVICE_PORT" \
+        --data-parallel-size "$DP_SIZE" \
+        --tensor-parallel-size "$TP_SIZE" \
+        --pipeline-parallel-size "$PP_SIZE" \
+        --distributed-executor-backend mp \
+        --served-model-name minimax-m3.1-flash \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --max-model-len 1050624 \
+        --max-num-seqs 1 \
+        --max-num-batched-tokens 1 \
+        --long-prefill-token-threshold 1 \
+        --enable-chunked-prefill \
+        --no-enable-prefix-caching \
+        --no-async-scheduling \
+        --trust-remote-code \
+        --quantization ascend \
+        --dtype bfloat16 \
+        --block-size 128 \
+        --hf-overrides '{"architectures":["MiniMaxM3SparseForCausalLM"]}' \
+        --gpu-memory-utilization 0.99 \
+        --kv-cache-memory-bytes 48421142528 \
+        --offload-backend prefetch \
+        --offload-group-size 1 \
+        --offload-num-in-group 1 \
+        --offload-prefetch-step 1 \
+        --offload-params gate.weight qkv_proj.weight o_proj.weight \
+        --kv-cache-dtype bfloat16 \
+        --language-model-only \
+        --additional-config '{
+        "enable_cpu_binding": true,
+        "ascend_compilation_config": {
+            "enable_static_kernel": false,
+            "fuse_norm_quant": false,
+            "fuse_qknorm_rope": false
+        },
+        "multistream_overlap_shared_expert": false,
+        "weight_nz_mode": 0,
+        "enable_shared_expert_dp": false,
+        "enable_flashcomm1": false
+    }' \
+        --kv-transfer-config '{
+        "kv_connector": "MooncakeConnectorV1",
+        "kv_buffer_device": "npu",
+        "kv_role": "kv_consumer",
+        "kv_port": '"$KV_PORT"',
+        "engine_id": "m31-1m-decode-'"$DP_RANK"'",
+        "kv_connector_extra_config": {
+            "use_ascend_direct": true,
+            "prefill": {
+                "dp_size": 1,
+                "tp_size": 8,
+                "pp_size": 2,
+                "pp_layer_partition": "30,30"
+            },
+            "decode": {
+                "dp_size": 4,
+                "tp_size": 8,
+                "pp_size": 1
+            }
+        }
+    }'
+    ```
 
-exec vllm serve "$MODEL_PATH" \
-    --host 0.0.0.0 --port "$SERVICE_PORT" \
-    --served-model-name "$SERVED_MODEL_NAME" \
-    --trust-remote-code --language-model-only \
-    --hf-overrides '{"architectures":["MiniMaxM3SparseForCausalLM"]}' \
-    --quantization ascend --dtype bfloat16 \
-    --tensor-parallel-size 8 --pipeline-parallel-size "$PP_SIZE" \
-    --data-parallel-size "$DP_SIZE" \
-    --distributed-executor-backend mp --enable-expert-parallel \
-    --seed 1024 --max-model-len 1050624 --max-num-seqs 1 \
-    --block-size 128 --kv-cache-dtype bfloat16 \
-    --enforce-eager --compilation-config '{"cudagraph_mode":"NONE"}' \
-    --enable-chunked-prefill --no-enable-prefix-caching \
-    --no-async-scheduling "${ROLE_ARGS[@]}" \
-    --additional-config "$ADDITIONAL_CONFIG" \
-    --kv-transfer-config "$KV_CONFIG"
-```
+Keep the tested Decode settings on both hosts: `HCCL_BUFFSIZE=8`, token budget and long-prefill threshold `1`, and `48421142528` bytes of KV cache per worker. The KV handshake port is `21000 + DP_RANK × 64`, giving `21000`, `21064`, `21128`, and `21192`; Prefill uses `20000`. These ports are separate from the HTTP and DP RPC ports. If changing TP/PP/DP, update both roles' KV-transfer layouts and all launch mappings together.
 
-#### 5.5.2 Start Prefill and Decode
+#### 5.5.3 Start the Services
 
-Run inside the Prefill container:
-
-```bash
-cd /workspace/m31-1m
-nohup bash run_1m_rank.sh prefill 0 0 > prefill.log 2>&1 &
-```
-
-Run inside the first Decode container:
+**1. Prefill node**
 
 ```bash
-cd /workspace/m31-1m
-nohup bash run_1m_rank.sh decode 0 0 > decode-dp0.log 2>&1 &
-nohup bash run_1m_rank.sh decode 1 1 > decode-dp1.log 2>&1 &
+cd /workspace/m31-1m/prefill
+
+export LOCAL_IP="<PREFILL_NODE_IP>"
+export NIC_NAME="<PREFILL_NODE_NIC>"
+export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+export DP_SIZE=1
+export TP_SIZE=8
+export PP_SIZE=2
+export LOCAL_DP_SIZE=1
+export DP_RANK_START=0
+export DP_ADDRESS="$LOCAL_IP"
+export DP_RPC_PORT=6884
+export SERVICE_PORT=31050
+
+python launch_online_dp.py \
+    --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+    --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+    --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+    --vllm-start-port "$SERVICE_PORT"
 ```
 
-Run inside the second Decode container:
+**2. First Decode node: global DP ranks 0–1**
 
 ```bash
-cd /workspace/m31-1m
-nohup bash run_1m_rank.sh decode 2 0 > decode-dp2.log 2>&1 &
-nohup bash run_1m_rank.sh decode 3 1 > decode-dp3.log 2>&1 &
+cd /workspace/m31-1m/decode
+
+export LOCAL_IP="<FIRST_DECODE_NODE_IP>"
+export NIC_NAME="<FIRST_DECODE_NODE_NIC>"
+export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+export DP_SIZE=4
+export TP_SIZE=8
+export PP_SIZE=1
+export LOCAL_DP_SIZE=2
+export DP_RANK_START=0
+export DP_ADDRESS="$LOCAL_IP"
+export DP_RPC_PORT=31422
+export SERVICE_PORT=31260
+
+python launch_online_dp.py \
+    --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+    --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+    --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+    --vllm-start-port "$SERVICE_PORT"
 ```
 
-Wait for all five HTTP-serving instances to report `Application startup complete`. Check that each engine reports enough KV-cache tokens for `1050624` total tokens and that Decode logs confirm weight prefetching. Cache capacity alone does not establish functional readiness: retain operator workspace and complete the long-input test below before using a different image, checkpoint, or memory budget.
+This starts the DP coordinator and the first two engines. Keep this command running and start the second D host from another shell; do not wait for the first D host to become fully healthy before starting the second.
+
+**3. Second Decode node: global DP ranks 2–3**
+
+```bash
+cd /workspace/m31-1m/decode
+
+export LOCAL_IP="<SECOND_DECODE_NODE_IP>"
+export NIC_NAME="<SECOND_DECODE_NODE_NIC>"
+export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+export DP_SIZE=4
+export TP_SIZE=8
+export PP_SIZE=1
+export LOCAL_DP_SIZE=2
+export DP_RANK_START=2
+export DP_ADDRESS="<FIRST_DECODE_NODE_IP>"
+export DP_RPC_PORT=31422
+export SERVICE_PORT=31260
+
+python launch_online_dp.py \
+    --dp-size "$DP_SIZE" --tp-size "$TP_SIZE" --pp-size "$PP_SIZE" \
+    --dp-size-local "$LOCAL_DP_SIZE" --dp-rank-start "$DP_RANK_START" \
+    --dp-address "$DP_ADDRESS" --dp-rpc-port "$DP_RPC_PORT" \
+    --vllm-start-port "$SERVICE_PORT"
+```
+
+The launcher's device assignment is:
+
+| Host / DP rank | Local logical NPUs | API port |
+| --- | --- | --- |
+| Prefill / 0 | 0–15 | 31050 |
+| First D / 0 | 0–7 | 31260 |
+| First D / 1 | 8–15 | 31261 |
+| Second D / 2 | 0–7 | 31260 |
+| Second D / 3 | 8–15 | 31261 |
+
+Wait for all five APIs to report `Application startup complete` and return HTTP 200 from `/health`. Run the two D launch commands concurrently until their shared initialization completes.
+
+Check that each engine reports enough KV-cache tokens for `1050624` total tokens and that Decode logs confirm weight prefetching. Cache capacity alone does not establish functional readiness: retain operator workspace and complete the long-input test below when using a different image, checkpoint, or memory budget.
+
+**4. Proxy: one Prefill endpoint and four Decode endpoints**
 
 Reuse the proxy prepared in Section 5.3. Set the three host IPs and start it inside the Prefill container:
 
@@ -1947,12 +2117,13 @@ python3 /workspace/load_balance_proxy_server_example.py \
     --workers 1
 ```
 
-#### 5.5.3 Verify the 1M Input
+#### 5.5.4 Verify the 1M Input
 
 Send requests to the proxy so that the test exercises KV transfer. First run the text request in Section 6.1 and check that the response is coherent. Then generate an exact 1M-token input with three distinct records near 5%, 50%, and 95% of the context. Run the following from `/workspace/m31-1m` in a container with the checkpoint tokenizer:
 
 ```bash
-source ./pd_1m.env
+export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+export SERVED_MODEL_NAME=minimax-m3.1-flash
 python3 - <<'PYCODE'
 import json
 import os
