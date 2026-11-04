@@ -1134,10 +1134,13 @@ def test_handle_requests_attributes_failed_tp_to_affected_requests(
 
     if submission_error:
         with pytest.raises(RuntimeError, match="submit failed"):
-            thread._handle_requests("engine-p", "10.0.0.1", 6000, requests)
+            thread._handle_requests("engine-p", "10.0.0.1", 6000, requests, selection_index_offset=3)
     else:
-        assert thread._handle_requests("engine-p", "10.0.0.1", 6000, requests) == {"request-b"}
+        assert thread._handle_requests("engine-p", "10.0.0.1", 6000, requests, selection_index_offset=3) == {
+            "request-b"
+        }
     completed_result.assert_called_once_with()
+    assert thread._build_transfer_block_buckets.call_args.kwargs["selection_index_offset"] == 3
 
 
 def test_connector_worker_groups_start_load_by_remote_engine() -> None:
@@ -1325,6 +1328,50 @@ def test_worker_run_marks_only_failed_requests_and_finishes_the_batch(
         finished_recving=set(requests), failed_recving=expected_failed
     )
     assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults()
+    request_queue.task_done.assert_called_once_with()
+
+
+@pytest.mark.parametrize("first_error", [False, True])
+def test_worker_run_publishes_each_request_before_starting_next(
+    monkeypatch: pytest.MonkeyPatch, first_error: bool
+) -> None:
+    thread = make_thread(device=0, ready_event=threading.Event())
+    requests = {
+        "request-a": make_req_meta(local=([10],)),
+        "request-b": make_req_meta(local=([20],)),
+    }
+    request_queue = MagicMock()
+    request_queue.get.side_effect = [("engine-p", requests), _StopWorkerLoop()]
+    thread.request_queue = request_queue
+    seen = []
+
+    def handle(engine_id, host, port, pending, selection_index_offset=0):
+        assert engine_id == "engine-p"
+        assert (host, port) == ("10.0.0.1", 6000)
+        assert len(pending) == 1
+        request_id = next(iter(pending))
+        assert pending[request_id] is requests[request_id]
+        assert selection_index_offset == len(seen)
+        if seen:
+            assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(
+                finished_recving={"request-a"},
+                failed_recving={"request-a"} if first_error else set(),
+            )
+        else:
+            assert thread.finished_requests.empty()
+        seen.append(request_id)
+        if first_error and request_id == "request-a":
+            raise RuntimeError("first request failed")
+        return set()
+
+    thread._handle_requests = handle
+    monkeypatch.setattr(torch.npu, "set_device", MagicMock())
+    with pytest.raises(_StopWorkerLoop):
+        thread.run()
+
+    assert seen == ["request-a", "request-b"]
+    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(finished_recving={"request-b"})
+    assert thread.invalid_block_ids == ({10} if first_error else set())
     request_queue.task_done.assert_called_once_with()
 
 

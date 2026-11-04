@@ -176,33 +176,33 @@ class MooncakePullRecvingThread(threading.Thread):
         self.ready_event.set()
         while True:
             remote_engine_id, requests = self.request_queue.get()
-            failed_request_ids: set[str] = set()
-            request_endpoints = {(request.remote_host, request.remote_port) for request in requests.values()}
             try:
-                remote_host, remote_port = self._get_remote_endpoint(request_endpoints)
-                failed_request_ids = self._handle_requests(
-                    remote_engine_id,
-                    remote_host,
-                    remote_port,
-                    requests,
-                )
-                for request_id in failed_request_ids:
-                    self._mark_request_failed(requests[request_id])
-            except Exception as exc:
-                failed_request_ids = set(requests)
-                if self.can_report_invalid_block_ids:
-                    for request_metadata in requests.values():
-                        self._mark_request_failed(request_metadata)
-                logger.exception(
-                    "Mooncake pull failed for remote engine %s at %s, marking batch requests failed: %s; error=%s",
-                    remote_engine_id,
-                    sorted(request_endpoints),
-                    sorted(failed_request_ids),
-                    exc,
-                )
+                # Finish and publish each request before preparing the next
+                # one. Keep its original index for replicated-TP selection.
+                for selection_index, (request_id, request) in enumerate(requests.items()):
+                    failed = False
+                    try:
+                        failed_request_ids = self._handle_requests(
+                            remote_engine_id,
+                            request.remote_host,
+                            request.remote_port,
+                            {request_id: request},
+                            selection_index_offset=selection_index,
+                        )
+                        failed = request_id in failed_request_ids
+                    except Exception:
+                        failed = True
+                        logger.exception(
+                            "Mooncake pull failed for request %s from remote engine %s at %s:%s",
+                            request_id,
+                            remote_engine_id,
+                            request.remote_host,
+                            request.remote_port,
+                        )
+                    if failed and self.can_report_invalid_block_ids:
+                        self._mark_request_failed(request)
+                    self.finished_requests.put((request_id, failed))
             finally:
-                for request_id in requests:
-                    self.finished_requests.put((request_id, request_id in failed_request_ids))
                 self.request_queue.task_done()
 
     def _mark_request_failed(self, request_metadata: ReqMeta) -> None:
@@ -533,6 +533,7 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_host: str,
         remote_port: int,
         requests: dict[str, ReqMeta],
+        selection_index_offset: int = 0,
     ) -> set[str]:
         """Build and execute transfer buckets for one producer engine."""
         remote_metadata = self._get_remote_metadata(remote_engine_id, remote_host, remote_port)
@@ -568,6 +569,7 @@ class MooncakePullRecvingThread(threading.Thread):
                     remote_metadata.dcp_size,
                     requests,
                     transfer_block_ids_by_spec,
+                    selection_index_offset=selection_index_offset,
                 )
                 for (remote_pcp_rank, remote_tp_rank), transfer_entries_by_spec in transfer_block_buckets.items():
                     future = self.executor.submit(
@@ -624,6 +626,7 @@ class MooncakePullRecvingThread(threading.Thread):
                 list[tuple[int, list[int], list[int]]],
             ],
         ],
+        selection_index_offset: int = 0,
     ) -> tuple[
         dict[tuple[int, int], dict[int, dict[tuple[int, int], list[tuple[str, list[int], list[int]]]]]],
         dict[tuple[int, int], set[str]],
@@ -642,7 +645,9 @@ class MooncakePullRecvingThread(threading.Thread):
         # (remote_pcp_rank, remote_tp_rank) -> requests with at least one
         # transfer entry in the bucket.
         request_ids_by_remote_rank: dict[tuple[int, int], set[str]] = {}
-        for selection_index, (request_id, request_metadata) in enumerate(requests.items()):
+        for selection_index, (request_id, request_metadata) in enumerate(
+            requests.items(), start=selection_index_offset
+        ):
             request_block_ids_by_spec = transfer_block_ids_by_spec.setdefault(request_id, {})
             for local_layer_index, remote_layer_index in layer_pairs:
                 spec_index = self.spec_indices[local_layer_index]
