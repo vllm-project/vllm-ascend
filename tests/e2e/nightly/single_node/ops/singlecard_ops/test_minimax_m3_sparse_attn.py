@@ -358,7 +358,7 @@ def _ensure_cann_sparse_attention_ops() -> None:
         return
 
     try:
-        from cann_ops_transformer.ops import (  # type: ignore[import-not-found]
+        from cann_ops_transformer.ops import (
             generic_block_sparse_attention,
             generic_block_sparse_attention_metadata,
         )

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from importlib import import_module
 from typing import Any
 
 import torch
@@ -65,7 +66,7 @@ def _npu_k2q_csr(
     """Convert MiniMax-M3 q2k indices to k2q CSR on NPU."""
     # A5 disables the generic custom-op loader, so register the in-tree
     # MiniMax M3 operators lazily after the NPU runtime has been initialized.
-    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
+    import_module("vllm_ascend.vllm_ascend_C")
 
     enable_custom_op()
     if total_rows < 0 or max_kv < 0:
@@ -639,7 +640,7 @@ def _is_minimax_sparse_attention_split_kv_available() -> bool:
     Restart workers after installing the experimental package and sourcing its
     environment; the ACLNN loader also caches its library search paths.
     """
-    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
+    import_module("vllm_ascend.vllm_ascend_C")
 
     enable_custom_op()
     return torch.ops._C_ascend.is_minimax_sparse_attention_split_kv_available()

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from importlib import import_module
 from importlib.util import find_spec
 from typing import Any, ClassVar
 
@@ -77,7 +78,7 @@ def _cann_index_score_available() -> bool:
     if find_spec("cann_ops_transformer") is None:
         return False
     try:
-        from cann_ops_transformer.ops import msa_index_score  # noqa: F401, PLC0415
+        _ = import_module("cann_ops_transformer.ops").msa_index_score
     except Exception:  # noqa: BLE001 -- optional toolchain, any failure -> Triton
         return False
     return True

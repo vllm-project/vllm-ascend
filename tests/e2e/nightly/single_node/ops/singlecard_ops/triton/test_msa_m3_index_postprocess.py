@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from importlib import import_module
 from typing import Any
 
 import pytest
@@ -243,7 +244,7 @@ def test_sorted_decode_model_shapes_and_workspace_contract(
 def test_sorted_topk_unaligned_multihead_repeated(init_blocks: int, local_blocks: int, tmp_path) -> None:
     # MiniMax M3/M3.1 select 16 blocks. Exercise an unaligned score width with
     # repeated allocations and compare both paths with an independent CPU oracle.
-    import vllm_ascend.ops  # noqa: F401
+    import_module("vllm_ascend.ops")
     from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import _sort_valid_gbsa_prefix
 
     heads, requests, query_len, topk, width = 4, 2, 8, 16, 33
