@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import pytest
 import torch
 import torch_npu  # noqa: F401
@@ -11,7 +13,8 @@ from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import index_decode_top
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("shape", [(0, 0, 0), (0, 3, 32), (4, 0, 32), (4, 0, 0)])
 def test_empty_shape(shape: tuple[int, int, int]) -> None:
@@ -25,7 +28,8 @@ def test_empty_shape(shape: tuple[int, int, int]) -> None:
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("width", [0, 32])
 def test_zero_logical_blocks(width: int) -> None:
@@ -37,7 +41,8 @@ def test_zero_logical_blocks(width: int) -> None:
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize(
     "change,message",
@@ -71,14 +76,15 @@ def test_invalid_inputs(change: dict, message: str) -> None:
         dtype=options.pop("context_dtype", torch.int32),
         device=options.pop("context_device", "npu"),
     )
-    kwargs = dict(decode_query_len=1, topk=16, logical_block_count=32, init_blocks=0, local_blocks=1)
+    kwargs: dict[str, Any] = dict(decode_query_len=1, topk=16, logical_block_count=32, init_blocks=0, local_blocks=1)
     kwargs.update(options)
     with pytest.raises(ValueError, match=message):
         index_decode_topk_fused(score, context, **kwargs)
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("context_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("query_len", [1, 4])
@@ -100,7 +106,8 @@ def test_block_boundaries(context_dtype: torch.dtype, query_len: int, topk: int,
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("strided", [False, True])
 @pytest.mark.parametrize("init_blocks,local_blocks", [(0, 0), (1, 2)])
@@ -145,3 +152,31 @@ def test_decode_topk_varying_runtime_parameters(strided: bool, init_blocks: int,
                 actual = expected_scores[head, selected].sort(descending=True).values
                 expected = expected_scores[head].topk(min(visible, topk)).values
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("topk,width", [(1, 0), (3, 7), (16, 513), (32, 2055)])
+def test_sorted_decode_indices_match_normalized_selection(query_len: int, strided: bool, topk: int, width: int) -> None:
+    context = torch.tensor([-query_len, 0, 127, 128, 255, 65535], dtype=torch.int64, device="npu")
+    tokens = context.numel() * query_len
+    score = torch.arange(width, dtype=torch.float32, device="npu").expand(1, tokens, width).contiguous()
+    if strided:
+        storage = torch.empty((1, tokens, width * 2), dtype=score.dtype, device=score.device)
+        storage[..., ::2] = score
+        score = storage[..., ::2]
+        context_storage = torch.empty(context.numel() * 2, dtype=context.dtype, device=context.device)
+        context_storage[::2] = context
+        context = context_storage[::2]
+    unsorted, expected_counts = index_decode_topk_fused(score, context, query_len, topk, width)
+    keys = torch.where(unsorted >= 0, unsorted.to(torch.float32), float("inf"))
+    ordered = keys.sort(dim=-1).values
+    expected = torch.where(ordered == float("inf"), -1, ordered).to(torch.int32)
+    actual, counts = index_decode_topk_fused(score, context, query_len, topk, width, sort_indices=True)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(counts, expected_counts, rtol=0, atol=0)
+    assert actual.is_contiguous() and actual.dtype == torch.int32
