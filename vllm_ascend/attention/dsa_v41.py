@@ -1717,6 +1717,15 @@ def _get_v41_role_builder(role: str):
 
     builder_cls, _ = dsa_v41_cp.get_v41_cp_classes()
 
+    if builder_cls is AscendDSAV41MetadataBuilder:
+        return {
+            "State": AscendDSAV41StateMetadataBuilder,
+            "SWA": AscendDSAV41SWAMetadataBuilder,
+            "Attention": AscendDSAV41AttentionMetadataBuilder,
+            "Indexer": AscendDSAV41IndexerMetadataBuilder,
+            "FoldedIndex": AscendDSAV41FoldedIndexMetadataBuilder,
+        }[role]
+
     if builder_cls is not dsa_v41_cp.AscendDSAV41PCPMetadataBuilder:
         return builder_cls
 

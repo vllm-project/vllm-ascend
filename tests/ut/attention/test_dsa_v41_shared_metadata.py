@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Consumer-specific V4.1 PCP metadata and shared-buffer regressions."""
+"""Consumer-specific V4.1 metadata and shared-buffer regressions."""
 
 from types import SimpleNamespace
 from typing import Any
@@ -16,6 +16,92 @@ from vllm_ascend.attention.context_parallel import dsa_cp, dsa_v41_cp
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
 builders = pcp_builders
+
+
+class TestRoleMetadata:
+    @pytest.mark.parametrize("pcp", [False, True])
+    @pytest.mark.parametrize("role", ["State", "SWA", "Attention", "Indexer", "FoldedIndex"])
+    def test_backend_selects_role_builder(self, monkeypatch, pcp, role):
+        monkeypatch.setattr(dsa_v41_cp, "is_pcp_enabled", lambda: pcp)
+        module = dsa_v41_cp if pcp else dsa_v41
+        prefix = "AscendDSAV41PCP" if pcp else "AscendDSAV41"
+        backend = getattr(dsa_v41, f"DeepseekV41{role}Backend")
+        assert backend.get_builder_cls() is getattr(module, f"{prefix}{role}MetadataBuilder")
+
+    @pytest.mark.parametrize("scenario", ["prefill", "mixed", "decode", "dummy"])
+    @pytest.mark.parametrize("ratio", [1, 2])
+    @pytest.mark.parametrize("deferred", [False, True])
+    def test_non_pcp_matches_consumed_fields(self, builders, monkeypatch, scenario, ratio, deferred):
+        templates = builders(world=1, max_seqs=4, ratio=ratio)
+        config = templates["swa"].vllm_config.model_config.hf_text_config
+        config.index_n_heads = 2
+        config.index_head_dim = 2
+        monkeypatch.setattr(dsa_v41_cp, "is_pcp_enabled", lambda: False)
+        batch = _batch(2, 0, scenario)
+        output = torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+        monkeypatch.setattr(
+            torch.ops._C_ascend, "npu_sparse_flash_mla_metadata", Mock(return_value=output), raising=False
+        )
+        monkeypatch.setattr(
+            torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_metadata", Mock(return_value=output), raising=False
+        )
+        rope = ({LAYER: batch.positions.float()}, {LAYER: -batch.positions.float()})
+        role_by_kind = {"swa": "SWA", "long_kv": "Attention", "index_k": "Indexer", "compressor_state": "State"}
+        results = []
+        for specialized in (False, True):
+            batch_cache: dict[str, Any] = {}
+            group_caches: dict[int, dict[str, Any]] = {}
+            metadata = {}
+            for kind, template in templates.items():
+                backend = getattr(dsa_v41, f"DeepseekV41{role_by_kind[kind]}Backend")
+                builder_cls = backend.get_builder_cls() if specialized else dsa_v41.AscendDSAV41MetadataBuilder
+                owner = builder_cls(
+                    template.kv_cache_spec, template.layer_names, template.vllm_config, torch.device("cpu")
+                )
+                owner._supports_device_ops = kind != "compressor_state"
+                owner._uses_a5_packed_cache = False
+                owner._device_metadata_enabled = deferred
+                group = int(kind in {"long_kv", "index_k"})
+                common = dsa_cp.AscendDSAPCPMetadataBuilder._build_global_common_attn_metadata(
+                    batch.context, group, batch.local
+                )
+                if batch.graph:
+                    common = dsa_cp.AscendDSAPCPMetadataBuilder._build_graph_common_attn_metadata(
+                        common, batch.context.global_batch.num_reqs
+                    )
+                metadata[kind] = owner.build(
+                    0,
+                    common,
+                    num_actual_reqs=batch.context.global_batch.num_reqs,
+                    common_v41_metadata=group_caches.setdefault(group, {}),
+                    common_v41_batch_metadata=batch_cache,
+                    full_graph_mode=batch.graph,
+                    skip_ring_state_update=batch.context.global_batch.is_dummy,
+                    rope_views=rope,
+                )
+                for task in owner.take_device_metadata_tasks():
+                    task.run()
+            results.append(metadata)
+        reference, actual = results
+        for kind, result in actual.items():
+            expected = reference[kind]
+            fields = ["block_table", "query_start_loc", "seq_lens", "positions", "slot_mapping", "flat_slot_mapping"]
+            if kind == "compressor_state":
+                fields += ["c2_ring_metadata", "c2_complete_mask", "c2_source_positions"]
+            else:
+                fields += ["cache_seq_lens", "cmp_residual"]
+                assert result.max_cache_seq_len == expected.max_cache_seq_len
+            if kind in {"swa", "long_kv"}:
+                fields.append("smla_metadata")
+            if kind == "swa":
+                fields += ["cos", "sin", "ori_mask_mode", "ori_win_left", "ori_win_right", "ori_topk_length"]
+            if kind == "index_k":
+                fields.append("qli_metadata")
+            for name in fields:
+                torch.testing.assert_close(getattr(result, name), getattr(expected, name))
+        assert actual["swa"].seq_lens.data_ptr() == actual["long_kv"].seq_lens.data_ptr()
+        assert actual["long_kv"].cache_seq_lens.data_ptr() == actual["index_k"].cache_seq_lens.data_ptr()
+        assert actual["long_kv"].slot_mapping.data_ptr() == actual["index_k"].slot_mapping.data_ptr()
 
 
 class TestSharedPCPMetadata:
