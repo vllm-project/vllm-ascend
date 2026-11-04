@@ -22,7 +22,6 @@ import logging
 import os
 import subprocess
 import sys
-from pathlib import Path
 from sysconfig import get_paths
 
 from setuptools import Command, Extension, find_packages, setup
@@ -327,21 +326,6 @@ class cmake_build_ext(build_ext):
             raise RuntimeError(f"CMake configuration failed: {e}")
 
     def build_extensions(self) -> None:
-        for ext in self.extensions:
-            if ext.name == "vllm_ascend.third_party.deep_gemm._C":
-                destination = Path(self.get_ext_fullpath(ext.name)).resolve().parent
-                subprocess.check_call(
-                    [
-                        sys.executable,
-                        os.path.join(ROOT_DIR, "tools", "deepgemm", "build.py"),
-                        "--source",
-                        os.path.join(ROOT_DIR, ".deps", "deepgemm-ascend"),
-                        "--work-dir",
-                        os.path.join(self.build_temp, "deepgemm-ascend"),
-                        "--destination",
-                        str(destination),
-                    ]
-                )
         if not envs.COMPILE_CUSTOM_KERNELS:
             return
         # Ensure that CMake is present and working
@@ -363,8 +347,6 @@ class cmake_build_ext(build_ext):
 
         # Build all the extensions
         for ext in self.extensions:
-            if not isinstance(ext, CMakeExtension):
-                continue
             self.configure(ext)
             targets.append(target_name(ext.name))
 
@@ -414,15 +396,6 @@ class cmake_build_ext(build_ext):
             shutil.copytree(src_cann_ops_custom, dst_cann_ops_custom)
             print(f"Copy: {src_cann_ops_custom} -> {dst_cann_ops_custom}")
 
-    def copy_extensions_to_source(self):
-        if any(ext.name == "vllm_ascend.third_party.deep_gemm._C" for ext in self.extensions):
-            import shutil
-
-            relative = Path("vllm_ascend/third_party/deep_gemm")
-            # Stage the generated package before setuptools copies its extension.
-            shutil.copytree(Path(self.build_lib) / relative, Path(ROOT_DIR) / relative, dirs_exist_ok=True)
-        super().copy_extensions_to_source()
-
     def run(self):
         if envs.COMPILE_CUSTOM_KERNELS:
             # First, ensure ACLNN custom-ops is built and installed.
@@ -449,9 +422,6 @@ except LookupError:
 ext_modules = []
 if envs.COMPILE_CUSTOM_KERNELS:
     ext_modules = [CMakeExtension(name="vllm_ascend.vllm_ascend_C")]
-    if hardware.device_type_from_soc_version(envs.SOC_VERSION) == hardware.AscendDeviceType.A5:
-        # Keep a real extension entry so wheels carry the Python/platform ABI tag.
-        ext_modules.append(Extension("vllm_ascend.third_party.deep_gemm._C", sources=[]))
 
 
 def get_path(*filepath) -> str:

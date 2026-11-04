@@ -663,6 +663,16 @@ class AscendConfig:
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
+        if self.deepgemm_mega_moe:
+            from vllm_ascend.deepgemm import is_deepgemm_available
+
+            if not is_deepgemm_available():
+                logger.warning_once(
+                    "deepgemm_mega_moe was requested but the NPU DeepGEMM package is unavailable. "
+                    "Install the matching deepgemm_ascend wheel to enable it. "
+                    "Setting deepgemm_mega_moe=False and using the standard MoE backend."
+                )
+                self.deepgemm_mega_moe = False
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.

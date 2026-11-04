@@ -41,12 +41,6 @@ RUN yum update -y && \
     yum install -y git vim wget curl protobuf protobuf-devel protobuf-compiler net-tools gcc gcc-c++ make cmake numactl numactl-devel libibverbs-devel hiredis-devel clang patch && \
     rm -rf /var/cache/yum/*
 
-# Use openEuler's parallel toolset for the native DeepGEMM build. Its default
-# linking preserves the system libstdc++ ABI; no global compiler switch is needed.
-COPY tools/deepgemm/install_build_deps.sh /tmp/install-deepgemm-build-deps.sh
-RUN bash /tmp/install-deepgemm-build-deps.sh && \
-    rm -f /tmp/install-deepgemm-build-deps.sh && yum clean all
-
 # Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge

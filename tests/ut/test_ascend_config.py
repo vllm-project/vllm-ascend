@@ -115,6 +115,31 @@ class TestRlConfig(TestBase):
 
 
 class TestAscendConfig(TestBase):
+    def test_missing_deepgemm_disables_backend_before_model_initialization(self):
+        with (
+            patch("vllm_ascend.deepgemm.is_deepgemm_available", return_value=False),
+            patch("vllm_ascend.ascend_config.logger.warning_once") as warning,
+        ):
+            config = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False), deepgemm_mega_moe=True)
+        self.assertFalse(config.deepgemm_mega_moe)
+        warning.assert_called_once()
+        self.assertIn("deepgemm_ascend wheel", warning.call_args.args[0])
+
+    def test_available_deepgemm_keeps_opt_in_without_native_import(self):
+        with (
+            patch("vllm_ascend.deepgemm.is_deepgemm_available", return_value=True),
+            patch("vllm_ascend.deepgemm.load_deepgemm") as load,
+        ):
+            config = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False), deepgemm_mega_moe=True)
+        self.assertTrue(config.deepgemm_mega_moe)
+        load.assert_not_called()
+
+    def test_disabled_deepgemm_does_not_probe_optional_package(self):
+        with patch("vllm_ascend.deepgemm.is_deepgemm_available") as probe:
+            config = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False))
+        self.assertFalse(config.deepgemm_mega_moe)
+        probe.assert_not_called()
+
     @staticmethod
     def _clean_up_ascend_config(func):
         def wrapper(*args, **kwargs):

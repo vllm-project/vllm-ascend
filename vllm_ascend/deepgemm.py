@@ -13,7 +13,6 @@ from functools import cache
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-_BUNDLED = "vllm_ascend.third_party.deep_gemm"
 _REQUIRED_APIS = ("get_npu_arch", "fp8_fp4_mega_moe", "transform_weights_for_mega_moe", "SymmBuffer")
 
 
@@ -47,32 +46,31 @@ def _validate(module):
         raise RuntimeError("NPU DeepGEMM requires SymmBuffer(base=...) for target/draft storage reuse")
 
 
+def is_deepgemm_available() -> bool:
+    """Probe the optional NPU package without loading its native extension."""
+    loaded = sys.modules.get("deep_gemm")
+    if loaded is not None:
+        return callable(getattr(loaded, "get_npu_arch", None))
+    return _is_npu_package(importlib.util.find_spec("deep_gemm"))
+
+
 @cache
 def load_deepgemm():
-    """Resolve once per worker, before weights are transformed or buffers allocated."""
+    """Load the separately installed Ascend wheel once, in workers only."""
+    if not is_deepgemm_available():
+        raise RuntimeError("Install the matching deepgemm_ascend wheel to use NPU MegaMoE")
+
     import torch_npu  # noqa: F401 -- load the NPU shared libraries before the extension
     from vllm import envs as vllm_envs
 
-    # This is the dependency's existing cache setting, with the vLLM default.
-    # It is not a new user configuration requirement.
     os.environ.setdefault("DG_JIT_CACHE_DIR", str(Path(vllm_envs.VLLM_CACHE_ROOT) / "deep_gemm" / "ascend"))
-    loaded = sys.modules.get("deep_gemm")
-    if loaded is not None and not callable(getattr(loaded, "get_npu_arch", None)):
-        raise RuntimeError("A non-NPU deep_gemm is already loaded; cannot load a second native backend in this worker")
-    external = None if loaded is not None else importlib.util.find_spec("deep_gemm")
-    name = "deep_gemm" if loaded is not None or _is_npu_package(external) else _BUNDLED
-    if external is not None and name == _BUNDLED:
-        logger.warning("Ignoring external deep_gemm without the upstream NPU API; using bundled Ascend backend")
     try:
-        module = importlib.import_module(name)
+        module = importlib.import_module("deep_gemm")
         _validate(module)
     except Exception as exc:
-        # Native registration may already have happened. Never attempt a second
-        # native implementation after an initialization or API validation error.
         raise RuntimeError(
-            f"Cannot initialize NPU MegaMoE backend {name}. Install the matching Ascend 950 "
-            "vLLM Ascend distribution and its supported platform dependencies. "
-            "No CUDA DeepGEMM fallback is supported."
+            "Cannot initialize NPU MegaMoE backend deep_gemm. Check that the deepgemm_ascend wheel "
+            "matches Python, Torch, CANN and the Ascend platform. No CUDA DeepGEMM fallback is supported."
         ) from exc
     logger.info("Loaded NPU DeepGEMM %s from %s", getattr(module, "__version__", "unknown"), module.__file__)
     return module

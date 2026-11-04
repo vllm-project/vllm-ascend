@@ -52,7 +52,7 @@ def context():
         )
 
     dependency.SymmBuffer.side_effect = buffer
-    with patch("vllm_ascend.ops.fused_moe.deepgemm_loader.load_deepgemm", return_value=dependency):
+    with patch("vllm_ascend.deepgemm.load_deepgemm", return_value=dependency):
         yield backend, config, group, ascend, dependency
 
 
@@ -132,7 +132,7 @@ def test_unsupported_config_fails_before_weight_conversion(context, mode):
     if mode == "activation":
         item.moe_config.activation = "relu"
     with (
-        patch("vllm_ascend.ops.fused_moe.deepgemm_loader.load_deepgemm") as load,
+        patch("vllm_ascend.deepgemm.load_deepgemm") as load,
         pytest.raises(ValueError),
     ):
         backend.DeepGemmV41Experts(item)

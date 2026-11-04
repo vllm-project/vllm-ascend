@@ -5,4 +5,4 @@ entries:
   - category: bugfix
     text: Reduced deferred MLA tensor reuse with a same-stream lifetime adjustment, replacing the experimental MegaMoE Prefill host synchronization.
   - category: feature
-    text: Bundle the native Ascend 950 DeepGEMM backend with automatic loading and JIT cache setup, removing manual source overlays and compatibility-header configuration.
+    text: Load the optional prebuilt Ascend 950 DeepGEMM wheel lazily; when it is unavailable, warn and disable deepgemm_mega_moe before model initialization.
