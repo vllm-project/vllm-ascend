@@ -26,8 +26,14 @@ normalizing per route, exactly as it is without expert parallelism. The fused
 dispatch/MLP/combine operator (``enable_fused_mc2``) is the one MoE path that
 cannot express it, and is rejected.
 
-Quantized checkpoints, EPLB, sequence-parallel MoE and the DSpark draft are
-not supported yet.
+Tensor parallelism without expert parallelism slices every expert along its
+intermediate size, so each rank's down-projection rows are partial sums, and
+RMS is not linear in them. As upstream does, the rows are all-reduced over TP
+before the norm, and the MoE output then skips its final all-reduce.
+
+Quantized checkpoints, EPLB, sequence-parallel MoE, data or prefill context
+parallelism without expert parallelism, and the DSpark draft are not
+supported yet.
 """
 
 from collections.abc import Callable
@@ -36,8 +42,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from vllm.config import VllmConfig
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_ep_group
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
+from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.models.muse_spark.amd.model import (
@@ -51,7 +58,7 @@ from vllm.models.muse_spark.common.layers import (
     MuseSpark1xRMSNorm,
     MuseSpark1xRMSNormWithInputScale,
 )
-from vllm.models.muse_spark.common.moe import MuseSpark1xRouter
+from vllm.models.muse_spark.common.moe import MuseSpark1xRouter, needs_pre_norm_all_reduce
 from vllm.models.muse_spark.common.omni import (
     OMNI_WEIGHTS_MAPPER,
     MuseSpark1xOmniMixin,
@@ -59,6 +66,7 @@ from vllm.models.muse_spark.common.omni import (
 )
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.routed_experts import (
     AscendRoutedExperts,
     AscendUnquantizedFusedMoEMethod,
@@ -185,6 +193,13 @@ class AscendMuseSparkFusedMoEMethod(AscendUnquantizedFusedMoEMethod):
     weighted sum, so this rounds once more than upstream does: measured at
     0.21% mean relative error over random rows, against bf16's own 0.39% unit
     in the last place. The error is rounding noise of that order, not a bias.
+
+    Without expert parallelism every expert is sliced along its intermediate
+    size, so each TP rank's rows are partial sums, and RMS is not linear in
+    them. The rows are then all-reduced over TP before the norm, as upstream's
+    ``needs_pre_norm_all_reduce`` path does, in the activation dtype the down
+    projection already rounded them to. Every TP rank routes the same tokens
+    through the same permutation, so the rows line up across ranks.
     """
 
     # Attached by the owning MoE once the factory has built the layer, as
@@ -193,11 +208,18 @@ class AscendMuseSparkFusedMoEMethod(AscendUnquantizedFusedMoEMethod):
     # so holding the norm itself would register its weight a second time under
     # the quant method and put a key in the state dict no checkpoint carries.
     post_expert_norm_fn: Callable[..., torch.Tensor] | None = None
+    pre_norm_all_reduce: bool = False
+
+    def __init__(self, moe: FusedMoEConfig, tid2eid=None) -> None:
+        super().__init__(moe, tid2eid=tid2eid)
+        self.pre_norm_all_reduce = needs_pre_norm_all_reduce(moe)
 
     def apply_gmm2(self, mlp_compute_input, hidden_states, act_out_scale):
         routed_rows = super().apply_gmm2(mlp_compute_input, hidden_states, act_out_scale)
         if self.post_expert_norm_fn is None:
             raise RuntimeError("Muse Spark routed experts ran without their post-expert norm.")
+        if self.pre_norm_all_reduce:
+            routed_rows = tensor_model_parallel_all_reduce(routed_rows)
         return self.post_expert_norm_fn(routed_rows, out_dtype=routed_rows.dtype)
 
 
@@ -205,10 +227,7 @@ class AscendMuseSparkRoutedExperts(AscendRoutedExperts):
     """Routed experts whose MLP stage ends in the Muse Spark per-route norm.
 
     ``AscendRoutedExperts`` installs the stock unquantized method itself, so
-    the Muse Spark one replaces it here rather than being passed in. Only the
-    expert container is specialized; the runner still arrives through the
-    usual pluggable dispatch, so the Ascend combine and its reduction hooks
-    are untouched.
+    the Muse Spark one replaces it here rather than being passed in.
     """
 
     def __init__(self, *args, **kwargs):
@@ -216,6 +235,35 @@ class AscendMuseSparkRoutedExperts(AscendRoutedExperts):
         self._replace_quant_method(
             AscendMuseSparkFusedMoEMethod(self.moe_config, tid2eid=self.tid2eid),
         )
+
+
+class AscendMuseSparkMoERunner(AscendMoERunner):
+    """The Ascend MoE runner, without the final all-reduce the experts already did.
+
+    Once the routed rows are summed over TP ahead of the per-route norm, the
+    combined output is complete on every rank, and reducing it again would
+    multiply it by the TP size. Upstream's ``MuseMoERunner`` skips that
+    all-reduce the same way. Everything else, the comm methods and the
+    combine included, is the Ascend runner's. Both overrides read only the
+    MoE config, so they are static properties of the layer and safe to
+    capture in a graph.
+    """
+
+    @property
+    def _fused_output_is_reduced(self) -> bool:
+        return needs_pre_norm_all_reduce(self.moe_config) or super()._fused_output_is_reduced
+
+    def _maybe_reduce_final_output(
+        self,
+        states: torch.Tensor,
+        trunc_size: int | None,
+        output_is_reduced: bool | None = None,
+    ) -> torch.Tensor:
+        if not needs_pre_norm_all_reduce(self.moe_config):
+            return super()._maybe_reduce_final_output(states, trunc_size, output_is_reduced)
+        if trunc_size is not None and trunc_size > 0:
+            return states[..., :trunc_size]
+        return states
 
 
 class MuseSparkReferenceExperts(nn.Module):
@@ -279,10 +327,9 @@ class AscendMuseSpark1xMoE(MuseSpark1xMoE):
 
     The upstream constructor is not called: it pins a CUDA/ROCm runner and a
     MoE config that defers the top-k finalize, neither of which applies here.
-    The factory is built again with the Ascend routed experts, leaving the
-    runner to the usual pluggable dispatch. Router, pooler, unpooler and the
-    two expert norms keep their upstream names, so checkpoints map onto the
-    same keys.
+    The factory is built again with the Ascend routed experts and the Ascend
+    runner. Router, pooler, unpooler and the two expert norms keep their
+    upstream names, so checkpoints map onto the same keys.
     """
 
     def __init__(self, vllm_config: VllmConfig, layer_idx: int, prefix: str = "") -> None:
@@ -313,6 +360,15 @@ class AscendMuseSpark1xMoE(MuseSpark1xMoE):
         self.ep_group = ep_group.device_group
         self.ep_rank = ep_group.rank_in_group if self.use_ep else 0
         self.ep_size = self.ep_group.size() if self.use_ep else 1
+        # Without expert parallelism the experts are sliced over TP x DP x PCP,
+        # but the rows are summed before the norm over TP only, as upstream's
+        # are; upstream rejects DP and PCP here too.
+        if not self.use_ep and (
+            parallel_config.data_parallel_size > 1 or parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "Muse Spark on Ascend needs expert parallelism under data or prefill context parallelism."
+            )
 
         self.layer_idx = layer_idx
         self.top_k = config.num_experts_per_tok
@@ -415,6 +471,7 @@ class AscendMuseSpark1xMoE(MuseSpark1xMoE):
             e_score_correction_bias=self.expert_bias,
             routed_scaling_factor=self.route_scale,
             routed_experts_cls=AscendMuseSparkRoutedExperts,
+            runner_cls=AscendMuseSparkMoERunner,
         )
         self.experts.routed_experts.quant_method.post_expert_norm_fn = self.post_expert_norm.forward
 

@@ -1,21 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Muse Spark Open under expert parallelism on two NPUs.
+"""Muse Spark Open on two NPUs, with and without expert parallelism.
 
 The reduced config and the dummy-weight harness come from the one-card test;
-the parallel layout differs, and the expert hidden size is widened to what the
-MC2 dispatch kernel accepts. What this adds over that test:
+the parallel layout differs, and under expert parallelism the expert hidden
+size is widened to what the MC2 dispatch kernel accepts. What this adds over
+that test:
 
-* the experts are really sharded (``ep_size == 2``, half the experts per rank),
-* the MoE communication method the selector lands on is recorded, and the one
-  path that cannot carry Muse Spark's per-route norm is rejected,
-* the decode still replays, so the sharded routing is deterministic.
+* under expert parallelism the experts are really sharded (``ep_size == 2``,
+  half the experts per rank), the MoE communication method the selector lands
+  on is recorded, and the one path that cannot carry Muse Spark's per-route
+  norm is rejected,
+* under plain tensor parallelism every expert is sliced along its
+  intermediate size, so the down-projection rows are summed over TP before the
+  per-route norm, and the runner skips its final all-reduce,
+* in both layouts the decode still replays, so the routing is deterministic.
 
-What it does not check is the *value* of the per-route norm under expert
-parallelism. Dummy weights are sharded differently per layout, so there is no
-one-card output to compare against. That the norm is still correct rests on it
-being a single shared row-wise norm, which commutes with the dispatch
-permutation; ``tests/ut/models/test_muse_spark.py`` pins that property.
+What it does not check is the *value* of the per-route norm in either layout.
+Dummy weights are sharded differently per layout, so there is no one-card
+output to compare against. ``tests/ut/models/test_muse_spark.py`` pins the
+properties the norm rests on: under expert parallelism it is a row-wise norm
+that commutes with the dispatch permutation, and under tensor parallelism the
+summed TP partials are the unsharded rows.
 """
 
 from typing import Any, cast
@@ -109,5 +115,60 @@ def test_muse_spark_expert_parallel_shards_and_replays(tmp_path):
     # place for that norm, which is why the model rejects it at construction.
     assert comm_methods[0] in {"MC2", "ALLGATHER"}, f"unexpected MoE comm method {comm_methods[0]}"
     print(f"MoE comm method under EP=2: {comm_methods[0]}")
+
+    _assert_replay_matches(baseline, replay)
+
+
+class MuseSparkTensorParallelWorker:
+    """Read-only checks of the MoE layout under plain tensor parallelism."""
+
+    model_runner: Any  # Supplied by the worker extension host at runtime.
+    vllm_config: Any
+
+    def check_muse_spark_tensor_parallel(self) -> str:
+        from vllm_ascend.ascend_forward_context import select_moe_comm_method
+        from vllm_ascend.models.muse_spark import AscendMuseSpark1xMoE, AscendMuseSparkMoERunner
+
+        moes = [module for module in self.model_runner.model.modules() if isinstance(module, AscendMuseSpark1xMoE)]
+        assert moes, "no Muse Spark MoE layer on this rank"
+        for moe in moes:
+            assert not moe.use_ep
+            assert moe.n_local_physical_experts == NUM_EXPERTS
+            # Every rank holds a slice of each expert's intermediate size, so
+            # its rows are partial sums that must be summed before the norm.
+            assert moe.experts.moe_config.moe_parallel_config.tp_size == TENSOR_PARALLEL_SIZE
+            assert moe.experts.routed_experts.quant_method.pre_norm_all_reduce
+            assert type(moe.experts) is AscendMuseSparkMoERunner
+
+        comm = select_moe_comm_method(num_tokens=DECODE_TOKENS, vllm_config=self.vllm_config)
+        return comm.name
+
+
+@wait_until_npu_memory_free()
+def test_muse_spark_tensor_parallel_sums_rows_before_the_norm_and_replays(tmp_path):
+    model = tmp_path / "model"
+    _write_model(model)
+    with VllmRunner(
+        str(model),
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        worker_extension_cls=f"{__name__}.MuseSparkTensorParallelWorker",
+        tensor_parallel_size=TENSOR_PARALLEL_SIZE,
+        dtype="bfloat16",
+        max_model_len=1024,
+        max_num_seqs=2,
+        max_num_batched_tokens=1024,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.5,
+        seed=0,
+    ) as runner:
+        comm_methods = runner.model.collective_rpc("check_muse_spark_tensor_parallel")
+        baseline = _generate(runner)
+        replay = _generate(runner)
+
+    # Without expert parallelism the selector always takes ALLGATHER, the
+    # path whose rows line up across TP ranks.
+    assert comm_methods == ["ALLGATHER"] * TENSOR_PARALLEL_SIZE, f"unexpected MoE comm methods {comm_methods}"
 
     _assert_replay_matches(baseline, replay)

@@ -26,6 +26,7 @@ from vllm.models.muse_spark.common.layers import (  # noqa: E402
 
 import vllm_ascend.models.muse_spark as muse_spark  # noqa: E402
 from vllm_ascend import models  # noqa: E402
+from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner  # noqa: E402
 
 NUM_TOKENS = 5
 NUM_HEADS = 2
@@ -147,12 +148,67 @@ def test_fused_moe_method_normalizes_the_rows_gmm2_returns():
     method.post_expert_norm_fn = norm.forward
     routed_rows = torch.randn(NUM_TOKENS * 3, hidden_size)
 
-    with patch.object(muse_spark.AscendUnquantizedFusedMoEMethod, "apply_gmm2", return_value=routed_rows):
+    with (
+        patch.object(muse_spark.AscendUnquantizedFusedMoEMethod, "apply_gmm2", return_value=routed_rows),
+        # Complete rows, as on one card or under expert parallelism.
+        patch.object(muse_spark, "tensor_model_parallel_all_reduce", side_effect=AssertionError("all-reduce")),
+    ):
         output = method.apply_gmm2(None, None, None)
 
     expected = norm.forward_native(routed_rows, out_dtype=routed_rows.dtype)
     torch.testing.assert_close(output, expected)
     assert output.dtype == routed_rows.dtype
+
+
+@pytest.mark.parametrize(("tp_size", "pre_norm_all_reduce"), [(1, False), (2, True)])
+def test_fused_moe_method_sums_rows_before_the_norm_only_under_tp(tp_size, pre_norm_all_reduce):
+    """Expert parallelism leaves the MoE TP size at 1; plain TP does not."""
+    moe = SimpleNamespace(moe_parallel_config=SimpleNamespace(tp_size=tp_size))
+
+    with patch.object(
+        muse_spark.AscendUnquantizedFusedMoEMethod, "__init__", lambda self, moe, tid2eid=None: nn.Module.__init__(self)
+    ):
+        method = muse_spark.AscendMuseSparkFusedMoEMethod(moe)
+
+    assert method.pre_norm_all_reduce is pre_norm_all_reduce
+
+
+def test_tp_partial_rows_are_summed_before_the_norm():
+    """Without expert parallelism each TP rank holds half of every expert's
+    intermediate size, so its down-projection rows are partial sums. Summing
+    them before the norm gives the unsharded rows' norm on every rank;
+    normalizing the partials and summing afterwards does not.
+    """
+    torch.manual_seed(0)
+    hidden_size, intermediate_size, num_rows = 8, 6, NUM_TOKENS * 3
+    norm = _post_expert_norm(hidden_size)
+    activated = torch.randn(num_rows, intermediate_size)
+    w2 = torch.randn(hidden_size, intermediate_size)
+    half = intermediate_size // 2
+    partial_rows = [activated[:, :half] @ w2[:, :half].T, activated[:, half:] @ w2[:, half:].T]
+
+    outputs = []
+    for rank_rows in partial_rows:
+        method = _bare_moe_method()
+        method.post_expert_norm_fn = norm.forward
+        method.pre_norm_all_reduce = True
+        with (
+            patch.object(muse_spark.AscendUnquantizedFusedMoEMethod, "apply_gmm2", return_value=rank_rows),
+            patch.object(
+                muse_spark,
+                "tensor_model_parallel_all_reduce",
+                side_effect=lambda rows: partial_rows[0] + partial_rows[1],
+            ) as all_reduce,
+        ):
+            outputs.append(method.apply_gmm2(None, None, None))
+        assert all_reduce.call_count == 1
+        assert all_reduce.call_args.args[0] is rank_rows
+
+    expected = norm.forward_native(activated @ w2.T, out_dtype=torch.float32)
+    for output in outputs:
+        torch.testing.assert_close(output, expected)
+    normalized_partials = sum(norm.forward_native(rows, out_dtype=torch.float32) for rows in partial_rows)
+    assert not torch.allclose(normalized_partials, expected)
 
 
 class _Container(nn.Module):
@@ -275,7 +331,13 @@ def test_quantized_checkpoints_are_rejected_before_construction():
         muse_spark.AscendMuseSpark1xForCausalLM.__init__(model, vllm_config=vllm_config)
 
 
-def _moe_vllm_config(*, enable_expert_parallel: bool, enable_eplb: bool = False) -> SimpleNamespace:
+def _moe_vllm_config(
+    *,
+    enable_expert_parallel: bool,
+    enable_eplb: bool = False,
+    data_parallel_size: int = 1,
+    prefill_context_parallel_size: int = 1,
+) -> SimpleNamespace:
     text_config = SimpleNamespace(
         hidden_size=16,
         num_local_experts=4,
@@ -294,6 +356,8 @@ def _moe_vllm_config(*, enable_expert_parallel: bool, enable_eplb: bool = False)
             enable_expert_parallel=enable_expert_parallel,
             enable_eplb=enable_eplb,
             use_sequence_parallel_moe=False,
+            data_parallel_size=data_parallel_size,
+            prefill_context_parallel_size=prefill_context_parallel_size,
         ),
     )
 
@@ -388,15 +452,66 @@ def test_moe_rejects_eplb():
         _build_moe(vllm_config=_moe_vllm_config(enable_expert_parallel=True, enable_eplb=True), ep_world_size=2)
 
 
+@pytest.mark.parametrize("parallel_sizes", [{"data_parallel_size": 2}, {"prefill_context_parallel_size": 2}])
+def test_moe_rejects_data_or_context_parallelism_without_ep(parallel_sizes):
+    """Without EP the experts are sliced over DP and PCP too, but the rows are
+    summed before the norm over TP only."""
+    with pytest.raises(NotImplementedError, match="data or prefill context parallelism"):
+        _build_moe(
+            vllm_config=_moe_vllm_config(enable_expert_parallel=False, **parallel_sizes),
+            ep_world_size=2,
+        )
+
+
+def test_moe_builds_under_data_parallelism_with_ep():
+    """Under EP every rank holds whole experts, so its rows are complete."""
+    moe, _ = _build_moe(
+        vllm_config=_moe_vllm_config(enable_expert_parallel=True, data_parallel_size=2),
+        ep_world_size=2,
+    )
+
+    assert moe.ep_size == 2
+
+
 def test_moe_builds_the_experts_on_the_ascend_fused_path():
-    """The runner is left to the pluggable dispatch; only the container differs."""
+    """The expert container and the runner's final reduction are all that differ."""
     moe, kwargs = _build_moe()
 
     assert kwargs["routed_experts_cls"] is muse_spark.AscendMuseSparkRoutedExperts
-    # Passing runner_cls would bypass the Ascend runner and its combine.
-    assert "runner_cls" not in kwargs
+    # A subclass of the Ascend runner keeps its comm methods and combine;
+    # upstream's runner would bypass them.
+    assert kwargs["runner_cls"] is muse_spark.AscendMuseSparkMoERunner
+    assert issubclass(kwargs["runner_cls"], AscendMoERunner)
     assert "moe_config_cls" not in kwargs
     assert kwargs["router"] is moe.moe_router
+
+
+def _runner(tp_size: int) -> muse_spark.AscendMuseSparkMoERunner:
+    runner = muse_spark.AscendMuseSparkMoERunner.__new__(muse_spark.AscendMuseSparkMoERunner)
+    runner.moe_config = SimpleNamespace(moe_parallel_config=SimpleNamespace(tp_size=tp_size))
+    return runner
+
+
+def test_runner_skips_the_final_all_reduce_after_the_pre_norm_one():
+    """The rows were summed before the norm; reducing again would multiply by TP."""
+    runner = _runner(tp_size=2)
+    states = torch.randn(NUM_TOKENS, 4)
+
+    with patch.object(AscendMoERunner, "_maybe_reduce_final_output", side_effect=AssertionError("final all-reduce")):
+        assert runner._maybe_reduce_final_output(states, trunc_size=None) is states
+        torch.testing.assert_close(runner._maybe_reduce_final_output(states, trunc_size=2), states[..., :2])
+    assert runner._fused_output_is_reduced
+
+
+def test_runner_keeps_the_ascend_final_reduction_without_tp_partials():
+    """Under EP, or on one card, the Ascend runner reduces as it always does."""
+    runner = _runner(tp_size=1)
+    states = torch.randn(NUM_TOKENS, 4)
+    reduced = states + 1
+
+    with patch.object(AscendMoERunner, "_maybe_reduce_final_output", return_value=reduced) as final_reduce:
+        assert runner._maybe_reduce_final_output(states, trunc_size=None) is reduced
+    final_reduce.assert_called_once_with(states, None, None)
 
 
 def test_moe_sizes_the_experts_to_the_pooled_width():
