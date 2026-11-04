@@ -1,4 +1,4 @@
-pr: 20945
+pr: 20947
 entries:
   - category: performance
     text: Fused QSA LightningIndexer visibility, per-row block-table gathering, query offsets, score weights and head padding into one preparation kernel.
