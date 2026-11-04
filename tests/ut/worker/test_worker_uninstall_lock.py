@@ -17,6 +17,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 SOURCE = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/worker.py"
@@ -26,7 +27,7 @@ def load_uninstall():
     tree = ast.parse(SOURCE.read_text())
     worker = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "NPUWorker")
     method = next(n for n in worker.body if isinstance(n, ast.FunctionDef) and n.name == "uninstall_static_kernel")
-    namespace = {}
+    namespace: dict[str, Any] = {}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(SOURCE), "exec"), namespace)
     return namespace["uninstall_static_kernel"]
 
