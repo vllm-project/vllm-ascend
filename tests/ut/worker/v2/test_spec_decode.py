@@ -123,7 +123,8 @@ def test_init_speculator_suffix_uses_current_request_state(monkeypatch, enforce_
     assert draft_device == device
     assert draft_states is req_states
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
-    assert draft_config.compilation_config.mode == (CompilationMode.NONE if enforce_eager else CompilationMode.VLLM_COMPILE)
+    expected_mode = CompilationMode.NONE if enforce_eager else CompilationMode.VLLM_COMPILE
+    assert draft_config.compilation_config.mode == expected_mode
 
 
 def test_init_speculator_suffix_requires_request_state():
