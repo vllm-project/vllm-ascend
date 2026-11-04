@@ -630,11 +630,18 @@ class BaseKVPoolScheduler(ABC):
             scheduler_output.preempted_req_ids,
             self._async_loading_req_ids.copy(),
         )
-        # Immediate block free: requests finished in the previous output
-        # processing and requests preempted by this schedule released their
-        # blocks; the worker fences their queued saves before reuse.
-        meta.released_req_ids = set(scheduler_output.preempted_req_ids or ()) | set(
-            scheduler_output.finished_req_ids or ()
+        # A running sliding-window request can release blocks mid-schedule.
+        # Fence any previous save before another step writes the same block.
+        for new_block_ids in (
+            *(getattr(req, "block_ids", ()) for req in scheduler_output.scheduled_new_reqs),
+            *getattr(scheduler_output.scheduled_cached_reqs, "new_block_ids", ()),
+        ):
+            if new_block_ids is None:
+                continue
+            for group_blocks in normalize_block_ids_by_group(new_block_ids):
+                meta.allocated_block_ids.update(block_id for block_id in group_blocks if block_id > 0)
+        meta.allocated_block_ids.update(
+            copy.dst_block_id for copy in (getattr(scheduler_output, "kv_cache_block_copies", None) or ())
         )
 
         for request in scheduler_output.scheduled_new_reqs:

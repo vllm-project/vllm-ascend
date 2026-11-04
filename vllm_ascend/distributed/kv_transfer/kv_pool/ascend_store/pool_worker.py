@@ -1049,22 +1049,23 @@ class KVPoolWorker:
             self._invalid_block_ids.clear()
         return invalid_blocks
 
-    def handle_released_saves(self, released_req_ids: set[str] | None) -> None:
-        """Fence only the saves of requests whose blocks this step may reuse.
+    def handle_save_reuse(
+        self,
+        preempted_req_ids: set[str] | None,
+        allocated_block_ids: set[int] | None,
+    ) -> None:
+        """Fence preempted jobs and jobs reading newly assigned blocks.
 
-        Finished and preempted requests' blocks are freed immediately by the
-        scheduler; before this step's forward can reallocate those blocks,
-        every queued save chunk of exactly those requests must have drained.
-        Requests whose blocks were already released in earlier steps were
-        drained by that step's fence and never queue new puts, so they need
-        no further waiting here.
+        Preempted jobs must finish before request state is discarded. Saves
+        from finished and running requests remain tracked by physical source
+        block until completion, so only actual reuse needs a wait for them.
         """
         send_thread = self.kv_send_thread
         if send_thread is None:
             return
         send_thread.raise_if_failed()
         if isinstance(send_thread, KVCacheStoreSendingThread):
-            send_thread.wait_for_requests_saved(released_req_ids)
+            send_thread.wait_for_safe_reuse(preempted_req_ids, allocated_block_ids)
         # Layerwise saves are already synchronized at each step's final layer.
 
     def wait_for_save(self, connector_metadata: AscendConnectorMetadata) -> None:
@@ -1375,8 +1376,8 @@ class KVPoolWorker:
                         send_thread.reset_saved_request(req_id)
                         self._retired_store_req_ids.discard(req_id)
             self.kv_send_thread.discard_finished_requests(meta.preempted_req_ids)
-            # Saves complete synchronously in wait_for_save(), so the scheduler
-            # never waits for a request-level finished_sending notification.
+            # Async saves are fenced by job/block reuse. The scheduler does not
+            # use request-level finished_sending notifications for bulk stores.
             self.kv_send_thread.get_and_clear_finished_requests()
             done_sending: set[str] = set()
         else:

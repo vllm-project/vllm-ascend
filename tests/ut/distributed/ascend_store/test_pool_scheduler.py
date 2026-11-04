@@ -1036,7 +1036,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertNotIn("r1", scheduler._request_trackers)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def test_build_connector_meta_released_req_ids_union(self, mock_client_cls):
+    def test_build_connector_meta_tracks_no_reuse_for_finished_and_preempted_only(self, mock_client_cls):
         config = self._make_config()
         scheduler = KVPoolScheduler(config, use_layerwise=False)
 
@@ -1059,7 +1059,25 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         sched_output.scheduled_cached_reqs.req_ids = []
 
         meta = scheduler.build_connector_meta(sched_output)
-        self.assertEqual(meta.released_req_ids, {"f1", "f2", "p1"})
+        self.assertEqual(meta.allocated_block_ids, set())
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_build_connector_meta_tracks_reallocated_blocks_of_running_requests(self, mock_client_cls):
+        scheduler = KVPoolScheduler(self._make_config(), use_layerwise=False)
+        scheduler._process_new_request = MagicMock(return_value=None)
+        sched_output = MagicMock()
+        sched_output.finished_req_ids = set()
+        sched_output.preempted_req_ids = set()
+        sched_output.scheduled_new_reqs = [SimpleNamespace(req_id="new", block_ids=[[0, 623], [44]])]
+        sched_output.scheduled_cached_reqs.req_ids = []
+        sched_output.scheduled_cached_reqs.new_block_ids = [None, [[624], [0]]]
+        sched_output.new_block_ids_to_zero = [625]
+        sched_output.kv_cache_block_copies = [SimpleNamespace(dst_block_id=626)]
+        sched_output.num_scheduled_tokens = {}
+
+        meta = scheduler.build_connector_meta(sched_output)
+
+        self.assertEqual(meta.allocated_block_ids, {623, 624, 626, 44})
 
 
 @pytest.mark.parametrize(
@@ -1124,7 +1142,7 @@ def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cl
     assert metadata.requests == []
     assert scheduler._unfinished_requests == ({"retired": (None, [])} if cleared_by == "scheduled-new" else {})
     scheduler._process_async_load_request.assert_not_called()
-    assert metadata.released_req_ids == output.finished_req_ids | output.preempted_req_ids
+    assert metadata.allocated_block_ids == set()
 
 
 def test_connector_metadata_filter_has_linear_key_lookup_work():

@@ -722,17 +722,20 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
     def test_store_job_lifecycle(self):
         t, _ = self._make_thread()
-        first = ReqMeta("r1", store_job_id=1)
-        second = ReqMeta("r1", store_job_id=2)
+        first = ReqMeta("r1", block_ids=[11], store_job_id=1)
+        second = ReqMeta("r1", block_ids=[22], store_job_id=2)
         t.add_stored_request(first)
         t.add_stored_request(second)
         self.assertEqual(t.stored_requests["r1"], {1, 2})
+        self.assertEqual(set(t._block_to_save_jobs), {11, 22})
         self.assertEqual(t.finish_store_job(first), 1)
         self.assertEqual(t.stored_requests["r1"], {2})
+        self.assertEqual(set(t._block_to_save_jobs), {22})
         self.assertIsNone(t.finish_store_job(ReqMeta("missing", store_job_id=3)))
         t.delete_finished_stored_request("nonexistent")
         t.delete_finished_stored_request("r1")
         self.assertNotIn("r1", t.stored_requests)
+        self.assertEqual(t._block_to_save_jobs, {})
 
     def test_wait_for_requests_saved_returns_immediately_without_released_ids(self):
         t, _ = self._make_thread()
@@ -824,6 +827,127 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._fatal_error = RuntimeError("boom")
         with self.assertRaises(RuntimeError):
             t.wait_for_requests_saved({"r1"})
+
+    def test_block_fence_waits_only_for_overlapping_save(self):
+        t, _ = self._make_thread()
+        saving_swa = ReqMeta(req_id="running", block_ids_by_group=[[623], [44]], kv_cache_group_ids=[0, 1])
+        unrelated = ReqMeta(req_id="other", block_ids_by_group=[[624], [45]], kv_cache_group_ids=[0, 1])
+        t.add_save_batch([saving_swa, unrelated])
+        t.wait_for_safe_reuse(set(), {999})
+        entered = threading.Event()
+
+        def wait_for_reuse():
+            entered.set()
+            # The global block pool can assign a source block to another group.
+            t.wait_for_safe_reuse(set(), {44})
+
+        waiter = threading.Thread(target=wait_for_reuse)
+        waiter.start()
+        self.assertTrue(entered.wait(timeout=5))
+        time.sleep(0.05)
+        self.assertTrue(waiter.is_alive())
+
+        t.finish_store_job(unrelated)
+        time.sleep(0.05)
+        self.assertTrue(waiter.is_alive(), "an unrelated save cannot release the fence")
+        t.finish_store_job(saving_swa)
+        waiter.join(timeout=5)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(t._block_to_save_jobs, {})
+
+    def test_block_fence_waits_for_all_jobs_reading_same_block(self):
+        t, _ = self._make_thread()
+        first = ReqMeta(req_id="running", block_ids_by_group=[[623]])
+        second = ReqMeta(req_id="running", block_ids_by_group=[[623]])
+        t.add_save_batch([first, second])
+        entered = threading.Event()
+
+        def wait_for_reuse():
+            entered.set()
+            t.wait_for_safe_reuse(set(), {623})
+
+        waiter = threading.Thread(target=wait_for_reuse)
+        waiter.start()
+        self.assertTrue(entered.wait(timeout=5))
+        t.finish_store_job(first)
+        time.sleep(0.05)
+        self.assertTrue(waiter.is_alive())
+        t.finish_store_job(second)
+        waiter.join(timeout=5)
+        self.assertFalse(waiter.is_alive())
+
+    def test_block_fence_raises_on_sender_failure(self):
+        t, _ = self._make_thread()
+        request = ReqMeta(req_id="running", block_ids_by_group=[[623]])
+        t.add_save_batch([request])
+        t._fatal_error = RuntimeError("boom")
+        with self.assertRaises(RuntimeError):
+            t.wait_for_safe_reuse(set(), {623})
+
+        t._handle_request_exception(None)
+        self.assertEqual(t._block_to_save_jobs, {})
+        self.assertEqual(t._save_job_source_blocks, {})
+
+    def test_preempted_job_drains_even_before_its_block_is_reused(self):
+        t, _ = self._make_thread()
+        request = ReqMeta(req_id="preempted", block_ids_by_group=[[623]])
+        t.add_save_batch([request])
+        entered = threading.Event()
+
+        def wait_for_preemption():
+            entered.set()
+            t.wait_for_safe_reuse({"preempted"}, set())
+
+        waiter = threading.Thread(target=wait_for_preemption)
+        waiter.start()
+        self.assertTrue(entered.wait(timeout=5))
+        time.sleep(0.05)
+        self.assertTrue(waiter.is_alive())
+        t.finish_store_job(request)
+        waiter.join(timeout=5)
+        self.assertFalse(waiter.is_alive())
+
+    def test_preempted_and_reallocated_jobs_share_one_fence(self):
+        t, _ = self._make_thread()
+        preempted = ReqMeta(req_id="preempted", block_ids_by_group=[[623]])
+        running = ReqMeta(req_id="running", block_ids_by_group=[[624]])
+        t.add_save_batch([preempted, running])
+        entered = threading.Event()
+
+        def wait_for_both():
+            entered.set()
+            t.wait_for_safe_reuse({"preempted"}, {624})
+
+        waiter = threading.Thread(target=wait_for_both)
+        waiter.start()
+        self.assertTrue(entered.wait(timeout=5))
+        t.finish_store_job(preempted)
+        time.sleep(0.05)
+        self.assertTrue(waiter.is_alive())
+        t.finish_store_job(running)
+        waiter.join(timeout=5)
+        self.assertFalse(waiter.is_alive())
+
+    def test_finished_job_is_fenced_when_its_block_is_reused_later(self):
+        t, _ = self._make_thread()
+        request = ReqMeta(req_id="finished", block_ids_by_group=[[623]])
+        t.add_save_batch([request])
+        t.wait_for_safe_reuse(set(), set())
+        self.assertIn(623, t._block_to_save_jobs)
+        entered = threading.Event()
+
+        def wait_for_later_reuse():
+            entered.set()
+            t.wait_for_safe_reuse(set(), {623})
+
+        waiter = threading.Thread(target=wait_for_later_reuse)
+        waiter.start()
+        self.assertTrue(entered.wait(timeout=5))
+        time.sleep(0.05)
+        self.assertTrue(waiter.is_alive())
+        t.finish_store_job(request)
+        waiter.join(timeout=5)
+        self.assertFalse(waiter.is_alive())
 
     def test_failed_store_retries_suffix_and_events(self):
         t, store = self._make_thread([0, 0], enable_kv_event=True)

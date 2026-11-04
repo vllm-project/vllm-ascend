@@ -340,16 +340,16 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.register_kv_caches(kv_caches)
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
-        """Fence only the saves of requests whose blocks this step may reuse.
+        """Fence preempted jobs and saves whose blocks may be overwritten.
 
-        Blocks are freed immediately when a request finishes or is preempted.
-        Before this step's forward can reallocate them, the in-flight puts of
-        exactly those requests are awaited (released_req_ids carried in the
-        connector metadata), instead of the whole previous save batch.
+        Preempted requests are drained before their save state is discarded.
+        Other saves are drained only when this step assigns a source block to
+        new work, before model computation can overwrite it.
         """
         assert self.connector_worker is not None
-        released_req_ids = getattr(kv_connector_metadata, "released_req_ids", None)
-        self.connector_worker.handle_released_saves(released_req_ids)
+        preempted_req_ids = getattr(kv_connector_metadata, "preempted_req_ids", None)
+        allocated_block_ids = getattr(kv_connector_metadata, "allocated_block_ids", None)
+        self.connector_worker.handle_save_reuse(preempted_req_ids, allocated_block_ids)
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         super().bind_connector_metadata(connector_metadata)

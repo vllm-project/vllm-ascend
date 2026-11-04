@@ -804,11 +804,10 @@ class TestAscendConnectorMetadata(unittest.TestCase):
         self.assertEqual(len(meta.requests), 1)
         self.assertEqual(meta.requests[0].req_id, "r1")
 
-    def test_released_req_ids_seed_from_preempted(self):
+    def test_allocated_block_ids_start_empty(self):
         meta = AscendConnectorMetadata(preempted_req_ids={"p1"})
-        self.assertEqual(meta.released_req_ids, {"p1"})
-        self.assertEqual(AscendConnectorMetadata(preempted_req_ids=None).released_req_ids, set())
-        self.assertEqual(AscendConnectorMetadata(preempted_req_ids=set()).released_req_ids, set())
+        self.assertEqual(meta.preempted_req_ids, {"p1"})
+        self.assertEqual(meta.allocated_block_ids, set())
 
 
 class TestLayerMultiBlockReqMeta(unittest.TestCase):
