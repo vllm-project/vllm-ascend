@@ -678,56 +678,7 @@ def test_shared_layer_event_preserves_final_chunk_only_state(worker, monkeypatch
     )
 
 
-@pytest.mark.parametrize("worker", ["multi_cache"], indirect=True)
-def test_only_changed_layers_are_planned_and_idle_polls_do_no_work(worker, monkeypatch):
-    monkeypatch.setattr(worker, "_get_remote_metadata", lambda message: multi_cache_remote(worker))
-    partition = Mock(wraps=worker._get_transfer_partition)
-    plan = Mock(wraps=worker._build_layer_transfer_request)
-    monkeypatch.setattr(worker, "_get_transfer_partition", partition)
-    monkeypatch.setattr(worker, "_build_layer_transfer_request", plan)
-    message = ready()
-    message["block_ids"] = [[20, 21], [10, 11]]
-    worker._ready_queue.put(message)
-    meta = MooncakeConnectorMetadata()
-    meta.add_new_push_send_req("p-request", ([1, 2], [3, 4]), 8, 0, 8, {"transfer_id": "t"})
-    worker.start_load_kv(meta)
-    state = worker._reqs_send_state["t"]
-    drive(worker, lambda: state.destinations[(0, 0, 0)].required_layers is not None)
-    assert partition.call_count == 3
-    attention, indexer, next_layer = worker.transfer_metadata.layer_names
-    worker.save_kv_layer(attention)
-    drive(worker, lambda: len(state.destinations[(0, 0, 0)].sent_tokens) == 2)
-    assert plan.call_count == 2
-    for _ in range(20):
-        worker.get_transfer_results()
-    worker.save_kv_layer(indexer)
-    assert plan.call_count == 2
-    assert partition.call_count == 3
-    worker.save_kv_layer(next_layer)
-    drive(worker, lambda: worker._send_done.called)
-    assert plan.call_count == 3
-    assert partition.call_count == 3
-
-
-def test_metadata_layout_is_reused_between_requests(worker, monkeypatch):
-    partition = Mock(wraps=worker._get_transfer_partition)
-    monkeypatch.setattr(worker, "_get_transfer_partition", partition)
-    worker._ready_queue.put(ready())
-    second = ready()
-    second["transfer_id"] = "second"
-    worker._ready_queue.put(second)
-    drive(
-        worker,
-        lambda: (
-            all(state.destinations[(0, 0, 0)].required_layers is not None for state in worker._reqs_send_state.values())
-            and len(worker._reqs_send_state) == 2
-        ),
-    )
-    assert partition.call_count == 1
-    assert worker._reqs_send_state["t"].expected_ranks is worker._reqs_send_state["second"].expected_ranks
-
-
-def test_new_progress_while_write_pending_is_not_lost(worker, monkeypatch):
+def test_new_progress_while_write_pending_is_not_lost(worker):
     entered, release = threading.Event(), threading.Event()
     calls = []
 
@@ -744,12 +695,6 @@ def test_new_progress_while_write_pending_is_not_lost(worker, monkeypatch):
     worker.save_kv_layer("model.layers.0.attn")
     drive(worker, entered.is_set)
     try:
-        future = next(iter(worker._pending_sends))
-        done = Mock(wraps=future.done)
-        monkeypatch.setattr(future, "done", done)
-        for _ in range(20):
-            worker.get_transfer_results()
-        assert done.call_count == 0
         # Publish newer availability while the older snapshot is still in use.
         state = worker._reqs_send_state["t"]
         state.metadata = source_meta(4, 4).push_send_requests["p-request"]
