@@ -1591,6 +1591,7 @@ Refer to the verification operations in Steps 1-5 of Configuration Examples.
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `kv_load_failure_policy` | str | fail | No | recompute / fail | Behavior when KV loading fails: `recompute` rolls back and recomputes (does not yet support hybrid attention models like DeepSeekV4, Qwen 3.5), `fail` terminates the request. When using MultiConnector, configure on the top-level `kv-transfer-config`. |
 | `lookup_rpc_port` | str | No default | Yes | Distinct service identifier (e.g., "0", "1") | Local IPC identifier between pooling scheduler and worker processes. DP replicas within a service are isolated automatically; independently launched services sharing the RPC base directory need unique values. The legacy name `mooncake_rpc_port` is deprecated; use `lookup_rpc_port`. |
+| `lookup_rpc_timeout_ms` | int | 5000 | No | Positive integer, in milliseconds; `0` and negative values are rejected when the client is created | Wall-clock deadline for one lookup RPC, shared by send, reply wait and reply validation. Any timeout or RPC fault fails open: the lookup reports 0 external hit tokens, the scheduler keeps computing locally, and the client rebuilds its socket inside the same call. |
 | `load_async` | bool | false | No | true / false | Whether to enable asynchronous loading. |
 | `backend` | str | mooncake | No | mooncake / memcache / yuanrong | KV Pool storage backend. |
 | `save_decode_cache` | bool | false | No | true / false | Save complete Decode KV blocks on a consumer. Prefill writes are skipped until Decode saving starts, when missing Prefill ancestors can be filled. Supports blockwise and layerwise transfer. |
@@ -1625,7 +1626,9 @@ Existing configurations must replace `consumer_is_to_load` with `enable_lookup` 
 
 ### QoS Configuration
 
-Both the Mooncake and Memcache backends support configuring the transfer QoS. The valid range is **0-4 (integers only)**, and the default value is 0 when not configured. A larger value means a higher transfer priority. Invalid values (non-integer, out of range) cause startup to fail fast with a validation error.
+Both the Mooncake and Memcache backends support configuring the transfer QoS.
+
+The valid range is **0-4 (integers only)**, and the default value is 0 when not configured. A larger value means a higher transfer priority. Invalid values (non-integer, out of range) cause startup to fail fast with a validation error.
 
 QoS can be configured through `kv_connector_extra_config`, which is injected into the backend-specific configuration automatically:
 
@@ -1647,6 +1650,17 @@ QoS can be configured through `kv_connector_extra_config`, which is injected int
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | Supported by both Mooncake and Memcache backends. Invalid values (non-integer, out of range) cause fast startup failure. |
 
 Values in `kv_connector_extra_config` take precedence over environment variables; a WARN log is emitted on override. For the Mooncake backend, `qos_priority` is merged into existing `ASCEND_GLOBAL_RESOURCE_CONFIG` (other fields preserved). When `ASCEND_GLOBAL_RESOURCE_CONFIG` was not set, configuring `qos_priority` also creates it.
+
+### Lookup RPC Wire Protocol
+
+The scheduler-to-worker lookup RPC carries a versioned msgpack envelope in a single reply frame:
+
+- success: `{"version": 1, "status": "ok", "hit_tokens": N, "tail_key_boundaries": [...]}`
+- failure: `{"version": 1, "status": "error", "code": CODE, "message": SANITIZED_MESSAGE}`
+
+A reply that is not this envelope -- including the previous `(hit_length, tail_key_boundaries)` tuple -- is a protocol error and fails open to 0 external hit tokens; an unsupported `version` is treated the same way. Requests must carry exactly five frames (type, token length, KV group list, HBM hit count, block-hash list); surplus frames are rejected rather than absorbed as extra hashes. Error `code` is limited to `frame_count`, `field_invalid`, `decode_error`, `backend_error`, and `internal_error`; any other value is malformed and is classified as `decode:field_invalid` instead of being copied into logs or metric labels.
+
+This is a breaking change to a same-instance channel only: the client and the server live in one process pair joined by `lookup_rpc_port` and ship in the same wheel, so both ends always upgrade together. Rollback is a plain revert; until then a broken RPC degrades to a cache miss instead of a crash or a wrong hit.
 
 ## FAQ
 
