@@ -66,6 +66,7 @@ def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread.invalid_block_ids_lock = threading.Lock()
     thread.finished_requests = queue.SimpleQueue()
     thread.request_queue = queue.Queue()
+    thread.inflight_requests = threading.BoundedSemaphore(thread._MAX_INFLIGHT_REQUESTS)
     for name, value in overrides.items():
         setattr(thread, name, value)
     return thread
@@ -1091,7 +1092,7 @@ def test_execute_bucket_uses_selected_pcp_endpoint_and_addresses() -> None:
 
 @pytest.mark.parametrize("can_report", [True, False])
 @pytest.mark.parametrize("submission_error", [False, True])
-def test_handle_requests_attributes_failed_tp_to_affected_requests(
+def test_submit_transfer_requests_preserves_tasks_after_submission_error(
     can_report: bool,
     submission_error: bool,
 ) -> None:
@@ -1132,14 +1133,19 @@ def test_handle_requests_attributes_failed_tp_to_affected_requests(
     thread.executor.submit.side_effect = submit
     requests = {"request-a": make_req_meta(), "request-b": make_req_meta()}
 
+    tasks, error = thread._submit_transfer_requests("engine-p", "10.0.0.1", 6000, requests, selection_index_offset=3)
+    assert completed_future in tasks
+    assert tasks[completed_future][3] == {"request-a"}
     if submission_error:
-        with pytest.raises(RuntimeError, match="submit failed"):
-            thread._handle_requests("engine-p", "10.0.0.1", 6000, requests, selection_index_offset=3)
+        assert isinstance(error, RuntimeError)
+        assert len(tasks) == 1
     else:
-        assert thread._handle_requests("engine-p", "10.0.0.1", 6000, requests, selection_index_offset=3) == {
-            "request-b"
-        }
-    completed_result.assert_called_once_with()
+        assert error is None
+        assert len(tasks) == 2
+        failed_future = next(future for future in tasks if future is not completed_future)
+        assert tasks[failed_future][3] == {"request-b"}
+        assert isinstance(failed_future.exception(), RuntimeError)
+    completed_result.assert_not_called()
     assert thread._build_transfer_block_buckets.call_args.kwargs["selection_index_offset"] == 3
 
 
@@ -1295,84 +1301,121 @@ def test_validate_remote_metadata_rejects_invalid_topology(
         MooncakePullRecvingThread._validate_remote_metadata(metadata, "engine-p")
 
 
-@pytest.mark.parametrize("can_report", [True, False])
-@pytest.mark.parametrize("batch_error", [False, True])
-def test_worker_run_marks_only_failed_requests_and_finishes_the_batch(
-    monkeypatch: pytest.MonkeyPatch,
-    can_report: bool,
-    batch_error: bool,
-) -> None:
-    thread = make_thread(device=0, ready_event=threading.Event(), can_report_invalid_block_ids=can_report)
-    requests = {
-        "request-a": make_req_meta(local=([10],)),
-        "request-b": make_req_meta(local=([20],)),
-    }
-    request_queue = MagicMock()
-    request_queue.get.side_effect = [("engine-p", requests), _StopWorkerLoop()]
-    thread.request_queue = request_queue
-    thread._handle_requests = MagicMock(  # type: ignore[method-assign]
-        side_effect=RuntimeError("metadata unavailable") if batch_error else None,
-        return_value={"request-b"},
-    )
-    set_device = MagicMock()
-    monkeypatch.setattr(torch.npu, "set_device", set_device)
-
-    with pytest.raises(_StopWorkerLoop):
-        thread.run()
-
-    set_device.assert_called_once_with(0)
-    assert thread.ready_event.is_set()
-    expected_failed = set(requests) if batch_error else {"request-b"}
-    assert thread.invalid_block_ids == (({10, 20} if batch_error else {20}) if can_report else set())
-    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(
-        finished_recving=set(requests), failed_recving=expected_failed
-    )
-    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults()
-    request_queue.task_done.assert_called_once_with()
-
-
-@pytest.mark.parametrize("first_error", [False, True])
-def test_worker_run_publishes_each_request_before_starting_next(
-    monkeypatch: pytest.MonkeyPatch, first_error: bool
-) -> None:
+def test_worker_pipelines_requests_and_reports_out_of_order(monkeypatch: pytest.MonkeyPatch) -> None:
     thread = make_thread(device=0, ready_event=threading.Event())
-    requests = {
-        "request-a": make_req_meta(local=([10],)),
-        "request-b": make_req_meta(local=([20],)),
-    }
-    request_queue = MagicMock()
-    request_queue.get.side_effect = [("engine-p", requests), _StopWorkerLoop()]
-    thread.request_queue = request_queue
-    seen = []
-
-    def handle(engine_id, host, port, pending, selection_index_offset=0):
-        assert engine_id == "engine-p"
-        assert (host, port) == ("10.0.0.1", 6000)
-        assert len(pending) == 1
-        request_id = next(iter(pending))
-        assert pending[request_id] is requests[request_id]
-        assert selection_index_offset == len(seen)
-        if seen:
-            assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(
-                finished_recving={"request-a"},
-                failed_recving={"request-a"} if first_error else set(),
-            )
-        else:
-            assert thread.finished_requests.empty()
-        seen.append(request_id)
-        if first_error and request_id == "request-a":
-            raise RuntimeError("first request failed")
-        return set()
-
-    thread._handle_requests = handle
+    requests = {"a": make_req_meta(local=([10],)), "b": make_req_meta(local=([20],))}
+    futures = [Future(), Future()]
+    thread._submit_transfer_requests = MagicMock(
+        side_effect=[({future: (0, 0, 0, {name})}, None) for future, name in zip(futures, requests)]
+    )
+    thread.request_queue = MagicMock()
+    thread.request_queue.get.side_effect = [("engine-p", requests), _StopWorkerLoop()]
     monkeypatch.setattr(torch.npu, "set_device", MagicMock())
     with pytest.raises(_StopWorkerLoop):
         thread.run()
 
-    assert seen == ["request-a", "request-b"]
-    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(finished_recving={"request-b"})
-    assert thread.invalid_block_ids == ({10} if first_error else set())
-    request_queue.task_done.assert_called_once_with()
+    # B was submitted while A's READ was still pending.
+    calls = thread._submit_transfer_requests.call_args_list
+    assert [list(call.args[3]) for call in calls] == [["a"], ["b"]]
+    assert [call.kwargs["selection_index_offset"] for call in calls] == [0, 1]
+    assert thread.finished_requests.empty()
+    futures[1].set_result(None)
+    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(finished_recving={"b"})
+    futures[0].set_result(None)
+    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(finished_recving={"a"})
+    thread.request_queue.task_done.assert_called_once_with()
+
+
+@pytest.mark.parametrize("can_report", [False, True])
+@pytest.mark.parametrize("submission_error", [False, True])
+def test_request_completion_drains_all_reads_after_failure(can_report: bool, submission_error: bool) -> None:
+    thread = make_thread(can_report_invalid_block_ids=can_report)
+    futures = [Future(), Future()]
+    error = RuntimeError("submit failed") if submission_error else None
+    thread._submit_transfer_requests = MagicMock(
+        return_value=({future: (0, 0, i, {"a"}) for i, future in enumerate(futures)}, error)
+    )
+    thread.inflight_requests.acquire()
+    thread._submit_request("engine-p", "a", make_req_meta(local=([10],)), 0)
+    futures[0].set_exception(RuntimeError("read failed"))
+    assert thread.finished_requests.empty()
+    assert thread.invalid_block_ids == set()
+    futures[1].set_result(None)
+    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(
+        finished_recving={"a"}, failed_recving={"a"}
+    )
+    assert thread.invalid_block_ids == ({10} if can_report else set())
+    # The request released exactly one admission slot.
+    for _ in range(thread._MAX_INFLIGHT_REQUESTS):
+        assert thread.inflight_requests.acquire(blocking=False)
+    assert not thread.inflight_requests.acquire(blocking=False)
+
+
+@pytest.mark.parametrize("mode", ["empty", "prepare_error", "submission_error", "already_done"])
+def test_request_pipeline_immediate_completion_releases_slot(mode: str) -> None:
+    thread = make_thread()
+    future = Future()
+    future.set_result(None)
+    thread._submit_transfer_requests = MagicMock(
+        return_value=(
+            {future: (0, 0, 0, {"a"})} if mode == "already_done" else {},
+            RuntimeError("submit failed") if mode == "submission_error" else None,
+        ),
+        side_effect=RuntimeError("prepare failed") if mode == "prepare_error" else None,
+    )
+    thread.inflight_requests.acquire()
+    thread._submit_request("engine-p", "a", make_req_meta(), 0)
+    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(
+        finished_recving={"a"}, failed_recving={"a"} if mode.endswith("error") else set()
+    )
+    for _ in range(thread._MAX_INFLIGHT_REQUESTS):
+        assert thread.inflight_requests.acquire(blocking=False)
+    assert not thread.inflight_requests.acquire(blocking=False)
+
+
+def test_request_pipeline_concurrent_callbacks_finish_once() -> None:
+    thread = make_thread()
+    futures = [Future() for _ in range(4)]
+    thread._submit_transfer_requests = MagicMock(
+        return_value=({future: (0, 0, i, {"a"}) for i, future in enumerate(futures)}, None)
+    )
+    thread.inflight_requests.acquire()
+    thread._submit_request("engine-p", "a", make_req_meta(), 0)
+    barrier = threading.Barrier(len(futures))
+
+    def complete(future):
+        barrier.wait(timeout=5)
+        future.set_result(None)
+
+    workers = [threading.Thread(target=complete, args=(future,)) for future in futures]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+    assert thread.finished_requests.get_nowait() == ("a", False)
+    assert thread.finished_requests.empty()
+    for _ in range(thread._MAX_INFLIGHT_REQUESTS):
+        assert thread.inflight_requests.acquire(blocking=False)
+    assert not thread.inflight_requests.acquire(blocking=False)
+
+
+def test_request_pipeline_bounds_pending_requests() -> None:
+    thread = make_thread()
+    futures = [Future() for _ in range(thread._MAX_INFLIGHT_REQUESTS)]
+    thread._submit_transfer_requests = MagicMock(
+        side_effect=[({future: (0, 0, 0, {str(i)})}, None) for i, future in enumerate(futures)]
+    )
+    for i in range(thread._MAX_INFLIGHT_REQUESTS):
+        assert thread.inflight_requests.acquire(blocking=False)
+        thread._submit_request("engine-p", str(i), make_req_meta(), i)
+    assert not thread.inflight_requests.acquire(blocking=False)
+    futures[-1].set_result(None)
+    assert thread.inflight_requests.acquire(blocking=False)
+    assert not thread.inflight_requests.acquire(blocking=False)
+    for future in futures[:-1]:
+        future.set_result(None)
+    assert len(thread.get_and_clear_finished_requests().finished_recving) == thread._MAX_INFLIGHT_REQUESTS
 
 
 def test_whole_block_mla_address_generation_uses_independent_stride() -> None:

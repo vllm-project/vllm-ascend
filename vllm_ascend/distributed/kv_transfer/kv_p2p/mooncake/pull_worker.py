@@ -5,7 +5,7 @@
 import queue
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 import msgspec
@@ -53,8 +53,10 @@ class MooncakePullRecvingThread(threading.Thread):
 
     The queue/result lifecycle is intentionally implemented separately from
     the transfer algorithm. Metadata lookup, block mapping, and Mooncake READ
-    submission belong in _handle_requests.
+    submission belong in _submit_transfer_requests.
     """
+
+    _MAX_INFLIGHT_REQUESTS = 32
 
     def __init__(
         self,
@@ -118,10 +120,11 @@ class MooncakePullRecvingThread(threading.Thread):
         self.device = device
         self.ready_event = ready_event
         self.executor = ThreadPoolExecutor(
-            max_workers=32,
+            max_workers=self._MAX_INFLIGHT_REQUESTS,
             initializer=torch.npu.set_device,
             initargs=(self.device,),
         )
+        self.inflight_requests = threading.BoundedSemaphore(self._MAX_INFLIGHT_REQUESTS)
         self.can_report_invalid_block_ids = len(kv_cache_config.kv_cache_groups) == 1
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeTransferMetadataGroups)
@@ -177,33 +180,64 @@ class MooncakePullRecvingThread(threading.Thread):
         while True:
             remote_engine_id, requests = self.request_queue.get()
             try:
-                # Finish and publish each request before preparing the next
-                # one. Keep its original index for replicated-TP selection.
                 for selection_index, (request_id, request) in enumerate(requests.items()):
-                    failed = False
-                    try:
-                        failed_request_ids = self._handle_requests(
-                            remote_engine_id,
-                            request.remote_host,
-                            request.remote_port,
-                            {request_id: request},
-                            selection_index_offset=selection_index,
-                        )
-                        failed = request_id in failed_request_ids
-                    except Exception:
-                        failed = True
-                        logger.exception(
-                            "Mooncake pull failed for request %s from remote engine %s at %s:%s",
-                            request_id,
-                            remote_engine_id,
-                            request.remote_host,
-                            request.remote_port,
-                        )
-                    if failed and self.can_report_invalid_block_ids:
-                        self._mark_request_failed(request)
-                    self.finished_requests.put((request_id, failed))
+                    self.inflight_requests.acquire()
+                    self._submit_request(remote_engine_id, request_id, request, selection_index)
             finally:
                 self.request_queue.task_done()
+
+    def _finish_request(self, request_id: str, request: ReqMeta, failed: bool) -> None:
+        """Publish completion only after all submitted reads have stopped."""
+        try:
+            if failed:
+                self._mark_request_failed(request)
+            self.finished_requests.put((request_id, failed))
+        finally:
+            self.inflight_requests.release()
+
+    def _submit_request(self, remote_engine_id: str, request_id: str, request: ReqMeta, selection_index: int) -> None:
+        """Submit one request without occupying a pool thread to wait for it."""
+        try:
+            future_to_task, submission_error = self._submit_transfer_requests(
+                remote_engine_id,
+                request.remote_host,
+                request.remote_port,
+                {request_id: request},
+                selection_index_offset=selection_index,
+            )
+        except Exception:
+            logger.exception("Mooncake could not prepare request %s from %s", request_id, remote_engine_id)
+            self._finish_request(request_id, request, True)
+            return
+
+        # Set the full count before adding callbacks: completed futures invoke
+        # callbacks immediately. Even after a partial submission failure, wait
+        # for every submitted READ before allowing the request's blocks to free.
+        remaining = len(future_to_task)
+        failed = submission_error is not None
+        if submission_error is not None:
+            logger.error("Mooncake request %s submission failed: %s", request_id, submission_error)
+        if not remaining:
+            self._finish_request(request_id, request, failed)
+            return
+        completion_lock = threading.Lock()
+
+        def on_done(future: Future[None]) -> None:
+            nonlocal remaining, failed
+            task_failed = False
+            try:
+                future.result()
+            except Exception:
+                task_failed = True
+                logger.exception("Mooncake transfer task failed for request %s", request_id)
+            with completion_lock:
+                failed = failed or task_failed
+                remaining -= 1
+                if remaining == 0:
+                    self._finish_request(request_id, request, failed)
+
+        for future in future_to_task:
+            future.add_done_callback(on_done)
 
     def _mark_request_failed(self, request_metadata: ReqMeta) -> None:
         if not self.can_report_invalid_block_ids:
@@ -527,15 +561,15 @@ class MooncakePullRecvingThread(threading.Thread):
         head_index = tp_rank // replication_size
         return head_index, head_index + 1
 
-    def _handle_requests(
+    def _submit_transfer_requests(
         self,
         remote_engine_id: str,
         remote_host: str,
         remote_port: int,
         requests: dict[str, ReqMeta],
         selection_index_offset: int = 0,
-    ) -> set[str]:
-        """Build and execute transfer buckets for one producer engine."""
+    ) -> tuple[dict[Future[None], tuple[int, int, int, set[str]]], Exception | None]:
+        """Build and submit transfer buckets for one producer engine."""
         remote_metadata = self._get_remote_metadata(remote_engine_id, remote_host, remote_port)
         tp_rank_groups_by_pp_rank = self.remote_tp_rank_groups[remote_engine_id]
         layer_pairs_by_pp_rank = self.remote_layer_index_pairs[remote_engine_id]
@@ -592,24 +626,7 @@ class MooncakePullRecvingThread(threading.Thread):
         except Exception as exc:
             submission_error = exc
 
-        failed_request_ids: set[str] = set()
-        for future in as_completed(future_to_task):
-            remote_pp_rank, remote_pcp_rank, remote_tp_rank, request_ids = future_to_task[future]
-            try:
-                future.result()
-            except Exception:
-                logger.exception(
-                    "Mooncake transfer task failed for remote PP rank %s, PCP rank %s, TP rank %s, requests=%s",
-                    remote_pp_rank,
-                    remote_pcp_rank,
-                    remote_tp_rank,
-                    sorted(request_ids),
-                )
-                failed_request_ids.update(request_ids)
-
-        if submission_error is not None:
-            raise submission_error
-        return failed_request_ids
+        return future_to_task, submission_error
 
     def _build_transfer_block_buckets(
         self,
