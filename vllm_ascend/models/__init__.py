@@ -1,4 +1,19 @@
+import importlib.util
+
 from vllm import ModelRegistry
+
+
+def _upstream_has_module(name: str) -> bool:
+    """Whether the installed vLLM ships ``name``.
+
+    Models that landed in vLLM after the pinned release are registered only
+    where their upstream package exists; elsewhere nothing is registered and
+    their tests skip.
+    """
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ModuleNotFoundError:
+        return False
 
 
 def register_model():
@@ -113,3 +128,10 @@ def register_model():
     ModelRegistry.register_model(
         "LlamaForCausalLMEagle3", "vllm_ascend.models.llama_eagle3:AscendEagle3LlamaForCausalLM"
     )
+    # Mistral Large 4 is not in a vLLM release yet (vllm-project/vllm#64534);
+    # register it only where upstream ships the package the adapter builds on.
+    if _upstream_has_module("vllm.models.mistral.mistral_large4"):
+        ModelRegistry.register_model(
+            "MistralLarge4ForCausalLM",
+            "vllm_ascend.models.mistral_large4:AscendMistralLarge4ForCausalLM",
+        )
