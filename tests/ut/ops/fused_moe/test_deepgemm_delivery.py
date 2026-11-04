@@ -25,7 +25,7 @@ def load_file(name, path):
 
 @pytest.fixture
 def loader(tmp_path, monkeypatch):
-    module = load_file("test_loader", ROOT / "vllm_ascend/deepgemm.py")
+    module = load_file("test_loader", ROOT / "vllm_ascend/ops/fused_moe/deepgemm_loader.py")
     monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(envs=SimpleNamespace(VLLM_CACHE_ROOT=str(tmp_path))))
     monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace())
     monkeypatch.delitem(sys.modules, "deep_gemm", raising=False)
@@ -55,11 +55,12 @@ def npu_module():
 def test_external_identification(loader, tmp_path, source, is_npu):
     initializer = tmp_path / "__init__.py"
     initializer.write_text(source)
-    assert loader._is_npu_package(SimpleNamespace(origin=str(initializer))) is is_npu
+    with patch.object(loader.importlib.util, "find_spec", return_value=SimpleNamespace(origin=str(initializer))):
+        assert loader.is_deepgemm_available() is is_npu
 
 
 def test_selection_and_cache(loader, monkeypatch):
-    monkeypatch.setattr(loader, "_is_npu_package", lambda spec: True)
+    monkeypatch.setattr(loader, "is_deepgemm_available", lambda: True)
     with (
         patch.object(loader.importlib.util, "find_spec", return_value=None),
         patch.object(loader.importlib, "import_module", return_value=npu_module()) as imported,
@@ -70,7 +71,7 @@ def test_selection_and_cache(loader, monkeypatch):
 
 
 def test_native_failure_does_not_load_second_extension(loader, monkeypatch):
-    monkeypatch.setattr(loader, "_is_npu_package", lambda spec: True)
+    monkeypatch.setattr(loader, "is_deepgemm_available", lambda: True)
     with (
         patch.object(loader.importlib.util, "find_spec", return_value=None),
         patch.object(
@@ -101,7 +102,7 @@ def test_already_loaded_cuda_is_not_mixed_with_npu(loader, monkeypatch):
 
 
 def test_default_cache_preserves_existing_setting(loader, monkeypatch):
-    monkeypatch.setattr(loader, "_is_npu_package", lambda spec: True)
+    monkeypatch.setattr(loader, "is_deepgemm_available", lambda: True)
     monkeypatch.setenv("DG_JIT_CACHE_DIR", "/existing/cache")
     with (
         patch.object(loader.importlib.util, "find_spec", return_value=None),
@@ -136,7 +137,7 @@ def test_availability_probe_does_not_import_native_package(tmp_path):
 import sys
 sys.path.insert(0, {str(ROOT)!r})
 sys.path.insert(0, {str(tmp_path)!r})
-from vllm_ascend.deepgemm import is_deepgemm_available
+from vllm_ascend.ascend_config import is_deepgemm_available
 assert is_deepgemm_available()
 assert 'deep_gemm' not in sys.modules
 assert 'torch_npu' not in sys.modules

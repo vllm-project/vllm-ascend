@@ -15,11 +15,14 @@
 # limitations under the License.
 from __future__ import annotations
 
+import ast
 import dataclasses
 import importlib.util
 import json
 import math
 import os
+import sys
+from pathlib import Path
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -51,6 +54,31 @@ def is_mega_moe_supported() -> bool:
     if _MEGA_MOE_SUPPORTED is None:
         _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
     return _MEGA_MOE_SUPPORTED
+
+
+def is_deepgemm_available() -> bool:
+    """Identify the optional Ascend package without importing native operators.
+
+    Ascend and CUDA distributions both import as deep_gemm. Only the Ascend
+    initializer re-exports get_npu_arch from its native extension.
+    """
+    loaded = sys.modules.get("deep_gemm")
+    if loaded is not None:
+        return callable(getattr(loaded, "get_npu_arch", None))
+    spec = importlib.util.find_spec("deep_gemm")
+    if spec is None or not spec.origin or not spec.origin.endswith(".py"):
+        return False
+    try:
+        tree = ast.parse(Path(spec.origin).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeError):
+        return False
+    return any(
+        isinstance(node, ast.ImportFrom)
+        and node.level == 1
+        and node.module == "_C"
+        and any(alias.name == "get_npu_arch" for alias in node.names)
+        for node in tree.body
+    )
 
 
 def validate_additional_config_bool(value: Any, path: str) -> bool:
@@ -664,8 +692,6 @@ class AscendConfig:
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
         if self.deepgemm_mega_moe:
-            from vllm_ascend.deepgemm import is_deepgemm_available
-
             if not is_deepgemm_available():
                 logger.warning_once(
                     "deepgemm_mega_moe was requested but the NPU DeepGEMM package is unavailable. "

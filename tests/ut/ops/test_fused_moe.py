@@ -2173,7 +2173,7 @@ def test_runner_selects_sp_multistream_custom_op(
     has_routed_input_transform,
     uses_sp_custom_op,
 ):
-    with patch("vllm_ascend.deepgemm.is_deepgemm_available", return_value=False):
+    with patch("vllm_ascend.ascend_config.is_deepgemm_available", return_value=False):
         config = AscendConfig(
             sparse_kv_offload_config=SimpleNamespace(enabled=False), deepgemm_mega_moe=request_deepgemm
         )
