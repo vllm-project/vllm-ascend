@@ -21,6 +21,7 @@ from vllm.config import (
     VllmConfig,
     replace,
 )
+from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
@@ -322,7 +323,7 @@ def _mla_pcp_decode_metadata(num_tokens, query_ends):
 def test_pcp_draft_mla_query_lengths_match_real_decode_rows(num_tokens, query_ends, expected):
     target = _mla_pcp_decode_metadata(num_tokens, query_ends)
     target_metadata = {"mtp": target}
-    draft = AscendMTPSpeculator._get_pcp_draft_prefill_metadata(target_metadata)["mtp"]
+    draft = AscendMTPSpeculator._get_draft_prefill_metadata(target_metadata)["mtp"]
 
     # This is the FIA TND contract that failed on PCP1 with Q=4, offsets=[4, 8].
     assert draft.decode.actual_seq_lengths_q == expected
@@ -344,8 +345,40 @@ def test_pcp_draft_metadata_preserves_other_attention_paths():
     prefill_only.decode = None
     other_backend = SimpleNamespace(num_decode_tokens=4, decode=SimpleNamespace(actual_seq_lengths_q=[4, 8]))
     metadata = {"prefill": prefill_only, "other": other_backend, "missing": None}
-    assert AscendMTPSpeculator._get_pcp_draft_prefill_metadata(metadata) == metadata
+    assert AscendMTPSpeculator._get_draft_prefill_metadata(metadata) == metadata
     assert other_backend.decode.actual_seq_lengths_q == [4, 8]
+
+
+@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
+@pytest.mark.parametrize("query_ends", [[2, 4, 6, 8], [2]])
+def test_non_pcp_draft_prefill_normalizes_main_target_graph_padding(mode, query_ends):
+    speculator = object.__new__(AscendMTPSpeculator)
+    speculator.pcp_manager = None
+    speculator.draft_attn_layer_names = {"mtp"}
+    target = _mla_pcp_decode_metadata(2, query_ends)
+    other = SimpleNamespace()
+    target_metadata = {"mtp": target, "target_only": other}
+    slots = {"mtp": target.slot_mapping}
+
+    with patch.object(speculator_module.TargetDependentARSpeculator, "_prefill") as parent:
+        speculator._prefill(1, 8, target_metadata, slots, None, mode)
+
+    passed_metadata = parent.call_args.args[2]
+    draft = passed_metadata["mtp"]
+    expected = query_ends if vllm_version_is("0.33.0") or mode == CUDAGraphMode.FULL else [2] * len(query_ends)
+    assert draft.decode.actual_seq_lengths_q == expected
+    assert set(passed_metadata) == {"mtp"}
+    assert target.decode.actual_seq_lengths_q == query_ends
+    assert target_metadata == {"mtp": target, "target_only": other}
+    assert draft.slot_mapping is target.slot_mapping
+    assert draft.decode.seq_lens_list is target.decode.seq_lens_list
+    assert parent.call_args.args[0:2] == (1, 8)
+    assert parent.call_args.args[3] is slots
+    assert parent.call_args.args[5] == mode
+    if expected != query_ends:
+        assert draft is not target and draft.decode is not target.decode
+    else:
+        assert draft is target
 
 
 @pytest.mark.parametrize("pcp_enabled", [False, True])
