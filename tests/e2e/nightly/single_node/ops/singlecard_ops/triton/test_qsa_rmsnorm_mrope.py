@@ -1,6 +1,7 @@
 import pytest
 import torch
 import torch_npu
+
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.linearnorm.qsa_rmsnorm_mrope import (
@@ -23,9 +24,7 @@ def _reference(
 ) -> torch.Tensor:
     values = tensor.float()
     reciprocal_std = torch.rsqrt(values.square().mean(dim=-1, keepdim=True) + eps)
-    normalized = (values * reciprocal_std * (weight.float() + 1.0)).to(
-        torch.bfloat16
-    )
+    normalized = (values * reciprocal_std * (weight.float() + 1.0)).to(torch.bfloat16)
     rotary_offsets = torch.arange(32)
     h_mask = (rotary_offsets % 3 == 1) & (rotary_offsets < 33)
     w_mask = (rotary_offsets % 3 == 2) & (rotary_offsets < 30)
@@ -38,12 +37,10 @@ def _reference(
     second = normalized[..., 32:64]
     output = normalized.clone()
     output[..., :32] = (
-        (first.float() * cos[:, None, :]).to(torch.bfloat16)
-        - (second.float() * sin[:, None, :]).to(torch.bfloat16)
+        (first.float() * cos[:, None, :]).to(torch.bfloat16) - (second.float() * sin[:, None, :]).to(torch.bfloat16)
     ).to(torch.bfloat16)
     output[..., 32:64] = (
-        (second.float() * cos[:, None, :]).to(torch.bfloat16)
-        + (first.float() * sin[:, None, :]).to(torch.bfloat16)
+        (second.float() * cos[:, None, :]).to(torch.bfloat16) + (first.float() * sin[:, None, :]).to(torch.bfloat16)
     ).to(torch.bfloat16)
     return output
 
