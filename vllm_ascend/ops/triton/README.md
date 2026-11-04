@@ -6,7 +6,7 @@ Operators shared by both runners, model-layer kernels, and general utilities
 keep their functional directories. A model supported by V2 alone does not make
 all of its mathematical kernels V2 runner operators.
 
-This inventory covers all 107 non-`__init__.py` Python modules under this package.
+This package contains 109 non-`__init__.py` Python modules.
 It includes launch wrappers and utilities as well as JIT definitions. Operators
 defined under `worker/v2/`, `models/`, or other packages are outside this layout
 change.
@@ -58,6 +58,7 @@ examples and links together.
 | [metrics/num_nans.py](metrics/num_nans.py) | `patch/worker/patch_triton.py` | [num_nans.md](docs/num_nans.md) |
 | [sample/categorical_sample.py](sample/categorical_sample.py) | `patch/worker/patch_triton.py` | [categorical_sample.md](docs/categorical_sample.md) |
 | [sample/fill_logprob_token_idx.py](sample/fill_logprob_token_idx.py) | `patch/worker/patch_triton.py` | [fill_logprob_token_ids.md](docs/fill_logprob_token_ids.md) |
+| [sample/logit_bias.py](sample/logit_bias.py) | `patch/worker/patch_triton.py` | [logit_bias.md](docs/logit_bias.md) |
 | [sample/sampling_mask.py](sample/sampling_mask.py) | `patch/worker/patch_triton.py` | [sampling_mask.md](docs/sampling_mask.md) |
 | [sample/thinking_budget.py](sample/thinking_budget.py) | `patch/worker/patch_triton.py` | [thinking_budget.md](docs/thinking_budget.md) |
 | [spec_decode/prepare_dflash_inputs.py](spec_decode/prepare_dflash_inputs.py) | `worker/v2/spec_decode/dflash/speculator.py` | [prepare_dflash_inputs.md](docs/prepare_dflash_inputs.md) |

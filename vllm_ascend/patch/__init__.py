@@ -1503,6 +1503,20 @@
 #    Future Plan:
 #       Remove this patch when Triton-Ascend can compile and efficiently lower
 #       the upstream kernel, or after an equivalent fix lands upstream.
+#
+#   9. `vllm.v1.worker.gpu.sample.logit_bias._bias_kernel`
+#    Why:
+#       Data-dependent masked stores can generate unordered lock workspaces in
+#       Triton-Ascend. Reinitializing a reused workspace outside the compute
+#       stream can race with an earlier grammar kernel and stall sampling.
+#    How:
+#       Preserve the upstream bias kernel and select finite stop-token logits
+#       with `tl.where`, keeping only the bounds mask on the store. The grammar
+#       kernel uses the same pattern to preserve allowed logits.
+#    Future Plan:
+#       Remove once the supported Triton-Ascend toolchain safely handles these
+#       stores without lock-workspace races, or upstream uses an equivalent
+#       implementation.
 # ** 22. File: worker/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`

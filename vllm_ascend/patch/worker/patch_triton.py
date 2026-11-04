@@ -92,6 +92,7 @@ from vllm.v1.worker.gpu import structured_outputs  # noqa: E402
 from vllm.v1.worker.gpu.sample import (  # noqa: E402
     bad_words,
     gumbel,
+    logit_bias,
     logprob,
     output,
     penalties,
@@ -110,6 +111,7 @@ from vllm_ascend.ops.triton.mamba.precopy import precopy_mamba_align_fused_kerne
 from vllm_ascend.ops.triton.metrics.num_nans import get_num_nans  # noqa: E402
 from vllm_ascend.ops.triton.sample.categorical_sample import categorical_sample  # noqa: E402
 from vllm_ascend.ops.triton.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel  # noqa: E402
+from vllm_ascend.ops.triton.sample.logit_bias import _bias_kernel  # noqa: E402
 from vllm_ascend.ops.triton.sample.sampling_mask import sampling_mask_from_logits_npu  # noqa: E402
 from vllm_ascend.ops.triton.sample.thinking_budget import (  # noqa: E402
     _load_effective_token_ascend,
@@ -148,6 +150,9 @@ dspark_speculator.gumbel_sample = categorical_sample
 sampler.gumbel_sample = categorical_sample
 topk_topp_sampler.apply_top_k_top_p_triton = apply_top_k_top_p
 structured_outputs._apply_grammar_bitmask_kernel = _apply_grammar_bitmask_kernel
+# Remove once the supported Triton-Ascend toolchain safely handles the upstream
+# data-dependent masked stores without unordered lock workspace races.
+logit_bias._bias_kernel = _bias_kernel
 mamba_utils.precopy_mamba_align_fused_kernel = precopy_mamba_align_fused_kernel
 # This patch may be revisited or reverted once the compiler and Triton Ascend toolkit
 # support the upstream implementation of fill_logprob_token_ids_kernel.

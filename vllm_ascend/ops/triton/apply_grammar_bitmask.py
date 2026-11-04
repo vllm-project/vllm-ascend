@@ -74,11 +74,12 @@ def _apply_grammar_bitmask_kernel_impl(
         blocked = blocked.reshape(BLOCK_SIZE)
 
         block_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        tl.store(
-            logits_ptr + logits_idx * logits_stride + block_offset,
-            -float("inf"),
-            mask=position_is_active & blocked & (block_offset < vocab_size),
-        )
+        logits_offset = logits_ptr + logits_idx * logits_stride + block_offset
+        valid = position_is_active & (block_offset < vocab_size)
+        logits = tl.load(logits_offset, mask=valid, other=0)
+        # Keep the store mask independent of grammar data to avoid generating
+        # unordered lock workspaces in the Triton-Ascend backend.
+        tl.store(logits_offset, tl.where(blocked, -float("inf"), logits), mask=valid)
 
 
 class _ApplyGrammarBitmaskKernelLauncher:
