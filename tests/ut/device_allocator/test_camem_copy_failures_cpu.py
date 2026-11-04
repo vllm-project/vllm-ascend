@@ -11,6 +11,7 @@ import ast
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
 
@@ -31,7 +32,7 @@ class AllocatorMemcpyTest(unittest.TestCase):
         self.memcpy = Mock(return_value=0)
         self.unmap = Mock()
         self.create = Mock()
-        namespace = {
+        namespace: dict[str, Any] = {
             "torch": SimpleNamespace(
                 empty=Mock(return_value=self.backup), uint8="uint8", npu=Mock(), accelerator=Mock()
             ),
