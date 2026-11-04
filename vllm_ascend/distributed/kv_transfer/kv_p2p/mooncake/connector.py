@@ -275,6 +275,16 @@ class MooncakePushConnector(MooncakeBaseConnector):
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
 
+    def save_kv_layer(
+        self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs: Any
+    ) -> None:
+        assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
+        self.connector_worker.save_kv_layer(layer_name)
+
+    def wait_for_save(self) -> None:
+        assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
+        self.connector_worker.wait_for_save()
+
     def shutdown(self) -> None:
         if self.connector_worker is not None:
             self.connector_worker.shutdown()
