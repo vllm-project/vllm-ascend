@@ -121,6 +121,21 @@ class TestACLGraphEntry(TestBase):
         self.assertEqual(entry.input_addresses, input_addresses)
 
 
+def test_fasteep_stages_new_activation_addresses_without_replacing_capture_inputs():
+    wrapper = object.__new__(ACLGraphWrapper)
+    wrapper.graph_allocator = object()
+    buffer = torch.zeros(3)
+    entry = ACLGraphEntry(batch_descriptor=None, aclgraph=Mock(), input_buffers={0: buffer})
+    address = buffer.data_ptr()
+    for value in (torch.tensor([1.0, 2.0, 3.0]), torch.tensor([7.0, 8.0, 9.0])):
+        args, kwargs = wrapper._stage_fasteep_inputs(entry, (value,), {})
+        assert args[0].data_ptr() == address
+        assert kwargs == {}
+        torch.testing.assert_close(args[0], value)
+    with pytest.raises(ValueError, match="metadata changed"):
+        wrapper._stage_fasteep_inputs(entry, (torch.zeros(4),), {})
+
+
 class TestACLGraphWrapper(TestBase):
     def setUp(self):
         """Set up test fixtures"""
@@ -560,7 +575,7 @@ class TestACLGraphWrapper(TestBase):
     @patch("vllm_ascend.compilation.acl_graph.current_platform")
     @patch("vllm_ascend.compilation.acl_graph.envs")
     @patch("vllm_ascend.compilation.acl_graph.weak_ref_tensors")
-    def test_call_with_debug_mode_input_address_mismatch(
+    def test_call_with_fasteep_input_address_mismatch(
         self,
         mock_weak_ref_tensors,
         mock_envs,
@@ -570,7 +585,7 @@ class TestACLGraphWrapper(TestBase):
         mock_validate_cudagraph_capturing_enabled,
         mock_torch,
     ):
-        """Test __call__ method with debug mode input address mismatch raises AssertionError"""
+        """FastEEP rejects changed graph inputs even when debug logging is disabled"""
         mock_envs.VLLM_LOGGING_LEVEL = "DEBUG"  # Enable debug mode
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
         mock_get_forward_context.return_value = self.mock_forward_context
@@ -611,6 +626,9 @@ class TestACLGraphWrapper(TestBase):
         # Second call with different tensor addresses should raise AssertionError
         tensor2 = torch.tensor([4, 5, 6])  # Different values, different address
 
+        # FastEEP must enforce stable addresses even without DEBUG logging.
+        wrapper.is_debugging_mode = False
+        wrapper.graph_allocator = MagicMock()
         with self.assertRaises(AssertionError) as context:
             wrapper(tensor2, "arg2")
 

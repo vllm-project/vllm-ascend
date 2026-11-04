@@ -420,7 +420,9 @@ def _patch_initial_expert_layout() -> None:
         routed_experts.get_expert_mapping = _with_expert_mapping_ep_size(
             original_get,
             lambda self, *_args, **_kwargs: (
-                self.moe_config.ep_size if getattr(self, "_use_v2_model_runner", False) else 1
+                self.moe_config.ep_size
+                if getattr(self, "_use_v2_model_runner", False) and not getattr(self, "_fasteep", False)
+                else 1
             ),
         )
 
@@ -436,7 +438,9 @@ def _patch_initial_expert_layout() -> None:
             ep_sizes = {
                 module.moe_config.ep_size
                 for module in model.modules()
-                if isinstance(module, routed_experts) and getattr(module, "_use_v2_model_runner", False)
+                if isinstance(module, routed_experts)
+                and getattr(module, "_use_v2_model_runner", False)
+                and not getattr(module, "_fasteep", False)
             }
             if len(ep_sizes) > 1:
                 raise RuntimeError("MRV2 redundant expert loading requires one EP size")

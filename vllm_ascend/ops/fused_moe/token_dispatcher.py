@@ -81,7 +81,8 @@ class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
     @property
     def ep_group(self):
         """Get expert model parallel group."""
-        return get_ep_group().device_group
+        group = get_ep_group()
+        return group if getattr(group, "fasteep", False) else group.device_group
 
     @property
     def ep_rank(self):
@@ -501,9 +502,12 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             )
 
         # TODO: Try local_rank = ep_group.rank_in_group
-        local_rank = torch.distributed.get_rank(group=self.ep_group)
-        backend = self.ep_group._get_backend(torch.device("npu"))
-        self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+        if getattr(self.ep_group, "fasteep", False):
+            self.moe_all_to_all_group_name = None
+        else:
+            local_rank = torch.distributed.get_rank(group=self.ep_group)
+            backend = self.ep_group._get_backend(torch.device("npu"))
+            self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
 
     def token_dispatch(
         self,

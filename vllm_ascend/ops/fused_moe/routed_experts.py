@@ -34,7 +34,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
+from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map, init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -421,6 +421,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
         self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
+        from vllm_ascend.distributed.fasteep.policy import is_fasteep
+
+        self._fasteep = is_fasteep(vllm_config)
         self.dynamic_eplb = False
         self.multi_stage = False
         self.load_counter = None
@@ -431,7 +434,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.global_redundant_expert_num: int = 0
         self.ascend_pertoken_scale: torch.Tensor | None = None
         self.ascend_mc2_mask: torch.Tensor | None = None
-        if not self._use_v2_model_runner:
+        if not self._use_v2_model_runner or self._fasteep:
             self.init_eplb(n_shared_experts)
         self.return_with_event = False
 
@@ -515,6 +518,13 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
         )
 
+        from vllm_ascend.distributed.fasteep.policy import communication_method
+
+        if self._fasteep and communication_method(vllm_config) == "allgather":
+            # Every rank routes the same gathered tokens. Replica selection
+            # must therefore agree across ranks before reduce-scatter.
+            self.log2phy.copy_(generate_log2phy_map(self.global_expert_map, 0, tp_size=1).to(self.log2phy.device))
+
         self.moe_config.global_redundant_expert_num = self.global_redundant_expert_num
         local_num_experts = self.moe_config.num_local_experts
         expected_local_num_experts = (
@@ -585,7 +595,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     @property
     def ascend_expert_map(self) -> torch.Tensor | None:
         """Return the global-to-local map used by Ascend MoE execution."""
-        if getattr(self, "_use_v2_model_runner", False):
+        if getattr(self, "_use_v2_model_runner", False) and not getattr(self, "_fasteep", False):
             return self.expert_map
         return getattr(self, "_ascend_expert_map", None)
 
@@ -603,6 +613,17 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
     def get_log2phy_map(self) -> torch.Tensor | None:
         return self.log2phy
+
+    def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
+        if getattr(self, "_fasteep", False):
+            # FastEEP checkpoint mappings enumerate logical experts followed by
+            # redundant copies. Load each logical tensor into the configured
+            # local slot, rather than the loader's default contiguous shard.
+            logical = expert_id % self.moe_config.num_logical_experts
+            expert_map = self.ascend_expert_map
+            assert expert_map is not None, "FastEEP checkpoint loading requires an expert map."
+            return int(expert_map[logical])
+        return super()._map_global_expert_id_to_local_expert_id(expert_id)
 
     @property
     def ep_rank(self) -> int:

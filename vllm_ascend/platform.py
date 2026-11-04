@@ -1196,7 +1196,15 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
     if not isinstance(eplb_config, dict):
         raise TypeError("additional_config.eplb_config must be a dictionary.")
 
+    from vllm_ascend.distributed.fasteep.policy import is_fasteep
+
     use_v2_model_runner = bool(getattr(vllm_config, "use_v2_model_runner", False))
+    if is_fasteep(vllm_config):
+        # FastEEP owns static placement and migration for both runners. The
+        # V2 continuous-EPLB filter would discard its checkpoint placement.
+        if vllm_config.parallel_config.enable_eplb:
+            raise ValueError("Pause continuous EPLB when using FastEEP-controlled expert migration.")
+        return
     if use_v2_model_runner:
         unsupported_eplb_fields = sorted(set(eplb_config) - _V2_EPLB_CONFIG_FIELDS)
         stair_config = eplb_config.get("stair_config")
@@ -1574,6 +1582,13 @@ def _setup_compile_backend(
                 "vllm::glm5next_kda_forward",
             ]
         )
+        from vllm_ascend.distributed.fasteep.policy import is_fasteep
+
+        if is_fasteep(vllm_config):
+            # Recreated HCCL handles must remain outside retained ACL graphs.
+            compilation_config.splitting_ops.extend(
+                ["vllm::moe_forward", "vllm::moe_forward_shared", "vllm::ascend_moe_forward_shared_sp"]
+            )
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False

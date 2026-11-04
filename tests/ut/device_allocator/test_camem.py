@@ -280,6 +280,7 @@ class TestCaMem(PytestBase):
     @patch("vllm_ascend.device_allocator.camem.create_and_map")
     @patch("vllm_ascend.device_allocator.camem.memcpy")
     def test_wake_up_loads_and_clears_cpu_backup(self, mock_memcpy, mock_create_and_map):
+        mock_memcpy.return_value = 0
         allocator = CaMemAllocator.get_instance()
 
         handle = (1, 10, 1000, 0)
