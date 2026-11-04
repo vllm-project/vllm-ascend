@@ -51,9 +51,9 @@ decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode.
 
 ### 3.1 Model Weights and Hardware
 
-The official DeepSeek-V4.1-Flash checkpoint is available from
-[Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) and
-[ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4.1-Flash).
+The official DeepSeek-V4.1-Flash-1017 checkpoint is available from
+[Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) and
+[ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4.1-Flash-1017).
 
 The recommended Ascend W4A8 checkpoint used by this guide is available as
 [Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8)
@@ -150,7 +150,7 @@ separate images from the v0.32.0 release branch.
     An A2 server exposes 8 devices. Run this command on all four A2 servers.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a2
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     export MODEL_ROOT="/data/weights"
 
     docker pull "$IMAGE"
@@ -189,9 +189,8 @@ absolute path inside and outside every container.
 
 To build from source, follow the
 [software environment installation guide](../../getting_started/installation.md#installation-software-environment)
-and check out the **releases/v0.32.0rc** branch of vLLM Ascend. Use the
-matching upstream vLLM tag recorded in `.github/vllm-release-tag.commit` at
-the selected revision.
+and check out the **v0.32.0rc** tag of vLLM Ascend. Use the matching upstream
+vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
 ## 5 Online Service Deployment
 
@@ -1868,7 +1867,8 @@ For common environment, installation, and parameter issues, refer to the
 
 - The documented A3 deployments use either one server in colocated mode or two
   servers in 1P1D mode, with an Ascend W4A8 checkpoint and INT8 Engram storage.
-- The A2 deployment parameters require separate runtime validation.
+- The A2 configuration is retained unchanged and is not revalidated by this
+  update. Its revised configuration will be documented separately.
 - In the A3 PD example, Prefill runs in eager mode. Decode uses
   `FULL_DECODE_ONLY` ACL Graph with DSpark draft graph execution enabled.
 - Production performance qualification and task-level accuracy evaluation are
