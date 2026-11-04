@@ -133,22 +133,25 @@ def test_dense_layout_and_graph_replay(layout):
     check(captured, 2)
 
 
-@pytest.mark.parametrize("case", ["empty_query", "invalid_layout", "invalid_return"])
+@pytest.mark.parametrize("case", ["empty_query", "invalid_layout", "invalid_return", "mixed_devices"])
 def test_wrapper_rejects_invalid_inputs(case):
     q = torch.zeros((1, 4, 128), dtype=torch.bfloat16, device="npu:0")
     k = torch.zeros((1, 16, 1, 128), dtype=torch.bfloat16, device=q.device)
     w = torch.ones((1, 4), dtype=torch.float32, device=q.device)
-    options = dict(layout_q="TND", layout_k="PA_BBND")
+    layout_q = "TND"
     return_value = 0
     if case == "empty_query":
         q = q[:0]
         w = w[:0]
         message = "Tensor q is empty"
     elif case == "invalid_layout":
-        options["layout_q"] = "INVALID"
+        layout_q = "INVALID"
         message = "Unsupported query layout"
+    elif case == "mixed_devices":
+        k = torch.zeros_like(k, device="cpu")
+        message = "LI Q/K/weights must be on the same NPU"
     else:
         return_value = 2
         message = "return_value must be 0 or 1"
     with pytest.raises(RuntimeError, match=message):
-        lightning_indexer_v2(q, k, w, 16, return_value=return_value, **options)
+        lightning_indexer_v2(q, k, w, 16, layout_q=layout_q, layout_k="PA_BBND", return_value=return_value)
