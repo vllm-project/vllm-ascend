@@ -1677,12 +1677,13 @@
 #       are tracked per row (a contiguous prefix in O(1), scattered writes
 #       through a mask) and published on `uva()`. A write the tracker cannot
 #       observe is refused (NumPy views, `.data`), widened to a whole-buffer
-#       copy (Boolean masks, uint8 mask keys, untypeable keys), or - when the
-#       mirror hands out a writable alias, which cannot be tracked at all -
-#       makes every later `uva()` publish the whole buffer. Two boundaries stay
-#       open and are documented on the proxies: a write through a
-#       `buf.cpu[...]` view, and a tensor built with `torch.from_numpy` over
-#       `buf.np`. With
+#       copy (0-d and multi-dimensional Boolean masks, uint8 mask keys,
+#       untypeable keys), or - when the mirror hands out a writable alias, which
+#       cannot be tracked at all - makes every later `uva()` publish the whole
+#       buffer. Three boundaries stay open and are documented on the proxies: a
+#       write through a `buf.cpu[...]` view, a tensor built with
+#       `torch.from_numpy` over `buf.np`, and the raw pointer (`.np.ctypes`).
+#       With
 #       `PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True` the pinned buffer is
 #       mapped for the device, `uva()` returns it directly and nothing is
 #       copied.
