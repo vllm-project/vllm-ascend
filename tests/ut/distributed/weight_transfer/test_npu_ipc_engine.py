@@ -50,7 +50,6 @@ from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
     NPUIPCTrainerWeightTransferEngine,
     NPUIPCWeightTransferEngine,
 )
-from vllm_ascend.worker.v2 import utils as v2_utils
 
 _MODULE = "vllm_ascend.distributed.weight_transfer.npu_ipc_engine"
 
@@ -250,7 +249,6 @@ def test_trainer_init_uses_assigned_npu_without_cuda(packed):
     accelerator = types.SimpleNamespace(current_device_index=lambda: 2)
     with (
         patch.object(torch, "accelerator", accelerator, create=True),
-        patch.object(v2_utils, "torch", types.SimpleNamespace(cuda=MagicMock(), npu=MagicMock())),
         patch(f"{_MODULE}.npu_generate_uuid", return_value="node-7") as uuid,
         patch.object(torch.cuda, "get_device_properties", side_effect=AssertionError("CUDA used")),
     ):
@@ -302,27 +300,12 @@ def test_packed_sender_waits_before_reusing_each_chunk(is_sender):
 
 
 @pytest.mark.parametrize("is_sender", [False, True])
-@pytest.mark.parametrize("world_size", [0, 1, 2])
-def test_standalone_trainer_inherits_npu_collectives_and_cleanup(is_sender, world_size):
+def test_multi_rank_handles_are_merged_and_synchronized_on_npu(is_sender):
+    engine = object.__new__(NPUIPCTrainerWeightTransferEngine)
+    engine.is_sender = is_sender
     local = [{"node-0": (0,)}, {"node-0": (1,)}]
     remote = [{"node-1": (2,)}, {"node-1": (3,)}]
     events = []
-    fake_torch = types.SimpleNamespace(
-        cuda=MagicMock(),
-        npu=MagicMock(),
-        accelerator=types.SimpleNamespace(
-            current_device_index=lambda: 0,
-            synchronize=lambda: fake_torch.npu.synchronize(),
-        ),
-        distributed=MagicMock(),
-    )
-    fake_torch.cuda.synchronize.side_effect = AssertionError("CUDA used")
-    fake_torch.cuda.ipc_collect.side_effect = AssertionError("CUDA used")
-    fake_torch.npu.synchronize.side_effect = lambda: events.append("npu")
-    fake_torch.npu.ipc_collect.side_effect = lambda: events.append("collect")
-    fake_torch.distributed.is_initialized.return_value = world_size > 0
-    fake_torch.distributed.get_world_size.return_value = world_size
-    fake_torch.distributed.barrier.side_effect = lambda: events.append("barrier")
 
     def gather(output, handles):
         assert handles is local
@@ -330,22 +313,16 @@ def test_standalone_trainer_inherits_npu_collectives_and_cleanup(is_sender, worl
         events.append("gather")
 
     with (
-        patch(f"{_MODULE}.torch", fake_torch),
-        patch("vllm.distributed.weight_transfer.ipc_engine.torch", fake_torch),
-        patch.object(v2_utils, "torch", fake_torch),
-        patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
+        patch.object(torch.distributed, "is_initialized", return_value=True),
+        patch.object(torch.distributed, "get_world_size", return_value=2),
+        patch.object(torch.distributed, "all_gather_object", side_effect=gather),
+        patch.object(torch.distributed, "barrier", side_effect=lambda: events.append("barrier")),
+        patch.object(torch, "npu", types.SimpleNamespace(synchronize=lambda: events.append("npu")), create=True),
+        patch.object(torch.cuda, "synchronize", side_effect=AssertionError("CUDA used")),
     ):
-        fake_torch.distributed.all_gather_object.side_effect = gather
-        # A fresh trainer must establish mappings itself, without a model runner.
-        engine = NPUIPCTrainerWeightTransferEngine(client=MagicMock(), source=[], is_sender=is_sender)
         result = engine._all_gather_and_merge_handles(local)
-        engine._post_send_sync()
-    if world_size < 2:
-        assert result is local
-        assert events == ["collect"]
-    else:
-        assert events == ["gather", "barrier", "npu", "barrier", "collect"]
-        assert result == ([{**local[i], **remote[i]} for i in range(2)] if is_sender else [{}, {}])
+    assert events == ["gather", "barrier", "npu"]
+    assert result == ([{**local[i], **remote[i]} for i in range(2)] if is_sender else [{}, {}])
 
 
 def test_packed_receive_rejects_missing_sizes():

@@ -1,4 +1,0 @@
-pr: 20840
-entries:
-  - category: bugfix
-    text: Fixed NPU IPC trainer cleanup to collect released IPC allocations after weight updates.
