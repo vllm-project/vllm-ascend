@@ -1,0 +1,37 @@
+{
+  "date": "2026-11-04",
+  "scope": "Local HTTP simulation executes the actual Bash/curl/Python scripts; no NPU or model inference",
+  "checks": {
+    "four_scenarios": {
+      "requests": 9,
+      "concurrency_observed": 2,
+      "shared_prefix_with_distinct_tails": true,
+      "quoted_model_and_output_path": true,
+      "new_service_log_only": true
+    },
+    "http_500_preserves_body_and_fails": true,
+    "malformed_200_response_fails": true,
+    "empty_answer_fails": true,
+    "curl_timeout_retains_diagnostics": true,
+    "concurrent_failure_is_not_masked": true,
+    "run_all_stops_at_failed_case": true,
+    "invalid_concurrency_rejected_before_http": true,
+    "static_checks": {
+      "bash_syntax": "passed (6 scripts)",
+      "shellcheck": "passed (warning severity)",
+      "ruff_check": "passed",
+      "ruff_format": "passed",
+      "git_diff_check": "passed",
+      "local_document_links": "passed",
+      "format_sh_ci": "blocked before hooks: nodeenv cannot parse Node version 0-alpha"
+    }
+  },
+  "not_validated": [
+    "A3 inference",
+    "real tokenization",
+    "real prefix cache hits",
+    "replay execution",
+    "model accuracy",
+    "performance improvement"
+  ]
+}

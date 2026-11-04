@@ -81,6 +81,18 @@ MRV1 用 `VLLM_USE_V2_MODEL_RUNNER=0`。
 `--swa-bounded-replay` 被接受、启动成功或 HTTP 返回成功，均不能单独证明裁剪路径执行。
 短于窗口的请求不一定触发裁剪；开启 prompt logprobs 的请求会保留所需行。
 
+现有服务可直接使用 [curl 测试脚本](../../../examples/swa_replay/README.md)，无需重启
+或编译服务。脚本默认连接 `127.0.0.1:8989`、服务别名 `dsv41`，提供短输入、长输入、
+重复前缀和并发四个场景，保存完整响应、HTTP 状态、usage 和非流式请求总耗时。
+
+```bash
+SERVICE_LOG=/workspace/serve_swa_replay_on.log \
+  bash examples/swa_replay/02_long_prefill.sh
+```
+
+若设置 `SERVICE_LOG`，脚本仅显示本轮开始后新增的 replay 日志；每个 worker 以前
+已打印过首次激活日志时，本轮可能没有新增消息。HTTP 成功仍不能单独证明裁剪生效。
+
 可运行已有的小型服务探针，先保存 OFF 结果，再重启服务验证 ON：
 
 ```bash
