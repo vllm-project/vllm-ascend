@@ -1037,11 +1037,16 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_INTRA_ROCE_ENABLE=1
-    export HCCL_CONNECT_TIMEOUT=6000 HCCL_EXEC_TIMEOUT=204 HCCL_BUFFSIZE=1200
-    export GLOO_SOCKET_IFNAME="$nic_name" HCCL_SOCKET_IFNAME="$nic_name" TP_SOCKET_IFNAME="$nic_name"
+    export HCCL_CONNECT_TIMEOUT=6000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_BUFFSIZE=1200
+    export GLOO_SOCKET_IFNAME="$nic_name"
+    export HCCL_SOCKET_IFNAME="$nic_name"
+    export TP_SOCKET_IFNAME="$nic_name"
     export HCCL_IF_IP="$local_ip"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000 VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export VLLM_RPC_TIMEOUT=3600000
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     kv_config='{
       "kv_connector": "MooncakeHybridConnector",
@@ -1065,21 +1070,36 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     }'
 
     vllm serve "$model_path" \
-      --host 0.0.0.0 --port "$((7100 + p_rank))" \
-      --data-parallel-size 2 --data-parallel-rank "$p_rank" \
-      --data-parallel-address "$head_ip" --data-parallel-rpc-port 12321 \
-      --tensor-parallel-size 1 --pipeline-parallel-size 1 \
-      --prefill-context-parallel-size 8 --decode-context-parallel-size 1 \
-      --served-model-name dsv4 --enable-expert-parallel \
-      --max-model-len 150000 --max-num-batched-tokens 4096 \
-      --max-num-seqs 16 --api-server-count 4 \
-      --block-size 32 --gpu-memory-utilization 0.96 \
-      --enable-chunked-prefill --no-disable-hybrid-kv-cache-manager \
-      --enable-prefix-caching --enforce-eager \
-      --quantization ascend --tokenizer-mode deepseek_v4 \
+      --host 0.0.0.0 \
+      --port "$((7100 + p_rank))" \
+      --data-parallel-size 2 \
+      --data-parallel-rank "$p_rank" \
+      --data-parallel-address "$head_ip" \
+      --data-parallel-rpc-port 12321 \
+      --tensor-parallel-size 1 \
+      --pipeline-parallel-size 1 \
+      --prefill-context-parallel-size 8 \
+      --decode-context-parallel-size 1 \
+      --served-model-name dsv4 \
+      --enable-expert-parallel \
+      --max-model-len 150000 \
+      --max-num-batched-tokens 4096 \
+      --max-num-seqs 16 \
+      --api-server-count 4 \
+      --block-size 32 \
+      --gpu-memory-utilization 0.96 \
+      --enable-chunked-prefill \
+      --no-disable-hybrid-kv-cache-manager \
+      --enable-prefix-caching \
+      --enforce-eager \
+      --quantization ascend \
+      --tokenizer-mode deepseek_v4 \
       --attention_config.indexer_kv_dtype int8 \
-      --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
-      --reasoning-parser deepseek_v4 --trust-remote-code --seed 1024 \
+      --tool-call-parser deepseek_v4 \
+      --enable-auto-tool-choice \
+      --reasoning-parser deepseek_v4 \
+      --trust-remote-code \
+      --seed 1024 \
       --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
       --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
       --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}' \
@@ -1099,12 +1119,18 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_INTRA_ROCE_ENABLE=1
-    export HCCL_CONNECT_TIMEOUT=120 HCCL_EXEC_TIMEOUT=204 HCCL_BUFFSIZE=1800
-    export GLOO_SOCKET_IFNAME="$nic_name" HCCL_SOCKET_IFNAME="$nic_name" TP_SOCKET_IFNAME="$nic_name"
+    export HCCL_CONNECT_TIMEOUT=120
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_BUFFSIZE=1800
+    export GLOO_SOCKET_IFNAME="$nic_name"
+    export HCCL_SOCKET_IFNAME="$nic_name"
+    export TP_SOCKET_IFNAME="$nic_name"
     export HCCL_IF_IP="$local_ip"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000 VLLM_RPC_TIMEOUT=3600000
-    export OMP_NUM_THREADS=10 OMP_PROC_BIND=false
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export VLLM_RPC_TIMEOUT=3600000
+    export OMP_NUM_THREADS=10
+    export OMP_PROC_BIND=false
 
     for local_rank in 0 1 2 3 4 5 6 7; do
       global_rank=$((local_rank + rank_offset))
@@ -1129,20 +1155,33 @@ The following sections describe multi-node PD separation deployment on Atlas 800
         }
       }'
       vllm serve "$model_path" \
-        --host 0.0.0.0 --port "$((7100 + local_rank))" \
-        --data-parallel-size 16 --data-parallel-rank "$global_rank" \
-        --data-parallel-address "$head_ip" --data-parallel-rpc-port 12321 \
-        --tensor-parallel-size 1 --enable-expert-parallel --seed 1024 \
-        --max-model-len 508576 --max-num-batched-tokens 720 \
-        --max-num-seqs 128 --async-scheduling --block-size 32 \
-        --served-model-name dsv4 --attention_config.indexer_kv_dtype int8 \
-        --no-enable-prefix-caching --no-disable-hybrid-kv-cache-manager \
+        --host 0.0.0.0 \
+        --port "$((7100 + local_rank))" \
+        --data-parallel-size 16 \
+        --data-parallel-rank "$global_rank" \
+        --data-parallel-address "$head_ip" \
+        --data-parallel-rpc-port 12321 \
+        --tensor-parallel-size 1 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --max-model-len 508576 \
+        --max-num-batched-tokens 720 \
+        --max-num-seqs 128 \
+        --async-scheduling \
+        --block-size 32 \
+        --served-model-name dsv4 \
+        --attention_config.indexer_kv_dtype int8 \
+        --no-enable-prefix-caching \
+        --no-disable-hybrid-kv-cache-manager \
         --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
-        --trust-remote-code --tokenizer-mode deepseek_v4 \
-        --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
-        --reasoning-parser deepseek_v4 --gpu-memory-utilization 0.97 \
+        --trust-remote-code \
+        --tokenizer-mode deepseek_v4 \
+        --tool-call-parser deepseek_v4 \
+        --enable-auto-tool-choice \
+        --reasoning-parser deepseek_v4 \
+        --gpu-memory-utilization 0.97 \
         --quantization ascend \
-        --speculative-config "{\"num_speculative_tokens\":1,\"method\":\"dspark\"}" \
+        --speculative-config '{"num_speculative_tokens":1,"method":"dspark"}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --kv-transfer-config "$kv_config" \
         --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
@@ -1170,9 +1209,13 @@ The following sections describe multi-node PD separation deployment on Atlas 800
       done
     done
     python3 examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
-      --host 0.0.0.0 --port 18590 --workers "$proxy_workers" \
-      --prefiller-hosts "$p_a" "$p_b" --prefiller-ports 7100 7101 \
-      --decoder-hosts "${decode_hosts[@]}" --decoder-ports "${decode_ports[@]}"
+      --host 0.0.0.0 \
+      --port 18590 \
+      --workers "$proxy_workers" \
+      --prefiller-hosts "$p_a" "$p_b" \
+      --prefiller-ports 7100 7101 \
+      --decoder-hosts "${decode_hosts[@]}" \
+      --decoder-ports "${decode_ports[@]}"
     ```
 
     Verify `/healthcheck` reports two P and sixteen D endpoints and inspect the proxy/worker file-descriptor limits. Use the same `ulimit -n 65536` on the benchmark client. Both P endpoints must receive requests; their separate APIs do not imply independent compute capacity, because expert/MC2 collectives can span both DP groups. Measure aggregate P throughput in one shared wall-clock window.
@@ -1964,9 +2007,14 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
         ```shell
         mooncake_master \
-          --port 50088 --eviction_high_watermark_ratio 0.5 --eviction_ratio 0.1 \
-          --default_kv_lease_ttl 11000 --enable_offload=true \
-          --offload_on_evict=true --offload_force_evict=false --client_ttl=120
+          --port 50088 \
+          --eviction_high_watermark_ratio 0.5 \
+          --eviction_ratio 0.1 \
+          --default_kv_lease_ttl 11000 \
+          --enable_offload=true \
+          --offload_on_evict=true \
+          --offload_force_evict=false \
+          --client_ttl=120
         ```
 
         After the Store is ready, use these complete P/D scripts. The Mooncake environment and the full `MultiConnector` JSON are included in each block.
@@ -2024,11 +2072,16 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
-        export HCCL_CONNECT_TIMEOUT=6000 HCCL_EXEC_TIMEOUT=204 HCCL_BUFFSIZE=1200
-        export GLOO_SOCKET_IFNAME="$nic_name" HCCL_SOCKET_IFNAME="$nic_name" TP_SOCKET_IFNAME="$nic_name"
+        export HCCL_CONNECT_TIMEOUT=6000
+        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_BUFFSIZE=1200
+        export GLOO_SOCKET_IFNAME="$nic_name"
+        export HCCL_SOCKET_IFNAME="$nic_name"
+        export TP_SOCKET_IFNAME="$nic_name"
         export HCCL_IF_IP="$local_ip"
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000 VLLM_RPC_TIMEOUT=3600000
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+        export VLLM_RPC_TIMEOUT=3600000
         export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
         export MOONCAKE_CONFIG_PATH="<CONFIG_DIR>/mooncake.json"
         export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=34359738368
@@ -2079,21 +2132,36 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         }'
 
         vllm serve "$model_path" \
-          --host 0.0.0.0 --port "$((7100 + p_rank))" \
-          --data-parallel-size 2 --data-parallel-rank "$p_rank" \
-          --data-parallel-address "$head_ip" --data-parallel-rpc-port 12321 \
-          --tensor-parallel-size 1 --pipeline-parallel-size 1 \
-          --prefill-context-parallel-size 8 --decode-context-parallel-size 1 \
-          --served-model-name dsv4 --enable-expert-parallel \
-          --max-model-len 150000 --max-num-batched-tokens 8192 \
-          --max-num-seqs 16 --api-server-count 4 \
-          --block-size 32 --gpu-memory-utilization 0.96 \
-          --enable-chunked-prefill --no-disable-hybrid-kv-cache-manager \
-          --enable-prefix-caching --enforce-eager \
-          --quantization ascend --tokenizer-mode deepseek_v4 \
+          --host 0.0.0.0 \
+          --port "$((7100 + p_rank))" \
+          --data-parallel-size 2 \
+          --data-parallel-rank "$p_rank" \
+          --data-parallel-address "$head_ip" \
+          --data-parallel-rpc-port 12321 \
+          --tensor-parallel-size 1 \
+          --pipeline-parallel-size 1 \
+          --prefill-context-parallel-size 8 \
+          --decode-context-parallel-size 1 \
+          --served-model-name dsv4 \
+          --enable-expert-parallel \
+          --max-model-len 150000 \
+          --max-num-batched-tokens 8192 \
+          --max-num-seqs 16 \
+          --api-server-count 4 \
+          --block-size 32 \
+          --gpu-memory-utilization 0.96 \
+          --enable-chunked-prefill \
+          --no-disable-hybrid-kv-cache-manager \
+          --enable-prefix-caching \
+          --enforce-eager \
+          --quantization ascend \
+          --tokenizer-mode deepseek_v4 \
           --attention_config.indexer_kv_dtype int8 \
-          --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
-          --reasoning-parser deepseek_v4 --trust-remote-code --seed 1024 \
+          --tool-call-parser deepseek_v4 \
+          --enable-auto-tool-choice \
+          --reasoning-parser deepseek_v4 \
+          --trust-remote-code \
+          --seed 1024 \
           --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
           --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
           --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}' \
@@ -2116,11 +2184,16 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
-        export HCCL_CONNECT_TIMEOUT=6000 HCCL_EXEC_TIMEOUT=204 HCCL_BUFFSIZE=1200
-        export GLOO_SOCKET_IFNAME="$nic_name" HCCL_SOCKET_IFNAME="$nic_name" TP_SOCKET_IFNAME="$nic_name"
+        export HCCL_CONNECT_TIMEOUT=6000
+        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_BUFFSIZE=1200
+        export GLOO_SOCKET_IFNAME="$nic_name"
+        export HCCL_SOCKET_IFNAME="$nic_name"
+        export TP_SOCKET_IFNAME="$nic_name"
         export HCCL_IF_IP="$local_ip"
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000 VLLM_RPC_TIMEOUT=3600000
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+        export VLLM_RPC_TIMEOUT=3600000
         export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
         MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
         export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -2166,21 +2239,36 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         }'
 
         vllm serve "$model_path" \
-          --host 0.0.0.0 --port "$((7100 + p_rank))" \
-          --data-parallel-size 2 --data-parallel-rank "$p_rank" \
-          --data-parallel-address "$head_ip" --data-parallel-rpc-port 12321 \
-          --tensor-parallel-size 1 --pipeline-parallel-size 1 \
-          --prefill-context-parallel-size 8 --decode-context-parallel-size 1 \
-          --served-model-name dsv4 --enable-expert-parallel \
-          --max-model-len 150000 --max-num-batched-tokens 8192 \
-          --max-num-seqs 16 --api-server-count 4 \
-          --block-size 32 --gpu-memory-utilization 0.96 \
-          --enable-chunked-prefill --no-disable-hybrid-kv-cache-manager \
-          --enable-prefix-caching --enforce-eager \
-          --quantization ascend --tokenizer-mode deepseek_v4 \
+          --host 0.0.0.0 \
+          --port "$((7100 + p_rank))" \
+          --data-parallel-size 2 \
+          --data-parallel-rank "$p_rank" \
+          --data-parallel-address "$head_ip" \
+          --data-parallel-rpc-port 12321 \
+          --tensor-parallel-size 1 \
+          --pipeline-parallel-size 1 \
+          --prefill-context-parallel-size 8 \
+          --decode-context-parallel-size 1 \
+          --served-model-name dsv4 \
+          --enable-expert-parallel \
+          --max-model-len 150000 \
+          --max-num-batched-tokens 8192 \
+          --max-num-seqs 16 \
+          --api-server-count 4 \
+          --block-size 32 \
+          --gpu-memory-utilization 0.96 \
+          --enable-chunked-prefill \
+          --no-disable-hybrid-kv-cache-manager \
+          --enable-prefix-caching \
+          --enforce-eager \
+          --quantization ascend \
+          --tokenizer-mode deepseek_v4 \
           --attention_config.indexer_kv_dtype int8 \
-          --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
-          --reasoning-parser deepseek_v4 --trust-remote-code --seed 1024 \
+          --tool-call-parser deepseek_v4 \
+          --enable-auto-tool-choice \
+          --reasoning-parser deepseek_v4 \
+          --trust-remote-code \
+          --seed 1024 \
           --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
           --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
           --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}' \
@@ -2204,12 +2292,18 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
-        export HCCL_CONNECT_TIMEOUT=120 HCCL_EXEC_TIMEOUT=204 HCCL_BUFFSIZE=1800
-        export GLOO_SOCKET_IFNAME="$nic_name" HCCL_SOCKET_IFNAME="$nic_name" TP_SOCKET_IFNAME="$nic_name"
+        export HCCL_CONNECT_TIMEOUT=120
+        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_BUFFSIZE=1800
+        export GLOO_SOCKET_IFNAME="$nic_name"
+        export HCCL_SOCKET_IFNAME="$nic_name"
+        export TP_SOCKET_IFNAME="$nic_name"
         export HCCL_IF_IP="$local_ip"
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000 VLLM_RPC_TIMEOUT=3600000
-        export OMP_NUM_THREADS=10 OMP_PROC_BIND=false
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+        export VLLM_RPC_TIMEOUT=3600000
+        export OMP_NUM_THREADS=10
+        export OMP_PROC_BIND=false
         export MOONCAKE_CONFIG_PATH="<CONFIG_DIR>/mooncake.json"
         export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=34359738368
         export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=34359738368
@@ -2262,20 +2356,33 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             }
           }'
           vllm serve "$model_path" \
-            --host 0.0.0.0 --port "$((7100 + local_rank))" \
-            --data-parallel-size 16 --data-parallel-rank "$global_rank" \
-            --data-parallel-address "$head_ip" --data-parallel-rpc-port 12321 \
-            --tensor-parallel-size 1 --enable-expert-parallel --seed 1024 \
-            --max-model-len 508576 --max-num-batched-tokens 720 \
-            --max-num-seqs 128 --async-scheduling --block-size 32 \
-            --served-model-name dsv4 --attention_config.indexer_kv_dtype int8 \
-            --enable-prefix-caching --no-disable-hybrid-kv-cache-manager \
+            --host 0.0.0.0 \
+            --port "$((7100 + local_rank))" \
+            --data-parallel-size 16 \
+            --data-parallel-rank "$global_rank" \
+            --data-parallel-address "$head_ip" \
+            --data-parallel-rpc-port 12321 \
+            --tensor-parallel-size 1 \
+            --enable-expert-parallel \
+            --seed 1024 \
+            --max-model-len 508576 \
+            --max-num-batched-tokens 720 \
+            --max-num-seqs 128 \
+            --async-scheduling \
+            --block-size 32 \
+            --served-model-name dsv4 \
+            --attention_config.indexer_kv_dtype int8 \
+            --enable-prefix-caching \
+            --no-disable-hybrid-kv-cache-manager \
             --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
-            --trust-remote-code --tokenizer-mode deepseek_v4 \
-            --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
-            --reasoning-parser deepseek_v4 --gpu-memory-utilization 0.97 \
+            --trust-remote-code \
+            --tokenizer-mode deepseek_v4 \
+            --tool-call-parser deepseek_v4 \
+            --enable-auto-tool-choice \
+            --reasoning-parser deepseek_v4 \
+            --gpu-memory-utilization 0.97 \
             --quantization ascend \
-            --speculative-config "{\"num_speculative_tokens\":1,\"method\":\"dspark\"}" \
+            --speculative-config '{"num_speculative_tokens":1,"method":"dspark"}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --kv-transfer-config "$kv_config" \
             --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
@@ -2301,12 +2408,18 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
         export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_INTRA_ROCE_ENABLE=1
-        export HCCL_CONNECT_TIMEOUT=120 HCCL_EXEC_TIMEOUT=204 HCCL_BUFFSIZE=1800
-        export GLOO_SOCKET_IFNAME="$nic_name" HCCL_SOCKET_IFNAME="$nic_name" TP_SOCKET_IFNAME="$nic_name"
+        export HCCL_CONNECT_TIMEOUT=120
+        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_BUFFSIZE=1800
+        export GLOO_SOCKET_IFNAME="$nic_name"
+        export HCCL_SOCKET_IFNAME="$nic_name"
+        export TP_SOCKET_IFNAME="$nic_name"
         export HCCL_IF_IP="$local_ip"
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000 VLLM_RPC_TIMEOUT=3600000
-        export OMP_NUM_THREADS=10 OMP_PROC_BIND=false
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+        export VLLM_RPC_TIMEOUT=3600000
+        export OMP_NUM_THREADS=10
+        export OMP_PROC_BIND=false
         MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
         export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         export MMC_LOCAL_CONFIG_PATH="<CONFIG_DIR>/mmc-local.conf"
@@ -2354,20 +2467,33 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             }
           }'
           vllm serve "$model_path" \
-            --host 0.0.0.0 --port "$((7100 + local_rank))" \
-            --data-parallel-size 16 --data-parallel-rank "$global_rank" \
-            --data-parallel-address "$head_ip" --data-parallel-rpc-port 12321 \
-            --tensor-parallel-size 1 --enable-expert-parallel --seed 1024 \
-            --max-model-len 508576 --max-num-batched-tokens 720 \
-            --max-num-seqs 128 --async-scheduling --block-size 32 \
-            --served-model-name dsv4 --attention_config.indexer_kv_dtype int8 \
-            --enable-prefix-caching --no-disable-hybrid-kv-cache-manager \
+            --host 0.0.0.0 \
+            --port "$((7100 + local_rank))" \
+            --data-parallel-size 16 \
+            --data-parallel-rank "$global_rank" \
+            --data-parallel-address "$head_ip" \
+            --data-parallel-rpc-port 12321 \
+            --tensor-parallel-size 1 \
+            --enable-expert-parallel \
+            --seed 1024 \
+            --max-model-len 508576 \
+            --max-num-batched-tokens 720 \
+            --max-num-seqs 128 \
+            --async-scheduling \
+            --block-size 32 \
+            --served-model-name dsv4 \
+            --attention_config.indexer_kv_dtype int8 \
+            --enable-prefix-caching \
+            --no-disable-hybrid-kv-cache-manager \
             --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
-            --trust-remote-code --tokenizer-mode deepseek_v4 \
-            --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
-            --reasoning-parser deepseek_v4 --gpu-memory-utilization 0.97 \
+            --trust-remote-code \
+            --tokenizer-mode deepseek_v4 \
+            --tool-call-parser deepseek_v4 \
+            --enable-auto-tool-choice \
+            --reasoning-parser deepseek_v4 \
+            --gpu-memory-utilization 0.97 \
             --quantization ascend \
-            --speculative-config "{\"num_speculative_tokens\":1,\"method\":\"dspark\"}" \
+            --speculative-config '{"num_speculative_tokens":1,"method":"dspark"}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --kv-transfer-config "$kv_config" \
             --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
