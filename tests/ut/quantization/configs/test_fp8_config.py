@@ -154,10 +154,111 @@ class TestAscendFp8Config(TestBase):
     def test_glm53_flash_kda_layer_stays_unquantized(self):
         # Official zai-org/GLM-5.3-Flash lists KDA projections in
         # modules_to_not_convert; they have no weight_scale_inv.
+        #
+        # NOTE: checking the ignored-layers entry against *itself* here only
+        # proves is_layer_skipped() can match two identical strings -- it says
+        # nothing about whether this checkpoint's actual naming convention
+        # matches what vLLM constructs at runtime. See
+        # test_glm53_flash_nested_prefix_mismatch_is_rescued_by_suffix_fallback
+        # below for the real-world prefix, which this exact-match call never
+        # sees in production.
         kda_name = "model.layers.0.self_attn.q_proj"
         config = self.build_config(ignored_layers=[kda_name])
         method = config.get_quant_method(MagicMock(spec=LinearBase), kda_name)
         self.assertIsInstance(method, AscendUnquantizedLinearMethod)
+
+    def test_glm53_flash_nested_prefix_mismatch_is_rescued_by_suffix_fallback(self):
+        # The official zai-org/GLM-5.3-Flash config.json lists
+        # modules_to_not_convert using a flat prefix, e.g.
+        # "model.layers.3.self_attn.indexer.wq_b". But vLLM loads this model
+        # as a nested Glm5NextForConditionalGeneration wrapper, whose real
+        # module prefix for that same layer is
+        # "language_model.model.layers.3.self_attn.indexer.wq_b" (see
+        # Glm5NextForConditionalGeneration.hf_to_vllm_mapper). An exact match
+        # against the checkpoint's flat entry therefore never succeeds for any
+        # of this checkpoint's ignored layers.
+        #
+        # This indexer query projection (wq_b) has no weight_scale_inv in the
+        # checkpoint at all, because it was never meant to be quantized. Prior
+        # to this fix, failing the exact match silently routed it through the
+        # real FP8 block scheme instead of AscendUnquantizedLinearMethod, with
+        # no error or shape mismatch -- just a layer whose weight is treated
+        # as pre-quantized FP8 data when it is actually plain bf16, which can
+        # make its output collapse to a degenerate value with no indication
+        # anything is wrong.
+        flat_entry = "model.layers.3.self_attn.indexer.wq_b"
+        real_runtime_prefix = "language_model.model.layers.3.self_attn.indexer.wq_b"
+        config = self.build_config(ignored_layers=[flat_entry])
+
+        with patch("vllm_ascend.quantization.configs.fp8_config.logger") as mock_logger:
+            method = config.get_quant_method(MagicMock(spec=LinearBase), real_runtime_prefix)
+            mock_logger.warning_once.assert_called_once()
+            self.assertIn(real_runtime_prefix, mock_logger.warning_once.call_args.args)
+
+        self.assertIsInstance(method, AscendUnquantizedLinearMethod)
+
+    def test_suffix_fallback_does_not_engage_when_exact_match_already_succeeds(self):
+        # A checkpoint whose ignored_layers already use vLLM's real prefixes
+        # must not trigger the fallback path (or its warning) at all -- the
+        # fallback is purely additive for checkpoints the exact match already
+        # handles correctly.
+        real_runtime_prefix = "language_model.model.layers.3.self_attn.indexer.wq_b"
+        config = self.build_config(ignored_layers=[real_runtime_prefix])
+
+        with patch("vllm_ascend.quantization.configs.fp8_config.logger") as mock_logger:
+            method = config.get_quant_method(MagicMock(spec=LinearBase), real_runtime_prefix)
+            mock_logger.warning_once.assert_not_called()
+
+        self.assertIsInstance(method, AscendUnquantizedLinearMethod)
+
+    def test_suffix_fallback_does_not_over_match_a_genuinely_quantized_layer(self):
+        # The fallback must not accidentally exempt a layer that was never
+        # listed as ignored just because some unrelated ignored entry shares a
+        # dotted suffix with a different part of its name.
+        config = self.build_config(ignored_layers=["model.layers.3.self_attn.indexer.wq_b"])
+        quantized_prefix = "language_model.model.layers.3.self_attn.q_b_proj"
+
+        with (
+            patch(
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "vllm_ascend.quantization.method_adapters.AscendLinearMethod",
+                return_value="block-fp8",
+            ),
+        ):
+            method = config.get_quant_method(MagicMock(spec=LinearBase), quantized_prefix)
+
+        self.assertEqual(method, "block-fp8")
+
+    def test_suffix_fallback_is_skipped_when_is_layer_skipped_has_no_match_mode(self):
+        # On a vLLM tree whose is_layer_skipped() predates match_mode support,
+        # the fallback retry must not be attempted (it would pass an
+        # unsupported keyword argument).
+        def old_is_layer_skipped(prefix, ignored_layers, packed_modules_mapping):
+            return prefix in ignored_layers
+
+        flat_entry = "model.layers.3.self_attn.indexer.wq_b"
+        real_runtime_prefix = "language_model.model.layers.3.self_attn.indexer.wq_b"
+        config = self.build_config(ignored_layers=[flat_entry])
+
+        with (
+            patch("vllm_ascend.quantization.configs.fp8_config._IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE", False),
+            patch("vllm_ascend.quantization.configs.fp8_config.is_layer_skipped", side_effect=old_is_layer_skipped),
+            patch(
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "vllm_ascend.quantization.method_adapters.AscendLinearMethod",
+                return_value="block-fp8",
+            ),
+        ):
+            method = config.get_quant_method(MagicMock(spec=LinearBase), real_runtime_prefix)
+
+        # Falls through to the quantized path, same as before this fix existed.
+        self.assertEqual(method, "block-fp8")
 
     def test_ignored_moe_falls_back_to_unquantized(self):
         config = self.build_config(ignored_layers=["model.layers.0.mlp.experts"])
