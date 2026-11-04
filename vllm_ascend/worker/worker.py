@@ -282,16 +282,10 @@ class NPUWorker(WorkerBase):
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,
+                    pass_fds=(lock_fd.fileno(),),
                 )
             except (BlockingIOError, OSError):
                 return
-            finally:
-                try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                    if os.path.exists(lock_file_path):
-                        os.remove(lock_file_path)
-                except Exception:
-                    return
 
     def _save_sleep_parameters(self, model: nn.Module) -> None:
         # Older supported vLLM versions do not expose the retention option.
