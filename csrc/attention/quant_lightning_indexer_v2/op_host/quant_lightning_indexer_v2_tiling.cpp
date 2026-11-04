@@ -241,6 +241,8 @@ void QLIV2InfoParser::GetOptionalInputParaInfo()
     opParamInfo_.metadata.desc = context_->GetOptionalInputDesc(METADATA_INDEX);
     opParamInfo_.candidateTopkIndex.tensor = context_->GetOptionalInputTensor(CANDIDATE_TOPK_INDEX_INPUT_INDEX);
     opParamInfo_.candidateTopkIndex.desc = context_->GetOptionalInputDesc(CANDIDATE_TOPK_INDEX_INPUT_INDEX);
+    opParamInfo_.candidateBlockLength.tensor = context_->GetOptionalInputTensor(CANDIDATE_BLOCK_LENGTH_INDEX);
+    opParamInfo_.candidateBlockLength.desc = context_->GetOptionalInputDesc(CANDIDATE_BLOCK_LENGTH_INDEX);
 }
 
 void QLIV2InfoParser::GetInputParaInfo()
@@ -475,6 +477,33 @@ ge::graphStatus QLIV2InfoParser::CheckAttrParaInfo()
                         OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "candidate_topk_index",
                                                                  "candidate_topk_index input is required when "
                                                                  "candidate_mode=2(consumer)"),
+                        return ge::GRAPH_FAILED);
+        }
+        // candidate_block_length（候选块长度，DSL 契约）：int32，元素数 = query 行数
+        //   TND → query 0 轴（所有序列拼接的 token 总数）；BSND → B × S1。
+        //   取值上界（≤ candidate_topk_blocks）由 kernel 侧钳位（host 读不到 device 张量数值）。
+        if (opParamInfo_.candidateBlockLength.tensor != nullptr) {
+            OP_CHECK_IF(opParamInfo_.candidateBlockLength.desc == nullptr ||
+                            opParamInfo_.candidateBlockLength.desc->GetDataType() != ge::DT_INT32,
+                        OP_LOGE(opName_, "candidate_block_length dtype only supports int32."),
+                        return ge::GRAPH_FAILED);
+            const gert::StorageShape *candLenStorageShape =
+                context_->GetOptionalInputShape(CANDIDATE_BLOCK_LENGTH_INDEX);
+            OP_CHECK_IF(candLenStorageShape == nullptr,
+                        OP_LOGE(opName_, "candidate_block_length shape is nullptr."), return ge::GRAPH_FAILED);
+            const gert::Shape &candLenShape = candLenStorageShape->GetStorageShape();
+            int64_t expectRows = 0;
+            if (std::string(opParamInfo_.layOutQuery) == "TND") {
+                expectRows = opParamInfo_.query.shape->GetStorageShape().GetDim(0);
+            } else {
+                expectRows = opParamInfo_.query.shape->GetStorageShape().GetDim(0) *
+                             opParamInfo_.query.shape->GetStorageShape().GetDim(1);
+            }
+            OP_CHECK_IF(candLenShape.GetShapeSize() != expectRows,
+                        OP_LOGE(opName_,
+                                "candidate_block_length numel (%s) must equal query row count (%s).",
+                                std::to_string(candLenShape.GetShapeSize()).c_str(),
+                                std::to_string(expectRows).c_str()),
                         return ge::GRAPH_FAILED);
         }
     }
@@ -1711,6 +1740,16 @@ ge::graphStatus QuantLightningIndexerV2Tiling::DoTiling(QLIV2TilingInfo *tilingI
     } else {
         uint32_t mm1ResSize = M_BASE_SIZE * S2_BASE_SIZE;
         workspaceSize += mm1ResSize * MM1_RES_ELEM_SIZE * DOUBLE_BUFFER * aicNum;
+        // W 区（AIV 写、AIC 读）：对应 kernel Init 的 weightWorkspaceGm，
+        // 每核 BLOCK_CUBE × mBaseSize(=S1_BASE_SIZE×gSize) × 2(双缓冲) × 2B。
+        // 此前 host 漏算该区，kernel 的 offset 累计比 host 大 8~16KB/核，尾部候选区会越界。
+        {
+            constexpr uint32_t BLOCK_CUBE = 16;
+            uint64_t weightMemSize = static_cast<uint64_t>(BLOCK_CUBE) *
+                                     (static_cast<uint64_t>(S1_BASE_SIZE) * tilingInfo->gSize) * DOUBLE_BUFFER *
+                                     sizeof(uint16_t);
+            workspaceSize += weightMemSize * aicNum;
+        }
         // Decode流程(LD)需要Workspace大小
         // 临时存储Decode中间结果大小: 2(头/尾)*8(s1Base)*2(idx/value)*2048(K)*sizeof(int32)*24=6M
         workspaceSize +=
@@ -1724,6 +1763,27 @@ ge::graphStatus QuantLightningIndexerV2Tiling::DoTiling(QLIV2TilingInfo *tilingI
             uint64_t candPairWidth = 2ULL * CAND_TOPK_BLOCKS_MAX; // 每行 value+index 对宽 (float 个数)
             workspaceSize += V1_DECODE_DATA_NUM * S1_BASE_SIZE * V1_RES_ELEM_TYPE * candPairWidth *
                              V1_RES_ELEM_SIZE * aicNum;
+        }
+        // D3a: 候选驱动 staging（mode=2 且传入 candidate_block_length 时）：
+        // v4 单 id 计数信号量，槽数不再受 flag id 限制（8 槽流水深度），与 kernel Init 一致
+        if (tilingInfo->candidateMode == CANDIDATE_MODE_CONSUMER &&
+            tilingInfo->opParamInfo.candidateBlockLength.tensor != nullptr) {
+            constexpr uint32_t CAND_STAGING_SLOTS = 8;    // v4 ring 深度（CAND_RING_SLOTS）
+            constexpr uint32_t CAND_STAGING_TOKENS = 256; // V1 tile = 32 块 × 8 token
+            constexpr uint32_t CAND_HEAD_DIM = 128;
+            constexpr uint32_t CAND_SCALE_SLOT_BYTES = 32 * 32; // 32 块 × 32B(含 16B 填充)
+            workspaceSize += static_cast<uint64_t>(aicNum) * CAND_STAGING_SLOTS *
+                             (CAND_STAGING_TOKENS * CAND_HEAD_DIM + CAND_SCALE_SLOT_BYTES);
+            // D3b: 候选分数区（s1Base 行 × 64 tile × 256 float = 256KB/核；v4 按任务奇偶双缓冲 = 512KB/核）
+            constexpr uint32_t CAND_SCORE_TILES_MAX = 64; // ceil(2048 块 × 8 / 256)
+            constexpr uint32_t CAND_SCORE_DOUBLE_BUF = 2; // v4 跨任务延迟消费
+            workspaceSize += static_cast<uint64_t>(aicNum) * CAND_SCORE_DOUBLE_BUF * S1_BASE_SIZE *
+                             CAND_SCORE_TILES_MAX * 256 * sizeof(float);
+            // v4: 候选 kscale 辅助区（每任务 256 tile × 1KB，奇偶双缓冲 = 512KB/核）
+            constexpr uint32_t CAND_AUX_SCALE_TILES = 256; // 4 行 × 64 tile
+            constexpr uint32_t CAND_AUX_SCALE_BYTES_PER_TILE = 32 * 16 * sizeof(uint16_t); // 1KB
+            workspaceSize += static_cast<uint64_t>(aicNum) * CAND_SCORE_DOUBLE_BUF * CAND_AUX_SCALE_TILES *
+                             CAND_AUX_SCALE_BYTES_PER_TILE;
         }
     }
     size_t *workSpaces = context_->GetWorkspaceSizes(1);

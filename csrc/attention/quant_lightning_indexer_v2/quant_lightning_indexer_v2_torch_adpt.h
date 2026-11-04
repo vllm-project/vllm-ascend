@@ -107,7 +107,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
     const c10::optional<at::Tensor> &blockTable, const c10::optional<at::Tensor> &outputIdxOffset,
     const c10::optional<at::Tensor> &metadata, int64_t maxSeqlenQ, c10::string_view layoutQ,
     c10::string_view layoutK, int64_t maskMode, int64_t cmpRatio, int64_t candidateMode,
-    int64_t candidateTopkBlocks, int64_t candidateBlockSize)
+    int64_t candidateTopkBlocks, int64_t candidateBlockSize,
+    const c10::optional<at::Tensor> &candidateBlockLength = c10::nullopt)
 {
     TORCH_CHECK(query.numel() > 0, "Tensor query is empty.")
     TORCH_CHECK(key.numel() > 0, "Tensor key is empty.")
@@ -149,9 +150,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
 
     EXEC_NPU_CMD(aclnnVllmAscendQuantLightningIndexerV2, query, key, weights, queryDequantScale, keyDequantScale,
               cuSeqlensQ, cuSeqlensK, sequsedQ, sequsedK, cmpResidualK, blockTable, outputIdxOffset,
-              metadata, candidateTopkIndexIn, topk, quantMode, maxSeqlenQ, queryLayoutPtr, keyLayoutPtr, maskMode,
-              cmpRatio, returnValue, candidateMode, candidateTopkBlocks, candidateBlockSize, keyStride0,
-              keyScaleStride0, sparseIndicesOut, sparseValuesOut, candidateTopkIndexOut);
+              metadata, candidateTopkIndexIn, candidateBlockLength, topk, quantMode, maxSeqlenQ, queryLayoutPtr,
+              keyLayoutPtr, maskMode, cmpRatio, returnValue, candidateMode, candidateTopkBlocks, candidateBlockSize,
+              keyStride0, keyScaleStride0, sparseIndicesOut, sparseValuesOut, candidateTopkIndexOut);
 
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(sparseIndicesOut, sparseValuesOut, candidateTopkIndexOut);
 }

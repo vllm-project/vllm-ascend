@@ -78,6 +78,14 @@ public:
             .DataTypeList({ge::DT_INT32})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
+        // 每行有效候选块数（DSL QSLI 的 candidate_block_length 语义）：
+        // 与 candidate_topk_index 一起构成"定长容量 + 有效前缀"的稀疏候选描述。
+        // 可选：未传时 kernel 保持全量 S2 扫描（现网行为不变）。
+        this->Input("candidate_block_length")
+            .ParamType(OPTIONAL)
+            .DataTypeList({ge::DT_INT32})
+            .FormatList({ge::FORMAT_ND})
+            .AutoContiguous();
         this->Output("sparse_indices").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
         this->Output("sparse_values").ParamType(REQUIRED).DataTypeList({ge::DT_BF16}).FormatList({ge::FORMAT_ND});
         this->Output("candidate_topk_index_out").ParamType(OPTIONAL).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});

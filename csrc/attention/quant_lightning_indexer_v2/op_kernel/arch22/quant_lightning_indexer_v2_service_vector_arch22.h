@@ -59,6 +59,27 @@ public:
                                                   GlobalTensor<int32_t> candidateTopkIndexOutGm,
                                                   GlobalTensor<int32_t> outputIdxOffsetGm,
                                                   bool outputIdxOffsetValid);
+    // D3a: 候选 gather —— 每个 AIV 搬 16 个候选块（8 token × 128B）到 UB，再写 GM staging ring。
+    // V1 阶段 cube 尚未消费（探针模式），仅验证地址/吞吐；D3b 接入 ring 握手。
+    __aicore__ inline void InitVecCandidateGatherTensor(GlobalTensor<typename QLIV2T::keyType> keyGm,
+                                                        GlobalTensor<int8_t> stagingKeyGm,
+                                                        GlobalTensor<half> stagingScaleGm,
+                                                        GlobalTensor<int32_t> candLenGm,
+                                                        GlobalTensor<float> candScoreGm,
+                                                        GlobalTensor<half> candAuxScaleGm, bool enabled);
+    // v4 候选任务驱动（对齐 DSL 软件流水）：按 token 交错执行 ——
+    //   先 gather token t 的全部候选 tile（生产），再消费 token t-1 的分数（消费滞后一拍）；
+    // taskSeq 决定分数区奇偶槽；任务内最后一个 token 的消费延迟到下一任务（或核尾
+    // ConsumePendingCandScore），保证每次分数读之前 AIC 已继续推进过（GM 写已落地）。
+    __aicore__ inline void RunCandTask(uint32_t bIdx, uint32_t n2Idx, uint32_t rowBase, uint32_t taskTokens,
+                                       uint32_t maxTiles, uint32_t taskSeq, uint32_t s1RowBase, uint32_t actS1Size,
+                                       uint32_t actS2Size, uint32_t actS2SizeOrig, uint32_t indiceOutOffset,
+                                       uint32_t outputIdxOffsetBase);
+    // 消费队首的一条 pending 记录（队列满时由 RunCandTask 调用）
+    __aicore__ inline void ConsumePendingCandScore();
+    // 核尾排空：消费队列中所有 pending 记录
+    // （调用前须等 AIC 主循环结束令牌；由 kernel 在 ProcessMain 末尾触发）
+    __aicore__ inline void DrainPendingCandScore();
     __aicore__ inline void InitVecInputTensor(GlobalTensor<half> weightsGm, GlobalTensor<half> qScaleGm,
                                               GlobalTensor<half> kScaleGm, GlobalTensor<int32_t> indiceOutGm,
                                               GlobalTensor<int32_t> blockTableGm);
@@ -81,6 +102,39 @@ protected:
     GlobalTensor<int32_t> candidateTopkIndexInGm;
     GlobalTensor<int32_t> candidateTopkIndexOutGm;
     GlobalTensor<int32_t> blockTableGm;
+    // D3a 候选 gather：K 源、GM staging（K/scale）与使能标志
+    GlobalTensor<typename QLIV2T::keyType> keyGmCand_;
+    GlobalTensor<int8_t> candStagingKeyGm_;
+    GlobalTensor<half> candStagingScaleGm_;
+    GlobalTensor<int32_t> candLenGm_;       // B5: 每行有效候选块数
+    GlobalTensor<float> candScoreGm_;       // B5: AIC 写出的候选分数（每 (token,tile) 256 float）
+    GlobalTensor<half> candAuxScaleGm_;     // v4: 每 tile 32 块 × 16 half 的 kscale（任务奇偶双缓冲）
+    bool candGatherEnabled_ = false;
+    // v4: 候选 tile 生产序号（每个 tile 自增一次，槽号 = seq % CAND_RING_SLOTS；
+    // 与 AIC 侧消费序号按同一顺序推进，独立计数即可对齐）
+    uint32_t candProdTileSeq_ = 0U;
+    // v4: 跨任务延迟消费的"任务末尾 token"记录队列（深度 8，正常保留 ≤7 条）。
+    // 每任务压 2 条（最后两个 token）⇒ 队首约延迟 3 个任务再消费，对 1-tile 任务也保证
+    // ≥3 个后续 tile 的 AIC 计算量，覆盖 GM 写落地延迟；核尾由 DrainPendingCandScore 排空。
+    static constexpr uint32_t CAND_PENDING_SCORE_SLOTS = 8;
+    struct PendingCandScore {
+        bool valid = false;
+        uint32_t bIdx = 0;
+        uint32_t rowBase = 0;
+        uint32_t s1RowBase = 0;
+        uint32_t n2Idx = 0;
+        uint32_t tokenIdx = 0;
+        uint32_t maxTiles = 0;
+        uint32_t actS1Size = 0;
+        uint32_t actS2Size = 0;
+        uint32_t actS2SizeOrig = 0;
+        uint32_t indiceOutOffset = 0;
+        uint32_t outputIdxOffsetBase = 0;
+        uint64_t scoreSlotBase = 0;
+    };
+    PendingCandScore pendingScore_[CAND_PENDING_SCORE_SLOTS];
+    uint32_t pendingHead_ = 0U;
+    uint32_t pendingCount_ = 0U;
     // =================================常量区=================================
 
 private:
@@ -96,6 +150,18 @@ private:
     // mode=1 + LD：把本行块级累积器溢写到 GM，供跨核归约侧（ProcessLD）读取
     __aicore__ inline void SpillBlockTopkToGm(const QLIV2Common::RunInfo &info, int32_t blockRowIdx,
                                               int32_t innerS1Idx);
+    // v4 候选驱动：单 token 的 gather / 分数消费（由 RunCandTask 按 token 交错调用）
+    __aicore__ inline void GatherTokenCandidates(uint32_t bIdx, uint32_t n2Idx, uint32_t rowBase, uint32_t tokenIdx,
+                                                 uint32_t maxTiles, uint64_t scoreSlotBase);
+    __aicore__ inline void ConsumeCandScoreToken(uint32_t bIdx, uint32_t rowBase, uint32_t s1RowBase, uint32_t n2Idx,
+                                                 uint32_t tokenIdx, uint32_t maxTiles, uint32_t actS1Size,
+                                                 uint32_t actS2Size, uint32_t actS2SizeOrig, uint32_t indiceOutOffset,
+                                                 uint32_t outputIdxOffsetBase, uint64_t scoreSlotBase);
+    // 记录任务最后一个 token（压入 pending 队列）
+    __aicore__ inline void RecordPendingCandScore(uint32_t bIdx, uint32_t rowBase, uint32_t s1RowBase, uint32_t n2Idx,
+                                                  uint32_t tokenIdx, uint32_t maxTiles, uint32_t actS1Size,
+                                                  uint32_t actS2Size, uint32_t actS2SizeOrig, uint32_t indiceOutOffset,
+                                                  uint32_t outputIdxOffsetBase, uint64_t scoreSlotBase);
     // candidate 新增向量 op 的 64 元素分块封装 (本版本 Level-2 count > 64 的 vmax 等指令会触发 aicore 异常)
     __aicore__ inline void VecMaxPair(const LocalTensor<float> &dst, const LocalTensor<float> &src0,
                                       const LocalTensor<float> &src1, int32_t n);
@@ -132,6 +198,7 @@ private:
     TBuf<TPosition::VECCALC> blockSortOutBuf_; // mode=1: 块级 topk 累加器 [CeilDiv(s1BaseSize,2), 2048, 2]
     TBuf<TPosition::VECCALC> candBuf_;         // mode=2: 排序后的候选块索引 [2048, 2] (value+idx)
     TBuf<TPosition::VECCALC> candConstBuf_;    // mode=1/2: negHuge 常量 [2048]
+    TBuf<TPosition::VECCALC> candGatherScaleBuf_; // D3a: gather 的 scale 暂存 (16 块 × 8 token × 2B)
 
     LocalTensor<int32_t> globalTopkIndice_;
     LocalTensor<float> globalTopkUb_;
@@ -250,6 +317,10 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::InitBuffers(TPipe *pipe)
         candNegHuge_ = candConstBuf_.Get<float>();
         Duplicate(candNegHuge_.template ReinterpretCast<int32_t>(), QLIV2ServiceVec::NEG_HUGE_F32, BASE_TOPK);
         PipeBarrier<PIPE_V>();
+    }
+    // D3a: gather 的 scale 暂存（16 块 × 8 token × 2B = 256B，按 512B 分配）
+    if (candGatherEnabled_) {
+        pipe->InitBuffer(candGatherScaleBuf_, 512);
     }
 
     // 基本块执行前初始化UB和GM
@@ -979,6 +1050,12 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::SpillBlockTopkToGm(const QLIV2Common
 template <typename QLIV2T>
 __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec0(const QLIV2Common::RunInfo &info)
 {
+    // v4: 候选任务先领 W 槽回收令牌 —— 两个 AIV 都 wait，保持计数守恒
+    // （AIC 每完成一个候选任务回补 1 个；预置 2 个 ⇒ AIV 最多领先 2 个任务，
+    //   写入的槽是 AIC 已读完的槽，不会覆盖正在读的 W）
+    if (info.candTask) {
+        AscendC::CrossCoreWaitFlag(QLIV2Common::CAND_WFREE_FLAG);
+    }
     // 只需要一个v核做
     if (blockId_ % 2 != 0) {
         return;
@@ -1025,8 +1102,369 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec0(const QLIV2Common::RunIn
 }
 
 template <typename QLIV2T>
-__aicore__ inline int32_t QLIV2Vector<QLIV2T>::AlignS2(int32_t cuS2Len)
+__aicore__ inline void QLIV2Vector<QLIV2T>::InitVecCandidateGatherTensor(
+    GlobalTensor<typename QLIV2T::keyType> keyGm, GlobalTensor<int8_t> stagingKeyGm,
+    GlobalTensor<half> stagingScaleGm, GlobalTensor<int32_t> candLenGm,
+    GlobalTensor<float> candScoreGm, GlobalTensor<half> candAuxScaleGm, bool enabled)
 {
+    this->keyGmCand_ = keyGm;
+    this->candStagingKeyGm_ = stagingKeyGm;
+    this->candStagingScaleGm_ = stagingScaleGm;
+    this->candLenGm_ = candLenGm;
+    this->candScoreGm_ = candScoreGm;
+    this->candAuxScaleGm_ = candAuxScaleGm;
+    this->candGatherEnabled_ = enabled;
+}
+
+// v4 候选任务驱动（对齐 DSL 软件流水）：按 token 交错执行 ——
+//   先 gather token t 的全部候选 tile（生产），再消费 token t-1 的分数（消费滞后一拍）。
+// 任务内**最后一个 token** 不在此任务内消费：记入 pendingScore_，延迟到下一任务 gather 了
+// 1~2 个 token 之后（或核尾 ConsumePendingCandScore）再读 —— 这样最后一次分数读之前，
+// AIC 一定已经推进过至少一个 tile 的计算（规避 910B 上 GM"写后立即读"不可见的时序问题）。
+// taskSeq 决定分数区奇偶槽，跨任务消费上一任务分数时不会被本任务的写覆盖。
+template <typename QLIV2T>
+__aicore__ inline void QLIV2Vector<QLIV2T>::RunCandTask(
+    uint32_t bIdx, uint32_t n2Idx, uint32_t rowBase, uint32_t taskTokens, uint32_t maxTiles, uint32_t taskSeq,
+    uint32_t s1RowBase, uint32_t actS1Size, uint32_t actS2Size, uint32_t actS2SizeOrig, uint32_t indiceOutOffset,
+    uint32_t outputIdxOffsetBase)
+{
+    if (!candGatherEnabled_ || taskTokens == 0U) {
+        return;
+    }
+    const uint64_t scoreSlotBase = static_cast<uint64_t>(taskSeq & 1U) * QLIV2Common::CAND_SCORE_TILES_PER_TASK *
+                                   QLIV2Common::CAND_TILE_TOKENS;
+    if (maxTiles == 0U) {
+        // 空候选任务：不产生 ring 流量与分数信号（AIC 侧同样提前返回），只做整行 -1 输出。
+        // pending 队列不在此处消费（延迟策略由队列统一管理，核尾排空）。
+        for (uint32_t t = 0U; t < taskTokens; t++) {
+            ConsumeCandScoreToken(bIdx, rowBase, s1RowBase, n2Idx, t, maxTiles, actS1Size, actS2Size,
+                                  actS2SizeOrig, indiceOutOffset, outputIdxOffsetBase, scoreSlotBase);
+        }
+        return;
+    }
+    // 任务内 token 交错：gather token t 后消费 token t-2（两 token 领先）。
+    // 退两拍的原因：AIC 在算完 token 的**最后一个 tile** 后立刻发 SCORE_READY，
+    // 退一拍时该 tile 的分数写还没有落地余量（随机数据下会读到 0/旧值）；
+    // 退两拍后，读 token t-2 时 AIC 必然已继续推进过 token t-1 的计算。
+    // 末尾两个 token 不入循环，记入 pending 队列，至少再延迟约 3 个任务消费。
+    for (uint32_t t = 0U; t < taskTokens; t++) {
+        GatherTokenCandidates(bIdx, n2Idx, rowBase, t, maxTiles, scoreSlotBase);
+        if (t >= 2U) {
+            ConsumeCandScoreToken(bIdx, rowBase, s1RowBase, n2Idx, t - 2U, maxTiles, actS1Size, actS2Size,
+                                  actS2SizeOrig, indiceOutOffset, outputIdxOffsetBase, scoreSlotBase);
+        }
+    }
+    // drain：AIC 每任务 wait 的令牌数 = tile 数 + 1，最后一个 tile 也能错拍消费
+    AscendC::CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_MTE3>(
+        QLIV2Common::CAND_READY_FLAG);
+    // 末尾两个 token 入队；队列满（>7 条）时消费队首（约 3 个任务之前的那条）
+    if (taskTokens >= 2U) {
+        RecordPendingCandScore(bIdx, rowBase, s1RowBase, n2Idx, taskTokens - 2U, maxTiles, actS1Size, actS2Size,
+                               actS2SizeOrig, indiceOutOffset, outputIdxOffsetBase, scoreSlotBase);
+    }
+    RecordPendingCandScore(bIdx, rowBase, s1RowBase, n2Idx, taskTokens - 1U, maxTiles, actS1Size, actS2Size,
+                           actS2SizeOrig, indiceOutOffset, outputIdxOffsetBase, scoreSlotBase);
+    while (pendingCount_ > CAND_PENDING_SCORE_SLOTS - 1U) {
+        ConsumePendingCandScore();
+    }
+}
+
+template <typename QLIV2T>
+__aicore__ inline void QLIV2Vector<QLIV2T>::RecordPendingCandScore(
+    uint32_t bIdx, uint32_t rowBase, uint32_t s1RowBase, uint32_t n2Idx, uint32_t tokenIdx, uint32_t maxTiles,
+    uint32_t actS1Size,
+    uint32_t actS2Size, uint32_t actS2SizeOrig, uint32_t indiceOutOffset, uint32_t outputIdxOffsetBase,
+    uint64_t scoreSlotBase)
+{
+    const uint32_t slot = (pendingHead_ + pendingCount_) % CAND_PENDING_SCORE_SLOTS;
+    PendingCandScore &rec = pendingScore_[slot];
+    rec.valid = true;
+    rec.bIdx = bIdx;
+    rec.rowBase = rowBase;
+    rec.s1RowBase = s1RowBase;
+    rec.n2Idx = n2Idx;
+    rec.tokenIdx = tokenIdx;
+    rec.maxTiles = maxTiles;
+    rec.actS1Size = actS1Size;
+    rec.actS2Size = actS2Size;
+    rec.actS2SizeOrig = actS2SizeOrig;
+    rec.indiceOutOffset = indiceOutOffset;
+    rec.outputIdxOffsetBase = outputIdxOffsetBase;
+    rec.scoreSlotBase = scoreSlotBase;
+    ++pendingCount_;
+}
+
+template <typename QLIV2T>
+__aicore__ inline void QLIV2Vector<QLIV2T>::ConsumePendingCandScore()
+{
+    if (pendingCount_ == 0U) {
+        return;
+    }
+    PendingCandScore &rec = pendingScore_[pendingHead_];
+    if (rec.valid) {
+        rec.valid = false;
+        ConsumeCandScoreToken(rec.bIdx, rec.rowBase, rec.s1RowBase, rec.n2Idx, rec.tokenIdx, rec.maxTiles,
+                              rec.actS1Size, rec.actS2Size, rec.actS2SizeOrig, rec.indiceOutOffset,
+                              rec.outputIdxOffsetBase, rec.scoreSlotBase);
+    }
+    pendingHead_ = (pendingHead_ + 1U) % CAND_PENDING_SCORE_SLOTS;
+    --pendingCount_;
+}
+
+template <typename QLIV2T>
+__aicore__ inline void QLIV2Vector<QLIV2T>::DrainPendingCandScore()
+{
+    while (pendingCount_ > 0U) {
+        ConsumePendingCandScore();
+    }
+}
+
+// 单 token gather：每个 AIV 搬本候选 tile 的一半（16 个候选块），块内 8 token × 128B 连续读。
+// 候选块号来自 candidate_topk_index 原始顺序（与后续位置映射同一份表）；
+// 超出有效前缀（c<0）的槽位不搬，内容由 vector 掩码丢弃。
+template <typename QLIV2T>
+__aicore__ inline void QLIV2Vector<QLIV2T>::GatherTokenCandidates(uint32_t bIdx, uint32_t n2Idx, uint32_t rowBase,
+                                                                  uint32_t tokenIdx, uint32_t maxTiles,
+                                                                  uint64_t scoreSlotBase)
+{
+    if (!candGatherEnabled_ || maxTiles == 0U) {
+        return;
+    }
+    using K_T = typename QLIV2T::keyType;
+    constexpr uint32_t CAND_BLOCKS_PER_TILE = QLIV2Common::CAND_TILE_BLOCKS; // 32 块 = 256 token
+    constexpr uint32_t CAND_BLOCKS_PER_AIV = 16U;
+    constexpr uint32_t CAND_TOKENS_PER_TILE = QLIV2Common::CAND_TILE_TOKENS;
+    constexpr uint32_t CAND_BLOCK_BYTES = 8U * 128U; // 8 token × D=128（int8）
+    const uint32_t aivHalf = static_cast<uint32_t>(blockId_ % 2);
+    const uint32_t halfBlkBase = aivHalf * CAND_BLOCKS_PER_AIV;
+    const uint32_t pageBlkNum = static_cast<uint32_t>(kCacheBlockSize_) / 8U;
+    if (pageBlkNum == 0U) {
+        return;
+    }
+    // 与 Cube KeyNd2NzForPA 同一套地址口径：块基址 = 页表值 × stride(0 时兜底紧凑 stride)
+    const uint64_t blkStride = (constInfo_.keyStride0 != 0) ?
+        static_cast<uint64_t>(constInfo_.keyStride0) :
+        static_cast<uint64_t>(kCacheBlockSize_) * static_cast<uint64_t>(kHeadNum_) * 128ULL;
+    const uint64_t scaleStride = (constInfo_.keyDequantScaleStride0 != 0) ?
+        static_cast<uint64_t>(constInfo_.keyDequantScaleStride0) : static_cast<uint64_t>(kCacheBlockSize_);
+    const uint64_t tableBase = static_cast<uint64_t>(bIdx) * static_cast<uint64_t>(maxBlockNumPerBatch_);
+    LocalTensor<half> scaleUb = candGatherScaleBuf_.Get<half>();
+    const uint32_t row = rowBase + tokenIdx;
+    const uint64_t rowOff = (static_cast<uint64_t>(row) * static_cast<uint64_t>(kHeadNum_) + n2Idx) *
+                            constInfo_.candidateTopkBlocks;
+    for (uint32_t tile = 0U; tile < maxTiles; tile++) {
+        LocalTensor<K_T> kUb = inQueue_.AllocTensor<K_T>();
+        for (uint32_t i = 0U; i < CAND_BLOCKS_PER_AIV; i++) {
+            int32_t c = candidateTopkIndexInGm.GetValue(
+                rowOff + static_cast<uint64_t>(tile) * CAND_BLOCKS_PER_TILE + halfBlkBase + i);
+            if (c < 0) {
+                continue;
+            }
+            uint64_t page = static_cast<uint64_t>(c) / pageBlkNum;
+            uint64_t within = static_cast<uint64_t>(c) % pageBlkNum;
+            int32_t phys = blockTableGm.GetValue(tableBase + page);
+            uint64_t kOff = static_cast<uint64_t>(phys) * blkStride + within * 8ULL * 128ULL;
+            uint64_t sOff = static_cast<uint64_t>(phys) * scaleStride + within * 8ULL;
+            AscendC::DataCopyPadExtParams<K_T> kPad{false, 0, 0, 0};
+            AscendC::DataCopyExtParams kParams;
+            kParams.blockCount = 1;
+            kParams.blockLen = CAND_BLOCK_BYTES * sizeof(K_T);
+            kParams.srcStride = 0;
+            kParams.dstStride = 0;
+            kParams.rsv = 0;
+            AscendC::DataCopyPad(kUb[i * CAND_BLOCK_BYTES], keyGmCand_[kOff], kParams, kPad);
+            AscendC::DataCopyPadExtParams<half> sPad{false, 0, 0, 0};
+            AscendC::DataCopyExtParams sParams;
+            sParams.blockCount = 1;
+            sParams.blockLen = 8 * sizeof(half);
+            sParams.srcStride = 0;
+            sParams.dstStride = 0;
+            sParams.rsv = 0;
+            // UB 目的地址按 32B 对齐：每块 scale 占 32B（16B 实数据 + 16B 填充）
+            AscendC::DataCopyPad(scaleUb[i * 16], kScaleGm[sOff], sParams, sPad);
+        }
+        SetWaitFlag<HardEvent::MTE2_MTE3>(HardEvent::MTE2_MTE3);
+        // v4 ring：槽号 = 全局生产序号 % RING_SLOTS；等 AIC 回补一个空槽令牌再覆盖写
+        const uint32_t ringSlot = candProdTileSeq_ % QLIV2Common::CAND_RING_SLOTS;
+        ++candProdTileSeq_;
+        AscendC::CrossCoreWaitFlag(QLIV2Common::CAND_FREE_FLAG);
+        const uint64_t slotKeyBase =
+            static_cast<uint64_t>(ringSlot) * CAND_TOKENS_PER_TILE * 128ULL +
+            static_cast<uint64_t>(aivHalf) * CAND_BLOCKS_PER_AIV * CAND_BLOCK_BYTES;
+        AscendC::DataCopyExtParams outParams;
+        outParams.blockCount = 1;
+        outParams.blockLen = CAND_BLOCKS_PER_AIV * CAND_BLOCK_BYTES;
+        outParams.srcStride = 0;
+        outParams.dstStride = 0;
+        outParams.rsv = 0;
+        AscendC::DataCopyPad(candStagingKeyGm_[slotKeyBase], kUb, outParams);
+        const uint64_t slotScaleBase =
+            static_cast<uint64_t>(ringSlot) * (CAND_BLOCKS_PER_TILE * 32ULL) +
+            static_cast<uint64_t>(aivHalf) * CAND_BLOCKS_PER_AIV * 32ULL; // 每块 32B（含 16B 填充）
+        AscendC::DataCopyExtParams outSParams;
+        outSParams.blockCount = 1;
+        outSParams.blockLen = CAND_BLOCKS_PER_AIV * 32U;
+        outSParams.srcStride = 0;
+        outSParams.dstStride = 0;
+        outSParams.rsv = 0;
+        AscendC::DataCopyPad(candStagingScaleGm_[slotScaleBase], scaleUb, outSParams);
+        // v4: kscale 按 tile 落辅助区（本 AIV 半区 16 块 × 16 half = 512B，一次 DMA）；
+        // 消费侧按 (token,tile) 一次 1KB 读回，取代逐块 16B DMA + block_table 标量读。
+        const uint64_t auxTileBase =
+            2ULL * (scoreSlotBase + static_cast<uint64_t>(tokenIdx * maxTiles + tile) *
+                                        QLIV2Common::CAND_TILE_TOKENS) +
+            static_cast<uint64_t>(aivHalf) * (CAND_BLOCKS_PER_AIV * 16ULL);
+        AscendC::DataCopyExtParams auxParams;
+        auxParams.blockCount = 1;
+        auxParams.blockLen = CAND_BLOCKS_PER_AIV * 32U; // 16 块 × 32B(16B 实数据 + 16B 填充)
+        auxParams.srcStride = 0;
+        auxParams.dstStride = 0;
+        auxParams.rsv = 0;
+        AscendC::DataCopyPad(candAuxScaleGm_[auxTileBase], scaleUb, auxParams);
+        // 本 AIV 的一半已写完 → 通知 AIC（两个 AIV 的 set 合并成 1 个令牌/tile）
+        AscendC::CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_MTE3>(
+            QLIV2Common::CAND_READY_FLAG);
+        SetWaitFlag<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
+        inQueue_.FreeTensor(kUb);
+    }
+}
+
+// 单 token 分数消费：掩码 A（列表序号 < L）/ 掩码 B（逻辑 token = c×8 + 块内偏移 < cuRealAcSeq）。
+// 无效位置分数置 -inf、索引 -1；有效位置直接写逻辑 token 号（TopK 之后无需再映射）。
+// 空行/零候选行走 CleanInvalidOutput（全 -1）。
+template <typename QLIV2T>
+__aicore__ inline void QLIV2Vector<QLIV2T>::ConsumeCandScoreToken(
+    uint32_t bIdx, uint32_t rowBase, uint32_t s1RowBase, uint32_t n2Idx, uint32_t tokenIdx, uint32_t maxTiles,
+    uint32_t actS1Size, uint32_t actS2Size, uint32_t actS2SizeOrig, uint32_t indiceOutOffset,
+    uint32_t outputIdxOffsetBase, uint64_t scoreSlotBase)
+{
+    constexpr uint32_t CAND_TILE_TOKENS = QLIV2Common::CAND_TILE_TOKENS;
+    constexpr uint32_t CAND_BLOCKS_PER_TILE = QLIV2Common::CAND_TILE_BLOCKS;
+    constexpr uint32_t BLOCK_TOKENS = 8U;
+    const int32_t candBlocks = static_cast<int32_t>(constInfo_.candidateTopkBlocks);
+    const uint32_t aivParity = static_cast<uint32_t>(blockId_ % 2);
+    LocalTensor<float> sortBuff = tmpBuf_.Get<float>();
+    LocalTensor<float> sortTmp = tmpBuf_.Get<float>()[2 * CAND_TILE_TOKENS];
+    LocalTensor<int32_t> idxUb = sortBuff[CAND_TILE_TOKENS].template ReinterpretCast<int32_t>();
+    LocalTensor<int32_t> scoreBits = sortBuff.template ReinterpretCast<int32_t>();
+    // AIC 每 token set 一次；两个 AIV 各 wait 一次（广播语义）。未分到的 token 也要 wait，
+    // 保持计数守恒。maxTiles==0 时 AIC 不产生任何 token（ComputeMm1Candidate 提前返回），
+    // 这里也不能 wait，否则死锁。
+    if (maxTiles > 0U) {
+        AscendC::CrossCoreWaitFlag(QLIV2Common::CAND_SCORE_READY_FLAG);
+    }
+    if ((tokenIdx % 2U) != aivParity) {
+        return;
+    }
+    const uint32_t row = rowBase + tokenIdx;
+    int32_t L = candLenGm_.GetValue(row);
+    L = (L < 0) ? 0 : ((L > candBlocks) ? candBlocks : L);
+    int32_t V = static_cast<int32_t>(actS2Size);
+    if (constInfo_.attenMaskFlag) {
+        V = (static_cast<int32_t>(actS2SizeOrig) - static_cast<int32_t>(actS1Size) +
+             static_cast<int32_t>(s1RowBase + tokenIdx) + 1) /
+            static_cast<int32_t>(constInfo_.cmpRatio);
+    }
+    const uint64_t outRow = static_cast<uint64_t>(indiceOutOffset) +
+                            static_cast<uint64_t>(tokenIdx) * constInfo_.sparseCount;
+    if (L <= 0 || V <= 0 || maxTiles == 0U) {
+        CleanInvalidOutput(static_cast<int64_t>(outRow));
+        return;
+    }
+    const uint32_t inner = tokenIdx / 2U;
+    InitSortOutBuf(globalTopkUb_[inner * topkPairWidth_], topkPairWidth_);
+    PipeBarrier<PIPE_V>();
+    const uint64_t candRowOff =
+        (static_cast<uint64_t>(row) * static_cast<uint64_t>(kHeadNum_) + n2Idx) *
+        constInfo_.candidateTopkBlocks;
+    for (uint32_t tile = 0U; tile < maxTiles; tile++) {
+        if (static_cast<int32_t>(tile * CAND_BLOCKS_PER_TILE) >= L) {
+            break;
+        }
+        const uint64_t scoreBase =
+            scoreSlotBase + (static_cast<uint64_t>(tokenIdx) * maxTiles + tile) * CAND_TILE_TOKENS;
+        AscendC::DataCopyPadExtParams<float> padParams{false, 0, 0, 0};
+        AscendC::DataCopyExtParams copyParams;
+        copyParams.blockCount = 1;
+        copyParams.blockLen = CAND_TILE_TOKENS * sizeof(float);
+        copyParams.srcStride = 0;
+        copyParams.dstStride = 0;
+        copyParams.rsv = 0;
+        // 上一 tile 的 V 读（SortAll/MergeSort）完成后才能覆盖 sortBuff
+        SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
+        AscendC::DataCopyPad(sortBuff, candScoreGm_[scoreBase], copyParams, padParams);
+        // v4: 本 tile 的 kscale 从辅助区一次读回（32 块 × 16 half = 1KB，块内前 8 half 有效）。
+        // gather 时两个 AIV 各写本半；消费至少延后一拍（任务内退两拍 / 跨任务队列），
+        // 跨 AIV 的写已可见。
+        LocalTensor<half> scaleHalf = sortTmp.template ReinterpretCast<half>();
+        AscendC::DataCopyPadExtParams<half> sPad{false, 0, 0, 0};
+        AscendC::DataCopyExtParams sParams;
+        sParams.blockCount = 1;
+        sParams.blockLen = QLIV2Common::CAND_AUX_SCALE_HALVES_PER_TILE * sizeof(half); // 1KB
+        sParams.srcStride = 0;
+        sParams.dstStride = 0;
+        sParams.rsv = 0;
+        AscendC::DataCopyPad(scaleHalf, candAuxScaleGm_[2ULL * scoreBase], sParams, sPad);
+        // 标量读/写 UB 不受 PipeBarrier 围栏：DMA→标量必须显式 MTE2_S（P2 铁律），
+        // 且上一 tile 的 V 读也要先完成（V→S）
+        SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
+        SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
+        for (uint32_t b = 0U; b < CAND_BLOCKS_PER_TILE; b++) {
+            const uint32_t ci = tile * CAND_BLOCKS_PER_TILE + b;
+            int32_t c = -1;
+            if (static_cast<int32_t>(ci) < L) {
+                c = candidateTopkIndexInGm.GetValue(candRowOff + ci);
+            }
+            for (uint32_t j = 0U; j < BLOCK_TOKENS; j++) {
+                const uint32_t p = b * BLOCK_TOKENS + j;
+                const int32_t tok =
+                    (c >= 0) ? (c * static_cast<int32_t>(BLOCK_TOKENS) + static_cast<int32_t>(j)) : -1;
+                if (c >= 0 && tok < V) {
+                    // key_dequant_scale：与全量扫 ProcessVec1 的 Cast+Mul 等价（fp32 相乘）。
+                    // 必须走 sortBuff（float 视图）读写：scoreBits 是 int32 位型视图，
+                    // 用 SetValue(int32) 写 float 结果会截断/丢精度。
+                    sortBuff.SetValue(p, sortBuff.GetValue(p) * static_cast<float>(scaleHalf.GetValue(b * 16U + j)));
+                    idxUb.SetValue(p, tok);
+                } else {
+                    scoreBits.SetValue(p, QLIV2ServiceVec::NEG_INF);
+                    idxUb.SetValue(p, -1);
+                }
+            }
+        }
+        SetWaitFlag<HardEvent::S_V>(HardEvent::S_V);
+        QLIV2ServiceVec::SortAll(sortBuff, sortTmp, CAND_TILE_TOKENS);
+        PipeBarrier<PIPE_V>();
+        QLIV2ServiceVec::MergeSort(globalTopkUb_[inner * topkPairWidth_], topkWidth_, sortBuff,
+                                   CAND_TILE_TOKENS, sortTmp);
+        PipeBarrier<PIPE_V>();
+    }
+    LocalTensor<uint32_t> idxULocal = outQueue_.AllocTensor<uint32_t>();
+    QLIV2ServiceVec::ExtractIndex(idxULocal,
+                                  globalTopkUb_[inner * topkPairWidth_].template ReinterpretCast<uint32_t>(),
+                                  topkWidth_);
+    PipeBarrier<PIPE_V>();
+    if (isOutputIdxOffsetValid_) {
+        int32_t rowOff = outputIdxOffsetGm_.GetValue(outputIdxOffsetBase +
+                                                     static_cast<uint64_t>(tokenIdx) * kHeadNum_);
+        if (rowOff != 0) {
+            LocalTensor<int32_t> idxI32 = idxULocal.template ReinterpretCast<int32_t>();
+            for (int32_t off = 0; off < constInfo_.sparseCount; off += 64) {
+                Adds(idxI32[off], idxI32[off], rowOff, 64);
+            }
+            PipeBarrier<PIPE_V>();
+        }
+    }
+    outQueue_.EnQue<uint32_t>(idxULocal);
+    idxULocal = outQueue_.DeQue<uint32_t>();
+    QLIV2ServiceVec::CopyOut(indiceOutGm[outRow], idxULocal.template ReinterpretCast<int32_t>(),
+                             constInfo_.sparseCount);
+    outQueue_.FreeTensor(idxULocal);
+    InitSortOutBuf(globalTopkUb_[inner * topkPairWidth_], topkPairWidth_);
+    PipeBarrier<PIPE_V>();
+}
+
+template <typename QLIV2T>
+__aicore__ inline int32_t QLIV2Vector<QLIV2T>::AlignS2(int32_t cuS2Len){
     // 限制：当前cuS2Len最大为2048，暂不考虑更长
     // 该函数目的是将cuS2Len对齐到形如 32*(4^n)*m 的形式 (m ∈ [1, 3])，方便后续sort/merge
     if (cuS2Len <= ELE_NUM_128) {
@@ -1161,7 +1599,7 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
             bool isS2End = cuBaseS2Idx + s2BaseSize_ >= cuRealAcSeq;
             bool needCopyOutGm = blockS2StartIdx_ == 0 && isS2End;
             // 中间结果保存
-            if (needCopyOutGm && !info.isNeedLD) {
+            if (needCopyOutGm && !info.isNeedLD && !info.suppressOut) {
                 LocalTensor<uint32_t> idxULocal = outQueue_.AllocTensor<uint32_t>();
                 // P3: 只抽取前 topkWidth_ 对 (降序排序下 2048 名之后永不入选, 截断语义等价)
                 ExtractIndex(idxULocal,
@@ -1225,7 +1663,7 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
                 if (constInfo_.candidateMode == CANDIDATE_MODE_SOURCE) {
                     SpillBlockTopkToGm(info, blockRowIdx, innerS1Idx); // 与位置级成对溢写
                 }
-            } else {
+            } else if (!info.suppressOut) {
                 CleanInvalidOutput(info.indiceOutOffset + cuS1Idx * constInfo_.sparseCount);
             }
         } else if (cuS2Len <= 0) {

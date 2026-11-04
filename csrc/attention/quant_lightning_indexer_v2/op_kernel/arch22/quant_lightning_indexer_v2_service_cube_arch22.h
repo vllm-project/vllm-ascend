@@ -46,6 +46,12 @@ public:
     __aicore__ inline void AllocEventID();
     __aicore__ inline void FreeEventID();
     __aicore__ inline void ComputeMm1(const QLIV2Common::RunInfo& runInfo);
+    // D3b（B1+B2 冒烟版）：候选驱动 per-token M=32 QK —— K 源为 AIV gather 的 GM staging，
+    // 结果写候选分数区（256/tile）。**未接 ring 握手**：仅验证 cube 结构与形状，不参与最终输出。
+    __aicore__ inline void InitCandMm1Tensor(const GlobalTensor<int8_t>& stagingKeyGm,
+                                             const GlobalTensor<float>& candScoreGm);
+    __aicore__ inline void ComputeMm1Candidate(const QLIV2Common::RunInfo& runInfo, uint32_t taskTokens,
+                                               uint32_t maxTiles);
 
     static constexpr IsResetLoad3dConfig LOAD3DV2_CONFIG = {true, true}; // isSetFMatrix isSetPadding;
     static constexpr uint64_t DOUBLE_BUF_NUM = 2;
@@ -78,6 +84,8 @@ public:
     static constexpr uint64_t S1G_BASIC_BLOCK_L0 = 128;
     static constexpr uint64_t S2_BASIC_BLOCK_L0 = 128;
 
+
+
     static constexpr uint64_t QUERY_BUFFER_OFFSET = S1G_BASIC_BLOCK_L1 * D_BASIC_BLOCK;
     static constexpr uint64_t SL1_BUFFER_OFFSET = S1G_BASIC_BLOCK_L0 * S2_BASIC_BLOCK_L0;
     static constexpr uint64_t KEY_BUFFER_OFFSET = S2_BASIC_BLOCK_L0 * D_BASIC_BLOCK;
@@ -94,6 +102,8 @@ private:
     __aicore__ inline void QueryNd2Nz(uint64_t s1gL1RealSize, const QLIV2Common::RunInfo& runInfo);
     __aicore__ inline void KeyNd2NzForPA(uint64_t s2L1RealSize, uint64_t s2GmOffset,
                                          const QLIV2Common::RunInfo& runInfo);
+    // D3b: 候选 staging（ND [256][128B]）→ L1，nValue = 本次 L0B 块 token 数
+    __aicore__ inline void KeyFromStaging(uint64_t s2L0RealSize, uint64_t srcByteBase);
     __aicore__ inline void KeyNd2Nz(uint64_t s2L1RealSize, const MmInfo& mmInfo, const QLIV2Common::RunInfo& runInfo);
     __aicore__ inline void FixpSToL1(uint64_t s1gL0RealSize, uint64_t s2L0RealSize);
     __aicore__ inline void LoadSToL0b(uint64_t s1gL1RealSize, uint64_t s2L0RealSize, uint64_t sL1BufIdx,
@@ -118,6 +128,15 @@ private:
     GlobalTensor<Q_T> queryGm_;
     GlobalTensor<half> weightGm_;
     GlobalTensor<float> mm1ResGm_;
+    // D3b: 候选驱动（K staging / 候选分数区 / 当前 tile 的基址与 W 行偏移）
+    GlobalTensor<int8_t> candStagingKeyGm_;
+    GlobalTensor<float> candScoreGm_;
+    bool candMode_ = false;          // 仅当前 ComputeMm1 调用生效（候选分支开关）
+    uint64_t candKBase_ = 0;         // 当前候选 tile 的 staging 字节基址
+    uint64_t candOutBase_ = 0;       // 当前 (token,tile) 的候选分数 float 基址
+    uint64_t weightRowOffset_ = 0;   // 当前 token 在 vec0OutGm 中的 half 行偏移（非候选路径恒 0）
+    // v4: 候选 tile 消费序号（每消费一个 tile 自增一次，槽号 = seq % CAND_RING_SLOTS）
+    uint32_t candConsTileSeq_ = 0U;
 
     TBuf<TPosition::A1> bufQL1_;
     LocalTensor<Q_T> queryL1_;
@@ -219,7 +238,14 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::ProcessQk(uint64_t s1gL0RealSize, ui
     if (mmInfo.s1gL0LoopId == 0) {
         WaitFlag<HardEvent::MTE1_MTE2>(KEY_MTE1_MTE2_EVENT + keyL1BufIdx_ % DOUBLE_BUF_NUM);
         if constexpr (K_LAYOUT_T == LI_LAYOUT::PA_BBND) {
-            KeyNd2NzForPA(mmInfo.s2L0RealSize, runInfo.s2Idx * constInfo_.s2BaseSize + mmInfo.s2GmOffset, runInfo);
+            if (candMode_) {
+                // D3b: 候选 tile 的 K 已在 staging（ND 连续），按 s2L0 子块偏移直接 nd2nz 搬入 L1
+                KeyFromStaging(mmInfo.s2L0RealSize,
+                               candKBase_ + static_cast<uint64_t>(mmInfo.s2GmOffset) * constInfo_.headDim);
+            } else {
+                KeyNd2NzForPA(mmInfo.s2L0RealSize, runInfo.s2Idx * constInfo_.s2BaseSize + mmInfo.s2GmOffset,
+                              runInfo);
+            }
         } else {
             KeyNd2Nz(mmInfo.s2L0RealSize, mmInfo, runInfo);
         }
@@ -373,6 +399,89 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::KeyNd2NzForPA(uint64_t s2L1RealSize,
     }
 }
 
+// D3b: 候选 staging（ND [256][128B]，AIV 已按 8-token 块打包好）→ L1。
+// 与 KeyNd2NzForPA 的区别：源地址连续、无需页表；srcDValue = headDim（每 token 128B）。
+template <typename QLIV2T>
+__aicore__ inline void QLIV2Matmul<QLIV2T>::KeyFromStaging(uint64_t s2L0RealSize, uint64_t srcByteBase)
+{
+    Nd2NzParams nd2nzPara;
+    nd2nzPara.ndNum = 1;
+    nd2nzPara.nValue = s2L0RealSize; // token 行数（128）
+    nd2nzPara.dValue = constInfo_.headDim;
+    nd2nzPara.srcDValue = constInfo_.headDim;
+    nd2nzPara.dstNzC0Stride = CeilAlign(s2L0RealSize, (uint64_t)BLOCK_CUBE);
+    nd2nzPara.dstNzNStride = 1;
+    nd2nzPara.srcNdMatrixStride = 0;
+    nd2nzPara.dstNzMatrixStride = 0;
+    DataCopy(keyL1_[(keyL1BufIdx_ % DOUBLE_BUF_NUM) * KEY_BUFFER_OFFSET],
+             candStagingKeyGm_[srcByteBase], nd2nzPara);
+}
+
+template <typename QLIV2T>
+__aicore__ inline void QLIV2Matmul<QLIV2T>::InitCandMm1Tensor(const GlobalTensor<int8_t>& stagingKeyGm,
+                                                              const GlobalTensor<float>& candScoreGm)
+{
+    candStagingKeyGm_ = stagingKeyGm;
+    candScoreGm_ = candScoreGm;
+}
+
+// v4（对齐 DSL 软件流水）：逐 token 跑现成的 ComputeMm1 骨架 —— M=32（该 token 的 32 头），
+// N=256（一个候选 tile）。Q 按 token 重新装载（tile0），W 按 token 行偏移读取；
+// K 从 staging 读（KeyFromStaging）；输出写候选分数区。
+// **消费错一拍**：进入任务先领一个 READY 令牌（丢弃），此后每个 tile 消费前再 wait 一个，
+// 最后一个 tile 等 AIV 任务末的 drain 令牌 ⇒ 每个 tile 的写→读间隔 ≥ 一个 tile 的 gather
+// 时间（与 DSL "先发 tile k、再算 tile k-1" 同构，规避 910B GM 写后立即读不可见）。
+template <typename QLIV2T>
+__aicore__ inline void QLIV2Matmul<QLIV2T>::ComputeMm1Candidate(const QLIV2Common::RunInfo& runInfo,
+                                                                uint32_t taskTokens, uint32_t maxTiles)
+{
+    if (maxTiles == 0U || taskTokens == 0U) {
+        return;
+    }
+    constexpr uint32_t CAND_TILE_TOKENS = QLIV2Common::CAND_TILE_TOKENS; // 32 块 × 8 token = 256
+    const uint64_t tokenQueryStride =
+        static_cast<uint64_t>(constInfo_.gSize) * static_cast<uint64_t>(constInfo_.headDim);
+    candMode_ = true;
+    QLIV2Common::RunInfo candInfo = runInfo;
+    candInfo.actMBaseSize = static_cast<uint32_t>(constInfo_.gSize);           // M = 32 头
+    candInfo.actualSingleProcessSInnerSize = CAND_TILE_TOKENS;                 // N = 256
+    candInfo.actualSingleProcessSInnerSizeAlign = CAND_TILE_TOKENS;
+    const uint32_t tileCount = taskTokens * maxTiles;
+    // 错一拍：先领一个令牌（tile0 的 READY），之后每消费一个 tile 前再 wait 一个令牌
+    AscendC::CrossCoreWaitFlag(QLIV2Common::CAND_READY_FLAG);
+    for (uint32_t k = 0U; k < tileCount; k++) {
+        AscendC::CrossCoreWaitFlag(QLIV2Common::CAND_READY_FLAG);
+        const uint32_t t = k / maxTiles;
+        const uint32_t tile = k % maxTiles;
+        candInfo.tensorQueryOffset = runInfo.tensorQueryOffset + static_cast<uint64_t>(t) * tokenQueryStride;
+        candInfo.isFirstS2InnerLoop = (tile == 0U);
+        candInfo.isLastS2InnerLoop = (tile == maxTiles - 1U);
+        // vec0Out 每 token 行 = 32 头 × 16 lane = 512 half
+        weightRowOffset_ = static_cast<uint64_t>(t) * BLOCK_CUBE * constInfo_.gSize;
+        const uint32_t slot = candConsTileSeq_ % QLIV2Common::CAND_RING_SLOTS;
+        ++candConsTileSeq_;
+        candKBase_ = static_cast<uint64_t>(slot) * CAND_TILE_TOKENS *
+                     static_cast<uint64_t>(constInfo_.headDim);
+        // 分数区按任务序号奇偶双缓冲（runInfo.loop = 候选任务序号）：
+        // AIV 跨任务延迟消费上一任务最后一个 token 的分数时，本任务的写不会覆盖它。
+        const uint64_t scoreSlotBase = static_cast<uint64_t>(runInfo.loop & 1U) *
+                                       QLIV2Common::CAND_SCORE_TILES_PER_TASK * CAND_TILE_TOKENS;
+        candOutBase_ = scoreSlotBase + static_cast<uint64_t>(k) * CAND_TILE_TOKENS;
+        ComputeMm1(candInfo);
+        // 消费完成：一次 set 广播给两个 AIV，各放一个空槽令牌
+        AscendC::CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(
+            QLIV2Common::CAND_FREE_FLAG);
+        // 本 token 的全部候选 tile 已算完 → 放行 AIV 消费该 token 的分数
+        // （AIV 侧对任务最后一个 token 另有 ≥3 个任务的延迟消费队列，不依赖此处时序）
+        if (tile + 1U == maxTiles) {
+            AscendC::CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(
+                QLIV2Common::CAND_SCORE_READY_FLAG);
+        }
+    }
+    candMode_ = false;
+    weightRowOffset_ = 0U;
+}
+
 template <typename QLIV2T>
 __aicore__ inline void QLIV2Matmul<QLIV2T>::KeyNd2Nz(uint64_t s2L1RealSize, const MmInfo& mmInfo,
                                                      const QLIV2Common::RunInfo& runInfo)
@@ -405,7 +514,8 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::WeightDmaCopy(uint64_t s1gL1RealSize
     copyInParams.srcStride = 0;
     copyInParams.dstStride = 0;
     DataCopy(weightL1_[(qwL1Mte2BufIdx_ % DOUBLE_BUF_NUM) * WEIGHT_BUFFER_OFFSET],
-             weightGm_[runInfo.loop % DOUBLE_BUF_NUM * BLOCK_CUBE * constInfo_.mBaseSize], copyInParams);
+             weightGm_[runInfo.loop % DOUBLE_BUF_NUM * BLOCK_CUBE * constInfo_.mBaseSize + weightRowOffset_],
+             copyInParams);
 }
 
 // batch, s1, n2, g, d
@@ -613,10 +723,17 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::FixpResToGm(uint64_t s1L0RealCount, 
     intriParams.reluPre = 0;
     AscendC::SetFixpipeNz2ndFlag(s1L0RealCount, CeilDiv(constInfo_.gSize, BLOCK_CUBE) * S2_BASIC_BLOCK_L0 / BLOCK_CUBE,
                                  2048);
-    AscendC::DataCopy(mm1ResGm_[(runInfo.loop % 2) * constInfo_.mBaseSize / constInfo_.gSize * constInfo_.s2BaseSize +
-                                s1GmOffset * intriParams.dstStride + s2GmOffset],
-                      cL0_.template ReinterpretCast<float>()[(l0cBufIdx_ % DOUBLE_BUF_NUM) * L0C_BUFFER_OFFSET],
-                      intriParams);
+    if (candMode_) {
+        // D3b: 候选分数区 —— 每个 (token, tile) 一行 256 float，由调用方给出基址
+        AscendC::DataCopy(candScoreGm_[candOutBase_ + s2GmOffset],
+                          cL0_.template ReinterpretCast<float>()[(l0cBufIdx_ % DOUBLE_BUF_NUM) * L0C_BUFFER_OFFSET],
+                          intriParams);
+    } else {
+        AscendC::DataCopy(mm1ResGm_[(runInfo.loop % 2) * constInfo_.mBaseSize / constInfo_.gSize * constInfo_.s2BaseSize +
+                                    s1GmOffset * intriParams.dstStride + s2GmOffset],
+                          cL0_.template ReinterpretCast<float>()[(l0cBufIdx_ % DOUBLE_BUF_NUM) * L0C_BUFFER_OFFSET],
+                          intriParams);
+    }
 }
 
 template <typename QLIV2T>

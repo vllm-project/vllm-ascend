@@ -3111,7 +3111,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor? block_table=None, Tensor? output_idx_offset=None, Tensor? metadata=None, "
         "int max_seqlen_q=-1, str layout_q='TND', str layout_k='PA_BBND', int mask_mode=3, "
         "int cmp_ratio=1, int candidate_mode=3, int candidate_topk_blocks=2048, "
-        "int candidate_block_size=8) -> (Tensor, Tensor, Tensor)"
+        "int candidate_block_size=8, Tensor? candidate_block_length=None) -> (Tensor, Tensor, Tensor)"
     );
     ops.impl("npu_quant_lightning_indexer_v3", torch::kPrivateUse1,
              &vllm_ascend::qli_v2::QuantLightningIndexerCandidate);

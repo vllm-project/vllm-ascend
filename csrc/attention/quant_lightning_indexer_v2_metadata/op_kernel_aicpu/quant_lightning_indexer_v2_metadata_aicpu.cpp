@@ -35,6 +35,7 @@ bool QuantLightningIndexerV2MetadataCpuKernel::Prepare(CpuKernelContext &ctx)
     sequsedQ_ = ctx.Input(static_cast<uint32_t>(ParamId::seqUsedQ));
     sequsedK_ = ctx.Input(static_cast<uint32_t>(ParamId::seqUsedK));
     cmpResidualK_ = ctx.Input(static_cast<uint32_t>(ParamId::cmpResidualK));
+    candidateBlockLength_ = ctx.Input(static_cast<uint32_t>(ParamId::candidateBlockLength));
     // output
     metadata_ = ctx.Output(static_cast<uint32_t>(ParamId::metadata));
 
@@ -70,7 +71,7 @@ bool QuantLightningIndexerV2MetadataCpuKernel::ParamsCheck()
     }
     const int32_t batchSize = GetQueryBatchSize();
     return CheckCuSeqlensQ(batchSize) && CheckCuSeqlensK(batchSize) && CheckSequsedQ(batchSize) &&
-           CheckSequsedK(batchSize) && CheckCmpResidualK(batchSize);
+           CheckSequsedK(batchSize) && CheckCmpResidualK(batchSize) && CheckCandidateBlockLength();
 }
 
 bool QuantLightningIndexerV2MetadataCpuKernel::CheckCuSeqlensQ(int32_t batchSize) const
@@ -177,6 +178,42 @@ bool QuantLightningIndexerV2MetadataCpuKernel::CheckSequsedK(int32_t batchSize) 
                 return false;
             }
         }
+    }
+    return true;
+}
+
+// candidate_block_length（预留输入）的校验与统计：语义与 DSL 一致 —— 每行有效候选块数。
+// 本期不参与 cost model：当前 mode=2 的 kernel 是"全量 S2 扫描"，每行工作量与候选数无关，
+// 若按 L 估工作量会把核分给"行多但候选少"的 batch，反而失衡（设计见 prof_output/qli_v2_caseopt/DESIGN_window.md）。
+// 这里只校验取值范围并把 max/sum 记录到成员，供后续"按候选块取工作量"的 kernel 使用。
+bool QuantLightningIndexerV2MetadataCpuKernel::CheckCandidateBlockLength()
+{
+    if (candidateBlockLength_ == nullptr || candidateBlockLength_->GetData() == nullptr) {
+        return true; // 可选输入，缺省不启用
+    }
+    // 预留输入：本期不参与调度，故取值问题只记录、不置失败（AICPU 里返回 false 会变成 507018 异常，
+    // 对"暂时不消费的可选输入"代价过大；等它真正参与 cost model 时再收紧为硬校验）。
+    if (candidateBlockLength_->GetDataType() != DataType::DT_INT32) {
+        KERNEL_LOG_ERROR("candidate_block_length should be int32, ignored this time");
+        return true;
+    }
+    const int64_t dimNum = candidateBlockLength_->GetTensorShape() == nullptr ?
+                               0 :
+                               static_cast<int64_t>(candidateBlockLength_->GetTensorShape()->GetDimSize(0));
+    if (dimNum <= 0) {
+        return true;
+    }
+    const int32_t *lenPtr = static_cast<const int32_t *>(candidateBlockLength_->GetData());
+    for (int64_t i = 0; i < dimNum; ++i) {
+        const int32_t len = lenPtr[i];
+        if (len < 0) {
+            KERNEL_LOG_ERROR("candidate_block_length[%ld] = %d should be >= 0, ignored", static_cast<long>(i), len);
+            candLenMax_ = 0;
+            candLenSum_ = 0;
+            return true;
+        }
+        candLenMax_ = (len > candLenMax_) ? len : candLenMax_;
+        candLenSum_ += len;
     }
     return true;
 }

@@ -22,6 +22,46 @@ inline constexpr uint32_t CANDIDATE_MODE_SOURCE = 1;   // is_candidate_source: �
 inline constexpr uint32_t CANDIDATE_MODE_CONSUMER = 2; // use_candidate: 输入候选块索引, 候选内选topk
 inline constexpr uint32_t CANDIDATE_MODE_OFF = 3;      // 关闭candidate功能(默认)
 
+// D3b 候选 staging ring（AIV gather ↔ AIC cube 消费）。
+// 910B 的跨核 flag 语义（同 sparse_flash_attention 的 910B 用法）：多个 AIV 对同一 id 的
+// set 合并成一次可等待通知；AIC 的一次 set 广播给两个 AIV。故每个事件每侧只 set/wait 一次。
+// **flag id 约束**：910B 只有 4 bit（`GetffstMsg` 里 `flagId & 0xf`），且 AscendC 保留
+// 11=SYNC_AIC_FLAG、12=SYNC_AIV_FLAG、13=SYNC_AIC_AIV_FLAG、14=SYNC_AIV_ONLY_ALL；
+// 本 kernel 已用 0/1/2（syncV1C1/syncV0C1/syncC1V0）。
+//
+// v4（对齐 DSL 的软件流水）：生产/消费固定错一拍 + **单 id 计数信号量**，深度不再受
+// flag id 数量限制，只受 workspace 限制。槽号 = 全局 tile 序号 % CAND_RING_SLOTS。
+inline constexpr uint32_t CAND_RING_SLOTS = 8; // staging 槽数（流水深度）
+// AIV→AIC：每写完一个 tile 的半个 staging 槽各 set 一次（合并成 1 个令牌/tile）；
+// AIC 每消费一个 tile wait 一次，并在进入任务的 tile 循环前先 wait 一次（错一拍）。
+inline constexpr uint32_t CAND_READY_FLAG = 6;
+// AIC→AIV：空槽回执。AIC 启动预置 CAND_RING_SLOTS 个令牌，之后每消费 1 tile 回补 1 个。
+inline constexpr uint32_t CAND_FREE_FLAG = 8;
+// AIC→AIV：W 槽回收。W 按候选任务交替使用 2 个槽（runInfo.loop%2），预置 2 个令牌，
+// AIC 每完成一个候选任务回补 1 个 ⇒ AIV 最多领先 2 个任务，保证不覆盖 AIC 正在读的槽。
+inline constexpr uint32_t CAND_WFREE_FLAG = 3;
+// B4: 候选任务 W 就绪 —— AIV 先跑一次 ProcessVec0（w×qscale 广播到 vec0Out），
+// 再放行 AIC 的候选 cube 循环。id 10（避开 0/1/2、ring 6/8、WFREE 3、保留 11..14）。
+inline constexpr uint32_t CAND_WREADY_FLAG = 10;
+// B5: AIC 每算完一个 token 的全部候选 tile 就 set 一次；AIV 消费该 token 分数前 wait。
+// id 15（0/1/2 已用、3/6/8/10 被 W 与环占用、11..14 为 AscendC 保留）。
+inline constexpr uint32_t CAND_SCORE_READY_FLAG = 15;
+// v4: AIC 主循环结束令牌 —— pending 队列（各任务末尾两个 token）在核尾统一排空，
+// 等 AIC 推进/退出后再读，保证 GM 写已落地。
+inline constexpr uint32_t CAND_AIC_DONE_FLAG = 4;
+// 候选分数区每任务的槽位数：s1Base 4 行 × 最大 64 tile = 256 个 256-float 行。
+// 按任务序号奇偶双缓冲（跨任务延迟消费时，下一任务不会覆盖尚未消费的分数）。
+inline constexpr uint32_t CAND_SCORE_TILES_PER_TASK = 256;
+// 候选 tile 粒度：32 个候选块 × 8 token = 256 token（DSL 为 64 块×8=512；910B 上按
+// 现有 mm1 骨架与 UB 容量取 256）
+inline constexpr uint32_t CAND_TILE_BLOCKS = 32;
+inline constexpr uint32_t CAND_TILE_TOKENS = CAND_TILE_BLOCKS * 8;
+// 候选 kscale 辅助区（每 tile 32 块 × 16 half = 512 half = 1KB，块内前 8 half 有效、后 8 填充）：
+// AIV 在 gather 时每 AIV 写本半（256 half = 512B，一次 DMA），消费时按 tile 一次 1KB 读回，
+// 取代原先"每 tile 32 次 16B DMA + 32 次 block_table 标量读"的逐块读取；
+// 与分数区同样按任务奇偶双缓冲，跨任务延迟消费时不会被覆盖。
+inline constexpr uint32_t CAND_AUX_SCALE_HALVES_PER_TILE = CAND_TILE_BLOCKS * 16U;
+
 // 与tiling的layout保持一致
 enum class LI_LAYOUT : uint32_t {
     BSND = 0,
@@ -68,6 +108,10 @@ struct RunInfo {
     bool isLastS2InnerLoop;
     bool isValid = false;
     bool isNeedLD = false;
+    // B5: 候选驱动任务 —— 正常全量扫的输出写回被抑制（结果由候选分数路径产生）
+    bool suppressOut = false;
+    // v4: 本任务是否候选驱动任务（ProcessVec0 据此决定是否等待 W 槽回收令牌 WFREE）
+    bool candTask = false;
     uint32_t saveWorkSpaceIdx = 0;
 };
 

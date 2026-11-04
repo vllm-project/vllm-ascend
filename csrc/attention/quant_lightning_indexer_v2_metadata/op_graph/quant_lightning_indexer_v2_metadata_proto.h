@@ -26,6 +26,11 @@ REG_OP(VllmAscendQuantLightningIndexerV2Metadata)
     .OPTIONAL_INPUT(seqused_q, TensorType({DT_INT32}))
     .OPTIONAL_INPUT(seqused_k, TensorType({DT_INT32}))
     .OPTIONAL_INPUT(cmp_residual_k, TensorType({DT_INT32}))
+    // candidate_block_length（每行有效候选块数，DSL 的 candidate_block_length 语义）：
+    // 预留输入。本期只做校验与记录（见 aicpu 的 candidateBlockLength_）：
+    // 当前 kernel 的 mode=2 是"全量 S2 扫描"，每行工作量与 L 无关，若用它改 cost model 反而会误分核；
+    // 等 kernel 改成"按候选块取工作量"后才会真正参与调度（设计见 prof_output/qli_v2_caseopt/DESIGN_window.md）。
+    .OPTIONAL_INPUT(candidate_block_length, TensorType({DT_INT32}))
     .OUTPUT(metadata, TensorType({DT_INT32}))
     .REQUIRED_ATTR(num_heads_q, Int)
     .REQUIRED_ATTR(num_heads_k, Int)

@@ -58,6 +58,7 @@ constexpr uint32_t BLOCK_TABLE_INDEX = 10;
 constexpr uint32_t OUTPUT_IDX_OFFSET_INDEX = 11;
 constexpr uint32_t METADATA_INDEX = 12;
 constexpr uint32_t CANDIDATE_TOPK_INDEX_INPUT_INDEX = 13;
+constexpr uint32_t CANDIDATE_BLOCK_LENGTH_INDEX = 14; // 每行有效候选块数（DSL candidate_block_length 语义）
 constexpr uint32_t SPARSE_INDICES_INDEX = 0;
 constexpr uint32_t SPARSE_VALUES_INDEX = 1;
 constexpr uint32_t CANDIDATE_TOPK_INDEX_OUTPUT_INDEX = 2;
@@ -157,6 +158,7 @@ struct QLIV2ParaInfo {
     TilingOptionalParaInfo outputIdxOffset = {nullptr, nullptr};
     TilingOptionalParaInfo metadata = {nullptr, nullptr};
     TilingOptionalParaInfo candidateTopkIndex = {nullptr, nullptr};
+    TilingOptionalParaInfo candidateBlockLength = {nullptr, nullptr}; // 每行有效候选块数 (int32)
     TilingRequiredParaInfo attenOut = {nullptr, nullptr};
     TilingRequiredParaInfo sparseValues = {nullptr, nullptr};
 

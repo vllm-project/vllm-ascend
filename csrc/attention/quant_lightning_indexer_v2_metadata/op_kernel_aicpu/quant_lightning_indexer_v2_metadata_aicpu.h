@@ -228,6 +228,7 @@ private:
     bool CheckSequsedQ(int32_t batchSize) const;
     bool CheckSequsedK(int32_t batchSize) const;
     bool CheckCmpResidualK(int32_t batchSize) const;
+    bool CheckCandidateBlockLength();
     int32_t GetQueryBatchSize();
     ValidSocVersion ProcessSocVersion();
     bool ParamsInit();
@@ -278,6 +279,10 @@ private:
     Tensor *sequsedQ_ = nullptr;
     Tensor *sequsedK_ = nullptr;
     Tensor *cmpResidualK_ = nullptr;
+    // candidate_block_length（每行有效候选块数，int32，预留输入）：只做校验与记录
+    Tensor *candidateBlockLength_ = nullptr;
+    int32_t candLenMax_ = 0;   // 各行最大有效候选块数（未传时为 0）
+    int64_t candLenSum_ = 0;   // 各行有效候选块数之和（用于后续调度使用，本期仅记录）
     // output
     Tensor *metadata_ = nullptr;
     // attributes
@@ -318,6 +323,7 @@ private:
         seqUsedQ = 2,
         seqUsedK = 3,
         cmpResidualK = 4,
+        candidateBlockLength = 5,
         // output
         metadata = 0,
     };

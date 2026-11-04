@@ -46,7 +46,7 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
             "Tensor? block_table=None, Tensor? output_idx_offset=None, Tensor? metadata=None, "
             'int max_seqlen_q=-1, str layout_q="BSND", str layout_k="BSND", int mask_mode=0, '
             "int cmp_ratio=1, int candidate_mode=3, int candidate_topk_blocks=2048, "
-            "int candidate_block_size=8) -> (Tensor, Tensor, Tensor)",
+            "int candidate_block_size=8, Tensor? candidate_block_length=None) -> (Tensor, Tensor, Tensor)",
         ]
 
     def register_meta(self):
@@ -74,6 +74,7 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
             layout_k: str | None = None,
             mask_mode: int | None = None,
             cmp_ratio: int | None = None,
+            candidate_block_length: torch.Tensor | None = None,
         ):
             return torch.empty((QLI_METADATA_SIZE), dtype=torch.int32, device="npu")
 
@@ -160,6 +161,7 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
             candidate_mode=3,
             candidate_topk_blocks=2048,
             candidate_block_size=8,
+            candidate_block_length=None,
         ):
             key_head_num = key.shape[1] if layout_k == "TND" else key.shape[2]
             if layout_q == "BSND":
@@ -217,6 +219,7 @@ def quant_lightning_indexer_metadata(
     layout_k: str | None = None,
     mask_mode: int | None = None,
     cmp_ratio: int | None = None,
+    candidate_block_length: torch.Tensor | None = None,
 ):
     """
     dispatcher implementation for NPU.zhe
@@ -249,6 +252,7 @@ def quant_lightning_indexer_metadata(
         layout_k,
         mask_mode,
         cmp_ratio,
+        candidate_block_length,
     )
 
 
@@ -271,6 +275,7 @@ def quant_lightning_indexer_metadata_fallback(
     layout_k: str | None = None,
     mask_mode: int | None = None,
     cmp_ratio: int | None = None,
+    candidate_block_length: torch.Tensor | None = None,
 ):
     # 处理所有 tensor 都为 None 的情况
     # 调用 NPU 实现
@@ -292,6 +297,7 @@ def quant_lightning_indexer_metadata_fallback(
         layout_k,
         mask_mode,
         cmp_ratio,
+        candidate_block_length,
     )
 
 
@@ -325,6 +331,7 @@ def quant_lightning_indexer_candidate(
     candidate_mode=3,
     candidate_topk_blocks=2048,
     candidate_block_size=8,
+    candidate_block_length=None,
 ):
     """两级TopK candidate 入口: mode=1(source)/2(consumer)/3(关闭)"""
     op_module = quant_lightning_indexer_op_builder.load()
@@ -353,6 +360,7 @@ def quant_lightning_indexer_candidate(
         candidate_mode,
         candidate_topk_blocks,
         candidate_block_size,
+        candidate_block_length,
     )
 
 
