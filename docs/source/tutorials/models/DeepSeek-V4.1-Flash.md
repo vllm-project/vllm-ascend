@@ -22,15 +22,13 @@ speculative decoding. These designs reduce the global KV cache footprint to
 one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports
 a continuously adjustable reasoning effort from 1 to 100.
 
-DeepSeek-V4.1-Flash deployment on Ascend includes A2 products, A3 products,
-and 950DT products.
-This guide recommends W4A8 deployment with **vLLM Ascend v0.32.0** for
-performance. W8A8 checkpoints remain supported. The examples below cover
-Atlas 800 A3 and A2 servers; use the corresponding
-hardware-specific image and configuration for 950DT products. They include a
-single-node colocated A3 configuration,
-a two-node A3 Prefill-Decode (PD) disaggregated configuration, a two-node
-hybrid A2 configuration, and a four-node A2 PD disaggregated configuration.
+vLLM Ascend supports W4A8 and W8A8 deployment on A2 products, A3 products,
+and 950DT products. This guide provides a single-node colocated A3
+configuration and a two-node A3 Prefill-Decode (PD) disaggregated
+configuration. It also supports a two-node hybrid A2 configuration and a
+four-node A2 PD disaggregated configuration.
+
+This guide uses **vLLM Ascend v0.32.0** and recommends W4A8 for performance.
 
 Use the matching upstream vLLM revision for the selected vLLM Ascend version.
 For source builds, use the upstream vLLM tag recorded in
