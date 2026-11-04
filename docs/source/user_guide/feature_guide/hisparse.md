@@ -118,10 +118,10 @@ A same-shaped batch is not permission to reuse old lengths or request mappings.
 
 ## Validation
 
-Portable, source-isolated CPU boundary checks:
+CPU boundary checks in the normal installed development environment:
 
 ```bash
-python -m pytest -q --noconftest \
+python -m pytest -q \
   tests/ut/distributed/kv_transfer/test_hisparse_foundation_cpu.py
 ```
 
@@ -130,7 +130,10 @@ isolation, strided indexer aliases, planner alignment, unsupported formats,
 and capture-only mirror suppression. C8 checks also
 cover opaque component bytes, nonzero slab offsets, stable duplicate/padding
 ordering, Indexer key/scale writes and planner alignment before allocation.
-They do not exercise an installed NPU package or qualify device execution.
+The tests directly import the production modules and Core/Ascend cache specs,
+using the repository's normal CPU-UT conftest. Install the matching Core and
+Ascend test dependencies before running them. CPU checks do not qualify device
+execution.
 
 The weight-loading wrapper keeps Ascend main's explicit activation-dtype ABI,
 already covered by `tests/ut/ops/test_mla_weight_processing.py`; this foundation
