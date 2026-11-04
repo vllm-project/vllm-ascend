@@ -1,0 +1,6 @@
+pr: 19365
+entries:
+  - category: performance
+    text: Reduced the experimental official A3 clipped shared-expert SwiGLU adapter overhead with native dispatch and prepared constants, and reject conflicting legacy OPP registrations instead of returning incorrect outputs.
+    model: deepseek-v4
+    hardware: [A3]
