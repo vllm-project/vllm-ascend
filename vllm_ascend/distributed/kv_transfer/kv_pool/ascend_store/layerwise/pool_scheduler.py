@@ -8,7 +8,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
-    get_backend_class,
+    resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
@@ -35,8 +35,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         kv_cache_config: KVCacheConfig | None = None,
     ) -> None:
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-        backend_name = str(extra_config.get("backend", "mooncake")).lower()
-        self.layerwise_backend = get_backend_class(backend_name)
+        backend_name, self.layerwise_backend = resolve_backend(extra_config)
         self.layerwise_data_plane = (
             self.layerwise_backend.layerwise_data_plane if self.layerwise_backend is not None else None
         )

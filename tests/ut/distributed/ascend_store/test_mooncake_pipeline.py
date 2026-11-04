@@ -160,7 +160,10 @@ class TestMooncakePipeline(unittest.TestCase):
         # does; do not hand-copy the worker's layout ID into the scheduler.
         with (
             patch.object(BaseKVPoolScheduler, "_build_cache_coordinator", return_value=None),
-            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend."
+                "MooncakeBackend.create_scheduler_client"
+            ),
         ):
             scheduler = create_kv_pool_scheduler(
                 worker.vllm_config, use_layerwise=True, kv_cache_config=worker.kv_cache_config
@@ -259,7 +262,10 @@ class TestMooncakePipeline(unittest.TestCase):
         config.cache_config.block_size = 16
         with (
             patch.object(BaseKVPoolScheduler, "_build_cache_coordinator", return_value=None),
-            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend."
+                "MooncakeBackend.create_scheduler_client"
+            ),
         ):
             scheduler = create_kv_pool_scheduler(config, use_layerwise=True, kv_cache_config=workers[0].kv_cache_config)
         scheduler.store_scheduler = store

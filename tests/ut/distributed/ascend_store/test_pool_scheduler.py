@@ -40,6 +40,7 @@ from zmq.sugar.context import Context
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import backend_map, get_backend_class
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
@@ -58,16 +59,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
 
 
 @pytest.fixture(autouse=True)
-def _patch_pool_scheduler_importlib():
-    """KVPoolScheduler resolves its backend dynamically via
-    ``importlib.import_module``; point it at a MagicMock so the scheduler's
-    ``store_scheduler`` is a mock (the heavy real backends are exercised
-    separately in test_backend.py). Scoped to this module so test_backend.py,
-    which imports the real backend classes and uses ``mock.patch`` (itself
-    backed by importlib.import_module), is unaffected.
-    """
-    with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib") as mock_importlib:
-        mock_importlib.import_module.return_value = MagicMock()
+def _mock_scheduler_clients():
+    """Resolve real backend capabilities while mocking external store creation."""
+    with ExitStack() as stack:
+        for backend_name in backend_map:
+            backend_class = get_backend_class(backend_name)
+            assert backend_class is not None
+            stack.enter_context(patch.object(backend_class, "create_scheduler_client"))
         yield
 
 
@@ -299,18 +297,17 @@ class TestKVPoolScheduler(unittest.TestCase):
 
     def test_layerwise_rejects_unsupported_data_plane_before_backend_init(self):
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store"
-        for backend_name in ("yuanrong", "unknown"):
-            for data_plane in (None, "unsupported"):
-                with self.subTest(backend=backend_name, data_plane=data_plane):
-                    config = self._make_config(extra_config={"backend": backend_name})
-                    backend = SimpleNamespace(layerwise_data_plane=data_plane)
-                    with (
-                        patch(f"{module}.layerwise.pool_scheduler.get_backend_class", return_value=backend),
-                        patch.object(KVPoolScheduler, "__init__", return_value=None) as base_init,
-                        self.assertRaisesRegex(ValueError, "does not support layerwise KV pooling"),
-                    ):
-                        create_kv_pool_scheduler(config, use_layerwise=True)
-                    base_init.assert_not_called()
+        for backend_name, data_plane in (("unknown", None), ("yuanrong", None), ("yuanrong", "unsupported")):
+            with self.subTest(backend=backend_name, data_plane=data_plane):
+                config = self._make_config(extra_config={"backend": backend_name})
+                backend = None if backend_name == "unknown" else SimpleNamespace(layerwise_data_plane=data_plane)
+                with (
+                    patch(f"{module}.layerwise.pool_scheduler.resolve_backend", return_value=(backend_name, backend)),
+                    patch.object(BaseKVPoolScheduler, "__init__", return_value=None) as base_init,
+                    self.assertRaisesRegex(ValueError, "does not support layerwise KV pooling"),
+                ):
+                    create_kv_pool_scheduler(config, use_layerwise=True)
+                base_init.assert_not_called()
 
     def test_mooncake_layerwise_rejects_tp_mismatch(self):
         config = self._make_config(
