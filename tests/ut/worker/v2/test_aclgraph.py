@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
+from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
 
