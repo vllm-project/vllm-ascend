@@ -35,13 +35,21 @@ from vllm_ascend.models.glm5next.cache_config import (
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
-def make_glm53_plan(layer_offset=0):
+def make_glm53_plan(layer_offset=0, *, use_recoverssm=False):
     register_all_kvcache_specs(None)
     specs = {}
     for name, spec in make_specs(pool=4).items():
         parts = name.split(".")
         parts[2] = str(int(parts[2]) + layer_offset)
-        specs[".".join(parts)] = replace(spec, mamba_cache_mode="align") if isinstance(spec, MambaSpec) else spec
+        if isinstance(spec, MambaSpec):
+            spec = replace(spec, mamba_cache_mode="align")
+            if use_recoverssm:
+                spec = replace(
+                    spec,
+                    shapes=(*spec.shapes, (1, 6, 16), (1, 6, 32)),
+                    dtypes=(*spec.dtypes, torch.float32, torch.bfloat16),
+                )
+        specs[".".join(parts)] = spec
     config = make_config()
     groups = get_glm5_next_kv_cache_groups(config, specs)
     return get_glm5_next_kv_cache_config(config, groups, 24 * get_glm5_next_pool_bytes_per_block(groups))
@@ -125,7 +133,10 @@ class TestGLM53Store(unittest.TestCase):
     def assert_restored(self, worker, caches, source, target, masks=None):
         for group_id, group in enumerate(worker.kv_cache_config.kv_cache_groups):
             for name in group.layer_names:
-                for cache in caches[name]:
+                for component, cache in enumerate(caches[name]):
+                    if worker.use_recoverssm and group_id >= 2 and component >= 2:
+                        self.assertTrue(torch.all(cache[target[group_id]] == -1))
+                        continue
                     if group_id == 1:
                         self.assertTrue(torch.all(cache[target[group_id]] == -1))
                     else:
@@ -167,11 +178,19 @@ class TestGLM53Store(unittest.TestCase):
                 self.doCleanups()
 
     def test_nonlayerwise_round_trip_keeps_each_tp_state_and_private_tail(self):
-        plan = make_glm53_plan()
+        self.check_nonlayerwise_round_trip(use_recoverssm=False)
+
+    def test_recoverssm_round_trip_restores_checkpoint_without_verification_records(self):
+        self.check_nonlayerwise_round_trip(use_recoverssm=True)
+
+    def check_nonlayerwise_round_trip(self, *, use_recoverssm):
+        plan = make_glm53_plan(use_recoverssm=use_recoverssm)
         hashes = [bytes([i]) * 32 for i in (1, 2)]
         source = [[1, 2], [3], [4, 5], [6, 7], [8, 9]]
         target = [[10, 11], [12], [13, 14], [15, 16], [17, 18]]
         for tp_size, load_async in ((1, False), (1, True), (2, False), (2, True)):
+            if use_recoverssm and load_async:
+                continue
             with self.subTest(tp_size=tp_size, load_async=load_async):
                 stored: dict[str, list[bytes]] = {}
                 workers = []
@@ -197,6 +216,7 @@ class TestGLM53Store(unittest.TestCase):
                         tp_size=tp_size,
                         tp_rank=rank,
                         extra_config={"load_async": load_async},
+                        use_recoverssm=use_recoverssm,
                     )
                     caches = make_glm53_caches(plan)
                     worker.m_store.requires_exists_before_put = False
@@ -204,6 +224,11 @@ class TestGLM53Store(unittest.TestCase):
                     worker.m_store.get.side_effect = get
                     worker.m_store.exists.side_effect = lambda keys, stored=stored: [int(key in stored) for key in keys]
                     worker.register_kv_caches(caches)
+                    if use_recoverssm:
+                        for group in plan.kv_cache_groups[2:]:
+                            for name in group.layer_names:
+                                self.assertEqual(len(caches[name]), 4)
+                                self.assertEqual(len(worker.kv_caches[name]), 2)
                     self.assertEqual(worker.kv_send_thread.block_size, [512, 4, 512, 512, 512])
                     self.assertTrue(
                         all(address > 0 for row in worker.group_kv_caches_base_addr.values() for address in row)
@@ -239,6 +264,31 @@ class TestGLM53Store(unittest.TestCase):
                     payload = stored.pop(missing)
                     self.assertLess(workers[0][0].lookup_scheduler(1024, hashes, list(range(5))), 1024)
                     stored[missing] = payload
+
+    def test_recoverssm_pool_keys_match_native_for_same_persistent_layout(self):
+        keys_by_mode = []
+        for use_recoverssm in (False, True):
+            plan = make_glm53_plan(use_recoverssm=use_recoverssm)
+            worker = make_worker(self, kv_cache_config=plan, use_mla=True, num_layers=4, use_recoverssm=use_recoverssm)
+            worker.register_kv_caches(make_glm53_caches(plan))
+            keys_by_mode.append(
+                {
+                    group_id: next(
+                        iter(
+                            worker.token_database.process_token_key_strings(512, ["prefix"], kv_cache_group_id=group_id)
+                        )
+                    )[2]
+                    for group_id in worker.cacheable_group_ids
+                }
+            )
+            self.doCleanups()
+        self.assertEqual(keys_by_mode[0], keys_by_mode[1])
+
+    def test_recoverssm_registration_rejects_native_state_layout(self):
+        plan = make_glm53_plan()
+        worker = make_worker(self, kv_cache_config=plan, use_mla=True, num_layers=4, use_recoverssm=True)
+        with self.assertRaisesRegex(ValueError, "one checkpoint and two verification records"):
+            worker.register_kv_caches(make_glm53_caches(plan))
 
     def test_memcache_layerwise_round_trip_keeps_each_tp_state(self):
         block_hash = bytes([1]) * 32

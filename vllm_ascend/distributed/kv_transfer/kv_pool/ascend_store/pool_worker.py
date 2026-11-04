@@ -87,6 +87,7 @@ class KVPoolWorker:
         parallel_config = vllm_config.parallel_config
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.vllm_config = vllm_config
+        self.use_recoverssm = getattr(vllm_config.cache_config, "use_kda_recoverssm", False) is True
         self.use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
         self.kv_cache_config = kv_cache_config
         hf_text_config = getattr(model_config, "hf_text_config", None)
@@ -720,7 +721,26 @@ class KVPoolWorker:
     def _register_dspark_prefix_cache(self, draft_caches: dict[str, torch.Tensor]) -> None:
         """Register draft caches when the layerwise worker enables prefix reuse."""
 
+    def _recoverssm_store_caches(self, kv_caches):
+        """Export persistent KDA state while leaving verification records local."""
+        if self.kv_cache_config is None:
+            raise ValueError("RecoverSSM pooling requires KV cache specs")
+        result = dict(kv_caches)
+        for group in self.kv_cache_config.kv_cache_groups:
+            specs = group.kv_cache_spec
+            for name in group.layer_names:
+                spec = specs.kv_cache_specs[name] if isinstance(specs, UniformTypeKVCacheSpecs) else specs
+                if not isinstance(spec, MambaSpec):
+                    continue
+                caches = self._as_cache_tuple(kv_caches[name])
+                if len(caches) != 4 or spec.num_speculative_blocks != 0:
+                    raise ValueError("RecoverSSM pooling requires one checkpoint and two verification records")
+                result[name] = caches[:2]
+        return result
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        if self.use_recoverssm:
+            kv_caches = self._recoverssm_store_caches(kv_caches)
         draft_names = getattr(self, "_dspark_draft_layer_names", ())
         draft_caches = {name: cache for name, cache in kv_caches.items() if name in draft_names}
         if draft_names:
