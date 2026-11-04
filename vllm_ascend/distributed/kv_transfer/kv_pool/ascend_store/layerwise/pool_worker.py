@@ -76,6 +76,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     is_kv_save_role,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.models.layerwise import get_model_layerwise_handler
 
 # PERF-TUNE switch: defer the last layer's save drain out of the forward
 # critical path; the drain runs at the start of the next step's start_load_kv.
@@ -229,7 +230,9 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 self.num_layers,
             )
             if self.use_layerwise_transfer:
-                self._layerwise_reuse_layout = build_layerwise_reuse_layout(
+                handler = get_model_layerwise_handler(self.vllm_config.model_config)
+                build_layout = handler.build_reuse_layout if handler is not None else build_layerwise_reuse_layout
+                self._layerwise_reuse_layout = build_layout(
                     target_specs,
                     base_layers,
                     self._extra_config,
@@ -1557,47 +1560,6 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         group_id: int = 0,
         layer_idx_in_group: int = 0,
     ) -> None:
-        layout = getattr(self, "_layerwise_reuse_layout", None)
-        if layout is None or not layout.cache_slot_map:
-            self._process_load_for_layer_batch_impl(requests, layer_id, group_id, layer_idx_in_group)
-            return
-        offsets = self.group_layer_cache_entry_offsets[group_id]
-        names = self.group_cache_entry_names[group_id][offsets[layer_idx_in_group] : offsets[layer_idx_in_group + 1]]
-        reused = layout.reused_cache_names()
-        for restore_reused in (True, False):
-            indices = tuple(i for i, name in enumerate(names) if (name in reused) == restore_reused)
-            if not indices:
-                continue
-            selected_requests = (
-                requests
-                if restore_reused
-                else [
-                    request
-                    for request in requests
-                    if request.load_spec is not None and not request.load_spec.layerwise_previous_step
-                ]
-            )
-            self._process_load_for_layer_batch_impl(
-                selected_requests,
-                layer_id,
-                group_id,
-                layer_idx_in_group,
-                cache_entry_indices=indices,
-                restore_reused=restore_reused,
-            )
-
-    def _process_load_for_layer_batch_impl(
-        self,
-        requests: list[ReqMeta],
-        layer_id: int,
-        group_id: int = 0,
-        layer_idx_in_group: int = 0,
-        *,
-        cache_entry_indices: tuple[int, ...] | None = None,
-        restore_reused: bool | None = None,
-    ) -> None:
-        if restore_reused is None:
-            restore_reused = self.layerwise_offload and layer_id not in self.independent_layers
         block_size = get_group_block_size(self.grouped_block_size, group_id)
         request_block_ranges = []
         for request in requests:
@@ -1637,7 +1599,11 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 block_size,
                 self.hash_block_size,
             )
-            load_start_block = request.load_spec.vllm_cached_tokens // block_size if not restore_reused else 0
+            load_start_block = (
+                request.load_spec.vllm_cached_tokens // block_size
+                if not self.layerwise_offload or layer_id in self.independent_layers
+                else 0
+            )
             cached_full_blocks = cached_tokens // block_size
             full_blocks = min(cached_full_blocks, len(group_block_hashes))
             if self._layerwise_load_snapshot_start(request, group_id, cached_tokens) is not None:
@@ -1649,7 +1615,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 block_size,
                 len(group_block_hashes),
             )
-            if not restore_reused:
+            if not self.layerwise_offload or layer_id in self.independent_layers:
                 partial_block_index = None
             partial_gva = (
                 request.partial_load_gva_per_group[group_id]
@@ -1712,7 +1678,6 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                     block_ranges=request_block_ranges,
                     group_id=group_id,
                     layer_idx_in_group=layer_idx_in_group,
-                    cache_entry_indices=cache_entry_indices,
                     use_key_major_ranges=self.use_block_key_layerwise,
                     final_group_layer=layer_idx_in_group
                     == getattr(self, "group_num_layers", {}).get(group_id, self.num_layers) - 1,

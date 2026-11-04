@@ -134,9 +134,9 @@ For the 48-layer Qwen4Exp configuration:
 | --- | --- | --- |
 | QSA main KV | Shared `r0` region | Save before reuse; restore before computation |
 | GDN conv and SSM | Two views of the same shared `r0` page | Restore and save both state components |
-| Compressed indexer | Original per-layer `r5` region | Retain in HBM; pool normally and restore missing external prefixes |
-| Raw indexer | Original per-layer `r4` region | Retain in HBM; preserve its non-prefix-cacheable lifetime |
-| PLE | Original private allocation | Retain in HBM and preserve existing state pooling |
+| Compressed indexer | Original per-layer `r5` region | Normal group save/load, including running-step restores |
+| Raw indexer | Original per-layer `r4` region | Preserve the existing non-prefix-cacheable lifetime |
+| PLE | Original private allocation | Preserve existing state pooling |
 
 The main/state assignments are `(0,)`, `(1, 3, ..., 47)`, and
 `(2, 4, ..., 46)`. Layer `i >= 3` waits for layer `i - 2` to finish saving
@@ -144,24 +144,18 @@ before its shared buffer is overwritten. A QSA main owner and its indexers
 can use different slab ordinals without changing their page formats.
 
 This mode preserves the original packed allocation, descriptor sizes, block
-strides, and all resident indexers. It does **not** reduce allocated HBM or
+strides, and per-layer indexer regions. It does **not** reduce allocated HBM or
 increase `num_blocks`. The shared buffers plus independent layers must fit in
 the existing slab count (12 for this configuration). Omitting the shared-buffer
 count or setting independent layers to `"all"` disables reuse. Excluded
 persistent draft owners are not supported by this packed reuse path.
 
-Compressed indexers remain part of the pooled QSA group. Running-step restores
-select only reused main entries, retaining each entry's original DRAM offset;
-external prefix restores can also load missing indexer entries. The raw
-indexer's `prefix_cacheable=False` flag is unchanged: this mode does not turn
-raw ring contents into reusable prefix blocks or add a raw-state snapshot
-protocol.
-
-The Qwen-specific startup message is:
-
-```text
-Qwen layerwise KV cache reuse binds ... layers to ... main/state slots; indexers and packed backing geometry remain resident.
-```
+Compressed indexers remain part of the pooled QSA group. Both running-step
+and external-prefix loads use the normal group transfer, including main KV
+and compressed indexer entries. There is no Qwen-specific entry filter or
+resident-indexer exception. The raw indexer's `prefix_cacheable=False` flag
+is unchanged: raw ring contents follow the existing private-state lifecycle,
+not prefix-block reuse. This mode adds no raw-state snapshot protocol.
 
 Before deploying this configuration, validate multi-step decode, chunked
 prefill, prefix hits, request preemption, and graph execution on the target NPU

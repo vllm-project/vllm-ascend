@@ -1,5 +1,5 @@
 pr: 20949
 entries:
   - category: feature
-    text: Added opt-in Qwen4Exp main KV and GDN state layerwise reuse on the GVA cache-pool path while retaining resident indexers and the original packed allocations.
+    text: Added opt-in Qwen4Exp main KV and GDN state layerwise reuse on the GVA cache-pool path with normal indexer offload and unchanged packed allocations.
     model: qwen4-exp

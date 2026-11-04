@@ -91,7 +91,6 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     allocate_shared_indexer_cache,
     get_layerwise_reuse_config,
-    get_qwen4_layerwise_slot_map,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
@@ -99,9 +98,11 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
-from vllm_ascend.models.qwen4_exp.cache_config import (
+from vllm_ascend.models.qwen4_exp.cache_config import build_qwen4_kv_cache_layout
+from vllm_ascend.models.qwen4_exp.layerwise import (
     allocate_qwen4_cache,
-    build_qwen4_kv_cache_layout,
+    bind_qwen4_layerwise_cache_layout,
+    get_qwen4_layerwise_slot_map,
     view_qwen4_cache,
 )
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
@@ -1685,8 +1686,12 @@ def _reshape_kv_cache_v2(
     qwen4_cache_layout = build_qwen4_kv_cache_layout(
         kv_cache_config.kv_cache_groups,
         kv_cache_config.num_blocks,
-        cache_slot_map=get_qwen4_layerwise_slot_map(kv_cache_config, vllm_config),
     )
+    if qwen4_cache_layout is not None:
+        qwen4_cache_layout = bind_qwen4_layerwise_cache_layout(
+            qwen4_cache_layout,
+            get_qwen4_layerwise_slot_map(kv_cache_config, vllm_config),
+        )
     layer_tuple_strides: dict[str, int] = {}
     if is_deepseek_v41_cache(layer_kv_cache_spec):
         layer_tuple_strides = {

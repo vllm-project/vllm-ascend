@@ -103,6 +103,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.models.layerwise import get_model_layerwise_handler
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -1228,17 +1229,17 @@ class NPUWorker(WorkerBase):
         num_layers = len(physical_layers)
         if num_layers < base_layers:
             return num_layers, num_layers, 1.0
-        reuse_layout = build_layerwise_reuse_layout(
+        handler = get_model_layerwise_handler(self.model_config)
+        build_layout = handler.build_reuse_layout if handler is not None else build_layerwise_reuse_layout
+        reuse_layout = build_layout(
             target_specs,
             base_layers,
             extra_config,
         )
         if not reuse_layout.has_layer_reuse:
             return num_layers, num_layers, 1.0
-        if reuse_layout.cache_slot_map:
-            # Qwen retains its packed allocation and all resident indexers.
-            # Aliasing r0 views does not reduce the physical backing budget.
-            return num_layers, len(reuse_layout.buffer_slots), 1.0
+        if handler is not None and handler.memory_scale is not None:
+            return num_layers, len(reuse_layout.buffer_slots), handler.memory_scale
         num_buffer_assignments = len(reuse_layout.buffer_slots)
 
         logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())

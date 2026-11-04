@@ -920,6 +920,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.num_kv_cache_groups = 2
         worker.cacheable_group_ids = [0, 1]
         worker.hf_config = SimpleNamespace(num_hidden_layers=4)
+        worker.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=worker.hf_config))
         worker.use_layerwise_transfer = True
         worker._extra_config = {"layerwise_num_shared_buffers": 2}
         main_spec = FullAttentionSpec(

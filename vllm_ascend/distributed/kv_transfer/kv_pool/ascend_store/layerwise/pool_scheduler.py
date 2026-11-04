@@ -25,6 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_group_block_size,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
+from vllm_ascend.models.layerwise import get_model_layerwise_handler
 
 
 class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
@@ -86,7 +87,9 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _init_layerwise_offload(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, extra_config) -> Any:
         reuse_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
         if kv_cache_config is not None and reuse_config is not None:
-            reuse_layout = build_layerwise_reuse_layout(
+            handler = get_model_layerwise_handler(vllm_config.model_config)
+            build_layout = handler.build_reuse_layout if handler is not None else build_layerwise_reuse_layout
+            reuse_layout = build_layout(
                 get_layerwise_kv_cache_specs(kv_cache_config),
                 self.num_layers,
                 reuse_config,

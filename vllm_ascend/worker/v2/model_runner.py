@@ -95,6 +95,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     init_sparse_kv_offload_manager,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
+from vllm_ascend.models.layerwise import get_model_layerwise_handler
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
     runtime_guard_step,
@@ -426,7 +427,13 @@ class NPUModelRunner(GPUModelRunner):
         # P also needs persistent prompt draft KV until D acknowledges its
         # transfer. It must never alias target layerwise scratch buffers.
         persistent_draft_names = resident_draft_names | set(getattr(kv_cache_config, "dspark_draft_layer_names", ()))
-        apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config, excluded_layer_names=persistent_draft_names)
+        handler = get_model_layerwise_handler(self.model_config)
+        apply_layerwise_kv_cache_plan(
+            kv_cache_config,
+            self.vllm_config,
+            excluded_layer_names=persistent_draft_names,
+            model_specific_plan=handler.apply_plan if handler is not None else None,
+        )
         if sparse_cfg.enabled:
             self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
                 self.vllm_config, kv_cache_config, sparse_cfg
