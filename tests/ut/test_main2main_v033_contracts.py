@@ -52,6 +52,61 @@ class ArrayBuffer:
 
 
 class TestMain2MainContracts(unittest.TestCase):
+    def test_310p_initialization_forwards_versioned_graph_shapes(self):
+        path = ROOT / "vllm_ascend/_310p/worker/v2/model_runner.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        assignment = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Assign)
+            and isinstance(n.value, ast.Call)
+            and isinstance(n.value.func, ast.Name)
+            and n.value.func.id == "ModelAclGraphManager310"
+        )
+        module = ast.fix_missing_locations(ast.Module(body=[assignment], type_ignores=[]))
+        for release in (False, True):
+            for query_len in (1, 4):
+                with self.subTest(release=release, query_len=query_len):
+                    shapes = {query_len: 8, query_len + 1: 4}
+
+                    def construct(
+                        config,
+                        device,
+                        mode,
+                        query_shapes,
+                        runner,
+                        *,
+                        release=release,
+                        query_len=query_len,
+                        shapes=shapes,
+                        **kwargs,
+                    ):
+                        if release:
+                            self.assertEqual(query_shapes, query_len)
+                        else:
+                            # The new upstream initializer requires this mapping.
+                            self.assertEqual(dict(query_shapes.items()), shapes)
+                        self.assertEqual(kwargs["lora_capture_cases"], [0, 2])
+                        return object()
+
+                    config = SimpleNamespace(get_decode_cudagraph_query_lens=MagicMock(return_value=shapes))
+                    runner = SimpleNamespace(
+                        vllm_config=config, device=object(), decode_query_len=query_len, lora_capture_cases=[0, 2]
+                    )
+                    exec(
+                        compile(module, str(path), "exec"),
+                        {
+                            "self": runner,
+                            "cudagraph_mode": object(),
+                            "ModelAclGraphManager310": construct,
+                            "vllm_version_is": lambda _, release=release: release,
+                        },
+                    )
+                    if release:
+                        config.get_decode_cudagraph_query_lens.assert_not_called()
+                    else:
+                        config.get_decode_cudagraph_query_lens.assert_called_once_with(query_len)
+
     def test_graph_mapping_preserves_request_limits_and_decode_sizes(self):
         path = "vllm_ascend/worker/v2/spec_decode/target_dependent_ar/aclgraph.py"
         for release in (False, True):
