@@ -1,13 +1,22 @@
-﻿# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 # This file is a part of the vllm-ascend project.
 """Model Runner V2: mask EOS while a request is inside its think block.
 
 V2 companion to ``vllm_ascend/sample/thinking_eos_mask.py`` (see that module
 and upstream vllm#55420 for the rationale). Patches the V2 sampler's
 ``ThinkingBudgetState`` construction so the masked subclass is used; the
-kernelized budget path (``apply_thinking_budget``) is left untouched, and a
-Python-side scan mirrors the V1 holder to track ``in_think`` per request and
-mask the configured EOS ids on every logits row of in-think requests.
+stock kernelized budget path is left untouched, and the mask itself runs
+as NPU Triton kernels
+(``vllm_ascend/ops/triton/v2/sample/thinking_eos_mask.py``):
+
+- a marker-cache kernel incrementally tracks the last reasoning-start /
+  natural-or-implicit end position in the committed token history,
+  mirroring the upstream budget path, so the Python-side per-request D2H
+  scan is gone;
+- a per-row kernel masks the configured EOS token ids to ``-inf`` on every
+  logits row of in-think requests: plain decode, bonus and spec-decode
+  verify rows alike, so with MTP enabled EOS can neither be sampled nor
+  drafted-and-accepted mid-think.
 
 Enabled by the same env vars as the V1 path:
 ``VLLM_ASCEND_THINKING_MASK_EOS_TOKEN_IDS`` (unset keeps stock behavior) and
@@ -23,6 +32,9 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 
 from vllm_ascend import envs
+from vllm_ascend.ops.triton.v2.sample.thinking_eos_mask import (
+    apply_thinking_eos_mask,
+)
 
 
 def _parse_token_ids(raw):
@@ -43,101 +55,66 @@ class ThinkingEosMaskV2State(ThinkingBudgetState):
 
     def __init__(self, req_states, reasoning_config):
         super().__init__(req_states, reasoning_config)
-        self._eos_mask_token_ids = _parse_token_ids(
-            envs.VLLM_ASCEND_THINKING_MASK_EOS_TOKEN_IDS
-        )
-        self._implicit_end_token_ids = _parse_token_ids(
-            envs.VLLM_ASCEND_THINKING_MASK_IMPLICIT_END_TOKEN_IDS
-        )
+        self._eos_mask_token_ids = _parse_token_ids(envs.VLLM_ASCEND_THINKING_MASK_EOS_TOKEN_IDS)
+        self._implicit_end_token_ids = _parse_token_ids(envs.VLLM_ASCEND_THINKING_MASK_IMPLICIT_END_TOKEN_IDS)
         self._mask_enabled = bool(self._eos_mask_token_ids) and self.enabled
-        # CPU copies of the marker id lists (the parent keeps device
-        # tensors); snapshot once here to avoid per-step device syncs.
-        self._start_ids_cpu = (
-            self.reasoning_start_token_ids.tolist() if self.enabled else []
+        if not self._mask_enabled:
+            return
+
+        self._eos_mask_token_ids_gpu = torch.tensor(self._eos_mask_token_ids, dtype=torch.int32, device=self.device)
+        # Implicit end markers are single tokens and can be absent; the
+        # kernel handles the empty list (zero static-range iterations).
+        self._implicit_end_token_ids_gpu = torch.tensor(
+            self._implicit_end_token_ids, dtype=torch.int32, device=self.device
         )
-        self._end_ids_cpu = (
-            self.natural_reasoning_end_token_ids.tolist() if self.enabled else []
-        )
+
+        # Marker caches owned by the mask path; separate from the budget
+        # path's because the mask tracks every request, not only the
+        # requests that set a thinking budget.
+        self._mask_cached_last_start = torch.full((self.max_num_reqs,), -1, dtype=torch.int32, device=self.device)
+        self._mask_cached_last_end = torch.full((self.max_num_reqs,), -1, dtype=torch.int32, device=self.device)
+        self._mask_cached_scan_pos = torch.zeros(self.max_num_reqs, dtype=torch.int32, device=self.device)
+        self._mask_reset_reqs: list[int] = []
 
     def add_request(self, req_idx, sampling_params):
         budget_used = super().add_request(req_idx, sampling_params)
         if self._mask_enabled:
             # Every request needs the logits-processing path so that
             # apply() can run the mask.
+            self._mask_reset_reqs.append(req_idx)
             return True
         return budget_used
 
+    def apply_staged_writes(self):
+        super().apply_staged_writes()
+        if self._mask_enabled and self._mask_reset_reqs:
+            idx = async_tensor_h2d(self._mask_reset_reqs, dtype=torch.int64, device=self.device)
+            self._mask_cached_last_start.index_fill_(0, idx, -1)
+            self._mask_cached_last_end.index_fill_(0, idx, -1)
+            self._mask_cached_scan_pos.index_fill_(0, idx, 0)
+            self._mask_reset_reqs.clear()
+
     def apply(self, logits, ctx):
-        # Budget-exhaustion forcing path unchanged.
+        # Budget-exhaustion forcing path unchanged; it launches before the
+        # mask kernels, so when both configure the same token id the mask
+        # wins - matching the V1 holder's ordering (parent forcing first,
+        # then the EOS mask).
         super().apply(logits, ctx)
-        if self._mask_enabled:
-            self._mask_eos_in_think(logits, ctx)
-
-    def _mask_eos_in_think(self, logits, ctx):
-        idx_mapping_np = ctx.idx_mapping_np
-        num_rows = logits.shape[0]
-        # A row maps to a request via idx_mapping (bonus/decode rows) or via
-        # expanded_idx_mapping (spec-decode verify rows); fall back to the
-        # plain mapping when the expanded one is absent.
-        row_req = getattr(ctx, "expanded_idx_mapping", None)
-        if row_req is None or row_req.shape[0] != num_rows:
-            row_req = idx_mapping_np
-        row_req = row_req[:num_rows]
-
-        # Refresh in_think once per request per call (a request can own
-        # several rows under spec decode).
-        in_think_cache: dict = {}
-        rows = []
-        for row in range(num_rows):
-            req_idx = row_req[row]
-            if req_idx < 0:
-                continue
-            if req_idx not in in_think_cache:
-                in_think_cache[req_idx] = self._refresh_in_think(req_idx)
-            if in_think_cache[req_idx]:
-                rows.append(row)
-        if not rows:
+        if not self._mask_enabled:
             return
-        flat_rows = [row for row in rows for _ in self._eos_mask_token_ids]
-        flat_tokens = [
-            token for _ in rows for token in self._eos_mask_token_ids
-        ]
-        rows_tensor = async_tensor_h2d(flat_rows, dtype=torch.long, device=logits.device)
-        tokens_tensor = async_tensor_h2d(
-            flat_tokens, dtype=torch.long, device=logits.device
-        )
-        fill = logits.new_full((len(flat_rows),), float("-inf"))
-        logits.index_put_((rows_tensor, tokens_tensor), fill)
-
-    def _refresh_in_think(self, req_idx) -> bool:
-        """Recompute in_think from the committed token history.
-
-        Mirrors the V1 holder's last-occurrence semantics: in think iff the
-        last think-start marker occurs after every think-end / implicit-end
-        marker. ``total_len`` / ``all_token_ids`` are StagedWriteTensors with
-        a device-side ``.gpu`` view only, so each refresh pays one small
-        D2H copy per active request per step; acceptable for the benchmark
-        scale this patch targets. A device-side marker kernel (as upstream
-        vllm#55420 discusses) is the production-throughput follow-up.
-        """
-        total_len = int(self.req_states.total_len.gpu[req_idx].item())
-        tokens = (
-            self.req_states.all_token_ids.gpu[req_idx, :total_len].cpu().tolist()
-        )
-        last_start = self._rfind_marker(tokens, self._start_ids_cpu)
-        last_end = max(
-            self._rfind_marker(tokens, self._end_ids_cpu),
-            self._rfind_marker(tokens, self._implicit_end_token_ids),
-        )
-        return last_start > last_end
-
-    @staticmethod
-    def _rfind_marker(tokens, marker_ids):
-        if not marker_ids:
-            return -1
-        return max(
-            (pos for pos, token in enumerate(tokens) if token in marker_ids),
-            default=-1,
+        apply_thinking_eos_mask(
+            logits,
+            ctx.idx_mapping,
+            ctx.expanded_idx_mapping,
+            self.req_states.all_token_ids.gpu,
+            self.req_states.total_len.gpu,
+            self._mask_cached_last_start,
+            self._mask_cached_last_end,
+            self._mask_cached_scan_pos,
+            self.reasoning_start_token_ids,
+            self.natural_reasoning_end_token_ids,
+            self._implicit_end_token_ids_gpu,
+            self._eos_mask_token_ids_gpu,
         )
 
 

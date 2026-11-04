@@ -7,4 +7,8 @@ entries:
       field. Enabled with VLLM_ASCEND_THINKING_MASK_EOS_TOKEN_IDS; implicit
       think-end markers (e.g. the Qwen3 tool-call start token) can be
       declared with VLLM_ASCEND_THINKING_MASK_IMPLICIT_END_TOKEN_IDS.
-      Covers both model runners and works with speculative decoding.
+      Covers both model runners and works with speculative decoding. On the
+      V2 model runner the mask runs as NPU Triton kernels (an incremental
+      per-request marker cache plus a per-row mask kernel mirroring the
+      thinking-budget path), so no per-step device-to-host token scan is
+      involved.
