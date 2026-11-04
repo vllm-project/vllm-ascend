@@ -80,24 +80,6 @@ kv_transfer_config = KVTransferConfig(
 )
 ```
 
-### Replicated MLA cache with tensor parallelism
-
-On vLLM main, `TieringOffloadingSpec` stores one shared CPU copy when all
-workers hold identical KV, including the MLA latent vectors, sparse indexer
-keys, and their quantization scales. This covers the GLM-5 MLA/DSA family,
-including GLM-5.2 and GLM-5.3, under single-node multiprocessing with TP > 1
-and PP = PCP = DCP = 1. No additional option is required. The backend must
-publish the replication metadata for every cache in the group.
-
-At TP8, a 50 GiB CPU primary tier can therefore hold approximately 50 GiB
-of distinct MLA KV rather than 6.25 GiB, before page alignment and metadata
-overheads. IndexShare changes how many indexer pages are stored, so capacity
-must include the actual indexer layers rather than assuming one per MLA layer.
-
-`CPUOffloadingSpec` uses process-local pinned tensors on Ascend and keeps
-one copy per worker. Hybrid models containing sharded linear-attention
-state, such as GLM-5.3-Flash, do not qualify for whole-worker replication.
-
 ## Configuration Parameters
 
 - `kv_connector`: Must be set to `"OffloadingConnector"`.

@@ -1,7 +1,0 @@
-pr: 20766
-entries:
-  - category: bugfix
-    text: >-
-      Fixed duplicated CPU-tier KV storage for replicated MLA and sparse-indexer
-      caches under single-node tensor parallelism with TieringOffloadingSpec,
-      including GLM-5.2, GLM-5.3, and DeepSeek-V3.2.
