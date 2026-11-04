@@ -226,8 +226,8 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
         self.model_update_group = None
         self._state = "ready"
 
-    # Mirror NCCLTrainerWeightTransferEngine.trainer_init orchestration until
-    # upstream exposes a hook for the endpoint opener and worker init-info type.
+    # Keep local rendezvous orchestration for v0.32 compatibility and failure
+    # cleanup. Adopting newer vLLM initialization hooks is a separate change.
     @classmethod
     def trainer_init(  # type: ignore[override]
         cls,
