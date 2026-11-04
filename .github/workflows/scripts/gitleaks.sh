@@ -28,6 +28,15 @@ if [[ -n "${GITHUB_BASE_REF}" ]]; then
     # nothing to inspect. Scan the commits that the pull request adds to the
     # base branch instead, so a leaked credential in the diff fails the job.
     BASE_REF="refs/remotes/origin/${GITHUB_BASE_REF}"
+    if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+        # A depth-1 pull_request checkout lacks both the base ref and the
+        # ancestry required for a correct incremental scan. Restore the full
+        # history instead of computing a merge base from a shallow boundary.
+        git fetch --no-tags --unshallow origin \
+            "+${GITHUB_BASE_REF}:${BASE_REF}" "$(git rev-parse HEAD)"
+    elif ! git rev-parse --verify --quiet "${BASE_REF}" > /dev/null; then
+        git fetch --no-tags origin "+${GITHUB_BASE_REF}:${BASE_REF}"
+    fi
     if ! git rev-parse --verify --quiet "${BASE_REF}" > /dev/null; then
         echo "::error::Cannot resolve the base branch ref '${BASE_REF}'."
         echo "::error::The secret scan cannot determine which commits to scan."
