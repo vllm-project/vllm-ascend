@@ -20,6 +20,20 @@ Please refer to the [Supported Features List](../../user_guide/support_matrix/su
 
 Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration information.
 
+### 2.1 Model Runner V2
+
+`Qwen3.6-27B` supports Model Runner V2 with `VLLM_USE_V2_MODEL_RUNNER=1`, in both offline
+`generate()` and OpenAI-compatible server mode.
+
+Validated configuration: TP=1, FP16, eager, greedy, 16 output tokens. Model Runner V1 and Model
+Runner V2 produce identical token sequences and text, with a maximum logprob difference of
+`1.25e-06` / `1.37e-06` across two prompts. Both runners pass the repository logprob tolerance
+(`0.0689` prefill, `0.1378` decode).
+
+Known Model Runner V2 issues for the 35B-A3B MoE sibling also apply to the shared serving path:
+[#20608](https://github.com/vllm-project/vllm-ascend/issues/20608) (prefill host overhead) and
+[#20609](https://github.com/vllm-project/vllm-ascend/issues/20609) (batch size greater than one).
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight

@@ -365,7 +365,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
     - To enable MTP speculative decoding, use `--speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'`. We recommend setting num_speculative_tokens to 1. If your usage scenario involves fewer than two concurrent requests, it is recommended to enable MTP. Otherwise, it is recommended not to enable MTP.
 
-Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in [Section 10](#10-faq).
+Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in [Section 11](#11-faq).
 
 **Service Verification:**
 
@@ -479,11 +479,35 @@ Recommended tuning order:
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Monitor HBM usage for long-context workloads; keep prefix caching disabled on Atlas 300I DUO (see [Section 5.1](#51-single-node-online-deployment)). |
 | Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | In [Section 5.1](#51-single-node-online-deployment), 950DT Products and A2/A3 Series use 3 speculative tokens; the optional Atlas 300I DUO configuration uses 1. Validate stability, TTFT, TPOT, and throughput for your workload. |
 
-## 10 FAQ
+## 10 Known Issues for Model Runner V2
+
+### 10.1 Prefill TTFT regression
+
+Model Runner V2 prefill TTFT is about **25%** higher than Model Runner V1 for
+`batch=4, prompt_len=2048, max_tokens=1` with TP=2, MTP with 3 speculative tokens and ACL Graph:
+0.9867 s versus 0.7866 s median over 12 measured runs. NPU op time is 3.8% lower on Model Runner V2;
+the regression comes from the host side, where Model Runner V2 re-resolves
+`aclnnMatmulGetWorkspaceSize` and `MatMulV2_Tiling` for every MatMul while Model Runner V1 uses
+cached workspace and tiling. Tracked in
+[#20608](https://github.com/vllm-project/vllm-ascend/issues/20608).
+
+If prefill TTFT is critical, set `VLLM_USE_V2_MODEL_RUNNER=0` to use Model Runner V1.
+
+### 10.2 Batch size greater than one
+
+With more than one sequence in a scheduler batch, two identical prompts can produce different
+final token sequences from index 13 onward. The divergence exists on **both Model Runner V1 and
+Model Runner V2** and is shared by the batched speculative-decoding path. With `batch=1` the two
+runners agree within `1.21e-06`. Tracked in
+[#20609](https://github.com/vllm-project/vllm-ascend/issues/20609).
+
+For accuracy-sensitive validation, submit one request per `generate()` call until this is fixed.
+
+## 11 FAQ
 
 For common environment, installation, and general parameter issues, refer to [Public FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3.6-35B-A3B.
 
-### 10.1 Why does the service report OOM during startup or soon after accepting requests?
+### 11.1 Why does the service report OOM during startup or soon after accepting requests?
 
 **Phenomenon:** The service fails during profile run, or it starts successfully but reports OOM when real traffic arrives.
 
@@ -491,7 +515,7 @@ For common environment, installation, and general parameter issues, refer to [Pu
 
 **Solution:** Use the W8A8 model with `--quantization ascend` when possible, lower `--max-model-len`, lower `--max-num-seqs`, lower `--max-num-batched-tokens`, or reduce `--gpu-memory-utilization`. Keep `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`.
 
-### 10.2 Why does enabling prefix caching not improve performance?
+### 11.2 Why does enabling prefix caching not improve performance?
 
 **Phenomenon:** Prefix caching is enabled, but throughput or latency does not improve.
 
