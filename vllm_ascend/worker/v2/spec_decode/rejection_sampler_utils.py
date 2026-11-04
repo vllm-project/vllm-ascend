@@ -20,6 +20,7 @@
 from typing import Any, cast
 
 import torch
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import _TL_RAND_MIN
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
@@ -42,157 +43,83 @@ from vllm_ascend.ops.triton.spec_decode.entropy_verify import (
 from vllm_ascend.ops.triton.spec_decode.resample import resample
 from vllm_ascend.utils import vllm_version_is
 
+logger = init_logger(__name__)
 
-def _current_stream_handle(device: torch.device) -> int:
-    """Best-effort raw handle of the current stream.
 
-    Scratch reuse is bound to a single stream; callers running on another
-    stream fall back to per-call allocations. Returns 0 when the handle
-    cannot be determined (e.g. CPU test runs), which keeps one shared slot
-    per device — the worker enqueues all sampler kernels on its single
-    compute stream.
+@triton.jit(do_not_specialize=["n_reqs", "n_logits", "total_logits"])
+def _pack_rejection_sample_metadata_kernel(
+    # [n_reqs + 1] -> [MAX_REQS + 1]
+    cu_src_ptr,
+    cu_dst_ptr,
+    # [n_reqs] -> [MAX_REQS]
+    idx_src_ptr,
+    idx_dst_ptr,
+    # [n_logits] -> [MAX_LOGITS]
+    exp_idx_src_ptr,
+    exp_idx_dst_ptr,
+    # [n_logits] -> [MAX_LOGITS]
+    elp_src_ptr,
+    elp_dst_ptr,
+    # [n_logits] -> [MAX_LOGITS]
+    pos_src_ptr,
+    pos_dst_ptr,
+    # [n_logits] -> [MAX_LOGITS + 1]
+    draft_sampled_src_ptr,
+    draft_sampled_dst_ptr,
+    # [MAX_REQS] -> [MAX_REQS]
+    temp_src_ptr,
+    temp_dst_ptr,
+    # [MAX_REQS] -> [MAX_REQS]
+    seed_src_ptr,
+    seed_dst_ptr,
+    n_reqs,
+    n_logits,
+    total_logits,
+    MAX_REQS: tl.constexpr,
+    MAX_LOGITS: tl.constexpr,
+    BLOCK: tl.constexpr,
+    NUM_SPEC_STEPS: tl.constexpr,
+):
+    """Copy the small rejection-sampling inputs into the static graph buffers.
+
+    One launch replaces eight ``copy_``/``fill_`` dispatches. Each program
+    handles one segment; lanes past the live region receive the padding value
+    that turns padded requests into no-ops for the captured kernels.
     """
-    npu = getattr(torch, "npu", None)
-    cuda = getattr(torch, "cuda", None)
-    try:
-        if npu is not None and device.type == "npu":
-            stream = npu.current_stream(device)
-        elif cuda is not None and device.type == "cuda":
-            stream = cuda.current_stream(device)
-        else:
-            return 0
-    except Exception:
-        return 0
-    return int(getattr(stream, "npu_stream", None) or getattr(stream, "cuda_stream", None) or 0)
-
-
-class _StatsWorkspace:
-    """Single-slot scratch set for the rejection-sampling statistics.
-
-    Bound to one ``(device, stream, vocab_num_blocks)`` layout and reused
-    across steps. Safety contract:
-
-    - Every scratch cell that is read is written earlier in the same step.
-      The stats kernel's grid covers exactly the ``[num_logits,
-      vocab_num_blocks]`` cells it stores unconditionally, the rejection
-      kernel stores both logsumexp cells for every request before any
-      consumer runs, and the resample/finalize kernels mask their block
-      loads with ``blocks < num_blocks`` and never index beyond the live
-      ranges — so residue from a larger previous batch is never read.
-    - All producers and consumers are enqueued on the bound stream, so the
-      next step's overwrites are stream-ordered after this step's reads; no
-      synchronization is required.
-    - Row slicing of the capacity tensors keeps the underlying layout:
-      ``t[:n]`` of a ``(cap, blocks)`` tensor has the same ``(blocks, 1)``
-      strides the kernels expect from a fresh ``(n, blocks)`` allocation.
-    - Growth replaces the tensors instead of accumulating; the caching
-      allocator recycles the released blocks for same-stream allocations
-      only, which the stream binding above guarantees. Capacity is bounded
-      by the runner's batch limits (``max_num_seqs x (num_speculative_steps
-      + 1)`` logits rows).
-    """
-
-    __slots__ = (
-        "device",
-        "stream",
-        "vocab_num_blocks",
-        "logits_cap",
-        "reqs_cap",
-        "_tensors",
-    )
-
-    def __init__(
-        self,
-        device: torch.device,
-        stream: int,
-        vocab_num_blocks: int,
-    ) -> None:
-        self.device = device
-        self.stream = stream
-        self.vocab_num_blocks = vocab_num_blocks
-        self.logits_cap = 0
-        self.reqs_cap = 0
-        self._tensors: tuple[torch.Tensor, ...] | None = None
-
-    def matches(
-        self,
-        device: torch.device,
-        stream: int,
-        vocab_num_blocks: int,
-    ) -> bool:
-        return self.device == device and self.stream == stream and self.vocab_num_blocks == vocab_num_blocks
-
-    def acquire(self, num_logits: int, num_reqs: int) -> tuple[torch.Tensor, ...]:
-        if num_logits > self.logits_cap or num_reqs > self.reqs_cap:
-            cap_l = max(num_logits, self.logits_cap * 2)
-            cap_r = max(num_reqs, self.reqs_cap * 2)
-            device = self.device
-            blocks = self.vocab_num_blocks
-            self._tensors = (
-                torch.empty((cap_l, blocks), dtype=torch.int64, device=device),
-                torch.empty((cap_l, blocks), dtype=torch.float32, device=device),
-                torch.empty((cap_l, blocks), dtype=torch.float32, device=device),
-                torch.empty((cap_l, blocks), dtype=torch.float32, device=device),
-                torch.empty((cap_l, blocks), dtype=torch.float32, device=device),
-                torch.empty((cap_r,), dtype=torch.float32, device=device),
-                torch.empty((cap_r,), dtype=torch.float32, device=device),
-            )
-            self.logits_cap = cap_l
-            self.reqs_cap = cap_r
-        tensors = self._tensors
-        assert tensors is not None
-        return (
-            tensors[0][:num_logits],
-            tensors[1][:num_logits],
-            tensors[2][:num_logits],
-            tensors[3][:num_logits],
-            tensors[4][:num_logits],
-            tensors[5][:num_reqs],
-            tensors[6][:num_reqs],
-        )
-
-
-_STATS_WORKSPACE: _StatsWorkspace | None = None
-
-_DUMMY_DRAFT_LOGITS: tuple[torch.device, torch.dtype, torch.Tensor] | None = None
-
-
-def _get_workspace(
-    target_logits: torch.Tensor,
-    num_logits: int,
-    num_reqs: int,
-    vocab_num_blocks: int,
-) -> tuple[torch.Tensor, ...]:
-    device = target_logits.device
-    stream = _current_stream_handle(device)
-    global _STATS_WORKSPACE
-    workspace = _STATS_WORKSPACE
-    if workspace is not None and not workspace.matches(device, stream, vocab_num_blocks):
-        # Bound to a different device/stream: fall back to an uncached
-        # per-call allocation instead of sharing scratch across streams.
-        return (
-            target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.int64),
-            target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32),
-            target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32),
-            target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32),
-            target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32),
-            target_logits.new_empty(num_reqs, dtype=torch.float32),
-            target_logits.new_empty(num_reqs, dtype=torch.float32),
-        )
-    if workspace is None:
-        workspace = _StatsWorkspace(device, stream, vocab_num_blocks)
-        _STATS_WORKSPACE = workspace
-    return workspace.acquire(num_logits, num_reqs)
-
-
-def _get_dummy_draft_logits(target_logits: torch.Tensor) -> torch.Tensor:
-    """Placeholder pointer for the one-hot draft path; never read."""
-    global _DUMMY_DRAFT_LOGITS
-    cached = _DUMMY_DRAFT_LOGITS
-    if cached is None or cached[0] != target_logits.device or cached[1] != target_logits.dtype:
-        cached = (target_logits.device, target_logits.dtype, target_logits.new_empty(1, 1, 1))
-        _DUMMY_DRAFT_LOGITS = cached
-    return cached[2]
+    seg = tl.program_id(0)
+    lanes = tl.arange(0, BLOCK)
+    # Each segment keeps a dedicated result variable: triton-ascend requires
+    # variables assigned in every branch of an if/elif chain to share one
+    # type, and the segments mix int32/int64/fp32.
+    if seg == 0:
+        # Padded requests repeat the total, so cu_num_logits[r] == cu_num_logits[r + 1]
+        # and their token loops never execute.
+        cu_vals = tl.load(cu_src_ptr + lanes, mask=lanes <= n_reqs, other=total_logits)
+        tl.store(cu_dst_ptr + lanes, cu_vals, mask=lanes < MAX_REQS + 1)
+    elif seg == 1:
+        idx_vals = tl.load(idx_src_ptr + lanes, mask=lanes < n_reqs, other=0)
+        tl.store(idx_dst_ptr + lanes, idx_vals, mask=lanes < MAX_REQS)
+    elif seg == 2:
+        exp_idx_vals = tl.load(exp_idx_src_ptr + lanes, mask=lanes < n_logits, other=0)
+        tl.store(exp_idx_dst_ptr + lanes, exp_idx_vals, mask=lanes < MAX_LOGITS)
+    elif seg == 3:
+        # Padded logits rows claim the bonus step so the stats kernel skips them.
+        elp_vals = tl.load(elp_src_ptr + lanes, mask=lanes < n_logits, other=NUM_SPEC_STEPS)
+        tl.store(elp_dst_ptr + lanes, elp_vals, mask=lanes < MAX_LOGITS)
+    elif seg == 4:
+        pos_vals = tl.load(pos_src_ptr + lanes, mask=lanes < n_logits, other=0)
+        tl.store(pos_dst_ptr + lanes, pos_vals, mask=lanes < MAX_LOGITS)
+    elif seg == 5:
+        # One extra slot: the finalize kernel reads draft_sampled[total_logits + 1]
+        # for padded requests (their bonus test is false).
+        ds_vals = tl.load(draft_sampled_src_ptr + lanes, mask=lanes < n_logits, other=0)
+        tl.store(draft_sampled_dst_ptr + lanes, ds_vals, mask=lanes < MAX_LOGITS + 1)
+    elif seg == 6:
+        temp_vals = tl.load(temp_src_ptr + lanes, mask=lanes < MAX_REQS, other=0.0)
+        tl.store(temp_dst_ptr + lanes, temp_vals, mask=lanes < MAX_REQS)
+    else:
+        seed_vals = tl.load(seed_src_ptr + lanes, mask=lanes < MAX_REQS, other=0)
+        tl.store(seed_dst_ptr + lanes, seed_vals, mask=lanes < MAX_REQS)
 
 
 @triton.jit
@@ -580,7 +507,7 @@ def _probabilistic_rejection_kernel(
     tl.store(draft_rejected_logsumexp_ptr + req_idx, draft_lse)
 
 
-def rejection_sample(
+def _rejection_sample_impl(
     # [num_logits, V]
     target_logits: torch.Tensor,
     # [max_num_reqs, num_speculative_steps, V]
@@ -622,6 +549,9 @@ def rejection_sample(
     posterior_threshold: float = 0.95,
     posterior_alpha: float = 0.4,
     draft_logits_num_shards: int = 1,
+    # Optional output buffers for the ACL graph path; allocated when None.
+    sampled: torch.Tensor | None = None,
+    num_sampled: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Upstream passes logits after applying sampling parameters. Resolve the
     # worker configuration here to keep its sampler and chunking flow unchanged.
@@ -689,10 +619,10 @@ def rejection_sample(
     stats_num_logits = num_speculative_steps if vllm_version_is("0.32.0") else num_logits
 
     if draft_logits is None:
-        # When draft_logits is None, pass a cached dummy tensor so that Triton
+        # When draft_logits is None, create a dummy tensor so that Triton
         # kernel signatures receive valid pointers/strides. The kernels
         # will never read from it when HAS_DRAFT_LOGITS=False.
-        draft_logits = _get_dummy_draft_logits(target_logits)
+        draft_logits = target_logits.new_empty(1, 1, 1)
     else:
         # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
         # vocab size is larger than the draft's due to padding.
@@ -704,15 +634,11 @@ def rejection_sample(
     VOCAB_BLOCK_SIZE = 8192
     vocab_num_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK_SIZE)
     padded_vocab_num_blocks = triton.next_power_of_2(vocab_num_blocks)
-    (
-        target_local_argmax,
-        target_local_max,
-        target_local_sumexp,
-        draft_local_max,
-        draft_local_sumexp,
-        target_rejected_logsumexp,
-        draft_rejected_logsumexp,
-    ) = _get_workspace(target_logits, num_logits, num_reqs, vocab_num_blocks)
+    target_local_argmax = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.int64)
+    target_local_max = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
+    target_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
+    draft_local_max = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
+    draft_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
     if vllm_version_is("0.32.0"):
         _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](
             target_local_argmax,
@@ -918,6 +844,8 @@ def rejection_sample(
     # the step.
     sampled = draft_sampled.new_empty(num_reqs, num_speculative_steps + 1, dtype=torch.int64)
     num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
+    target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
+    draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     _probabilistic_rejection_kernel[(num_reqs,)](
         sampled,
         sampled.stride(0),
@@ -980,3 +908,461 @@ def rejection_sample(
         use_block_verification=use_block_verification,
     )
     return sampled, num_sampled
+
+
+class _RejectionSamplerAclGraph:
+    """Captures the four plain-path rejection sampling kernels into one ACL
+    graph and replays it once per decode step.
+
+    Per step the host side is reduced to two large copies (target/draft
+    logits into static buffers), one metadata-pack launch and a single graph
+    replay, replacing four ~200us kernel dispatches. The static buffers are
+    allocated once at capture time; padded requests become no-ops inside the
+    graph (their ``cu_num_logits`` rows repeat the total, so every loop over
+    their tokens executes zero iterations and their outputs are dropped by
+    the caller).
+
+    Safety contract:
+    - The graph only captures the plain probabilistic path (no FP64, block
+      verification, synthetic rates, sharded draft, watermarking, FLy or
+      entropy verify); every other mode is routed to the eager
+      implementation by the dispatch below.
+    - The output buffers are graph-static: consumers must complete their
+      reads before the next replay overwrites them. Upstream consumes them
+      through ``AsyncModelRunnerOutput``, which enqueues the D2H on a
+      dedicated copy stream ordered after production via ``wait_stream``,
+      and blocks in ``get_output()`` on the copy event before the scheduler
+      releases the next step — the same exposure and contract upstream
+      already applies to its own graph-static ``sampled_token_ids`` buffer.
+    - Capture failures (including stream/resource errors) permanently
+      disable the graph, release the static buffers, and fall back to eager
+      sampling.
+    """
+
+    def __init__(self) -> None:
+        self._graph = None
+        self._disabled = False
+        self._device = None
+        self._max_reqs = 0
+        self._max_logits = 0
+        self._num_speculative_steps = 0
+        self._has_draft = False
+        self._vocab = 0
+        self._target_dtype = None
+        self._draft_shape = None
+        self._pack_block = 0
+        self._cu_buf = None
+        self._idx_buf = None
+        self._exp_idx_buf = None
+        self._elp_buf = None
+        self._pos_buf = None
+        self._ds_buf = None
+        self._temp_buf = None
+        self._seed_buf = None
+        self._target_buf = None
+        self._draft_buf = None
+        self._sampled_buf = None
+        self._num_sampled_buf = None
+
+    @staticmethod
+    def _is_stream_capturing() -> bool:
+        try:
+            return bool(torch.npu.is_current_stream_capturing())
+        except AttributeError:
+            return False
+        except Exception:
+            return False
+
+    def can_use(
+        self,
+        target_logits: torch.Tensor,
+        draft_logits,
+        cu_num_logits: torch.Tensor,
+        temperature: torch.Tensor,
+        seed: torch.Tensor,
+        num_speculative_steps: int,
+    ) -> bool:
+        if self._disabled:
+            return False
+        if self._is_stream_capturing():
+            return False
+        num_reqs = cu_num_logits.shape[0] - 1
+        if num_reqs < 1:
+            return False
+        has_draft = draft_logits is not None
+        if self._graph is not None:
+            return (
+                num_speculative_steps == self._num_speculative_steps
+                and has_draft == self._has_draft
+                and target_logits.device == self._device
+                and target_logits.dtype == self._target_dtype
+                and target_logits.shape[-1] == self._vocab
+                and num_reqs <= self._max_reqs
+                and target_logits.shape[0] <= self._max_logits
+                and temperature.shape[0] == self._max_reqs
+                and seed.shape[0] == self._max_reqs
+                and (not has_draft or tuple(draft_logits.shape) == self._draft_shape)
+            )
+        # Not captured yet: check capture feasibility.
+        return target_logits.device.type == "npu" and temperature.shape[0] == seed.shape[0]
+
+    def _fill_static_inputs(
+        self,
+        target_logits: torch.Tensor,
+        draft_logits,
+        draft_sampled: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        pos: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+        temperature: torch.Tensor,
+        seed: torch.Tensor,
+    ) -> None:
+        n_reqs = cu_num_logits.shape[0] - 1
+        n_logits = target_logits.shape[0]
+        self._target_buf[:n_logits].copy_(target_logits, non_blocking=True)
+        if self._has_draft:
+            self._draft_buf.copy_(draft_logits, non_blocking=True)
+        _pack_rejection_sample_metadata_kernel[(8,)](
+            cu_num_logits,
+            self._cu_buf,
+            idx_mapping,
+            self._idx_buf,
+            expanded_idx_mapping,
+            self._exp_idx_buf,
+            expanded_local_pos,
+            self._elp_buf,
+            pos,
+            self._pos_buf,
+            draft_sampled,
+            self._ds_buf,
+            temperature,
+            self._temp_buf,
+            seed,
+            self._seed_buf,
+            n_reqs,
+            n_logits,
+            n_logits,
+            MAX_REQS=self._max_reqs,
+            MAX_LOGITS=self._max_logits,
+            BLOCK=self._pack_block,
+            NUM_SPEC_STEPS=self._num_speculative_steps,
+        )
+
+    def _capture(
+        self,
+        target_logits: torch.Tensor,
+        draft_logits,
+        draft_sampled: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        pos: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+        temperature: torch.Tensor,
+        seed: torch.Tensor,
+        num_speculative_steps: int,
+    ) -> bool:
+        try:
+            device = target_logits.device
+            max_reqs = temperature.shape[0]
+            max_logits = max_reqs * (num_speculative_steps + 1)
+            vocab = target_logits.shape[-1]
+            has_draft = draft_logits is not None
+            self._device = device
+            self._max_reqs = max_reqs
+            self._max_logits = max_logits
+            self._num_speculative_steps = num_speculative_steps
+            self._has_draft = has_draft
+            self._vocab = vocab
+            self._target_dtype = target_logits.dtype
+            self._draft_shape = tuple(draft_logits.shape) if has_draft else None
+            self._pack_block = triton.next_power_of_2(max(max_logits + 1, max_reqs + 1))
+
+            def zeros(shape, dtype):
+                return torch.zeros(shape, dtype=dtype, device=device)
+
+            self._cu_buf = zeros((max_reqs + 1,), cu_num_logits.dtype)
+            self._idx_buf = zeros((max_reqs,), idx_mapping.dtype)
+            self._exp_idx_buf = zeros((max_logits,), expanded_idx_mapping.dtype)
+            self._elp_buf = zeros((max_logits,), expanded_local_pos.dtype)
+            self._pos_buf = zeros((max_logits,), pos.dtype)
+            self._ds_buf = zeros((max_logits + 1,), draft_sampled.dtype)
+            self._temp_buf = zeros((max_reqs,), temperature.dtype)
+            self._seed_buf = zeros((max_reqs,), seed.dtype)
+            self._target_buf = zeros((max_logits, vocab), target_logits.dtype)
+            if has_draft:
+                self._draft_buf = zeros(draft_logits.shape, draft_logits.dtype)
+            self._sampled_buf = zeros((max_reqs, num_speculative_steps + 1), torch.int64)
+            self._num_sampled_buf = zeros((max_reqs,), torch.int32)
+
+            static_args = (
+                self._target_buf,
+                self._draft_buf,
+                self._ds_buf,
+                self._cu_buf,
+                self._pos_buf,
+                self._idx_buf,
+                self._exp_idx_buf,
+                self._elp_buf,
+                self._temp_buf,
+                self._seed_buf,
+                num_speculative_steps,
+                None,
+                False,
+                False,
+            )
+            # Warm up with the live batch: fills the static buffers and lets
+            # the four kernels compile with their final launch keys before
+            # recording.
+            self._fill_static_inputs(
+                target_logits,
+                draft_logits,
+                draft_sampled,
+                cu_num_logits,
+                pos,
+                idx_mapping,
+                expanded_idx_mapping,
+                expanded_local_pos,
+                temperature,
+                seed,
+            )
+            _rejection_sample_impl(
+                *static_args,
+                sampled=self._sampled_buf,
+                num_sampled=self._num_sampled_buf,
+            )
+            torch.npu.synchronize()
+            self._graph = torch.npu.NPUGraph()
+            with torch.npu.graph(self._graph):
+                # Recorded, not executed; the buffers keep the warm-up
+                # results, which the capturing step returns.
+                _rejection_sample_impl(
+                    *static_args,
+                    sampled=self._sampled_buf,
+                    num_sampled=self._num_sampled_buf,
+                )
+            logger.info(
+                "Captured rejection sampler ACL graph (num_reqs=%d, num_logits=%d, vocab=%d, draft_logits=%s)",
+                max_reqs,
+                max_logits,
+                vocab,
+                has_draft,
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                "[vllm-ascend] [worker] - Rejection sampler ACL graph capture "
+                "failed; using eager rejection sampling: %s",
+                e,
+            )
+            self._disabled = True
+            self._graph = None
+            # Release the large static buffers: the capture failed
+            # permanently and nothing else references them.
+            self._cu_buf = None
+            self._idx_buf = None
+            self._exp_idx_buf = None
+            self._elp_buf = None
+            self._pos_buf = None
+            self._ds_buf = None
+            self._temp_buf = None
+            self._seed_buf = None
+            self._target_buf = None
+            self._draft_buf = None
+            self._sampled_buf = None
+            self._num_sampled_buf = None
+            return False
+
+    def run(
+        self,
+        target_logits: torch.Tensor,
+        draft_logits,
+        draft_sampled: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        pos: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+        temperature: torch.Tensor,
+        seed: torch.Tensor,
+        num_speculative_steps: int,
+    ):
+        if self._graph is None:
+            if not self._capture(
+                target_logits,
+                draft_logits,
+                draft_sampled,
+                cu_num_logits,
+                pos,
+                idx_mapping,
+                expanded_idx_mapping,
+                expanded_local_pos,
+                temperature,
+                seed,
+                num_speculative_steps,
+            ):
+                # Capture failed: serve this step eagerly with the live tensors.
+                return _rejection_sample_impl(
+                    target_logits,
+                    draft_logits,
+                    draft_sampled,
+                    cu_num_logits,
+                    pos,
+                    idx_mapping,
+                    expanded_idx_mapping,
+                    expanded_local_pos,
+                    temperature,
+                    seed,
+                    num_speculative_steps,
+                )
+            # Capture succeeded: the warm-up run inside _capture already
+            # produced this step's outputs into the static buffers.
+            num_reqs = cu_num_logits.shape[0] - 1
+            return self._sampled_buf[:num_reqs], self._num_sampled_buf[:num_reqs]
+        # Existing graph: unconditionally refresh the static inputs and replay.
+        self._fill_static_inputs(
+            target_logits,
+            draft_logits,
+            draft_sampled,
+            cu_num_logits,
+            pos,
+            idx_mapping,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            temperature,
+            seed,
+        )
+        self._graph.replay()
+        num_reqs = cu_num_logits.shape[0] - 1
+        return self._sampled_buf[:num_reqs], self._num_sampled_buf[:num_reqs]
+
+
+_SAMPLER_ACLGRAPH = _RejectionSamplerAclGraph()
+
+
+def rejection_sample(
+    # [num_logits, V]
+    target_logits: torch.Tensor,
+    draft_logits,
+    # [num_logits]
+    draft_sampled: torch.Tensor,
+    # [num_reqs + 1]
+    cu_num_logits: torch.Tensor,
+    # [num_logits]
+    pos: torch.Tensor,
+    # [num_reqs]
+    idx_mapping: torch.Tensor,
+    # [num_logits]
+    expanded_idx_mapping: torch.Tensor,
+    # [num_logits]
+    expanded_local_pos: torch.Tensor,
+    # [max_num_reqs]
+    temperature: torch.Tensor,
+    # [max_num_reqs]
+    seed: torch.Tensor,
+    num_speculative_steps: int,
+    # [num_speculative_steps]
+    synthetic_conditional_rates: torch.Tensor | None = None,
+    use_fp64: bool = False,
+    use_block_verification: bool = False,
+    # vLLM main (#59554) forwards these watermarking kwargs when a watermark
+    # key is configured; the NPU kernels do not implement watermarking.
+    contexts: torch.Tensor | None = None,
+    watermarking: torch.Tensor | None = None,
+    watermarking_skip_mask: torch.Tensor | None = None,
+    watermark_key: int | None = None,
+    # vLLM main (#53987) added FLy, an ROCm-only entropy-gated verification
+    # mode. Accept the kwargs so the shared call site keeps working, but reject
+    # the mode itself.
+    fly_window_size: int = 0,
+    fly_entropy_threshold: float = 0.3,
+    fly_entropy_top_k: int = 3,
+    use_entropy_verify: bool | None = None,
+    posterior_threshold: float = 0.95,
+    posterior_alpha: float = 0.4,
+    draft_logits_num_shards: int = 1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if use_entropy_verify is None:
+        # Resolve the same way the eager implementation does, so the graph is
+        # only engaged when entropy verify is provably off.
+        config = get_ascend_config().rejection_sampler_config
+        use_entropy_verify = config.enable_entropy_verify
+        posterior_threshold = config.posterior_threshold
+        posterior_alpha = config.posterior_alpha
+    if (
+        use_entropy_verify
+        or use_fp64
+        or use_block_verification
+        or synthetic_conditional_rates is not None
+        or fly_window_size > 0
+        or contexts is not None
+        or watermarking is not None
+        or watermarking_skip_mask is not None
+        or watermark_key is not None
+        or draft_logits_num_shards != 1
+        # A sharded draft cache object cannot be copied into the static
+        # buffer; the eager implementation either unwraps or rejects it.
+        or (draft_logits is not None and not isinstance(draft_logits, torch.Tensor))
+    ):
+        # Non-plain modes keep the eager implementation (which rejects the
+        # unsupported ones); they never reach the captured graph. Everything
+        # past `use_block_verification` is passed by keyword: the optional
+        # graph output buffers sit after it.
+        return _rejection_sample_impl(
+            target_logits,
+            draft_logits,
+            draft_sampled,
+            cu_num_logits,
+            pos,
+            idx_mapping,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            temperature,
+            seed,
+            num_speculative_steps,
+            synthetic_conditional_rates,
+            use_fp64,
+            use_block_verification,
+            contexts=contexts,
+            watermarking=watermarking,
+            watermarking_skip_mask=watermarking_skip_mask,
+            watermark_key=watermark_key,
+            fly_window_size=fly_window_size,
+            fly_entropy_threshold=fly_entropy_threshold,
+            fly_entropy_top_k=fly_entropy_top_k,
+            use_entropy_verify=use_entropy_verify,
+            posterior_threshold=posterior_threshold,
+            posterior_alpha=posterior_alpha,
+            draft_logits_num_shards=draft_logits_num_shards,
+            sampled=None,
+            num_sampled=None,
+        )
+    if _SAMPLER_ACLGRAPH.can_use(target_logits, draft_logits, cu_num_logits, temperature, seed, num_speculative_steps):
+        return _SAMPLER_ACLGRAPH.run(
+            target_logits,
+            draft_logits,
+            draft_sampled,
+            cu_num_logits,
+            pos,
+            idx_mapping,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            temperature,
+            seed,
+            num_speculative_steps,
+        )
+    return _rejection_sample_impl(
+        target_logits,
+        draft_logits,
+        draft_sampled,
+        cu_num_logits,
+        pos,
+        idx_mapping,
+        expanded_idx_mapping,
+        expanded_local_pos,
+        temperature,
+        seed,
+        num_speculative_steps,
+    )

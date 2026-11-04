@@ -25,110 +25,6 @@ def _get_vectorcore_num() -> int:
     return _VECTORCORE_NUM
 
 
-def _current_stream_handle(device: torch.device) -> int:
-    """Best-effort raw handle of the current stream.
-
-    Scratch reuse is bound to a single stream; callers running on another
-    stream fall back to per-call allocations. Returns 0 when the handle
-    cannot be determined (e.g. CPU test runs).
-    """
-    npu = getattr(torch, "npu", None)
-    cuda = getattr(torch, "cuda", None)
-    try:
-        if npu is not None and device.type == "npu":
-            stream = npu.current_stream(device)
-        elif cuda is not None and device.type == "cuda":
-            stream = cuda.current_stream(device)
-        else:
-            return 0
-    except Exception:
-        return 0
-    return int(getattr(stream, "npu_stream", None) or getattr(stream, "cuda_stream", None) or 0)
-
-
-class _ResampleWorkspace:
-    """Single-slot scratch set for the resample/finalize kernel pair.
-
-    Bound to one ``(device, stream, num_blocks)`` layout and reused across
-    steps. Safety contract:
-
-    - Every scratch cell that is read is written earlier in the same step:
-      the resample kernel's grid covers exactly the ``[num_reqs,
-      num_blocks]`` tasks and each stores its argmax/max/mass cells
-      unconditionally, while the finalize kernel masks its block loads with
-      ``blocks < num_blocks`` and its request grid equals the live
-      ``num_reqs`` — residue from a larger previous batch is never read.
-    - Both kernels are enqueued on the bound stream, so the next step's
-      overwrites are stream-ordered after this step's reads; no
-      synchronization is required.
-    - Row slicing keeps the underlying layout: ``t[:n]`` of a
-      ``(cap, num_blocks)`` tensor has the same ``(num_blocks, 1)`` strides
-      the kernels expect from a fresh ``(n, num_blocks)`` allocation.
-    - Growth replaces the tensors instead of accumulating; the caching
-      allocator recycles released blocks for same-stream allocations only.
-      Capacity is bounded by the runner's ``max_num_seqs``.
-    """
-
-    __slots__ = (
-        "device",
-        "stream",
-        "num_blocks",
-        "reqs_cap",
-        "_tensors",
-    )
-
-    def __init__(self, device: torch.device, stream: int, num_blocks: int) -> None:
-        self.device = device
-        self.stream = stream
-        self.num_blocks = num_blocks
-        self.reqs_cap = 0
-        self._tensors: tuple[torch.Tensor, ...] | None = None
-
-    def matches(self, device: torch.device, stream: int, num_blocks: int) -> bool:
-        return self.device == device and self.stream == stream and self.num_blocks == num_blocks
-
-    def acquire(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
-        if num_reqs > self.reqs_cap:
-            cap_r = max(num_reqs, self.reqs_cap * 2)
-            device = self.device
-            blocks = self.num_blocks
-            self._tensors = (
-                torch.empty((cap_r, blocks), dtype=torch.int64, device=device),
-                torch.empty((cap_r, blocks), dtype=torch.float32, device=device),
-                torch.empty((cap_r, blocks), dtype=torch.float32, device=device),
-            )
-            self.reqs_cap = cap_r
-        tensors = self._tensors
-        assert tensors is not None
-        return (
-            tensors[0][:num_reqs],
-            tensors[1][:num_reqs],
-            tensors[2][:num_reqs],
-        )
-
-
-_RESAMPLE_WORKSPACE: _ResampleWorkspace | None = None
-
-
-def _get_workspace(target_logits: torch.Tensor, num_reqs: int, num_blocks: int) -> tuple[torch.Tensor, ...]:
-    device = target_logits.device
-    stream = _current_stream_handle(device)
-    global _RESAMPLE_WORKSPACE
-    workspace = _RESAMPLE_WORKSPACE
-    if workspace is not None and not workspace.matches(device, stream, num_blocks):
-        # Bound to a different device/stream: fall back to an uncached
-        # per-call allocation instead of sharing scratch across streams.
-        return (
-            torch.empty((num_reqs, num_blocks), dtype=torch.int64, device=device),
-            torch.empty((num_reqs, num_blocks), dtype=torch.float32, device=device),
-            torch.empty((num_reqs, num_blocks), dtype=torch.float32, device=device),
-        )
-    if workspace is None:
-        workspace = _ResampleWorkspace(device, stream, num_blocks)
-        _RESAMPLE_WORKSPACE = workspace
-    return workspace.acquire(num_reqs)
-
-
 @triton.jit(
     do_not_specialize=["num_reqs"],
     do_not_specialize_on_alignment=[
@@ -525,7 +421,9 @@ def resample(
         draft_logits = target_logits.new_empty(1, 1, 1)
 
     num_blocks = triton.cdiv(vocab_size, _RESAMPLE_BLOCK_SIZE)
-    local_argmax, local_max, local_mass = _get_workspace(target_logits, num_reqs, num_blocks)
+    local_argmax = torch.empty((num_reqs, num_blocks), dtype=torch.int64, device=target_logits.device)
+    local_max = torch.empty((num_reqs, num_blocks), dtype=torch.float32, device=target_logits.device)
+    local_mass = torch.empty((num_reqs, num_blocks), dtype=torch.float32, device=target_logits.device)
     num_workers = min(_get_vectorcore_num(), num_reqs * num_blocks)
 
     _resample_kernel[(num_workers,)](
