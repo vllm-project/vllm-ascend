@@ -12,6 +12,7 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
+from vllm_ascend.core.kv_cache_interface import MambaStateSharding
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
@@ -465,6 +466,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         group_uses_align_state: list[bool] | None = None,
         enable_kv_event: bool = False,
         worker: Any = None,
+        group_state_sharding: dict[int, MambaStateSharding] | None = None,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
@@ -478,6 +480,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.stored_requests: dict[str, set[int]] = {}
         self._next_local_store_job_id = -1
         self.group_uses_align_state = group_uses_align_state or []
+        self.group_state_sharding = {} if group_state_sharding is None else group_state_sharding
         self.enable_kv_event = enable_kv_event
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
@@ -820,6 +823,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
             #  0        1 / 3            1      1, 5, ...
             #  1        0 / 2            2      2, 6, ...
             #  1        1 / 3            3      3, 7, ...
+            shard_rank = self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas
+            shard_size = self.pcp_size * tp_replicas
+            sharding = self.group_state_sharding.get(group_id)
+            if sharding is not None:
+                shard_rank, shard_size = sharding.replica_rank, sharding.replica_count
             iterator = self.token_database.process_token_key_strings_with_block_ids(
                 token_len,
                 req_meta.block_hashes,
@@ -827,8 +835,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 kv_cache_group_id=group_id,
                 skip_null_blocks=skip_null_blocks,
                 chunk_filter=chunk_filter,
-                shard_rank=self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas,
-                shard_size=self.pcp_size * tp_replicas,
+                shard_rank=shard_rank,
+                shard_size=shard_size,
                 chunk_mask=group_store_mask,
             )
             for start, end, key, block_hash, block_id in iterator:

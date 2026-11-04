@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import divide, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import (
@@ -32,6 +32,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
+from vllm_ascend.models.glm5next.parallel import get_kda_parallel_size
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
@@ -43,14 +44,6 @@ class Glm5NextGDNHostMetadataBackend(AscendGDNHostMetadataBackend):
         # The GLM KDA layer gathers PCP prefill tokens before its head-sharded
         # recurrent update and restores the PCP-local output afterward.
         return True
-
-
-def get_kda_parallel_size(parallel_config: ParallelConfig) -> int:
-    """Use PCP head sharding only when tensor parallelism is disabled."""
-    # TODO: Support joint TP * PCP head partitioning for projections and state.
-    if parallel_config.tensor_parallel_size == 1:
-        return parallel_config.prefill_context_parallel_size
-    return parallel_config.tensor_parallel_size
 
 
 class PCPColumnParallelLinear(ColumnParallelLinear):

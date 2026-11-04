@@ -122,6 +122,7 @@ def make_worker(
     cache_block_size=16,
     use_recoverssm=False,
     mamba_copy_funcs=None,
+    mamba_state_sharding=None,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
@@ -176,8 +177,9 @@ def make_worker(
     config.cache_config.block_size = cache_block_size
     config.cache_config.prefix_match_unit = prefix_match_unit
     config.cache_config.use_kda_recoverssm = use_recoverssm
+    model_cls = start_patch(test, f"{module}.get_model_cls").return_value
+    model_cls.get_mamba_state_sharding = mamba_state_sharding
     if use_recoverssm:
-        model_cls = start_patch(test, f"{module}.get_model_cls").return_value
         if mamba_copy_funcs is None:
             model_cls.get_mamba_state_copy_funcs.side_effect = lambda mamba_types: {
                 backend: MambaStateCopyFuncCalculator.kda_state_copy_func() for backend in mamba_types

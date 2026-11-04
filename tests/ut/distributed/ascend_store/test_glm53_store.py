@@ -34,6 +34,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_groups,
     get_glm5_next_pool_bytes_per_block,
 )
+from vllm_ascend.models.glm5next.parallel import get_kda_state_sharding
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
@@ -44,7 +45,7 @@ def make_glm53_plan(layer_offset=0, *, use_recoverssm=False):
         parts = name.split(".")
         parts[2] = str(int(parts[2]) + layer_offset)
         if isinstance(spec, MambaSpec):
-            spec = replace(spec, mamba_cache_mode="align")
+            spec = replace(spec, mamba_cache_mode="align", mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
             if use_recoverssm:
                 spec = replace(
                     spec,
@@ -190,10 +191,13 @@ class TestGLM53Store(unittest.TestCase):
         hashes = [bytes([i]) * 32 for i in (1, 2)]
         source = [[1, 2], [3], [4, 5], [6, 7], [8, 9]]
         target = [[10, 11], [12], [13, 14], [15, 16], [17, 18]]
-        for tp_size, load_async in ((1, False), (1, True), (2, False), (2, True)):
+        transfer_modes = [(1, 1, False), (1, 1, True), (2, 1, False), (2, 1, True), (1, 2, False)]
+        if not use_recoverssm:
+            transfer_modes.append((2, 2, False))
+        for tp_size, pcp_size, load_async in transfer_modes:
             if use_recoverssm and load_async:
                 continue
-            with self.subTest(tp_size=tp_size, load_async=load_async):
+            with self.subTest(tp_size=tp_size, pcp_size=pcp_size, load_async=load_async):
                 stored: dict[str, list[bytes]] = {}
                 workers = []
 
@@ -209,16 +213,28 @@ class TestGLM53Store(unittest.TestCase):
                             ctypes.memmove(address, payload, length)
                     return [0] * len(keys)
 
-                for rank in range(tp_size):
+                for rank in range(tp_size * pcp_size):
+                    tp_rank, pcp_rank = divmod(rank, pcp_size)
+
+                    def mamba_state_sharding(parallel_config, tp_rank, pcp_rank):
+                        return {
+                            MambaAttentionBackendEnum.GDN_ATTN: get_kda_state_sharding(
+                                parallel_config, tp_rank, pcp_rank
+                            )
+                        }
+
                     worker = make_worker(
                         self,
                         kv_cache_config=plan,
                         use_mla=True,
                         num_layers=4,
                         tp_size=tp_size,
-                        tp_rank=rank,
+                        tp_rank=tp_rank,
+                        pcp_size=pcp_size,
+                        pcp_rank=pcp_rank,
                         extra_config={"load_async": load_async},
                         use_recoverssm=use_recoverssm,
+                        mamba_state_sharding=mamba_state_sharding,
                     )
                     caches = make_glm53_caches(plan)
                     worker.m_store.requires_exists_before_put = False
@@ -236,7 +252,8 @@ class TestGLM53Store(unittest.TestCase):
                         all(address > 0 for row in worker.group_kv_caches_base_addr.values() for address in row)
                     )
                     self.assertEqual(worker.group_block_len[0], [512 * 512 * 2, 128 * 128 * 2])
-                    self.fill_caches(plan, caches, source, target, rank)
+                    state_rank = pcp_rank if tp_size == 1 else tp_rank
+                    self.fill_caches(plan, caches, source, target, state_rank)
                     metadata = self.make_metadata(source, hashes)
                     worker.wait_for_save(metadata)
                     worker.wait_for_previous_save()
@@ -257,7 +274,7 @@ class TestGLM53Store(unittest.TestCase):
                     self.assertTrue(worker.m_store.get.called)
                     masks = worker.token_database.load_mask(hashes, 1024)
                     self.assert_restored(worker, caches, source, target, masks)
-                for rank in range(tp_size):
+                for rank in range(workers[0][0].get_group_tp_size(4)):
                     missing = next(
                         key
                         for key in stored
