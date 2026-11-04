@@ -23,9 +23,8 @@ from tests.e2e.pull_request.kv_pool_watch import run_pool_hit_sequence
 MODEL = os.environ.get("DEEPSEEK_V4_1_FLASH_MODEL_PATH", "Eco-Tech/DeepSeek-V4.1-Flash-w8a8")
 
 DATA_PARALLEL_SIZE = 4
-# 16,384 tokens = 128 full blocks at block_size=128, the minimum size that
-# gives the hit ratio any resolution.
-POOL_PROMPT_TOKENS = 16384
+# 16,388 tokens = 128 full blocks plus a 4-token tail at block_size=128.
+POOL_PROMPT_TOKENS = 16388
 POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
 
 POOL_KV_TRANSFER_CONFIG = {

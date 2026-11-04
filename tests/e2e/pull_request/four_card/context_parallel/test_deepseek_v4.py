@@ -64,10 +64,12 @@ MTP_MIN_ACCEPTANCE_RATES = [0.85, 0.65, 0.35]
 DSPARK_MIN_ACCEPTANCE_RATES = [0.73, 0.64, 0.55, 0.49, 0.42]
 ACCEPTANCE_RATE_TOLERANCE = 0.03
 
-# KV pool watch load. 16,384 tokens = 128 full blocks at block_size=128, which
-# is the minimum size that gives the hit ratio any resolution.
-POOL_PROMPT_TOKENS = 16384
-# The prompt itself stays 128-aligned; max_model_len needs headroom for output tokens
+# KV pool watch load. 16,388 tokens = 128 full blocks plus a 4-token tail at
+# block_size=128; only whole blocks can hit.
+POOL_PROMPT_TOKENS = 16388
+# Chunked prefill cap: 4096 = 32 blocks of 128, keeps the activation peak low.
+POOL_BATCHED_TOKENS = 4096
+# max_model_len needs headroom for output tokens
 POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
 
 POOL_KV_TRANSFER_CONFIG = {
@@ -112,7 +114,7 @@ def _run_test(
             model,
             max_model_len=POOL_MAX_MODEL_LEN,
             max_num_seqs=MAX_NUM_SEQS,
-            max_num_batched_tokens=POOL_PROMPT_TOKENS,
+            max_num_batched_tokens=POOL_BATCHED_TOKENS,
             dtype="auto",
             tensor_parallel_size=2,
             prefill_context_parallel_size=2,
