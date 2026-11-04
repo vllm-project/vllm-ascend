@@ -1,5 +1,5 @@
 {
-  "date": "2026-11-03",
+  "date": "2026-11-04",
   "base": "7e37e29a7803d6897a7113088e2b771f83205bc0",
   "branch": "backport/cann-swa-bounded-replay",
   "upstream_vllm_tag": "v0.30.0",
@@ -11,10 +11,10 @@
     "triton_kernels": "mocked"
   },
   "unit_tests": {
-    "passed": 1356,
+    "passed": 1359,
     "skipped": 23,
     "failed": 0,
-    "subtests_passed": 465,
+    "subtests_passed": 477,
     "files": 29,
     "pcp2_dp2_four_process_gloo": "passed",
     "classes": {
@@ -56,7 +56,7 @@
       "tests.ut.worker.test_disable_compilation": 5,
       "tests.ut.worker.test_idle_dummy_config": 2,
       "tests.ut.worker.test_model_runner_v1.TestGlm5MtpGraphMetadata": 4,
-      "tests.ut.worker.test_model_runner_v1.TestDPPaddingPolicy": 6,
+      "tests.ut.worker.test_model_runner_v1.TestDPPaddingPolicy": 9,
       "tests.ut.worker.test_model_runner_v1.TestDPPaddingEplb": 4,
       "tests.ut.worker.test_model_runner_v1.TestDummyRunSlotInvalidation": 4,
       "tests.ut.worker.test_model_runner_v1.TestMmEncoderOnlyDummyRunEarlyExit": 2,
@@ -126,10 +126,10 @@
   },
   "checks": {
     "changed_python_ast": "passed (61 files)",
-    "changed_python_ruff_check": "passed",
-    "changed_python_ruff_format": "passed",
+    "changed_python_ruff_check": "passed (2 modified Python files; unchanged files retain prior validation)",
+    "changed_python_ruff_format": "passed (2 modified Python files; unchanged files retain prior validation)",
     "git_diff_check": "passed",
-    "format_sh_ci": "blocked before hooks: nodeenv SSL certificate verification error",
+    "format_sh_ci": "blocked before hooks: nodeenv cannot parse Node version 0-alpha with system CA configured",
     "standalone_markdownlint": "blocked: npm registry minipass metadata is truncated JSON"
   },
   "not_validated": [
@@ -224,13 +224,39 @@
     "vllm_ascend/patch/platform/patch_swa_bounded_replay_legacy.py": "dae4178730626b5a2ee86829b06b562f77ef44c217ff9fc2f52735352e6099d9",
     "vllm_ascend/platform.py": "f6ff50923205afea38f51aa0f1f13d675a42d60d9e7fedcf72811c220b1877e3",
     "vllm_ascend/worker/block_table.py": "bf6b7dd1185cdfe7e08a16fd8256c96aec0219bd24fa1591367206565d2465c3",
-    "vllm_ascend/worker/model_runner_v1.py": "c35a70ed82962b1f4b49fee033422d4a0481cdb3f42f401bc239dd06caa2ed12",
+    "vllm_ascend/worker/model_runner_v1.py": "a789e6481a7730ee553eaa2f703624508dba4f329ffdaf4d9b90cde2965e3616",
     "vllm_ascend/worker/utils.py": "0babee7e24fe16ef431656717f5ecd11729ffd3c988961848ba482bd5e7fe0f8",
     "vllm_ascend/worker/v2/attn_utils.py": "3ac0c87db9700f209733f039f60862a28841e80ff4fb0525113a1fc26c6cbf1c",
     "vllm_ascend/worker/v2/model_runner.py": "058da109c930a34f0f6e10c61f0d19d813374a18e96d296bca324820ebf7bccc",
     "vllm_ascend/worker/v2/model_states/default.py": "37ca566c79da8d211073a89f2201a9a2af37aba2566a429c7bae92cbe8977dad",
     "vllm_ascend/worker/v2/model_states/mamba_hybrid.py": "c452b615d0452202d846419e0bd7797da6e8c75ef1a007ca15cbe2572523ffcf",
     "vllm_ascend/worker/v2/pcp_manager.py": "bb9b57db4a1e39ca166664fddcf66e879e204413f89742c6d969dbdaf878b21d",
-    "vllm_ascend/worker/worker.py": "d36a691f9efe1c922d9a2132970aaa923061d9f2369f6fe7938ca12dabcffe47"
+    "vllm_ascend/worker/worker.py": "d36a691f9efe1c922d9a2132970aaa923061d9f2369f6fe7938ca12dabcffe47",
+    "tests/ut/worker/test_model_runner_v1.py": "ed3fae77c54c967c1d578811899abf99d7f755479e7287e4da5324ecfacf0929"
+  },
+  "previous_validation": {
+    "date": "2026-11-03",
+    "revision": "032a9d181dc74de4abdcbaa3021fb544efefd81f",
+    "passed": 1356,
+    "skipped": 23,
+    "subtests_passed": 465
+  },
+  "startup_regression": {
+    "introduced_by_backport_commit": "f7e727d1d894040bba28b5e3d7f4299ebbff5b40",
+    "error": "AttributeError: 'VllmConfig' object has no attribute 'aux_output_config'",
+    "reproduced_before_fix": "real vLLM v0.30.0 VllmConfig, both mocked DP ranks fail at the same attribute read",
+    "fix": "Use AuxOutputConfig when present; otherwise read legacy ModelConfig without mutating upstream configuration",
+    "targeted_tests": "9 passed, 144 subtests passed",
+    "full_regression": "1359 passed, 23 skipped, 477 subtests passed",
+    "new_coverage": [
+      "Real vLLM 0.30 config without aux_output_config",
+      "Legacy routing capture enabled/disabled",
+      "Modern config precedence over legacy config",
+      "None aux_output_config fallback"
+    ],
+    "cpu_log": "/tmp/cann-swa-aux-regressions.log",
+    "junit": "/tmp/cann-swa-aux-regressions.xml",
+    "a3_runtime": "not executed",
+    "config_workaround": "VLLM_USE_V2_MODEL_RUNNER=1 avoids this V1 method; complete A3 startup remains unvalidated"
   }
 }

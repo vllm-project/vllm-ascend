@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import torch
-from vllm.config import CompilationConfig, CUDAGraphMode
+from vllm.config import CompilationConfig, CUDAGraphMode, DeviceConfig, VllmConfig
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.sampling_params import SamplingParams
@@ -213,8 +213,7 @@ class TestDPPaddingPolicy(unittest.TestCase):
         runner.dp_size = 2
         runner.dp_rank = dp_rank
         runner.vllm_config = SimpleNamespace(
-            model_config=SimpleNamespace(),
-            aux_output_config=SimpleNamespace(enable_return_routed_experts=False),
+            model_config=SimpleNamespace(enable_return_routed_experts=False),
         )
         runner.ascend_config = SimpleNamespace(finegrained_tp_config=FinegrainedTPConfig())
         return runner
@@ -318,10 +317,45 @@ class TestDPPaddingPolicy(unittest.TestCase):
         for dp_rank in range(2):
             with self.subTest(dp_rank=dp_rank):
                 runner = self._make_runner(dp_rank)
-                runner.vllm_config.aux_output_config.enable_return_routed_experts = True
+                runner.vllm_config.model_config.enable_return_routed_experts = True
                 _, across_dp, mode = self._run_sync(runner, comm_method=MoECommType.FUSED_MC2)
                 self.assertEqual(mode, CUDAGraphMode.NONE)
                 self.assertEqual(across_dp.tolist(), [32, 32])
+
+    def test_dp_sync_with_real_legacy_vllm_config(self):
+        config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+        if hasattr(config, "aux_output_config"):
+            self.skipTest("The installed vLLM already supplies AuxOutputConfig")
+        for dp_rank in range(2):
+            with self.subTest(dp_rank=dp_rank):
+                runner = self._make_runner(dp_rank)
+                runner.vllm_config = config
+                maximum, across_dp, mode = self._run_sync(runner)
+                self.assertEqual(maximum, 32)
+                self.assertEqual(mode, CUDAGraphMode.NONE)
+                self.assertEqual(across_dp.tolist(), [8, 32])
+
+    def test_aux_output_config_takes_precedence_over_legacy_model_config(self):
+        for legacy_enabled in (False, True):
+            for modern_enabled in (False, True):
+                for dp_rank in range(2):
+                    with self.subTest(legacy=legacy_enabled, modern=modern_enabled, dp_rank=dp_rank):
+                        runner = self._make_runner(dp_rank)
+                        runner.vllm_config.model_config.enable_return_routed_experts = legacy_enabled
+                        runner.vllm_config.aux_output_config = SimpleNamespace(
+                            enable_return_routed_experts=modern_enabled
+                        )
+                        _, across_dp, _ = self._run_sync(runner)
+                        self.assertEqual(across_dp.tolist(), [32, 32] if modern_enabled else [8, 32])
+
+    def test_none_aux_output_config_falls_back_to_legacy_model_config(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                runner = self._make_runner()
+                runner.vllm_config.aux_output_config = None
+                runner.vllm_config.model_config.enable_return_routed_experts = enabled
+                _, across_dp, _ = self._run_sync(runner)
+                self.assertEqual(across_dp.tolist(), [32, 32] if enabled else [8, 32])
 
     def test_imbalanced_and_idle_metadata_use_agreed_graph_mode(self):
         for tokens in ((0, 32), (1, 32), (8, 32)):

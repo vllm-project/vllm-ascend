@@ -147,3 +147,31 @@ torch-npu 2.10 实测。数据见
 
 A3 算子构建、真实权重功能、质量和性能数据仍需实机补齐。CPU 回归没有执行自定义
 AscendC/Triton 算子，也没有验证 NPU 集合通信或建立性能收益结论。
+
+## MRV1 启动时缺少 aux_output_config
+
+2026-11-04 收到 A3 单机 DP4/TP4 的启动反馈：权重加载后，显存 profiling 的
+`_sync_metadata_across_dp()` 报出
+`AttributeError: 'VllmConfig' object has no attribute 'aux_output_config'`。
+这是回移 #18936 时遗漏的接口适配：vLLM 0.30 把 `enable_return_routed_experts`
+放在 `model_config`，较新接口才使用 `aux_output_config`。本分支已优先读取新接口、
+在其不存在或为 `None` 时回退到旧接口；不向 vLLM 注入一个虚构的新配置对象。
+
+该异常不表示 SWA replay 必须使用 MRV2。可以更新修复后继续使用
+`VLLM_USE_V2_MODEL_RUNNER=0`；若先尝试配置绕行，也可以只将这个值改为 `1`
+并保持其余参数不变，避开这处 MRV1 调用，但仍需验证完整 A3 启动和推理。
+
+对于现有 DP4/TP4、`FULL_DECODE_ONLY`、`enable_dsa_cp=true`、FlashComm 开启且没有
+KV connector 的配置，继续沿用 CANN 分支的旧 DSA-CP 参数。不要套用 0.32 CI 的
+“删除 enable_dsa_cp、切到 PCP4”步骤：那是另一套版本和拓扑的迁移。
+本分支的 decoder replay 允许配合旧 DSA-CP 的 SP 路径，但实际生效仍须检查
+`SWA decoder bounded replay active (MRV1/MRV2)` 日志。
+
+首轮建议在同一个 runner 上分别跑 replay OFF/ON。切换到 MRV2 后，原 MRV1/OFF
+的性能不能直接当作 MRV2/ON 的 replay 对照基线。
+
+本次修复先用真实 vLLM 0.30 `VllmConfig` 复现相同异常，再执行原来的 29 个 CPU
+回归文件：**1359 passed、23 skipped、477 subtests passed**；其中 DP padding 专项
+为 9 passed、144 subtests passed。新用例覆盖旧字段、新字段优先级以及新配置为
+`None` 时的回退。修改仅涉及 Python 读取逻辑，没有改动算子源码；实机启动仍需验证。
+2026-11-04 的全量格式检查在 nodeenv 解析 Node 版本 `0-alpha` 时中止，未标为通过。

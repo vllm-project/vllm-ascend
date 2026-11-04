@@ -910,7 +910,11 @@ class NPUModelRunner(GPUModelRunner):
         )
         # Routing capture assumes padding is at the end of the full DP batch,
         # not inside each SP shard after MC2 prepare.
-        needs_uniform_routing_capture = self.vllm_config.aux_output_config.enable_return_routed_experts
+        # vLLM 0.30 stores the flag in ModelConfig, before AuxOutputConfig.
+        routing_config = getattr(self.vllm_config, "aux_output_config", None)
+        if routing_config is None:
+            routing_config = self.vllm_config.model_config
+        needs_uniform_routing_capture = getattr(routing_config, "enable_return_routed_experts", False)
         # Graph replay, these MoE paths and cross-DP fine-grained TP require
         # uniform runner inputs.
         # Draft models retain their padding until their communication policy
