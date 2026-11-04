@@ -319,3 +319,43 @@ Single-node deployment is recommended when the model fits within the memory of a
 ### 25. What is the difference between FIA and PA operators for attention?
 
 FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.
+
+### 26. Why does `npu-smi info` hang inside an Atlas 950DT container? { #atlas-950dt-urma-provider }
+
+On some Atlas 950DT hosts, the driver path
+`/usr/local/Ascend/driver/lib64/driver/urma` is an absolute symbolic link to
+`/usr/lib64/urma`. Mounting the driver directory alone leaves this link broken
+inside the container if its target is missing. In this configuration,
+`npu-smi info` can hang even when it succeeds on the host.
+
+Check the link and its target on the host:
+
+```bash
+readlink /usr/local/Ascend/driver/lib64/driver/urma
+ls -l /usr/lib64/urma/
+```
+
+Compare them with the container, replacing `vllm-ascend` with your container name:
+
+```bash
+docker exec vllm-ascend readlink /usr/local/Ascend/driver/lib64/driver/urma
+docker exec vllm-ascend ls -l /usr/lib64/urma/
+```
+
+If the link points to `/usr/lib64/urma`, the host directory contains the URMA
+provider libraries, and that directory is missing inside the container, add this
+option to `docker run` and recreate the container:
+
+```bash
+-v /usr/lib64/urma:/usr/lib64/urma:ro \
+```
+
+An existing mount of `/usr/lib64` to `/usr/lib64` also exposes this directory, so
+it does not need the additional mount. Other driver layouts may not need it.
+
+After recreating the container, check that the command exits with code `0` and
+reports the expected NPUs with Health `OK`:
+
+```bash
+docker exec vllm-ascend timeout 25s npu-smi info
+```
