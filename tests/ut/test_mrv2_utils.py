@@ -53,13 +53,6 @@ def test_environment_override_wins(monkeypatch, env_value):
         SimpleNamespace(lora_config=object()),
         SimpleNamespace(speculative_config=SimpleNamespace(parallel_drafting=True)),
         SimpleNamespace(speculative_config=SimpleNamespace(method="eagle3", parallel_drafting=False)),
-        SimpleNamespace(
-            speculative_config=SimpleNamespace(
-                method="dflash",
-                enforce_eager=True,
-                draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
-            )
-        ),
         SimpleNamespace(model_config=SimpleNamespace(architectures=["HYV3ForCausalLM"])),
         SimpleNamespace(model_config=SimpleNamespace(architecture="HYV3ForCausalLM")),
         SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"])),
@@ -79,6 +72,8 @@ def test_environment_override_wins(monkeypatch, env_value):
         SimpleNamespace(additional_config={"enable_reduce_sample": "true"}),
         SimpleNamespace(additional_config={"enable_reduce_sample": 1}),
         SimpleNamespace(additional_config={"eplb_config": {"dynamic_eplb": True}}),
+        SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
+        SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
         SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector="AscendStoreConnector")),
         SimpleNamespace(
             kv_transfer_config=SimpleNamespace(
@@ -99,7 +94,6 @@ def test_environment_override_wins(monkeypatch, env_value):
         "lora",
         "parallel-drafting",
         "eagle3-without-parallel-drafting",
-        "dflash2-eager",
         "hy3-preview",
         "hy3-preview-architecture",
         "gemma4-causal",
@@ -115,6 +109,8 @@ def test_environment_override_wins(monkeypatch, env_value):
         "reduce-sample-string-true",
         "reduce-sample-int",
         "dynamic-eplb",
+        "pooling-runner",
+        "pooling-model",
         "kv-pool-connector",
         "kv-pool-memcache",
         "vl-encoder-disaggregation",
@@ -127,18 +123,25 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
     assert use_v2_model_runner(config) is True
 
 
+@pytest.mark.parametrize("enforce_eager", [None, False, True], ids=["unset", "graph", "eager"])
+@pytest.mark.parametrize("env_value", [None, False, True], ids=["default", "force-v1", "force-v2"])
+def test_dflash2_defaults_to_v2_and_honors_environment(monkeypatch, enforce_eager, env_value):
+    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", env_value)
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method="dflash",
+            enforce_eager=enforce_eager,
+            draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
+        ),
+        compilation_config=SimpleNamespace(cudagraph_mode="FULL_DECODE_ONLY"),
+    )
+
+    assert use_v2_model_runner(config) is (env_value is not False)
+
+
 @pytest.mark.parametrize(
     "config",
     [
-        SimpleNamespace(
-            speculative_config=SimpleNamespace(
-                method="dflash",
-                enforce_eager=False,
-                draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
-            )
-        ),
-        SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
-        SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
         SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mm_encoder=True)),
         SimpleNamespace(additional_config={"draft_window_size": 512}),
         SimpleNamespace(speculative_config=SimpleNamespace(method="suffix")),
@@ -149,9 +152,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         SimpleNamespace(speculative_config=SimpleNamespace(method="eagle", parallel_drafting=True)),
     ],
     ids=[
-        "dflash2-graph",
-        "pooling-runner",
-        "pooling-model",
         "vl-encoder-graph",
         "draft-window-size",
         "suffix-speculative-decoding",
@@ -225,15 +225,10 @@ def test_blacklist_logs_fallback(monkeypatch):
     monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
     monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args, **kwargs: warning_calls.append(args))
 
-    config = SimpleNamespace(
-        speculative_config=SimpleNamespace(
-            method="dflash",
-            draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
-        )
-    )
+    config = SimpleNamespace(speculative_config=SimpleNamespace(method="suffix"))
     assert use_v2_model_runner(config) is False
     assert len(warning_calls) == 1
-    assert "dflash2 graph" in warning_calls[0][1]
+    assert "suffix speculative decoding" in warning_calls[0][1]
 
 
 def test_validation_is_decoupled_from_upstream():

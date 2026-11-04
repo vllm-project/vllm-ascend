@@ -380,20 +380,19 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             )
             local_metadata.update(global_metadata)
             self.attn_metadata = local_metadata
-            return local_metadata
-
-        self.attn_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
-            self,
-            input_batch,
-            cudagraph_mode,
-            block_tables,
-            slot_mappings,
-            attn_groups,
-            kv_cache_config,
-            for_capture,
-            use_pcp_padding=pcp_context is not None,
-            pcp_context=pcp_context,
-        )
+        else:
+            self.attn_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
+                self,
+                input_batch,
+                cudagraph_mode,
+                block_tables,
+                slot_mappings,
+                attn_groups,
+                kv_cache_config,
+                for_capture,
+                use_pcp_padding=pcp_context is not None,
+                pcp_context=pcp_context,
+            )
         if self.recoverssm is not None:
             self.recoverssm.record_step(self.attn_metadata, attn_groups, for_capture=for_capture)
         return self.attn_metadata

@@ -6,7 +6,7 @@ from unittest.mock import patch
 import torch
 
 from tests.ut.model_executor.warmup.helpers import make_mock_vllm_config
-from vllm_ascend.ops.triton import penalty
+from vllm_ascend.ops.triton.v1 import penalty
 
 
 def _keys(module, kernel, config):

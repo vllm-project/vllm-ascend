@@ -363,19 +363,44 @@ A few important things to consider when using DFlash2 draft models:
     VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3.8-27B \
       --tensor-parallel-size 2 \
       --max-model-len 2048 \
+      --max-num-seqs 1 \
       --no-enable-prefix-caching \
-      --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens": 8, "enforce_eager": true}'
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[9]}' \
+      --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens": 8}'
     ```
 
-2. **Model runner V2 requires an eager draft**: DFlash2 on model runner V2
-   does not yet support graph mode for the draft. Set `"enforce_eager": true`
-   in `speculative_config`; the target model keeps its own graph mode (e.g.
-   `FULL_DECODE_ONLY`).
+2. **Model runner V2 draft graphs**: DFlash2 uses full ACL graphs when the
+   target enables `FULL_DECODE_ONLY` and the draft's `enforce_eager` is unset
+   or false. The draft backbone and candidate selector retain the configured
+   Dynamo compilation path. Candidate scoring uses its own request-shaped
+   forward context and compilation cache namespace, while the outer draft ACL
+   graph captures the compiled operations, candidate TopK, path sampling, and
+   proposal-cache updates. Set `"enforce_eager": true`
+   to compare against eager drafting. Validate graph/eager equivalence and
+   request reuse on the intended NPU configuration before deployment.
+
+   Non-causal draft layers with sliding-window size `W` use FIA band mode
+   (`sparse_mode=4`) with a cached compressed mask and
+   `pre_tokens=next_tokens=W-1`, matching upstream FlashAttention's symmetric
+   window. Both eager execution and graph capture preserve this window;
+   layers without a window retain full attention. This replaces the earlier
+   workaround that ignored non-causal sliding windows, including in eager
+   execution. The compressed mask is a band-mode template, not a causal
+   restriction on draft tokens.
+
+   The model-level acceptance test exercises DFlash2 draft graphs using
+   `VLLM_COMPILE` with `FULL_DECODE_ONLY` on two NPUs:
+
+   ```shell
+   pytest -sv tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py -k test_dflash2_v2_acceptance
+   ```
 
 3. **Graph capture sizes**: each decode step runs `(1 + K)` tokens per
    request, so every capture size must be `n * (num_speculative_tokens + 1)`
    for each batch size `n` you want to support — `[9]` above, for batch size
    1 with `num_speculative_tokens = 8`.
+   For `num_speculative_tokens` of 4, 5, or 6, use multiples of 5, 6, or 7,
+   respectively. Choose a draft length supported by the checkpoint.
 
 4. **The draft must use the target's unquantized LM head**: the candidate
    top-k is taken over the full-vocabulary logits, so a reduced draft
@@ -1060,13 +1085,39 @@ and devices:
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-RecoverSSM requires speculative decoding and does not support pipeline
-parallelism (PP), prefill context parallelism (PCP), or decode context
-parallelism (DCP). Stochastic rounding must be disabled.
+RecoverSSM requires speculative decoding, PP=1 and DCP=1. PCP is limited to
+Prefill producers with TP=1 using the Mooncake connectors below;
+PCP Decode consumers and colocated PCP execution are not supported.
+Stochastic rounding must be disabled.
 
 For prefill/decode separation, use `MooncakeConnectorV2` or
-`MooncakePullConnector` with matching model weights, TP size, speculative window,
-and RecoverSSM settings on both sides.
+`MooncakePullConnector` with matching model weights, speculative window,
+cache dtypes, convolution layout and RecoverSSM settings on both sides.
+PCP producers may use a different KDA head-shard count from Decode consumers:
+Mooncake gathers the producer head shards into each receiving consumer's state.
+Use SD convolution state layout `[state_len, conv_dim]` on both roles when
+their KDA head-shard counts differ.
+
+For example, an eight-device Prefill role and an eight-device Decode role can
+use the following layout with `--use-replayssm` and MTP5 on both sides:
+
+| Setting | Prefill | Decode |
+| --- | --- | --- |
+| Tensor parallel size | 1 | 1 |
+| Prefill context parallel size | 8 | 1 |
+| Data parallel size | 1 | 8 |
+| Expert parallelism | Enabled (EP8) | Enabled (EP8) |
+| KV role | `kv_producer` | `kv_consumer` |
+| Target and draft execution | Eager | `FULL_DECODE_ONLY` |
+
+In this example, set `--enforce-eager` on Prefill and keep its draft eager as well. Each Decode
+DP rank receives all eight KDA head shards for its assigned requests; DP ranks
+do not divide one request's recurrent state. Keep the same prefix-caching
+configuration on both roles.
+
+PCP does not require `--enforce-eager` for the entire P model. Its KDA path has
+an eager dispatch boundary, allowing the surrounding model to be compiled.
+Validate the selected P graph configuration separately for your deployment.
 
 !!! warning
 
@@ -1129,7 +1180,7 @@ vllm serve path/to/target/model \
 
 Upstream vLLM's synthetic path draws the per-token uniform numbers with `tl_rand64` (fp64) directly inside the Triton kernel. NPU Triton does **not** support `tl_rand64`/fp64, so vLLM Ascend reimplements synthetic mode per model-runner path:
 
-- **MRV1** (`vllm_ascend/sample/rejection_sampler.py` + `vllm_ascend/ops/triton/reject_sample.py`): the kernels receive the uniform probabilities as an explicit pointer argument instead of generating them internally. The probabilities are produced by `generate_uniform_probs` in fp64 (matching upstream, so the draw never samples exactly `0.0`) and cast to fp32 for the greedy kernels, which the fp32-only Ascend Triton kernels then compare against `rates[pos]`.
+- **MRV1** (`vllm_ascend/sample/rejection_sampler.py` + `vllm_ascend/ops/triton/v1/reject_sample.py`): the kernels receive the uniform probabilities as an explicit pointer argument instead of generating them internally. The probabilities are produced by `generate_uniform_probs` in fp64 (matching upstream, so the draw never samples exactly `0.0`) and cast to fp32 for the greedy kernels, which the fp32-only Ascend Triton kernels then compare against `rates[pos]`.
 - **MRV2** (`vllm_ascend/worker/v2/spec_decode/rejection_sampler_utils.py`, used when the V2 model runner is enabled): the uniform draw is generated **inside** `_probabilistic_rejection_kernel` with `SYNTHETIC_MODE=True`, using a 1-element-block fp32 `tl.rand` clamped to `[2^-31, 1)` — equivalent to upstream's `includes_zero=False` semantics. Both greedy and sampling temperatures are supported, and the first rejected position is followed by a resampled/bonus token from the target distribution, as in `standard` mode.
 
 The configuration interface (`rejection_sample_method`, `synthetic_acceptance_rates`, `synthetic_acceptance_length`) is identical on both paths.
