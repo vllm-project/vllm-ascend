@@ -117,6 +117,7 @@ Before starting:
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
     source /usr/local/Ascend/nnal/atb/set_env.sh
 
+    export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
@@ -179,6 +180,7 @@ Before starting:
     export GLOO_SOCKET_IFNAME="eth0"
     export TP_SOCKET_IFNAME="eth0"
     export HCCL_SOCKET_IFNAME="eth0"
+    export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
@@ -286,6 +288,7 @@ Select the hardware tab below.
     export no_proxy="localhost,127.0.0.1,192.168.0.1"
     export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
     export LD_LIBRARY_PATH="/usr/local/python3.12.16/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
     export HCCL_BUFFSIZE=4096
@@ -334,6 +337,7 @@ Select the hardware tab below.
     export no_proxy="localhost,127.0.0.1,192.168.0.1"
     export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
     export LD_LIBRARY_PATH="/usr/local/python3.12.16/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
     export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
     export HCCL_BUFFSIZE=512
@@ -444,6 +448,7 @@ Select the hardware tab below.
     export GLOO_SOCKET_IFNAME="eth0"
     export TP_SOCKET_IFNAME="eth0"
     export HCCL_SOCKET_IFNAME="eth0"
+    export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1
     export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -498,6 +503,7 @@ Select the hardware tab below.
     export GLOO_SOCKET_IFNAME="eth0"
     export TP_SOCKET_IFNAME="eth0"
     export HCCL_SOCKET_IFNAME="eth0"
+    export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=2,3
     export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -554,6 +560,7 @@ Select the hardware tab below.
     export GLOO_SOCKET_IFNAME="eth0"
     export TP_SOCKET_IFNAME="eth0"
     export HCCL_SOCKET_IFNAME="eth0"
+    export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=4,5
     export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -608,6 +615,7 @@ Select the hardware tab below.
     export GLOO_SOCKET_IFNAME="eth0"
     export TP_SOCKET_IFNAME="eth0"
     export HCCL_SOCKET_IFNAME="eth0"
+    export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=6,7
     export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
