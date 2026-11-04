@@ -1,0 +1,6 @@
+pr: 20842
+entries:
+  - category: performance
+    text: Improved Qwen3.8-Next speculative decode performance by grouping PLE convolution work per request and fusing state updates on Ascend.
+    model: qwen3.8-next
+    hardware: [A3]
