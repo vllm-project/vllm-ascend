@@ -161,7 +161,7 @@ For descriptions of the standard `vllm serve` arguments used in the deployment e
 | PD colocation, A2 | 133000 |
 | PD disaggregation, A3 | 263000 |
 | PD disaggregation, 950DT products | 133000 |
-| 1M PD disaggregation, A3 ([Section 5.5](#55-1m-token-context-deployment-a3-1p2d)) | 1050624 |
+| 1M PD disaggregation, A3 ([Section 5.5](#55-1m-token-context-deployment-a3-1p1d)) | 1050624 |
 
 These values belong to different deployment profiles. Weights, communication buffers, parallelism, and KV caches share device memory, so a context budget that fits one profile may not fit another. Select a value that covers the prompt and generated tokens together, and check available KV cache capacity at the intended concurrency. The `1M` model limit in the support matrix does not mean every example configuration reserves enough memory for 1M-token requests. To use the `263000` setting reported in [Text Evaluation](#72-text-evaluation), update `MAX_MODEL_LEN` in the serving scripts, including both roles for PD deployment, and recheck memory capacity before evaluation.
 
@@ -1757,15 +1757,15 @@ Proxy (:19080)
 5. Confirm Decode logs still show a normal Mooncake P→D KV transfer.
 6. Confirm SSD storage initializes under `ssd_offload_path` for each contributing worker. Use a working set larger than the memory pool to verify SSD offload and subsequent reads; a memory-pool hit alone does not exercise the SSD tier.
 
-### 5.5 1M-Token Context Deployment (A3, 1P2D)
+### 5.5 1M-Token Context Deployment (A3, 1P1D)
 
-This text-only W8A8 profile uses three Atlas 800I A3 nodes, each with 16 visible 64 GB NPU devices. Here, 1M means **1,048,576 input tokens**. The total context limit is `1050624`, reserving 2048 positions for generation; the verification request below caps generation at 256 tokens. Use the model image and W8A8 checkpoint from Sections 3 and 4 on every node. The validated runtime uses vLLM 0.32.0, torch_npu 2.10.0.post7, and CANN 9.2.0, with the M3.1 operators and selected-parameter prefetch options shown below available in the image.
+This text-only W8A8 profile uses a 1P1D topology: one Prefill service on one host and one distributed Decode service spanning two hosts. The two Decode hosts share one global DP4 × TP8 × PP1 group. All three hosts are Atlas 800I A3 machines, each with 16 visible 64 GB NPU devices. Here, 1M means **1,048,576 input tokens**. The total context limit is `1050624`, reserving 2048 positions for generation; the verification request below caps generation at 256 tokens. Use the model image and W8A8 checkpoint from Sections 3 and 4 on every node. The validated runtime uses vLLM 0.32.0, torch_npu 2.10.0.post7, and CANN 9.2.0, with the M3.1 operators and selected-parameter prefetch options shown below available in the image.
 
-| Role | Global DP / TP / PP | Local DP ranks | API ports | Batched-token budget |
+| Host | Global DP / TP / PP | Local DP ranks | API ports | Batched-token budget |
 | --- | --- | --- | --- | --- |
-| Prefill | 1 / 8 / 2 | 0 | 31050 | 8192 |
-| First Decode node | 4 / 8 / 1 | 0–1 | 31260, 31261 | 1 |
-| Second Decode node | 4 / 8 / 1 | 2–3 | 31260, 31261 | 1 |
+| Prefill host | 1 / 8 / 2 | 0 | 31050 | 8192 |
+| Decode host 1 | 4 / 8 / 1 | 0–1 | 31260, 31261 | 1 |
+| Decode host 2 | 4 / 8 / 1 | 2–3 | 31260, 31261 | 1 |
 
 This is a functional long-context configuration with one sequence per Decode replica. Both roles use eager execution, Model Runner V2, BF16 KV caches, and chunked prefill. Speculative decoding, prefix caching, asynchronous scheduling, and static kernels are disabled. The batched-token budget limits each iteration; it does not limit the total input length.
 
