@@ -80,7 +80,7 @@ class GroupSizeRegression(unittest.TestCase):
             ns,
         )
         methods_module = ModuleType("vllm_ascend.quantization.methods")
-        methods_module.get_scheme_class = lambda quant_type, layer_type: scheme_cls
+        methods_module.__dict__["get_scheme_class"] = lambda quant_type, layer_type: scheme_cls
         modules = {"torch_npu": mock.MagicMock(), "acl": mock.MagicMock(), methods_module.__name__: methods_module}
         with mock.patch.dict(sys.modules, modules):
             for group_size in (32, 64, 128):
@@ -122,6 +122,28 @@ class GroupSizeRegression(unittest.TestCase):
             "vllm_ascend/quantization/methods/wna16/w4a16.py", "AscendW4A16FusedMoEMethod", {"__init__"}, ns
         )
         self.assertEqual(cls().group_size, 64)
+
+    def test_explicit_group_size_does_not_require_legacy_quant_config(self):
+        current = SimpleNamespace(quant_config=None, use_v2_model_runner=True)
+        ns = {"get_current_vllm_config": lambda: current}
+        cls = load_class(
+            "vllm_ascend/quantization/methods/wna16/w4a16.py", "AscendW4A16FusedMoEMethod", {"__init__"}, ns
+        )
+        for quant_config in (None, SimpleNamespace(quant_description=None)):
+            with self.subTest(quant_config=quant_config):
+                current.quant_config = quant_config
+                self.assertEqual(cls(group_size=128).group_size, 128)
+
+    def test_modelslim_missing_group_size_keeps_legacy_default(self):
+        ns = {
+            "get_current_vllm_config": lambda: SimpleNamespace(
+                quant_config=SimpleNamespace(quant_description={}), use_v2_model_runner=True
+            )
+        }
+        cls = load_class(
+            "vllm_ascend/quantization/methods/wna16/w4a16.py", "AscendW4A16FusedMoEMethod", {"__init__"}, ns
+        )
+        self.assertEqual(cls().group_size, 32)
 
 
 if __name__ == "__main__":
