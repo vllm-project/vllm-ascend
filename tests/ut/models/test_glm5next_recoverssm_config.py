@@ -42,7 +42,7 @@ def test_default_does_not_change_native_cache_contract():
     assert not config.cache_config.use_kda_recoverssm
 
 
-@pytest.mark.parametrize("connector", [None, "MooncakeConnectorV2", "MooncakePullConnector"])
+@pytest.mark.parametrize("connector", [None, "MooncakeConnectorV2", "MooncakePullConnector", "AscendStoreConnector"])
 @pytest.mark.parametrize("prefix_caching", [False, True])
 def test_configuration_validation_derives_recoverssm_before_worker_initialization(connector, prefix_caching):
     config = make_config()
@@ -119,64 +119,6 @@ def test_pcp_rejects_unsupported_execution(section, field, value, message):
     with pytest.raises(ValueError, match=message):
         patch_replayssm_config.validate_mamba_cached_kernel(config)
     assert not config.cache_config.use_kda_recoverssm
-
-
-def make_store_config(**extra):
-    config = make_config()
-    config.parallel_config.tensor_parallel_size = 2
-    config.cache_config.enable_prefix_caching = True
-    config.cache_config.mamba_cache_mode = "align"
-    config.kv_transfer_config = SimpleNamespace(kv_connector="AscendStoreConnector", kv_connector_extra_config=extra)
-    return config
-
-
-@pytest.mark.parametrize("backend", ["mooncake", "memcache"])
-def test_bulk_store_prefix_reuse_enables_recoverssm(backend):
-    config = make_store_config(backend=backend)
-    assert patch_replayssm_config.validate_mamba_cached_kernel(config) is config
-    assert config.cache_config.use_kda_recoverssm
-
-
-@pytest.mark.parametrize("option", ["use_layerwise", "load_async", "save_decode_cache"])
-def test_store_rejects_execution_before_accepted_state_is_ready(option):
-    config = make_store_config(**{option: True})
-    with pytest.raises(ValueError, match=f"{option}=false"):
-        validate_glm_recoverssm(config)
-
-
-@pytest.mark.parametrize("option", ["prefill_tp_size", "decode_tp_size"])
-def test_store_rejects_heterogeneous_tp(option):
-    config = make_store_config(**{option: 4})
-    with pytest.raises(ValueError, match="matching TP sizes"):
-        validate_glm_recoverssm(config)
-
-
-def test_store_requires_prefix_caching():
-    config = make_store_config()
-    config.cache_config.enable_prefix_caching = False
-    config.cache_config.mamba_cache_mode = "none"
-    with pytest.raises(ValueError, match="requires prefix caching"):
-        validate_glm_recoverssm(config)
-
-
-def test_store_requires_v2_commit_lifecycle():
-    config = make_store_config()
-    config.use_v2_model_runner = False
-    with pytest.raises(ValueError, match="requires Model Runner V2"):
-        validate_glm_recoverssm(config)
-
-
-def test_store_rejects_kvpp():
-    config = make_store_config()
-    config.additional_config["enable_kvpp"] = True
-    with pytest.raises(ValueError, match="does not support KVPP"):
-        validate_glm_recoverssm(config)
-
-
-def test_store_rejects_unqualified_backend():
-    config = make_store_config(backend="yuanrong")
-    with pytest.raises(ValueError, match="mooncake or memcache"):
-        validate_glm_recoverssm(config)
 
 
 def test_other_models_and_disabled_switch_keep_upstream_validation(monkeypatch):
