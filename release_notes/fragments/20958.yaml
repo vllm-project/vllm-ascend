@@ -1,0 +1,12 @@
+pr: 20958
+entries:
+  - category: performance
+    text: >-
+      Dense sequence parallelism (FlashComm switch, Qwen3.5 dense family) now
+      fuses the sequence all-gather into the column GEMMs
+      (torch_npu.npu_all_gather_base_mm) and the reduce-scatter into the row
+      GEMMs (torch_npu.npu_mm_reduce_scatter_base) for prefill-sized
+      unquantized batches at TP size 2/4/8, overlapping the boundary
+      communication with the matmuls. Decode and unsupported configurations
+      keep the unfused layout with identical numerics; no new switch is
+      required.
