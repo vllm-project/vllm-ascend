@@ -1,0 +1,8 @@
+pr: 20926
+entries:
+  - category: feature
+    text: >-
+      Added an experimental Ascend HiSparse backend and unquantized sparse
+      MLA/SFA data path, reusing Core allocation and lifecycle interfaces.
+      Device and full-model qualification of the foundation remains pending.
+    hardware: [A5]
