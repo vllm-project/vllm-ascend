@@ -18,22 +18,23 @@ pytestmark = [
 @pytest.mark.parametrize("rows", [0, 1, 32, 129])
 @pytest.mark.parametrize("axes", [1, 3])
 @pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("num_q_heads", [2, 12])
 @torch.inference_mode()
-def test_direct_rope_matches_gathered_cache(rows: int, axes: int, weight_dtype: torch.dtype) -> None:
+def test_direct_rope_matches_gathered_cache(rows: int, axes: int, weight_dtype: torch.dtype, num_q_heads: int) -> None:
     torch.manual_seed(17)
     cache = torch.randn(129, 64, dtype=torch.bfloat16, device="npu")
     # Model-runner buffers can have much larger axis strides than active rows.
     storage = torch.randint(-4, 140, (3, 2 * rows + 17), device="npu", dtype=torch.int64)
     positions = storage[:, : 2 * rows : 2] if axes == 3 else storage[0, : 2 * rows : 2]
     gathered = cache[positions.clamp(0, 128)]
-    qkv = torch.randn(rows, 6 * 256, dtype=torch.bfloat16, device="npu")
+    qkv = torch.randn(rows, (2 * num_q_heads + 2) * 256, dtype=torch.bfloat16, device="npu")
     qw, kw = [torch.randn(256, dtype=weight_dtype, device="npu") for _ in range(2)]
     expected = triton_split_qkv_rmsnorm_mrope(
         qkv,
         1 + qw,
         1 + kw,
         gathered if axes == 3 else gathered.repeat(3, 1, 1),
-        num_q_heads=2,
+        num_q_heads=num_q_heads,
         num_kv_heads=1,
         head_size=256,
         eps=1e-6,
@@ -48,7 +49,7 @@ def test_direct_rope_matches_gathered_cache(rows: int, axes: int, weight_dtype: 
         kw,
         cache,
         positions=positions,
-        num_q_heads=2,
+        num_q_heads=num_q_heads,
         num_kv_heads=1,
         head_size=256,
         eps=1e-6,
