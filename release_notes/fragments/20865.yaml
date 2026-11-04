@@ -1,4 +1,4 @@
-pr: 3
+pr: 20865
 entries:
   - category: dependency
     text: The Worker inheritance migration requires the verified vLLM platform-hook commit; older release lanes require the same hook backport.
