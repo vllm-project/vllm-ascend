@@ -26,6 +26,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
 from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetadata
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.eagle import (
     speculator as eagle_speculator_module,
 )
@@ -289,7 +290,10 @@ def test_propose_renegotiates_pcp_draft_dp_sync(pcp_enabled, mismatch, dummy_run
     speculator.pcp_manager = object() if pcp_enabled else None
     input_batch = object()
     attn_metadata = {"mtp": _mla_pcp_decode_metadata(4, [4, 8])}
-    dp_sync = DPSyncState(num_tokens_across_dp=torch.tensor([64, 64]), uniform_token_count=4, eager=True, num_reqs=16)
+    sync_kwargs = {} if vllm_version_is("0.32.0") else {"max_query_len": None}
+    dp_sync = DPSyncState(
+        num_tokens_across_dp=torch.tensor([64, 64]), uniform_token_count=4, eager=True, num_reqs=16, **sync_kwargs
+    )
 
     def parent_propose(*args, **kwargs):
         sync = args[11]

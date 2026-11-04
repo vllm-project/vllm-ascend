@@ -13,6 +13,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as module
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("pcp_enabled", [False, True])
@@ -36,8 +37,9 @@ def test_dspark_global_requests_do_not_reuse_local_pcp_dp_capacity(monkeypatch, 
         idx_mapping=torch.arange(draft_reqs),
         is_prefilling_np=np.zeros(draft_reqs, dtype=np.bool_),
     )
+    sync_kwargs = {} if vllm_version_is("0.32.0") else {"max_query_len": None}
     target_sync = DPSyncState(
-        num_tokens_across_dp=torch.tensor([20, 20]), uniform_token_count=5, eager=False, num_reqs=4
+        num_tokens_across_dp=torch.tensor([20, 20]), uniform_token_count=5, eager=False, num_reqs=4, **sync_kwargs
     )
     monkeypatch.setattr(module, "build_attn_metadata_wrapper", lambda: nullcontext())
     monkeypatch.setattr(module, "build_attn_metadata_factory", lambda *a, **k: nullcontext())
