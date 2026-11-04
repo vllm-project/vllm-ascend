@@ -621,6 +621,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
             export HCCL_OP_EXPANSION_MODE="AIV"
 
             vllm serve "$MODEL_PATH" \
+              --device-ids "$1" \
               --host 0.0.0.0 \
               --port $2 \
               --data-parallel-size $3 \
@@ -686,6 +687,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
             export HCCL_OP_EXPANSION_MODE="AIV"
 
             vllm serve "$MODEL_PATH" \
+              --device-ids "$1" \
               --host 0.0.0.0 \
               --port $2 \
               --data-parallel-size $3 \
@@ -791,8 +793,9 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
     - `--data-parallel-size`, `--tensor-parallel-size`, and
       `--prefill-context-parallel-size` define TP1/PCP8/DP1 on Prefill
       and TP1/PCP1/DP8 on Decode. Each role uses eight devices on one node.
-      Prefill runs one eight-device engine. Decode selects one device per
-      DP rank.
+      Prefill runs one eight-device engine. `--device-ids "$1"` binds each
+      engine to the device list passed by the launcher: devices `0-7` for
+      Prefill and one device per DP rank for Decode.
     - `--data-parallel-address` and `--data-parallel-rpc-port` coordinate
       ranks within each role. Prefill and Decode use their respective node
       IPs; RPC port `12325` is reused on the separate hosts.
@@ -1476,21 +1479,207 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     #### 950DT products {: #glm53-flash-5-4-950dt }
 
-    Refer to
-    [Scenario 2: Memcache Backend](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend)
-    for backend installation and configuration. Set `backend` to `memcache`
-    in the `AscendStoreConnector` child configuration. Use `device_urma`
-    for UB or `device_uboe` for UBOE in `mmc-local.conf`.
+    Reuse the Prefill TP1/PCP8/DP1 and Decode TP1/PCP1/DP8 topology,
+    launcher and proxy from [Section 5.3](#glm53-flash-5-3-950dt).
+    Both roles use EP8, FP8 main KV cache and an FP8 indexer.
 
-    Use the Prefill TP1/PCP8/DP1 and Decode TP1/PCP1/DP8 topology from
-    [Section 5.3](#glm53-flash-5-3-950dt). Keep the indexer in FP8,
-    prefix caching and the hybrid KV cache manager enabled, and
-    `mamba_cache_mode=align`. Use non-layerwise pooling
-    (`use_layerwise=false`) and PP=DCP=1. The experimental RecoverSSM
+    ##### Prepare the Memcache Backend
+
+    Follow [Scenario 2: Memcache Backend](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend)
+    for prerequisite checks and installation of `memfabric-hybrid` and
+    `memcache-hybrid`. Add the following mount to the Docker command in
+    Section 4 on both nodes:
+
+    ```shell
+    -v /etc/hccn.conf:/etc/hccn.conf:ro \
+    ```
+
+    Locate the installed Memcache package in each container:
+
+    ```shell
+    pip show memcache_hybrid
+    ```
+
+    The `Location` field is `<PYTHON_SITE_PACKAGES>` in the commands below.
+    Replace `<CONFIG_DIRECTORY>` with the absolute directory containing
+    the configuration files on each node.
+
+    On the Prefill node, create `mmc-meta.conf`:
+
+    ```ini
+    ock.mmc.meta_service_url = tcp://<P0_IP>:5000
+    ock.mmc.meta_service.config_store_url = tcp://<P0_IP>:6000
+    ock.mmc.meta_service.metrics_url = http://<P0_IP>:18000
+    ock.mmc.log_level = info
+    ```
+
+    On both nodes, create `mmc-local.conf`:
+
+    ```ini
+    ock.mmc.meta_service_url = tcp://<P0_IP>:5000
+    ock.mmc.local_service.config_store_url = tcp://<P0_IP>:6000
+    ock.mmc.log_level = info
+    ock.mmc.local_service.world_size = 256
+    ock.mmc.local_service.protocol = device_urma
+    ock.mmc.local_service.dram.size = 20GB
+    ock.mmc.local_service.max.dram.size = 1024GB
+    ock.mmc.local_service.storage.enabled = false
+    ```
+
+    Use `device_urma` for UB. For UBOE, replace it with `device_uboe`.
+    Both roles must use the same MetaService and ConfigStore endpoints.
+    This example uses embedded LocalServices, with each worker contributing
+    `20GB` of DDR memory. Eight workers per node contribute `160GB` per
+    node and `320GB` in total. Adjust this capacity to the available DDR
+    memory after reserving memory for the operating system and vLLM.
+    `world_size` is the maximum number of LocalServices supported by the
+    pool; keep it consistent and large enough for the 16 workers.
+
+    ##### Add the Pool Environment Variables
+
+    On both nodes, add the following exports to `run_dp_template.sh`
+    before `vllm serve`:
+
+    ```shell
+    MEMCACHE_PACKAGE_DIR="<PYTHON_SITE_PACKAGES>/memcache_hybrid"
+    PYTHON_LIB_DIR="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+
+    export PYTHONHASHSEED=0
+    export MMC_LOCAL_CONFIG_PATH="<CONFIG_DIRECTORY>/mmc-local.conf"
+    export LD_LIBRARY_PATH="${MEMCACHE_PACKAGE_DIR}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+    ```
+
+    `PYTHONHASHSEED` keeps Python hash generation consistent across the
+    nodes. `MMC_LOCAL_CONFIG_PATH` selects the LocalService configuration;
+    `LD_LIBRARY_PATH` includes the Memcache and Python shared libraries.
+
+    ##### Update the Prefill and Decode Connectors
+
+    Keep prefix caching, chunked prefill and the hybrid KV cache manager
+    enabled. With prefix caching enabled, the model configuration selects
+    `mamba_cache_mode=align`, which is required by `AscendStoreConnector`.
+    Keep `use_layerwise=false` and PP=DCP=1. The experimental RecoverSSM
     path requires PCP=PP=DCP=1 and does not accept `MultiConnector`.
 
-    Start the Memcache MetaService before the vLLM engines. Check Memcache
-    lookup/load hits to verify KV Cache Pool reuse.
+    1. On the Prefill node, replace the final `--kv-transfer-config`
+       argument in `run_dp_template.sh` with the following fragment.
+       Keep the remaining Prefill flags from Section 5.3, including
+       `--device-ids "$1"`, PCP8, FP8 indexer and eager execution.
+
+        ```shell
+          --kv-transfer-config \
+          '{
+            "kv_connector": "MultiConnector",
+            "kv_role": "kv_producer",
+            "engine_id": "0",
+            "kv_connector_extra_config": {
+              "connectors": [
+                {
+                  "kv_connector": "MooncakeConnectorV2",
+                  "kv_role": "kv_producer",
+                  "kv_port": "30100",
+                  "kv_connector_extra_config": {
+                    "prefill": {"dp_size": 1, "tp_size": 1, "pcp_size": 8},
+                    "decode": {"dp_size": 8, "tp_size": 1, "pcp_size": 1}
+                  }
+                },
+                {
+                  "kv_connector": "AscendStoreConnector",
+                  "kv_role": "kv_producer",
+                  "kv_connector_extra_config": {
+                    "backend": "memcache",
+                    "use_layerwise": false,
+                    "lookup_rpc_port": '"$((37000 + $4))"'
+                  }
+                }
+              ]
+            }
+          }'
+        ```
+
+    2. On the Decode node, replace the final `--kv-transfer-config`
+       argument in `run_dp_template.sh` with the following fragment.
+       Keep the remaining Decode flags from Section 5.3, including
+       `--device-ids "$1"`, the FP8 indexer, MTP5 and `FULL_DECODE_ONLY`.
+
+        ```shell
+          --kv-transfer-config \
+          '{
+            "kv_connector": "MultiConnector",
+            "kv_role": "kv_consumer",
+            "engine_id": "1",
+            "kv_connector_extra_config": {
+              "connectors": [
+                {
+                  "kv_connector": "MooncakeConnectorV2",
+                  "kv_role": "kv_consumer",
+                  "kv_port": "30800",
+                  "kv_connector_extra_config": {
+                    "prefill": {"dp_size": 1, "tp_size": 1, "pcp_size": 8},
+                    "decode": {"dp_size": 8, "tp_size": 1, "pcp_size": 1}
+                  }
+                },
+                {
+                  "kv_connector": "AscendStoreConnector",
+                  "kv_role": "kv_consumer",
+                  "kv_connector_extra_config": {
+                    "backend": "memcache",
+                    "use_layerwise": false,
+                    "consumer_is_to_load": false,
+                    "consumer_is_to_put": false,
+                    "lookup_rpc_port": '"$((37100 + $4))"'
+                  }
+                }
+              ]
+            }
+          }'
+        ```
+
+    `$4` is the DP rank passed by the launcher. The Prefill lookup value
+    is `37000`; the Decode values are `37100-37107`. `lookup_rpc_port`
+    identifies the local IPC endpoint between the pooling scheduler and
+    worker. Prefill loads and saves pooled prefixes; Decode receives KV
+    cache through `MooncakeConnectorV2` and contributes DDR pool memory.
+
+    ##### Start the Services
+
+    1. In a separate terminal in the Prefill container, start MetaService:
+
+        ```shell
+        MEMCACHE_PACKAGE_DIR="<PYTHON_SITE_PACKAGES>/memcache_hybrid"
+        PYTHON_LIB_DIR="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+        export LD_LIBRARY_PATH="${MEMCACHE_PACKAGE_DIR}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+        export MMC_META_CONFIG_PATH="<CONFIG_DIRECTORY>/mmc-meta.conf"
+        python -c "from memcache_hybrid import MetaService; MetaService.main()"
+        ```
+
+        Ensure ports `5000` and `6000` are reachable from both nodes and
+        port `18000` is available for metrics. The vLLM API uses port
+        `8000` on the same host.
+
+    2. Start Prefill and Decode with the launcher commands from
+       [Section 5.3](#glm53-flash-5-3-950dt). Each worker initializes its
+       Memcache LocalService during startup. Wait until the Prefill API
+       on port `8000` and all eight Decode APIs on ports `8000-8007`
+       pass the health checks from that section.
+    3. Start the proxy from Section 5.3. Send requests to the proxy using
+       [Section 6](#6-functional-verification).
+
+    ##### Verify KV Cache Reuse
+
+    Send a request with a prompt longer than one cache block to populate
+    the pool, then repeat requests with the same prefix. Wait for pool
+    saves to complete before repeating the prefix. Check Prefill output
+    for successful pool lookups, saves and loads, and Decode output for
+    successful P-to-D transfers.
+
+    Compare `vllm:ascend_store_load_get_keys_total` at the Prefill API's
+    `/metrics` endpoint before and after a request that loads pooled
+    prefixes. An increase records pool GET keys; a local prefix-cache
+    hit or HTTP 200 alone does not establish pool reuse. Confirm that the
+    pool loads and inference requests complete successfully. If a repeated
+    request hits only the local prefix cache, use a prefix whose local
+    cache blocks have been evicted to check external pool loading.
 
 === "A3 series"
 
