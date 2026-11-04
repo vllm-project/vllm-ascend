@@ -1,9 +1,5 @@
 # Source: https://github.com/vllm-project/vllm/blob/52a65d7b19e9e3ad86bf1e3b6954e4e11eeec7da/recipes/models/moonshotai/Kimi-K3.yaml
 # Extracted with vllm-project/recipes@b08ad73889f9e33319d8ac9c887dec6a0975c55d.
-kv_offload_hardware:
-  ascend_910c: unsupported
-  ascend_950dt: unsupported
-
 variants:
   ascend_w4a8:
     # https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8
@@ -155,10 +151,6 @@ strategy_overrides:
 guide_sections:
   section1: |
     ## Ascend mixed Prefill/Decode deployment
-
-    KV Offload supports only **Off** on Ascend 910C (A3) and 950DT (A5).
-    Simple, CPU offloading, Mooncake Store, and LMCache are unavailable for
-    these recipe profiles.
 
     In the four-node A3/A5 mixed deployment, node 0 runs the API server and
     Nodes 1-3 join with `--headless` and their respective
