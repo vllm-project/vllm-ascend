@@ -201,7 +201,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
                 causal=common.causal,
                 window_size=_get_window_size(sliding_window, common.causal),
                 has_softcap=softcap != 0.0,
-                softmax_scale=scale,
                 num_splits=0,
             )
             if spec in scheduler_metadata:

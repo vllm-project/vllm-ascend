@@ -250,6 +250,7 @@ def test_cache_write_precedes_attention_and_transfer_completion(fa3):
     assert events == ["cache", "notify", "begin", "attention", "end"]
     assert torch.equal(out, query * 2)
     assert fa3.flash_attn_with_kvcache.call_args.kwargs["window_size"] == (7, 7)
+    assert fa3.flash_attn_with_kvcache.call_args.kwargs["softmax_scale"] == impl.scale
     events.clear()
     impl.forward(layer, query, None, None, cache, None, out)
     assert not events and not out.any()
@@ -355,7 +356,7 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded, softcap):
         causal=causal,
     )
 
-    # Match the keyword-only subset of the public scheduler API.
+    # The public scheduler API has no softmax_scale; only attention takes it.
     def scheduler(
         *,
         batch_size,
@@ -371,11 +372,9 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded, softcap):
         causal,
         window_size,
         has_softcap,
-        softmax_scale,
         num_splits,
     ):
         assert has_softcap is (softcap != 0.0)
-        assert softmax_scale == scale
         assert window_size == (4095, 0 if causal else 4095)
         assert cache_seqlens.numel() == batch_size
         assert cu_seqlens_q.numel() == batch_size + 1
