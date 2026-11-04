@@ -18,10 +18,14 @@
 launched on a CPU-only CI (raw device addresses are meaningless on the host).
 These tests therefore pin the kernel's *contract* instead:
 
-* the kernel is registered as a Triton JIT kernel with the expected signature
-  and ``BLOCK_SIZE`` marked as ``tl.constexpr``;
+* with an active triton driver, the kernel is registered as a Triton JIT
+  kernel with the expected signature and ``BLOCK_SIZE`` marked as
+  ``tl.constexpr``; on CPU-only CI vllm substitutes identity/no-op triton
+  placeholders, so those pins degrade to checks on the raw function and the
+  ``tl``/``triton`` bindings instead;
 * a launch uses exactly one program per copy and forwards the raw
-  pointer/size tensors and ``BLOCK_SIZE`` unchanged;
+  pointer/size tensors and ``BLOCK_SIZE`` unchanged (verifiable only when
+  triton is active);
 * the byte-level copy algorithm the kernel implements (uint8 pointer casting,
   ``block_size`` iterations with a per-step mask, sizes in *bytes*) matches a
   plain CPU ``torch`` copy on the same underlying storage, including sizes
@@ -35,8 +39,9 @@ casting) requires NPU hardware and is covered by the nightly E2E test
 import inspect
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
-from vllm.triton_utils import tl
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 
@@ -79,14 +84,23 @@ def _reference_batch_memcpy(src, dst, src_ptrs, dst_ptrs, sizes, block_size):
 
 def test_kernel_is_triton_jit_kernel():
     """``@triton.jit`` registers the function as a Triton kernel object."""
-    # A Triton JITFunction is launched via `kernel[grid](...)`; it is the
-    # ``__getitem__``/``run`` API, not plain ``__call__``, that serializes to
-    # the device. triton and triton-ascend both name this type
-    # ``JITFunction``.
-    assert batch_memcpy_kernel.__class__.__name__ == "JITFunction"
-    for attr in ("run", "warmup", "__getitem__"):
-        assert callable(getattr(batch_memcpy_kernel, attr)), attr
     assert batch_memcpy_kernel.__name__ == "batch_memcpy_kernel"
+    if HAS_TRITON:
+        # A Triton JITFunction is launched via `kernel[grid](...)`; it is the
+        # ``__getitem__``/``run`` API, not plain ``__call__``, that serializes
+        # to the device. triton and triton-ascend both name this type
+        # ``JITFunction``.
+        assert batch_memcpy_kernel.__class__.__name__ == "JITFunction"
+        for attr in ("run", "warmup", "__getitem__"):
+            assert callable(getattr(batch_memcpy_kernel, attr)), attr
+    else:
+        # Without an active triton driver, vllm.triton_utils substitutes
+        # TritonPlaceholder whose ``jit`` is an identity decorator: the kernel
+        # stays the raw Python function with no launch API. Pin that
+        # degradation (and that no other wrapper slipped in) instead of the
+        # JITFunction contract, which cannot exist here.
+        assert callable(batch_memcpy_kernel)
+        assert batch_memcpy_kernel is _kernel_callable()
 
 
 def test_kernel_signature_and_block_size_constexpr():
@@ -100,10 +114,22 @@ def test_kernel_signature_and_block_size_constexpr():
     # Runtime pointer/size tensors only: no element-size assumption here.
     for param in params[:3]:
         assert param.annotation is inspect.Parameter.empty, param.name
-    # The final parameter is the constexpr bound.
+    # The annotation is evaluated at import time against the ``tl`` this module
+    # imported, so it *is* ``tl.constexpr``: the real constexpr class when
+    # triton is active, or vllm's placeholder value (``None``) on CPU-only
+    # boxes. The identity check pins the binding in both worlds; only with
+    # triton active does it also pin the constexpr type itself.
     assert params[-1].annotation is tl.constexpr
 
 
+@pytest.mark.skipif(
+    not HAS_TRITON,
+    reason=(
+        "CPU-only CI has no active triton driver: vllm.triton_utils uses an "
+        "identity 'jit' placeholder, so the kernel is a plain function "
+        "without the run/__getitem__ launch API."
+    ),
+)
 def test_launch_uses_one_program_per_copy_and_forwards_arguments():
     """A single batch row maps to one program id; args pass through unchanged."""
     batch = 3
@@ -167,10 +193,15 @@ def test_sizes_are_byte_counts_not_element_counts():
 
 
 def test_kernel_launch_is_available_through_vllm_triton_utils():
-    """The ``vllm.triton_utils`` binding still exposes the constexpr type.
+    """The ``vllm.triton_utils`` binding still exposes ``tl``/``triton``.
 
     Guards the module-level ``from vllm.triton_utils import tl, triton`` line
-    in the source file during CPU-only runs where ``triton.runtime`` is mocked
-    by ``tests/ut/conftest.py``.
+    in the source file. On CPU-only runs without an active triton driver, vllm
+    substitutes ``TritonLanguagePlaceholder``/``TritonPlaceholder``: the names
+    stay bound, but ``tl.constexpr`` degrades to ``None`` (older vllm) or a
+    no-op lambda (newer vllm) instead of the constexpr class.
     """
-    assert callable(tl.constexpr)
+    assert tl is not None and triton is not None
+    assert hasattr(tl, "constexpr")
+    if HAS_TRITON:
+        assert callable(tl.constexpr)
