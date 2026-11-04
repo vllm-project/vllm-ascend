@@ -87,6 +87,11 @@ layerwise, hybrid and D2RH connectors and `MooncakeConnectorV2` raise if
 MemFabric engine is process-wide, so when several connectors in one
 `MultiConnector` use it they must agree on `memfabric_transfer_protocol`.
 
+The Mooncake engine is process-wide, so `transfer_protocol` is a property of the
+process rather than of one connector: the AscendStore Mooncake backend and
+encoder-cache transfer reuse that engine and therefore the same transport, even
+though neither reads the key.
+
 #### Mooncake Layerwise Connector
 
 1. The request is sent to the Proxy's `_handle_completions` endpoint.
