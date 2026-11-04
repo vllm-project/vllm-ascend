@@ -31,7 +31,9 @@ def load_hook_class():
             method.decorator_list = []
         fields = [node for node in cls.body if isinstance(node, ast.AnnAssign) and isinstance(node.value, ast.Constant)]
         module = ast.parse(f"from __future__ import annotations\nclass {class_name}(Parent):\n    pass\n")
-        module.body[1].body = fields + selected
+        hook_class = module.body[1]
+        assert isinstance(hook_class, ast.ClassDef)
+        hook_class.body = [*fields, *selected]
         namespace = {**namespace, "Parent": parent}
         exec(compile(ast.fix_missing_locations(module), str(ROOT / path), "exec"), namespace)
         return namespace[class_name]
@@ -107,7 +109,8 @@ def manager_factory():
 
 @pytest.fixture
 def native_runtime(monkeypatch):
-    calls, allocations = [], []
+    calls: list[str | tuple[int, int]] = []
+    allocations = []
     stream = Mock(npu_stream=123, synchronize=lambda: calls.append("sync"))
     npu = SimpleNamespace(
         current_stream=lambda _: stream,
