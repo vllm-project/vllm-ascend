@@ -45,6 +45,8 @@ def test_native_v1_pp_async_validation(pipeline_parallel_size, async_scheduling,
             enable_batch_sharded_sampling=False,
         ),
         scheduler_config=SimpleNamespace(async_scheduling=async_scheduling),
+        attention_config=SimpleNamespace(hisparse_config=None),
+        watermark_config=None,
         _dflash_needs_multi_kv_group=lambda: False,
         _is_dflash2_draft=lambda: False,
         _is_dflash_candidate_draft=lambda: False,
@@ -67,7 +69,11 @@ def test_native_v1_pp_async_validation(pipeline_parallel_size, async_scheduling,
 def test_native_v2_spec_pp_validation(method, enable_sp):
     config = SimpleNamespace(
         model_config=None,
-        speculative_config=SimpleNamespace(method=method, parallel_drafting=False),
+        speculative_config=SimpleNamespace(
+            method=method,
+            parallel_drafting=False,
+            speculator_config=SimpleNamespace(speculator_class="test.Speculator"),
+        ),
         compilation_config=SimpleNamespace(mode=CompilationMode.NONE, pass_config=SimpleNamespace(enable_sp=enable_sp)),
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=2,

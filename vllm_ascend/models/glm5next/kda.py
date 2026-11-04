@@ -191,6 +191,9 @@ class PCPGlm5NextMergedColumnParallelLinear(_Glm5NextMergedColumnParallelLinear,
         # MergedColumnParallelLinear's constructor hardcodes the TP group.
         # Retain its shard loaders while allocating through the PCP column layer.
         PCPColumnParallelLinear.__init__(self, input_size, sum(self.output_sizes), **kwargs)
+        # vLLM #63752: the PCP allocation bypasses the stacked initializer.
+        self.shard_ids = tuple(range(len(self.output_sizes)))
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
 
 
 class Glm5NextLinearAttention(GatedDeltaNetAttention):

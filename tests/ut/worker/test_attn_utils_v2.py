@@ -1449,7 +1449,10 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         _device: torch.device,
         _layout: Any,
         _kernel_block_sizes: list[int],
+        *,
+        allocate=None,
     ) -> dict[str, Any]:
+        assert allocate is None
         del _layout
         raw_tensors = attn_utils._allocate_kv_cache(
             _kv_cache_config,

@@ -50,6 +50,7 @@ from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
     NPUIPCTrainerWeightTransferEngine,
     NPUIPCWeightTransferEngine,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _MODULE = "vllm_ascend.distributed.weight_transfer.npu_ipc_engine"
 
@@ -76,6 +77,8 @@ def _patch_reload_module(*, initialize=None, finalize=None):
     fake_mod = types.ModuleType("vllm.model_executor.model_loader.reload")
     fake_mod.initialize_layerwise_reload = initialize or MagicMock()  # type: ignore[attr-defined]
     fake_mod.finalize_layerwise_reload = finalize or MagicMock()  # type: ignore[attr-defined]
+    fake_mod.start_reload = fake_mod.initialize_layerwise_reload  # type: ignore[attr-defined]
+    fake_mod.finish_reload = fake_mod.finalize_layerwise_reload  # type: ignore[attr-defined]
     return patch.dict(
         sys.modules,
         {"vllm.model_executor.model_loader.reload": fake_mod},
@@ -196,13 +199,17 @@ def test_finish_weight_update():
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
     engine.model_config = MagicMock()
+    engine.device = torch.device("cpu")
     engine._packed_importer = MagicMock()
     mock_finalize = MagicMock()
 
     with _patch_reload_module(finalize=mock_finalize):
         engine.finish_weight_update()
 
-    mock_finalize.assert_called_once_with(engine.model, engine.model_config)
+    if vllm_version_is("0.33.0"):
+        mock_finalize.assert_called_once_with(engine.model, engine.model_config)
+    else:
+        mock_finalize.assert_called_once_with(engine.model, engine.model_config, engine.device)
     engine._packed_importer.close.assert_called_once_with()
 
 

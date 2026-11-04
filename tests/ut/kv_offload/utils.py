@@ -59,6 +59,7 @@ def _fake_opt_model_info() -> SimpleNamespace:
     """Static ModelInfo for OPT fake weights; avoids registry subprocess inspect."""
     return SimpleNamespace(
         architecture="OPTForCausalLM",
+        speculator_config_class=None,
         is_text_generation_model=True,
         is_pooling_model=False,
         attn_type="decoder",
