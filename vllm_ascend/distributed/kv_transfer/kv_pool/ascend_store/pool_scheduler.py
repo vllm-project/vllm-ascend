@@ -23,7 +23,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import (
+    DEFAULT_TIMEOUT_MS,
+    LookupKeyClient,
+    validate_timeout_ms,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
@@ -37,6 +41,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
     uses_hybrid_kv_cache,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
+    LOOKUP_RPC_FAILURES_KEY,
+    AscendStoreKVConnectorStats,
 )
 
 
@@ -182,6 +190,15 @@ class BaseKVPoolScheduler(ABC):
             self.put_step = 1
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.model_name = model_config.model.split("/")[-1]
+
+        # Reject a bad lookup_rpc_timeout_ms while the engine is still starting:
+        # the client itself is built lazily on the first request, so validating only
+        # there would turn a typo into a crash inside scheduling.
+        self.lookup_timeout_ms = validate_timeout_ms(
+            (vllm_config.kv_transfer_config.kv_connector_extra_config or {}).get(
+                "lookup_rpc_timeout_ms", DEFAULT_TIMEOUT_MS
+            )
+        )
 
         self.client: LookupKeyClient | None = None
 
@@ -767,6 +784,18 @@ class BaseKVPoolScheduler(ABC):
         except Exception as e:
             logger.error("AscendStore reset_store RPC failed: %s", e)
             return False
+
+    def get_stats(self) -> AscendStoreKVConnectorStats | None:
+        if self.client is None:
+            return None
+        counts = self.client.snapshot()
+        # Empty stays None: the scheduler loop drops stats whose is_empty() is true,
+        # so a healthy engine starts no payload. snapshot() rather than
+        # failure_counts because this object can outlive the call (queued for the
+        # next flush) and must not alias the client's live map.
+        if not counts:
+            return None
+        return AscendStoreKVConnectorStats(data={LOOKUP_RPC_FAILURES_KEY: counts})
 
 
 class KVPoolScheduler(BaseKVPoolScheduler):

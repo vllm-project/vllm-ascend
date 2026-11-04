@@ -534,6 +534,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.build_connector_worker_meta()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        # The lookup-RPC failure counters live on the scheduler-side client, so the
+        # scheduler object has to report them itself: vLLM calls this method on the
+        # SCHEDULER connector too (Scheduler.update_from_output) and aggregates whatever
+        # is returned into the worker-side stats. A worker-only answer here would make
+        # those counters unreachable rather than merely empty.
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.get_stats()
         if self.connector_worker is None:
             return None
         return self.connector_worker.get_stats()
