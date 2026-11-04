@@ -16,18 +16,22 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import torch_npu
+import torch_npu  # noqa: F401
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakePCPTransferMetadata,
     MooncakePPTransferMetadata,
     MooncakeTPTransferMetadata,
+    MooncakeTransferMetadata,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import MooncakePullRecvingThread
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
-from vllm_ascend.kv_offload.dsa_pd_mooncake import register_dsa_pd_mooncake_offloaded_kv_tensor
 from vllm_ascend.kv_offload.dsa_pd_mooncake_staging import DSAPDMooncakeStagingReader
+from vllm_ascend.worker.v2.attn_utils import (
+    _allocate_dsa_pd_mooncake_kv_tensor,
+    _register_dsa_pd_mooncake_final_kv_views,
+)
 
 
 def pattern(size: int, offset: int = 0) -> torch.Tensor:
@@ -60,8 +64,8 @@ def consumer(args: argparse.Namespace, engine: Any) -> None:
     block = 256
     if args.nbytes % block:
         raise ValueError("nbytes must be a multiple of 256")
-    host = torch_npu.empty_with_swapped_memory((args.nbytes,), dtype=torch.int8, device="npu")
-    register_dsa_pd_mooncake_offloaded_kv_tensor(host)
+    host = _allocate_dsa_pd_mooncake_kv_tensor(args.nbytes, 2 * 1024 * 1024)
+    _register_dsa_pd_mooncake_final_kv_views({"host": host})
     hbm = torch.zeros(128 * 1024, dtype=torch.int8, device="npu")
     global_te.register_buffer([hbm.data_ptr()], [hbm.nbytes])
     reader = DSAPDMooncakeStagingReader(engine, {"host": host, "hbm": hbm}, [[block], [block]])
@@ -77,6 +81,21 @@ def consumer(args: argparse.Namespace, engine: Any) -> None:
     thread.block_strides = thread.block_lens = [[block], [block]]
     thread.block_shapes = [[(1, 16, 8)], [(1, 16, 8)]]
     thread.block_size_scales = [[1], [1]]
+    thread.local_metadata = MooncakeTransferMetadata(
+        engine_id="smoke-consumer",
+        te_rpc_port=engine.get_rpc_port(),
+        block_size=16,
+        num_blocks=args.nbytes // block,
+        layer_names=thread.layer_names,
+        layer_block_sizes=[16, 16],
+        group_indices=[0, 0],
+        kv_caches_base_addr=thread.kv_caches_base_addr,
+        block_strides=thread.block_strides,
+        block_lens=thread.block_lens,
+        block_shapes=thread.block_shapes,
+        block_size_scales=thread.block_size_scales,
+        local_ip=args.hostname,
+    )
     ip, port = remote["session"].rsplit(":", 1)
     pp = MooncakePPTransferMetadata(
         block_size=16,
@@ -124,6 +143,7 @@ def consumer(args: argparse.Namespace, engine: Any) -> None:
     result = {
         "role": "consumer",
         "connector": "MooncakeConnectorV2",
+        "allocator": "ModelRunnerV2 DSA Host KV",
         "host_ok": host_ok,
         "hbm_ok": hbm_ok,
         "host_bytes": host.nbytes,
@@ -146,7 +166,7 @@ def main() -> None:
     parser.add_argument("--hostname", required=True)
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--done", type=Path, required=True)
-    parser.add_argument("--nbytes", type=int, default=5 * 1024 * 1024 + 128 * 1024)
+    parser.add_argument("--nbytes", type=int, default=9 * 1024 * 1024 + 128 * 1024)
     parser.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args()
     torch.npu.set_device(args.device)
