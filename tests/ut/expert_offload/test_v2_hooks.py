@@ -57,9 +57,12 @@ def make_runner(load_hook_class, *, manager=None, has_prefill=False):
 
         def execute_model(self, scheduler_output, **kwargs):
             self.gather_batch_req_state(scheduler_output, kwargs["dummy_run"])
+            events.append(("parent_execute", kwargs["dummy_run"], kwargs["is_profile"]))
             return "result"
 
         def gather_batch_req_state(self, scheduler_output, dummy_run):
+            if dummy_run:
+                return None, 1
             return SimpleNamespace(has_prefill=getattr(scheduler_output, "has_prefill", has_prefill)), 1
 
         def shutdown(self):
@@ -134,22 +137,23 @@ def test_disabled_load_does_not_allocate_or_finalize_offload(load_hook_class, lo
     loading_memory.assert_not_called()
 
 
-def test_execute_refreshes_batch_flags_after_profile_dummy_and_prefill(load_hook_class):
+def test_execute_preserves_dummy_pool_and_restores_decode_phase(load_hook_class):
     manager = ExpertOffloadManager()
-    runner, _ = make_runner(load_hook_class, manager=manager)
+    runner, events = make_runner(load_hook_class, manager=manager)
     scheduler_output = SimpleNamespace(
         total_num_scheduled_tokens=1, num_scheduled_tokens={"request": 1}, has_prefill=False
     )
     for profile, dummy, prefill in (
-        (True, False, False),
+        (True, True, False),
+        (False, False, False),
         (False, True, False),
         (False, False, True),
         (False, False, False),
     ):
         scheduler_output.has_prefill = prefill
         runner.execute_model(scheduler_output, is_profile=profile, dummy_run=dummy)
-        assert manager.has_prefill is prefill
-        assert manager.is_profile is (profile or dummy)
+        assert manager.has_prefill is (dummy or prefill)
+        assert events[-1] == ("parent_execute", dummy, profile)
 
 
 @pytest.fixture

@@ -709,9 +709,9 @@ class NPUModelRunner(GPUModelRunner):
         forward_failed = True
         offload_manager = self.expert_offload_manager
         if offload_manager is not None:
-            # Batch metadata below refines this conservative prefill default.
+            # Dummy runs have no batch state and keep the full-pool default.
+            # Real batch metadata below selects prefill or decode.
             offload_manager.has_prefill = True
-            offload_manager.is_profile = is_profile or dummy_run
         with dp_coordination_context:
             try:
                 output = super().execute_model(

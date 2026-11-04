@@ -167,7 +167,7 @@ class LayerOffloadBinding:
         # One batched synchronization. No scalar device .item() loop.
         logical_ids = selected_ids.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist()
         plan = self.residency.plan(logical_ids)
-        full_pool = manager.has_prefill or manager.is_profile or plan.use_full_pool
+        full_pool = manager.has_prefill or plan.use_full_pool
         if full_pool:
             tensors = manager.prefill_pool.fill(self)
             physical_ids = selected_ids
@@ -268,7 +268,6 @@ class ExpertOffloadManager:
         self.prefill_pool = PrefillExpertPool()
         self.comm_methods = {}
         self.has_prefill = True
-        self.is_profile = False
         self.capturing_graphs = False
         self.graph_error: Exception | None = None
         self.graph_load_stream = None
@@ -309,7 +308,6 @@ class ExpertOffloadManager:
     @contextmanager
     def graph_capture(self):
         self.has_prefill = False
-        self.is_profile = False
         self.capturing_graphs = True
         try:
             yield

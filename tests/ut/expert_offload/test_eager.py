@@ -20,19 +20,18 @@ def test_loading_decode_prefill_and_capacity_fallback(expert_factory, manager_fa
     assert binding.host_store.tensors["w13_weight"].float().sum() > 0
     addresses = {name: value.data_ptr() for name, value in binding.resident.items()}
     map_addresses = (binding.mapping.host_map.data_ptr(), binding.mapping.device_map.data_ptr())
-    for prefill, profile, logical in (
-        (False, False, [[4, 5]]),
-        (False, False, [[1, 4]]),
-        (True, False, [[0, 5]]),
-        (False, False, [[0, 1], [2, 3]]),
-        (False, True, [[0, 1]]),
-        (False, False, [[2, 2]]),
+    for prefill, logical in (
+        (False, [[4, 5]]),
+        (False, [[1, 4]]),
+        (True, [[0, 5]]),
+        (False, [[0, 1], [2, 3]]),
+        (False, [[2, 2]]),
     ):
-        manager.has_prefill, manager.is_profile = prefill, profile
+        manager.has_prefill = prefill
         ids = torch.tensor(logical, dtype=torch.int32)
         before = binding.residency.logical_to_physical()
         view, physical, _ = binding.prepare(layer, ids)
-        full_pool = prefill or profile or ids.unique().numel() > binding.num_slots
+        full_pool = prefill or ids.unique().numel() > binding.num_slots
         assert manager.get_comm.call_args.args[-1] == (binding.num_experts if full_pool else binding.num_slots)
         if full_pool:
             assert torch.equal(physical, ids)
