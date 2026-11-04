@@ -281,6 +281,7 @@ Model runner V2 and `--logprobs-mode processed_logprobs` are required.
 The following example also uses `--tokens-only` to expose the token-in/token-out
 API and skip tokenizer initialization. Use `--enable-scale-out` instead to expose the
 same endpoint while retaining the normal serving setup and tokenizer.
+See [Tokens in, tokens out](#tokens-in-tokens-out) for serving details.
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=1 \
