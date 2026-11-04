@@ -9,6 +9,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
+from vllm.distributed.weight_transfer import ipc_engine
 from vllm.distributed.weight_transfer.base import (
     TrainerWeightTransferEngine,
 )
@@ -26,7 +27,6 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
-from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -211,8 +211,8 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
     """Trainer-side NPU IPC weight transfer engine.
 
     Inherits the handshake, send lifecycle, unpacked sender and payload
-    construction, collectives and cleanup. Only device identity and packing
-    need NPU implementations.
+    construction, collectives, packed sending and cleanup. Device identity
+    and the producer compatibility wrapper remain NPU-specific.
     """
 
     init_info_cls = NPUIPCTrainerInitInfo
@@ -233,6 +233,9 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         # Standalone trainers do not initialize an NPU model runner. Apply
         # its persistent CUDA mappings for upstream synchronization and IPC cleanup.
         with torch_cuda_wrapper():
+            # The upstream sender binds its producer at module scope. Remove
+            # this process-wide bridge when upstream provides a producer hook.
+            ipc_engine.packed_ipc_producer = packed_npu_ipc_producer
             TrainerWeightTransferEngine.__init__(
                 self,
                 client=client,
@@ -245,29 +248,3 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         self.npu_uuid = npu_generate_uuid(self.device_index)
         # Upstream's unpacked sender treats gpu_uuid as an opaque wire key.
         self.gpu_uuid = self.npu_uuid
-
-    def _send_packed(self, source: "WeightSource") -> None:
-        """Send weights in bounded-memory chunks (packed mode)."""
-        # vLLM main replaced `WeightSource.__iter__` with `iter_full()`;
-        # v0.32.0 still iterates the source directly.
-        iterator = iter(source) if vllm_version_is("0.32.0") else source.iter_full()
-        for chunk in packed_npu_ipc_producer(
-            iterator=iterator,
-            npu_uuid=self.npu_uuid,
-            post_iter_func=lambda item: item[1],
-            buffer_size_bytes=self.packed_buffer_size_bytes,
-        ):
-            ipc_handle = self._all_gather_and_merge_handles([chunk.ipc_handle])[0]
-            self._do_send(
-                names=chunk.names,
-                dtype_names=chunk.dtype_names,
-                shapes=chunk.shapes,
-                ipc_handles=ipc_handle,
-                tensor_sizes=chunk.tensor_sizes,
-            )
-            # Per-chunk barrier: the producer reuses a single IPC buffer
-            # across chunks. Without syncing every rank here, non-sender
-            # ranks race ahead and overwrite their buffer while their
-            # colocated worker is still reading the current chunk, silently
-            # corrupting the transfer.
-            self._post_send_sync()

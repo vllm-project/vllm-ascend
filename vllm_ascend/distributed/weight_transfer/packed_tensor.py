@@ -14,6 +14,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_NUM_BUFFERS,
     PackedBufferImporter,
     PackedIpcChunk,
+    packed_ipc_producer,
 )
 from vllm.logger import logger
 
@@ -285,88 +286,70 @@ def packed_broadcast_consumer(
 
 def packed_npu_ipc_producer(
     iterator: Iterator[tuple[str, torch.Tensor]],
-    npu_uuid: str,
+    gpu_uuid: str,
     post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
 ) -> Iterator[PackedIpcChunk]:
-    """Pack tensors into a reusable NPU IPC buffer and yield chunks.
+    """Adapt NPU allocation and validation around upstream IPC packing.
 
-    Allocates a single NPU buffer of ``buffer_size_bytes`` and registers
-    it for IPC once via ``reduce_tensor``.  Each chunk's packed data is
-    copied into this buffer before yielding, so only one IPC-shared
-    allocation exists for the lifetime of the transfer.
-    A nonempty iterator containing only zero-element tensors still yields a
-    chunk so its names, shapes and dtypes are delivered; an empty iterator does not.
-
-    Args:
-        iterator: Iterator of (name, tensor) pairs.
-        npu_uuid: Physical NPU UUID string for this rank.
-        post_iter_func: Applied to each (name, tensor) before packing. Must return
-            a Tensor with the source dtype and element count, or raises ValueError.
-            Flattened element positions must match the source metadata: values,
-            device and strides may change, but elements must not be reordered
-            (e.g. by transposing). Order is a caller contract, not checked here.
-        buffer_size_bytes: Exact capacity of the reusable IPC buffer.
+    ``gpu_uuid`` is the upstream argument name; it carries the NPU wire key.
+    The CUDA compatibility wrapper persists across generator yields. Normal
+    packing, buffer reuse and chunk creation are owned by upstream.
     """
+    from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+
     if buffer_size_bytes <= 0:
         raise ValueError(f"buffer_size_bytes must be positive, got {buffer_size_bytes}")
-    ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device="npu")
-    # Store only the rebuild args (drop the func); the consumer rebuilds with
-    # the well-known ``rebuild_npu_tensor``, mirroring upstream's CUDA IPC engine.
-    _, ipc_args = reduce_tensor(ipc_buffer)
 
-    names: list[str] = []
-    shapes: list[list[int]] = []
-    dtypes: list[torch.dtype] = []
-    tensor_sizes: list[int] = []
-    total_bytes = 0
-
-    for name, orig_tensor in iterator:
-        tensor = post_iter_func((name, orig_tensor))
+    def checked_post_iter(item: tuple[str, torch.Tensor]) -> torch.Tensor:
+        tensor = post_iter_func(item)
         if not isinstance(tensor, torch.Tensor):
-            raise ValueError(f"post_iter_func for tensor {name!r} must return a torch.Tensor")
-        tensor = tensor.contiguous()
-        if tensor.dtype != orig_tensor.dtype or tensor.numel() != orig_tensor.numel():
+            raise ValueError(f"post_iter_func for tensor {item[0]!r} must return a torch.Tensor")
+        original = item[1]
+        if tensor.dtype != original.dtype or tensor.numel() != original.numel():
             raise ValueError(
-                f"post_iter_func returned tensor {name!r} with dtype={tensor.dtype}, "
-                f"numel={tensor.numel()}; expected dtype={orig_tensor.dtype}, numel={orig_tensor.numel()}"
+                f"post_iter_func returned tensor {item[0]!r} with dtype={tensor.dtype}, "
+                f"numel={tensor.numel()}; expected dtype={original.dtype}, numel={original.numel()}"
             )
-        flat = tensor.reshape(-1).view(torch.uint8)
+        return tensor
 
-        if flat.numel() > buffer_size_bytes:
-            raise ValueError(
-                f"Tensor '{name}' has size {flat.numel()} bytes, "
-                f"which exceeds buffer_size_bytes={buffer_size_bytes}. "
-                f"Increase buffer_size_bytes to at least {flat.numel()}."
-            )
+    with torch_cuda_wrapper():
+        # Upstream uses total_bytes for its final flush, so an all-empty
+        # source needs a metadata-only chunk. Look ahead only until the first
+        # nonempty tensor; mixed sources then take the unchanged upstream path.
+        iterator = iter(iterator)
+        prefix: list[tuple[str, torch.Tensor]] = []
+        for item in iterator:
+            prefix.append(item)
+            if item[1].numel():
+                break
+        else:
+            if prefix:
+                for item in prefix:
+                    checked_post_iter(item)
+                ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device="npu")
+                _, ipc_args = reduce_tensor(ipc_buffer)
+                torch.npu.current_stream().synchronize()
+                yield PackedIpcChunk(
+                    names=[name for name, _ in prefix],
+                    shapes=[list(tensor.shape) for _, tensor in prefix],
+                    dtype_names=[str(tensor.dtype).split(".")[-1] for _, tensor in prefix],
+                    tensor_sizes=[0] * len(prefix),
+                    ipc_handle={gpu_uuid: ipc_args},
+                )
+            return
 
-        if total_bytes and total_bytes + flat.numel() > buffer_size_bytes:
-            torch.npu.current_stream().synchronize()
-            yield PackedIpcChunk(
-                names=names,
-                shapes=shapes,
-                dtype_names=[str(d).split(".")[-1] for d in dtypes],
-                tensor_sizes=tensor_sizes,
-                ipc_handle={npu_uuid: ipc_args},
-            )
-            names, shapes, dtypes, tensor_sizes = [], [], [], []
-            total_bytes = 0
+        def replay_prefix() -> Iterator[tuple[str, torch.Tensor]]:
+            yield from prefix
+            prefix.clear()
+            yield from iterator
 
-        ipc_buffer[total_bytes : total_bytes + flat.numel()].copy_(flat)
-        names.append(name)
-        shapes.append(list(orig_tensor.shape))
-        dtypes.append(orig_tensor.dtype)
-        tensor_sizes.append(flat.numel())
-        total_bytes += flat.numel()
-
-    if names:
-        torch.npu.current_stream().synchronize()
-        yield PackedIpcChunk(
-            names=names,
-            shapes=shapes,
-            dtype_names=[str(d).split(".")[-1] for d in dtypes],
-            tensor_sizes=tensor_sizes,
-            ipc_handle={npu_uuid: ipc_args},
+        del item
+        yield from packed_ipc_producer(
+            iterator=replay_prefix(),
+            gpu_uuid=gpu_uuid,
+            post_iter_func=checked_post_iter,
+            buffer_size_bytes=buffer_size_bytes,
         )
 
 

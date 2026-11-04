@@ -57,6 +57,14 @@ from vllm_ascend.worker.v2 import utils as v2_utils
 _MODULE = "vllm_ascend.distributed.weight_transfer.npu_ipc_engine"
 
 
+@pytest.fixture(autouse=True)
+def _restore_upstream_producer():
+    # Trainer construction installs a process-wide producer bridge. Keep each
+    # test independent of whether an earlier test constructed a trainer.
+    with patch("vllm.distributed.weight_transfer.ipc_engine.packed_ipc_producer"):
+        yield
+
+
 def _patch_rebuild_npu_tensor(rebuild_func):
     """Install a fake ``torch_npu.multiprocessing.reductions`` module.
 
@@ -254,7 +262,11 @@ def test_trainer_init_uses_assigned_npu_without_cuda(packed):
     accelerator = types.SimpleNamespace(current_device_index=lambda: 2)
     with (
         patch.object(torch, "accelerator", accelerator, create=True),
-        patch.object(v2_utils, "torch", types.SimpleNamespace(cuda=MagicMock(), npu=MagicMock())),
+        patch.object(
+            v2_utils,
+            "torch",
+            types.SimpleNamespace(cuda=MagicMock(), npu=MagicMock(), empty=MagicMock(), device=torch.device),
+        ),
         patch(f"{_MODULE}.npu_generate_uuid", return_value="node-7") as uuid,
         patch.object(torch.cuda, "get_device_properties", side_effect=AssertionError("CUDA used")),
     ):
@@ -279,12 +291,13 @@ def test_packed_sender_waits_before_reusing_each_chunk(is_sender):
     engine.is_sender = is_sender
     engine.packed = True
     engine.npu_uuid = "node-0"
+    engine.gpu_uuid = engine.npu_uuid
     engine.packed_buffer_size_bytes = 16
     engine.source = MagicMock()
     events: list[str] = []
 
     def chunks(**kwargs):
-        assert kwargs["npu_uuid"] == "node-0"
+        assert kwargs["gpu_uuid"] == "node-0"
         assert kwargs["buffer_size_bytes"] == 16
         for i in range(2):
             yield PackedIpcChunk(
@@ -297,7 +310,7 @@ def test_packed_sender_waits_before_reusing_each_chunk(is_sender):
     with (
         patch.object(engine, "_all_gather_and_merge_handles", side_effect=lambda handles: handles),
         patch.object(engine, "_post_send_sync", side_effect=lambda: events.append("sync")),
-        patch(f"{_MODULE}.packed_npu_ipc_producer", side_effect=chunks),
+        patch("vllm.distributed.weight_transfer.ipc_engine.packed_ipc_producer", side_effect=chunks),
     ):
         engine._send_packed(engine.source)
     expected_chunk = ["update", "sync", "reuse"] if is_sender else ["sync", "reuse"]
@@ -314,6 +327,8 @@ def test_standalone_trainer_inherits_npu_collectives_and_cleanup(is_sender, worl
     fake_torch = types.SimpleNamespace(
         cuda=MagicMock(),
         npu=MagicMock(),
+        empty=MagicMock(),
+        device=torch.device,
         accelerator=types.SimpleNamespace(
             current_device_index=lambda: 0,
             synchronize=lambda: fake_torch.npu.synchronize(),

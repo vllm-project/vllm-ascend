@@ -35,6 +35,7 @@ import pytest
 import torch
 from vllm.distributed.weight_transfer.packed_tensor import PackedIpcChunk
 
+from vllm_ascend.distributed.weight_transfer import packed_tensor as packed_module
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_broadcast_consumer,
@@ -80,7 +81,7 @@ def _stub_torch_npu():
     to redirect ``device="npu"`` to ``device="cpu"`` (the packing logic under test
     is dtype/shape/byte-correctness, which is device-agnostic).
     """
-    fake_npu = types.SimpleNamespace(
+    fake_npu = MagicMock(
         Stream=_FakeNpuStream,
         current_stream=_FakeNpuStream,
         synchronize=lambda *a, **kw: None,
@@ -96,8 +97,79 @@ def _stub_torch_npu():
             kwargs["device"] = "cpu"
         return original_empty(*args, **kwargs)
 
-    with patch.object(torch, "npu", fake_npu, create=True), patch.object(torch, "empty", _fake_empty):
+    with (
+        patch.object(torch, "npu", fake_npu, create=True),
+        patch.object(torch, "cuda", MagicMock()),
+        patch.object(torch, "empty", _fake_empty),
+        patch.object(torch.accelerator, "current_stream", _FakeNpuStream, create=True),
+        patch.object(torch.accelerator, "current_device_index", return_value=0, create=True),
+        patch(
+            "vllm.distributed.weight_transfer.packed_tensor.reduce_tensor",
+            side_effect=lambda tensor: packed_module.reduce_tensor(tensor),
+        ),
+    ):
         yield
+
+
+@pytest.mark.parametrize("empty_only", [False, True])
+def test_inherited_packed_sender_roundtrip_through_upstream_producer(empty_only):
+    from vllm.distributed.weight_transfer import ipc_engine
+
+    from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import NPUIPCTrainerWeightTransferEngine
+
+    tensors = (
+        [("empty", torch.empty(0, 3))]
+        if empty_only
+        else [("a", torch.tensor([1.0, 2.0])), ("b", torch.tensor([3.0, 4.0]))]
+    )
+    source = MagicMock()
+    source.__iter__.return_value = iter(tensors)
+    source.iter_full.return_value = iter(tensors)
+    buffers, received = [], []
+
+    def export(buffer):
+        buffers.append(buffer)
+        return None, (0,) * 7
+
+    importer = packed_module.NPUPackedBufferImporter()
+    client = MagicMock()
+
+    def receive(payload):
+        received.extend(
+            packed_npu_ipc_consumer(
+                payload["ipc_handles"],
+                "node-0",
+                payload["names"],
+                payload["shapes"],
+                payload["dtype_names"],
+                payload["tensor_sizes"],
+                0,
+                importer=importer,
+            )
+        )
+
+    client.update_weights.side_effect = receive
+    client.finish_weight_update.side_effect = importer.close
+    with (
+        patch.object(ipc_engine, "packed_ipc_producer"),
+        patch("vllm_ascend.distributed.weight_transfer.npu_ipc_engine.npu_generate_uuid", return_value="node-0"),
+        patch(f"{_MODULE}.reduce_tensor", side_effect=export),
+        _install_fake_rebuild_npu_tensor(torch.empty(0, dtype=torch.uint8)),
+    ):
+        rebuild = sys.modules["torch_npu.multiprocessing.reductions"].rebuild_npu_tensor
+        rebuild.side_effect = lambda *args: buffers[0]
+        engine = NPUIPCTrainerWeightTransferEngine(
+            client=client, source=source, packed=True, packed_buffer_size_bytes=8
+        )
+        assert type(engine)._send_packed is ipc_engine.IPCTrainerWeightTransferEngine._send_packed
+        engine.send_weights()
+        assert rebuild.call_count == 1
+    assert len(buffers) == 1
+    assert client.update_weights.call_count == (1 if empty_only else 2)
+    assert [name for name, _ in received] == [name for name, _ in tensors]
+    assert all(torch.equal(actual, expected) for (_, actual), (_, expected) in zip(received, tensors))
+    client.start_weight_update.assert_called_once_with()
+    client.finish_weight_update.assert_called_once_with()
 
 
 @pytest.mark.parametrize(
@@ -367,7 +439,7 @@ def test_packed_npu_ipc_producer_single_chunk():
         chunks = list(
             packed_npu_ipc_producer(
                 iterator=iter([("w", tensor)]),
-                npu_uuid="node-0",
+                gpu_uuid="node-0",
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
             )
@@ -389,12 +461,33 @@ def test_packed_npu_ipc_producer_empty_iterator():
         chunks = list(
             packed_npu_ipc_producer(
                 iterator=iter([]),
-                npu_uuid="node-0",
+                gpu_uuid="node-0",
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
             )
         )
     assert chunks == []
+
+
+@pytest.mark.parametrize("empty_only", [False, True])
+def test_upstream_adapter_preserves_empty_prefix_and_callback_order(empty_only):
+    tensors = [("leading", torch.empty(0, 2))]
+    if not empty_only:
+        tensors.append(("weight", torch.tensor([1.0, 2.0])))
+    tensors.append(("trailing", torch.empty(0)))
+    seen = []
+
+    def transform(item):
+        seen.append(item[0])
+        return item[1]
+
+    patcher, _ = _install_fake_reduce_tensor()
+    with patcher:
+        chunks = list(packed_npu_ipc_producer(iter(tensors), "node-0", transform, 8))
+    assert len(chunks) == 1
+    assert chunks[0].names == [name for name, _ in tensors]
+    assert chunks[0].tensor_sizes == ([0, 0] if empty_only else [0, 8, 0])
+    assert seen == [name for name, _ in tensors]
 
 
 def test_packed_npu_ipc_producer_splits_when_exceeding_buffer():
@@ -408,7 +501,7 @@ def test_packed_npu_ipc_producer_splits_when_exceeding_buffer():
         chunks = list(
             packed_npu_ipc_producer(
                 iterator=iter(tensors),
-                npu_uuid="node-0",
+                gpu_uuid="node-0",
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=20,  # Only one 16-byte tensor fits per chunk
             )
@@ -434,7 +527,7 @@ def test_packed_npu_ipc_producer_raises_when_single_tensor_exceeds_buffer():
             list(
                 packed_npu_ipc_producer(
                     iterator=iter([("big", big)]),
-                    npu_uuid="node-0",
+                    gpu_uuid="node-0",
                     post_iter_func=lambda item: item[1],
                     buffer_size_bytes=128,
                 )
@@ -453,7 +546,7 @@ def test_packed_npu_ipc_producer_dtype_name_extraction():
         chunks = list(
             packed_npu_ipc_producer(
                 iterator=iter(tensors),
-                npu_uuid="node-0",
+                gpu_uuid="node-0",
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
             )
@@ -776,7 +869,7 @@ def test_packed_npu_ipc_producer_post_iter_func_transforms_tensor():
         chunks = list(
             packed_npu_ipc_producer(
                 iterator=iter([("w", original)]),
-                npu_uuid="node-0",
+                gpu_uuid="node-0",
                 post_iter_func=lambda item: item[1] * 3,
                 buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
             )
@@ -797,7 +890,7 @@ def test_packed_npu_ipc_producer_handles_multiple_tensors_one_chunk():
         chunks = list(
             packed_npu_ipc_producer(
                 iterator=iter([("a", a), ("b", b)]),
-                npu_uuid="node-0",
+                gpu_uuid="node-0",
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
             )
@@ -820,7 +913,7 @@ def test_packed_npu_ipc_producer_ipc_handle_key_matches_npu_uuid():
         chunks = list(
             packed_npu_ipc_producer(
                 iterator=iter([("w", torch.zeros(4, dtype=torch.float32))]),
-                npu_uuid="physical-npu-7",
+                gpu_uuid="physical-npu-7",
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
             )

@@ -5,9 +5,48 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+import torch
 import vllm.distributed.device_communicators.cuda_communicator as cuda_comm_mod
 
 from vllm_ascend.worker.v2 import utils as v2_utils
+
+
+@pytest.mark.parametrize(
+    ("device", "expected"),
+    [
+        ("cuda", "npu"),
+        ("cuda:2", "npu:2"),
+        (torch.device("cuda"), "npu"),
+        (torch.device("cuda:3"), "npu:3"),
+        ("cpu", "cpu"),
+        (torch.device("cpu"), "cpu"),
+        ("meta", "meta"),
+        (None, None),
+    ],
+)
+def test_empty_mapping_persists_and_is_idempotent(device, expected):
+    original_empty = MagicMock(return_value="allocation")
+    fake_torch = SimpleNamespace(cuda=MagicMock(), npu=MagicMock(), empty=original_empty, device=torch.device)
+    with patch.object(v2_utils, "torch", fake_torch):
+        with v2_utils.torch_cuda_wrapper():
+            wrapped = fake_torch.empty
+        with v2_utils.torch_cuda_wrapper():
+            assert fake_torch.empty is wrapped
+        assert fake_torch.empty(2, device=device, dtype=torch.uint8) == "allocation"
+        original_empty.assert_called_once()
+        kwargs = original_empty.call_args.kwargs
+        actual_device = kwargs["device"]
+        assert (None if actual_device is None else str(actual_device)) == expected
+        assert kwargs["dtype"] == torch.uint8
+
+
+def test_empty_mapping_preserves_allocation_errors():
+    fake_torch = SimpleNamespace(empty=MagicMock(side_effect=RuntimeError("allocation failed")), device=torch.device)
+    with patch.object(v2_utils, "torch", fake_torch):
+        v2_utils._wrap_torch_empty()
+        with pytest.raises(RuntimeError, match="allocation failed"):
+            fake_torch.empty(2, device="cuda")
 
 
 def test_v2_utils_context_managers_switch_and_restore():
@@ -18,7 +57,9 @@ def test_v2_utils_context_managers_switch_and_restore():
     npu_cls = object()
 
     with (
-        patch.object(v2_utils, "torch", SimpleNamespace(cuda=fake_cuda, npu=fake_npu)),
+        patch.object(
+            v2_utils, "torch", SimpleNamespace(cuda=fake_cuda, npu=fake_npu, empty=MagicMock(), device=torch.device)
+        ),
         patch.object(v2_utils, "breakable_cudagraph", MagicMock()),
         patch.object(v2_utils, "weak_ref_workspaces") as weak_ref,
         patch.object(v2_utils, "get_graph_params", return_value="graph"),
