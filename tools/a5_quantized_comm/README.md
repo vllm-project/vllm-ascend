@@ -1,5 +1,10 @@
 # A5 原生 QuantAllReduce 精度验证
 
+若需采用 INT8 基准相同的单文件多卡测试方式，优先使用
+[原生 MXFP8 精度与性能单测](../../benchmarks/benchmark_native_mxfp8_all_reduce.md)。
+它提供 `--check-only` 精度模式、BF16 性能基线、NPU Event 计时及 JSON 结果，
+可只复制 benchmark 的 `.py` 文件运行。本目录保留较细的历史诊断用例。
+
 默认通过官方 `cann_ops_transformer.ops.quant_all_reduce` 做多卡精度验证，
 不需要编译本目录的 C++ 封装或重编 vLLM。用户的 0.32 镜像已在
 CANN 9.2.1 安装目录下发现此入口，Python 为 3.12.16、PyTorch 为 2.10.0、
