@@ -332,6 +332,10 @@ a5:
         os: linux-aarch64-a5-8
         config_file_path: GLM5_1_W4A4_A5.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
+      - name: glm-5.2-w4a4c8-mtp-a5-v2
+        os: linux-aarch64-a5-8
+        config_file_path: GLM-5.2-W4A4C8-MTP-A5-V2.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
       - name: Qwen3_6_27b_A5
         os: linux-aarch64-a5-8
         config_file_path: Qwen3_6_27b_A5.yaml
