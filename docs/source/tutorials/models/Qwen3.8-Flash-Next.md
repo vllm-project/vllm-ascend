@@ -42,13 +42,13 @@ The commands use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. For PD se
 
 Refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image) for the complete installation guide.
 
-Use an image version that supports the selected Qwen3.8-Flash-Next checkpoint.
+Use the v0.32.0rc image for the target hardware.
 
 === "Ascend 950 DT"
 
     ```bash
     # Reuse the host model cache at /root/.cache.
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc-a5
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -84,7 +84,7 @@ Use an image version that supports the selected Qwen3.8-Flash-Next checkpoint.
 
     ```bash
     # Reuse the host model cache at /root/.cache.
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc-a3
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -125,7 +125,7 @@ Use an image version that supports the selected Qwen3.8-Flash-Next checkpoint.
 
     ```bash
     # Reuse the host model cache at /root/.cache.
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc
     export NAME=vllm-ascend
 
     docker run --rm \
