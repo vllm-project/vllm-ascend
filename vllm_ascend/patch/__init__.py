@@ -1210,7 +1210,7 @@
 #    How:
 #       `__init__`: after the upstream constructor, raise
 #       `use_attn_reduce_scatter_for_moe` for the dense family when dense SP
-#       is active (vllm_ascend.utils.enable_dense_sp resolves the FlashComm
+#       is active (this module's `enable_dense_sp` resolves the FlashComm
 #       switch), and flip `o_proj` / GDN `out_proj` / dense `down_proj`
 #       to `reduce_results=False`. Reusing the upstream flag keeps
 #       Qwen3NextModel's entry chunk / exit all-gather and the MTP head's
