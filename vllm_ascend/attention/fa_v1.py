@@ -53,6 +53,9 @@ class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
 
 
 class AscendFlashAttentionBackend(AscendAttentionBackend):
+    # Rejection-adjusted sequence lengths are read from device tensors.
+    uses_device_seq_lens = True
+
     @staticmethod
     def get_supported_head_sizes():
         # Logical 192-wide heads use zero padding to the native 256-wide kernel.
@@ -117,7 +120,7 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
             metadata.flash_attn_lengths = boundaries, lengths
 
         layout_kv = "PA_BNBD" if self.use_bnsd_kv_cache else "PA_BBND"
-        plan_key = (self.num_heads, self.num_kv_heads, query.shape[-1], self.sliding_window, layout_kv)
+        plan_key = (self.num_heads, self.num_kv_heads, query.shape[-1], self.sliding_window, layout_kv, metadata.causal)
         cached = metadata.flash_attn_plans.get(plan_key)
         if cached is None:
             window = self.sliding_window - 1 if self.sliding_window is not None else -1

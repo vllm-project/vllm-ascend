@@ -1314,6 +1314,26 @@ class NPUModelRunner(GPUModelRunner):
             return True
 
         if (
+            spec is not None
+            and self.speculator is not None
+            and spec.method == "dspark"
+            and spec.draft_model_config is not None
+            and {"MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"}.intersection(
+                spec.draft_model_config.architectures or ()
+            )
+            and self.model_config.hf_text_config.model_type == "minimax_m3_text"
+        ):
+            # Flash's sparse target uses device lengths, but a mixed target
+            # GQA backend still consumes the shared CPU length mirror.
+            backends = [group.backend for groups in self.attn_groups for group in groups]
+            has_device_lengths = any(getattr(backend, "uses_device_seq_lens", False) for backend in backends)
+            return has_device_lengths and all(
+                getattr(backend, "uses_device_seq_lens", False)
+                or backend.get_name() in ("ASCEND_MINIMAX_M3_SPARSE", "ASCEND_MINIMAX_M3_SPARSE_INDEXER")
+                for backend in backends
+            )
+
+        if (
             spec is None
             or self.speculator is None
             or spec.method != "dspark"

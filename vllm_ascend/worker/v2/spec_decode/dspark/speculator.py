@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from typing import Any, cast
 
 import numpy as np
@@ -291,12 +292,28 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             max_model_len=self.max_model_len,
         )
 
+    @contextmanager
+    def _draft_metadata_request_count(self, num_reqs: int):
+        # Upstream DFlash may reduce a dummy batch to the DP-agreed request
+        # count without changing InputBatch.num_reqs. Rebuild graph metadata
+        # using that same count, while preserving the target batch object.
+        previous = getattr(self, "_draft_metadata_num_reqs", None)
+        self._draft_metadata_num_reqs = num_reqs
+        try:
+            yield
+        finally:
+            self._draft_metadata_num_reqs = previous
+
     # Graph capture builds metadata from the padded request shape.
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         assert self.input_batch is not None
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
+        num_reqs = getattr(self, "_draft_metadata_num_reqs", None)
+        if num_reqs is None:
+            num_reqs = self.input_batch.num_reqs
+        assert 0 <= num_reqs <= num_reqs_padded, (num_reqs, num_reqs_padded)
         seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
-            self.input_batch.num_reqs, num_reqs_padded, self.num_query_per_req
+            num_reqs, num_reqs_padded, self.num_query_per_req
         )
         with (
             build_attn_metadata_wrapper(),
@@ -317,7 +334,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 num_reqs=num_reqs_padded,
             )
             attn_metadata = self._build_uniform_attn_metadata(
-                num_reqs=self.input_batch.num_reqs,
+                num_reqs=num_reqs,
                 batch_desc=batch_desc,
                 num_query_per_req=self.num_query_per_req,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
@@ -390,6 +407,17 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 continue
             decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
             decode_metadata.actual_seq_lengths_q = query_lens_list
+            if self.attn_architecture == "GQA" and getattr(metadata, "seq_lens_list", None) is not None:
+                # The generic builder can append a synthetic request for the
+                # target's padded token extent. Draft FULL graphs already have
+                # uniform padded request slots: keep Q, KV and block-table
+                # rows at the same captured extent when updating FIA tasks.
+                if len(metadata.seq_lens_list) > num_reqs_padded:
+                    metadata.seq_lens_list = metadata.seq_lens_list[:num_reqs_padded]
+                    for name in ("seq_lens", "seq_lens_cpu", "seq_lens_gpu", "block_tables"):
+                        value = getattr(metadata, name, None)
+                        if value is not None:
+                            setattr(metadata, name, value[:num_reqs_padded])
         return attn_metadata
 
     @torch.inference_mode()
@@ -446,6 +474,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             # TODO: Remove this guard once main2main includes upstream vLLM
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
+        num_draft_reqs = input_batch.num_reqs
+        if dummy_run and sync_state is not None:
+            num_draft_reqs = min(num_draft_reqs, sync_state.num_reqs)
         seq_lens_cpu = None
         is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
         if self.use_dcp and self.attn_architecture in ("GQA", "MLA") and not (dummy_run and skip_attn_for_dummy_run):
@@ -455,6 +486,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
             )
         with (
+            self._draft_metadata_request_count(num_draft_reqs),
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
                 self.input_buffers.positions,
