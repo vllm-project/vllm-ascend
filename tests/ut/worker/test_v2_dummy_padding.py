@@ -49,12 +49,23 @@ def runner(buffers):
 def _make_graph_manager(buffers, mode, uniform, capture_size):
     manager = ModelAclGraphManager.__new__(ModelAclGraphManager)
     manager.vllm_config = SimpleNamespace(
-        speculative_config=None, cache_config=SimpleNamespace(use_kda_recoverssm=False)
+        speculative_config=None,
+        cache_config=SimpleNamespace(use_kda_recoverssm=False),
+        uniform_decode_query_len=uniform,
     )
-    manager.compilation_config = SimpleNamespace(cudagraph_capture_sizes=[capture_size], max_cudagraph_capture_size=64)
+    manager.compilation_config = SimpleNamespace(
+        cudagraph_capture_sizes=[capture_size],
+        max_cudagraph_capture_size=64,
+        prefill_cudagraph_capture_token_sizes=[capture_size],
+        decode_cudagraph_capture_request_sizes=[(capture_size + uniform - 1) // uniform],
+        max_decode_cudagraph_capture_tokens=None,
+    )
+    manager.decode_request_sizes = None
     manager.cudagraph_mode = mode
     manager.decode_query_len = uniform
     manager.max_num_reqs = len(buffers.seq_lens_cpu)
+    manager.decode_max_reqs = {uniform: manager.max_num_reqs}
+    manager._decode_descs = {}
     manager.varlen_decode = False
     manager.ubatch_runner = None
     manager.lora_capture_cases = [0]

@@ -37,7 +37,7 @@ def test_legacy_shard_loads_and_missing_parameter_still_fails(norm, tmp_path, mo
         "_render_default_pattern",
         staticmethod(lambda *args, **kwargs: "model-rank-0-part-*.safetensors"),
     )
-    config = SimpleNamespace(model=str(tmp_path), model_weights=None)
+    config = SimpleNamespace(model=str(tmp_path), model_weights=None, revision=None)
     loader.load_weights(model, config)
     torch.testing.assert_close(model.visual.proj.weight, legacy_state["visual.proj.weight"])
     assert set(model.state_dict()) == set(legacy_state)

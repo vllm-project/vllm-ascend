@@ -20,6 +20,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, fields
+from typing import Any
 
 from vllm.config import SchedulerConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
@@ -901,13 +902,15 @@ class RecomputeScheduler(Scheduler):
         # len(self.running).
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
 
-        # Get the longest common prefix among all requests in the running queue.
-        # This can be potentially used for cascade attention.
-        num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
-                any_request_id = self.running[0].request_id
-                num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
+        # vLLM #64076 removed the deprecated cascade-attention contract.
+        common_prefix_kwargs: dict[str, Any] = {}
+        if "num_common_prefix_blocks" in SchedulerOutput.__dataclass_fields__:
+            num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
+            with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
+                if self.running:
+                    any_request_id = self.running[0].request_id
+                    num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
+            common_prefix_kwargs["num_common_prefix_blocks"] = num_common_prefix_blocks
 
         # Construct the scheduler output.
         new_request_kwargs = {
@@ -989,7 +992,7 @@ class RecomputeScheduler(Scheduler):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             scheduled_encoder_input_stats=scheduled_encoder_input_stats,
-            num_common_prefix_blocks=num_common_prefix_blocks,
+            **common_prefix_kwargs,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
