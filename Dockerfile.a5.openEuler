@@ -43,7 +43,8 @@ RUN git config --global url."${GIT_CDN_MIRROR}".insteadOf "https://github.com/" 
       git -C /vllm-workspace/vllm checkout FETCH_HEAD; \
     else \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
-    fi
+    fi && \
+    git config --global --unset url."${GIT_CDN_MIRROR}".insteadOf
 
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
 ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"

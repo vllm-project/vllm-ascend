@@ -43,6 +43,7 @@ RUN export PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}" && \
 # Install benchmark tools
 RUN git config --global url."${GIT_CDN_MIRROR}".insteadOf "https://github.com/" && \
     git clone -b ${AIS_BENCH_TAG} --depth 1 "${AIS_BENCH_URL}" /vllm-workspace/vllm-ascend/benchmark && \
+    git config --global --unset url."${GIT_CDN_MIRROR}".insteadOf && \
     cd /vllm-workspace/vllm-ascend/benchmark && \
     pip install -e . -r requirements/api.txt -r requirements/extra.txt && \
     python3 -m pip cache purge
