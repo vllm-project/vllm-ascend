@@ -23,10 +23,20 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 
 
-def _get_ascend_sfa_indexer_backend(_self):
-    if get_current_vllm_config().attention_config.hisparse_config is not None:
-        return AscendHiSparseIndexerBackend
-    return AscendSFAIndexerBackend
+def _get_ascend_sfa_indexer_backend(self):
+    backend = getattr(self, "_ascend_indexer_backend", None)
+    if backend is None:
+        # IndexerWrapper first queries this while constructing the layer.
+        # Post-load platform discovery also queries it, outside that config
+        # context. Keep the choice on this cache rather than consulting a
+        # temporary global context again.
+        backend = (
+            AscendHiSparseIndexerBackend
+            if get_current_vllm_config().attention_config.hisparse_config is not None
+            else AscendSFAIndexerBackend
+        )
+        self._ascend_indexer_backend = backend
+    return backend
 
 
 # vLLM main (#63384) moved OLMoE to the Transformers backend, whose
