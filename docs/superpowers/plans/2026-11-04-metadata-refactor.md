@@ -39,12 +39,12 @@ then separate save decisions and worker preparation from scheduling payloads.
 `ReqMeta.get_transfer_arrays(group_id, is_save=True)` with existing grouped-first,
 group-0 fallback semantics. Keep all constructor fields declared consistently.
 
-- [ ] Establish the existing affected CPU-test baseline.
-- [ ] Test literal group selection and load/save array selection before changes.
-- [ ] Implement accessors and migrate repeated selection branches.
-- [ ] Remove unused parameters and their callers; declare dynamic payload fields.
-- [ ] Run affected tests and Ruff; inspect the diff.
-- [ ] Commit with sign-off and record validation in the ledger.
+- [x] Establish the existing affected CPU-test baseline.
+- [x] Test literal group selection and load/save array selection before changes.
+- [x] Implement accessors and migrate repeated selection branches.
+- [x] Remove unused parameters and their callers; declare dynamic payload fields.
+- [x] Run affected tests and Ruff; inspect the diff.
+- [x] Commit with sign-off and record validation in the ledger.
 
 ### Task 2: Consolidate layouts and segmented address calculation
 
@@ -55,13 +55,13 @@ package; update metadata imports and affected address-generation tests.
 `ChunkedTokenDatabase` retains its existing public methods and key outputs.
 Bulk and layer addressing share one implementation over selected descriptors.
 
-- [ ] Add tests for selecting a layer in a nonzero group and for segmented partial
+- [x] Add tests for selecting a layer in a nonzero group and for segmented partial
   ranges, with hand-derived addresses and sizes.
-- [ ] Extract the database, preserving a compatibility import in metadata.
-- [ ] Normalize descriptor lengths/strides and layer boundaries at registration.
-- [ ] Share address calculation and preserve the existing group-0 layer default.
-- [ ] Run metadata, segmented-copy, worker, hybrid, layerwise, and PP tests.
-- [ ] Commit with sign-off and record validation in the ledger.
+- [x] Extract the database, preserving a compatibility import in metadata.
+- [x] Normalize descriptor lengths/strides and layer boundaries at registration.
+- [x] Share address calculation and preserve the existing group-0 layer default.
+- [x] Run metadata, segmented-copy, worker, hybrid, layerwise, and PP tests.
+- [x] Commit with sign-off and record validation in the ledger.
 
 ### Task 3: Separate save decisions and worker preparation state
 
@@ -75,11 +75,11 @@ entry points remain available for callers while production uses explicit state.
 Configuration helpers move unchanged to their own module; production imports
 their owning modules while the old metadata import paths remain available.
 
-- [ ] Test decision computation without tracker mutation, hash-boundary saves,
+- [x] Test decision computation without tracker mutation, hash-boundary saves,
   independent worker state, and group access after preparation.
-- [ ] Extract decision computation and make tracker application explicit.
-- [ ] Move worker-prepared fields into transfer state and migrate consumers.
-- [ ] Keep group-0 aliases and constructor compatibility only where still needed.
-- [ ] Run the complete affected CPU suite and formatting checks.
-- [ ] Commit with sign-off, request a fresh whole-change review, and fix material
+- [x] Extract decision computation and make tracker application explicit.
+- [x] Move worker-prepared fields into transfer state and migrate consumers.
+- [x] Keep group-0 aliases and constructor compatibility only where still needed.
+- [x] Run the runnable affected CPU scope, compare baseline failures, and attempt full formatting checks.
+- [x] Commit with sign-off, request a fresh whole-change review, and fix material
   findings with focused regression tests before final validation.
