@@ -1644,9 +1644,11 @@ class AscendDSAV41IndexerMetadataBuilder(AscendDSAV41AttentionMetadataBuilder):
                 candidate_block_size = (
                     int(_config_value(text_config, "candidate_block_size")) if emits_candidates else -1
                 )
+                # Deferred tasks run after the build context restores the builder's mode.
+                metadata_in_graph = self._device_metadata_in_graph
 
                 def build_qli_metadata() -> None:
-                    if req.num_actual_tokens == 0 and not self._device_metadata_in_graph:
+                    if req.num_actual_tokens == 0 and not metadata_in_graph:
                         self._qli_metadata.zero_()
                         return
                     assert self._device_backend is not None
