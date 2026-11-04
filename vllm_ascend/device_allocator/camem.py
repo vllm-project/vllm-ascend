@@ -200,8 +200,9 @@ class CaMemAllocator(CuMemAllocator):
                 cpu_backup_tensor = torch.empty(size_in_bytes, dtype=torch.uint8, device="cpu", pin_memory=True)
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 ACL_MEMCPY_DEVICE_TO_HOST = 2
-                dest_max = cpu_ptr + size_in_bytes * 2
-                memcpy(cpu_ptr, dest_max, ptr, size_in_bytes, ACL_MEMCPY_DEVICE_TO_HOST)
+                ret = memcpy(cpu_ptr, size_in_bytes, ptr, size_in_bytes, ACL_MEMCPY_DEVICE_TO_HOST)
+                if ret != 0:
+                    raise RuntimeError(f"ACL device-to-host memcpy failed with error code {ret}")
                 data.cpu_backup_tensor = cpu_backup_tensor
             try:
                 unmap_and_release(handle)
@@ -269,16 +270,18 @@ class CaMemAllocator(CuMemAllocator):
             if tags is None or data.tag in tags:
                 handle = data.handle
                 create_and_map(handle)
-                data.is_asleep = False
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
                         size_in_bytes = cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         ACL_MEMCPY_HOST_TO_DEVICE = 1
-                        dest_max = ptr + size_in_bytes * 2
-                        memcpy(ptr, dest_max, cpu_ptr, size_in_bytes, ACL_MEMCPY_HOST_TO_DEVICE)
+                        ret = memcpy(ptr, size_in_bytes, cpu_ptr, size_in_bytes, ACL_MEMCPY_HOST_TO_DEVICE)
+                        if ret != 0:
+                            unmap_and_release(handle)
+                            raise RuntimeError(f"ACL host-to-device memcpy failed with error code {ret}")
                         data.cpu_backup_tensor = None
+                data.is_asleep = False
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
