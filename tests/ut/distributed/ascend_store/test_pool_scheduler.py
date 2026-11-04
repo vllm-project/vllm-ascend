@@ -623,6 +623,18 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertEqual(result, (False, None))
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_request_finished_clears_pending_load_spec(self, mock_client_cls):
+        config = self._make_config()
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        scheduler.load_specs["r1"] = LoadSpec(0, 32, can_load=True)
+
+        request = MagicMock()
+        request.request_id = "r1"
+        result = scheduler.request_finished(request, [1, 2])
+        self.assertEqual(result, (False, None))
+        self.assertNotIn("r1", scheduler.load_specs)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_request_finished_with_saved_tokens_frees_immediately(self, mock_client_cls):
         config = self._make_config()
         scheduler = KVPoolScheduler(config, use_layerwise=False)
@@ -1011,6 +1023,23 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertNotIn("r1", scheduler._request_trackers)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_build_connector_meta_finished_req_clears_load_spec(self, mock_client_cls):
+        config = self._make_config()
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        scheduler.load_specs["r1"] = LoadSpec(0, 32, can_load=True)
+
+        sched_output = MagicMock()
+        sched_output.finished_req_ids = {"r1"}
+        sched_output.preempted_req_ids = set()
+        sched_output.scheduled_new_reqs = []
+        sched_output.num_scheduled_tokens = {}
+        sched_output.scheduled_cached_reqs = MagicMock()
+        sched_output.scheduled_cached_reqs.req_ids = []
+
+        scheduler.build_connector_meta(sched_output)
+        self.assertNotIn("r1", scheduler.load_specs)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_build_connector_meta_preempted(self, mock_client_cls):
         config = self._make_config()
         scheduler = KVPoolScheduler(config, use_layerwise=False)
@@ -1110,6 +1139,7 @@ def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cl
     scheduler._unfinished_requests = {} if cleared_by == "already-empty" else {"retired": (None, [])}
     scheduler._preempted_req_ids = set()
     scheduler._async_loading_req_ids = set()
+    scheduler.load_specs = {}
     scheduler._process_new_request = MagicMock(return_value=None)
     scheduler._process_async_load_request = MagicMock()
     output = SimpleNamespace(
@@ -1558,6 +1588,15 @@ class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
         request.request_id = "r_nonexist"
         delay, _ = scheduler.request_finished_all_groups(request, ([1, 2],))
         self.assertFalse(delay)
+
+    def test_clears_pending_load_spec(self):
+        scheduler = self._make_scheduler()
+        scheduler.load_specs["r1"] = LoadSpec(0, 32, can_load=True)
+        request = MagicMock()
+        request.request_id = "r1"
+        delay, _ = scheduler.request_finished_all_groups(request, ([1, 2],))
+        self.assertFalse(delay)
+        self.assertNotIn("r1", scheduler.load_specs)
 
     def test_tracker_not_saved(self):
         scheduler = self._make_scheduler()

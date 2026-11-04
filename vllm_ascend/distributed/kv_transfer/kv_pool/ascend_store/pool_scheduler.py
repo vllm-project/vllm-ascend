@@ -619,6 +619,7 @@ class BaseKVPoolScheduler(ABC):
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._preempted_req_ids.discard(finished_req_id)
+            self.load_specs.pop(finished_req_id, None)
 
         for req_id in scheduler_output.preempted_req_ids:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
@@ -724,6 +725,7 @@ class BaseKVPoolScheduler(ABC):
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         """Allow the scheduler to free blocks after synchronous saving."""
+        self.load_specs.pop(request.request_id, None)
         return False, None
 
     def request_finished_all_groups(
@@ -732,6 +734,7 @@ class BaseKVPoolScheduler(ABC):
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         """Allow the scheduler to free all groups after synchronous saving."""
+        self.load_specs.pop(request.request_id, None)
         return False, None
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
