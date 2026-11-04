@@ -712,12 +712,16 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
     ) -> tuple[LayerTransferRequest, Any] | None:
         meta = state.metadata
         ready = destination.ready
+        available, event = state.available_layers[layer_name]
+        end = min(available, ready["num_computed_tokens"] + ready["num_external_tokens"])
+        start = destination.sent_tokens.get(layer_name, ready["num_computed_tokens"])
+        if start >= end:
+            return None
         remote = destination.metadata_future.result()
         pp = remote.metadata_by_pp_rank[ready["consumer_rank"][0]]
         local_index = self._layer_indices[layer_name]
         remote_index = pp.layer_names.index(layer_name)
         spec = self.kv_cache_specs[self.layer_name_to_spec_index[layer_name]]
-        available, event = state.available_layers[layer_name]
         final = available >= meta.num_prompt_tokens
         final_only = (
             isinstance(spec, MambaSpec)
@@ -725,10 +729,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             or getattr(spec, "sliding_window", None) is not None
         )
         if final_only and not final:
-            return None
-        end = min(available, ready["num_computed_tokens"] + ready["num_external_tokens"])
-        start = destination.sent_tokens.get(layer_name, ready["num_computed_tokens"])
-        if start >= end:
             return None
         local_blocks = meta.local_block_ids[self.transfer_metadata.group_indices[local_index]]
         remote_blocks = ready["block_ids"][pp.group_indices[remote_index]]
@@ -893,16 +893,16 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     continue
                 try:
                     remote = destination.metadata_future.result()
-                    expected = {
-                        (pp, pcp, tp)
-                        for pp in range(remote.pp_size)
-                        for pcp in range(remote.pcp_size)
-                        for tp in range(remote.tp_size)
-                    }
-                    if rank not in expected:
-                        raise ValueError("Ready rank is absent from D topology")
-                    state.expected_ranks = expected
                     if destination.required_layers is None:
+                        expected = {
+                            (pp, pcp, tp)
+                            for pp in range(remote.pp_size)
+                            for pcp in range(remote.pcp_size)
+                            for tp in range(remote.tp_size)
+                        }
+                        if rank not in expected:
+                            raise ValueError("Ready rank is absent from D topology")
+                        state.expected_ranks = expected
                         destination.required_layers = {
                             name
                             for name in self._layer_indices
@@ -947,12 +947,15 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     del self._reqs_send_state[transfer_id]
         for (_, rank, layer_name, _), (remote, event, requests) in batches.items():
             # A later layer/destination may have failed while building this pass.
-            active = tuple(req for req in requests if self._reqs_send_state[req.transfer_id].error is None)
+            active = []
             for req in requests:
-                if req not in active:
-                    self._reqs_send_state[req.transfer_id].destinations[rank].pending_layers.remove(layer_name)
+                state = self._reqs_send_state[req.transfer_id]
+                if state.error is None:
+                    active.append(req)
+                else:
+                    state.destinations[rank].pending_layers.remove(layer_name)
             if active:
-                batch = LayerTransferBatch(layer_name, rank, remote, active, event)
+                batch = LayerTransferBatch(layer_name, rank, remote, tuple(active), event)
                 self._pending_sends.append((batch, self._sender_executor.submit(self._execute_layer_transfer, batch)))
 
     def save_kv_layer(self, layer_name: str) -> None:

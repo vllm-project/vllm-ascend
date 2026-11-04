@@ -179,7 +179,7 @@ def worker(monkeypatch, request):
     assert not obj._recving_thread.is_alive()
 
 
-def test_ready_listener_and_two_chunks(worker):
+def test_ready_listener_and_two_chunks(worker, monkeypatch):
     with zmq.Context() as ctx, ctx.socket(zmq.REQ) as sock:
         sock.setsockopt(zmq.RCVTIMEO, 2000)
         sock.connect(worker._recving_thread.address)
@@ -192,6 +192,16 @@ def test_ready_listener_and_two_chunks(worker):
     worker.wait_for_save()
     assert not worker._send_done.called
     assert worker.engine.batch_transfer_sync_write.call_args.args[1:] == ([1032], [10320], [32])
+    state = worker._reqs_send_state["t"]
+    destination = state.destinations[(0, 0, 0)]
+    expected_ranks = state.expected_ranks
+    worker.get_transfer_results()
+    assert state.expected_ranks is expected_ranks  # No topology allocation on idle scans.
+    with monkeypatch.context() as patch:
+        result = Mock(wraps=destination.metadata_future.result)
+        patch.setattr(destination.metadata_future, "result", result)
+        assert worker._build_layer_transfer_request("t", state, destination, "model.layers.0.attn") is None
+        result.assert_not_called()
     worker.start_load_kv(source_meta(4, 4))
     worker.save_kv_layer("model.layers.0.attn")
     worker.wait_for_save()
@@ -558,7 +568,8 @@ def test_wait_for_save_drains_write_without_blocking_ready_listener(worker):
     assert returned.is_set()
 
 
-def test_layer_batch_groups_requests_for_one_destination(worker):
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_layer_batch_groups_requests_for_one_destination(worker, monkeypatch, fail_first):
     first, second = ready(), ready()
     second.update(transfer_id="t2", request_id="d-request-2", block_ids=[[12, 13]])
     worker._ready_queue.put(first)
@@ -572,15 +583,30 @@ def test_layer_batch_groups_requests_for_one_destination(worker):
             state.destinations[(0, 0, 0)].required_layers is not None for state in worker._reqs_send_state.values()
         ),
     )
+    if fail_first:
+        build = worker._build_layer_transfer_request
+
+        def build_with_failure(transfer_id, state, destination, layer_name):
+            # Invalidate a request after it entered this pass's unsubmitted batch.
+            if transfer_id == "t2":
+                worker._reqs_send_state["t"].error = "request failed during planning"
+            return build(transfer_id, state, destination, layer_name)
+
+        monkeypatch.setattr(worker, "_build_layer_transfer_request", build_with_failure)
     worker.save_kv_layer("model.layers.0.attn")
     worker.wait_for_save()
     drive(worker, lambda: worker._send_done.call_count == 2)
     assert worker.engine.batch_transfer_sync_write.call_count == 1
+    expected_src = [1096, 1128] if fail_first else [1032, 1064, 1096, 1128]
+    expected_dst = [10384, 10416] if fail_first else [10320, 10352, 10384, 10416]
     assert worker.engine.batch_transfer_sync_write.call_args.args[1:] == (
-        [1032, 1064, 1096, 1128],
-        [10320, 10352, 10384, 10416],
-        [32] * 4,
+        expected_src,
+        expected_dst,
+        [32] * len(expected_src),
     )
+    outcomes = {call.args[0]["transfer_id"]: call.args[1] for call in worker._send_done.call_args_list}
+    assert outcomes == {"t": "request failed during planning" if fail_first else None, "t2": None}
+    assert all(not state.destinations[(0, 0, 0)].pending_layers for state in worker._reqs_send_state.values())
 
 
 def test_cached_destination_prefix_is_not_written(worker):
