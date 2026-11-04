@@ -1,6 +1,6 @@
 # Tutorial-derived A3 PD case adapted to MRV2 with PCP on Prefill.
 # Keep two explicit capture sizes for static-kernel coverage.
-# MTP3 uses four query tokens per request: capture one and 32 requests.
+# MTP3 uses four query tokens per request: capture one and 16 requests.
 # Keep the datasets and benchmark thresholds aligned with the existing PD case.
 test_name: "GLM-5.3-Flash-W8A8-A3-PD-Static-2Sizes"
 model: "Eco-Tech/GLM-5.3-Flash-w8a8"
@@ -127,7 +127,7 @@ templates:
       - --safetensors-load-strategy
       - "prefetch"
       - --max-num-seqs
-      - "32"
+      - "16"
       - --max-model-len
       - "1048576"
       - --max-num-batched-tokens
@@ -147,7 +147,7 @@ templates:
       - --kv-cache-dtype
       - "int8"
       - --compilation-config
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 128], "max_cudagraph_capture_size": 128}'
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 64], "max_cudagraph_capture_size": 64}'
       - --speculative-config
       - '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}'
       - --additional_config
