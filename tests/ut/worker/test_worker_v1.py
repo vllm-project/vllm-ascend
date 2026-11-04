@@ -2259,17 +2259,24 @@ class TestNPUWorker(TestBase):
             self.assertEqual(result, mock_empty_output)
 
     def test_update_config(self):
-        """Test update_config delegates to model_runner.update_config"""
+        """A replacement must be shared by the config, worker and runner."""
         from vllm_ascend.worker.worker import NPUWorker
 
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-            worker.model_runner = MagicMock()
-
-            overrides = {"load_config": {"load_format": "dummy"}}
-            worker.update_config(overrides)
-
-            worker.model_runner.update_config.assert_called_once_with(overrides)
+        for use_v2 in (False, True):
+            with self.subTest(use_v2=use_v2), patch("vllm_ascend.worker.worker.update_config") as update:
+                worker = NPUWorker.__new__(NPUWorker)
+                worker.use_v2_model_runner = use_v2
+                worker.model_runner = MagicMock()
+                worker.vllm_config = SimpleNamespace(load_config=object())
+                replacement = object()
+                update.return_value = replacement
+                worker.update_config({"load_config": {"load_format": "dummy"}})
+                self.assertIs(worker.vllm_config.load_config, replacement)
+                self.assertIs(worker.load_config, replacement)
+                self.assertIs(worker.model_runner.load_config, replacement)
+                worker.model_runner.update_config.assert_not_called()
+                with self.assertRaisesRegex(ValueError, "cache_config"):
+                    worker.update_config({"cache_config": {}})
 
     def test_reload_weights(self):
         """Test reload_weights delegates to model_runner.reload_weights"""

@@ -21,6 +21,7 @@ def worker_method(name, **bindings):
     tree = ast.parse(WORKER.read_text(encoding="utf-8"))
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "NPUWorker")
     method = copy.deepcopy(next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == name))
+    method.name = "_contract_method"
     method.decorator_list = []
     module = ast.Module(
         body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), method],
@@ -28,7 +29,7 @@ def worker_method(name, **bindings):
     )
     scope = dict(bindings)
     exec(compile(ast.fix_missing_locations(module), str(WORKER), "exec"), scope)
-    return scope[name]
+    return scope["_contract_method"]
 
 
 class WorkerAlignmentContract(unittest.TestCase):
@@ -115,6 +116,25 @@ class WorkerAlignmentContract(unittest.TestCase):
                             pp.irecv_tensor_dict.assert_called_once_with(all_gather_group=group)
                         else:
                             pp.irecv_tensor_dict.assert_not_called()
+
+    def test_config_identity_and_rejection(self):
+        for runner_version in ("v1", "v2"):
+            with self.subTest(runner=runner_version):
+                old = SimpleNamespace(value=1)
+                config = SimpleNamespace(model_config=old, load_config=old)
+                worker = SimpleNamespace(vllm_config=config, model_runner=SimpleNamespace())
+
+                def replace_config(config, overrides):
+                    return SimpleNamespace(**(vars(config) | overrides))
+
+                update = worker_method("update_config", update_config=replace_config)
+                update(worker, {"model_config": {"value": 2}, "load_config": {"value": 3}})
+                for name in ("model_config", "load_config"):
+                    self.assertIs(getattr(worker, name), getattr(config, name))
+                    self.assertIs(getattr(worker.model_runner, name), getattr(config, name))
+                    self.assertIsNot(getattr(config, name), old)
+                with self.assertRaisesRegex(ValueError, "cache_config"):
+                    update(worker, {"cache_config": {}})
 
     def test_execution_decorators(self):
         cls = next(

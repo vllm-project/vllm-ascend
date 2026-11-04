@@ -32,7 +32,7 @@ import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
 from vllm import envs
-from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config, update_config
 from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
 from vllm.distributed.ec_transfer import (
     ensure_ec_transfer_initialized,
@@ -1486,7 +1486,19 @@ class NPUWorker(WorkerBase):
         return self.model_runner.take_draft_token_ids()
 
     def update_config(self, overrides: dict[str, Any]) -> None:
-        self.model_runner.update_config(overrides)
+        # Replace each config once, sharing the replacement across all owners.
+        # Both NPU runners inherit GPUModelRunner.update_config; calling it after
+        # replacement would construct a second, different object.
+        allowed_config_names = {"load_config", "model_config"}
+        for config_name, config_overrides in overrides.items():
+            if config_name not in allowed_config_names:
+                allowed = ", ".join(sorted(allowed_config_names))
+                raise ValueError(f"Config override '{config_name}' is not supported. Supported configs: {allowed}")
+            config = getattr(self.vllm_config, config_name)
+            new_config = update_config(config, config_overrides)
+            setattr(self.vllm_config, config_name, new_config)
+            setattr(self.model_runner, config_name, new_config)
+            setattr(self, config_name, new_config)
 
     def reload_weights(self, *args, **kwargs) -> None:
         with set_current_vllm_config(self.vllm_config):
