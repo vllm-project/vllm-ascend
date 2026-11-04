@@ -1,4 +1,4 @@
-# MiniMax-M3.1-Flash (Experimental)
+# MiniMax-M3.1-Flash
 
 ## 1 Introduction
 
@@ -12,12 +12,9 @@ MiniMax-M3.1-Flash is a multimodal Mixture-of-Experts model with approximately 4
 
 This document covers supported features, environment and model preparation, single-node deployment, PD separation, functional verification, accuracy and performance evaluation, performance tuning, and troubleshooting.
 
-!!! warning
+MiniMax-M3.1-Flash is supported on the vLLM Ascend `main` branch and in `v0.32.0rc`. This guide is written based on the `main` branch. Use the deployment image for your hardware from [Installation](#4-installation).
 
-    **Current status and constraints**
-
-    - `MiniMax-M3.1-Flash` is provided **out-of-the-box** through the Docker images described in [Installation](#4-installation). The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
-    - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for `MiniMax-M3.1-Flash`. This is an early-access version; performance optimization and reliability validation are still in progress.
+The features described below are those enabled by the deployment commands in this guide. Refer to [Supported Features](#2-supported-features) for the model support matrix.
 
 ## 2 Supported Features
 
@@ -45,105 +42,109 @@ On each host, use `ip addr` or `ifconfig` to identify the host communication IP 
 
 ## 4 Installation
 
-### 4.1 A2 Docker Container
+### 4.1 Docker Image Installation
 
-Run the following on each A2 host. Set the model path to the W8A8 checkpoint.
+Choose the tab for your hardware and run the commands on each participating host.
 
-```bash
-export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-flash"
-export CONTAINER_NAME=minimax_m31_flash
-export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_PATH>"
-export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
-mkdir -p "$WORK_DIR"
+=== "A2 series (W8A8)"
 
-docker run -it --name "$CONTAINER_NAME" \
-    --network host --privileged --shm-size=100g \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    --device /dev/davinci0 --device /dev/davinci1 \
-    --device /dev/davinci2 --device /dev/davinci3 \
-    --device /dev/davinci4 --device /dev/davinci5 \
-    --device /dev/davinci6 --device /dev/davinci7 \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
-    -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
-    -v /usr/local/sbin:/usr/local/sbin:ro \
-    -v /etc/hccn.conf:/etc/hccn.conf:ro \
-    -v /usr/local/dcmi:/usr/local/dcmi:ro \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
-    -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-    -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8:ro \
-    -v "$WORK_DIR":/workspace \
-    -w /workspace "$IMAGE" bash
-```
+    Run the following on each A2 host. Set the model path to the W8A8 checkpoint.
 
-### 4.2 A3 Docker Container
+    ```bash
+    export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-flash"
+    export CONTAINER_NAME=minimax_m31_flash
+    export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_PATH>"
+    export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
+    mkdir -p "$WORK_DIR"
 
-Run the following on each A3 host. Set the model path to the W8A8 checkpoint.
+    docker run -it --name "$CONTAINER_NAME" \
+        --network host --privileged --shm-size=100g \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        --device /dev/davinci0 --device /dev/davinci1 \
+        --device /dev/davinci2 --device /dev/davinci3 \
+        --device /dev/davinci4 --device /dev/davinci5 \
+        --device /dev/davinci6 --device /dev/davinci7 \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+        -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
+        -v /usr/local/sbin:/usr/local/sbin:ro \
+        -v /etc/hccn.conf:/etc/hccn.conf:ro \
+        -v /usr/local/dcmi:/usr/local/dcmi:ro \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+        -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
+        -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8:ro \
+        -v "$WORK_DIR":/workspace \
+        -w /workspace "$IMAGE" bash
+    ```
 
-```bash
-export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a3-openeuler"
-export CONTAINER_NAME=minimax_m31_flash
-export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_PATH>"
-export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
-mkdir -p "$WORK_DIR"
+=== "A3 series (W8A8)"
 
-docker run -it --name "$CONTAINER_NAME" \
-    --network host --privileged --shm-size=100g \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    --device /dev/davinci0 --device /dev/davinci1 \
-    --device /dev/davinci2 --device /dev/davinci3 \
-    --device /dev/davinci4 --device /dev/davinci5 \
-    --device /dev/davinci6 --device /dev/davinci7 \
-    --device /dev/davinci8 --device /dev/davinci9 \
-    --device /dev/davinci10 --device /dev/davinci11 \
-    --device /dev/davinci12 --device /dev/davinci13 \
-    --device /dev/davinci14 --device /dev/davinci15 \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
-    -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
-    -v /usr/local/sbin:/usr/local/sbin:ro \
-    -v /etc/hccn.conf:/etc/hccn.conf:ro \
-    -v /usr/local/dcmi:/usr/local/dcmi:ro \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
-    -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-    -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8:ro \
-    -v "$WORK_DIR":/workspace \
-    -w /workspace "$IMAGE" bash
-```
+    Run the following on each A3 host. Set the model path to the W8A8 checkpoint.
 
-### 4.3 950DT products Docker Container
+    ```bash
+    export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a3-openeuler"
+    export CONTAINER_NAME=minimax_m31_flash
+    export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_PATH>"
+    export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
+    mkdir -p "$WORK_DIR"
 
-Run the following on each 950DT products host. Set the model path to the W8A8-MXFP8 checkpoint.
+    docker run -it --name "$CONTAINER_NAME" \
+        --network host --privileged --shm-size=100g \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        --device /dev/davinci0 --device /dev/davinci1 \
+        --device /dev/davinci2 --device /dev/davinci3 \
+        --device /dev/davinci4 --device /dev/davinci5 \
+        --device /dev/davinci6 --device /dev/davinci7 \
+        --device /dev/davinci8 --device /dev/davinci9 \
+        --device /dev/davinci10 --device /dev/davinci11 \
+        --device /dev/davinci12 --device /dev/davinci13 \
+        --device /dev/davinci14 --device /dev/davinci15 \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+        -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
+        -v /usr/local/sbin:/usr/local/sbin:ro \
+        -v /etc/hccn.conf:/etc/hccn.conf:ro \
+        -v /usr/local/dcmi:/usr/local/dcmi:ro \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+        -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
+        -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8:ro \
+        -v "$WORK_DIR":/workspace \
+        -w /workspace "$IMAGE" bash
+    ```
 
-```bash
-export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a5-openeuler"
-export CONTAINER_NAME=minimax_m31_flash
-export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_MXFP8_PATH>"
-export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
+=== "950DT products"
 
-docker run -it --name "$CONTAINER_NAME" \
-    --network host --ipc host --privileged --shm-size=100g \
-    --device /dev/davinci_manager --device /dev/hisi_hdc \
-    --device /dev/ummu --device /dev/uburma \
-    --device /dev/davinci0 --device /dev/davinci1 \
-    --device /dev/davinci2 --device /dev/davinci3 \
-    --device /dev/davinci4 --device /dev/davinci5 \
-    --device /dev/davinci6 --device /dev/davinci7 \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
-    -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
-    -v /usr/local/sbin:/usr/local/sbin:ro \
-    -v /etc/hccn.conf:/etc/hccn.conf:ro \
-    -v /usr/local/dcmi:/usr/local/dcmi:ro \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
-    -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-    -v /etc/hixlep:/etc/hixlep:ro \
-    -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro \
-    -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8-MXFP8:ro \
-    -v "$WORK_DIR":/workspace \
-    -w /workspace "$IMAGE" bash
-```
+    Run the following on each 950DT products host. Set the model path to the W8A8-MXFP8 checkpoint.
+
+    ```bash
+    export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a5-openeuler"
+    export CONTAINER_NAME=minimax_m31_flash
+    export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_MXFP8_PATH>"
+    export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
+
+    docker run -it --name "$CONTAINER_NAME" \
+        --network host --ipc host --privileged --shm-size=100g \
+        --device /dev/davinci_manager --device /dev/hisi_hdc \
+        --device /dev/ummu --device /dev/uburma \
+        --device /dev/davinci0 --device /dev/davinci1 \
+        --device /dev/davinci2 --device /dev/davinci3 \
+        --device /dev/davinci4 --device /dev/davinci5 \
+        --device /dev/davinci6 --device /dev/davinci7 \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+        -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
+        -v /usr/local/sbin:/usr/local/sbin:ro \
+        -v /etc/hccn.conf:/etc/hccn.conf:ro \
+        -v /usr/local/dcmi:/usr/local/dcmi:ro \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+        -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
+        -v /etc/hixlep:/etc/hixlep:ro \
+        -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro \
+        -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8-MXFP8:ro \
+        -v "$WORK_DIR":/workspace \
+        -w /workspace "$IMAGE" bash
+    ```
 
 ## 5 Online Service Deployment
 
@@ -161,7 +162,7 @@ For descriptions of the standard `vllm serve` arguments used in the deployment e
 | PD colocation, A2 | 133000 |
 | PD disaggregation, A3 | 133000 |
 | PD disaggregation, 950DT products | 133000 |
-| 1M PD disaggregation, A3 ([Section 5.5](#55-1m-token-context-deployment-a3-1p1d)) | 1050624 |
+| 1M PD disaggregation, A3 ([Section 5.5](#55-1m-token-context-deployment)) | 1050624 |
 
 These values belong to different deployment profiles. Weights, communication buffers, parallelism, and KV caches share device memory, so a context budget that fits one profile may not fit another. Select a value that covers the prompt and generated tokens together, and check available KV cache capacity at the intended concurrency. The `1M` model limit in the support matrix does not mean every example configuration reserves enough memory for 1M-token requests. To use the `263000` setting reported in [Text Evaluation](#72-text-evaluation), update `MAX_MODEL_LEN` in the serving scripts, including both roles for PD deployment, and recheck memory capacity before evaluation.
 
@@ -518,7 +519,7 @@ The following values match the configurations in the Prefill and Decode scripts 
 
 **950DT products deployment configuration**
 
-Use one Prefill host and two hosts for the distributed Decode service (1P1D), each with all eight NPUs and the W8A8-MXFP8 weights. Prefill uses DP1 × TP4 × PP2. The two Decode hosts form one global DP4 × TP4 × PP1 / EP16 group with two local DP ranks per host: D1 runs ranks 0–1 and D2 runs ranks 2–3. Both Decode hosts serve the HTTP API and are registered separately as proxy endpoints, so do not add `--headless` to the D2 script. D1 is the Data Parallel master and the two Decode scripts must use the same `DECODE_HEAD_IP`, DP RPC port, and KV port.
+Use one Prefill host and two hosts for the distributed Decode service (1P1D), each with all eight NPUs and the W8A8-MXFP8 weights. Prefill uses DP1 × TP4 × PP2. The two Decode hosts form one global DP4 × TP4 × PP1 / EP16 group with two local DP ranks per host: D1 runs ranks 0–1 and D2 runs ranks 2–3. Both Decode hosts serve the HTTP API and are registered separately as proxy endpoints, so do not add `--headless` to the D2 script. The verified configuration uses `--data-parallel-size-local 2` on both hosts and `--data-parallel-start-rank 2` on D2. Each host exposes one API endpoint serving its two local DP ranks; retaining the API on D2 does not change its local DP size. D1 is the Data Parallel master and the two Decode scripts must use the same `DECODE_HEAD_IP`, DP RPC port, and KV port.
 
 The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles. They use 128K input and 1K output; see the configuration table after the role summary for the 16K input variant.
 
@@ -1269,7 +1270,7 @@ Add this bind mount when creating each model container:
 
 The left side is the directory on that host's SSD; the right side is the directory visible inside the container. With this mapping, keep `"ssd_offload_path": "/nvme/mooncake_offload"` in `mooncake.json`. If the container path changes, update `ssd_offload_path` to match. Use an absolute path that exists and is writable by the vLLM process; do not use a symlink. Repeat this setup on P and every D host: identical path strings refer to separate local SSD storage on each host. The backend creates per-rank subdirectories beneath it. The installed Mooncake package must support the `enable_ssd_offload` and `ssd_offload_path` arguments in `MooncakeDistributedStore.setup()`; use the dependencies in the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
 
-Place `mooncake.json` next to `run_prefill.sh`, `run_decode_d1.sh`, and `run_decode_d2.sh` on every node. Use the same reachable Mooncake Master address and `tenant_id` across P and D. `global_segment_size` is allocated per worker rank, not per node; a non-zero value must be aligned to `1GB`. If `MOONCAKE_GLOBAL_SEGMENT_SIZE` is already exported, update it to the intended size or unset it before startup because it overrides the JSON value.
+Place `mooncake.json` in the same directory as `run_prefill.sh`, `run_decode_d1.sh`, and `run_decode_d2.sh` on every node. The scripts resolve `MOONCAKE_CONFIG_PATH` relative to their own location using `BASH_SOURCE[0]`, so the JSON must be present beside each script on its host, regardless of the working directory. Use the same reachable Mooncake Master address and `tenant_id` across P and D. `global_segment_size` is allocated per worker rank, not per node; a non-zero value must be aligned to `1GB`. If `MOONCAKE_GLOBAL_SEGMENT_SIZE` is already exported, update it to the intended size or unset it before startup because it overrides the JSON value.
 
 A3 `mooncake.json` on P, first D and second D (replace `<MOONCAKE_MASTER_IP>` with the actual Master IP):
 
@@ -1727,6 +1728,19 @@ Proxy (:19080)
 
     These are example Master settings: `default_kv_lease_ttl=11000` is in milliseconds, while `client_ttl=120` is in seconds. The eviction ratios are dimensionless; see the [Mooncake Master parameter table](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-2-configure-mooncakejson-and-start-mooncake_master) for their meanings and supported ranges. Keep `enable_offload=true` for this SSD-offload deployment.
 
+    Before starting the model services, run this TCP connectivity check from each model container, replacing the Master IP. Continue only after it succeeds and the Master logs show successful startup. If it fails, check the Master process, bind address, and network access, then retry:
+
+    ```bash
+    python3 - <<'PYCODE'
+    import socket
+
+    with socket.create_connection(("<MOONCAKE_MASTER_IP>", 50088), timeout=5):
+        print("Mooncake Master TCP endpoint is reachable")
+    PYCODE
+    ```
+
+    This checks the TCP listener; successful worker registration and KV operations are verified in Section 5.4.5.
+
 2. Start the first A3 Decode node (global DP ranks 0–3). Use the pooled `run_decode_d1.sh`, not the normal-PD script:
 
     ```bash
@@ -1772,7 +1786,7 @@ Proxy (:19080)
 5. Confirm Decode logs still show a normal Mooncake P→D KV transfer.
 6. Confirm SSD storage initializes under `ssd_offload_path` for each contributing worker. Use a working set larger than the memory pool to verify SSD offload and subsequent reads; a memory-pool hit alone does not exercise the SSD tier.
 
-### 5.5 1M-Token Context Deployment (A3, 1P1D)
+### 5.5 1M-Token Context Deployment
 
 This text-only W8A8 profile uses a 1P1D topology: one Prefill service on one host and one distributed Decode service spanning two hosts. The two Decode hosts share one global DP4 × TP8 × PP1 group. All three hosts are Atlas 800I A3 machines, each with 16 visible 64 GB NPU devices. Here, 1M means **1,048,576 input tokens**. The total context limit is `1050624`, reserving 2048 positions for generation; the verification request below caps generation at 256 tokens. Use the model image and W8A8 checkpoint from Sections 3 and 4 on every node. The validated runtime uses vLLM 0.32.0, torch_npu 2.10.0.post7, and CANN 9.2.0, with the M3.1 operators and selected-parameter prefetch options shown below available in the image.
 
@@ -2396,9 +2410,19 @@ Use the commands in [Section 5](#5-online-service-deployment) as starting config
 
 ### 9.2 Tuning Guidelines
 
+#### 9.2.1 DSpark and KV Cache Configuration
+
 The examples explicitly enable FlashComm1 and seven-token DSpark. On 950DT products, the PD main model uses FP8 KV cache while the DSpark draft uses BF16 KV cache. Preserve that distinction when tuning; the draft cache dtype is configured inside `--speculative-config`.
 
+#### 9.2.2 Workload-Specific Tuning
+
 Change one parameter at a time and retain the command and benchmark result for each run. For general methods, refer to [Optimization and Tuning](../../developer_guide/performance_and_debug/optimization_and_tuning.md). For feature descriptions and configuration constraints, refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) and [Speculative Decoding Guide](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark).
+
+#### 9.2.3 Tool-Assisted Tuning with msmodeling
+
+The msmodeling tool (MindStudio-Modeling) optimizes serving and benchmark parameters together, combining measured results with knowledge-base experience to determine a better parameter set in one run and push performance toward the hardware limit.
+
+For the complete, step-by-step usage guide please refer to **[Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md)**.
 
 ## 10 FAQ
 
