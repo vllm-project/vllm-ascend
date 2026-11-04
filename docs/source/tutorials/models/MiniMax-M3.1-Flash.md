@@ -159,7 +159,7 @@ For descriptions of the standard `vllm serve` arguments used in the deployment e
 | --- | --- |
 | Single-node, A3 or 950DT products | 133000 |
 | PD colocation, A2 | 133000 |
-| PD disaggregation, A3 | 263000 |
+| PD disaggregation, A3 | 133000 |
 | PD disaggregation, 950DT products | 133000 |
 | 1M PD disaggregation, A3 ([Section 5.5](#55-1m-token-context-deployment-a3-1p1d)) | 1050624 |
 
@@ -565,7 +565,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
     SERVICE_PORT=19100
     KV_PORT=24000
     MAX_NUM_SEQS=8
-    MAX_MODEL_LEN=263000
+    MAX_MODEL_LEN=133000
     MAX_BATCHED_TOKENS=8192
     GPU_MEMORY_UTILIZATION=0.85
 
@@ -655,7 +655,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
     DP_RPC_PORT=16920
     KV_PORT=$((25000 + DP_RANK*32))
     MAX_NUM_SEQS=128
-    MAX_MODEL_LEN=263000
+    MAX_MODEL_LEN=133000
     MAX_BATCHED_TOKENS=2048
     GPU_MEMORY_UTILIZATION=0.92
 
@@ -749,7 +749,7 @@ The capture size is not cosmetic: with 128 sequences and seven draft tokens, one
     DP_RPC_PORT=16920
     KV_PORT=$((26000 + LOCAL_RANK*32))
     MAX_NUM_SEQS=128
-    MAX_MODEL_LEN=263000
+    MAX_MODEL_LEN=133000
     MAX_BATCHED_TOKENS=2048
     GPU_MEMORY_UTILIZATION=0.92
 
@@ -1352,7 +1352,7 @@ The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP4` on one host 
     SERVICE_PORT=19100
     KV_PORT=24000
     MAX_NUM_SEQS=8
-    MAX_MODEL_LEN=263000
+    MAX_MODEL_LEN=133000
     MAX_BATCHED_TOKENS=8192
     GPU_MEMORY_UTILIZATION=0.85
 
@@ -1469,7 +1469,7 @@ The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP4` on one host 
     DP_RPC_PORT=16920
     KV_PORT=$((25000 + DP_RANK*32))
     MAX_NUM_SEQS=128
-    MAX_MODEL_LEN=263000
+    MAX_MODEL_LEN=133000
     MAX_BATCHED_TOKENS=2048
     GPU_MEMORY_UTILIZATION=0.92
 
@@ -1588,7 +1588,7 @@ The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP4` on one host 
     DP_RPC_PORT=16920
     KV_PORT=$((26000 + LOCAL_RANK*32))
     MAX_NUM_SEQS=128
-    MAX_MODEL_LEN=263000
+    MAX_MODEL_LEN=133000
     MAX_BATCHED_TOKENS=2048
     GPU_MEMORY_UTILIZATION=0.92
 
@@ -2379,7 +2379,7 @@ Use the commands in [Section 5](#5-online-service-deployment) as starting config
 
 | Scenario | Starting Configuration | Parameters to Evaluate | Validation |
 | --- | --- | --- | --- |
-| Long context | A3 PD example with `MAX_MODEL_LEN=263000`; the other examples start at `133000`. | Set `MAX_MODEL_LEN` for the combined input/output budget and reduce `--max-num-seqs` if KV cache capacity is insufficient. | Confirm the requested context fits at the target concurrency before increasing load. |
+| Long context | All examples set `MAX_MODEL_LEN` to `133000`. | Set `MAX_MODEL_LEN` for the combined input/output budget and reduce `--max-num-seqs` if KV cache capacity is insufficient. | Confirm the requested context fits at the target concurrency before increasing load. |
 | Low latency | Single-node examples in Section 5.1. | Reduce request concurrency and compare `--max-num-seqs` and `--max-num-batched-tokens` settings. | Compare TTFT and TPOT alongside output-token throughput. |
 | High throughput | PD examples in Section 5.3. | Adjust `MAX_NUM_SEQS` and `MAX_BATCHED_TOKENS` on Prefill and Decode separately while keeping both connector topology declarations consistent. | Increase offered load gradually and check throughput, latency, and failed requests. |
 
