@@ -17,14 +17,10 @@ BASE = "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/"
 def load_class(filename, name, methods, bases, namespace):
     tree = ast.parse((ROOT / BASE / filename).read_text())
     original = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == name)
-    body = [n for n in original.body if isinstance(n, ast.FunctionDef) and n.name in methods]
-    cls = ast.ClassDef(
-        name=name,
-        bases=[ast.Name(id="Base", ctx=ast.Load())],
-        keywords=[],
-        body=body or [ast.Pass()],
-        decorator_list=[],
-    )
+    body: list[ast.stmt] = [n for n in original.body if isinstance(n, ast.FunctionDef) and n.name in methods]
+    cls = ast.parse(f"class {name}(Base):\n    pass\n").body[0]
+    assert isinstance(cls, ast.ClassDef)
+    cls.body = body or [ast.Pass()]
     module = ast.Module(
         body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), cls], type_ignores=[]
     )
@@ -110,6 +106,48 @@ class MooncakeShutdownRepro(unittest.TestCase):
         self.receiver.executor.shutdown.assert_called_once_with(wait=True)
         self.connector.shutdown()
         self.receiver.executor.shutdown.assert_called_once_with(wait=True)
+
+    def test_shutdown_retains_ownership_until_cleanup_finishes(self):
+        cleanup_started = threading.Event()
+        allow_cleanup = threading.Event()
+        shutdown_errors: list[BaseException] = []
+
+        def wait_for_cleanup(*args, **kwargs):
+            cleanup_started.set()
+            if not allow_cleanup.wait(timeout=5):
+                raise TimeoutError("test did not release executor cleanup")
+
+        def stop_connector():
+            try:
+                self.connector.shutdown()
+            except BaseException as error:
+                shutdown_errors.append(error)
+
+        self.receiver.executor.shutdown.side_effect = wait_for_cleanup
+        shutdown_thread = threading.Thread(target=stop_connector, daemon=True)
+        shutdown_thread.start()
+        try:
+            self.assertTrue(cleanup_started.wait(timeout=2))
+            self.assertTrue(shutdown_thread.is_alive())
+            self.assertIs(self.connector.connector_worker, self.worker)
+            self.assertIs(self.worker._recving_thread, self.receiver)
+        finally:
+            allow_cleanup.set()
+            shutdown_thread.join(timeout=2)
+        self.assertFalse(shutdown_thread.is_alive())
+        self.assertEqual(shutdown_errors, [])
+        self.assertIsNone(self.worker._recving_thread)
+        self.receiver.executor.shutdown.assert_called_once_with(wait=True)
+
+    def test_failed_shutdown_preserves_resources_for_retry(self):
+        self.receiver.executor.shutdown.side_effect = [RuntimeError("executor cleanup failed"), None]
+        with self.assertRaisesRegex(RuntimeError, "executor cleanup failed"):
+            self.connector.shutdown()
+        self.assertIs(self.connector.connector_worker, self.worker)
+        self.assertIs(self.worker._recving_thread, self.receiver)
+        self.connector.shutdown()
+        self.assertEqual(self.receiver.executor.shutdown.call_count, 2)
+        self.assertIsNone(self.worker._recving_thread)
 
 
 if __name__ == "__main__":
