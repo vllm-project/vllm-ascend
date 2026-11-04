@@ -30,7 +30,7 @@ multiple cache groups, see [Mooncake Layerwise Hybrid Attention](mooncake_hybrid
 | Parallelism | Instances sharing layerwise objects must use matching TP, PP, and PCP sizes and the same PP layer partition. DCP greater than `1` and TP mismatch are not supported. |
 | PP | Uneven layer partitions are supported, but each stage must own layers in every cache group. Empty stage-local cache groups are not supported. |
 | Cache layout | Readers and writers must agree on model weights, cache format, block sizes, and transfer mode. Use separate pool namespaces for incompatible configurations. |
-| Buffer reuse | Mooncake layerwise transfer does not enable cross-layer reuse of NPU cache buffers. |
+| Buffer reuse | Producers can opt into [prefill buffer reuse](mooncake_prefill_offload.md); ordinary layerwise transfer keeps dedicated NPU buffers. |
 | KVPP | Experimental for non-hybrid MLA/SFA models with `load_async=false`; cannot be combined with Mooncake layerwise PCP. See [KVPP](kvpp.md) for its support scope. |
 
 Hybrid models have additional cache-state and execution-mode requirements in the

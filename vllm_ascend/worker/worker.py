@@ -78,6 +78,10 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.core.kv_cache_physical_plan import (
+    get_kv_cache_allocation_overhead,
+    get_physical_kv_cache_config_from_specs,
+)
 from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
     create_kvpp_cache_allocation_plan,
@@ -657,6 +661,17 @@ class NPUWorker(WorkerBase):
         num_blocks = plan.get_num_blocks(available_bytes)
         return num_blocks * sum(spec.page_size_bytes for spec in plan.logical_cache_spec.values())
 
+    def _reserve_kv_cache_alignment(self, available_bytes: int) -> int:
+        if self.vllm_config.kv_transfer_config is None:
+            return available_bytes
+        specs = self.get_kv_cache_spec()
+        plan = get_physical_kv_cache_config_from_specs(self.vllm_config, specs)
+        if plan is None:
+            return available_bytes
+        reserve = get_kv_cache_allocation_overhead(plan)
+        logger.info("Reserve %d bytes for KV cache backing alignment.", reserve)
+        return max(available_bytes - reserve, 0)
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -690,7 +705,9 @@ class NPUWorker(WorkerBase):
                 GiB(kv_cache_memory_bytes),
             )
             return self._apply_kvpp_memory_budget(
-                self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
+                self._reserve_kv_cache_alignment(
+                    self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
+                )
             )
 
         # Execute a forward pass with dummy inputs to profile the memory usage
@@ -763,7 +780,7 @@ class NPUWorker(WorkerBase):
         self.available_kv_cache_memory_bytes = self._apply_kv_offload_decode_memory_constraints(
             self.available_kv_cache_memory_bytes
         )
-        return self._apply_kvpp_memory_budget(self.available_kv_cache_memory_bytes)
+        return self._apply_kvpp_memory_budget(self._reserve_kv_cache_alignment(self.available_kv_cache_memory_bytes))
 
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
         """Scale the KV cache budget for vllm main's multi-group layout.
@@ -1224,6 +1241,14 @@ class NPUWorker(WorkerBase):
         num_layers = len(physical_layers)
         if num_layers < base_layers:
             return num_layers, num_layers, 1.0
+        # Physical builders already account for the final shared backings.
+        # Consume that same layout rather than applying a logical multiplier.
+        config = getattr(self, "vllm_config", None)
+        plan = get_physical_kv_cache_config_from_specs(config, kv_cache_spec) if config is not None else None
+        if plan is not None:
+            layout = getattr(plan, "layerwise_reuse_layout", None)
+            assignments = len(layout.buffer_slots) if layout is not None and layout.has_layer_reuse else num_layers
+            return num_layers, assignments, 1.0
         reuse_layout = build_layerwise_reuse_layout(
             target_specs,
             base_layers,

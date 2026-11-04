@@ -352,3 +352,52 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
     plan = get_glm5_next_kv_cache_config(config, groups, budget)
     assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) == required
     assert sum(tensor.size for tensor in plan.kv_cache_tensors) == required
+
+
+@pytest.mark.parametrize("buffers", [1, 2])
+def test_mooncake_glm_main_packs_reuse_preserves_resident_auxiliary_capacity(buffers):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+        apply_layerwise_kv_cache_plan,
+    )
+
+    config = make_config()
+    config.model_config.get_num_layers = lambda parallel: 12
+    config.parallel_config.tensor_parallel_size = 8
+    config.parallel_config.enable_expert_parallel = True
+    config.speculative_config = None
+    config.kv_transfer_config = SimpleNamespace(
+        kv_connector="AscendStoreConnector",
+        kv_role="kv_producer",
+        kv_connector_extra_config={
+            "backend": "mooncake",
+            "use_layerwise": True,
+            "layerwise_num_shared_buffers": buffers,
+            "layerwise_independent_layers": [],
+        },
+    )
+    specs = {}
+    for offset in (0, 4, 8):
+        for name, spec in make_specs().items():
+            layer = int(name.split("layers.")[1].split(".")[0])
+            name = name.replace(f"layers.{layer}.", f"layers.{layer + offset}.")
+            specs[name] = replace(spec, mamba_cache_mode="align") if isinstance(spec, MambaSpec) else spec
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    byte_cost = get_glm5_next_pool_bytes_per_block(groups, config)
+    plan = get_glm5_next_kv_cache_config(config, groups, byte_cost * 9)
+    assert plan.num_blocks == 9
+    assert len(plan.kv_cache_tensors) == buffers + 3
+    assert sum(tensor.size for tensor in plan.kv_cache_tensors) == byte_cost * 9
+    assert len(plan.layerwise_cache_topology.main_packs) == 3
+    assert len(plan.layerwise_reuse_layout.buffer_slots) == buffers
+    names = [name for tensor in plan.kv_cache_tensors for name in tensor.layers]
+    assert sorted(names) == sorted(specs)
+    for tensor in plan.kv_cache_tensors:
+        if any("indexer" in name for name in tensor.layers):
+            assert len(tensor.layers) == 2
+            assert all("indexer" in name for name in tensor.layers)
+    tensors = plan.kv_cache_tensors
+    apply_layerwise_kv_cache_plan(plan, config)
+    assert plan.kv_cache_tensors is tensors
+    config.speculative_config = SimpleNamespace(method="mtp")
+    with pytest.raises(NotImplementedError, match="speculative decoding disabled"):
+        get_glm5_next_pool_bytes_per_block(groups, config)
