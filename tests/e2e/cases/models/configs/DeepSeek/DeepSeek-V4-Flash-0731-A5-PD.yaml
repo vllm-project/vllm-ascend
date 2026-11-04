@@ -130,6 +130,17 @@ test_cases:
         - "--additional-config"
         - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true,"enable_shared_expert_dp":true,"combine_quant_mode":4}'
     benchmarks:
+      perf_128:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 256
+        max_out_len: 1024
+        batch_size: 64
+        request_rate: 0
+        baseline: 1395.70
+        threshold: 0.95
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K_prefix100_in1047400_DeepSeek-V4-Flash-0731
@@ -139,5 +150,18 @@ test_cases:
         max_out_len: 1024
         batch_size: 1
         request_rate: 0
-        baseline: 57.4647
+        baseline: 57.46
         threshold: 0.95
+      acc:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gpqa
+        request_conf: vllm_api_general_chat
+        dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+        max_out_len: 393216
+        batch_size: 200
+        baseline: 90.1
+        threshold: 5
+        temperature: 1.0
+        top_p: 1.0
+        thinking: true
+        reasoning_effort: "max"
