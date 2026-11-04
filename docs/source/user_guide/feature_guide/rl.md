@@ -269,10 +269,10 @@ for decoding and replay logic.
 
 ### Sampling Mask (Distribution Replay)
 
-Sampling Mask returns the token IDs retained after top-k/top-p/min-p filtering
-for each generated position. RL frameworks can use these supports with the
-corresponding logits to normalize training probabilities over the same token
-sets. See the upstream
+During RL rollout inference, top-k/top-p/min-p sampling truncates the model's
+distribution. Sampling Mask returns the retained token IDs for each generated
+position, so training can normalize policy probabilities over the same support
+used during rollout. See the upstream
 [Sampling Mask (Distribution Replay) guide](https://docs.vllm.ai/en/latest/training/sampling_mask/)
 for training-side usage.
 
@@ -304,7 +304,7 @@ curl -sS -X POST http://127.0.0.1:8000/inference/v1/generate \
             "temperature": 1.0,
             "top_k": 20,
             "top_p": 0.95,
-            "max_tokens": 32,
+            "max_tokens": 2,
             "logprobs": 1
         },
         "output_mode": "tokens",
@@ -312,15 +312,31 @@ curl -sS -X POST http://127.0.0.1:8000/inference/v1/generate \
     }'
 ```
 
-Each choice returns one support set per generated token. For example, this
-illustrative choice excerpt has two output positions:
+Each choice returns one support set per generated token. The following tested
+Qwen3-0.6B response excerpt omits metadata, ranks, and `top_logprobs`:
 
 ```json
 {
-  "token_ids": [12, 25],
-  "sampling_mask": [[3, 12, 20], [6, 25]]
+  "finish_reason": "length",
+  "token_ids": [12095, 11],
+  "sampling_mask": [
+    [220, 264, 279, 304, 320, 510, 1112, 1181, 1304, 2130,
+     2598, 7407, 7436, 9625, 12095, 21718, 24209, 30743, 32671, 55201],
+    [11, 13, 323, 382]
+  ],
+  "logprobs": {
+    "content": [
+      {"token_id": 12095, "logprob": -0.2592906951904297},
+      {"token_id": 11, "logprob": -0.7923774719238281}
+    ]
+  }
 }
 ```
+
+Basic distribution replay needs the complete mask and the sampled token's old
+logprob. During training, apply the saved mask to the current policy's logits
+to compute that token's new logprob. Old logprobs for every candidate token are
+not required.
 
 The sampled token belongs to its corresponding support. Mask size is independent
 of `logprobs`, and top-k ties can retain more than `top_k` tokens. With
@@ -560,10 +576,7 @@ The output tokens will always be `[15, 284, 1026, 374]`. The logprobs reflect th
 | `--weight-transfer-config '{"backend": "ipc"}'` | Same-NPU weight transfer | Select the Ascend NPU IPC transfer engine |
 | `--enable-return-routed-experts` | MoE router replay | Return encoded expert routing decisions |
 | `--return-sampling-mask` | Sampling Mask (Distribution Replay) | Return the support set for each generated token; disabled by default |
-| `--logprobs-mode processed_logprobs` | Required for Sampling Mask | Normalize returned logprobs over the processed sampling distribution |
-| Request `temperature > 0` and `top_k > 0` | Required for Sampling Mask | Use random sampling with a bounded top-k support |
-| Speculative config `enable_adaptive_verification=false` | Sampling Mask with speculative decoding | Keep fixed verification boundaries |
-| `VLLM_USE_V2_MODEL_RUNNER=1` | Sampling Mask and trace replay | Select the required model runner V2 implementation |
+| `VLLM_USE_V2_MODEL_RUNNER=1` | Trace replay | Select the required model runner V2 implementation |
 | `--enable-scale-out` | Token-in/token-out requests on a normal server | Register `/inference/v1/generate`; `--tokens-only` also registers this endpoint |
 | `--enable-trace-replay` | trace replay | Forces decoding to follow a predetermined token sequence |
 
