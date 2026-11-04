@@ -687,6 +687,24 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
         # 2. Recurrent attention
+        if spec_sequence_masks is None and attn_metadata.num_prefills == 0 and attn_metadata.num_decodes > 0:
+            fused_output = DeviceOperator.try_fused_gdn_decode(
+                query_non_spec.squeeze(0),
+                key_non_spec.squeeze(0),
+                value_non_spec.squeeze(0),
+                a,
+                b,
+                self.A_log,
+                self.dt_bias,
+                ssm_state,
+                _flatten_recurrent_state_indices(non_spec_state_indices_tensor, attn_metadata.num_decode_tokens),
+                attn_metadata.non_spec_decode_metadata.causal_conv1d.query_start_loc,
+            )
+            if fused_output is not None:
+                core_attn_out[:num_actual_tokens] = fused_output
+                maybe_save_kv_layer_to_connector("", [])
+                return
+
         g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
