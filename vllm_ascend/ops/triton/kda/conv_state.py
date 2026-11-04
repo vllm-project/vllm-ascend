@@ -9,7 +9,7 @@ _CONV_STATE_COPY_BLOCK_SIZE = 256
 _CONV_STATE_COPY_MAX_PROGRAMS = 65535
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["REQUESTS"])
 def _copy_conv_state_kernel(
     cache,
     packed,
@@ -19,7 +19,7 @@ def _copy_conv_state_kernel(
     cache_stride,
     index_stride,
     num_slots,
-    REQUESTS: tl.constexpr,
+    REQUESTS,
     STATE_LEN: tl.constexpr,
     DIM: tl.constexpr,
     STATE_STRIDE: tl.constexpr,
