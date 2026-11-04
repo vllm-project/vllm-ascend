@@ -312,17 +312,17 @@ Multi-node deployment spreads one data-parallel group across multiple hosts. Eve
 
 Monitor node log while weights load and graph capture completes. Startup duration depends on storage, hardware, and the selected configuration; use continuing log progress and `Application startup complete` to judge readiness. If logs stop progressing or report an error, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
 
+There are two A2 nodes, DP4 × TP4 / EP16 in total. The following values match the configurations in the node scripts below and summarize the differences between the two nodes.
+
+| Parameter | Node 0 | Node 1 |
+| --- | --- | --- |
+| Role | API server | Headless worker |
+| DP × TP | 2 × 4 | 2 × 4 |
+| Data-parallel rank | 0, 1 | 2, 3 |
+| Tool-call parsing | Enabled | — |
+| max-num-seqs | 32 | 32 |
+
 === "A2 series (W8A8)"
-
-    There are two A2 nodes, DP4 × TP4 / EP16 in total. The following values match the configurations in the node scripts below and summarize the differences between the two nodes.
-
-    | Parameter | Node 0 | Node 1 |
-    | --- | --- | --- |
-    | Role | API server | Headless worker |
-    | DP × TP | 2 × 4 | 2 × 4 |
-    | Data-parallel rank | 0, 1 | 2, 3 |
-    | Tool-call parsing | Enabled | — |
-    | max-num-seqs | 32 | 32 |
 
     **Node 0**
 
@@ -496,25 +496,59 @@ Start Prefill, D1, and D2 within a few seconds of each other, and start the prox
 
 Monitor the role logs while weights load and graph capture completes. Startup duration depends on storage, hardware, and the selected configuration; use continuing log progress to monitor initialization, and wait for `Application startup complete` on every HTTP-serving instance to judge readiness. If logs stop progressing or report an error, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails) before starting the proxy.
 
+**A3 series (W8A8) deployment configuration**
+
+Use one Prefill host and two hosts for the distributed Decode service (1P1D), each with all 16 NPUs and the W8A8 weights. Prefill uses DP1 × TP4 × PP4. Decode uses one global DP8 × TP4 × PP1 group across the two hosts: D1 runs global DP ranks 0–3 and D2 runs ranks 4–7, and each rank starts one TP4 replica on four local NPUs. Every Decode rank exposes its own HTTP API, and the proxy registers all eight Decode endpoints. Use the same image and weights on all three hosts.
+
+The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles.
+
+| Parameter | Prefill | Decode |
+| --- | --- | --- |
+| DP × TP × PP | 1 × 4 × 4 | 8 × 4 × 1 across two nodes |
+| Global DP ranks | 0 | D1: 0–3; D2: 4–7 |
+| API port | 19100 | D1: 19200–19203; D2: 19300–19303 |
+| DP RPC port | 16920 | 16920, D1 is the DP master |
+| KV port | 24000 | 25000 + rank × 32 (D1); 26000 + local rank × 32 (D2) |
+| PP layer partition | 15,15,15,15 | — |
+| max-num-seqs | 8 | 128 per replica |
+| max-num-batched-tokens | 8192 | 2048 |
+| gpu-memory-utilization | 0.85 | 0.92 |
+| Execution mode | Eager | FULL_DECODE_ONLY |
+| HCCL_BUFFSIZE (MB) | 512 | 1024 |
+
+**950DT products deployment configuration**
+
+Use one Prefill host and two hosts for the distributed Decode service (1P1D), each with all eight NPUs and the W8A8-MXFP8 weights. Prefill uses DP1 × TP4 × PP2. The two Decode hosts form one global DP4 × TP4 × PP1 / EP16 group with two local DP ranks per host: D1 runs ranks 0–1 and D2 runs ranks 2–3. Both Decode hosts serve the HTTP API and are registered separately as proxy endpoints, so do not add `--headless` to the D2 script. D1 is the Data Parallel master and the two Decode scripts must use the same `DECODE_HEAD_IP`, DP RPC port, and KV port.
+
+The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles. They use 128K input and 1K output; see the configuration table after the role summary for the 16K input variant.
+
+| Parameter | Prefill | Decode |
+| --- | --- | --- |
+| DP × TP × PP | 1 × 4 × 2 | 4 × 4 × 1 across two nodes |
+| Local DP ranks | 0 | D1: 0–1; D2: 2–3 |
+| API port | 31050 | 31060 on both nodes |
+| DP RPC port | 6884 | 6885, D1 is the DP master |
+| KV port | 30000 | 26900 |
+| max-num-seqs | 128 | 128 per DP engine |
+| max-num-batched-tokens | 8000 | 8000 |
+| gpu-memory-utilization | 0.85 | 0.92 |
+| HCCL_BUFFSIZE (MB) | 512 | 1024 |
+| Main-model execution | Eager | FULL_DECODE_ONLY with 1024-token graph capture |
+| KV cache dtype | fp8 | fp8 (DSpark draft uses bfloat16) |
+
+All three scripts use `MAX_MODEL_LEN=133000`, which covers a 128K prompt plus 1K generated tokens. For 16K input workloads, only the Decode side changes: lower the sequence limit and fall back to the default graph capture size, which is enough for 64 sequences × (1 + 7 draft tokens) = 512 tokens per step.
+
+| Parameter | 128K input / 1K output | 16K input / 1K output |
+| --- | --- | --- |
+| Decode `MAX_NUM_SEQS` | 128 | 64 |
+| Decode `--compilation-config` | `{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}` | `{"cudagraph_mode":"FULL_DECODE_ONLY"}` |
+| All other parameters | Unchanged | Unchanged; keep `MAX_MODEL_LEN=133000` and `MAX_BATCHED_TOKENS=8000` |
+
+The capture size is not cosmetic: with 128 sequences and seven draft tokens, one decode step holds 1024 tokens, and the default capture limit of 512 makes the scheduler fall back to eager execution for the oversized batch, which raises TPOT by an order of magnitude. With 64 sequences the default limit is sufficient.
+
+**Deployment scripts**
+
 === "A3 series (W8A8)"
-
-    Use one Prefill host and two hosts for the distributed Decode service (1P1D), each with all 16 NPUs and the W8A8 weights. Prefill uses DP1 × TP4 × PP4. Decode uses one global DP8 × TP4 × PP1 group across the two hosts: D1 runs global DP ranks 0–3 and D2 runs ranks 4–7, and each rank starts one TP4 replica on four local NPUs. Every Decode rank exposes its own HTTP API, and the proxy registers all eight Decode endpoints. Use the same image and weights on all three hosts.
-
-    The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles.
-
-    | Parameter | Prefill | Decode |
-    | --- | --- | --- |
-    | DP × TP × PP | 1 × 4 × 4 | 8 × 4 × 1 across two nodes |
-    | Global DP ranks | 0 | D1: 0–3; D2: 4–7 |
-    | API port | 19100 | D1: 19200–19203; D2: 19300–19303 |
-    | DP RPC port | 16920 | 16920, D1 is the DP master |
-    | KV port | 24000 | 25000 + rank × 32 (D1); 26000 + local rank × 32 (D2) |
-    | PP layer partition | 15,15,15,15 | — |
-    | max-num-seqs | 8 | 128 per replica |
-    | max-num-batched-tokens | 8192 | 2048 |
-    | gpu-memory-utilization | 0.85 | 0.92 |
-    | Execution mode | Eager | FULL_DECODE_ONLY |
-    | HCCL_BUFFSIZE (MB) | 512 | 1024 |
 
     **Prefill Node (P)**
 
@@ -827,34 +861,6 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     Send requests to port `19080` with model name `minimax-m3.1-flash`.
 
 === "950DT products"
-
-    Use one Prefill host and two hosts for the distributed Decode service (1P1D), each with all eight NPUs and the W8A8-MXFP8 weights. Prefill uses DP1 × TP4 × PP2. The two Decode hosts form one global DP4 × TP4 × PP1 / EP16 group with two local DP ranks per host: D1 runs ranks 0–1 and D2 runs ranks 2–3. Both Decode hosts serve the HTTP API and are registered separately as proxy endpoints, so do not add `--headless` to the D2 script. D1 is the Data Parallel master and the two Decode scripts must use the same `DECODE_HEAD_IP`, DP RPC port, and KV port.
-
-    The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles. They use 128K input and 1K output; see the configuration table after the role summary for the 16K input variant.
-
-    | Parameter | Prefill | Decode |
-    | --- | --- | --- |
-    | DP × TP × PP | 1 × 4 × 2 | 4 × 4 × 1 across two nodes |
-    | Local DP ranks | 0 | D1: 0–1; D2: 2–3 |
-    | API port | 31050 | 31060 on both nodes |
-    | DP RPC port | 6884 | 6885, D1 is the DP master |
-    | KV port | 30000 | 26900 |
-    | max-num-seqs | 128 | 128 per DP engine |
-    | max-num-batched-tokens | 8000 | 8000 |
-    | gpu-memory-utilization | 0.85 | 0.92 |
-    | HCCL_BUFFSIZE (MB) | 512 | 1024 |
-    | Main-model execution | Eager | FULL_DECODE_ONLY with 1024-token graph capture |
-    | KV cache dtype | fp8 | fp8 (DSpark draft uses bfloat16) |
-
-    All three scripts use `MAX_MODEL_LEN=133000`, which covers a 128K prompt plus 1K generated tokens. For 16K input workloads, only the Decode side changes: lower the sequence limit and fall back to the default graph capture size, which is enough for 64 sequences × (1 + 7 draft tokens) = 512 tokens per step.
-
-    | Parameter | 128K input / 1K output | 16K input / 1K output |
-    | --- | --- | --- |
-    | Decode `MAX_NUM_SEQS` | 128 | 64 |
-    | Decode `--compilation-config` | `{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}` | `{"cudagraph_mode":"FULL_DECODE_ONLY"}` |
-    | All other parameters | Unchanged | Unchanged; keep `MAX_MODEL_LEN=133000` and `MAX_BATCHED_TOKENS=8000` |
-
-    The capture size is not cosmetic: with 128 sequences and seven draft tokens, one decode step holds 1024 tokens, and the default capture limit of 512 makes the scheduler fall back to eager execution for the oversized batch, which raises TPOT by an order of magnitude. With 64 sequences the default limit is sufficient.
 
     **Prefill Node (P)**
 
@@ -1325,11 +1331,11 @@ Adjust both values to the workload and usable SSD space, allowing for all worker
 
 Reuse the Section 5.3 role scripts and launch commands. Replace each role script with the pooled version below. Keep the Section 5.3 `vllm serve` flag style; only `--kv-transfer-config` switches to `MultiConnector`. Derive the Decode `lookup_rpc_port` from `DP_RANK` so each rank uses a distinct IPC endpoint; Prefill has one DP rank and uses `37000`.
 
+Prefill-Decode disaggregation with KV Cache Pool on 3 Atlas 800I A3 (64GB × 16) for `MiniMax-M3.1-Flash-W8A8` with DSpark speculative decoding.
+
+The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP4` on one host and one distributed Decode service with a global `DP8 × TP4 × PP1` group spanning two hosts, with four local ranks per Decode host. Service settings match Section 5.3; `MultiConnector` adds the KV pool.
+
 === "A3 series (W8A8)"
-
-    Prefill-Decode disaggregation with KV Cache Pool on 3 Atlas 800I A3 (64GB × 16) for `MiniMax-M3.1-Flash-W8A8` with DSpark speculative decoding.
-
-    The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP4` on one host and one distributed Decode service with a global `DP8 × TP4 × PP1` group spanning two hosts, with four local ranks per Decode host. Service settings match Section 5.3; `MultiConnector` adds the KV pool.
 
     **1. Prefill node**
 
@@ -2195,118 +2201,118 @@ Replace `{ip}` and `{port}` with the service endpoint. All examples use `minimax
 
 ### 6.1 Text
 
-  ```bash
-  curl http://{ip}:{port}/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d @- <<EOF
-  {
-    "model": "minimax-m3.1-flash",
-    "messages": [
-      {
-        "role": "user",
-        "content": "Answer the following multiple choice question. The last line of your response should be of the following format: 'Answer: LETTER' (without quotes) where LETTER is one of ABCD. Think step by step before answering.\n\nA student regrets that he fell asleep during a lecture in electrochemistry, facing the following incomplete statement in a test:\nThermodynamically, oxygen is a …oxidant in basic solutions. Kinetically, oxygen reacts …in acidic solutions.\nWhich combination of weaker/stronger and faster/slower is correct?\n\nA) weaker —faster\nB) stronger —faster\nC) weaker - slower\nD) stronger —slower"
-      }
-    ],
-    "max_tokens": 8000,
-    "temperature": 1.0
-  }
-  EOF
-  ```
+```bash
+curl http://{ip}:{port}/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d @- <<EOF
+{
+  "model": "minimax-m3.1-flash",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Answer the following multiple choice question. The last line of your response should be of the following format: 'Answer: LETTER' (without quotes) where LETTER is one of ABCD. Think step by step before answering.\n\nA student regrets that he fell asleep during a lecture in electrochemistry, facing the following incomplete statement in a test:\nThermodynamically, oxygen is a …oxidant in basic solutions. Kinetically, oxygen reacts …in acidic solutions.\nWhich combination of weaker/stronger and faster/slower is correct?\n\nA) weaker —faster\nB) stronger —faster\nC) weaker - slower\nD) stronger —slower"
+    }
+  ],
+  "max_tokens": 8000,
+  "temperature": 1.0
+}
+EOF
+```
 
-  Expected result: the answer is C.
+Expected result: the answer is C.
 
 ### 6.2 Single Image
 
-  Start the service with image input enabled, for example `--limit-mm-per-prompt '{"image":1,"video":0}'`. Replace `${IMAGE_PATH}` with a local image path on the client side.
+Start the service with image input enabled, for example `--limit-mm-per-prompt '{"image":1,"video":0}'`. Replace `${IMAGE_PATH}` with a local image path on the client side.
 
-  ```bash
-  IMAGE_PATH=/path/to/image.jpg
-  IMAGE_BASE64="$(base64 -w 0 "${IMAGE_PATH}")"
+```bash
+IMAGE_PATH=/path/to/image.jpg
+IMAGE_BASE64="$(base64 -w 0 "${IMAGE_PATH}")"
 
-  curl http://{ip}:{port}/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d @- <<EOF
-  {
-    "model": "minimax-m3.1-flash",
-    "messages": [
-      {
-        "role": "user",
-        "content": [
-          {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,${IMAGE_BASE64}"}},
-          {"type": "text", "text": "Briefly describe this image."}
-        ]
-      }
-    ],
-    "max_tokens": 512,
-    "temperature": 0
-  }
-  EOF
-  ```
+curl http://{ip}:{port}/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d @- <<EOF
+{
+  "model": "minimax-m3.1-flash",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,${IMAGE_BASE64}"}},
+        {"type": "text", "text": "Briefly describe this image."}
+      ]
+    }
+  ],
+  "max_tokens": 512,
+  "temperature": 0
+}
+EOF
+```
 
-  Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text describing the image.
+Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text describing the image.
 
 ### 6.3 Single Video
 
-  Start the service with video input enabled, for example `--limit-mm-per-prompt '{"image":0,"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory. If `media_io_kwargs.video.num_frames` is not specified, vLLM samples 32 frames by default.
+Start the service with video input enabled, for example `--limit-mm-per-prompt '{"image":0,"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory. If `media_io_kwargs.video.num_frames` is not specified, vLLM samples 32 frames by default.
 
-  ```bash
-  curl http://{ip}:{port}/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-      "model": "minimax-m3.1-flash",
-      "messages": [
-        {
-          "role": "user",
-          "content": [
-            {
-              "type": "video_url",
-              "video_url": {
-                "url": "file:///path/to/video.mp4"
-              }
-            },
-            {
-              "type": "text",
-              "text": "Briefly describe the main content of this video."
-            }
-          ]
-        }
-      ],
-      "max_tokens": 512,
-      "temperature": 0
-    }'
-  ```
-
-  Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text describing the video content.
-
-### 6.4 Mixed Image and Video Request
-
-  Start the service with both image and video input enabled. For the following request, use `--limit-mm-per-prompt '{"image":1,"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory.
-
-  ```bash
-  IMAGE_BASE64="$(base64 -w 0 /path/to/image.jpg)"
-
-  curl http://{ip}:{port}/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d @- <<EOF
-  {
+```bash
+curl http://{ip}:{port}/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
     "model": "minimax-m3.1-flash",
     "messages": [
       {
         "role": "user",
         "content": [
-          {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,${IMAGE_BASE64}"}},
-          {"type": "video_url", "video_url": {"url": "file:///path/to/video.mp4"}},
-          {"type": "text", "text": "Describe the image and video separately, and explain whether they are related."}
+          {
+            "type": "video_url",
+            "video_url": {
+              "url": "file:///path/to/video.mp4"
+            }
+          },
+          {
+            "type": "text",
+            "text": "Briefly describe the main content of this video."
+          }
         ]
       }
     ],
     "max_tokens": 512,
     "temperature": 0
-  }
-  EOF
-  ```
+  }'
+```
 
-  Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text that describes the image and video separately and explains whether they are related.
+Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text describing the video content.
+
+### 6.4 Mixed Image and Video Request
+
+Start the service with both image and video input enabled. For the following request, use `--limit-mm-per-prompt '{"image":1,"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory.
+
+```bash
+IMAGE_BASE64="$(base64 -w 0 /path/to/image.jpg)"
+
+curl http://{ip}:{port}/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d @- <<EOF
+{
+  "model": "minimax-m3.1-flash",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,${IMAGE_BASE64}"}},
+        {"type": "video_url", "video_url": {"url": "file:///path/to/video.mp4"}},
+        {"type": "text", "text": "Describe the image and video separately, and explain whether they are related."}
+      ]
+    }
+  ],
+  "max_tokens": 512,
+  "temperature": 0
+}
+EOF
+```
+
+Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text that describes the image and video separately and explains whether they are related.
 
 ## 7 Accuracy Evaluation
 
