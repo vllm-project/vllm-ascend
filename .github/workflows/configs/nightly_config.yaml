@@ -229,14 +229,6 @@ a3-560t:
         os: linux-aarch64-a3-800i-16
         config_file_path: GLM-5.2-W4A8C8-SFA-DCP.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
-      - name: glm-5.2-w4a8-dspark
-        os: linux-aarch64-a3-800i-16
-        config_file_path: GLM-5.2-W4A8-DSpark-A3.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM
-      - name: glm-5.2-w4a8-mtp
-        os: linux-aarch64-a3-800i-16
-        config_file_path: GLM-5.2-W4A8-MTP-A3.yaml
-        config_base_path: tests/e2e/cases/models/configs/GLM
       - name: glm-5.2-w4a8-dspark-v2
         os: linux-aarch64-a3-800i-16
         config_file_path: GLM-5.2-W4A8-DSpark-A3-V2.yaml
