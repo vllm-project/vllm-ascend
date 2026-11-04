@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# TEMPORARY: validate the A2 and 800i FED runners only. Do not merge.
+# TEMPORARY: validate all A2 tests and A3 smoke tests on FED runners. Do not merge.
 name: E2E
 
 on:
@@ -92,7 +92,7 @@ jobs:
           }
           echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
 
-      - name: Select only A2 and 800i tests and route to FED runners
+      - name: Select all A2 tests and A3 smoke tests for FED runners
         id: scope
         run: |
           pip install regex pyyaml
@@ -107,18 +107,30 @@ jobs:
               line.split("=", 1)
               for line in Path(os.environ["RUNNER_TEMP"], "all-test-groups.txt").read_text().splitlines()
           )
-          prefix = "linux-aarch64-a3-800i-"
-          groups = [
-              group for group in json.loads(outputs["test_groups"])
-              if group["npu_type"] == "a2" or group["runner"].startswith(prefix)
-          ]
+          all_groups = json.loads(outputs["test_groups"])
+          groups = [group for group in all_groups if group["npu_type"] == "a2"]
           if not groups:
-              raise SystemExit("No A2 or 800i tests selected")
+              raise SystemExit("No A2 tests selected")
           for group in groups:
-              if group["npu_type"] == "a2":
-                  group["runner"] = f"linux-aarch64-a2-fed-{group['num_npus']}"
-              else:
-                  group["runner"] = group["runner"].replace(prefix, prefix + "fed-", 1)
+              group["runner"] = f"linux-aarch64-a2-fed-{group['num_npus']}"
+
+          smoke_tests = {
+              "tests/e2e/pull_request/two_card/test_activation.py",
+              "tests/e2e/pull_request/two_card/test_prefix_caching.py",
+              "tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py",
+          }
+          a3_groups = [group for group in all_groups if group["npu_type"] == "a3" and group["num_npus"] == 2]
+          available = {test for group in a3_groups for test in group["tests"].split()}
+          if missing := smoke_tests - available:
+              raise SystemExit(f"A3 smoke tests missing or skipped: {sorted(missing)}")
+          groups.append(dict(
+              a3_groups[0],
+              runner="linux-aarch64-a3-800t-vllm-ascend-fed-2",
+              partition_name="a3-smoke",
+              partition="1-1",
+              tests=" ".join(sorted(smoke_tests)),
+          ))
+          for group in groups:
               print(f"{group['runner']} / {group['partition']}: {group['tests']}")
           target_ids = sorted({group["csrc_cache_target"] for group in groups})
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
