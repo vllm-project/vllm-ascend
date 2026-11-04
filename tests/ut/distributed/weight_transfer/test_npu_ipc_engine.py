@@ -44,6 +44,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.distributed.weight_transfer.base import WeightTransferEngine
+from vllm.distributed.weight_transfer.packed_tensor import PackedIpcChunk
 
 from vllm_ascend.distributed.weight_transfer import npu_ipc_engine
 from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
@@ -283,7 +284,7 @@ def test_packed_sender_waits_before_reusing_each_chunk(is_sender):
         assert kwargs["npu_uuid"] == "node-0"
         assert kwargs["buffer_size_bytes"] == 16
         for i in range(2):
-            yield dict(
+            yield PackedIpcChunk(
                 names=[f"w{i}"], dtype_names=["float32"], shapes=[[4]], tensor_sizes=[16], ipc_handle={"node-0": (i,)}
             )
             assert events[-1] == "sync"

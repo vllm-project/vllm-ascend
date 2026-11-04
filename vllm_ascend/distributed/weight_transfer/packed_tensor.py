@@ -9,12 +9,12 @@ from typing import Any
 
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
+from vllm.distributed.weight_transfer.packed_tensor import (
+    DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    DEFAULT_PACKED_NUM_BUFFERS,
+    PackedIpcChunk,
+)
 from vllm.logger import logger
-
-# Default values for packed tensor configuration.
-# These are imported by HCCLWeightTransferUpdateInfo and trainer_send_weights.
-DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
-DEFAULT_PACKED_NUM_BUFFERS = 2
 
 # On a failed stream drain, keep storage alive until process exit. Its async
 # users may still be running, so returning it to the allocator is unsafe.
@@ -287,7 +287,7 @@ def packed_npu_ipc_producer(
     npu_uuid: str,
     post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
-) -> Iterator[dict[str, Any]]:
+) -> Iterator[PackedIpcChunk]:
     """Pack tensors into a reusable NPU IPC buffer and yield chunks.
 
     Allocates a single NPU buffer of ``buffer_size_bytes`` and registers
@@ -341,13 +341,13 @@ def packed_npu_ipc_producer(
 
         if total_bytes and total_bytes + flat.numel() > buffer_size_bytes:
             torch.npu.current_stream().synchronize()
-            yield {
-                "names": names,
-                "shapes": shapes,
-                "dtype_names": [str(d).split(".")[-1] for d in dtypes],
-                "tensor_sizes": tensor_sizes,
-                "ipc_handle": {npu_uuid: ipc_args},
-            }
+            yield PackedIpcChunk(
+                names=names,
+                shapes=shapes,
+                dtype_names=[str(d).split(".")[-1] for d in dtypes],
+                tensor_sizes=tensor_sizes,
+                ipc_handle={npu_uuid: ipc_args},
+            )
             names, shapes, dtypes, tensor_sizes = [], [], [], []
             total_bytes = 0
 
@@ -360,13 +360,13 @@ def packed_npu_ipc_producer(
 
     if names:
         torch.npu.current_stream().synchronize()
-        yield {
-            "names": names,
-            "shapes": shapes,
-            "dtype_names": [str(d).split(".")[-1] for d in dtypes],
-            "tensor_sizes": tensor_sizes,
-            "ipc_handle": {npu_uuid: ipc_args},
-        }
+        yield PackedIpcChunk(
+            names=names,
+            shapes=shapes,
+            dtype_names=[str(d).split(".")[-1] for d in dtypes],
+            tensor_sizes=tensor_sizes,
+            ipc_handle={npu_uuid: ipc_args},
+        )
 
 
 def packed_npu_ipc_consumer(

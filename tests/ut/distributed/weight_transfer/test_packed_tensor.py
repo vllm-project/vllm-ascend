@@ -33,6 +33,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.distributed.weight_transfer.packed_tensor import PackedIpcChunk
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
@@ -359,7 +360,7 @@ def _install_fake_reduce_tensor():
 
 
 def test_packed_npu_ipc_producer_single_chunk():
-    """A small tensor fits in one chunk; one dict is yielded."""
+    """A small tensor fits in one upstream-compatible chunk."""
     patcher, args_sentinel = _install_fake_reduce_tensor()
     with patcher:
         tensor = torch.full((4,), 1.5, dtype=torch.float32)
@@ -374,11 +375,11 @@ def test_packed_npu_ipc_producer_single_chunk():
 
     assert len(chunks) == 1
     chunk = chunks[0]
-    assert chunk["names"] == ["w"]
-    assert chunk["shapes"] == [[4]]
-    assert chunk["dtype_names"] == ["float32"]
-    assert chunk["tensor_sizes"] == [16]  # 4 float32 = 16 bytes
-    assert chunk["ipc_handle"] == {"node-0": args_sentinel}
+    assert chunk.names == ["w"]
+    assert chunk.shapes == [[4]]
+    assert chunk.dtype_names == ["float32"]
+    assert chunk.tensor_sizes == [16]  # 4 float32 = 16 bytes
+    assert chunk.ipc_handle == {"node-0": args_sentinel}
 
 
 def test_packed_npu_ipc_producer_empty_iterator():
@@ -415,13 +416,13 @@ def test_packed_npu_ipc_producer_splits_when_exceeding_buffer():
 
     assert len(chunks) == 2
     # First chunk holds the first tensor only.
-    assert chunks[0]["names"] == ["a"]
-    assert chunks[0]["tensor_sizes"] == [16]
+    assert chunks[0].names == ["a"]
+    assert chunks[0].tensor_sizes == [16]
     # Second chunk holds the second tensor.
-    assert chunks[1]["names"] == ["b"]
-    assert chunks[1]["tensor_sizes"] == [16]
+    assert chunks[1].names == ["b"]
+    assert chunks[1].tensor_sizes == [16]
     # Every chunk carries the same IPC handle (reusable single buffer).
-    assert all(c["ipc_handle"] == {"node-0": args_sentinel} for c in chunks)
+    assert all(c.ipc_handle == {"node-0": args_sentinel} for c in chunks)
 
 
 def test_packed_npu_ipc_producer_raises_when_single_tensor_exceeds_buffer():
@@ -458,7 +459,7 @@ def test_packed_npu_ipc_producer_dtype_name_extraction():
             )
         )
     assert len(chunks) == 1
-    assert chunks[0]["dtype_names"] == ["float16", "bfloat16", "int64"]
+    assert chunks[0].dtype_names == ["float16", "bfloat16", "int64"]
 
 
 # ---------------------------------------------------------------------------
@@ -783,8 +784,8 @@ def test_packed_npu_ipc_producer_post_iter_func_transforms_tensor():
 
     assert len(chunks) == 1
     # Chunk metadata records the original shape/dtype, not the transformed one.
-    assert chunks[0]["shapes"] == [[4]]
-    assert chunks[0]["dtype_names"] == ["float32"]
+    assert chunks[0].shapes == [[4]]
+    assert chunks[0].dtype_names == ["float32"]
 
 
 def test_packed_npu_ipc_producer_handles_multiple_tensors_one_chunk():
@@ -803,9 +804,9 @@ def test_packed_npu_ipc_producer_handles_multiple_tensors_one_chunk():
         )
 
     assert len(chunks) == 1
-    assert chunks[0]["names"] == ["a", "b"]
-    assert chunks[0]["shapes"] == [[2], [3]]
-    assert chunks[0]["tensor_sizes"] == [8, 12]
+    assert chunks[0].names == ["a", "b"]
+    assert chunks[0].shapes == [[2], [3]]
+    assert chunks[0].tensor_sizes == [8, 12]
 
 
 def test_packed_npu_ipc_producer_ipc_handle_key_matches_npu_uuid():
@@ -825,8 +826,8 @@ def test_packed_npu_ipc_producer_ipc_handle_key_matches_npu_uuid():
             )
         )
 
-    assert "physical-npu-7" in chunks[0]["ipc_handle"]
-    assert chunks[0]["ipc_handle"]["physical-npu-7"] == args_sentinel
+    assert "physical-npu-7" in chunks[0].ipc_handle
+    assert chunks[0].ipc_handle["physical-npu-7"] == args_sentinel
 
 
 # ---------------------------------------------------------------------------
@@ -935,15 +936,15 @@ def _assert_packed_roundtrip(backend, tensors, buffer_size):
         assert len(chunks) == 1  # IPC callers here deliberately fit in one chunk.
         chunk_count = len(chunks)
         chunk = chunks[0]
-        assert isinstance(chunk, dict)  # Keep the existing IPC wire representation.
+        assert isinstance(chunk, PackedIpcChunk)
         with _install_fake_rebuild_npu_tensor(buffers[0]):
             received = packed_npu_ipc_consumer(
-                chunk["ipc_handle"],
+                chunk.ipc_handle,
                 "node-0",
-                chunk["names"],
-                chunk["shapes"],
-                chunk["dtype_names"],
-                chunk["tensor_sizes"],
+                chunk.names,
+                chunk.shapes,
+                chunk.dtype_names,
+                chunk.tensor_sizes,
                 0,
             )
     for buffer in buffers:
