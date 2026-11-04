@@ -52,7 +52,12 @@ def _qsa_rmsnorm_mrope_kernel(
     else:
         axis = tl.full((half_rope_dim,), 0, tl.int32)
     if GATHER_CACHE:
-        position = tl.load(positions_ptr + axis * position_stride_axis + token_id * position_stride_token)
+        if has_mrope:
+            position = tl.load(positions_ptr + axis * position_stride_axis + token_id * position_stride_token)
+        else:
+            # Keep the shared position scalar: an all-zero axis vector creates
+            # a repeated-address gather unsupported by Triton Ascend lowering.
+            position = tl.load(positions_ptr + token_id * position_stride_token)
         position = tl.minimum(tl.maximum(position, 0), cache_rows - 1)
         cache_row = cos_sin_ptr + position.to(tl.int64) * cos_sin_stride_token
     else:
