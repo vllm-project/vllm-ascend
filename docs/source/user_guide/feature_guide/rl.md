@@ -576,7 +576,7 @@ The output tokens will always be `[15, 284, 1026, 374]`. The logprobs reflect th
 | `--weight-transfer-config '{"backend": "ipc"}'` | Same-NPU weight transfer | Select the Ascend NPU IPC transfer engine |
 | `--enable-return-routed-experts` | MoE router replay | Return encoded expert routing decisions |
 | `--return-sampling-mask` | Sampling Mask (Distribution Replay) | Return the support set for each generated token; disabled by default |
-| `VLLM_USE_V2_MODEL_RUNNER=1` | Trace replay | Select the required model runner V2 implementation |
+| `VLLM_USE_V2_MODEL_RUNNER=1` | Sampling Mask and Trace Replay | Select the model runner V2 implementation required by both features |
 | `--enable-scale-out` | Token-in/token-out requests on a normal server | Register `/inference/v1/generate`; `--tokens-only` also registers this endpoint |
 | `--enable-trace-replay` | trace replay | Forces decoding to follow a predetermined token sequence |
 
