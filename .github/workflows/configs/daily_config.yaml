@@ -26,6 +26,5 @@ a3-560t:
     - name: Kimi-K2.6-w4a8-A3
     - name: MiniMax-M3-BF16-A3
     - name: DeepSeek-V4-Flash-W8A8-A3
-    - name: glm-5.2-w4a8-dspark
   multi_card:
     - name: Qwen3-32B-QuaRot

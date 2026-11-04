@@ -41,8 +41,6 @@ env_common: &env_common
   VLLM_USE_V2_MODEL_RUNNER: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   HCCL_BUFFSIZE: "1024"
-  ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config.protocol_desc":["hccs:device"]}'
-  ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
 
 templates:
   - node_index: 0
