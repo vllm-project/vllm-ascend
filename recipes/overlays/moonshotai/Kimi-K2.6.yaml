@@ -7,6 +7,8 @@ meta:
 hardware_opt_in_features:
   ascend_950dt:
     - spec_decoding
+  ascend_910c:
+    - spec_decoding
 variants:
   w4a8_ascend:
     model_id: Eco-Tech/Kimi-K2.6-w4a8
@@ -22,6 +24,10 @@ variants:
     extra_args:
       - '--quantization'
       - ascend
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: vllm serve
 strategy_hardware:
   pd_cluster:
     ascend_950dt: unsupported
@@ -35,10 +41,6 @@ strategy_hardware:
     ascend_950dt: unsupported
 guide_sections:
   ascend: |
-    ## Ascend deployment
-
-    Prerequisites: 1 Atlas 800 A3 node (16 x 64 GB NPUs, Ascend 910C).
-
     ### Huawei Ascend 910C
 
     The [official vLLM-Ascend single-node deployment example](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html#51-single-node-online-deployment)
@@ -47,7 +49,35 @@ guide_sections:
     tutorial. Download the main and draft checkpoints first and replace their
     model arguments with the corresponding local paths when necessary.
     The host CPU/sysctl tuning commands require appropriate host permissions.
-    This reference command is independent of the interactive command builder.
+    The 910C DEP builder uses TP=4, DP=4 and the runtime tuning below, while
+    retaining the shared DEP topology: vLLM listens on 8100 and its companion
+    router on 8000. Spec Decoding is off by default on 910C so the main model
+    runs without a draft. Manually enabling it selects the tutorial DFlash
+    configuration; confirm target/draft compatibility before doing so. The draft below is a Hugging Face checkpoint;
+    when using VLLM_USE_MODELSCOPE=True, download the draft separately and replace
+    its model argument with a local path. Host CPU/sysctl tuning and profiling
+    remain Guide-only steps. These generated settings have not been rerun on NPU
+    hardware as part of this recipe update.
+
+    #### Installation requirements (910C / Atlas 800 A3)
+
+    Use the A3 image from the [official Kimi-K2.6 installation instructions](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html#41-docker-image-installation):
+
+    ```bash
+    docker pull quay.io/ascend/vllm-ascend:v0.30.0-a3
+    ```
+
+    The container provides user-space dependencies; install compatible drivers and
+    firmware on the host and check device health with `npu-smi info` before launch.
+    For a source installation, follow the [official installation guide](https://docs.vllm.ai/projects/ascend/en/latest/getting_started/installation.html)
+    for this release, including vLLM-Ascend and its Ascend dependencies; the generic
+    vLLM pip command alone does not install the Ascend stack. Select Docker in the
+    Install block to use the pinned A3 image. The shared Install version heading
+    still describes the base recipe's minimum vLLM version, not this tested stack.
+    This environment is an official 910C reference, not evidence of 950DT validation
+    or a new runtime test of the generated commands.
+
+    #### Launch command
 
     ```bash
     #!/bin/sh
@@ -65,12 +95,13 @@ guide_sections:
     export HCCL_BUFFSIZE=600
 
     # Ensure the model path matches the directory recorded during download
-    vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
+    vllm serve Eco-Tech/Kimi-K2.6-w4a8 \
         --quantization ascend \
+        --enable-auto-tool-choice \
         --tool-call-parser kimi_k2 \
         --reasoning-parser kimi_k2 \
-        --allowed-local-media-path / \
-        --served-model-name kimi_k26 \
+        --allowed-local-media-path /data/media \
+        --served-model-name Eco-Tech/Kimi-K2.6-w4a8 \
         --trust-remote-code \
         --tensor-parallel-size 4 \
         --data-parallel-size 4 \
@@ -78,7 +109,7 @@ guide_sections:
         --enable-expert-parallel \
         --port 8000 \
         --max-num-seqs 4 \
-        --max-model-len 34816 \
+        --max-model-len 15000 \
         --max-num-batched-tokens 16384 \
         --gpu-memory-utilization 0.87 \
         --seed 42 \
@@ -86,12 +117,98 @@ guide_sections:
         --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
         --mm-processor-cache-gb 0 \
         --mm-encoder-tp-mode data \
-        --additional-config '{"scheduler_config":{"enable_balance_scheduling":false},"enable_mlapo":true}' \
-        --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
+        --additional-config '{"scheduler_config":{"enable_balance_scheduling":false},"enable_mlapo":true}'
     ```
-
-    ### References
-
+  huawei_prerequisites: |
+    - **Huawei support:** 1 Atlas 800 A3 node (16 x 64 GB NPUs, Ascend 910C). Official reference environment: vLLM 0.30.0 and vLLM-Ascend 0.30.0; host Ascend HDK 26.1.1.
+  ascend_references: |
     - [Kimi-K2.6 on ModelScope](https://www.modelscope.cn/models/moonshotai/Kimi-K2.6)
     - [Eco-Tech Kimi-K2.6-W4A8 on ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.6-w4a8)
     - [vLLM-Ascend Kimi-K2.6 tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Kimi-K2.6.html)
+  ascend_client_usage: |+
+    ## Client Usage
+
+    Once the vLLM server is running, consume it via the OpenAI-compatible API:
+
+    ```python
+    import time
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key="EMPTY",
+        base_url="http://localhost:8000/v1",
+        timeout=3600
+    )
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://ofasys-multimodal-wlcb-3-toshanghai.oss-accelerate.aliyuncs.com/wpf272043/keepme/image/receipt.png"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "Read all the text in the image."
+                }
+            ]
+        }
+    ]
+
+    start = time.time()
+    response = client.chat.completions.create(
+        model="Eco-Tech/Kimi-K2.6-w4a8",
+        messages=messages,
+        max_tokens=2048
+    )
+    print(f"Response costs: {time.time() - start:.2f}s")
+    print(f"Generated text: {response.choices[0].message.content}")
+    ```
+
+strategy_overrides:
+  single_node_dep:
+    hardware_overrides:
+      ascend_910c:
+        extra_args:
+          - '--tensor-parallel-size'
+          - '4'
+          - '--data-parallel-size'
+          - '4'
+          - '--allowed-local-media-path'
+          - /data/media
+          - '--served-model-name'
+          - Eco-Tech/Kimi-K2.6-w4a8
+          - '--no-enable-prefix-caching'
+          - '--max-num-seqs'
+          - '4'
+          - '--max-model-len'
+          - '15000'
+          - '--max-num-batched-tokens'
+          - '16384'
+          - '--gpu-memory-utilization'
+          - '0.87'
+          - '--seed'
+          - '42'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          - '--mm-processor-cache-gb'
+          - '0'
+          - '--additional-config'
+          - '{"scheduler_config":{"enable_balance_scheduling":false},"enable_mlapo":true}'
+        extra_env:
+          HCCL_OP_EXPANSION_MODE: AIV
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '1'
+          TASK_QUEUE_ENABLE: '1'
+          HCCL_BUFFSIZE: '600'
+features:
+  spec_decoding:
+    hardware_overrides:
+      ascend_910c:
+        args:
+          - '--speculative-config'
+          - '{"method":"dflash","model":"z-lab/Kimi-K2.5-DFlash","num_speculative_tokens":15}'
