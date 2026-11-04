@@ -50,6 +50,7 @@ class AscendECMooncakeScheduler(ECMooncakeScheduler):
         self._store_get_waiters: dict[str, set[str]] = {}
         self._store_get_to_dispatch: dict[str, TensorSpec] = {}
         self._store_get_to_consume: set[str] = set()
+        self._store_get_to_recompute: set[str] = set()
         self._store_get_to_discard: set[str] = set()
 
     def _release_store_get(self, identifier: str) -> None:
@@ -106,6 +107,8 @@ class AscendECMooncakeScheduler(ECMooncakeScheduler):
             _StoreGetState.FAILED,
         ):
             self._store_get_to_consume.add(identifier)
+            if state is not _StoreGetState.HIT:
+                self._store_get_to_recompute.add(identifier)
             self._release_store_get(identifier)
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> AscendECMooncakeConnectorMetadata:
@@ -115,10 +118,12 @@ class AscendECMooncakeScheduler(ECMooncakeScheduler):
             **vars(base),
             store_get_requests=self._store_get_to_dispatch,
             store_get_consume=self._store_get_to_consume,
+            store_get_recompute=self._store_get_to_recompute,
             store_get_discard=self._store_get_to_discard,
         )
         self._store_get_to_dispatch = {}
         self._store_get_to_consume = set()
+        self._store_get_to_recompute = set()
         self._store_get_to_discard = set()
         return metadata
 
@@ -166,9 +171,12 @@ class AscendECMooncakeScheduler(ECMooncakeScheduler):
 
     def has_pending_push_work(self) -> bool:
         """Keep scheduling while upstream pushes or asynchronous GETs need work."""
+        # Terminal GET states may be gone before their commands reach the worker.
         return (
             super().has_pending_push_work()
             or bool(self._store_get_to_dispatch)
+            or bool(self._store_get_to_consume)
+            or bool(self._store_get_to_discard)
             or any(
                 state in (_StoreGetState.PENDING, _StoreGetState.ABANDONED) for state in self._store_get_states.values()
             )

@@ -59,7 +59,8 @@ For cross-Encoder caching:
 
 - Install Mooncake with Ascend Store support and run a RAM Store with
   `mooncake_master`.
-- Keep `--mm-processor-cache-gb` greater than zero to preserve content identifiers.
+- Leave multimodal processor caching enabled (the default) to preserve content
+  identifiers.
 - Use the same immutable weights, compatible preprocessing, and matching
   multimodal identifiers on participating Encoders.
 - Do not enable LoRA; the current connector rejects LoRA configurations.
@@ -249,18 +250,12 @@ setup from step 1:
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=0 vllm serve "$MODEL" \
   --host 0.0.0.0 --port 19534 \
-  --tensor-parallel-size 1 \
-  --dtype bfloat16 \
-  --enforce-eager \
   --gpu-memory-utilization 0.35 \
   --max-model-len 4096 \
   --max-num-batched-tokens 4096 \
   --max-num-seqs 2 \
   --limit-mm-per-prompt '{"image":2,"video":0}' \
-  --mm-processor-device cpu \
-  --mm-processor-cache-gb 0.3 \
   --enable-request-id-headers \
-  --no-enable-prefix-caching \
   --ec-transfer-config '{
     "ec_connector": "ECMooncakeConnector",
     "ec_role": "ec_producer",
@@ -277,18 +272,13 @@ Start PD in another terminal with the same model and the matching transport setu
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=1 vllm serve "$MODEL" \
   --host 0.0.0.0 --port 19537 \
-  --tensor-parallel-size 1 \
-  --dtype bfloat16 \
-  --enforce-eager \
   --gpu-memory-utilization 0.75 \
   --max-model-len 4096 \
   --max-num-batched-tokens 4096 \
   --max-num-seqs 2 \
   --limit-mm-per-prompt '{"image":2,"video":0}' \
-  --mm-processor-device cpu \
   --enable-mm-embeds \
   --enable-request-id-headers \
-  --no-enable-prefix-caching \
   --ec-transfer-config '{
     "ec_connector": "ECMooncakeConnector",
     "ec_role": "ec_consumer",
@@ -320,10 +310,10 @@ role; `ec_connector_extra_config` holds connector-specific options:
 | `control_timeout_s` | Extra config, optional | Reservation RPC timeout; default 30 seconds. |
 | `push_wait_timeout_s` | Extra config, optional | Consumer wait for a matching push; default 60 seconds. |
 
-`--enable-mm-embeds` lets PD inject the received outputs. On a caching E,
-`--mm-processor-cache-gb` must be positive so multimodal content identifiers are
-preserved. Encoder TP/PP/DP must each be one; these example commands use TP=1
-and the default PP=1, DP=1.
+`--enable-mm-embeds` explicitly enables received-embedding inputs on PD.
+Cross-Encoder caching requires multimodal processor caching to remain enabled;
+the default already satisfies this requirement. Encoder TP/PP/DP must each be
+one; these example commands use TP=1 and the default PP=1, DP=1.
 
 For the single-worker example, PD listens for EC control requests on `19019`.
 Its OpenAI HTTP API listens on `19537`; these are different services. The
@@ -343,12 +333,11 @@ needed in total. Apply the same model and chosen transport environment first.
 ASCEND_RT_VISIBLE_DEVICES=1,2 vllm serve "$MODEL" \
   --host 0.0.0.0 --port 19537 \
   --tensor-parallel-size 2 --data-parallel-size 1 \
-  --dtype bfloat16 --enforce-eager \
   --gpu-memory-utilization 0.75 \
   --max-model-len 4096 --max-num-batched-tokens 4096 --max-num-seqs 2 \
   --limit-mm-per-prompt '{"image":2,"video":0}' \
-  --mm-processor-device cpu --enable-mm-embeds \
-  --enable-request-id-headers --no-enable-prefix-caching \
+  --enable-mm-embeds \
+  --enable-request-id-headers \
   --ec-transfer-config '{
     "ec_connector": "ECMooncakeConnector",
     "ec_role": "ec_consumer",
@@ -379,13 +368,12 @@ python "$VLLM_ROOT/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=1,2 vllm serve "$MODEL" \
   --host 0.0.0.0 --port 19537 \
-  --tensor-parallel-size 1 --data-parallel-size 2 \
-  --dtype bfloat16 --enforce-eager \
+  --data-parallel-size 2 \
   --gpu-memory-utilization 0.75 \
   --max-model-len 4096 --max-num-batched-tokens 4096 --max-num-seqs 2 \
   --limit-mm-per-prompt '{"image":2,"video":0}' \
-  --mm-processor-device cpu --enable-mm-embeds \
-  --enable-request-id-headers --no-enable-prefix-caching \
+  --enable-mm-embeds \
+  --enable-request-id-headers \
   --ec-transfer-config '{
     "ec_connector": "ECMooncakeConnector",
     "ec_role": "ec_consumer",

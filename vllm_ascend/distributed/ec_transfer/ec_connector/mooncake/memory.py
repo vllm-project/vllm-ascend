@@ -26,6 +26,10 @@ from vllm.utils.math_utils import round_up
 ASCEND_DIRECT_MEMORY_ALIGNMENT = 2 * 1024 * 1024
 
 
+class SafeP2PDeliveryError(RuntimeError):
+    """Delivery failed before writes or after all native payload reads completed."""
+
+
 class AscendContiguousAllocator(ContiguousAllocator):
     """Allocate a 2 MiB-aligned registered-memory slab on NPU."""
 
@@ -110,6 +114,13 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
     def capacity(self) -> int:
         """Return the total producer slab capacity in bytes."""
         return self._allocator._capacity
+
+    def check_healthy(self) -> None:
+        """Surface uncertain native use even when no new allocation is attempted."""
+        if self._poisoned:
+            raise RuntimeError(
+                "Ascend producer staging pool is poisoned; native completion is unconfirmed; worker must exit"
+            )
 
     def ensure_prepared(self, device: torch.device) -> None:
         """Ensure that the shared producer slab is allocated and registered."""

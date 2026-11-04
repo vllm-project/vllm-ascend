@@ -3,7 +3,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from threading import Event
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
@@ -11,6 +11,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_cl
 
 from tests.ut.distributed.ec_transfer.test_mooncake_memory import _make_pool
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import store_client as module
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import SafeP2PDeliveryError
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_client import AscendMooncakeEmbeddingStoreClient
 
 
@@ -51,16 +52,83 @@ def _get(client, objects):
     return loaded, source
 
 
-def test_failed_direct_send_poisons_and_retains_get_lease():
+@pytest.mark.parametrize("error_type", [RuntimeError, TimeoutError])
+def test_failed_direct_send_poisons_and_retains_get_lease(error_type):
     client, pool, _ = _client(256)
     send: Future[None] = Future()
     client.on_get_payloads = lambda payloads: [send]
     loaded, _ = _get(client, ["key"])
-    send.set_exception(RuntimeError("native write status unknown"))
+    send.set_exception(error_type("native write status unknown"))
     assert client._poisoned
     assert pool._allocator._free == []
     assert client._unsafe_owners
     assert torch.equal(loaded["key"], torch.arange(8, dtype=torch.float32).view(2, 4))
+
+
+@pytest.mark.parametrize("failure_stage", ["reservation", "write", "partial_write", "notification"])
+def test_direct_get_delivery_failure_releases_only_confirmed_readers(failure_stage):
+    from vllm.distributed.ec_transfer.ec_connector.mooncake.metadata import ECMooncakePushSpec
+
+    from tests.ut.distributed.ec_transfer.test_mooncake_worker import _make_lifecycle_worker
+    from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.worker import AscendProducerPushManager
+
+    client, pool, _ = _client(256)
+    send, other = Future(), Future()
+    client.on_get_payloads = lambda payloads: [send, other]
+    loaded, _ = _get(client, ["key"])
+    worker = _make_lifecycle_worker()
+    worker._producer_memory = pool
+    worker._producer_pushes = manager = AscendProducerPushManager()
+    worker._notify_completions = MagicMock()
+    worker._abandon_pushes = MagicMock()
+    worker._run_fanout = lambda tasks, on_submit: [task() for task in tasks]
+    reservation = Future()
+    push, _ = manager.reserve(
+        ECMooncakePushSpec("key", 32, (2, 4), "float32", "consumer", "transfer"), lambda: reservation
+    )
+    manager.bind_source("key", loaded["key"], None)
+    shards = [{"ready": True, "nbytes": 32, "dst_session": "peer", "dst_ptr": 1234}]
+    error = TimeoutError(f"{failure_stage} timed out")
+    if failure_stage == "reservation":
+        reservation.set_exception(error)
+    elif failure_stage == "write":
+        worker._transfer.write.side_effect = error
+    elif failure_stage == "partial_write":
+        shards.append({"ready": True, "nbytes": 32, "dst_session": "other-peer", "dst_ptr": 5678})
+        worker._transfer.write.side_effect = [None, error]
+    else:
+        worker._notify_completions.side_effect = error
+    if not reservation.done():
+        reservation.set_result(shards)
+
+    with pytest.raises(RuntimeError) as caught:
+        worker._push_batch([push], loaded_payloads=loaded)
+    send.set_exception(caught.value)
+    assert manager.poll() == [("key", push.error)]
+    assert push.error and not manager.pending
+    assert (
+        worker._transfer.write.call_count
+        == {"reservation": 0, "write": 1, "partial_write": 2, "notification": 1}[failure_stage]
+    )
+    safe = failure_stage in ("reservation", "notification")
+    assert isinstance(caught.value, SafeP2PDeliveryError) is safe
+    if safe:
+        assert caught.value.__cause__ is error
+        assert push.error == str(error)
+        client._check_healthy()
+    else:
+        worker._notify_completions.assert_not_called()
+        with pytest.raises(EmbeddingStoreError):
+            client._check_healthy()
+        assert client._unsafe_owners
+    # Even a safe failure cannot release memory while another reader is pending.
+    assert pool._allocator._free == []
+    other.set_result(None)
+    assert client._poisoned is (not safe)
+    assert pool._allocator._free == ([(0, 256)] if safe else [])
+    if not safe:
+        with pytest.raises(RuntimeError, match="poisoned"):
+            pool.reserve_bytes([1], torch.device("cpu"))
 
 
 def test_get_when_pool_busy_does_not_block_or_submit_io():
@@ -356,6 +424,11 @@ def test_npu_cache_copy_uses_event_or_synchronizes_only_copy_stream(mock_npu_con
     target.device.type = "npu"
     payload = MagicMock()
     compute_stream = mock_npu_control_calls.return_value
+    calls = MagicMock()
+    calls.attach_mock(copy_stream.wait_stream, "wait_stream")
+    calls.attach_mock(target.record_stream, "record_stream")
+    calls.attach_mock(target.copy_, "copy")
+    calls.attach_mock(copy_event.record, "record_event")
     with (
         patch.object(module.torch.npu, "Stream", return_value=copy_stream),
         patch.object(module.torch.npu, "stream", return_value=nullcontext()),
@@ -366,6 +439,12 @@ def test_npu_cache_copy_uses_event_or_synchronizes_only_copy_stream(mock_npu_con
             {"key": payload},
             torch.device("cpu"),
         )
+    assert calls.mock_calls == [
+        call.wait_stream(compute_stream),
+        call.record_stream(copy_stream),
+        call.copy(payload, non_blocking=True),
+        call.record_event(copy_stream),
+    ]
     target.record_stream.assert_called_once_with(copy_stream)
     target.copy_.assert_called_once_with(payload, non_blocking=True)
     copy_event.record.assert_called_once_with(copy_stream)
@@ -379,7 +458,8 @@ def test_npu_cache_copy_uses_event_or_synchronizes_only_copy_stream(mock_npu_con
         copy_stream.synchronize.assert_not_called()
 
 
-def test_get_event_and_direct_send_both_hold_lease():
+@pytest.mark.parametrize("safe_send_failure", [False, True])
+def test_get_event_and_direct_send_both_hold_lease(safe_send_failure):
     client, pool, _ = _client(256)
     lease = pool.reserve_bytes([64], torch.device("cpu"))
     event_started, finish_event = Event(), Event()
@@ -395,9 +475,14 @@ def test_get_event_and_direct_send_both_hold_lease():
     try:
         assert event_started.wait(3)
         assert pool.reserve_bytes([256], torch.device("cpu")) is None
+        if safe_send_failure:
+            send.set_exception(SafeP2PDeliveryError("reservation failed before write"))
+            assert not client._poisoned
+            assert pool.reserve_bytes([256], torch.device("cpu")) is None
         finish_event.set()
-        assert pool.reserve_bytes([256], torch.device("cpu")) is None
-        send.set_result(None)
+        if not send.done():
+            assert pool.reserve_bytes([256], torch.device("cpu")) is None
+            send.set_result(None)
         client._get_completion_executor.submit(lambda: None).result(timeout=3)
         assert pool._allocator._free == [(0, 256)]
     finally:

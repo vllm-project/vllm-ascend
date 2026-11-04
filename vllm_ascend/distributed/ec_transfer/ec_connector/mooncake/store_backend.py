@@ -176,7 +176,6 @@ class _SaveState(Enum):
     """Track deferred publication from admission through submission."""
 
     DEFERRED = auto()
-    CHECKING = auto()
     PREPARED = auto()
     SUBMITTED = auto()
 
@@ -260,8 +259,8 @@ class AscendDeferredStoreBackend(MooncakeEmbeddingStoreBackend):
         return True
 
     def prepare_saves(self, identifiers: list[str]) -> dict[str, PreparedStoreSave]:
-        """Run one immutable-key preflight for an admitted encoder batch."""
-        selected: list[tuple[str, _DeferredSave]] = []
+        """Claim admitted outputs for shared staging without waiting for Store I/O."""
+        prepared = {}
         with self._pending_lock:
             if self._fatal_error is not None:
                 raise EmbeddingStoreError("Store publisher has failed") from self._fatal_error
@@ -272,61 +271,17 @@ class AscendDeferredStoreBackend(MooncakeEmbeddingStoreBackend):
                 save = item[1]
                 assert isinstance(save, _DeferredSave)
                 if save.state is _SaveState.DEFERRED:
-                    selected.append((identifier, save))
-            if not selected:
-                return {}
-            future = self._executor.submit(
-                self.store_client.batch_exists,
-                [save.pool_key for _, save in selected],
-            )
-            for _, save in selected:
-                save.state = _SaveState.CHECKING
-                save.future = future
-
-        try:
-            exists = future.result()
-        except (EmbeddingStoreOperationError, OSError) as error:
-            logger.warning(
-                "Store PUT preflight failed for identifiers=%s: %s",
-                [identifier for identifier, _ in selected],
-                error,
-            )
-            with self._pending_lock:
-                for identifier, save in selected:
-                    self._finalize_locked(identifier, save)
-            return {}
-        except BaseException as error:
-            traceback.clear_frames(error.__traceback__)
-            with self._pending_lock:
-                if self._fatal_error is None:
-                    self._fatal_error = error
-            return {}
-
-        if not isinstance(exists, list) or len(exists) != len(selected):
-            lookup_error = RuntimeError("Mooncake Store returned an unexpected number of lookup results")
-            with self._pending_lock:
-                if self._fatal_error is None:
-                    self._fatal_error = lookup_error
-            return {}
-
-        prepared = {}
-        with self._pending_lock:
-            for (identifier, save), already_exists in zip(selected, exists, strict=True):
-                if already_exists:
-                    self._finalize_locked(identifier, save)
-                    continue
-                tensor = save.tensor
-                assert tensor is not None
-                save.state = _SaveState.PREPARED
-                save.future = None
-                prepared[identifier] = PreparedStoreSave(identifier, save.pool_key, tensor, save)
+                    tensor = save.tensor
+                    assert tensor is not None
+                    save.state = _SaveState.PREPARED
+                    prepared[identifier] = PreparedStoreSave(identifier, save.pool_key, tensor, save)
         return prepared
 
     def submit_prepared_batch(
         self,
         store_puts: list[PreparedStorePut],
     ) -> Future[None]:
-        """Submit all prepared objects through one publisher/native batch."""
+        """Queue lookup and optional PUT, retaining the shared staging owners."""
         if not store_puts:
             raise ValueError("prepared Store PUT batch must not be empty")
         with self._pending_lock:
@@ -337,21 +292,39 @@ class AscendDeferredStoreBackend(MooncakeEmbeddingStoreBackend):
                     raise RuntimeError("prepared Store save is no longer pending")
                 if ticket.save.state is not _SaveState.PREPARED:
                     raise RuntimeError("prepared Store save was already submitted")
-            future = self._executor.submit(
-                self._put_prepared_batch,
-                store_puts,
-            )
+            accepted: Future[bool] = Future()
+
+            def publish() -> None:
+                # submit() can fail while starting a thread after queueing work.
+                # Never let such orphaned work read a lease the caller may free.
+                if accepted.result():
+                    self._put_prepared_batch(store_puts)
+
+            try:
+                future = self._executor.submit(publish)
+            except BaseException as error:
+                accepted.set_result(False)
+                if isinstance(error, RuntimeError):
+                    raise EmbeddingStoreOperationError("Could not submit Store publication") from error
+                raise
             for store_put in store_puts:
                 store_put.ticket.save.future = future
                 store_put.ticket.save.state = _SaveState.SUBMITTED
+            accepted.set_result(True)
             return future
 
     def _put_prepared_batch(
         self,
         store_puts: list[PreparedStorePut],
     ) -> None:
-        """Publish staged objects and release their source-save ownership."""
+        """Check immutable keys and publish from the same bytes used by P2P."""
         try:
+            exists = self.store_client.batch_exists([put.ticket.pool_key for put in store_puts])
+            if not isinstance(exists, list) or len(exists) != len(store_puts):
+                raise EmbeddingStoreError("Mooncake Store returned an unexpected number of lookup results")
+            missing = [put for put, hit in zip(store_puts, exists, strict=True) if not hit]
+            if not missing:
+                return
             results = self.store_client.put_prepared_tensors(
                 [
                     (
@@ -360,10 +333,10 @@ class AscendDeferredStoreBackend(MooncakeEmbeddingStoreBackend):
                         store_put.sizes,
                         store_put.owners,
                     )
-                    for store_put in store_puts
+                    for store_put in missing
                 ]
             )
-            for store_put, result in zip(store_puts, results, strict=True):
+            for store_put, result in zip(missing, results, strict=True):
                 if result < 0:
                     logger.warning(
                         "Store PUT rejected for %s: result=%d",

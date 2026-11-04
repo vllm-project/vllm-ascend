@@ -43,7 +43,10 @@ def test_deferred_store_budget_and_exists_rejection_do_not_submit_put():
     backend.save_output("second", _tensor(2000))
     assert list(backend._pending) == ["first"]
     client.batch_exists.side_effect = lambda keys: [True] * len(keys)
-    assert backend.prepare_saves(["first"]).get("first") is None
+    ticket = backend.prepare_saves(["first"])["first"]
+    client.batch_exists.assert_not_called()
+    backend.submit_prepared_batch([PreparedStorePut(ticket, [10], [128], [ticket.tensor])]).result(timeout=1)
+    backend.reap()
 
     client.batch_exists.assert_called_once()
     client.put_tensor.assert_not_called()
@@ -73,15 +76,17 @@ def test_pending_views_charge_storage_until_last_save_is_reaped():
     backend.shutdown()
 
 
-def test_encoder_batch_uses_one_exists_and_one_put_call():
+@pytest.mark.parametrize("exists", [[False, False], [True, False], [True, True]])
+def test_encoder_batch_uses_one_exists_and_at_most_one_put_call(exists):
     backend, client = _backend()
+    client.batch_exists.side_effect = lambda keys: exists
     first, second = _tensor(1000), _tensor(2000)
     backend.save_output("first", first)
     backend.save_output("second", second)
 
     prepared = backend.prepare_saves(["first", "second"])
     assert list(prepared) == ["first", "second"]
-    client.batch_exists.assert_called_once_with([prepared["first"].pool_key, prepared["second"].pool_key])
+    client.batch_exists.assert_not_called()
 
     puts = [
         PreparedStorePut(prepared["first"], [10], [128], [first]),
@@ -90,12 +95,16 @@ def test_encoder_batch_uses_one_exists_and_one_put_call():
     backend.submit_prepared_batch(puts).result(timeout=1)
     backend.reap()
 
-    client.put_prepared_tensors.assert_called_once_with(
-        [
-            (prepared["first"].pool_key, [10], [128], [first]),
-            (prepared["second"].pool_key, [20], [128], [second]),
-        ]
-    )
+    client.batch_exists.assert_called_once_with([prepared["first"].pool_key, prepared["second"].pool_key])
+    missing = [
+        (put.ticket.pool_key, put.addresses, put.sizes, put.owners)
+        for put, hit in zip(puts, exists, strict=True)
+        if not hit
+    ]
+    if missing:
+        client.put_prepared_tensors.assert_called_once_with(missing)
+    else:
+        client.put_prepared_tensors.assert_not_called()
     assert backend._pending == {}
     assert backend._pending_bytes == 0
     backend.shutdown()
@@ -117,17 +126,29 @@ def test_shutdown_drains_unselected_deferred_save_through_original_path():
     client.close.assert_called_once_with()
 
 
-def test_prepared_submission_failure_leaves_ticket_abortable():
-    backend, _ = _backend()
+@pytest.mark.parametrize("queued", [False, True])
+def test_prepared_submission_failure_leaves_ticket_abortable(queued):
+    backend, client = _backend()
     backend.save_output("first", _tensor())
     ticket = backend.prepare_saves(["first"]).get("first")
     put = PreparedStorePut(ticket, [10], [128], [ticket.tensor])
+    orphaned = []
+
+    def reject(task):
+        if queued:
+            orphaned.append(task)
+        raise RuntimeError("executor stopped")
+
     with (
-        patch.object(backend._executor, "submit", side_effect=RuntimeError("executor stopped")),
-        pytest.raises(RuntimeError, match="executor stopped"),
+        patch.object(backend._executor, "submit", side_effect=reject),
+        pytest.raises(module.EmbeddingStoreOperationError, match="Could not submit"),
     ):
         backend.submit_prepared_batch([put])
     backend.abort_prepared(ticket)
+    for task in orphaned:
+        task()
+    client.batch_exists.assert_not_called()
+    client.put_prepared_tensors.assert_not_called()
     assert backend._pending == {}
     assert backend._pending_bytes == 0
     backend.shutdown()

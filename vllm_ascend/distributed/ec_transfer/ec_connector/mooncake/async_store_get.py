@@ -41,6 +41,7 @@ class AscendECMooncakeConnectorMetadata(ECMooncakeConnectorMetadata):
 
     store_get_requests: dict[str, TensorSpec] = field(default_factory=dict)
     store_get_consume: set[str] = field(default_factory=set)
+    store_get_recompute: set[str] = field(default_factory=set)
     store_get_discard: set[str] = field(default_factory=set)
 
 
@@ -56,14 +57,18 @@ class AscendECMooncakeWorkerMetadata(ECMooncakeWorkerMetadata):
         self,
         other: ECMooncakeWorkerMetadata,
     ) -> AscendECMooncakeWorkerMetadata:
-        """Intersect worker hits and combine misses and failures."""
+        """Publish an outcome only when every aggregated worker is terminal."""
         assert isinstance(other, AscendECMooncakeWorkerMetadata)
         base = super().aggregate(other)
+        completed = (self.store_get_hits | self.store_get_misses | self.store_get_failures) & (
+            other.store_get_hits | other.store_get_misses | other.store_get_failures
+        )
+        failures = (self.store_get_failures | other.store_get_failures) & completed
         return AscendECMooncakeWorkerMetadata(
             **vars(base),
-            store_get_hits=self.store_get_hits & other.store_get_hits,
-            store_get_misses=self.store_get_misses | other.store_get_misses,
-            store_get_failures=self.store_get_failures | other.store_get_failures,
+            store_get_hits=self.store_get_hits & other.store_get_hits & completed,
+            store_get_misses=((self.store_get_misses | other.store_get_misses) & completed) - failures,
+            store_get_failures=failures,
         )
 
 
@@ -195,26 +200,26 @@ class AsyncStoreGetExecutor:
             if identifier not in self._ready:
                 raise RuntimeError(f"Asynchronous Store GET result is unavailable for {identifier}")
             tensor = self._ready.pop(identifier)
-            if tensor is not None:
+            if tensor is not None and identifier not in metadata.store_get_recompute:
                 encoder_cache[identifier] = tensor
+        for identifier in consumed | metadata.store_get_discard:
+            self._hits.discard(identifier)
+            self._misses.discard(identifier)
+            self._failures.discard(identifier)
         return consumed
 
     def extend_worker_metadata(
         self,
         base: ECMooncakeWorkerMetadata,
     ) -> AscendECMooncakeWorkerMetadata:
-        """Report newly completed outcomes and clear their notification sets."""
+        """Retain terminal outcomes until scheduler consume/discard acknowledgement."""
         self.poll()
-        metadata = AscendECMooncakeWorkerMetadata(
+        return AscendECMooncakeWorkerMetadata(
             **vars(base),
-            store_get_hits=self._hits,
-            store_get_misses=self._misses,
-            store_get_failures=self._failures,
+            store_get_hits=set(self._hits),
+            store_get_misses=set(self._misses),
+            store_get_failures=set(self._failures),
         )
-        self._hits = set()
-        self._misses = set()
-        self._failures = set()
-        return metadata
 
     def close(self) -> None:
         """Drain queued and running GETs before dropping unconsumed results."""
@@ -223,3 +228,6 @@ class AsyncStoreGetExecutor:
             self._executor = None
             self.poll()
         self._ready.clear()
+        self._hits.clear()
+        self._misses.clear()
+        self._failures.clear()

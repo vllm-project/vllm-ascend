@@ -42,6 +42,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_cl
     EmbeddingStoreOperationError,
 )
 from vllm.logger import logger
+from vllm.utils.math_utils import round_up
 from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.async_store_get import (
@@ -54,6 +55,7 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
     AscendContiguousAllocator,
     AscendProducerMemoryPool,
     AscendStagedSources,
+    SafeP2PDeliveryError,
 )
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_backend import (
     AscendDeferredStoreBackend,
@@ -196,6 +198,8 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         **kwargs: Any,
     ) -> None:
         """Route cache preparation through asynchronous GETs or the upstream path."""
+        if self.is_producer:
+            self._producer_memory.check_healthy()
         store = self._output_store
         if store is None:
             super().start_save_caches(metadata, encoder_cache, **kwargs)
@@ -454,6 +458,8 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
     ) -> bool:
         """Submit Store work and wait only for EC writes, retaining PUT futures."""
         source_index = {push.spec.transfer_id: index for index, push in enumerate(pushes)}
+        shared_index = {push.spec.mm_hash: index for index, push in enumerate(pushes)}
+        independent = getattr(self, "_use_store_independent_te", False)
         by_session: dict[
             str,
             list[tuple[torch.Tensor, int]],
@@ -461,6 +467,8 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         session_records: dict[str, dict[str, ProducerPushRecord]] = {}
         for push, shard in ready:
             index = source_index.get(push.spec.transfer_id)
+            if index is None and not independent:
+                index = shared_index.get(push.spec.mm_hash)
             if index is None:
                 continue
 
@@ -486,7 +494,12 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         try:
             if store_puts:
                 assert deferred_store is not None
-                store_futures.append(deferred_store.submit_prepared_batch(store_puts))
+                try:
+                    store_futures.append(deferred_store.submit_prepared_batch(store_puts))
+                except EmbeddingStoreOperationError as error:
+                    for put in store_puts:
+                        deferred_store.abort_prepared(put.ticket)
+                    logger.warning("Store publication skipped before submission: %s", error)
             sessions = list(by_session.items())
 
             def track_write(index: int, future: Future[None]) -> None:
@@ -601,44 +614,101 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             elif not reusable:
                 self._retain_transfer_owners([staged])
 
+    def _push_source_waves(
+        self,
+        sources: list[ProducerPushRecord],
+        ready: list[tuple[ProducerPushRecord, dict[str, Any]]],
+        store_saves: dict[str, PreparedStoreSave],
+    ) -> None:
+        """Plan aligned whole-object waves, then retire each lease independently."""
+        pool = cast(AscendProducerMemoryPool, self._producer_memory)
+        independent = getattr(self, "_use_store_independent_te", False)
+
+        def source_id(push: ProducerPushRecord) -> str:
+            """Share immutable payloads by hash only in the shared layout."""
+            return push.spec.transfer_id if independent else push.spec.mm_hash
+
+        required = {source_id(push) for push, _ in ready}
+        unique: dict[str, ProducerPushRecord] = {}
+        for push in sources:
+            unique.setdefault(source_id(push), push)
+        remaining_saves = dict(store_saves)
+        planned: list[ProducerPushRecord] = []
+        headers: list[torch.Tensor | None] = []
+        sizes: list[int] = []
+        # Validate every required object before any wave is submitted. Each
+        # publication gets one header even if independent transfers repeat it.
+        for identifier, push in unique.items():
+            tensor = cast(torch.Tensor, push.source_tensor)
+            allocated = round_up(tensor.nbytes, pool._allocator.alignment)
+            ticket = remaining_saves.pop(push.spec.mm_hash, None)
+            if allocated > pool.capacity and identifier in required:
+                raise RuntimeError(f"EC payload for mm_hash={push.spec.mm_hash} exceeds the fixed staging pool")
+            header = None
+            if ticket is not None:
+                store = cast(AscendDeferredStoreBackend, self._output_store)
+                if allocated <= pool.capacity:
+                    header = store.store_client.prepare_put_header(tensor)
+                    allocated = round_up(tensor.nbytes + header.nbytes, pool._allocator.alignment)
+                if allocated > pool.capacity:
+                    # This ticket has never been submitted. Optional Store
+                    # bytes must not prevent an otherwise valid P2P delivery.
+                    store.abort_prepared(ticket)
+                    header = None
+                    allocated = round_up(tensor.nbytes, pool._allocator.alignment)
+            if identifier not in required and header is None:
+                continue
+            planned.append(push)
+            headers.append(header)
+            sizes.append(allocated)
+
+        start = 0
+        while start < len(planned):
+            end, allocated = start, 0
+            while end < len(planned) and allocated + sizes[end] <= pool.capacity:
+                allocated += sizes[end]
+                end += 1
+            wave = planned[start:end]
+            wave_headers = headers[start:end]
+            wave_ids = {source_id(push) for push in wave}
+            wave_ready = [(push, shard) for push, shard in ready if source_id(push) in wave_ids]
+            wave_saves = {
+                push.spec.mm_hash: store_saves[push.spec.mm_hash]
+                for push, header in zip(wave, wave_headers, strict=True)
+                if header is not None
+            }
+            tensors = [cast(torch.Tensor, push.source_tensor) for push in wave]
+            # Store-only work is optional: do not delay completed P2P delivery
+            # waiting for an earlier publication to return its lease.
+            staged = (
+                pool.stage_with_headers(tensors, wave_headers, wait=bool(wave_ready))
+                if wave_saves
+                else pool.stage_wait(tensors)
+            )
+            if staged is None:
+                if not wave_ready:
+                    start = end
+                    continue
+                raise RuntimeError("Could not stage a capacity-bounded EC wave")
+            # P2P completes here; a PUT may retain only this wave's lease.
+            # Reclaiming it never waits for a later wave or the batch Future.
+            self._push_staged_sources(wave, wave_ready, staged, wave_saves)
+            start = end
+
     def _push_store_batch(
         self,
         pushes: list[ProducerPushRecord],
         ready: list[tuple[ProducerPushRecord, dict[str, Any]]],
         ordered_pushes: list[ProducerPushRecord],
     ) -> None:
-        """Stage whole payloads and headers atomically; publish asynchronously."""
+        """Publish best-effort while delivering capacity-bounded P2P waves."""
         deferred_store = cast(AscendDeferredStoreBackend, self._output_store)
-        independent = getattr(self, "_use_store_independent_te", False)
         prepared: dict[str, PreparedStoreSave] = {}
         try:
             prepared.update(deferred_store.prepare_saves(list(dict.fromkeys(push.spec.mm_hash for push in pushes))))
-
-            sources = list(ordered_pushes)
-
-            # Preserve each topology's existing source layout: independent
-            # mode stages distinct transfers; shared mode adds Store-only hashes.
-            def source_id(push: ProducerPushRecord) -> str:
-                """Choose the staging identity required by the active engine topology."""
-                return push.spec.transfer_id if independent else push.spec.mm_hash
-
-            staged_ids = {source_id(push) for push in sources}
-            for push in pushes:
-                if push.spec.mm_hash in prepared and source_id(push) not in staged_ids:
-                    sources.append(push)
-                    staged_ids.add(source_id(push))
-            if not sources:
-                return
-            tensors = [cast(torch.Tensor, push.source_tensor) for push in sources]
-            producer_memory = cast(AscendProducerMemoryPool, self._producer_memory)
-            headers = [
-                deferred_store.store_client.prepare_put_header(tensor) if push.spec.mm_hash in prepared else None
-                for push, tensor in zip(sources, tensors, strict=True)
-            ]
-            staged = producer_memory.stage_with_headers(tensors, headers)
-            if staged is None:
-                raise RuntimeError("encoder batch including Store headers exceeds the fixed staging pool")
-            self._push_staged_sources(sources, ready, staged, prepared)
+            # The wave planner deduplicates by the active topology's identity.
+            sources = [*ordered_pushes, *(push for push in pushes if push.spec.mm_hash in prepared)]
+            self._push_source_waves(sources, ready, prepared)
         finally:
             for ticket in prepared.values():
                 deferred_store.abort_prepared(ticket)
@@ -653,6 +723,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         started_at = time.monotonic()
         deferred_store = getattr(self, "_output_store", None)
         failure: Exception | None = None
+        reads_settled = True
         try:
             ready, ordered_pushes = self._resolve_writable_pushes(
                 pushes,
@@ -667,16 +738,16 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                     [],
                     [None] * len(pushes),
                 )
+                # From this handoff onward, assume native readers may exist
+                # until every write has returned with confirmed completion.
+                reads_settled = False
                 if not self._write_staged_sources(pushes, ready, loaded_sources, [], []):
                     raise RuntimeError("GET P2P completion is unconfirmed")
+                reads_settled = True
             elif deferred_store is not None:
                 self._push_store_batch(pushes, ready, ordered_pushes)
             elif ready:
-                tensors = [cast(torch.Tensor, push.source_tensor) for push in ordered_pushes]
-                staged = self._producer_memory.stage_wait(tensors)
-                if staged is None:
-                    raise RuntimeError("encoder batch exceeds the fixed staging pool")
-                self._push_staged_sources(ordered_pushes, ready, staged, {})
+                self._push_source_waves(ordered_pushes, ready, {})
 
             self._producer_pushes.begin_notifying(pushes)
             self._notify_completions(ready)
@@ -695,6 +766,8 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                 if loaded_payloads is not None:
                     # Propagate to the GET lease owner's callback. Normal
                     # encoder sends retain their existing async reporting.
+                    if reads_settled:
+                        raise SafeP2PDeliveryError(str(failure)) from failure
                     raise failure
 
     def _bind_push_source(self, tensor: torch.Tensor, mm_hash: str) -> None:
@@ -723,7 +796,12 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
 
     def build_connector_worker_meta(self) -> AscendECMooncakeWorkerMetadata | None:
         """Attach asynchronous GET outcomes to upstream worker metadata."""
+        if self.is_producer:
+            self._producer_memory.check_healthy()
         base = super().build_connector_worker_meta()
+        if self.is_producer:
+            # Flushing/polling upstream pushes can expose a completed failure.
+            self._producer_memory.check_healthy()
         if base is None:
             return None
         return self._async_store_get.extend_worker_metadata(base)

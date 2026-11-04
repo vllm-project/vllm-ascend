@@ -31,6 +31,7 @@ from vllm.utils.math_utils import round_up
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
     AscendProducerMemoryPool,
     AscendStagedSources,
+    SafeP2PDeliveryError,
 )
 
 _PROCESS_LIFETIME_STORE_OWNERS: list[tuple[Any, Any]] = []
@@ -124,6 +125,7 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
     def _check_healthy(self) -> None:
         """Reject operations on a poisoned or closed Store client."""
         super()._check_healthy()
+        self._staging_pool.check_healthy()
         if self._closed:
             raise EmbeddingStoreError("Ascend Mooncake Store client is closed")
 
@@ -350,6 +352,9 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
 
         copy_stream = self._get_copy_stream(device)
         compute_stream = torch.npu.current_stream(device)
+        # Targets were allocated on this caller's stream. Cached blocks may
+        # still have earlier work there; record_stream only guards reclamation.
+        copy_stream.wait_stream(compute_stream)
         with torch.npu.stream(copy_stream):
             for key, target in loaded.items():
                 target.record_stream(copy_stream)
@@ -400,8 +405,13 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
             raise EmbeddingStoreError("Could not track Store GET completion; retaining staging") from error
 
     def _release_get_after_sends(self, lease: AscendStagedSources, sends: list[Future[None]]) -> None:
-        """Cache copies are settled; any failed P2P reader poisons this GET."""
-        self._staging_pool.release_after(lease, sends, retain=partial(self._poison, [lease]))
+        """Cache copies are settled; only unconfirmed P2P reads poison this GET."""
+        self._staging_pool.release_after(
+            lease,
+            sends,
+            retain=partial(self._poison, [lease]),
+            safe_errors=(SafeP2PDeliveryError,),
+        )
 
     def close(self) -> None:
         """Drain copy tracking and preserve native owners of bound EC storage."""
