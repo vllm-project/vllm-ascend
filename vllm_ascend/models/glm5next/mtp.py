@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import typing
 from collections.abc import Callable, Iterable
+from contextlib import nullcontext
 
+import regex as re
 import torch
 import torch.nn as nn
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -21,13 +24,13 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.linearnorm.fused_eh_norm import fused_eh_norm
-from vllm_ascend.utils import is_rot_weight_used, vllm_version_is
+from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, is_rot_weight_used, vllm_version_is
 
 from .model import (
     Glm5NextDecoderLayer,
@@ -36,6 +39,30 @@ from .model import (
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
+
+
+def _prepare_mtp_vllm_config(vllm_config: VllmConfig, prefix: str = "") -> VllmConfig:
+    """Give the text-only drafter its own compressed-tensors layer names."""
+    quant_config = vllm_config.quant_config
+    get_name = getattr(quant_config, "get_name", None)
+    if not callable(get_name) or get_name() != COMPRESSED_TENSORS_METHOD:
+        return vllm_config
+
+    # The proposer can share the target's quant config, whose names have already
+    # been mapped to language_model.model.*. Do not rewrite the target in place.
+    draft_config = copy.copy(vllm_config)
+    draft_config.quant_config = copy.deepcopy(quant_config)
+    mapper = WeightsMapper(
+        orig_to_new_regex={
+            re.compile(r"^(?:model\.language_model\.|language_model\.model\.|model\.)"): (
+                maybe_prefix(prefix, "model") + "."
+            ),
+            re.compile(r"^(?:language_model\.)?lm_head(?=\.|$)"): maybe_prefix(prefix, "lm_head"),
+        }
+    )
+    # Remap both the explicit MXFP4 expert targets and high-precision exclusions.
+    draft_config.quant_config.apply_vllm_mapper(mapper)
+    return draft_config
 
 
 def glm5next_mtp_eh_norm(
@@ -236,10 +263,17 @@ class Glm5NextMultiTokenPredictor(nn.Module):
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.config = vllm_config.model_config.hf_text_config
-        self.quant_config = vllm_config.quant_config
-        self.model = Glm5NextMultiTokenPredictor(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
-        self.is_rot_weight_used = is_rot_weight_used(vllm_config)
+        draft_config = _prepare_mtp_vllm_config(vllm_config, prefix)
+        self.config = draft_config.model_config.hf_text_config
+        self.quant_config = draft_config.quant_config
+        # Scheme constructors also consult the active config for group sizes and
+        # packed parameter names, so expose the same draft-local config there.
+        config_context = (
+            set_current_vllm_config(draft_config, prefix=prefix) if draft_config is not vllm_config else nullcontext()
+        )
+        with config_context:
+            self.model = Glm5NextMultiTokenPredictor(vllm_config=draft_config, prefix=maybe_prefix(prefix, "model"))
+        self.is_rot_weight_used = is_rot_weight_used(draft_config)
         if self.is_rot_weight_used:
             self.rot = nn.Linear(self.config.hidden_size, self.config.hidden_size, bias=False)
         self.set_moe_parameters()

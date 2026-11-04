@@ -1,0 +1,5 @@
+# Replace the filename and pr value with the assigned PR number before submission.
+pr: null
+entries:
+  - category: bugfix
+    text: Fixed compressed-tensors quantization rule matching for GLM-5.3-Flash MTP drafts, preserving MXFP4 expert targets and high-precision exclusions without changing the target model configuration.
