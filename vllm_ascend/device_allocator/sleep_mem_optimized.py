@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, MutableMapping
 from dataclasses import fields
+from datetime import timedelta
+from enum import Enum
 from typing import Any
 
 import torch
@@ -29,7 +31,38 @@ from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 
 from vllm_ascend.compilation import acl_graph
+from vllm_ascend.device_allocator.hccl_suspend import (
+    SLEEP_HCCL_POLICIES,
+    HcclSuspendBackend,
+    HcclSuspendStats,
+    resume_group,
+    suspend_group,
+)
 from vllm_ascend.utils import SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME
+
+
+class SleepHcclState(str, Enum):
+    """Lifecycle of the HCCL side of sleep mode.
+
+    ``idle -> sleeping -> asleep -> waking -> idle`` is the happy path.
+    A failed sleep/wake leaves the manager in ``failed`` so the next cycle
+    cannot silently continue with a half-suspended communicator set.
+    """
+
+    IDLE = "idle"
+    SLEEPING = "sleeping"
+    ASLEEP = "asleep"
+    WAKING = "waking"
+    FAILED = "failed"
+
+
+_ALLOWED_HCCL_TRANSITIONS: dict[SleepHcclState, set[SleepHcclState]] = {
+    SleepHcclState.IDLE: {SleepHcclState.SLEEPING},
+    SleepHcclState.SLEEPING: {SleepHcclState.ASLEEP, SleepHcclState.IDLE, SleepHcclState.FAILED},
+    SleepHcclState.ASLEEP: {SleepHcclState.WAKING, SleepHcclState.FAILED},
+    SleepHcclState.WAKING: {SleepHcclState.IDLE, SleepHcclState.FAILED},
+    SleepHcclState.FAILED: {SleepHcclState.IDLE},
+}
 
 
 class SleepWakeupManager:
@@ -140,6 +173,160 @@ class HcclSleepWakeupManager:
         self.worker = worker
         self._lifecycle_anchor_group: Any | None = None
         self._skip_hccl_cleanup_for_cycle = False
+        self._state = SleepHcclState.IDLE
+        self._suspend_backend = HcclSuspendBackend()
+        self._suspended_groups: list[tuple[Any, list[int]]] = []
+        self._destroyed_groups = False
+        self._active_policy: str | None = None
+
+    @property
+    def state(self) -> SleepHcclState:
+        return self._state
+
+    @property
+    def active_policy(self) -> str | None:
+        return self._active_policy
+
+    @property
+    def suspend_stats(self) -> HcclSuspendStats:
+        return self._suspend_backend.stats
+
+    def _transition(self, target: SleepHcclState) -> None:
+        allowed = _ALLOWED_HCCL_TRANSITIONS.get(self._state, set())
+        if target not in allowed:
+            raise RuntimeError(f"Illegal HCCL sleep transition: {self._state.value} -> {target.value}")
+        logger.info("HCCL sleep state: %s -> %s", self._state.value, target.value)
+        self._state = target
+
+    def _require_state(self, expected: SleepHcclState, action: str) -> None:
+        if self._state is not expected:
+            raise RuntimeError(f"Cannot {action} HCCL sleep lifecycle while state={self._state.value}")
+
+    @staticmethod
+    def _resolve_sleep_hccl_policy() -> tuple[str, bool]:
+        policy = "auto"
+        allow_fallback = True
+        try:
+            from vllm_ascend.ascend_config import get_ascend_config
+
+            rl_config = get_ascend_config().rl_config
+            candidate = getattr(rl_config, "sleep_hccl_policy", "auto")
+            if isinstance(candidate, str) and candidate in SLEEP_HCCL_POLICIES:
+                policy = candidate
+            fallback = getattr(rl_config, "sleep_allow_fallback", True)
+            if isinstance(fallback, bool):
+                allow_fallback = fallback
+        except Exception:  # noqa: BLE001
+            pass
+        return policy, allow_fallback
+
+    def _drain_and_sync(self) -> None:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            for handle in getattr(self.worker, "_pp_send_work", []):
+                handle.wait()
+            self.worker._pp_send_work = []
+            torch.npu.synchronize()
+
+    def _suspend_all_groups(self) -> bool:
+        suspended: list[tuple[Any, list[int]]] = []
+        seen_device_groups: set[int] = set()
+        seen_handles: set[int] = set()
+        for group in self.iter_alive_group_coordinators():
+            if group is self._lifecycle_anchor_group:
+                continue
+            device_group = getattr(group, "device_group", None)
+            if device_group is None or id(device_group) in seen_device_groups:
+                continue
+            seen_device_groups.add(id(device_group))
+            try:
+                ok, handles = suspend_group(device_group, self._suspend_backend)
+            except Exception:  # noqa: BLE001 - a timed-out/partial rank must fall back
+                logger.exception("HCCL suspend raised for group '%s'.", getattr(group, "group_name", "anonymous"))
+                ok, handles = False, []
+            if not ok:
+                for done_group, done_handles in reversed(suspended):
+                    resume_group(getattr(done_group, "device_group", None), done_handles, self._suspend_backend)
+                self._suspend_backend.stats.suspended_handles.clear()
+                return False
+            fresh_handles = [handle for handle in handles if handle not in seen_handles]
+            if fresh_handles:
+                seen_handles.update(fresh_handles)
+                suspended.append((group, fresh_handles))
+                logger.info(
+                    "Suspended HCCL group '%s' communicator(s) %s for sleep mode.",
+                    getattr(group, "group_name", "anonymous"),
+                    fresh_handles,
+                )
+        self._suspended_groups = suspended
+        if not suspended:
+            logger.info("Sleep mode: no HCCL communicators to suspend (single-rank or lazy groups).")
+        return True
+
+    def _rollback_suspend(self) -> None:
+        for group, handles in reversed(self._suspended_groups):
+            resume_group(getattr(group, "device_group", None), handles, self._suspend_backend)
+        self._suspended_groups = []
+        self._suspend_backend.stats.suspended_handles.clear()
+
+    _SUSPEND_CONSENSUS_TIMEOUT_S = 60.0
+
+    def _all_rank_vote(self, local_ok: bool, stage: str) -> bool | None:
+        """Run a CPU-process-group MIN vote for a suspend decision.
+
+        Returns ``True`` when every rank agrees, ``False`` when the vote
+        completed but at least one rank disagreed, and ``None`` when the vote
+        itself failed (timeout/exception).  ``None`` must not fall back to
+        destroy: a dead peer would make the destroy barrier hang as well.
+        """
+        try:
+            world_size = torch.distributed.get_world_size()
+        except Exception:  # noqa: BLE001
+            return local_ok
+        if world_size <= 1:
+            return local_ok
+        try:
+            cpu_group = getattr(get_world_group(), "cpu_group", None)
+        except Exception:  # noqa: BLE001
+            cpu_group = None
+        if cpu_group is None:
+            logger.warning("No CPU process group available for the HCCL %s vote.", stage)
+            return None
+        try:
+            vote = torch.tensor([1 if local_ok else 0], dtype=torch.int32)
+            work = torch.distributed.all_reduce(
+                vote,
+                op=torch.distributed.ReduceOp.MIN,
+                group=cpu_group,
+                async_op=True,
+            )
+            work.wait(timedelta(seconds=self._SUSPEND_CONSENSUS_TIMEOUT_S))
+            agreed = bool(int(vote.item()))
+        except Exception:  # noqa: BLE001
+            logger.exception("HCCL %s vote failed; failing the sleep cycle instead of mixing policies.", stage)
+            return None
+        if not agreed:
+            logger.warning("HCCL %s vote rejected: local_ok=%s.", stage, local_ok)
+        return agreed
+
+    def _agree_on_suspend(self, local_ok: bool) -> bool | None:
+        """Require every rank to suspend before committing the lightweight path.
+
+        HCCL suspension is per-process state.  If one rank falls back to
+        destroy/restore while another keeps a suspended communicator, the job
+        is left in a mixed state that can hang on wake-up.
+        """
+        return self._all_rank_vote(local_ok, "suspend")
+
+    def _force_destroy_and_restore(self) -> None:
+        """Last-resort recovery when a suspended group cannot be resumed."""
+        logger.warning("HCCL resume failed; recreating suspended process groups.")
+        for group, _ in self._suspended_groups:
+            try:
+                group.destroy_hccl()
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to destroy an unresumable HCCL group.")
+        self._suspended_groups = []
+        self.restore_hccl()
 
     @staticmethod
     def iter_alive_group_coordinators():
@@ -285,18 +472,96 @@ class HcclSleepWakeupManager:
                 refresh_fn()
 
     def sleep(self) -> None:
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            for handle in getattr(self.worker, "_pp_send_work", []):
-                handle.wait()
-            self.worker._pp_send_work = []
-            torch.npu.synchronize()
+        if self._state is SleepHcclState.ASLEEP:
+            logger.info("HCCL sleep ignored: already asleep.")
+            return
+        self._require_state(SleepHcclState.IDLE, "sleep")
+        self._transition(SleepHcclState.SLEEPING)
+        policy, allow_fallback = self._resolve_sleep_hccl_policy()
+        self._active_policy = policy
+        try:
+            if policy == "skip":
+                logger.info(
+                    "HCCL sleep skipped (policy=skip, distributed_ready=%s).",
+                    torch.distributed.is_available() and torch.distributed.is_initialized(),
+                )
+                self._transition(SleepHcclState.ASLEEP)
+                return
+            self._drain_and_sync()
+            if policy in ("auto", "lightweight"):
+                support = self._suspend_backend.available()
+                support_vote = self._all_rank_vote(support, "capability")
+                if support_vote is None:
+                    raise RuntimeError("HCCL suspend capability vote failed (timeout/exception)")
+                if not (support and support_vote):
+                    if policy == "lightweight" and not allow_fallback:
+                        raise RuntimeError(
+                            "HCCL suspend/resume is unavailable on at least one rank "
+                            "and sleep_allow_fallback is disabled"
+                        )
+                    self._suspend_backend.stats.fallbacks += 1
+                    logger.info("HCCL suspend unavailable on at least one rank; using destroy/restore sleep path.")
+                else:
+                    local_ok = self._suspend_all_groups()
+                    agreed = self._agree_on_suspend(local_ok)
+                    if local_ok and agreed:
+                        logger.info("HCCL sleep stats: %s", self._suspend_backend.stats.as_dict())
+                        self._transition(SleepHcclState.ASLEEP)
+                        return
+                    if agreed is None:
+                        raise RuntimeError(
+                            "HCCL suspend vote failed (timeout/exception); refusing to mix suspend and destroy"
+                        )
+                    if local_ok:
+                        self._rollback_suspend()
+                    if not allow_fallback:
+                        raise RuntimeError("HCCL lightweight suspend failed and sleep_allow_fallback is disabled")
+                    self._suspend_backend.stats.fallbacks += 1
+                    logger.warning("HCCL lightweight suspend failed; falling back to destroy/restore.")
             num_destroyed = self.destroy_hccl()
-            if num_destroyed > 0:
-                logger.info("Destroyed %d HCCL process groups for sleep mode.", num_destroyed)
+            self._destroyed_groups = True
+            logger.info("Destroyed %d HCCL process groups for sleep mode (policy=%s).", num_destroyed, policy)
+            self._transition(SleepHcclState.ASLEEP)
+        except Exception:
+            self._rollback_suspend()
+            self._transition(SleepHcclState.FAILED)
+            raise
 
     def wakeup(self) -> None:
-        with set_current_vllm_config(self.vllm_config):
-            num_restored = self.restore_hccl()
-            self.refresh_moe_hccl_groups()
-            self.refresh_moe_hccl_runtime_state()
-        logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)
+        if self._state is SleepHcclState.IDLE:
+            logger.info("HCCL wake-up ignored: not asleep.")
+            return
+        self._require_state(SleepHcclState.ASLEEP, "wake up")
+        self._transition(SleepHcclState.WAKING)
+        try:
+            with set_current_vllm_config(self.vllm_config):
+                if self._suspended_groups:
+                    failed: list[Any] = []
+                    for group, handles in self._suspended_groups:
+                        try:
+                            resumed = resume_group(getattr(group, "device_group", None), handles, self._suspend_backend)
+                        except Exception:  # noqa: BLE001 - fallback below
+                            logger.exception(
+                                "HCCL resume raised for group '%s'.", getattr(group, "group_name", "anonymous")
+                            )
+                            resumed = False
+                        if not resumed:
+                            failed.append(group)
+                    if failed:
+                        if not self._resolve_sleep_hccl_policy()[1]:
+                            raise RuntimeError(f"Failed to resume {len(failed)} suspended HCCL group(s)")
+                        self._suspend_backend.stats.fallbacks += 1
+                        self._force_destroy_and_restore()
+                    self._suspended_groups = []
+                    self._suspend_backend.stats.suspended_handles.clear()
+                    logger.info("HCCL wake-up stats: %s", self._suspend_backend.stats.as_dict())
+                elif self._destroyed_groups:
+                    num_restored = self.restore_hccl()
+                    self._destroyed_groups = False
+                    logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)
+                self.refresh_moe_hccl_groups()
+                self.refresh_moe_hccl_runtime_state()
+            self._transition(SleepHcclState.IDLE)
+        except Exception:
+            self._transition(SleepHcclState.FAILED)
+            raise

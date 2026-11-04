@@ -98,10 +98,18 @@ class TestRlConfig(TestBase):
 
         self.assertFalse(defaults.enabled)
         self.assertFalse(defaults.sleep_mode_extra_cleanup)
+        self.assertEqual(defaults.sleep_hccl_policy, "auto")
+        self.assertTrue(defaults.sleep_allow_fallback)
         self.assertTrue(enabled.enabled)
         self.assertTrue(enabled.sleep_mode_extra_cleanup)
         self.assertTrue(enabled.enable_training_consistency)
         self.assertTrue(enabled.enable_batch_invariant)
+
+    def test_sleep_hccl_policy_validation(self):
+        for policy in ("auto", "lightweight", "destroy", "skip"):
+            self.assertEqual(RlConfig(sleep_hccl_policy=policy).sleep_hccl_policy, policy)
+        with self.assertRaises(ValueError):
+            RlConfig(sleep_hccl_policy="bogus")
 
     def test_lax_bool_and_unknown_key(self):
         config = RlConfig(  # type: ignore[arg-type]

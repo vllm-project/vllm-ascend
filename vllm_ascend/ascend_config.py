@@ -373,8 +373,19 @@ class RlConfig:
 
     enabled: bool = False
     sleep_mode_extra_cleanup: bool = False
+    sleep_hccl_policy: str = "auto"
+    sleep_allow_fallback: bool = True
     enable_training_consistency: bool = False
     enable_batch_invariant: bool = False
+
+    @model_validator(mode="after")
+    def _validate_sleep_hccl_policy(self):
+        if self.sleep_hccl_policy not in ("auto", "lightweight", "destroy", "skip"):
+            raise ValueError(
+                "rl_config.sleep_hccl_policy must be one of 'auto', 'lightweight', 'destroy', 'skip', "
+                f"got {self.sleep_hccl_policy!r}"
+            )
+        return self
 
     def apply(self, ascend_config: AscendConfig) -> None:
         if not self.enabled:
