@@ -62,16 +62,6 @@ def test_dspark_without_pcp_reuses_target_sync(monkeypatch):
     monkeypatch.setattr(shared, "build_attn_metadata_wrapper", nullcontext)
     monkeypatch.setattr(shared, "build_attn_metadata_factory", lambda *a, **kw: nullcontext())
     # Without PCP, both models use the same request layout.
-    target_sync = DPSyncState(num_tokens_across_dp=torch.tensor([4, 4]), uniform_token_count=1, eager=False, num_reqs=4)
-
-    def parent_propose(self, *args, **kwargs):
-        sync = args[11]
-        assert sync is target_sync
-        # Execute the actual upstream capacity check, not a duplicate of it.
-        self._build_uniform_batch_dp_sync(sync, batch.num_reqs, self.num_query_per_req)
-        return "draft"
-
-    # The helper replaces the real DP state after checking capacity.
     if vllm_version_is("0.32.0"):
         target_sync = DPSyncState(  # type: ignore[call-arg]
             num_tokens_across_dp=torch.tensor([4, 4]), uniform_token_count=1, eager=False, num_reqs=4
@@ -85,6 +75,14 @@ def test_dspark_without_pcp_reuses_target_sync(monkeypatch):
             eager=False,
             num_reqs=4,
         )
+
+    def parent_propose(self, *args, **kwargs):
+        sync = args[11]
+        assert sync is target_sync
+        # Execute the actual upstream capacity check, not a duplicate of it.
+        self._build_uniform_batch_dp_sync(sync, batch.num_reqs, self.num_query_per_req)
+        return "draft"
+
     monkeypatch.setattr(DSparkSpeculator, "propose", parent_propose)
     # vLLM #60754 renamed `dp_sync` -> `dp_sync_state` on main.
     dp_sync_kwarg = "dp_sync_state"
