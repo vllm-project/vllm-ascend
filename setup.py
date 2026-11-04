@@ -415,12 +415,13 @@ class cmake_build_ext(build_ext):
             print(f"Copy: {src_cann_ops_custom} -> {dst_cann_ops_custom}")
 
     def copy_extensions_to_source(self):
-        super().copy_extensions_to_source()
         if any(ext.name == "vllm_ascend.third_party.deep_gemm._C" for ext in self.extensions):
             import shutil
 
             relative = Path("vllm_ascend/third_party/deep_gemm")
+            # Stage the generated package before setuptools copies its extension.
             shutil.copytree(Path(self.build_lib) / relative, Path(ROOT_DIR) / relative, dirs_exist_ok=True)
+        super().copy_extensions_to_source()
 
     def run(self):
         if envs.COMPILE_CUSTOM_KERNELS:

@@ -164,3 +164,61 @@ def test_unrelated_tilelang_kernel_is_not_imported_at_package_load(tmp_path):
     assert "__init__.py" in hashes
     with pytest.raises(ModuleNotFoundError):
         package.tf32_hc_prenorm_gemm()
+
+
+@pytest.mark.parametrize("deepgemm", [False, True])
+def test_editable_build_preserves_native_packages(tmp_path, deepgemm):
+    import __future__
+
+    import ast
+    from typing import Any
+
+    from setuptools import Distribution, Extension
+    from setuptools.command.build_ext import build_ext
+
+    # Load the production command without executing setup.py's installation.
+    tree = ast.parse((ROOT / "setup.py").read_text())
+    command = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "cmake_build_ext")
+    source = tmp_path / "source"
+    (source / "vllm_ascend").mkdir(parents=True)
+    namespace: dict[str, Any] = {"build_ext": build_ext, "Path": Path, "ROOT_DIR": str(source)}
+    exec(
+        compile(
+            ast.Module(body=[command], type_ignores=[]), "setup.py", "exec", flags=__future__.annotations.compiler_flag
+        ),
+        namespace,
+    )
+    names = ["vllm_ascend.vllm_ascend_C"]
+    if deepgemm:
+        names.append("vllm_ascend.third_party.deep_gemm._C")
+    distribution = Distribution(
+        {"ext_modules": [Extension(name, sources=[]) for name in names], "package_dir": {"": str(source)}}
+    )
+    build = namespace["cmake_build_ext"](distribution)
+    build.ensure_finalized()
+    build.build_lib = str(tmp_path / "build")
+    for name in names:
+        extension = Path(build.build_lib) / build.get_ext_filename(name)
+        extension.parent.mkdir(parents=True, exist_ok=True)
+        extension.write_bytes(b"native-extension")
+    relative = Path("vllm_ascend/third_party/deep_gemm")
+    resources = {
+        "__init__.py": b"",
+        "include/deep_gemm/mega_moe.hpp": b"header",
+        "ascend_build.json": b"{}",
+        "LICENSE": b"license",
+    }
+    if deepgemm:
+        for name, content in resources.items():
+            resource = Path(build.build_lib) / relative / name
+            resource.parent.mkdir(parents=True, exist_ok=True)
+            resource.write_bytes(content)
+    assert not (source / relative).exists()
+    build.copy_extensions_to_source()
+    for name in names:
+        assert (source / build.get_ext_filename(name)).read_bytes() == b"native-extension"
+    if deepgemm:
+        for name, content in resources.items():
+            assert (source / relative / name).read_bytes() == content
+    else:
+        assert not (source / relative).exists()
