@@ -1,6 +1,0 @@
-pr: 20935
-entries:
-  - category: bugfix
-    text: Fixed MiniMax FA3 startup failures on A2/A3 caused by an unsupported scheduler argument.
-    model: minimax-m3
-    hardware: [A2, A3]
