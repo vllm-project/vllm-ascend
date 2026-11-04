@@ -843,6 +843,11 @@ class KVPoolWorker:
             )
 
         # Register buffers before starting the transfer threads.
+        mamba_state = getattr(self, "mamba_state", None)
+        if mamba_state is not None:
+            backing = mamba_state.layerwise_mamba_backing
+            ptrs.append(backing.data_ptr())
+            lengths.append(backing.numel() * backing.element_size())
         self.m_store.register_buffer(ptrs, lengths)
         self._start_kv_transfer_threads()
 

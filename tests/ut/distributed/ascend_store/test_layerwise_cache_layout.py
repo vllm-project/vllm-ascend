@@ -563,12 +563,23 @@ def test_non_attention_cache_spec_is_rejected():
     )
     layer_specs = {f"model.layers.{layer}.mixer": mamba_spec for layer in range(3)}
 
-    with pytest.raises(NotImplementedError, match="attention cache specs only"):
+    with pytest.raises(NotImplementedError, match="align"):
         build_layerwise_reuse_layout(
             layer_specs,
             3,
             {"layerwise_num_shared_buffers": 1},
         )
+
+
+def test_aligned_recurrent_state_uses_existing_layerwise_slots():
+    spec = MambaSpec(block_size=2, shapes=((1,),), dtypes=(torch.int8,), mamba_cache_mode="align")
+    layout = build_layerwise_reuse_layout(
+        {f"model.layers.{layer}.mixer": spec for layer in range(3)},
+        3,
+        {"layerwise_num_shared_buffers": 1},
+    )
+    assert layout.buffer_slots == ((0,), (1, 2))
+    assert layout.prefetch_layer_map == {2: 1}
 
 
 def test_packed_cache_tensor_descriptors_are_rejected():

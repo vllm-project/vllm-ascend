@@ -14,10 +14,11 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
@@ -311,11 +312,17 @@ def build_layerwise_reuse_layout(
             for named_specs in named_specs_by_layer.values()
             for named_spec in named_specs
             if not isinstance(named_spec.spec, AttentionSpec)
+            and not (
+                isinstance(named_spec.spec, MambaSpec)
+                and is_prefix_cacheable(named_spec.spec)
+                and named_spec.spec.mamba_cache_mode == "align"
+                and getattr(named_spec.spec, "num_prefill_checkpoint_blocks", 0) == 0
+            )
         ]
         if unsupported_specs:
             named_spec = unsupported_specs[0]
             raise NotImplementedError(
-                "Layerwise KV cache reuse supports attention cache specs only; "
+                "Layerwise reuse requires attention or aligned recurrent state without extra prefill checkpoints; "
                 f"{named_spec.layer_name} uses {type(named_spec.spec).__name__}."
             )
 
@@ -352,6 +359,7 @@ def apply_layerwise_kv_cache_plan(
         base_layers,
         extra_config,
     )
+    kv_cache_config.layerwise_reuse_layout = reuse_layout
     actual_layers = len(reuse_layout.layer_cache_specs)
     if not reuse_layout.has_layer_reuse:
         return

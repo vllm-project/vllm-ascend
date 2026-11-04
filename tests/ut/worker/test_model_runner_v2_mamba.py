@@ -162,9 +162,15 @@ def test_unwrap_preserves_distinct_mamba_layouts():
 def test_mamba_model_state_inherits_upstream_state_management():
     assert issubclass(AscendMambaHybridModelState, MambaHybridModelState)
     # preprocess_state is overridden on Ascend to defer the align pre-copy
-    # behind layerwise KV pool loads; postprocess stays upstream.
+    # behind layerwise KV pool loads. Without staged state, postprocess must
+    # preserve the upstream lifecycle and forward the original tensors.
     assert AscendMambaHybridModelState.preprocess_state is not MambaHybridModelState.preprocess_state
-    assert AscendMambaHybridModelState.postprocess_state is MambaHybridModelState.postprocess_state
+    state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
+    state._mamba_staging = {}
+    mapping, sampled, computed = (torch.tensor([value]) for value in (0, 1, 127))
+    with patch.object(MambaHybridModelState, "postprocess_state") as postprocess:
+        state.postprocess_state(mapping, sampled, computed)
+    postprocess.assert_called_once_with(mapping, sampled, computed)
 
 
 def test_mrv2_advertises_standardized_shared_kv_backing():

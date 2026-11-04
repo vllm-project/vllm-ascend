@@ -161,12 +161,21 @@ class LayerBatchBuilder:
         block_ids_arr: np.ndarray,
         base_gvas_arr: np.ndarray,
         layer_id: int,
+        source_caches: tuple[torch.Tensor, ...] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         base_offset = int(self._layer_cache_entry_offsets_np[layer_id])
         end_offset = int(self._layer_cache_entry_offsets_np[layer_id + 1])
         layer_base_addrs = self._kv_caches_base_addr_np[base_offset:end_offset]
         layer_block_len = self._block_len_np[base_offset:end_offset]
         layer_block_stride = self._block_stride_np[base_offset:end_offset]
+        if source_caches is not None:
+            lengths = np.asarray([cache[0].numel() * cache.element_size() for cache in source_caches])
+            if not np.array_equal(lengths, layer_block_len):
+                raise ValueError("Staged source views must preserve the ordinary layer payload layout")
+            layer_base_addrs = np.asarray([cache.data_ptr() for cache in source_caches], dtype=np.int64)
+            layer_block_stride = np.asarray(
+                [cache.stride(0) * cache.element_size() for cache in source_caches], dtype=np.int64
+            )
         # Per-cache inner offsets within one layer's page: [0, len0, len0+len1, ...].
         layer_inner_offsets = np.concatenate(
             (np.zeros(1, dtype=np.int64), np.cumsum(layer_block_len[:-1], dtype=np.int64))
@@ -448,6 +457,7 @@ class LayerBatchBuilder:
         self,
         shared: SharedBlockData,
         layer_id: int,
+        source_caches: tuple[torch.Tensor, ...] | None = None,
     ) -> LayerBatchReqMeta | LayerRangeReqMeta:
         """Compute per-layer addresses from pre-computed shared block data."""
         if shared.block_keys is not None:
@@ -478,7 +488,7 @@ class LayerBatchBuilder:
 
         assert shared.block_gvas_arr is not None
         addr_array, size_array, gvas_array = self._build_transfer_arrays(
-            shared.block_ids_arr, shared.block_gvas_arr, layer_id
+            shared.block_ids_arr, shared.block_gvas_arr, layer_id, source_caches
         )
 
         return LayerBatchReqMeta(
@@ -1044,7 +1054,7 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                 continue
             has_any_save = True
             builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-            req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+            req_meta = builder.build_addrs(shared, task.layer_idx_in_group, task.source_caches)
             if not isinstance(req_meta, LayerBatchReqMeta):
                 raise TypeError(f"Expected GVA layer metadata, got {type(req_meta).__name__}")
             all_save_keys.extend(shared.save_keys)

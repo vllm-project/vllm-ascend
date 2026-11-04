@@ -339,6 +339,18 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
+    def configure_mamba_state(self, state) -> None:
+        worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+        if not self.use_layerwise or not self.can_put or not worker.use_layerwise_transfer:
+            raise NotImplementedError("Shared Mamba state requires layerwise GVA read/write transfers")
+        worker.mamba_state = state
+        worker.deferred_mamba_groups = state.layerwise_mamba_groups
+        worker.mamba_layers_by_index = {}
+        for name in state.layerwise_mamba_checkpoints:
+            layer = worker._extract_physical_layer_index(name)
+            layer = worker._global_to_local_layer.get(layer, layer)
+            worker.mamba_layers_by_index.setdefault(layer, []).append(name)
+
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
         """Fence only the saves of requests whose blocks this step may reuse.
 
@@ -369,6 +381,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if not self.use_layerwise:
             self._mamba_copy_bufs = None
         metadata = self._get_connector_metadata()
+        state = getattr(self.connector_worker, "mamba_state", None)
+        if state is not None:
+            state.prepare_mamba_state_load(metadata.requests)
         self._current_step_has_real_forward = forward_context is not None
         logger.debug(
             "KV pool connector start_load_kv metadata_requests=%d specs=%s",
@@ -451,6 +466,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             # A load-only consumer does not publish KV.
             return
         assert self.connector_worker is not None
+        worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+        state = getattr(worker, "mamba_state", None)
+        if state is not None:
+            for name in worker.mamba_layers_by_index.get(worker.current_layer, ()):
+                state.capture_mamba_layer(name)
         cast(LayerwiseKVPoolWorker, self.connector_worker).save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
@@ -459,6 +479,17 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         if self.use_layerwise:
+            worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+            state = getattr(worker, "mamba_state", None)
+            if state is not None:
+                try:
+                    endpoints, slots = state.get_mamba_checkpoints()
+                    worker.save_mamba_checkpoints(self._get_connector_metadata().requests, endpoints, slots)
+                except Exception:
+                    state.finish_mamba_save(failed=True)
+                    worker._layer_load_aborted.set()
+                    raise
+                state.finish_mamba_save()
             return
 
         assert self.connector_worker is not None

@@ -170,6 +170,9 @@ class LayerTransferTask:
     use_key_major_ranges: bool = False
     # Group-local completion differs from the physical model layer boundary.
     final_group_layer: bool = False
+    # Optional stable source views; keys, group offsets and publication still
+    # use the ordinary layerwise transfer plan.
+    source_caches: tuple[torch.Tensor, ...] | None = None
 
 
 @dataclass

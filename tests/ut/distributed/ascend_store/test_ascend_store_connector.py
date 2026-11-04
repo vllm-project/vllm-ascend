@@ -638,6 +638,7 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             patch.object(self.connector_mod, "create_kv_pool_worker") as mock_worker_cls,
             patch.object(self.connector_mod, "LookupKeyServer") as _mock_lookup_cls,
         ):
+            mock_worker_cls.return_value.mamba_state = None
             config = MagicMock()
             config.kv_transfer_config.kv_role = "kv_producer"
             config.kv_transfer_config.kv_connector = "AscendStoreConnector"

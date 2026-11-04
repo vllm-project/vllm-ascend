@@ -16,14 +16,16 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from copy import copy
 from dataclasses import dataclass
+from math import prod
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
-from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.model_executor.layers.mamba.mamba_utils import get_conv_copy_spec, is_conv_state_dim_first
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker import mamba_utils
@@ -41,7 +43,7 @@ from vllm.v1.worker.mamba_utils import (
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.utils import model_uses_kpool_indexer
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
+from vllm_ascend.worker.v2.attn_utils import _allocate_int8_cache_tensor, build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
@@ -51,6 +53,22 @@ if TYPE_CHECKING:
 # Copy block size used by the upstream fused mamba kernels.
 _COPY_BLOCK_SIZE = 1024
 _PREPROCESS_BLOCK_SIZE = 256
+_STATE_COPY_BLOCK_BYTES = 8192
+
+
+def _copy_state_rows(source, destination, source_rows, destination_rows, valid):
+    """Use the existing Mamba byte-copy kernel; page padding is never copied."""
+    if source.device.type == "cpu":
+        for src, dst, active in zip(source_rows.tolist(), destination_rows.tolist(), valid.tolist()):
+            if active:
+                destination[dst].copy_(source[src])
+        return
+    from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
+
+    src = source.data_ptr() + source_rows.long() * source.stride(0) * source.element_size()
+    dst = destination.data_ptr() + destination_rows.long() * destination.stride(0) * destination.element_size()
+    sizes = valid.long() * prod(source.shape[1:]) * source.element_size()
+    batch_memcpy_kernel[(sizes.numel(),)](src, dst, sizes, BLOCK_SIZE=_STATE_COPY_BLOCK_BYTES)
 
 
 @dataclass
@@ -94,6 +112,210 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self._layerwise_mamba_copy: _LayerwiseMambaCopyState | None = None
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
+        self._mamba_staging = {}
+        self._mamba_batch = None
+        self._mamba_staging_failed = False
+
+    def initialize_kv_cache(self, kv_cache_config, block_tables) -> None:
+        """Keep bounded candidates alive until acceptance without pinning main KV.
+
+        The existing Mamba copy context performs acceptance on these views;
+        layerwise IO publishes the checkpoint views through its normal queue.
+        Capacity scales with request slots and speculation width, not context.
+        """
+        super().initialize_kv_cache(kv_cache_config, block_tables)
+        self._mamba_staging = {}
+        self._mamba_batch = None
+        self._mamba_staging_failed = False
+        self._layer_state_ranges = None
+        layout = getattr(kv_cache_config, "layerwise_reuse_layout", None)
+        if layout is None or not layout.has_layer_reuse or not self.vllm_config.num_speculative_tokens:
+            return
+        reused = {
+            layout.layer_cache_specs[index].main.layer_name
+            for index in set(layout.prefetch_layer_map) | set(layout.prefetch_layer_map.values())
+        }
+        groups = {
+            gid
+            for gid in self._mamba_group_ids
+            if reused.intersection(kv_cache_config.kv_cache_groups[gid].layer_names)
+        }
+        if not groups:
+            return
+        if not self._align_mode or self.recoverssm is not None:
+            raise NotImplementedError("Shared speculative state requires the existing Mamba align copy contract")
+        if self.vllm_config.parallel_config.pipeline_parallel_size > 1:
+            raise NotImplementedError("Shared speculative state requires acceptance before the next target forward")
+        self.layerwise_mamba_groups = groups
+        self._mamba_reused = reused
+        self._mamba_width = self.vllm_config.num_speculative_tokens + 1
+        self._mamba_slots = self._mamba_width + 1  # Checkpoint followed by the ordinary candidate pages.
+        context = self.vllm_config.compilation_config.static_forward_context
+        drafts = set(getattr(kv_cache_config, "layerwise_draft_layer_names", ()))
+        self._mamba_layer_groups = {
+            name: gid
+            for gid in groups
+            for name in kv_cache_config.kv_cache_groups[gid].layer_names
+            if name not in drafts
+        }
+        self._mamba_original_caches = {name: tuple(context[name].kv_cache) for name in self._mamba_layer_groups}
+        self._mamba_copy_funcs = {}
+        regions, size = [], 0
+        for name, caches in self._mamba_original_caches.items():
+            spec = mamba_utils._get_mamba_spec_for_layer(
+                kv_cache_config.kv_cache_groups[self._mamba_layer_groups[name]], name
+            )
+            funcs = self._mamba_state_copy_funcs[spec.mamba_type]
+            if len(caches) != len(funcs) or any(not cache[0].is_contiguous() for cache in caches):
+                raise NotImplementedError("Shared state requires the existing pool's dense per-page copy contract")
+            self._mamba_copy_funcs[name] = funcs
+            for cache in caches:
+                rows = self.max_num_reqs * (self._mamba_slots if name in reused else 1)
+                shape = (rows, *cache.shape[1:])
+                size = (size + cache.element_size() - 1) // cache.element_size() * cache.element_size()
+                end = size + prod(shape) * cache.element_size()
+                regions.append((name, size, end, shape, cache.dtype))
+                size = end
+        alignment = getattr(kv_cache_config, "kv_cache_allocation_alignment", 2 * 1024 * 1024)
+        self.layerwise_mamba_backing = _allocate_int8_cache_tensor(size, alignment, self.device)
+        for name, start, end, shape, dtype in regions:
+            self._mamba_staging.setdefault(name, []).append(
+                self.layerwise_mamba_backing[start:end].view(dtype).view(shape)
+            )
+        self.layerwise_mamba_checkpoints = {
+            name: tuple(
+                cache.view(self.max_num_reqs, self._mamba_slots, *cache.shape[1:])[:, 0] if name in reused else cache
+                for cache in caches
+            )
+            for name, caches in self._mamba_staging.items()
+        }
+        self._mamba_valid = torch.zeros(self.max_num_reqs, dtype=torch.bool, device=self.device)
+        self._mamba_checkpoint_tokens = torch.zeros(self.max_num_reqs, dtype=torch.int64, device=self.device)
+        self._mamba_stage_base = torch.arange(self.max_num_reqs, device=self.device) * self._mamba_slots
+        self._mamba_stage_table = torch.empty(
+            (self.max_num_reqs, self._mamba_ctx.block_table_stride_req), dtype=torch.int32, device=self.device
+        )
+        # Rebind only the copy context. Attention still uses the planned shared
+        # main buffers, and resident/draft state retains its original context.
+        ctx = self._mamba_postprocess_ctx = copy(self._mamba_ctx)
+        for field in ("state_base_addrs", "state_block_strides", "state_dim_row_stride", "state_group_indices"):
+            setattr(ctx, field, getattr(ctx, field).clone())
+        ctx.block_table_ptrs = torch.cat(
+            (
+                ctx.block_table_ptrs,
+                torch.tensor([self._mamba_stage_table.data_ptr()], dtype=torch.int64, device=self.device),
+            )
+        )
+        for name, (start, end) in self._get_layer_state_ranges(kv_cache_config).items():
+            if name not in reused:
+                continue
+            caches = self._mamba_staging[name]
+            for field, values in (
+                ("state_base_addrs", [cache.data_ptr() for cache in caches]),
+                ("state_block_strides", [cache.stride(0) * cache.element_size() for cache in caches]),
+                ("state_dim_row_stride", [cache.stride(1) * cache.element_size() for cache in caches]),
+            ):
+                getattr(ctx, field)[start:end].copy_(torch.tensor(values, device=self.device, dtype=torch.int64))
+            ctx.state_group_indices[start:end].fill_(self._mamba_ctx.num_groups)
+        if not getattr(self, "_layerwise_is_profiling", False):
+            get_kv_transfer_group().configure_mamba_state(self)
+
+    def add_request(self, req_index, new_req_data) -> None:
+        super().add_request(req_index, new_req_data)
+        if self._mamba_staging:
+            self._mamba_valid[req_index] = False
+            self._mamba_checkpoint_tokens[req_index] = 0
+
+    def prepare_mamba_state_load(self, requests) -> None:
+        if not self._mamba_staging or self._mamba_batch is None:
+            return
+        req_ids, _mapping, slots, _tables = self._mamba_batch
+        rows = dict(zip(req_ids, slots))
+        for request in requests:
+            spec = request.load_spec
+            if spec is not None and spec.can_load and not spec.layerwise_previous_step:
+                self._mamba_valid[rows[request.req_id]] = False
+                self._mamba_checkpoint_tokens[rows[request.req_id]] = 0
+
+    def _copy_layer_candidates(self, name, *, restore):
+        _req_ids, mapping, _slots, tables = self._mamba_batch
+        slots = mapping.long()
+        columns = (self._mamba_src_col_gpu if restore else self._mamba_state_idx_gpu)[slots].long()
+        table = tables[self._mamba_layer_groups[name]][: len(slots)]
+        for cache, staged, func in zip(
+            self._mamba_original_caches[name], self._mamba_staging[name], self._mamba_copy_funcs[name]
+        ):
+            width = 1 if func is get_conv_copy_spec else self._mamba_width
+            offsets = torch.arange(width, device=self.device)
+            selected = columns[:, None] + offsets
+            blocks = table.gather(1, selected.clamp(0, table.shape[1] - 1)).long()
+            rows = slots[:, None] * self._mamba_slots + 1 + offsets
+            valid = (columns[:, None] >= 0) & (selected < table.shape[1]) & (blocks > 0)
+            if restore:
+                valid &= self._mamba_valid[slots, None]
+                _copy_state_rows(staged, cache, rows.flatten(), blocks.flatten(), valid.flatten())
+            else:
+                _copy_state_rows(cache, staged, blocks.flatten(), rows.flatten(), valid.flatten())
+
+    def capture_mamba_layer(self, name):
+        if name in self._mamba_reused and name in self._mamba_staging:
+            self._copy_layer_candidates(name, restore=False)
+            self._mamba_capture_pending.remove(name)
+
+    def postprocess_state(self, idx_mapping, num_sampled, num_computed_tokens=None) -> None:
+        if not self._mamba_staging or self._mamba_batch is None:
+            return super().postprocess_state(idx_mapping, num_sampled, num_computed_tokens)
+        if self._mamba_capture_pending or num_computed_tokens is None:
+            raise RuntimeError("Mamba acceptance requires every shared layer and the computed endpoint")
+        _req_ids, mapping, _slots, tables = self._mamba_batch
+        if idx_mapping.shape != mapping.shape:
+            raise RuntimeError("Mamba acceptance batch changed")
+        torch._assert_async(torch.all(idx_mapping == mapping), "Mamba acceptance batch changed")
+        ctx = self._mamba_ctx
+        try:
+            self._mamba_ctx = self._mamba_postprocess_ctx
+            super().postprocess_state(idx_mapping, num_sampled, num_computed_tokens)
+        finally:
+            self._mamba_ctx = ctx
+        # This tracks only which checkpoint may be published. State selection,
+        # conv shifts and accepted-count resets are all performed upstream.
+        slots = mapping.long()
+        computed = num_computed_tokens[slots]
+        accepted = max(num_sampled, 1) if isinstance(num_sampled, int) else num_sampled.clamp_min(1)
+        aligned = computed // self._mamba_spec.block_size * self._mamba_spec.block_size
+        ready = (aligned > 0) & (aligned >= computed - accepted + 1)
+        column = (aligned // self._mamba_spec.block_size - 1).clamp_min(0).long()
+        for name, caches in self._mamba_original_caches.items():
+            if name in self._mamba_reused:
+                # A same-column align copy updates candidate zero in place.
+                source_rows = slots * self._mamba_slots + 1
+                mask = ready & (column == self._mamba_state_idx_gpu[slots])
+                sources = self._mamba_staging[name]
+            else:
+                source_rows = (
+                    tables[self._mamba_layer_groups[name]][: len(slots)].gather(1, column[:, None]).flatten().long()
+                )
+                mask = ready & (source_rows > 0)
+                sources = caches
+            for source, checkpoint in zip(sources, self.layerwise_mamba_checkpoints[name]):
+                _copy_state_rows(source, checkpoint, source_rows, slots, mask)
+        self._mamba_checkpoint_tokens[slots] = torch.where(ready, aligned, self._mamba_checkpoint_tokens[slots])
+        self._mamba_valid[slots] = True
+        self._mamba_accepted = True
+
+    def get_mamba_checkpoints(self):
+        if self._mamba_batch is None:
+            return {}, {}
+        if not self._mamba_accepted:
+            raise RuntimeError("Mamba checkpoint publication preceded acceptance")
+        req_ids, mapping, slots, _tables = self._mamba_batch
+        # One bounded readback for ordinary host-side pool metadata planning.
+        endpoints = self._mamba_checkpoint_tokens[mapping.long()].cpu().tolist()
+        return dict(zip(req_ids, endpoints)), dict(zip(req_ids, slots))
+
+    def finish_mamba_save(self, *, failed=False):
+        self._mamba_staging_failed |= failed
+        self._mamba_batch = None
 
     def _get_layer_state_ranges(self, kv_cache_config: KVCacheConfig) -> dict[str, tuple[int, int]]:
         """Map every mamba layer name to its (start, end) range in the
@@ -141,7 +363,8 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             ctx=ctx,
             num_reqs=num_reqs,
             idx_mapping=idx_mapping,
-            pending_layers=set(self._get_layer_state_ranges(kv_cache_config)),
+            pending_layers=set(self._get_layer_state_ranges(kv_cache_config))
+            - set(getattr(kv_cache_config, "layerwise_draft_layer_names", ())),
         )
         return True
 
@@ -180,6 +403,8 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             return
         start, end = state_range
         ctx = pending.ctx
+        if layer_name in getattr(self, "_mamba_staging", {}) and layer_name in self._mamba_reused:
+            self._copy_layer_candidates(layer_name, restore=True)
         # Same kernel and arguments as MambaSpecDecodeGPUContext.run_fused_
         # precopy, restricted to one layer's state rows: the grid's second
         # axis is the state index and the kernel fast-exits per request when
@@ -270,6 +495,17 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self._finish_previous_layerwise_mamba_copy()
         mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
         ctx = self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
+        if getattr(self, "_mamba_staging", {}):
+            if self._mamba_batch is not None or self._mamba_staging_failed:
+                raise RuntimeError("Previous Mamba staging buffers still have readers or failed")
+            self._mamba_batch = (
+                tuple(input_batch.req_ids),
+                input_batch.idx_mapping.clone(),
+                tuple(int(slot) for slot in input_batch.idx_mapping_np),
+                block_tables,
+            )
+            self._mamba_accepted = False
+            self._mamba_capture_pending = set(self._mamba_staging).intersection(self._mamba_reused)
 
         # The state-advance + pre-copy kernels run every step; they fast-exit
         # per request when src_col < 0 or src_col == dst_col, so no copy
@@ -287,6 +523,17 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             BLOCK_SIZE=_PREPROCESS_BLOCK_SIZE,
             MAMBA_BLOCK_SIZE=mamba_spec.block_size,
         )
+        if getattr(self, "_mamba_staging", {}):
+            slots = input_batch.idx_mapping.long()
+            columns = self._mamba_state_idx_gpu[slots, None] + torch.arange(self._mamba_width, device=self.device)
+            torch._assert_async(
+                torch.all((columns >= 0) & (columns < self._mamba_stage_table.shape[1])),
+                "Mamba candidate columns exceed the block table",
+            )
+            self._mamba_stage_table.copy_(self._mamba_stage_base[:, None])
+            self._mamba_stage_table[slots[:, None], columns.long()] = (
+                self._mamba_stage_base[slots, None] + 1 + torch.arange(self._mamba_width, device=self.device)
+            ).to(torch.int32)
         if self._prepare_layerwise_mamba_copy(ctx, num_reqs, input_batch.idx_mapping, kv_cache_config):
             # Per-layer copies are executed by the connector right after each
             # layer's KV load finishes (do_mamba_copy_for_layer).
@@ -325,6 +572,8 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     def finish_execution(self, *, failed: bool) -> None:
         if failed:
             self._pending_bulk_copy = None
+            if getattr(self, "_mamba_staging", {}):
+                self.finish_mamba_save(failed=True)
         super().finish_execution(failed=failed)
 
     def prepare_attn(

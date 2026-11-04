@@ -5,6 +5,7 @@ import threading
 import time
 from collections.abc import Callable, Generator, Sequence
 from contextlib import suppress
+from copy import copy
 from typing import Any, cast
 
 import numpy as np
@@ -171,6 +172,9 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
 
     def _init_state_vars(self) -> None:
         super()._init_state_vars()
+        self.mamba_state = None
+        self.deferred_mamba_groups: set[int] = set()
+        self._mamba_save_requests: list[str] = []
         self._put_started_keys: set[str] = set()
         self._put_started_keys_lock = threading.Lock()
         self._load_session_lock = threading.Lock()
@@ -722,6 +726,14 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         # GVA groups use stage-local indices too; PP offsets apply to pool keys and remote addresses.
         return self.physical_layer_to_group_layers.get(local_layer, [(0, local_layer)])
 
+    def _group_reuses_buffer(self, group_id: int) -> bool:
+        """Include both writers of each shared slot, including its first owner."""
+        return any(
+            candidate_group == group_id
+            for layer in set(self.prefetch_layer_map) | set(self.prefetch_layer_map.values())
+            for candidate_group, _ in self.physical_layer_to_group_layers.get(layer, [(0, layer)])
+        )
+
     def _masked_block_runs_cached(
         self,
         tag: str,
@@ -742,6 +754,11 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             self._masked_runs_cache[key] = runs
         return runs
 
+    def _layerwise_key_rank(self, group_id: int) -> int:
+        if not getattr(self, "use_kvpp", False) and group_id in getattr(self, "layerwise_head_sharded_groups", ()):
+            return self.pcp_rank
+        return self.metadata[group_id].head_or_tp_rank
+
     def _make_layerwise_full_key(self, group_id: int, block_hash_hex: str) -> str:
         """Use the backend-bound layout shared with scheduler hit checks."""
         assert self.layerwise_keys is not None
@@ -759,7 +776,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         assert self.layerwise_backend is not None
         return self.layerwise_backend.make_partial_key(
             self.model_name,
-            request.req_id,
+            request.layerwise_request_id or request.req_id,
             group_id,
             block_index,
             end_token,
@@ -1171,15 +1188,20 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
     ) -> int:
         """Unhashed full blocks use normal GVA slots; the tail keeps its partial slot."""
         end = request.save_end_token // block_size
-        if (
-            self.use_layerwise_transfer
-            and self.layerwise_offload
-            and self.num_kv_cache_groups == 1
-            and not self.group_uses_align_state[group_id]
-        ):
+        if self.use_layerwise_transfer and self.layerwise_offload and not self.group_uses_align_state[group_id]:
             end = request.target_token_len // block_size
             if partial_block_index is not None:
                 end = min(end, partial_block_index)
+        elif self.use_layerwise_transfer and self.layerwise_offload:
+            # A group can complete pages before the transfer LCM boundary.
+            # Persist those pages before another layer overwrites the slot.
+            end = max(
+                end,
+                min(
+                    request.target_token_len // block_size,
+                    len(request.block_hashes) * self.hash_block_size // block_size,
+                ),
+            )
         return end
 
     def _pool_keys_missing(self, keys: list[str]) -> set[str]:
@@ -1235,7 +1257,9 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 request.can_save = False
                 request.save_keys = []
 
-    def _alloc_gvas_for_save_for_request(self, requests: list[ReqMeta]) -> bool | None:
+    def _alloc_gvas_for_save_for_request(
+        self, requests: list[ReqMeta], group_ids: set[int] | None = None
+    ) -> bool | None:
         """Allocate per-group GVA on the worker side right before batch_copy.
 
         For multi-group models, iterates all KV cache groups and allocates
@@ -1252,6 +1276,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             return None
         if not self.can_put:
             return None
+        if group_ids is None:
+            group_ids = set(range(self.num_kv_cache_groups)) - getattr(self, "deferred_mamba_groups", set())
         for request in requests:
             if request.can_save is None or not request.can_save:
                 continue
@@ -1269,7 +1295,11 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 )
                 if block_ids_by_group is None:
                     raise RuntimeError(f"Block IDs are not initialized for request {request.req_id}")
-                if group_id not in self.cacheable_group_ids or not self._is_layerwise_save_owner(group_id):
+                if (
+                    group_id not in group_ids
+                    or group_id not in self.cacheable_group_ids
+                    or not self._is_layerwise_save_owner(group_id)
+                ):
                     all_group_gvas.append(np.zeros(len(block_ids_by_group), dtype=np.int64))
                     all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
                     continue
@@ -1302,11 +1332,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                     else None
                 )
                 end_limit = min(save_end_block, len(block_ids_by_group))
-                if not (
-                    self.layerwise_offload
-                    and self.num_kv_cache_groups == 1
-                    and not self.group_uses_align_state[group_id]
-                ):
+                if not (self.layerwise_offload and not self.group_uses_align_state[group_id]):
                     end_limit = min(end_limit, len(group_block_hashes))
                 candidate_blocks = [
                     block_idx
@@ -1529,13 +1555,26 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             block_ids = request.block_ids_by_group[group_id]
             original_mask = result[group_id]
             num_blocks = request.save_end_token // self.grouped_block_size[group_id]
+            if self.layerwise_offload:
+                num_blocks = self._layerwise_save_full_end(request, group_id, self.grouped_block_size[group_id], None)
+            if self.layerwise_offload and self._group_reuses_buffer(group_id):
+                # Only the running endpoint belongs to this layer after reuse.
+                # Older non-null slots may already hold another layer's state.
+                result[group_id] = [
+                    index == num_blocks - 1
+                    and request.target_token_len == num_blocks * self.grouped_block_size[group_id]
+                    and index < len(block_ids)
+                    and block_ids[index] != 0
+                    for index in range(num_blocks)
+                ]
+                continue
             # An aligned prefill chunk ends with a real recurrent checkpoint,
             # even when it is not the final prompt replay boundary. Keep that
             # checkpoint before the next chunk moves/reuses its state slots.
             chunk_checkpoint = (
                 request.num_prompt_tokens is not None
-                and request.target_token_len == request.save_end_token
-                and request.save_end_token % self.cache_transfer_granularity == 0
+                and request.target_token_len == num_blocks * self.grouped_block_size[group_id]
+                and (self.layerwise_offload or request.save_end_token % self.cache_transfer_granularity == 0)
                 and 0 < request.target_token_len < request.num_prompt_tokens
             )
             result[group_id] = [
@@ -1577,6 +1616,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 )
                 continue
             if request.load_spec is None or not request.load_spec.can_load:
+                continue
+            if group_id in getattr(self, "deferred_mamba_groups", ()) and request.load_spec.layerwise_previous_step:
                 continue
             cached_tokens = request.load_spec.kvpool_cached_tokens
             if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
@@ -1695,9 +1736,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         step saved a longer request-scoped snapshot.  Reuse that exact saved
         identity when it still covers the logical prefix. A snapshot can
         include unhashed full blocks as well as its tail; rollback can land
-        in any of those blocks. The override is limited to the current
-        single-group, non-align-state path; hybrid/Mamba layouts keep their
-        existing behavior.
+        in any of those blocks for attention groups. Recurrent state can
+        only restore its exact saved endpoint; it cannot be rolled back.
         """
         partial_block_index = get_partial_block_index(
             cached_tokens,
@@ -1707,7 +1747,13 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         )
         partial_end_token = cached_tokens
         load_spec = request.load_spec
-        if load_spec is None or self.num_kv_cache_groups != 1 or group_id != 0 or self.group_uses_align_state[group_id]:
+        if load_spec is None:
+            return partial_block_index, partial_end_token
+        if self.layerwise_offload and self.group_uses_align_state[group_id]:
+            # A full recurrent page may have been saved before its hash was
+            # published. Keep that exact request snapshot when hashes arrive.
+            if load_spec.layerwise_previous_step and load_spec.layerwise_snapshot_end_token == cached_tokens:
+                return (cached_tokens - 1) // block_size, cached_tokens
             return partial_block_index, partial_end_token
 
         snapshot_end_token = load_spec.layerwise_snapshot_end_token
@@ -1733,8 +1779,6 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         spec = request.load_spec
         if (
             not self.layerwise_offload
-            or self.num_kv_cache_groups != 1
-            or group_id != 0
             or self.group_uses_align_state[group_id]
             or spec is None
             or cached_tokens <= 0
@@ -1742,11 +1786,17 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             or spec.layerwise_snapshot_end_token < cached_tokens
         ):
             return None
-        return (
+        start_block = (
             spec.layerwise_snapshot_start_block
             if spec.layerwise_snapshot_start_block is not None
             else spec.layerwise_snapshot_block_index
         )
+        if start_block is None:
+            return None
+        # RequestTracker records snapshot blocks in the transfer LCM unit;
+        # each group addresses pages in its own block size.
+        transfer_size = getattr(self, "cache_transfer_granularity", self.grouped_block_size[group_id])
+        return start_block * transfer_size // self.grouped_block_size[group_id]
 
     def _prepare_load_gvas(self, requests: list[ReqMeta]) -> None:
         for request in requests:
@@ -1791,7 +1841,20 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             all_group_load_keys: list[str] = []
             request.partial_load_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
+                if group_id in getattr(self, "deferred_mamba_groups", ()) and request.load_spec.layerwise_previous_step:
+                    all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
+                    continue
                 if group_id not in self.cacheable_group_ids:
+                    all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
+                    continue
+                if (
+                    self.layerwise_offload
+                    and request.load_spec.layerwise_previous_step
+                    and self.group_uses_align_state[group_id]
+                    and not self._group_reuses_buffer(group_id)
+                ):
+                    # Resident recurrent checkpoints are selected by the model
+                    # after speculative acceptance, not restored from snapshots.
                     all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
                     continue
                 group_block_size = self.grouped_block_size[group_id]
@@ -2006,16 +2069,22 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 request.load_gva_block_offset = 0
         return None
 
-    def _check_hybrid_load_errors(self) -> None:
-        # Memcache reports invalid blocks through the existing scheduler policy.
-        if self.use_layerwise_transfer:
+    def _check_layerwise_transfer_errors(self) -> None:
+        if self.layerwise_offload:
+            # Completion events also fire on failure. Reused buffers no longer
+            # have a resident copy to fall back to after a failed PUT or GET.
+            if self._save_disabled.is_set() or (self.kv_recv_thread and self.kv_recv_thread.load_disabled.is_set()):
+                self._layer_load_aborted.set()
+                raise RuntimeError("Layerwise transfer failed; refusing incomplete KV/state")
+        elif self.use_layerwise_transfer:
+            # Ordinary Memcache loads retain the existing scheduler policy.
             return
         # A hybrid block ID can belong to SWA, compressed KV or compressor
         # state. Do not feed partially restored state to the attention kernel.
         with self._invalid_block_ids_lock:
-            if self._invalid_block_ids:
+            if self._invalid_block_ids or (self.layerwise_offload and self._failed_requests):
                 self._layer_load_aborted.set()
-                raise RuntimeError("Hybrid layerwise load failed; refusing incomplete KV/state")
+                raise RuntimeError("Layerwise transfer failed; refusing incomplete KV/state")
 
     def _build_shared_load_data(self) -> None:
         """Share load metadata, preserving layer-specific selections for reuse."""
@@ -2080,16 +2149,34 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         managers need for a hit of ``cached_tokens`` are fetched, which is a
         subset of the blocks persisted by the reachable store masks.
         """
-        if getattr(self, "block_key_hybrid", False) and cached_tokens > 0:
-            if self.cache_coordinator is None:
-                raise ValueError("Block-key hybrid loads require a reachability coordinator")
-            return self.token_database.load_mask(request.block_hashes, cached_tokens)
-        if self.cache_coordinator is None or cached_tokens <= 0:
+        if cached_tokens <= 0:
             return None
-        try:
-            return self.token_database.load_mask(request.block_hashes, cached_tokens)
-        except AssertionError:
-            return None
+        if self.cache_coordinator is None and getattr(self, "block_key_hybrid", False):
+            raise ValueError("Block-key hybrid loads require a reachability coordinator")
+        masks = None
+        if self.cache_coordinator is not None:
+            try:
+                masks = self.token_database.load_mask(request.block_hashes, cached_tokens)
+            except AssertionError:
+                if getattr(self, "block_key_hybrid", False):
+                    raise
+        reused_state_groups = [
+            group_id
+            for group_id, uses_align in enumerate(self.group_uses_align_state)
+            if self.layerwise_offload and uses_align and self._group_reuses_buffer(group_id)
+        ]
+        if not reused_state_groups:
+            return masks
+        # Preserve other groups' reachability masks. An aligned recurrent page
+        # represents one endpoint; unaligned state uses the partial GVA path.
+        result = list(masks) if masks is not None else [None] * self.num_kv_cache_groups
+        for group_id in reused_state_groups:
+            size = self.grouped_block_size[group_id]
+            result[group_id] = [
+                index == cached_tokens // size - 1 and cached_tokens % size == 0 and block_id != 0
+                for index, block_id in enumerate(request.block_ids_by_group[group_id])
+            ]
+        return tuple(result)
 
     def _drain_deferred_last_save(self) -> None:
         """PERF-TUNE(2): deferred tail of the previous step's last-layer save."""
@@ -2113,6 +2200,43 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         self.layer_load_tasks = [[] for _ in range(self.num_layers)]
         if not requests:
             return
+        deferred = getattr(self, "deferred_mamba_groups", set())
+        if deferred:
+            if self._mamba_save_requests:
+                raise RuntimeError("Previous Mamba saves have not completed")
+            self._mamba_save_requests = [request.req_id for request in requests if request.can_save]
+            for req_id in self._mamba_save_requests:
+                # Use the existing send counter to keep completion pending
+                # until sampling decides whether a checkpoint can be saved.
+                self.kv_send_thread.add_stored_request(req_id)
+        reused_state_groups = [
+            group_id
+            for group_id, uses_align in enumerate(self.group_uses_align_state)
+            if self.layerwise_offload and uses_align and self._group_reuses_buffer(group_id)
+        ]
+        if reused_state_groups:
+            for request in requests:
+                # A prefill endpoint is final at the layer save hook, including
+                # with MTP enabled. Decode state may commit after sampling.
+                if (
+                    self.vllm_config.speculative_config is not None
+                    and not deferred
+                    and request.num_prompt_tokens is not None
+                    and request.target_token_len > request.num_prompt_tokens
+                ):
+                    raise NotImplementedError("Shared recurrent state supports speculative prefill, not decode commits")
+                for group_id in reused_state_groups:
+                    if group_id in deferred:
+                        continue
+                    endpoints = [request.target_token_len] if request.can_save else []
+                    if request.load_spec is not None and request.load_spec.can_load:
+                        endpoints.append(request.load_spec.kvpool_cached_tokens)
+                    blocks = request.block_ids_by_group[group_id]
+                    for end in endpoints:
+                        if end > 0:
+                            index = (end - 1) // self.grouped_block_size[group_id]
+                            if index >= len(blocks) or blocks[index] == 0:
+                                raise ValueError("Recurrent cache endpoint has no allocated state page")
         # Mooncake uses the projected stage-local cache layout, including any
         # draft layers. The GVA/key planes retain their existing PP key count.
         if not self.use_block_key_layerwise and getattr(self, "pp_size", 1) > 1:
@@ -2126,6 +2250,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             group_requests = self._prepare_layerwise_sessions(requests)
         for local_layer in range(num_local):
             for group_id, layer_idx_in_group in self._groups_for_layerwise_transfer(local_layer):
+                if group_id in deferred:
+                    continue
                 self._process_save_for_layer_batch(
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
                 )
@@ -2139,6 +2265,73 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
                 )
         self._build_shared_load_data()
+        if self.layerwise_offload:
+            self._check_layerwise_transfer_errors()
+
+    def save_mamba_checkpoints(self, requests, endpoints, slots) -> None:
+        """Submit confirmed checkpoints through the ordinary allocation/save path.
+
+        The V2 state owns only the bounded source views. This worker retains
+        key construction, writer ownership, allocation, publication and drains.
+        """
+        if not getattr(self, "deferred_mamba_groups", ()) or not endpoints:
+            return
+        self._masked_runs_cache.clear()
+        self.layer_save_tasks = [[] for _ in range(self.num_layers)]
+        checkpoint_requests = []
+        for original in requests:
+            endpoint = endpoints[original.req_id]
+            if not original.can_save or endpoint <= 0 or endpoint > len(original.block_hashes) * self.hash_block_size:
+                continue
+            request = copy(original)
+            request.load_spec = None
+            request.target_token_len = request.save_end_token = endpoint
+            request.partial_block_index = None
+            request.store_masks = None
+            request.save_keys = []
+            request.block_ids_by_group_np = list(original.block_ids_by_group_np)
+            for group in self.deferred_mamba_groups:
+                block_size = self.grouped_block_size[group]
+                request.save_start_token = endpoint - block_size
+                ids = np.zeros(endpoint // block_size, dtype=np.int64)
+                ids[-1] = slots[request.req_id]
+                request.block_ids_by_group_np[group] = ids
+            if self._alloc_gvas_for_save_for_request([request], self.deferred_mamba_groups) is False:
+                self._save_disabled.set()
+                raise RuntimeError("Mamba checkpoint allocation failed")
+            checkpoint_requests.append(request)
+        for layer in range(self.num_layers):
+            for group, index in self._groups_for_layerwise_transfer(layer):
+                if group not in self.deferred_mamba_groups:
+                    continue
+                self._process_save_for_layer_batch(checkpoint_requests, layer, group, index)
+                names = set(self.kv_cache_config.kv_cache_groups[group].layer_names)
+                for task in self.layer_save_tasks[layer]:
+                    if task.group_id == group:
+                        task.source_caches = tuple(
+                            cache
+                            for name in self.mamba_layers_by_index.get(layer, ())
+                            if name in names
+                            for cache in self.mamba_state.layerwise_mamba_checkpoints[name]
+                        )
+        self._build_shared_save_data()
+        sender = self.kv_send_thread
+        for layer, tasks in enumerate(self.layer_save_tasks):
+            self.layer_save_finished_events[layer].clear()
+            self.sync_save_events[layer].record()
+            if tasks:
+                for task in tasks:
+                    for block_range in task.block_ranges:
+                        sender.add_stored_request(block_range.request.req_id)
+                sender.add_request(tasks)
+            else:
+                self.layer_save_finished_events[layer].set()
+        for req_id in self._mamba_save_requests:
+            sender.dec_stored_request(req_id)
+            if sender.try_finish_and_delete_stored_request(req_id):
+                sender.set_finished_request(req_id)
+        self._wait_for_final_layer_save(self.num_layers, sender)
+        self._mamba_save_requests.clear()
 
     def _submit_attention_save(self, layer_id: int) -> None:
         """Start current-layer put only once KV is ready at attention entry."""
@@ -2218,7 +2411,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             thread.raise_if_failed()
         if drain_recv and self.kv_recv_thread is not None:
             # Errors are still surfaced per layer by wait_for_layer_load.
-            self._check_hybrid_load_errors()
+            self._check_layerwise_transfer_errors()
 
     def _submit_ready_layer_loads(self) -> None:
         assert self.kv_recv_thread is not None
@@ -2300,8 +2493,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 self.kv_recv_thread.raise_if_failed()
             elif self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(self.current_layer)
-            if getattr(self, "block_key_hybrid", False):
-                self._check_hybrid_load_errors()
+            if getattr(self, "layerwise_offload", False) or getattr(self, "block_key_hybrid", False):
+                self._check_layerwise_transfer_errors()
         except Exception:
             if hasattr(self, "_layer_load_aborted"):
                 self._layer_load_aborted.set()
@@ -2356,7 +2549,11 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             # Recurrent and record-only paths do not exit an attention window.
             self._finish_attention_window()
         if self.current_layer == num_local - 1:
-            if _LW_DEFER_LAST_SAVE:
+            # Recurrent state may be cleared or copied before the next load
+            # hook. Finish reading shared state before returning from forward.
+            if _LW_DEFER_LAST_SAVE and not (
+                self._recurrent_layers & (self.prefetch_layer_map.keys() | set(self.prefetch_layer_map.values()))
+            ):
                 # PERF-TUNE(2): move the last layer's save drain off the forward
                 # critical path. The drain (host wait + event reset) runs at the
                 # start of the NEXT step's start_load_kv, absorbing the send
@@ -2385,6 +2582,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             send_thread.raise_if_failed()
             logger.info("Layerwise %d save not done, keep waiting", num_local - 1)
         send_thread.raise_if_failed()
+        if getattr(self, "layerwise_offload", False):
+            self._check_layerwise_transfer_errors()
         if self.block_key_hybrid:
             # An empty final layer signals completion without waiting for PUTs
             # from earlier layers. Drain those before the next step reuses KV.
