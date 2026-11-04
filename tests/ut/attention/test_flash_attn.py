@@ -544,7 +544,7 @@ def test_graph_plans_are_recaptured_after_warmup_and_shared_only_within_graph(mo
     for graph_index in range(2):
         resources = {}
 
-        def capture_resource(key, factory):
+        def capture_resource(key, factory, resources=resources):
             if key not in resources:
                 resources[key] = factory()
             return resources[key]
