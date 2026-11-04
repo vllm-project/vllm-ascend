@@ -1,0 +1,8 @@
+pr: 20914
+entries:
+  - category: bugfix
+    text: >-
+      Fixed sparse KV offload resident-cache ownership collisions by assigning
+      non-recycled request incarnation IDs shared by target and MTP draft metadata.
+      New requests no longer inherit another request's resident prefix because
+      their request IDs have the same Adler32 checksum.
