@@ -37,7 +37,9 @@ def _inputs(with_positions: bool, chunk: int):
 
 
 def _unfused(args, weight, rotary, cache):
-    pooled, first = qsa_compress_groups_with_ratio(*args)
+    result = qsa_compress_groups_with_ratio(*args)
+    assert result is not None
+    pooled, first = result
     gathered = rotary[first.T.clamp(0, rotary.shape[0] - 1)]
     normalized = triton_qsa_rmsnorm_mrope(pooled, weight, gathered, 1e-6, [11, 11, 10], 64)
     qsa_store_cache_rows(cache, args[7], normalized)

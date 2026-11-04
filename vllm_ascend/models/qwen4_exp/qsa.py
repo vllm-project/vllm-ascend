@@ -83,7 +83,7 @@ def _compress_qsa_groups(
     rope_cache: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool completed groups with the fused QSA compression kernel."""
-    return qsa_compress_groups_with_ratio_fused(
+    result = qsa_compress_groups_with_ratio_fused(
         raw_keys,
         raw_positions,
         compressor_state_cache,
@@ -95,6 +95,8 @@ def _compress_qsa_groups(
         compress_ratio,
         rope_cache,
     )
+    assert result is not None
+    return result
 
 
 class QSAForwardMetadataProtocol(Protocol):
