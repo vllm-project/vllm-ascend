@@ -279,10 +279,6 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
     expr: this | attr dp_rank | str
   - name: npu_id
     expr: this | attr device | attr index | str
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._update_full_graph_params_if_needed
-  min_version: "0.9.1"
-  domain: ModelForward
-  name: NPUModelRunner._update_full_graph_params_if_needed
 - symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._all_gather_hidden_states_and_aux
   min_version: "0.9.1"
   domain: ModelForward
