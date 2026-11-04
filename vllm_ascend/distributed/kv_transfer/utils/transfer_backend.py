@@ -124,6 +124,10 @@ def build_transfer_engine(
     the KV buffer registration; ``engine`` is the object the connector issues
     transfers on. Both backends implement the same three methods the connector
     depends on, so the call sites stay backend agnostic.
+
+    ``device_name`` only applies to Mooncake: the MemFabric engine binds itself
+    to ``torch.npu.current_device()``, which is where the caller derives the name
+    from.
     """
     backend = resolve_transfer_backend(vllm_config)
     if backend == BACKEND_MEMFABRIC:
@@ -141,6 +145,8 @@ def build_transfer_engine(
         _log_backend(backend, role, protocol or "sdma (MemFabric default)")
         # MemFabric binds its process-wide engine to one role/device/protocol, so
         # it has to be configured before the first get_transfer_engine() call.
+        # The device is torch.npu.current_device(), the same one the caller
+        # derives device_name from, so device_name is not forwarded here.
         global_memfabric_te.configure(
             role=role,
             device_id=torch.npu.current_device(),
