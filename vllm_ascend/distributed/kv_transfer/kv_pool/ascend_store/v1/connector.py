@@ -1,0 +1,364 @@
+"""Adapt vLLM hooks to AscendStore v1."""
+
+from __future__ import annotations
+
+import sys
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any
+
+import torch
+import vllm.envs as envs
+from vllm.distributed.kv_events import KVCacheEvent
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRole,
+    KVConnectorTransferResults,
+    KVConnectorWorkerMetadata,
+    SupportsHMA,
+)
+from vllm.logger import logger
+
+from ..metrics import AscendStoreKVConnectorStats, AscendStorePromMetrics
+from .backend import LayerwiseAccessKind, resolve_backend_spec
+from .infrastructure.configuration import KVPoolConfig, resolve_kv_pool_config, validate_kv_pool_config
+from .infrastructure.coordinator import Coordinator
+from .infrastructure.resources import Resources
+from .infrastructure.topology import resolve_worker_topology
+from .protocol.lookup import LookupClient, LookupServer
+from .protocol.messages import KVTransferStep, StoreSourceReleaseMetadata
+from .protocol.observations import StoreEvents
+from .protocol.outcomes import LoadResult
+from .scheduler import AsynchronousScheduler, KVPoolScheduler, SynchronousScheduler
+from .worker import Worker
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import PromMetric, PromMetricT
+    from vllm.forward_context import ForwardContext
+    from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.outputs import KVConnectorOutput
+    from vllm.v1.request import Request
+
+
+class AscendStoreV1Connector(KVConnectorBase_V1, SupportsHMA):
+    """Delegate vLLM hooks to one Scheduler or Worker owner."""
+
+    @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
+        """Keep per-layer transfer hooks active between captured graph pieces."""
+        return extra_config.get("use_layerwise", False)
+
+    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig) -> None:
+        super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
+
+        config = resolve_kv_pool_config(vllm_config, kv_cache_config)
+        validate_kv_pool_config(vllm_config, kv_cache_config, config)
+        self._use_layerwise = config.use_layerwise
+        self._load_async = config.load_async and not config.use_layerwise
+        self._grouped_cache = len(config.group_specs) > 1
+        self.requires_mamba_state_copy_after_load = not config.use_layerwise and not self._load_async
+        self.scheduler: KVPoolScheduler | None = None
+        self.worker: Worker | None = None
+        self.lookup_server: LookupServer | None = None
+        self._pending_load_result: LoadResult | None = None
+        self._released_store_job_ids: set[int] = set()
+        self._kv_events: StoreEvents | None = None
+        if role == KVConnectorRole.SCHEDULER:
+            lookup_address = self._resolve_lookup_address(vllm_config)
+            self.scheduler = self._create_scheduler(config, lookup_address)
+        else:
+            self.worker = self._create_worker(vllm_config, kv_cache_config, config)
+            if vllm_config.parallel_config.rank == 0:
+                try:
+                    lookup_address = self._resolve_lookup_address(vllm_config)
+                    self.lookup_server = LookupServer(self.worker.lookup, lookup_address, reset=self.worker.reset_cache)
+                except BaseException:
+                    self.worker.close()
+                    raise
+
+    @staticmethod
+    def _create_scheduler(config: KVPoolConfig, lookup_address: str) -> KVPoolScheduler:
+        # Asynchronous publication is currently supported only for Bulk transfers.
+        scheduler_type = (
+            AsynchronousScheduler if config.load_async and not config.use_layerwise else SynchronousScheduler
+        )
+        client = LookupClient(lookup_address, timeout_ms=config.lookup_rpc_timeout_ms)
+        try:
+            return scheduler_type(config, client)
+        except BaseException:
+            client.close()
+            raise
+
+    @staticmethod
+    def _create_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, config: KVPoolConfig) -> Worker:
+        topology = resolve_worker_topology(vllm_config, kv_cache_config, config)
+        coordinator = Coordinator(
+            topology.transfer_groups,
+            config.cache_transfer_granularity,
+            config.hash_block_size,
+            vllm_config.model_config.max_model_len,
+            use_eagle=config.use_eagle,
+            retention_interval=config.retention_interval,
+        )
+        spec = resolve_backend_spec(config.backend_name)
+        if config.use_layerwise and spec.layerwise_access is None:
+            raise TypeError("Layerwise route requires a concrete Backend data plane")
+        key_builder = None
+        if config.use_layerwise and spec.layerwise_key_factory is not None:
+            key_builder = spec.layerwise_key_factory(vllm_config, kv_cache_config, config)
+        backend = spec.create(
+            vllm_config.parallel_config,
+            extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
+        )
+        # Resource ownership moves to Worker when its constructor is called.
+        try:
+            resources = Resources(
+                backend,
+                spec,
+                topology.transfer_groups,
+                align_shared_storage=(
+                    config.use_layerwise and spec.layerwise_access is LayerwiseAccessKind.GVA and config.use_hybrid
+                ),
+            )
+        except BaseException:
+            try:
+                backend.close()
+            except BaseException:
+                logger.exception("Failed to close Backend after resource creation failed")
+            raise
+        return Worker(
+            topology,
+            resources,
+            coordinator=coordinator,
+            kv_cache_layout=envs.VLLM_KV_CACHE_LAYOUT,
+            store_enabled=config.store_enabled,
+            layerwise=config.use_layerwise,
+            layerwise_prefetch_layers=config.layerwise_prefetch_layers,
+            key_builder=key_builder,
+        )
+
+    @staticmethod
+    def _resolve_lookup_address(vllm_config: VllmConfig) -> str:
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        rpc_port = extra_config.get("lookup_rpc_port", extra_config.get("mooncake_rpc_port", 0))
+        dp_rank = vllm_config.parallel_config.data_parallel_rank
+        return f"ipc://{envs.VLLM_RPC_BASE_PATH}/lookup_rpc_port_{rpc_port}_dp_rank{dp_rank}"
+
+    def set_xfer_handshake_metadata_pp_aware(self, metadata: dict[tuple[int, int], Any]) -> None:
+        """Pool keys, not the vLLM P/D handshake, identify PP shards."""
+        return
+
+    def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
+        assert self.scheduler is not None
+        return self.scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
+
+    def update_state_after_alloc(self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int) -> None:
+        assert self.scheduler is not None
+        self.scheduler.confirm_allocation(request, blocks, num_external_tokens)
+
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        if self.scheduler is not None:
+            self.scheduler.accept_worker_metadata(connector_output.kv_connector_worker_meta)
+        events = connector_output.kv_cache_events
+        if isinstance(events, StoreEvents):
+            if self._kv_events is None:
+                self._kv_events = events
+            else:
+                self._kv_events.merge(events)
+
+    def take_events(self) -> Iterable[KVCacheEvent]:
+        events, self._kv_events = self._kv_events, None
+        if events is not None:
+            yield from events.aggregate().get_all_events()
+
+    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVTransferStep:
+        assert self.scheduler is not None
+        return self.scheduler.build_step(scheduler_output)
+
+    def request_finished(self, request: Request, block_ids: list[int]) -> tuple[bool, None]:
+        assert self.scheduler is not None
+        return False, None
+
+    def request_finished_all_groups(self, request: Request, block_ids: tuple[list[int], ...]) -> tuple[bool, None]:
+        assert self.scheduler is not None
+        return False, None
+
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        assert self.scheduler is not None
+        return self.scheduler.register_finished_partial_tail(request, block_ids, partial_tail_offloads)
+
+    def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
+        assert self.scheduler is not None
+        self.scheduler.bind_gpu_block_pool(gpu_block_pool)
+
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        assert self.worker is not None
+        self.worker.bind_kv_caches(kv_caches)
+
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        if self.worker is None:
+            super().bind_connector_metadata(connector_metadata)
+            return
+        if not isinstance(connector_metadata, KVTransferStep):
+            raise TypeError(f"Expected KVTransferStep, got {type(connector_metadata).__name__}")
+        super().bind_connector_metadata(connector_metadata)
+        try:
+            self.worker.begin_step(connector_metadata)
+        except BaseException:
+            super().clear_connector_metadata()
+            raise
+
+    def clear_connector_metadata(self) -> None:
+        try:
+            if self.worker is not None:
+                with self._worker_hook() as worker:
+                    worker.end_step()
+        finally:
+            super().clear_connector_metadata()
+
+    @contextmanager
+    def _worker_hook(self) -> Iterator[Worker]:
+        """Abort on hook failure, including a forward exception entering framework finalization."""
+        assert self.worker is not None
+        # ModelRunner calls finalization hooks from finally, without passing the
+        # forward exception. Preserve that failure instead of starting more work.
+        forward_error = sys.exc_info()[1]
+        try:
+            if forward_error is not None:
+                raise forward_error
+            yield self.worker
+        except BaseException as error:
+            try:
+                self.worker.abort_step(error)
+            finally:
+                super().clear_connector_metadata()
+            raise
+
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        if not isinstance(kv_connector_metadata, KVTransferStep):
+            raise TypeError(f"Expected KVTransferStep, got {type(kv_connector_metadata).__name__}")
+        assert self.worker is not None
+        try:
+            self.worker.fence_previous_store(kv_connector_metadata.released_request_ids)
+        finally:
+            self._released_store_job_ids.update(self.worker.take_released_store_job_ids())
+
+    def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
+        with self._worker_hook() as worker:
+            worker.start_load()
+
+    def wait_for_layer_load(self, layer_name: str) -> None:
+        if not self._use_layerwise:
+            return
+        with self._worker_hook() as worker:
+            worker.wait_for_layer_load(layer_name)
+
+    def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: Any, **kwargs: Any) -> None:
+        if not self._use_layerwise:
+            return
+        del kv_layer, attn_metadata, kwargs
+        with self._worker_hook() as worker:
+            worker.save_layer(layer_name)
+
+    def wait_for_save(self) -> None:
+        with self._worker_hook() as worker:
+            worker.finish_step()
+
+    def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
+        with self._worker_hook() as worker:
+            if self._pending_load_result is not None:
+                raise RuntimeError("Previous Load result has not been fully consumed")
+            load_result = worker.collect_load_result()
+            self._pending_load_result = load_result
+            # Only async admission makes vLLM wait for finished_recving, including
+            # late completion needed to release a finished request's held blocks.
+            # Synchronous loads already participate in this step's forward.
+            done_recving = set(load_result.completed_request_ids) if self._load_async else set()
+            return set(), done_recving
+
+    def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        sending, receiving = self.get_finished(finished_req_ids)
+        assert self._pending_load_result is not None
+        return KVConnectorTransferResults(
+            finished_sending=sending,
+            finished_recving=receiving,
+            failed_recving=set(self._pending_load_result.failed_request_ids) if self._grouped_cache else set(),
+        )
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        assert self.worker is not None
+        if self._pending_load_result is None:
+            return set()
+        failed_block_ids = set() if self._grouped_cache else set(self._pending_load_result.failed_block_ids)
+        self._pending_load_result = None
+        return failed_block_ids
+
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        if self.worker is not None:
+            self._released_store_job_ids.update(self.worker.take_released_store_job_ids())
+        if not self._released_store_job_ids:
+            return None
+        metadata = StoreSourceReleaseMetadata({store_job_id: 1 for store_job_id in self._released_store_job_ids})
+        self._released_store_job_ids.clear()
+        return metadata
+
+    def has_pending_push_work(self) -> bool:
+        return self.scheduler is not None and self.scheduler.has_pending_push_work()
+
+    def has_pending_block_frees(self) -> bool:
+        return self.scheduler is not None and self.scheduler.has_pending_block_frees()
+
+    def reset_cache(self) -> bool | None:
+        result = self.scheduler.reset_cache() if self.scheduler is not None else None
+        if result is not None:
+            self._kv_events = None
+        return result
+
+    def get_kv_connector_kv_cache_events(self) -> StoreEvents | None:
+        if self.worker is None:
+            return None
+        events = self.worker.take_events()
+        return StoreEvents(list(events)) if events else None
+
+    def get_kv_connector_stats(self) -> AscendStoreKVConnectorStats | None:
+        if self.worker is not None:
+            return self.worker.get_stats()
+        if self.scheduler is not None:
+            return self.scheduler.get_stats()
+        return None
+
+    @classmethod
+    def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> AscendStoreKVConnectorStats:
+        return AscendStoreKVConnectorStats(data=data or {})
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> AscendStorePromMetrics:
+        return AscendStorePromMetrics(vllm_config, metric_types, labelnames, per_engine_labelvalues)
+
+    def shutdown(self) -> None:
+        if self.scheduler is not None:
+            self.scheduler.close()
+        if self.lookup_server is not None:
+            # close() must confirm that Lookup no longer uses the Worker's Backend.
+            self.lookup_server.close()
+        if self.worker is not None:
+            try:
+                self.worker.close()
+            finally:
+                super().clear_connector_metadata()

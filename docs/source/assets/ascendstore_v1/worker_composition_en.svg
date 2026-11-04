@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 850" role="img" aria-labelledby="worker_composition_en-title worker_composition_en-desc">
+<title id="worker_composition_en-title">Worker Business Composition</title>
+<desc id="worker_composition_en-desc">Lines show calls / composition; data owners are listed below. Load = write, Store = read.</desc>
+<defs>
+<marker id="worker_composition_en-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#526a76"/></marker>
+<marker id="worker_composition_en-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a52be"/></marker>
+<marker id="worker_composition_en-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a9cbe"/></marker>
+<style>text{font-family:'Geist','PingFang SC','Noto Sans SC',sans-serif;font-size:16px;fill:#223036}.title{font-size:28px;font-weight:600}.name{font-weight:600}.muted{fill:#526a76;font-size:14px}.band{fill:#fff;stroke:#c8d4d9;stroke-width:1.2}</style>
+</defs><rect width="1280" height="850" fill="#fff"/>
+<text x="48" y="60" class="title">Worker Business Composition</text>
+<text x="48" y="88" class="muted">Lines show calls / composition; data owners are listed below. Load = write, Store = read.</text>
+<path d="M 222,176 V 224" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#worker_composition_en-arrow)"/>
+<path d="M 640,176 V 224" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#worker_composition_en-arrow)"/>
+<path d="M 1032,176 V 224" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#worker_composition_en-arrow)"/>
+<path d="M 640,324 V 378" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#worker_composition_en-arrow)"/>
+<path d="M 1032,324 V 378" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#worker_composition_en-arrow)"/>
+<path d="M 614,476 V 524" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#worker_composition_en-arrow)"/>
+<path d="M 1030,476 V 524" fill="none" stroke="#526a76" stroke-width="1.5" marker-end="url(#worker_composition_en-arrow)"/>
+<g data-node="worker">
+<rect x="48" y="112" width="1184" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="139" class="name">Worker</text>
+<text x="64" y="163" class="muted">KV binding · model hooks · invalidate affected stores on synchronous fallback · begin, finish, abort and close</text>
+</g>
+<g data-node="lookup">
+<rect x="48" y="224" width="348" height="100" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="251" class="name">LookupService</text>
+<text x="64" y="275" class="muted">Naming + Coordinator + Backend</text>
+<text x="64" y="298" class="muted">Independent queries; no local KV addresses</text>
+</g>
+<g data-node="load">
+<rect x="420" y="224" width="372" height="100" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="436" y="251" class="name">LoadService</text>
+<text x="436" y="275" class="muted">Block selection, keys and all destinations</text>
+<text x="436" y="298" class="muted">Track LoadBatch · interpret failures / completion</text>
+</g>
+<g data-node="store">
+<rect x="816" y="224" width="416" height="100" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="832" y="251" class="name">StoreService</text>
+<text x="832" y="275" class="muted">Candidates, writers, existence and source ownership</text>
+<text x="832" y="298" class="muted">Track StoreBatch · decide publication / source release</text>
+</g>
+<text x="660" y="358" class="muted">One Transfer instance shared by Load and Store</text>
+<g data-node="transfer">
+<rect x="420" y="378" width="812" height="98" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.2"/>
+<text x="436" y="405" class="name">Transfer · choose BulkTransfer or LayerwiseTransfer during assembly</text>
+<text x="436" y="429" class="muted">Backend arguments and calls · object sessions · copy completion evidence</text>
+<text x="436" y="452" class="muted">Bulk: whole objects; Layerwise: per-layer KeyRange / GVA transfers</text>
+</g>
+<g data-node="bulkexecutor">
+<rect x="420" y="524" width="388" height="96" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="436" y="551" class="name">BulkExecutor</text>
+<text x="436" y="575" class="muted">Composes an Executor queue</text>
+<text x="436" y="598" class="muted">Whole-operation submission · source readiness</text>
+</g>
+<g data-node="layerexecutor">
+<rect x="832" y="524" width="400" height="96" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="848" y="551" class="name">LayerwiseExecutor</text>
+<text x="848" y="575" class="muted">Composes an Executor queue</text>
+<text x="848" y="598" class="muted">Layer scheduling · Gate · Future · seal / finish</text>
+</g>
+<text x="48" y="414" class="name">Lookup result</text>
+<text x="48" y="443" class="muted">Recovery endpoint + tail-key boundary</text>
+<text x="48" y="478" class="muted">Bypasses Transfer and transfer batches</text>
+<text x="48" y="572" class="name">Infrastructure ownership</text>
+<text x="48" y="601" class="muted">Resources owns queues and Backend resources</text>
+<text x="48" y="667" class="name">worker/data · stable bindings and two business states</text>
+<g data-node="context">
+<rect x="48" y="690" width="348" height="104" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="717" class="name">TransferContext</text>
+<text x="64" y="741" class="muted">Reused throughout one KV binding</text>
+<text x="64" y="764" class="muted">Topology · BlockHashMapping · byte layout</text>
+</g>
+<g data-node="loadbatch">
+<rect x="420" y="690" width="372" height="104" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="436" y="717" class="name">LoadBatch · owned by LoadService</text>
+<text x="436" y="741" class="muted">Objects and all local targets · result slots</text>
+<text x="436" y="764" class="muted">Failures, write safety and completion; cross-step</text>
+</g>
+<g data-node="storebatch">
+<rect x="816" y="690" width="416" height="104" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="832" y="717" class="name">StoreBatch · owned by StoreService</text>
+<text x="832" y="741" class="muted">Commands and sources · validity / publication evidence</text>
+<text x="832" y="764" class="muted">Read safety and source release; cross-step</text>
+</g>
+<text x="48" y="828" class="muted">Backend sessions protect remote objects; LayerwiseExecutor advances layers. Their lifecycles are separate.</text>
+</svg>

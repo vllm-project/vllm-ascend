@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 800" role="img" aria-labelledby="architecture_layers_en-title architecture_layers_en-desc">
+<title id="architecture_layers_en-title">AscendStore v1 Architecture</title>
+<desc id="architecture_layers_en-desc">Responsibility groups; Worker composition is shown separately.</desc>
+<defs>
+<marker id="architecture_layers_en-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#526a76"/></marker>
+<marker id="architecture_layers_en-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a52be"/></marker>
+<marker id="architecture_layers_en-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#2a9cbe"/></marker>
+<style>text{font-family:'Geist','PingFang SC','Noto Sans SC',sans-serif;font-size:16px;fill:#223036}.title{font-size:28px;font-weight:600}.name{font-weight:600}.muted{fill:#526a76;font-size:14px}.band{fill:#fff;stroke:#c8d4d9;stroke-width:1.2}</style>
+</defs><rect width="1280" height="800" fill="#fff"/>
+<text x="48" y="60" class="title">AscendStore v1 Architecture</text>
+<text x="48" y="88" class="muted">Responsibility groups; Worker composition is shown separately.</text>
+<g data-node="connector">
+<rect x="48" y="112" width="1184" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="139" class="name">vLLM / AscendStoreV1Connector</text>
+<text x="64" y="163" class="muted">Framework hooks and roles · directly constructs Scheduler / Worker · validates configuration before allocation</text>
+</g>
+<g data-node="scheduler">
+<rect x="48" y="192" width="568" height="80" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="219" class="name">Scheduler</text>
+<text x="64" y="243" class="muted">Lookup adoption · allocation · command planning · source leases</text>
+</g>
+<g data-node="worker">
+<rect x="632" y="192" width="600" height="80" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="648" y="219" class="name">Worker</text>
+<text x="648" y="243" class="muted">Query and transfer · result ownership · publication · local KV safety</text>
+</g>
+<g data-node="protocol">
+<rect x="48" y="288" width="1184" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="315" class="name">Protocol · shared business contracts</text>
+<text x="64" y="339" class="muted">Commands and completion / failure results · queries and cache control · source release and observations</text>
+</g>
+<rect x="48" y="368" width="1184" height="216" rx="6" fill="#edf1fa" stroke="#2a52be" stroke-width="1.2"/>
+<text x="64" y="397" class="name">Infrastructure · composable capabilities</text>
+<g data-node="configuration">
+<rect x="64" y="414" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="80" y="441" class="name">Configuration</text>
+<text x="80" y="465" class="muted">Static configuration · validation</text>
+</g>
+<g data-node="topology">
+<rect x="356" y="414" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="372" y="441" class="name">Topology</text>
+<text x="372" y="465" class="muted">Local ranks · cache groups · layers</text>
+</g>
+<g data-node="coordinator">
+<rect x="648" y="414" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="664" y="441" class="name">Coordinator</text>
+<text x="664" y="465" class="muted">Recovery endpoint · selection</text>
+</g>
+<g data-node="mapping">
+<rect x="940" y="414" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="956" y="441" class="name">Mapping</text>
+<text x="956" y="465" class="muted">Hash / Block ID · byte layout</text>
+</g>
+<g data-node="rpc">
+<rect x="64" y="496" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="80" y="523" class="name">RPC</text>
+<text x="80" y="547" class="muted">Byte frames · deadlines · lifecycle</text>
+</g>
+<g data-node="executor">
+<rect x="356" y="496" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="372" y="523" class="name">Executor</text>
+<text x="372" y="547" class="muted">Queues · Bulk / Layerwise control</text>
+</g>
+<g data-node="collective">
+<rect x="648" y="496" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="664" y="523" class="name">Collective</text>
+<text x="664" y="547" class="muted">CollectiveGroup / GroupCompletion</text>
+</g>
+<g data-node="resources">
+<rect x="940" y="496" width="276" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="956" y="523" class="name">Resources</text>
+<text x="956" y="547" class="muted">Ownership · registration · safe close</text>
+</g>
+<g data-node="backend">
+<rect x="48" y="600" width="1184" height="72" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="627" class="name">Backend · MooncakeBackend / MemcacheBackend</text>
+<text x="64" y="651" class="muted">Whole objects / KeyRange / GVA · registration · object sessions · native completion guarantees</text>
+</g>
+<g data-node="external">
+<rect x="48" y="688" width="1184" height="64" rx="6" fill="#fff" stroke="#c8d4d9" stroke-width="1.2"/>
+<text x="64" y="715" class="name">Native transport and storage · Mooncake / Memcache</text>
+<text x="64" y="739" class="muted">Native clients, transport capabilities and external storage services</text>
+</g>
+<text x="48" y="783" class="muted">Business logic composes infrastructure and calls Backend directly; layers are not a forwarding chain.</text>
+</svg>

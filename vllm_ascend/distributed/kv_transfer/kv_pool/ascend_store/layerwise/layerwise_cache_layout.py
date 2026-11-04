@@ -122,7 +122,7 @@ def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None
 
     connector_name = getattr(kv_transfer_config, "kv_connector", None)
     root_extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None) or {}
-    if connector_name in ("AscendStoreConnector", "MooncakeConnectorStoreV1"):
+    if connector_name in ("AscendStoreConnector", "AscendStoreV1Connector", "MooncakeConnectorStoreV1"):
         connector_configs = [
             {
                 "kv_connector": connector_name,
@@ -139,6 +139,7 @@ def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None
             continue
         if connector_config.get("kv_connector") not in (
             "AscendStoreConnector",
+            "AscendStoreV1Connector",
             "MooncakeConnectorStoreV1",
         ):
             continue
