@@ -1,7 +1,6 @@
 import contextlib
 import typing
 from dataclasses import dataclass
-from zlib import adler32
 
 import numpy as np
 import torch
@@ -32,6 +31,7 @@ from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_pool_capacity
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
 # Main BF16 cache:
@@ -407,23 +407,27 @@ def update_sparse_kv_offload_metadata(
     query_start_loc: CpuGpuBuffer | torch.Tensor | np.ndarray,
     offload_req_ids_tensor: CpuGpuBuffer,
     offload_token_to_req: CpuGpuBuffer,
+    *,
+    request_identity: RequestIdentityRegistry,
+    is_dummy: bool = False,
 ) -> None:
     """Populate per-request identity tensors for the Sparse KV offload LRU.
 
-    Request ids are adler32 hashes of the scheduler request id,
-    rows are reset whenever the occupying request changes.
+    Owners identify request incarnations, not hashes or batch rows. Target and
+    draft calls must share the registry for the lifetime of their resident KV.
+    Padding is zero; dummy owners cannot alias real owners or the empty sentinel.
     """
-    offload_req_ids_tensor.np[:num_reqs_padded].fill(0)
-    effective_num_reqs = min(num_reqs, len(req_ids))
-    req_id_values = np.asarray(
-        [
-            adler32(req_id.encode("utf-8")) if isinstance(req_id, str) else row + 1
-            for row, req_id in enumerate(req_ids[:effective_num_reqs])
-        ],
-        dtype=np.int64,
-    )
-    offload_req_ids_tensor.np[:effective_num_reqs] = req_id_values
-    offload_req_ids_tensor.copy_to_gpu(num_reqs_padded)
+    if is_dummy:
+        req_id_values = np.arange(-2, -2 - num_reqs, -1, dtype=np.int64)
+    else:
+        if len(req_ids) < num_reqs:
+            raise ValueError("Sparse KV offload requires an ID for every active request")
+        active_req_ids = req_ids[:num_reqs]
+        if any(not isinstance(req_id, str) for req_id in active_req_ids):
+            raise TypeError("Sparse KV offload request IDs must be strings")
+        req_id_values = np.asarray(
+            [request_identity.get_or_create(req_id) for req_id in active_req_ids], dtype=np.int64
+        )
 
     if isinstance(query_start_loc, CpuGpuBuffer):
         query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1].numpy()
@@ -440,6 +444,9 @@ def update_sparse_kv_offload_metadata(
             "KV offload token_to_req metadata is shorter than the scheduled token batch: "
             f"metadata={token_to_req.shape[0]}, tokens={num_tokens}"
         )
+    offload_req_ids_tensor.np[:num_reqs_padded].fill(0)
+    offload_req_ids_tensor.np[:num_reqs] = req_id_values
+    offload_req_ids_tensor.copy_to_gpu(num_reqs_padded)
     offload_token_to_req.np[:num_tokens] = token_to_req[:num_tokens]
     if num_tokens_padded > num_tokens:
         offload_token_to_req.np[num_tokens:num_tokens_padded].fill(0)
@@ -463,7 +470,7 @@ def prepare_sparse_kv_offload_mtp_dummy_metadata(
     if token_to_req.shape[0] < num_tokens:
         token_to_req = np.pad(token_to_req, (0, num_tokens - token_to_req.shape[0]))
 
-    req_ids_buffer.np[:num_reqs] = np.arange(1, num_reqs + 1, dtype=np.int64)
+    req_ids_buffer.np[:num_reqs] = np.arange(-2, -2 - num_reqs, -1, dtype=np.int64)
     req_ids_buffer.copy_to_gpu(num_reqs)
     token_to_req_buffer.np[:num_tokens] = token_to_req[:num_tokens]
     token_to_req_buffer.copy_to_gpu(num_tokens)
