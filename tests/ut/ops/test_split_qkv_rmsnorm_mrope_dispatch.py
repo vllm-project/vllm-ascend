@@ -388,6 +388,84 @@ class SplitQKVMRoPEBodyTests(unittest.TestCase):
             self._check_body(hq, 4, grouped=True)
 
 
+class SplitQKVMRoPEDemandTests(unittest.TestCase):
+    demand: ClassVar[ModuleType]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.demand = _load_source_module("test_split_qkv_demand", OP_DIR / "ac_ub_demand.py")
+
+    def test_separate_alignment_and_conditional_terms(self):
+        # Frozen ledger values deliberately use small, non-aligned arithmetic.
+        # They are host accounting cases, not additional kernel qualifications.
+        for dtype in ("float16", "bfloat16"):
+            for gate, bias, expected in (
+                (False, False, 706),
+                (False, True, 773),
+                (True, False, 740),
+                (True, True, 807),
+            ):
+                for pair in (False, True):
+                    with self.subTest(dtype=dtype, gate=gate, bias=bias, pair=pair):
+                        self.assertEqual(
+                            self.demand.estimate_demand(
+                                num_q_heads=1,
+                                num_kv_heads=1,
+                                head_size=2,
+                                has_gate=gate,
+                                rope_dim=2,
+                                dtype=dtype,
+                                has_bias=bias,
+                                has_pair_work=pair,
+                            ),
+                            expected,
+                        )
+
+    def test_full_row_and_pair_can_each_dominate(self):
+        # Values come from the original ledger, including common weights.
+        for hq, row, pair, expected in ((6, 37376, 73664, 77348), (36, 198912, 138240, 208858)):
+            with self.subTest(heads=hq):
+                weights = 1024
+                common = dict(kv_heads=1, head_size=256, has_gate=True, rope_dim=64, dtype_bytes=2)
+                self.assertEqual(weights + self.demand._tile_body_bytes(rows=1, q_heads=hq, **common), row)
+                self.assertEqual(weights + self.demand._tile_body_bytes(rows=2, q_heads=min(hq, 12), **common), pair)
+                self.assertEqual(
+                    self.demand.estimate_demand(
+                        num_q_heads=hq,
+                        num_kv_heads=1,
+                        head_size=256,
+                        has_gate=True,
+                        rope_dim=64,
+                        dtype="bfloat16",
+                        has_bias=False,
+                        has_pair_work=True,
+                    ),
+                    expected,
+                )
+
+    def test_geometry_is_chosen_by_caller_and_no_pair_is_not_evaluated(self):
+        kwargs = dict(
+            num_q_heads=36,
+            num_kv_heads=1,
+            head_size=256,
+            has_gate=True,
+            rope_dim=64,
+            dtype="bfloat16",
+            has_bias=False,
+        )
+        with mock.patch.object(self.demand, "_tile_body_bytes", wraps=self.demand._tile_body_bytes) as body:
+            with mock.patch.object(self.demand, "_bhq", side_effect=AssertionError("unexpected pair")):
+                self.demand.estimate_demand(**kwargs, has_pair_work=False)
+            self.assertEqual(len(body.call_args_list), 1)
+            self.assertEqual(body.call_args.kwargs["q_heads"], 36)
+            self.assertEqual(body.call_args.kwargs["rows"], 1)
+        with mock.patch.object(self.demand, "_tile_body_bytes", wraps=self.demand._tile_body_bytes) as body:
+            self.demand.estimate_demand(**kwargs, has_pair_work=True)
+            self.assertEqual(
+                [(call.kwargs["rows"], call.kwargs["q_heads"]) for call in body.call_args_list], [(1, 36), (2, 12)]
+            )
+
+
 class SplitQKVMRoPEDispatchTests(unittest.TestCase):
     contracts: ClassVar[SimpleNamespace]
     envs: ClassVar[ModuleType]
