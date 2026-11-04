@@ -1007,27 +1007,6 @@ def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 1
 
 
-def _dense_sp_enabled(vllm_config) -> bool:
-    """Whether dense-family sequence parallelism is active for ``vllm_config``.
-
-    The dense-SP predicate and the model families it covers are owned by the
-    Qwen3.5 patch (``vllm_ascend.patch.worker.patch_qwen3_5.enable_dense_sp``),
-    so this helper reaches it through a lazy import and ``utils`` never pulls
-    the patch module's import-time monkey patches. The capability gate mirrors
-    ``vllm_ascend/patch/worker/__init__.py``: devices that never load the
-    standard worker patches (e.g. 310P) must not import the patch module here
-    either.
-    """
-    from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-
-    if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
-        return False
-
-    from vllm_ascend.patch.worker.patch_qwen3_5 import enable_dense_sp
-
-    return enable_dense_sp(vllm_config)
-
-
 def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         try:
@@ -1040,7 +1019,25 @@ def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         return False
 
-    return bool(vllm_config.parallel_config.use_sequence_parallel_moe) or _dense_sp_enabled(vllm_config)
+    if bool(vllm_config.parallel_config.use_sequence_parallel_moe):
+        return True
+
+    # Dense-family sequence parallelism: the predicate and the model families
+    # it covers are owned by the Qwen3.5 patch
+    # (``vllm_ascend.patch.worker.patch_qwen3_5.enable_dense_sp``), reached
+    # through a lazy import so this module never pulls the patch module's
+    # import-time monkey patches. The capability gate mirrors
+    # ``vllm_ascend/patch/worker/__init__.py``: devices that never load the
+    # standard worker patches (e.g. 310P) must not import the patch module
+    # here either.
+    from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
+    if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+        return False
+
+    from vllm_ascend.patch.worker.patch_qwen3_5 import enable_dense_sp
+
+    return enable_dense_sp(vllm_config)
 
 
 def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
