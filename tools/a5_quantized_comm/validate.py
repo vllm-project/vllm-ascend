@@ -193,11 +193,11 @@ def run(args) -> None:
     dist.init_process_group(backend="gloo", timeout=timeout)
     quant_group = dist.new_group(ranks=list(range(world_size)), backend="hccl", timeout=timeout)
     backend = quant_group._get_backend(device)
-    if args.backend == "ops-transformer":
-        # Let the official MTE context manager create its communication context.
-        hcom = backend.get_hccl_comm_name(rank, init_comm=False)
-    else:
-        hcom = backend.get_hccl_comm_name(rank)
+    # A newly created ProcessGroupHCCL is lazy. QuantMteContextManager consumes
+    # an existing communicator name; it does not initialize the process group.
+    hcom = backend.get_hccl_comm_name(rank)
+    if not hcom:
+        raise RuntimeError("Failed to initialize the dedicated HCCL communicator")
     if rank == 0:
         print(
             json.dumps(

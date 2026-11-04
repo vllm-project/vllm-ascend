@@ -37,8 +37,25 @@ class TestNativeMxfp8Benchmark(unittest.TestCase):
         for size in (1, 3, 16):
             with self.assertRaises(ValueError):
                 bench.NativeMxfp8AllReduce(size, "quant-domain", MagicMock(), MagicMock())
+        with self.assertRaisesRegex(RuntimeError, "communicator name is empty"):
+            bench.NativeMxfp8AllReduce(2, "", MagicMock(), MagicMock())
         with self.assertRaises(RuntimeError):
             bench.NativeMxfp8AllReduce(2, "quant-domain", None, MagicMock())
+
+    def test_dedicated_hccl_group_is_initialized_before_use(self):
+        backend = MagicMock()
+        backend.get_hccl_comm_name.return_value = "initialized-quant-domain"
+        group = MagicMock()
+        group._get_backend.return_value = backend
+        device = torch.device("cpu")
+
+        self.assertEqual(bench._get_initialized_hcom(group, device, 3), "initialized-quant-domain")
+        group._get_backend.assert_called_once_with(device)
+        backend.get_hccl_comm_name.assert_called_once_with(3)
+
+        backend.get_hccl_comm_name.return_value = ""
+        with self.assertRaisesRegex(RuntimeError, "Failed to initialize"):
+            bench._get_initialized_hcom(group, device, 3)
 
     def test_official_signatures_and_scale_bytes(self):
         source = torch.ones(2, 1024, dtype=torch.bfloat16)

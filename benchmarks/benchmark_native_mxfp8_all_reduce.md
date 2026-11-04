@@ -79,7 +79,7 @@ BF16 输入大小为 `tokens * hidden_size * 2` 字节；脚本不设最小通�
 ## 正确性与通信域约定
 
 - 默认 HCCL 组用于 BF16 基线、普通 FP32 参考求和、统计和 barrier。
-- 额外创建专用 HCCL 组，其 hcom 只交给官方 `quant_all_reduce`；不在该组上调用普通集合通信。
+- 额外创建并显式初始化专用 HCCL 组，其非空 hcom 只交给官方 `quant_all_reduce`；不在该组上调用普通集合通信。
 - 使用官方 Python facade，由它管理 context 和 buffer，不直接伪造底层 `torch.ops` 参数。
 - E4M3FN 和 E8M0 按原始字节在 CPU 独立解析，逐 rank 反量化后在普通组中做 FP32 SUM。
   这条通信 golden 不依赖 `npu_anti_mx_quant`。

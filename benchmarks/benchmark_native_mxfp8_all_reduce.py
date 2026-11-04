@@ -46,6 +46,8 @@ class NativeMxfp8AllReduce:
     def __init__(self, world_size: int, hcom: str, quantize_op: Callable, all_reduce_op: Callable):
         if world_size not in _SUPPORTED_WORLD_SIZES:
             raise ValueError("Use TP=2, 4 or 8 for this benchmark.")
+        if not hcom:
+            raise RuntimeError("The dedicated HCCL communicator name is empty.")
         if not callable(quantize_op) or not callable(all_reduce_op):
             raise RuntimeError("Both npu_dynamic_mx_quant and official quant_all_reduce must be callable.")
         self.world_size, self.hcom = world_size, hcom
@@ -123,6 +125,15 @@ def summarize(samples: list[float]) -> dict:
         "min_ms": ordered[0],
         "max_ms": ordered[-1],
     }
+
+
+def _get_initialized_hcom(group, device: torch.device, rank: int) -> str:
+    """Initialize the lazy HCCL process group and return its communicator name."""
+    backend = group._get_backend(device)
+    hcom = backend.get_hccl_comm_name(rank)
+    if not hcom:
+        raise RuntimeError("Failed to initialize the dedicated HCCL communicator.")
+    return hcom
 
 
 def _max_across_ranks(values: list, device: torch.device) -> list:
@@ -367,7 +378,7 @@ def main() -> None:
         rank = dist.get_rank()
         device = torch.device("npu", torch.npu.current_device())
         quant_group = dist.new_group(ranks=list(range(world_size)), backend="hccl", timeout=timeout)
-        hcom = quant_group._get_backend(device).get_hccl_comm_name(rank, init_comm=False)
+        hcom = _get_initialized_hcom(quant_group, device, rank)
         pipeline = NativeMxfp8AllReduce(world_size, hcom, quantize_op, all_reduce_op)
         report = {
             "torch": torch.__version__,
