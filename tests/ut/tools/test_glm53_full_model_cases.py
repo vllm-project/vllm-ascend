@@ -96,16 +96,45 @@ class FullModelConfigTests(unittest.TestCase):
                 if path.stem.endswith("ACCURACY"):
                     self.assertEqual(list(benchmarks), ["acc_gpqa"])
                     continue
-                self.assertEqual(len(benchmarks), 8)
+                self.assertEqual(len(benchmarks), 8 if a5 else 2)
                 for name, bench in benchmarks.items():
                     self.assertEqual(bench["max_out_len"], 1 if prefill_case else 1024)
-                    self.assertEqual(bench["request_rate"], 0)
+                    expected_rate = 1.8 if not a5 and path.stem.endswith("E2E") else 0
+                    self.assertEqual(bench["request_rate"], expected_rate)
                     if name.endswith("_warmup"):
                         measured = benchmarks[name.removesuffix("_warmup")]
-                        for key in ("dataset_path", "num_prompts", "batch_size", "max_out_len"):
+                        for key in ("dataset_path", "batch_size", "max_out_len", "request_rate"):
                             self.assertEqual(bench[key], measured[key])
+                        if a5 or path.stem.endswith("DECODE"):
+                            self.assertEqual(bench["num_prompts"], measured["num_prompts"])
                     if prefill_case:
                         self.assertNotIn("tpot_threshold", bench)
+
+    def test_a3_16k_release_load_and_cache_policy(self):
+        # Independent release-table values: rows 104, 124 (low latency), 135.
+        expected = {
+            "PREFILL": (7, 28, 0, 1, 14, False),
+            "DECODE": (80, 320, 0, 1024, 320, True),
+            "E2E": (40, 160, 1.8, 1024, 80, False),
+        }
+        for mode, (concurrency, requests, rate, output, warmup_count, cache_p) in expected.items():
+            with self.subTest(mode=mode):
+                path = CONFIG_DIR / f"GLM-5.3-W8A8C8-A3-ALL-{mode}.yaml"
+                config = yaml.safe_load(path.read_text(encoding="utf-8"))
+                self.assertEqual(list(config["benchmarks"]), ["perf_16k_warmup", "perf_16k"])
+                perf = config["benchmarks"]["perf_16k"]
+                self.assertEqual(
+                    (perf["batch_size"], perf["num_prompts"], perf["request_rate"], perf["max_out_len"]),
+                    (concurrency, requests, rate, output),
+                )
+                self.assertEqual(perf["dataset_path"], "vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8")
+                self.assertEqual(config["benchmarks"]["perf_16k_warmup"]["num_prompts"], warmup_count)
+                self.assertEqual(perf.get("tpot_threshold"), None if mode == "PREFILL" else 20)
+                for template in config["templates"]:
+                    cache_enabled = template["node_index"] < 2 and cache_p
+                    args = template["server_cmd_template"]
+                    self.assertEqual("--enable-prefix-caching" in args, cache_enabled)
+                    self.assertEqual("--no-enable-prefix-caching" in args, not cache_enabled)
 
     def test_matrix_entries_resolve_to_correct_hardware(self):
         resolver = ROOT / ".github/workflows/scripts/resolve_nightly_tests.py"
