@@ -25,6 +25,8 @@ def make_config():
             data_parallel_size=1,
         ),
         kv_transfer_config=None,
+        use_v2_model_runner=True,
+        additional_config={},
     )
 
 
@@ -70,7 +72,7 @@ def test_initialization_requires_speculative_decoding():
         ("parallel_config", "pipeline_parallel_size", 2, "PP=1"),
         ("parallel_config", "prefill_context_parallel_size", 2, "requires a Mooncake KV producer"),
         ("parallel_config", "decode_context_parallel_size", 2, "DCP=1"),
-        (None, "kv_transfer_config", SimpleNamespace(kv_connector="AscendStoreConnector"), "requires Mooncake"),
+        (None, "kv_transfer_config", SimpleNamespace(kv_connector="MultiConnector"), "requires Mooncake"),
     ],
 )
 def test_initialization_rejects_unsupported_execution(section, field, value, message):
@@ -105,7 +107,7 @@ def test_pcp_prefill_producer_and_dp_decode_consumer(connector, prefix_caching, 
         ("parallel_config", "tensor_parallel_size", 2, "PCP requires TP=1"),
         ("kv_transfer_config", "kv_role", "kv_consumer", "PCP requires a Mooncake KV producer"),
         ("kv_transfer_config", "kv_role", "kv_both", "PCP requires a Mooncake KV producer"),
-        ("kv_transfer_config", "kv_connector", "AscendStoreConnector", "requires Mooncake"),
+        ("kv_transfer_config", "kv_connector", "AscendStoreConnector", "requires a Mooncake KV producer"),
     ],
 )
 def test_pcp_rejects_unsupported_execution(section, field, value, message):
@@ -117,6 +119,64 @@ def test_pcp_rejects_unsupported_execution(section, field, value, message):
     with pytest.raises(ValueError, match=message):
         patch_replayssm_config.validate_mamba_cached_kernel(config)
     assert not config.cache_config.use_kda_recoverssm
+
+
+def make_store_config(**extra):
+    config = make_config()
+    config.parallel_config.tensor_parallel_size = 2
+    config.cache_config.enable_prefix_caching = True
+    config.cache_config.mamba_cache_mode = "align"
+    config.kv_transfer_config = SimpleNamespace(kv_connector="AscendStoreConnector", kv_connector_extra_config=extra)
+    return config
+
+
+@pytest.mark.parametrize("backend", ["mooncake", "memcache"])
+def test_bulk_store_prefix_reuse_enables_recoverssm(backend):
+    config = make_store_config(backend=backend)
+    assert patch_replayssm_config.validate_mamba_cached_kernel(config) is config
+    assert config.cache_config.use_kda_recoverssm
+
+
+@pytest.mark.parametrize("option", ["use_layerwise", "load_async", "save_decode_cache"])
+def test_store_rejects_execution_before_accepted_state_is_ready(option):
+    config = make_store_config(**{option: True})
+    with pytest.raises(ValueError, match=f"{option}=false"):
+        validate_glm_recoverssm(config)
+
+
+@pytest.mark.parametrize("option", ["prefill_tp_size", "decode_tp_size"])
+def test_store_rejects_heterogeneous_tp(option):
+    config = make_store_config(**{option: 4})
+    with pytest.raises(ValueError, match="matching TP sizes"):
+        validate_glm_recoverssm(config)
+
+
+def test_store_requires_prefix_caching():
+    config = make_store_config()
+    config.cache_config.enable_prefix_caching = False
+    config.cache_config.mamba_cache_mode = "none"
+    with pytest.raises(ValueError, match="requires prefix caching"):
+        validate_glm_recoverssm(config)
+
+
+def test_store_requires_v2_commit_lifecycle():
+    config = make_store_config()
+    config.use_v2_model_runner = False
+    with pytest.raises(ValueError, match="requires Model Runner V2"):
+        validate_glm_recoverssm(config)
+
+
+def test_store_rejects_kvpp():
+    config = make_store_config()
+    config.additional_config["enable_kvpp"] = True
+    with pytest.raises(ValueError, match="does not support KVPP"):
+        validate_glm_recoverssm(config)
+
+
+def test_store_rejects_unqualified_backend():
+    config = make_store_config(backend="yuanrong")
+    with pytest.raises(ValueError, match="mooncake or memcache"):
+        validate_glm_recoverssm(config)
 
 
 def test_other_models_and_disabled_switch_keep_upstream_validation(monkeypatch):

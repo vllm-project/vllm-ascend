@@ -724,6 +724,15 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         return sched_output
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_recoverssm_bulk_pool_does_not_publish_decode_increments(self, mock_client_cls):
+        config = self._make_config()
+        config.cache_config.use_kda_recoverssm = True
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        self._set_running_chunk(scheduler)
+        output = self._make_running_chunk_output([1], num_computed_tokens=64)
+        self.assertFalse(scheduler.build_connector_meta(output).requests)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_running_chunk_passes_computed_tokens_to_tracker(self, mock_client_cls):
         scheduler = KVPoolScheduler(self._make_config(), use_layerwise=False)
         request = MagicMock()

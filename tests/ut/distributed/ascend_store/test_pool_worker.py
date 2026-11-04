@@ -119,6 +119,7 @@ def make_worker(
     layer_offset=0,
     pp_partition=None,
     cache_block_size=16,
+    use_recoverssm=False,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
@@ -172,6 +173,7 @@ def make_worker(
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.block_size = cache_block_size
     config.cache_config.prefix_match_unit = prefix_match_unit
+    config.cache_config.use_kda_recoverssm = use_recoverssm
     config.kv_events_config = None
     if enable_kv_events:
         config.kv_events_config = MagicMock(enable_kv_cache_events=True)
