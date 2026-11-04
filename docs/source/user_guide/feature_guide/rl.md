@@ -267,6 +267,81 @@ expert choices. See the upstream
 [routed experts example](https://docs.vllm.ai/en/latest/examples/rl/routed_experts_e2e/)
 for decoding and replay logic.
 
+### Sampling Mask (Distribution Replay)
+
+Sampling Mask returns the token IDs retained after top-k/top-p/min-p filtering
+for each generated position. RL frameworks can use these supports with the
+corresponding logits to normalize training probabilities over the same token
+sets. See the upstream
+[Sampling Mask (Distribution Replay) guide](https://docs.vllm.ai/en/latest/training/sampling_mask/)
+for training-side usage.
+
+Start a tokens-only server with model runner V2 and processed logprobs:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 \
+vllm serve Qwen/Qwen3-0.6B \
+    --tokens-only \
+    --return-sampling-mask \
+    --logprobs-mode processed_logprobs
+```
+
+Capture is disabled by default. When enabled, requests must use
+`temperature > 0` and `top_k > 0`. Send pre-tokenized input to
+`/inference/v1/generate`:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/inference/v1/generate \
+    -H 'Content-Type: application/json' \
+    -d '{
+        "token_ids": [785, 6722, 315, 9625, 374],
+        "sampling_params": {
+            "temperature": 1.0,
+            "top_k": 20,
+            "top_p": 0.95,
+            "max_tokens": 32,
+            "logprobs": 1
+        },
+        "output_mode": "tokens",
+        "stream": false
+    }'
+```
+
+Each choice returns one support set per generated token. For example, this
+illustrative choice excerpt has two output positions:
+
+```json
+{
+  "token_ids": [12, 25],
+  "sampling_mask": [[3, 12, 20], [6, 25]]
+}
+```
+
+The sampled token belongs to its corresponding support. Mask size is independent
+of `logprobs`, and top-k ties can retain more than `top_k` tokens. With
+`stream=true`, concatenate token and mask chunks by choice index and token
+position.
+
+For an MTP-capable model, speculative decoding is supported with fixed
+verification boundaries. Add the following configuration to the server command:
+
+```bash
+--speculative-config '{"method":"mtp","num_speculative_tokens":2,"enable_adaptive_verification":false}'
+```
+
+Each committed token receives the processed target-model support at its
+position. The mask does not record draft or acceptance probabilities.
+
+On Ascend, supports are packed on the NPU and decoded on the CPU using the
+exact bitmask fallback. This preserves the complete support but adds transfer,
+CPU decoding, and response-size overhead. The adapter requires the upstream
+request-major sampling-mask interface.
+
+Diffusion models, custom logits processors, adaptive verification, and the
+batch-sharded LM-head gather path are not supported for this feature.
+Sampling masks contain neither probability values nor RNG state; they do not
+force a token sequence as [Trace Replay](#trace-replay) does.
+
 ## Deterministic rollouts
 
 Batch invariance reduces output differences caused by changes in batch shape
