@@ -67,7 +67,7 @@ test_cases:
         dataset_path: vllm-ascend/gsm8k
         request_conf: vllm_api_general_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-        max_out_len: 32768
+        max_out_len: 10240
         batch_size: 32
         temperature: 0
         baseline: 95
