@@ -195,7 +195,7 @@ run_pytest_target() {
     run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}"
   else
     set +e
-    run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n "${pytest_xdist_workers}" -sv --color=yes "${target}"
+    run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n "${pytest_xdist_workers}" -sv --color=yes "${target}"
   fi
   local status=$?
   set -e
@@ -246,7 +246,7 @@ run_pytest_batch() {
     run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}"
   else
     set +e
-    run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n "${pytest_xdist_workers}" -sv --color=yes "${batch_targets[@]}"
+    run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n "${pytest_xdist_workers}" -sv --color=yes "${batch_targets[@]}"
   fi
   local status=$?
   set -e
