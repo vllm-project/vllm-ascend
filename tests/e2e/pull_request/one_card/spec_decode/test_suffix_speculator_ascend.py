@@ -17,6 +17,13 @@ except ImportError:
 if not _IS_NPU:
     pytest.skip("requires Ascend NPU (torch_npu)", allow_module_level=True)
 
+from vllm.triton_utils import triton  # noqa: E402
+
+from vllm_ascend.ops.triton.spec_decode.suffix import (  # noqa: E402
+    segment_local_scan,
+    segment_scan_carries,
+    segment_tail_merge,
+)
 from vllm_ascend.worker.v2.spec_decode.suffix.speculator import (  # noqa: E402
     SuffixSpeculator,
 )
@@ -376,11 +383,9 @@ def test_ingestion_is_deterministic():
     assert torch.equal(states[0][1], states[1][1])
 
 
-# [NPU] The adaptive-verification observe kernel fails bishengir MLIR
-# compilation on CANN 9.1 (Ascend A3) with a ConvertLinalgRToBinary error;
-# the four core kernels (local_scan, corpus_draft, finalize, ingest) all
-# pass on NPU. Adaptive verification is an optional feature
-# (enable_adaptive_verification defaults to False) — tracked as follow-up.
+# The optional adaptive observe kernel has a known CANN 9.1 (Ascend A3)
+# ConvertLinalgRToBinary compiler failure. Keep that diagnostic scoped to
+# the adaptive cases; it is not evidence that adaptive verification works.
 def test_adaptive_verification_confidences():
     k, depth, max_reqs, max_len = 4, 8, 2, 64
     spec, rs = _make(k, depth, max_reqs, max_len, corpus_tokens=0, adaptive=True)
@@ -510,3 +515,144 @@ def test_reused_slot_does_not_inherit_verification_stats():
 def test_short_tree_depth_disables_the_corpus():
     spec, _ = _make(3, 1, 2, 64, corpus_tokens=1024)
     assert not spec.has_corpus
+
+
+def test_ingestion_reuses_poisoned_scratch_across_batch_sizes():
+    """Every active record is overwritten, including both padding planes."""
+    spec, rs = _make(4, 8, 8, 1100, corpus_tokens=97)
+    ref = dict(
+        corpus=np.full(97, -1, dtype=np.int64),
+        table=np.full(tuple(spec.table.shape), -1, dtype=np.int64),
+        head=0,
+        doc_seq=0,
+    )
+    scratch = (spec.emit_keys, spec.emit_values, spec.emit_prefixes)
+    addresses = [buffer.data_ptr() for buffer in scratch]
+    for burst, size in enumerate([8, 1, 5, 2, 8, 1]):
+        # Bad old keys/payloads must not leak into a smaller batch's sort.
+        spec.emit_keys.fill_(0)
+        spec.emit_values.fill_(torch.iinfo(torch.int64).max)
+        spec.emit_prefixes.fill_(torch.iinfo(torch.int64).max)
+        ids, docs = {}, []
+        for slot in range(size):
+            # Includes empty, short, truncated and full-block documents.
+            length = [0, 1, 2, 4, 95, 96, 1024, 1100][slot]
+            doc = [((j + slot + burst) % 11) for j in range(length)]
+            _set(rs, slot, [], doc)
+            ids[f"b{burst}-{slot}"] = slot
+            docs.append(doc)
+        _finish(spec, rs, ids)
+        _ref_ingest(ref, docs, 97, spec.num_buckets)
+        assert spec.corpus.tolist() == ref["corpus"].tolist()
+        assert spec.table.tolist() == ref["table"].tolist()
+        assert int(spec.corpus_head) == ref["head"]
+        assert int(spec.doc_seq) == ref["doc_seq"]
+        assert [buffer.data_ptr() for buffer in scratch] == addresses
+
+
+def test_ingestion_before_slot_reuse_preserves_finished_history():
+    spec, rs = _make(4, 8, 2, 64, corpus_tokens=256)
+    _set(rs, 0, [90, 91, 92], [7, 8, 9, 10])
+    _finish(spec, rs, {"finished": 0})
+    # Enqueue reuse immediately on the same stream, with no host wait.
+    rs.req_id_to_index = {"replacement": 0}
+    spec.add_request(0)
+    _set(rs, 0, [55], [56, 57])
+    _set(rs, 1, [], [90, 91, 92, 7])
+    drafts, valid = _propose(spec, rs, [1])
+    assert valid.tolist() == [3]
+    assert drafts[0].tolist() == [8, 9, 10, 7]
+
+
+@pytest.mark.parametrize("count", [1, 1023, 1024, 1025, 4103])
+@pytest.mark.parametrize("all_padding", [False, True])
+def test_segmented_max_preserves_exact_payloads_and_sentinel(count, all_padding):
+    block, cells = 1024, 32
+    rng = np.random.default_rng(count)
+    if all_padding:
+        keys = np.full(count, cells, dtype=np.float32)
+        values = np.full(count, -1, dtype=np.int64)
+    else:
+        # One run spans several tiles. Its maximum is in the first tile,
+        # while a later segment has smaller values (must reset carry).
+        keys = np.zeros(count, dtype=np.float32)
+        if count > 3:
+            keys[-3:] = [1, 2, cells]
+        values = (1 << 62) + rng.integers(0, 10000, size=count, dtype=np.int64)
+        values[0] = (1 << 63) - 2
+        values[keys == cells] = -1
+    initial = np.full(cells + 2, -1, dtype=np.int64)
+    initial[0], initial[-1] = 111, 222
+    # Cell 2 already has a newer payload; reduction must preserve it.
+    initial[3] = (1 << 63) - 1
+    expected = initial.copy()
+    for key, value in zip(keys, values):
+        if key < cells:
+            expected[1 + int(key)] = max(expected[1 + int(key)], int(value))
+    table_storage = torch.tensor(initial, device=DEVICE)
+    table = table_storage[1:-1]
+    key_tensor = torch.tensor(keys, device=DEVICE)
+    value_tensor = torch.tensor(values, device=DEVICE)
+    sorted_keys, permutation = torch.sort(key_tensor)
+    tiles = triton.cdiv(count, block)
+    prefixes = torch.empty(count, dtype=torch.int64, device=DEVICE)
+    summaries = torch.empty(tiles, dtype=torch.int64, device=DEVICE)
+    heads = torch.empty(tiles, dtype=torch.int32, device=DEVICE)
+    carries = torch.empty(tiles, dtype=torch.int64, device=DEVICE)
+    segment_local_scan[(tiles,)](
+        sorted_keys,
+        permutation,
+        value_tensor,
+        prefixes,
+        summaries,
+        heads,
+        count,
+        SENTINEL=cells,
+        BLOCK=block,
+        num_warps=4,
+    )
+    segment_scan_carries[(1,)](
+        summaries,
+        heads,
+        carries,
+        NUM_TILES=tiles,
+        CARRY_BLOCK=triton.next_power_of_2(tiles),
+        num_warps=4,
+    )
+    segment_tail_merge[(tiles,)](
+        sorted_keys,
+        prefixes,
+        carries,
+        table,
+        count,
+        SENTINEL=cells,
+        BLOCK=block,
+        num_warps=4,
+    )
+    assert table_storage.tolist() == expected.tolist()
+
+
+def test_ingestion_dense_collisions_keep_int64_document_order():
+    spec, rs = _make(4, 8, 8, 3072, corpus_tokens=1 << 16)
+    sequence = (1 << 31) - 9
+    spec.num_docs = sequence
+    spec.doc_seq.fill_(sequence)
+    ref = dict(
+        corpus=np.full(spec.corpus_len, -1, dtype=np.int64),
+        table=np.full(tuple(spec.table.shape), -1, dtype=np.int64),
+        head=0,
+        doc_seq=sequence,
+    )
+    docs, ids = [], {}
+    for slot in range(8):
+        # Equal hash keys collide through multiple emit and reduction tiles.
+        doc = [7] * (2049 + slot)
+        docs.append(doc)
+        _set(rs, slot, [], doc)
+        ids[f"finished-{slot}"] = slot
+    _finish(spec, rs, ids)
+    _ref_ingest(ref, docs, spec.corpus_len, spec.num_buckets)
+    assert spec.table.tolist() == ref["table"].tolist()
+    assert spec.corpus.tolist() == ref["corpus"].tolist()
+    assert int(spec.doc_seq) == ref["doc_seq"]
+    assert int(spec.corpus_head) == ref["head"]

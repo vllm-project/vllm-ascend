@@ -288,3 +288,91 @@ def test_init_speculator_skips_special_mtp():
         match="mtp is not supported yet",
     ):
         init_speculator(config, torch.device("cpu"))
+
+
+def _suffix_config():
+    config = _make_config("suffix")
+    config.speculative_config.num_speculative_tokens = 4
+    config.speculative_config.suffix_decoding_max_tree_depth = 24
+    config.speculative_config.suffix_decoding_max_cached_requests = 10000
+    config.speculative_config.suffix_decoding_corpus_tokens = 1 << 20
+    config.speculative_config.enable_adaptive_verification = False
+    return config
+
+
+def _mock_suffix_base(monkeypatch):
+    module = ModuleType("vllm.v1.worker.gpu.spec_decode.speculator")
+    module.BaseSpeculator = type(
+        "BaseSpeculator",
+        (),
+        {name: lambda *args: None for name in ("add_request", "on_requests_finished", "reset_state")},
+    )
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    return module.BaseSpeculator
+
+
+@pytest.mark.parametrize("enforce_eager", [False, True])
+def test_init_suffix_preserves_request_state_and_eager_config(monkeypatch, enforce_eager):
+    config = _suffix_config()
+    config.speculative_config.enforce_eager = enforce_eager
+    config.compilation_config = SimpleNamespace(mode=CompilationMode.VLLM_COMPILE)
+    _mock_suffix_base(monkeypatch)
+    speculator_cls = _mock_speculator_module(
+        monkeypatch, "vllm_ascend.worker.v2.spec_decode.suffix.speculator", "SuffixSpeculator"
+    )
+    req_states = object()
+    device = torch.device("cpu")
+    assert init_speculator(config, device, req_states) is speculator_cls.return_value
+    speculator_cls.assert_called_once()
+    actual_config, actual_device, actual_states = speculator_cls.call_args.args
+    assert actual_device == device
+    assert actual_states is req_states
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    if enforce_eager:
+        assert actual_config is not config
+        assert actual_config.compilation_config.mode == CompilationMode.NONE
+    else:
+        assert actual_config is config
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "num_speculative_tokens",
+        "suffix_decoding_max_tree_depth",
+        "suffix_decoding_max_cached_requests",
+        "suffix_decoding_corpus_tokens",
+        "enable_adaptive_verification",
+    ],
+)
+def test_init_suffix_rejects_missing_upstream_config(monkeypatch, field):
+    config = _suffix_config()
+    delattr(config.speculative_config, field)
+    _mock_suffix_base(monkeypatch)
+    speculator_cls = _mock_speculator_module(
+        monkeypatch, "vllm_ascend.worker.v2.spec_decode.suffix.speculator", "SuffixSpeculator"
+    )
+    with pytest.raises(RuntimeError, match=f"SpeculativeConfig.{field}"):
+        init_speculator(config, torch.device("cpu"), object())
+    speculator_cls.assert_not_called()
+
+
+@pytest.mark.parametrize("hook", ["add_request", "on_requests_finished", "reset_state"])
+@pytest.mark.parametrize("missing", [True, False])
+def test_init_suffix_rejects_partial_upstream_lifecycle(monkeypatch, hook, missing):
+    base = _mock_suffix_base(monkeypatch)
+    if missing:
+        delattr(base, hook)
+    else:
+        setattr(base, hook, None)
+    speculator_cls = _mock_speculator_module(
+        monkeypatch, "vllm_ascend.worker.v2.spec_decode.suffix.speculator", "SuffixSpeculator"
+    )
+    with pytest.raises(RuntimeError, match=f"BaseSpeculator.{hook}"):
+        init_speculator(_suffix_config(), torch.device("cpu"), object())
+    speculator_cls.assert_not_called()
+
+
+def test_init_suffix_requires_request_state():
+    with pytest.raises(ValueError, match="requires request states"):
+        init_speculator(_suffix_config(), torch.device("cpu"))

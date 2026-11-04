@@ -14,10 +14,10 @@ Extends the n-gram speculator with the two parts of SuffixDecoding
   longest suffix match, so the index is only an entry point for suffix
   matching.
 
-The propose path never synchronizes with the host. Ingestion reads token
-history and lengths directly from ``RequestState`` and processes finished
-requests in sorted id order; index updates are order-independent, so every
-TP rank holds an identical corpus without any collective.
+Ingestion reads token history and lengths directly from ``RequestState`` and
+processes finished requests in sorted id order. Exact index reduction and
+staged corpus state updates run in sequence on the current stream, so each
+TP rank builds the same corpus without a collective.
 """
 
 from __future__ import annotations
@@ -33,6 +33,14 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
+
+from vllm_ascend.ops.triton.spec_decode.suffix import (
+    _bucket,
+    _suffix_ingest_emit_kernel,
+    segment_local_scan,
+    segment_scan_carries,
+    segment_tail_merge,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -53,6 +61,8 @@ _BUCKET_SLOTS = 8
 # Prompt tokens stored ahead of each response (longest hash key length - 1).
 _PROMPT_CONTEXT = 3
 _INGEST_BLOCK = 1024
+# Address keys (including the one-past-table sentinel) must be float32-exact.
+_MAX_EXACT_TABLE_CELLS = 1 << 24
 # Adaptive verification: acceptance is tracked per (draft source, match-length
 # bucket, position). Match lengths 1-6 get their own bucket, then 7-10, 11-20
 # and 21+. Counts are halved every _STATS_HALF_LIFE steps so the estimate
@@ -64,11 +74,6 @@ _STATS_HALF_LIFE = 1024
 @triton.jit
 def _len_bucket(L):
     return tl.where(L <= 6, L - 1, tl.where(L <= 10, 6, tl.where(L <= 20, 7, 8)))
-
-
-@triton.jit
-def _bucket(hv, NUM_BUCKETS: tl.constexpr):
-    return ((hv >> 29) ^ hv) & (NUM_BUCKETS - 1)
 
 
 @triton.jit
@@ -423,113 +428,6 @@ def _suffix_observe_kernel(
     tl.store(last_bucket_ptr + req, -1)
 
 
-@triton.jit(do_not_specialize=["num_docs"])
-def _suffix_ingest_kernel(
-    token_ids_ptr,  # *int32  [max_num_reqs, token_ids_stride]
-    token_ids_stride,
-    docs_ptr,  # *int32  [F, 2]  (slot, start) of finished requests, sorted
-    num_docs,
-    total_len_ptr,  # *int32  [max_num_reqs]
-    corpus_ptr,  # *int32  [corpus_len]
-    corpus_len,
-    head_ptr,  # *int64  [1]  next write offset
-    doc_seq_ptr,  # *int64  [1]  documents ingested so far
-    head_out_ptr,  # *int64  [1]
-    doc_seq_out_ptr,  # *int64  [1]
-    table_ptr,  # *int64  [2, NUM_BUCKETS, SLOTS]
-    HASH_MUL: tl.constexpr,
-    NUM_BUCKETS: tl.constexpr,
-    SLOTS: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    """Append finished responses to the corpus ring and index them, with one
-    program per (document, block).
-
-    Documents are placed one after another. A document that does not fit
-    before the end of the ring wraps to offset 0, so no document straddles
-    the boundary. Older documents are overwritten in FIFO order (including
-    earlier documents of the same batch, if the batch exceeds the ring);
-    their index entries become stale and are rejected by verification at
-    lookup. Each program replays the batch's placement to find its offset
-    and skips positions a later document of the batch overwrites, so every
-    position is written by exactly one program and the result does not
-    depend on execution order.
-    """
-    f = tl.program_id(0).to(tl.int64)
-    blk = tl.program_id(1).to(tl.int64)
-    cap = tl.cast(corpus_len, tl.int64)
-    req = tl.load(docs_ptr + 2 * f).to(tl.int64)
-    end = tl.load(total_len_ptr + req).to(tl.int64)
-    # Keep the newest cap - 1 tokens of an over-long response.
-    start = tl.maximum(tl.load(docs_ptr + 2 * f + 1).to(tl.int64), end - (cap - 1))
-    n = tl.maximum(end - start, 0)
-    # Block 0 also writes the separator.
-    if (blk > 0) & (blk * BLOCK >= n):
-        return
-    head = tl.load(head_ptr)
-    for i in range(f):
-        req_i = tl.load(docs_ptr + 2 * i).to(tl.int64)
-        end_i = tl.load(total_len_ptr + req_i).to(tl.int64)
-        start_i = tl.maximum(
-            tl.load(docs_ptr + 2 * i + 1).to(tl.int64), end_i - (cap - 1)
-        )
-        n_i = tl.maximum(end_i - start_i, 0)
-        head = tl.where(head + n_i + 1 > cap, 0, head) + n_i + 1
-    head = tl.where(head + n + 1 > cap, 0, head)
-    doc_seq = tl.load(doc_seq_ptr) + f
-
-    j = blk * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
-    m = j < n
-    pos = head + j
-    sep = head + n
-    keep = m
-    keep_sep = sep >= 0
-    later = head + n + 1
-    for g in range(f + 1, num_docs):
-        req_g = tl.load(docs_ptr + 2 * g).to(tl.int64)
-        end_g = tl.load(total_len_ptr + req_g).to(tl.int64)
-        start_g = tl.maximum(
-            tl.load(docs_ptr + 2 * g + 1).to(tl.int64), end_g - (cap - 1)
-        )
-        n_g = tl.maximum(end_g - start_g, 0)
-        later = tl.where(later + n_g + 1 > cap, 0, later)
-        # Document g and its separator occupy [later, later + n_g].
-        keep = keep & ((pos < later) | (pos > later + n_g))
-        keep_sep = keep_sep & ((sep < later) | (sep > later + n_g))
-        later += n_g + 1
-    if blk == 0:
-        tl.store(corpus_ptr + sep, -1, mask=keep_sep)
-        if f == num_docs - 1:
-            tl.store(head_out_ptr, sep + 1)
-            tl.store(doc_seq_out_ptr, doc_seq + 1)
-
-    row = token_ids_ptr + req * token_ids_stride + start
-    tl.store(corpus_ptr + pos, tl.load(row + j, mask=m), mask=keep)
-    # Index each position j under its preceding 2 and 4 tokens, when they lie
-    # in the document. Entries order by (document, position), so atomic_max
-    # keeps the newest occurrence regardless of execution order.
-    slot = doc_seq % SLOTS
-    val = (doc_seq << 32) | pos
-    hv = tl.zeros([BLOCK], tl.int64)
-    for d in tl.static_range(4):
-        # [NPU] clamp the potentially-negative address before loading.
-        _hp = tl.where(j - 1 - d < 0, 0, j - 1 - d)
-        t = tl.load(row + _hp, mask=m & (j - 1 - d >= 0), other=0)
-        hv = (hv ^ t.to(tl.int64)) * HASH_MUL
-        if d == 1:
-            tl.atomic_max(
-                table_ptr + (NUM_BUCKETS + _bucket(hv, NUM_BUCKETS)) * SLOTS + slot,
-                val,
-                mask=m & (j >= 2),
-            )
-        if d == 3:
-            tl.atomic_max(
-                table_ptr + _bucket(hv, NUM_BUCKETS) * SLOTS + slot,
-                val,
-                mask=m & (j >= 4),
-            )
-
-
 class SuffixSpeculator(BaseSpeculator):
     """V2-compatible GPU suffix decoding speculator."""
 
@@ -562,9 +460,6 @@ class SuffixSpeculator(BaseSpeculator):
         else:
             self.block_l = max(16, triton.next_power_of_2(max(L, 1)))
         self.n_blocks = triton.cdiv(L, self.block_l)
-        self.scratch = torch.zeros(
-            (self.max_num_reqs, self.n_blocks), dtype=torch.int64, device=device
-        )
 
         # Corpus of finished responses separated by -1, plus two hash tables
         # keyed on the last 4 and last 2 tokens before each position. A
@@ -585,6 +480,18 @@ class SuffixSpeculator(BaseSpeculator):
             self.corpus_len = 0
         self.has_corpus = self.corpus_len > 0
         self.num_buckets = triton.next_power_of_2(max(16, self.corpus_len // 4))
+        table_cells = 2 * (self.num_buckets if self.has_corpus else 1) * _BUCKET_SLOTS
+        if table_cells > _MAX_EXACT_TABLE_CELLS:
+            raise ValueError(
+                "suffix corpus hash table exceeds 2**24 cells; "
+                "float32 ingestion address keys would not be exact. "
+                "Reduce suffix_decoding_corpus_tokens."
+            )
+        # Validate before allocating the corpus, table, or configuration-sized
+        # scratch, including when Python assertions are disabled.
+        self.scratch = torch.zeros(
+            (self.max_num_reqs, self.n_blocks), dtype=torch.int64, device=device
+        )
         self.corpus = torch.full(
             (max(self.corpus_len, 1),), -1, dtype=torch.int32, device=device
         )
@@ -599,6 +506,28 @@ class SuffixSpeculator(BaseSpeculator):
         # Host mirror of doc_seq: index entries keep it in 31 bits.
         self.num_docs = 0
         self.ingest_out = torch.zeros(2, dtype=torch.int64, device=device)
+
+        # Non-atomic ingest scratch (sort + segmented-max path). Sized by
+        # configuration, not by any single batch: C_max = 2 * F_max * P.
+        # Allocated only when the corpus is enabled; a disabled corpus never
+        # runs the ingest chain, so no full-size buffers are held.
+        if self.has_corpus:
+            self.emit_p = (
+                triton.cdiv(self.max_model_len, _INGEST_BLOCK) * _INGEST_BLOCK
+            )
+            self.emit_c_max = 2 * self.max_num_reqs * self.emit_p
+            cmax = max(self.emit_c_max, 1)
+            self.emit_keys = torch.zeros(cmax, dtype=torch.float32, device=device)
+            self.emit_values = torch.zeros(cmax, dtype=torch.int64, device=device)
+            self.emit_prefixes = torch.zeros(cmax, dtype=torch.int64, device=device)
+            t_max = triton.cdiv(cmax, _INGEST_BLOCK)
+            self.emit_summary_values = torch.zeros(
+                t_max, dtype=torch.int64, device=device
+            )
+            self.emit_summary_heads = torch.zeros(
+                t_max, dtype=torch.int32, device=device
+            )
+            self.emit_carries = torch.zeros(t_max, dtype=torch.int64, device=device)
 
         # Batch-ordered draft output, scattered into RequestState.draft_tokens
         # by the model runner (same contract as the model-based speculators).
@@ -710,7 +639,11 @@ class SuffixSpeculator(BaseSpeculator):
         self.num_docs += num_docs
         docs_gpu = async_tensor_h2d(docs, self.device, torch.int32)
         token_ids = self.req_states.all_token_ids.gpu
-        _suffix_ingest_kernel[
+        # Dense record capacity for THIS batch; the second family plane starts
+        # at this batch's F (num_docs), not at max_num_reqs.
+        C = 2 * num_docs * self.emit_p
+        T = triton.cdiv(C, _INGEST_BLOCK)
+        _suffix_ingest_emit_kernel[
             (num_docs, triton.cdiv(self.max_model_len, _INGEST_BLOCK))
         ](
             token_ids,
@@ -724,13 +657,50 @@ class SuffixSpeculator(BaseSpeculator):
             self.doc_seq,
             self.ingest_out[0:1],
             self.ingest_out[1:2],
-            self.table,
+            self.emit_keys[:C],
+            self.emit_values[:C],
             HASH_MUL=_HASH_MUL,
             NUM_BUCKETS=self.num_buckets,
             SLOTS=_BUCKET_SLOTS,
             BLOCK=_INGEST_BLOCK,
+            P=self.emit_p,
+            SENTINEL=self.table.numel(),
             num_warps=4,
         )
+        # Sort address keys only; values keep original record order and are
+        # gathered on device inside segment_local_scan (no host-side gather).
+        sorted_keys, permutation = torch.sort(self.emit_keys[:C])
+        segment_local_scan[(T,)](
+            sorted_keys,
+            permutation,
+            self.emit_values[:C],
+            self.emit_prefixes[:C],
+            self.emit_summary_values[:T],
+            self.emit_summary_heads[:T],
+            C,
+            SENTINEL=self.table.numel(),
+            BLOCK=_INGEST_BLOCK,
+            num_warps=4,
+        )
+        segment_scan_carries[(1,)](
+            self.emit_summary_values[:T],
+            self.emit_summary_heads[:T],
+            self.emit_carries[:T],
+            NUM_TILES=T,
+            CARRY_BLOCK=triton.next_power_of_2(max(T, 1)),
+            num_warps=4,
+        )
+        segment_tail_merge[(T,)](
+            sorted_keys,
+            self.emit_prefixes[:C],
+            self.emit_carries[:T],
+            self.table,
+            C,
+            SENTINEL=self.table.numel(),
+            BLOCK=_INGEST_BLOCK,
+            num_warps=4,
+        )
+        # Publish staged state for the next batch only after the whole chain.
         self.corpus_head.copy_(self.ingest_out[0:1])
         self.doc_seq.copy_(self.ingest_out[1:2])
 
