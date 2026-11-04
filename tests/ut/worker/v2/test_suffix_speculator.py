@@ -29,6 +29,16 @@ def _config(corpus_tokens=128, max_cached_requests=10000, depth=8):
 def make_speculator(monkeypatch):
     # These tests allocate real CPU tensors but never launch Triton kernels.
     monkeypatch.setattr(suffix, "HAS_TRITON", True)
+    # The CPU Triton placeholder has no host arithmetic helpers. Supply only
+    # those helpers; kernel objects remain untouched and are never simulated.
+    monkeypatch.setattr(
+        suffix,
+        "triton",
+        SimpleNamespace(
+            next_power_of_2=lambda n: 1 << (max(1, n) - 1).bit_length(),
+            cdiv=lambda n, divisor: -(-n // divisor),
+        ),
+    )
     return lambda config: suffix.SuffixSpeculator(config, torch.device("cpu"), SimpleNamespace())
 
 
