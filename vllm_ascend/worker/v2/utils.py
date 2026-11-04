@@ -39,6 +39,7 @@ class AscendV2KVBlockZeroer(KVBlockZeroer):
         num_blocks: int,
         runner_only_attn_layers: set[str] | None = None,
         cache_dtype: str | None = None,
+        excluded_cache_components: set[tuple[str, int]] | None = None,
     ) -> None:
         # The upstream constructor changed between v0.28 and main. Set the two
         # fields consumed by this subclass directly, then delegate each logical
@@ -46,6 +47,7 @@ class AscendV2KVBlockZeroer(KVBlockZeroer):
         self.device = device
         self._meta = None
         runner_only_attn_layers = runner_only_attn_layers or set()
+        excluded_cache_components = excluded_cache_components or set()
         groups = list(attn_groups_iter)
         # The 4th component of an mxfp8 tuple is the static checkpoint V
         # scale: clearing a recycled block must preserve it.
@@ -72,13 +74,17 @@ class AscendV2KVBlockZeroer(KVBlockZeroer):
                 for layer_name in group.layer_names:
                     if layer_name in runner_only_attn_layers:
                         continue
+                    # Offload TopK views are query-row scratch, not paged KV.
+                    if (layer_name, component_id) in excluded_cache_components:
+                        continue
                     kv_cache = layer_caches[layer_name]
                     component = None
                     if isinstance(kv_cache, torch.Tensor) and component_id == 0:
                         component = kv_cache
                     elif isinstance(kv_cache, (tuple, list)) and component_id < len(kv_cache):
                         component = kv_cache[component_id]
-                    if component is not None:
+                    # Ascend Block Zeroer unpacks tuple/list KV caches; skip empty views to avoid zero-sized launches.
+                    if isinstance(component, torch.Tensor) and component.numel() > 0:
                         layer_names.append(layer_name)
                         component_context[layer_name] = SimpleNamespace(kv_cache=component)
                 if layer_names:

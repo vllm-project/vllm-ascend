@@ -1,0 +1,6 @@
+pr: 19179
+entries:
+  - category: bugfix
+    text: Fixed MiniMax-M3 mixed FP8/BF16 KV cache initialization on Ascend A5 pipeline stages without dense attention layers by preserving 128-token cache blocks.
+    model: MiniMax-M3
+    hardware: [A5]

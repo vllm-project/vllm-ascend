@@ -197,6 +197,7 @@
             "moonshotai/Kimi-K2-Thinking",
             "moonshotai/Kimi-Linear-48B-A3B-Instruct",
             "neuralmagic/Qwen2.5-3B-quantized.w8a8",
+            "niannianxu/Qwen3.8-27B-LiLiCorr-block8-epoch0",
             "nv-community/Minitron-8B-Base",
             "nv-community/audio-flamingo-3",
             "nv-community/audio-flamingo-3-hf",
@@ -346,6 +347,7 @@
             "Eco-Tech/Kimi-K2.5-W4A8",
             "Eco-Tech/Kimi-K2.6-w4a8",
             "Eco-Tech/Kimi-K2.7-Code-w4a8",
+            "Eco-Tech/Kimi-K3-w4a8",
             "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot",
             "Eco-Tech/MiniMax-M2.7-eagle-model-short",
             "Eco-Tech/MiniMax-M2.7-w8a8-QuaRot",
@@ -446,6 +448,7 @@
             "Qwen/Qwen3.5-9B",
             "Qwen/Qwen3.6-27B",
             "Qwen/Qwen3.6-35B-A3B",
+            "Qwen/Qwen3.8-27B",
             "RedHatAI/GLM-5.2-speculator.dspark",
             "RedHatAI/Qwen3-32B-speculator.eagle3",
             "RedHatAI/Qwen3-8B-speculator.eagle3",
@@ -504,6 +507,7 @@
             "mistralai/Voxtral-Mini-4B-Realtime-2602",
             "moonshotai/Kimi-K2-Thinking",
             "moonshotai/Kimi-Linear-48B-A3B-Instruct",
+            "niannianxu/Qwen3.8-27B-LiLiCorr-block8-epoch0",
             "nv-community/audio-flamingo-3",
             "nv-community/audio-flamingo-3-hf",
             "openai-mirror/whisper-large-v3",
@@ -583,7 +587,8 @@
             "Eco-Tech/GLM-5.2-w8a8c8",
             "rainney/AEON-DFlash-Qwen3.6-35B-A3B",
             "Eco-Tech/GLM-5.3-w8a8c8",
-            "Eco-Tech/GLM-5.3-Flash-w8a8"
+            "Eco-Tech/GLM-5.3-Flash-w8a8",
+            "Eco-Tech/Qwen3.6-27B-W8A8-310P"
         ],
         "a5": [
             "Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4",

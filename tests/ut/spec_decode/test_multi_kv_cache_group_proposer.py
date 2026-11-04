@@ -8,11 +8,11 @@ import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 
-import vllm_ascend.spec_decode as spec_decode
-import vllm_ascend.spec_decode.multi_kv_cache_group_proposer as multi_group_proposer
+import vllm_ascend.worker.v1.spec_decode as spec_decode
+import vllm_ascend.worker.v1.spec_decode.multi_kv_cache_group_proposer as multi_group_proposer
 from vllm_ascend.attention.indexer_kpool import AscendIndexerKPoolMetadata, AscendIndexerKPoolTailMetadata
-from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
-from vllm_ascend.spec_decode.multi_kv_cache_group_proposer import (
+from vllm_ascend.worker.v1.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.worker.v1.spec_decode.multi_kv_cache_group_proposer import (
     AscendMultiKVCacheGroupMTPProposer,
     is_multi_kv_cache_group_mtp,
 )
@@ -225,7 +225,7 @@ def test_primary_group_crops_block_table_to_builder_width():
     )
 
     refreshed_gids: set[int] = set()
-    group_metadata = proposer._common_attn_metadata_for_draft_group(
+    group_metadata = proposer._common_attn_metadata_for_draft_group(  # type: ignore[call-arg]
         common_attn_metadata,
         attn_group,
         num_input_tokens=4,
@@ -237,10 +237,14 @@ def test_primary_group_crops_block_table_to_builder_width():
     assert not group_metadata.block_table_tensor[2:].any()
     assert group_metadata.slot_mapping.data_ptr() == common_attn_metadata.slot_mapping.data_ptr()
     common_attn_metadata.block_table_tensor.fill_(99)
-    reused = proposer._common_attn_metadata_for_draft_group(common_attn_metadata, attn_group, 4, 0, refreshed_gids)
+    reused = proposer._common_attn_metadata_for_draft_group(  # type: ignore[call-arg]
+        common_attn_metadata, attn_group, 4, 0, refreshed_gids
+    )
     assert reused.block_table_tensor.data_ptr() == group_metadata.block_table_tensor.data_ptr()
     assert reused.block_table_tensor[0, 0] == 0
-    refreshed = proposer._common_attn_metadata_for_draft_group(common_attn_metadata, attn_group, 4, 0, set())
+    refreshed = proposer._common_attn_metadata_for_draft_group(  # type: ignore[call-arg]
+        common_attn_metadata, attn_group, 4, 0, set()
+    )
     assert refreshed.block_table_tensor[0, 0] == 99
 
 
@@ -259,7 +263,9 @@ def test_cache_only_next_step_uses_group_metadata_without_advancing_state():
         layer_names=["draft.indexer.k_cache"],
         get_metadata_builder=MagicMock(return_value=builder),
     )
-    proposer._common_attn_metadata_for_draft_group = MagicMock(return_value=group_common_attn_metadata)
+    proposer._common_attn_metadata_for_draft_group = MagicMock(  # type: ignore[method-assign]
+        return_value=group_common_attn_metadata
+    )
 
     per_layer_metadata = proposer._build_cache_only_group_next_step_attn_metadata(
         common_attn_metadata,
@@ -306,8 +312,10 @@ def test_multi_group_graph_capture_uses_per_group_views(draft_index):
         for index, builder in enumerate(builders)
     ]
     proposer.draft_attn_groups = groups
-    proposer._is_cache_only_draft_attn_group = MagicMock(side_effect=lambda group: group is groups[1])
-    proposer._common_attn_metadata_for_draft_group = MagicMock(side_effect=group_views)
+    proposer._is_cache_only_draft_attn_group = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda group: group is groups[1]
+    )
+    proposer._common_attn_metadata_for_draft_group = MagicMock(side_effect=group_views)  # type: ignore[method-assign]
     expected = [object(), object()]
     for builder, metadata in zip(builders, expected):
         builder.build_for_graph_capture.return_value = metadata
@@ -420,6 +428,7 @@ def test_later_draft_sequence_lengths_exclude_rejected_tokens():
         num_computed_tokens_cpu=None,
         positions=torch.arange(12, dtype=torch.int32),
         block_table_tensor=torch.tensor([[2], [7]], dtype=torch.int32),
+        invalidate_cached_layout=lambda: None,
     )
     positions = torch.tensor([10, 20], dtype=torch.int32)
     for step in range(1, 5):
@@ -465,6 +474,7 @@ def test_full_graph_later_draft_accepts_missing_cpu_sequence_lengths():
         num_computed_tokens_cpu=None,
         positions=torch.arange(12, dtype=torch.int32),
         block_table_tensor=torch.tensor([[2], [7]], dtype=torch.int32),
+        invalidate_cached_layout=lambda: None,
     )
 
     updated, _ = proposer.attn_update_stack_num_spec_norm(

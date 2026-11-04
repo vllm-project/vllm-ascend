@@ -19,8 +19,14 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     uses_a5_packed_cache,
 )
 from vllm_ascend.ops.triton.fold_indexer_cache import fold_indexer_cache_rows
-from vllm_ascend.ops.triton.prepare_indexer_indices import prepare_indexer_indices
-from vllm_ascend.ops.triton.quantize_indexer_query import quantize_indexer_query
+from vllm_ascend.ops.triton.prepare_indexer_indices import (
+    prepare_indexer_indices,
+    register_indexer_warmup,
+)
+from vllm_ascend.ops.triton.quantize_indexer_query import (
+    _QUANTIZE_INDEXER_QUERY_KERNEL,
+    quantize_indexer_query,
+)
 from vllm_ascend.ops.triton.quantize_mxfp4_indexer import quantize_mxfp4_indexer
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -53,6 +59,10 @@ class DeepseekV41Indexer(nn.Module):
         self.width = int(config.index_head_dim)
         self.rope_width = int(config.qk_rope_head_dim)
         self.index_topk = int(config.index_topk)
+        # Declarative JIT warmup for both indexer kernels; the model runner
+        # holds the registry window open during model construction.
+        register_indexer_warmup(self.index_topk, compress_ratio, vllm_config)
+        _QUANTIZE_INDEXER_QUERY_KERNEL.register_warmup(vllm_config)
         self.softmax_scale = self.width**-0.5
         self.weights_scale = self.softmax_scale * self.n_heads**-0.5
         self.wq_b = ReplicatedLinear(

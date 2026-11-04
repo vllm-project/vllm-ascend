@@ -103,6 +103,13 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         self._connectors[:] = [*self._layerwise_slot_release_providers, *self._non_slot_release_connectors]
         super().shutdown()
 
+    def wait_for_layer_load_ready(self, layer_name: str) -> None:
+        """Observe child completion without advancing their layer cursors."""
+        for connector in self._connectors:
+            wait_ready = getattr(connector, "wait_for_layer_load_ready", None)
+            if wait_ready is not None:
+                wait_ready(layer_name)
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         if getattr(self, "_external_slot_release_sink_configured", False):
             # AscendStore owns the layer-entry reuse wait after accepting the

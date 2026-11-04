@@ -19,7 +19,8 @@ config:
     dp_size: 4
     dp_size_local: 2
     dp_rank_start: 0
-    tp_size: 8
+    tp_size: 1
+    cp_size: 8
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
@@ -28,7 +29,8 @@ config:
     dp_size: 4
     dp_size_local: 2
     dp_rank_start: 2
-    tp_size: 8
+    tp_size: 1
+    cp_size: 8
     dp_address: "${NODE_0_IP}"
 
   - node_index: 2
@@ -88,6 +90,8 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
       - --enable-expert-parallel
       - --speculative-config
       - '{"num_speculative_tokens": 3, "method":"mtp"}'
@@ -96,7 +100,7 @@ templates:
       - --max-model-len
       - "140000"
       - --additional-config
-      - '{"enable_dsa_cp": true,"enable_fused_mc2":1}'
+      - '{"enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -113,7 +117,7 @@ templates:
       - --reasoning-parser
       - "glm45"
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV1",
+      - '{"kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_producer",
         "kv_port": "32120",
         "engine_id": "0",
@@ -121,7 +125,7 @@ templates:
                     "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
-                            "tp_size": 8
+                            "tp_size": 1
                     },
                     "decode": {
                             "dp_size": 4,
@@ -148,6 +152,8 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
       - --enable-expert-parallel
       - --speculative-config
       - '{"num_speculative_tokens": 3, "method":"mtp"}'
@@ -156,7 +162,7 @@ templates:
       - --max-model-len
       - "140000"
       - --additional-config
-      - '{"enable_dsa_cp": true,"enable_fused_mc2":1}'
+      - '{"enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -173,7 +179,7 @@ templates:
       - --reasoning-parser
       - "glm45"
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV1",
+      - '{"kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_producer",
         "kv_port": "32120",
         "engine_id": "1",
@@ -181,7 +187,7 @@ templates:
                     "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
-                            "tp_size": 8
+                            "tp_size": 1
                     },
                     "decode": {
                             "dp_size": 4,
@@ -236,7 +242,7 @@ templates:
       - --reasoning-parser
       - "glm45"
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV1",
+      - '{"kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_consumer",
         "kv_port": "32122",
         "engine_id": "2",
@@ -244,7 +250,7 @@ templates:
           "use_ascend_direct": true,
           "prefill": {
             "dp_size": 4,
-            "tp_size": 8
+            "tp_size": 1
           },
           "decode": {
             "dp_size": 4,
@@ -298,7 +304,7 @@ templates:
       - --reasoning-parser
       - "glm45"
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV1",
+      - '{"kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_consumer",
         "kv_port": "32122",
         "engine_id": "3",
@@ -306,7 +312,7 @@ templates:
           "use_ascend_direct": true,
           "prefill": {
             "dp_size": 4,
-            "tp_size": 8
+            "tp_size": 1
           },
           "decode": {
             "dp_size": 4,

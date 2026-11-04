@@ -4,6 +4,9 @@ import numpy as np
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
+
 NUM_TOKENS = [1, 8, 32]
 NUM_QKV_HEADS = [(6, 1), (8, 2)]
 HEAD_DIMS = [128]
@@ -106,6 +109,10 @@ def _reference_impl(
     )
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_q_heads, num_kv_heads", NUM_QKV_HEADS)
 @pytest.mark.parametrize("head_dim", HEAD_DIMS)

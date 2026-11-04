@@ -18,6 +18,7 @@ from vllm_ascend.models.qwen3_dspark import (
     AscendQwen3DSparkForCausalLM,
     process_weight,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
     AscendDSparkSpeculator,
 )
@@ -202,10 +203,11 @@ def _context_speculator(monkeypatch, group_ids=(0, 1), layer_map=(1, 0)):
     )
     spec.attn_architecture, spec.use_dcp = "MLA", False
     spec.device = torch.device("cpu")
-    spec.max_model_len = 16
+    if vllm_version_is("0.32.0"):
+        spec.max_model_len = 16
     spec.speculative_config = object()
     spec.vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(get_hidden_size=lambda: 4),
+        model_config=SimpleNamespace(get_hidden_size=lambda: 4, max_model_len=16),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
     )
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
@@ -280,16 +282,3 @@ def test_dspark_local_context_validates_before_writing_kv(monkeypatch, invalid):
         assert kwargs["draft_block_ids_by_group"] == {0: (4,), 1: (7,)}
         assert kwargs["layer_group_ids"] == (1, 0)
         assert kwargs["block_sizes_by_group"] == {0: 64, 1: 128}
-
-
-@pytest.mark.parametrize("replicated_pcp", [False, True])
-def test_dspark_sampling_uses_replicated_backbone_output(monkeypatch, replicated_pcp):
-    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
-    spec.replicated_pcp = replicated_pcp
-    local, replicated = torch.ones(3, 2), torch.zeros(3, 2)
-    monkeypatch.setattr(DSparkSpeculator, "_run_model", lambda *args: local)
-    broadcast = MagicMock(return_value=(replicated, replicated))
-    monkeypatch.setattr(dspark_module.AscendPCPManager, "broadcast_replicated_hidden_states", broadcast)
-
-    assert spec._run_model(3, None, None, None) is replicated
-    broadcast.assert_called_once_with(local, local, 3, replicated_pcp=replicated_pcp)

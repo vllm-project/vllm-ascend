@@ -617,6 +617,9 @@ finish_without_aop() {
 main() {
     if [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
         trap finish_run EXIT
+        # Keep bisect reports and round logs scoped to this LWS instance so
+        # the workflow can upload them without mixing in older PVC runs.
+        export BISECT_WORK_DIR="${BISECT_WORK_DIR:-${LOG_PREFIX}/nightly_bisect_runs}"
     else
         trap finish_without_aop EXIT
     fi

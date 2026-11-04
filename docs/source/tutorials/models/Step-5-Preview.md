@@ -212,7 +212,7 @@ Key Parameter Descriptions:
 | Feature | Description | Configuration |
 | --- | --- | --- |
 | Tensor Parallel (TP) | Splits the model across all 4 NPUs within a node. | `--tensor-parallel-size 4` |
-| Expert Parallel (EP) | Distributes the MoE experts across NPUs. | `--enable-expert-parallel` |
+| Expert Parallelism (EP) | Distributes the MoE experts across NPUs. | `--enable-expert-parallel` |
 | Data Parallel (DP) | Multi-node DP across 2 nodes, extending the context to 1M. | `--data-parallel-size 4` |
 | Speculative Decoding (MTP) | Uses the native MTP layer for Multi-Token Prediction. | `--speculative-config '{"method": "mtp", "num_speculative_tokens": 3}'` |
 | Decode Graph Capture | Captures the decode phase into a graph to reduce kernel launch overhead. | `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` |

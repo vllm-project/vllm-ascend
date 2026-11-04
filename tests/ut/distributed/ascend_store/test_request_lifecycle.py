@@ -38,6 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def aligned_buffer(size):
@@ -347,9 +348,16 @@ def test_raw_sequence_lifecycle(
                 kv_connector_worker_meta=worker.build_connector_worker_meta(),
             )
             computed_before_update = request.num_computed_tokens
+            output_tokens_before_update = request.num_output_tokens
             scheduler.update_from_output(output, result)
             if drafts:
-                assert request.num_computed_tokens == computed_before_update - len(drafts) + accepted
+                expected_computed = computed_before_update - len(drafts) + accepted
+                if not vllm_version_is("0.32.0"):
+                    # vLLM main trims ``num_computed_tokens`` to cover only the
+                    # tokens actually kept when a request stops mid token-list.
+                    appended = request.num_output_tokens - output_tokens_before_update
+                    expected_computed -= (accepted + 1) - appended
+                assert request.num_computed_tokens == expected_computed
             if speculative_method:
                 scheduler.update_draft_token_ids(
                     DraftTokenIds([req_id], [[1000 + request.num_tokens + i for i in range(3)]])
@@ -427,7 +435,13 @@ def test_raw_sequence_lifecycle(
         seed_length = 256 if speculative_method else 128
         seed_hit = 128 if speculative_method else (0 if has_private_state else 127)
         run_request("local-prefix", producer_tokens[:seed_length], seed_hit)
-        run_request("mixed-local-remote", list(range(513)), 512, expected_local=128)
+        # vLLM main caches speculative blocks in the base Scheduler; only the
+        # pure full-attention dspark layout sees the doubled local prefix hit.
+        only_full_attention = isinstance(plan.kv_cache_groups[0].kv_cache_spec, FullAttentionSpec)
+        mixed_local = 128
+        if not vllm_version_is("0.32.0") and speculative_method == "dspark" and only_full_attention:
+            mixed_local = 256
+        run_request("mixed-local-remote", list(range(513)), 512, expected_local=mixed_local)
         assert scheduler.reset_prefix_cache()
         missing_group = len(plan.kv_cache_groups) - 1
         MemoryBackend.payloads = {key: value for key, value in saved.items() if f"@group:{missing_group}@" not in key}

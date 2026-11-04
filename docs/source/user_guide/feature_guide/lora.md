@@ -12,7 +12,7 @@ LoRA on vLLM-Ascend is supported on Atlas 300I Duo, Atlas A2, and Atlas A3.
 
 LoRA applies to both dense models and mixture-of-experts (MoE) models. The base model stays frozen. Each request selects an adapter by the `name` registered at startup. The current MoE support status is as follows:
 
-| MoE mode | Tensor parallel (AllGather) | Expert parallel (All-to-All) |
+| MoE mode | Tensor parallel (AllGather) | Expert parallelism (All-to-All) |
 | --- | --- | --- |
 | Non-quantized | Supported | Supported |
 | W8A8 dynamic quantization | Supported | Supported |

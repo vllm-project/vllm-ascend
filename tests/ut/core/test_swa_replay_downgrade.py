@@ -55,7 +55,7 @@ def _ascend_config(**overrides) -> SimpleNamespace:
     )
     for name, value in overrides.items():
         setattr(scheduler_config, name, value)
-    return SimpleNamespace(scheduler_config=scheduler_config, enable_dsa_cp=False)
+    return SimpleNamespace(scheduler_config=scheduler_config)
 
 
 def _vllm_config(*, swa_bounded_replay: bool = True, architectures=V41) -> SimpleNamespace:

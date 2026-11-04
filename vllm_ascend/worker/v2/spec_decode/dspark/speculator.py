@@ -22,11 +22,12 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
@@ -46,12 +47,11 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
-from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
+    build_dspark_draft_config,
     disable_profiling_chunk_for_draft,
-    prepare_replicated_pcp_config,
 )
 
 
@@ -64,8 +64,14 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     # override, upstream sampling logic untouched).
     _lmhead_tp_sample_draft_supported = True
 
+    if not vllm_version_is("0.32.0"):
+
+        def supports_batch_sharded_draft_logits(self) -> bool:
+            # NPU draft-logits kernels index the cache by request state.
+            return False
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
+        vllm_config = build_dspark_draft_config(vllm_config)
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
@@ -253,15 +259,10 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 self.attn_architecture = "GQA"
             else:
                 self.attn_architecture = None
-            if vllm_version_is("0.31.0"):
-                dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(
-                    self.vllm_config.cache_config.block_size
-                )
-            else:
-                dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(  # type: ignore[call-arg]
-                    self.vllm_config.cache_config.block_size,
-                    block_tables,
-                )
+            dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(  # type: ignore[call-arg]
+                self.vllm_config.cache_config.block_size,
+                block_tables,
+            )
 
     def _prepare_draft_dcp_metadata_inputs(
         self, num_reqs: int, num_reqs_padded: int, step: int
@@ -391,180 +392,86 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             decode_metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
 
-    @torch.inference_mode()
-    def _run_model(
+    def propose(
         self,
-        num_tokens: int,
-        attn_metadata: dict[str, Any] | None,
-        slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        input_batch: InputBatch,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        last_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        dp_sync_state: Any = None,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
-        hidden_states = super()._run_model(
-            num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode
-        )
-        # PCP replicas must propose identical tokens for the next joint target
-        # verification. Share the backbone output before sequential Markov sampling.
-        hidden_states, _ = AscendPCPManager.broadcast_replicated_hidden_states(
-            hidden_states, hidden_states, num_tokens, replicated_pcp=self.replicated_pcp
-        )
-        return hidden_states
-
-    # vLLM #60754 renamed the DP-sync argument to `dp_sync_state` on main, and
-    # vLLM #60335 added `num_speculative_tokens`. Define the per-version public
-    # signature and body.
-    if vllm_version_is("0.31.0"):
-
-        def propose(
-            self,
-            input_batch: InputBatch,
-            attn_metadata: dict[str, Any],
-            slot_mappings: dict[str, torch.Tensor],
-            last_hidden_states: torch.Tensor,
-            aux_hidden_states: list[torch.Tensor] | None,
-            num_sampled: torch.Tensor,
-            num_rejected: torch.Tensor,
-            last_sampled: torch.Tensor,
-            next_prefill_tokens: torch.Tensor,
-            temperature: torch.Tensor,
-            seeds: torch.Tensor,
-            dp_sync: Any = None,
-            dummy_run: bool = False,
-            skip_attn_for_dummy_run: bool = False,
-            mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-            is_profile: bool = False,
-        ) -> torch.Tensor:
-            self.input_batch = input_batch
-            assert self.input_batch is not None
-            # Replicated drafts consume global requests, unlike sharded targets.
-            # Adaptive verification also negotiates the draft shape independently.
-            # Every DP rank must synchronize the draft batch independently.
-            sync_state = dp_sync
-            if self.replicated_pcp or (self.enable_adaptive_verification and not is_profile):
-                sync_state = None
-            if dummy_run and skip_attn_for_dummy_run:
-                # Profiling runs the draft with its own query token count, which
-                # can differ from the target batch. Let forward_context coordinate
-                # the actual draft counts instead of reusing the target DP state.
-                # TODO: Remove this guard once main2main includes upstream vLLM
-                # #54856 (facd9a74a1), which resets the profiling DP counts.
-                sync_state = None
-            seq_lens_cpu = None
-            is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
-            if (
-                self.use_dcp
-                and self.attn_architecture in ("GQA", "MLA")
-                and not (dummy_run and skip_attn_for_dummy_run)
-            ):
-                # DSpark drafts one block with a fixed step; zero unused request slots
-                # before upstream selects the padded batch size and slices this view.
-                seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
-                    input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
-                )
-            with (
-                build_attn_metadata_wrapper(),
-                build_attn_metadata_factory(
-                    self.input_buffers.positions,
-                    self.max_num_tokens,
-                    is_prefilling,
-                    seq_lens_cpu=seq_lens_cpu,
-                    parallel_config=self.attn_vllm_config.parallel_config,
-                ),
-            ):
-                return super().propose(
-                    input_batch,
-                    attn_metadata,
-                    slot_mappings,
-                    last_hidden_states,
-                    aux_hidden_states,
-                    num_sampled,
-                    num_rejected,
-                    last_sampled,
-                    next_prefill_tokens,
-                    temperature,
-                    seeds,
-                    sync_state,
-                    dummy_run,
-                    skip_attn_for_dummy_run,
-                    mm_inputs,
-                    is_profile=is_profile,
-                )
-
-    else:
-
-        def propose(  # type: ignore[misc]
-            self,
-            input_batch: InputBatch,
-            attn_metadata: dict[str, Any],
-            slot_mappings: dict[str, torch.Tensor],
-            last_hidden_states: torch.Tensor,
-            aux_hidden_states: list[torch.Tensor] | None,
-            num_sampled: torch.Tensor,
-            num_rejected: torch.Tensor,
-            last_sampled: torch.Tensor,
-            next_prefill_tokens: torch.Tensor,
-            temperature: torch.Tensor,
-            seeds: torch.Tensor,
-            dp_sync_state: Any = None,
-            dummy_run: bool = False,
-            skip_attn_for_dummy_run: bool = False,
-            mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-            is_profile: bool = False,
-            num_speculative_tokens: int | None = None,
-        ) -> torch.Tensor:
-            self.input_batch = input_batch
-            assert self.input_batch is not None
-            # Replicated drafts consume global requests, unlike sharded targets.
-            # Adaptive verification also negotiates the draft shape independently.
-            # Every DP rank must synchronize the draft batch independently.
-            sync_state = dp_sync_state
-            if self.replicated_pcp or (self.enable_adaptive_verification and not is_profile):
-                sync_state = None
-            if dummy_run and skip_attn_for_dummy_run:
-                # Profiling runs the draft with its own query token count, which
-                # can differ from the target batch. Let forward_context coordinate
-                # the actual draft counts instead of reusing the target DP state.
-                # TODO: Remove this guard once main2main includes upstream vLLM
-                # #54856 (facd9a74a1), which resets the profiling DP counts.
-                sync_state = None
-            seq_lens_cpu = None
-            is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
-            if (
-                self.use_dcp
-                and self.attn_architecture in ("GQA", "MLA")
-                and not (dummy_run and skip_attn_for_dummy_run)
-            ):
-                # DSpark drafts one block with a fixed step; zero unused request slots
-                # before upstream selects the padded batch size and slices this view.
-                seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
-                    input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
-                )
-            with (
-                build_attn_metadata_wrapper(),
-                build_attn_metadata_factory(
-                    self.input_buffers.positions,
-                    self.max_num_tokens,
-                    is_prefilling,
-                    seq_lens_cpu=seq_lens_cpu,
-                    parallel_config=self.attn_vllm_config.parallel_config,
-                ),
-            ):
-                return super().propose(
-                    input_batch,
-                    attn_metadata,
-                    slot_mappings,
-                    last_hidden_states,
-                    aux_hidden_states,
-                    num_sampled,
-                    num_rejected,
-                    last_sampled,
-                    next_prefill_tokens,
-                    temperature,
-                    seeds,
-                    sync_state,
-                    dummy_run,
-                    skip_attn_for_dummy_run,
-                    mm_inputs,
-                    is_profile=is_profile,
-                    num_speculative_tokens=num_speculative_tokens,
-                )
+        self.input_batch = input_batch
+        assert self.input_batch is not None
+        # PCP restores global requests for the replicated draft, whereas the
+        # target DP sync describes its rank-local batch. Negotiate draft
+        # capacity independently, as adaptive verification also requires.
+        sync_state = dp_sync_state
+        if self.pcp_manager is not None or (self.enable_adaptive_verification and not is_profile):
+            sync_state = None
+        if dummy_run and skip_attn_for_dummy_run:
+            # Profiling runs the draft with its own query token count, which
+            # can differ from the target batch. Let forward_context coordinate
+            # the actual draft counts instead of reusing the target DP state.
+            # TODO: Remove this guard once main2main includes upstream vLLM
+            # #54856 (facd9a74a1), which resets the profiling DP counts.
+            sync_state = None
+        seq_lens_cpu = None
+        is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
+        if self.use_dcp and self.attn_architecture in ("GQA", "MLA") and not (dummy_run and skip_attn_for_dummy_run):
+            # DSpark drafts one block with a fixed step; zero unused request slots
+            # before upstream selects the padded batch size and slices this view.
+            seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
+                input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
+            )
+        with (
+            build_attn_metadata_wrapper(),
+            build_attn_metadata_factory(
+                self.input_buffers.positions,
+                self.max_num_tokens,
+                is_prefilling,
+                seq_lens_cpu=seq_lens_cpu,
+                parallel_config=self.attn_vllm_config.parallel_config,
+            ),
+        ):
+            draft_tokens = super().propose(
+                input_batch,
+                attn_metadata,
+                slot_mappings,
+                last_hidden_states,
+                aux_hidden_states,
+                num_sampled,
+                num_rejected,
+                last_sampled,
+                next_prefill_tokens,
+                temperature,
+                seeds,
+                sync_state,
+                dummy_run,
+                skip_attn_for_dummy_run,
+                mm_inputs,
+                is_profile=is_profile,
+                num_speculative_tokens=num_speculative_tokens,
+            )
+        if self.pcp_manager is not None and not dummy_run and not hasattr(PCPManager, "sync_drafts"):
+            # vLLM #61994 broadcasts proposals after drafting, outside the graph.
+            # Older vLLM lacks that runner hook; keep its token/logit contract
+            # here until both supported lanes provide PCPManager.sync_drafts.
+            pcp_group = get_pcp_group()
+            pcp_group.broadcast(draft_tokens, src=0)
+            if self.draft_logits is not None:
+                logits = self.draft_logits[input_batch.idx_mapping]
+                pcp_group.broadcast(logits, src=0)
+                self.draft_logits[input_batch.idx_mapping] = logits
+        return draft_tokens

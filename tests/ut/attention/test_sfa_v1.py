@@ -1,3 +1,4 @@
+# mypy: disable-error-code="arg-type, assignment, index, method-assign, type-var, union-attr"
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -15,7 +16,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.sfa_kv_offload import (
     AscendSFAKVOffloadImpl,
@@ -39,6 +39,7 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8LinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 class TestAscendSFABackend(TestBase):
@@ -54,8 +55,6 @@ class TestAscendSFABackend(TestBase):
 
         self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
         self.utils_patcher.start()
-        self.dsa_patcher = patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=False)
-        self.dsa_patcher.start()
 
         self.ascend_config_patcher = patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
         mock_ascend_config = self.ascend_config_patcher.start()
@@ -64,7 +63,6 @@ class TestAscendSFABackend(TestBase):
     def tearDown(self):
         self.ascend_config_patcher.stop()
         self.utils_patcher.stop()
-        self.dsa_patcher.stop()
         self.config_context.__exit__(None, None, None)
 
     def test_get_name(self):
@@ -176,6 +174,44 @@ class TestAscendSFADeviceOperator(TestBase):
         self.assertIs(output, attn_output)
         self.assertIs(actual_softmax_max, softmax_max)
         self.assertIs(actual_softmax_sum, softmax_sum)
+        self.assertTrue(mock_sfa.call_args.kwargs["return_softmax_lse"])
+
+    def test_execute_sparse_flash_attention_nope_single_cache_returns_lse(self):
+        (
+            impl,
+            ql_nope,
+            _,
+            topk_indices,
+            attn_metadata,
+            actual_seq_lengths_query,
+            actual_seq_lengths_key,
+        ) = self._make_common_inputs()
+        impl.qk_rope_head_dim = 0
+        kv_cache = (torch.randn(4, 1, 1, 8),)
+        result = (torch.randn(3, 4, 8), torch.zeros(1, 3, 4), torch.ones(1, 3, 4))
+
+        with patch.object(
+            torch.ops._C_ascend,
+            "npu_sparse_flash_attention",
+            create=True,
+            return_value=result,
+        ) as mock_sfa:
+            actual = DeviceOperator.execute_sparse_flash_attention_process(
+                impl,
+                ql_nope,
+                torch.empty(3, 4, 0),
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                sparse_mode=0,
+                return_lse=True,
+            )
+
+        self.assertIs(actual, result)
+        self.assertIsNone(mock_sfa.call_args.kwargs["query_rope"])
+        self.assertIsNone(mock_sfa.call_args.kwargs["key_rope"])
         self.assertTrue(mock_sfa.call_args.kwargs["return_softmax_lse"])
 
     def test_execute_sparse_flash_attention_c8_returns_softmax_components(self):
@@ -664,8 +700,8 @@ class TestAscendSFAKPathFusion(TestBase):
         indexer.wq_b = MagicMock(return_value=(torch.randn(num_tokens, n_head * head_dim), None))
         indexer.use_torch_npu_lightning_indexer = False
         indexer.k_cache = SimpleNamespace(kv_cache=torch.zeros(2, 16, 1, 128))
-        indexer._pcp_active = False
-        indexer._dsa_cp_active = False
+        indexer.use_pcp = False
+        indexer._use_fused_cache_store = False
         indexer.write_cache = MagicMock()
 
         hidden_states = torch.randn(num_tokens, head_dim + weights_dim)
@@ -1097,7 +1133,6 @@ class TestAscendSFAImpl(TestBase):
             actual_seq_lengths_query=[1, 2],
             actual_seq_lengths_key=[1, 2],
             kv_slot_mapping=metadata.slot_mapping,
-            gather_full_o_proj=False,
             topk_num_tokens=2,
         )
         cases = (
@@ -1128,7 +1163,6 @@ class TestAscendSFAImpl(TestBase):
                 self.impl._compose_sfa_kv_cache = lambda cache: cache
                 self.impl._get_sfa_kv_slot_mapping = lambda _: metadata.slot_mapping
                 self.impl._get_parallel_forward_context = lambda *_args: context
-                self.impl._prepare_native_hidden_states = lambda x, _: x
                 self.impl.fused_qkv_a_proj = lambda _: record_event("projection", (torch.zeros(2, width),))
                 self.impl.q_a_layernorm = torch.nn.Identity()
                 self.impl.indexer = lambda *_args, **_kwargs: record_event(
@@ -1138,7 +1172,6 @@ class TestAscendSFAImpl(TestBase):
                     wait_for_layer=lambda name: events.append(("wait", name))
                 )
                 self.impl.exec_kv = lambda *_args: record_event("cache", (hidden, hidden))
-                self.impl._prepare_kv_for_parallel = lambda *_args: (hidden, [])
                 self.impl._q_proj_and_k_up_proj = lambda _: (hidden, hidden)
                 self.impl.rope_single = lambda x, *_args: x
                 self.impl._record_query_gather_context = lambda *_args: None
@@ -1150,7 +1183,7 @@ class TestAscendSFAImpl(TestBase):
                 self.impl._get_indexcache_topk_indices = lambda _: torch.zeros(2, 1, dtype=torch.int64)
                 self.impl._execute_sparse_flash_attention_process = lambda *_args: torch.ones(2, 4)
                 self.impl._v_up_proj = lambda x: x
-                self.impl._finalize_o_proj = lambda x, output, _: output.copy_(x)
+                self.impl._finalize_o_proj = lambda x, output: output.copy_(x)
                 output = torch.empty_like(hidden)
                 with (
                     patch.object(sfa_v1, "wait_for_kv_layer_from_connector"),
@@ -1293,7 +1326,13 @@ class TestAscendSFAImpl(TestBase):
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        if vllm_version_is("0.32.0"):
+            # A re-derived value that no longer fits rebinds the parameter.
+            self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        else:
+            # Main copies a smaller value into the parameter's own storage, so
+            # the address captured by graphs is preserved.
+            self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
         self.assertEqual(
             self.impl.W_UV.shape,
             (self.impl.local_num_heads, self.impl.kv_lora_rank, self.impl.v_head_dim),
@@ -1585,7 +1624,7 @@ class TestAscendSFAImpl(TestBase):
 
     def test_resolve_path_kv_producer_quantized_goes_prolog_v3(self):
         """KV producer (P-node) + quantized -> PROLOG_V3: prefill steps take
-        the fused path too; enable_dsa_cp remains the P-node CP route."""
+        the fused path too."""
         self._set_quant(AscendW8A8DynamicLinearMethod)
         self.impl.is_kv_producer = True
         self.impl.is_kv_consumer = False
@@ -1621,16 +1660,9 @@ class TestAscendSFAImpl(TestBase):
         self.impl.q_proj = MagicMock()
         self.impl.q_proj._chunk_size = 0
 
-    def test_reasons_dsa_cp_blocked(self):
-        self._setup_prolog_v3_state()
-        impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
-        impl.__dict__.update(self.impl.__dict__)
-        reasons = impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
-        self.assertTrue(any("DSA-CP" in r for r in reasons))
-
     def test_reasons_kv_producer_not_blocked(self):
         """KV producers take PROLOG_V3 too: the prefill/P-node CP route is
-        selected by enable_dsa_cp (impl selection), not by the reasons."""
+        selected by the implementation, not by the reasons."""
         self._setup_prolog_v3_state()
         self.impl.is_kv_producer = True
 

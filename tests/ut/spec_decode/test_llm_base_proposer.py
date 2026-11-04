@@ -26,7 +26,7 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode
 
-from vllm_ascend.spec_decode.llm_base_proposer import (
+from vllm_ascend.worker.v1.spec_decode.llm_base_proposer import (
     AscendSpecDecodeBaseProposer,
     _draft_embed_accepts_mm,
 )
@@ -97,7 +97,7 @@ def test_eager_propose_aligns_block_table_to_draft_batch(target_use_mla, draft_u
     proposer.slot_mapping_group = [torch.zeros(6, dtype=torch.int32)]
     proposer.seq_lens_group = [torch.zeros(1, dtype=torch.int32)]
     proposer.query_start_loc_group = [torch.zeros(2, dtype=torch.int32)]
-    proposer._pad_draft_buffers = MagicMock()
+    proposer._pad_draft_buffers = MagicMock()  # type: ignore[method-assign]
     proposer.runner = SimpleNamespace(
         dcp_manager=None,
         input_batch=SimpleNamespace(lora_id_to_lora_request={}),
@@ -113,9 +113,12 @@ def test_eager_propose_aligns_block_table_to_draft_batch(target_use_mla, draft_u
         seq_lens=torch.tensor([16], dtype=torch.int32),
         block_table_tensor=block_table,
         slot_mapping=torch.arange(6, dtype=torch.int32),
+        invalidate_cached_layout=lambda: None,
     )
     sample_indices = torch.arange(1, 6, dtype=torch.int32)
-    proposer.set_inputs_first_pass = MagicMock(return_value=(6, sample_indices, metadata, None))
+    proposer.set_inputs_first_pass = MagicMock(  # type: ignore[method-assign]
+        return_value=(6, sample_indices, metadata, None)
+    )
 
     class MetadataChecked(Exception):
         pass
@@ -128,9 +131,9 @@ def test_eager_propose_aligns_block_table_to_draft_batch(target_use_mla, draft_u
         assert torch.equal(common_metadata.block_table_tensor, block_table[:expected_rows])
         raise MetadataChecked
 
-    proposer.build_draft_attn_metadata = check_metadata
+    proposer.build_draft_attn_metadata = check_metadata  # type: ignore[method-assign]
     with (
-        patch("vllm_ascend.spec_decode.llm_base_proposer._HIDDEN_STATE_DRAFTER_TYPES", (object,)),
+        patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer._HIDDEN_STATE_DRAFTER_TYPES", (object,)),
         pytest.raises(MetadataChecked),
     ):
         proposer._propose(
@@ -274,30 +277,30 @@ def test_load_model_reads_validated_draft_window_size():
     proposer.vllm_config = SimpleNamespace(additional_config={"draft_window_size": 64})
     proposer.maybe_eager_context = nullcontext()
     draft_model = MagicMock()
-    proposer._get_model = MagicMock(return_value=draft_model)
+    proposer._get_model = MagicMock(return_value=draft_model)  # type: ignore[method-assign]
     proposer.method = "eagle3"
     proposer.num_speculative_tokens = 4
     proposer.runner = SimpleNamespace(max_num_reqs=8)
     proposer.device = "cpu"
     proposer.parallel_drafting = False
     proposer.supports_mm_inputs = False
-    proposer._maybe_share_embeddings = MagicMock()
-    proposer._maybe_share_topk_indices = MagicMock()
-    proposer._maybe_share_lm_head = MagicMock()
+    proposer._maybe_share_embeddings = MagicMock()  # type: ignore[method-assign]
+    proposer._maybe_share_topk_indices = MagicMock()  # type: ignore[method-assign]
+    proposer._maybe_share_lm_head = MagicMock()  # type: ignore[method-assign]
 
     draft_layer = MagicMock()
     draft_layer.get_kv_cache_spec.return_value = object()
     draft_layer.get_attn_backend.return_value.get_supported_kernel_block_sizes.return_value = [16]
 
     with (
-        patch("vllm_ascend.spec_decode.llm_base_proposer.get_pp_group") as mock_pp_group,
+        patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_pp_group") as mock_pp_group,
         patch(
-            "vllm_ascend.spec_decode.llm_base_proposer.get_layers_from_vllm_config",
+            "vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_layers_from_vllm_config",
             side_effect=[{}, {"draft": draft_layer}, {"draft": draft_layer}],
         ),
-        patch("vllm_ascend.spec_decode.llm_base_proposer.get_ascend_config") as mock_get_ascend_config,
-        patch("vllm_ascend.spec_decode.llm_base_proposer.SlidingWindowAdapter") as mock_adapter,
-        patch("vllm_ascend.spec_decode.llm_base_proposer.supports_multimodal", return_value=False),
+        patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_ascend_config") as mock_get_ascend_config,
+        patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.SlidingWindowAdapter") as mock_adapter,
+        patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.supports_multimodal", return_value=False),
     ):
         mock_pp_group.return_value.is_last_rank = True
         mock_get_ascend_config.return_value.draft_window_size = 4096
@@ -338,14 +341,20 @@ def test_load_model_aligns_draft_after_sharing_before_precomputing_hidden_states
     if has_post_process:
         draft.post_process = post_process
     draft.combine_hidden_states = combine_hidden_states
-    proposer._get_model = MagicMock(return_value=draft)
-    proposer._maybe_share_embeddings = MagicMock(side_effect=lambda _: events.append("embeddings"))
-    proposer._maybe_share_topk_indices = MagicMock(side_effect=lambda _: events.append("indices"))
-    proposer._maybe_share_lm_head = MagicMock(side_effect=lambda _: events.append("lm_head"))
+    proposer._get_model = MagicMock(return_value=draft)  # type: ignore[method-assign]
+    proposer._maybe_share_embeddings = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda _: events.append("embeddings")
+    )
+    proposer._maybe_share_topk_indices = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda _: events.append("indices")
+    )
+    proposer._maybe_share_lm_head = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda _: events.append("lm_head")
+    )
     draft_layer = MagicMock()
     draft_layer.get_kv_cache_spec.return_value = object()
     draft_layer.get_attn_backend.return_value.get_supported_kernel_block_sizes.return_value = [16]
-    module = "vllm_ascend.spec_decode.llm_base_proposer"
+    module = "vllm_ascend.worker.v1.spec_decode.llm_base_proposer"
     with (
         patch(f"{module}.get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
         patch(
@@ -544,7 +553,7 @@ class TestDraftEmbedMmSupport:
         def embed_input_ids(input_ids, multimodal_embeddings=None):
             return input_ids
 
-        with patch("vllm_ascend.spec_decode.llm_base_proposer._inspect") as fake_inspect:
+        with patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer._inspect") as fake_inspect:
             fake_inspect.signature.side_effect = error
 
             assert _draft_embed_accepts_mm(embed_input_ids) is False
