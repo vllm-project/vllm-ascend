@@ -585,7 +585,9 @@ def test_mamba_padding_is_independent_of_pcp_context(
     assert kwargs["pcp_context"] is context
 
 
-def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests():
+@pytest.mark.parametrize("recover", [False, True])
+@pytest.mark.parametrize("for_capture", [False, True])
+def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests(recover, for_capture):
     local_batch = SimpleNamespace(is_dummy=False)
     global_batch = SimpleNamespace(num_reqs=1)
     pcp_context = SimpleNamespace(
@@ -597,6 +599,7 @@ def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests():
     state = SimpleNamespace(
         pcp_manager=pcp_manager,
         vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
+        recoverssm=SimpleNamespace(record_step=MagicMock()) if recover else None,
     )
     mamba_spec = _mamba_spec()
     attn_groups = [[SimpleNamespace(kv_cache_spec=object())], [_group(mamba_spec)]]
@@ -615,10 +618,13 @@ def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests():
             slot_mappings="local_slots",
             attn_groups=attn_groups,
             kv_cache_config=MagicMock(),
+            for_capture=for_capture,
         )
 
     assert metadata == {"sfa": local_metadata["sfa"], "linear_attn": mamba_metadata}
     assert mamba_metadata.pcp_context is pcp_context
+    if recover:
+        state.recoverssm.record_step.assert_called_once_with(metadata, attn_groups, for_capture=for_capture)
     assert build_batch.call_args_list[0].args[1] is local_batch
     assert build_batch.call_args_list[0].args[5][0][0] is attn_groups[0][0]
     assert build_batch.call_args_list[0].args[5][1] == []
@@ -1159,6 +1165,95 @@ def test_hybrid_model_selects_mamba_model_state(mock_mamba_state):
         encoder_cache,
         device,
     )
+
+
+@patch(
+    "vllm_ascend.worker.v2.model_states._has_encoder_only_layers",
+    return_value=True,
+)
+@patch("vllm_ascend.worker.v2.model_states.hybrid_encoder.AscendHybridEncoderModelState")
+def test_hybrid_encoder_model_selects_combined_model_state(mock_state, _mock_has_encoder_only):
+    """A hybrid model with ENCODER_ONLY layers needs mamba + encoder metadata."""
+    vllm_config = MagicMock()
+    vllm_config.model_config.is_hybrid = True
+    model = torch.nn.Module()
+    encoder_cache = MagicMock()
+    device = torch.device("cpu")
+
+    with patch(
+        "vllm_ascend.worker.v2.model_states.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A2),
+    ):
+        state = init_asecnd_model_state(vllm_config, model, encoder_cache, device)
+
+    assert state is mock_state.return_value
+    mock_state.assert_called_once_with(
+        vllm_config,
+        model,
+        encoder_cache,
+        device,
+    )
+
+
+def test_hybrid_encoder_state_merges_encoder_attn_metadata():
+    """Encoder-only layers must find their own metadata next to the mamba one."""
+    from vllm_ascend.worker.v2.model_states.hybrid_encoder import (
+        AscendHybridEncoderModelState,
+    )
+    from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
+        AscendMambaHybridModelState,
+    )
+
+    state = object.__new__(AscendHybridEncoderModelState)
+    input_batch = SimpleNamespace()
+
+    with (
+        patch.object(
+            AscendMambaHybridModelState,
+            "prepare_attn",
+            return_value={"language_model.model.layers.2.linear_attn": "gdn"},
+        ),
+        patch.object(
+            AscendHybridEncoderModelState,
+            "_build_encoder_attn_metadata",
+            return_value={"language_model.model.layers.3.self_attn.attn": "encoder"},
+        ),
+    ):
+        attn_metadata = AscendHybridEncoderModelState.prepare_attn(
+            state,
+            input_batch,
+            CUDAGraphMode.PIECEWISE,
+            (),
+            None,
+            [],
+            MagicMock(),
+        )
+
+    assert attn_metadata == {
+        "language_model.model.layers.2.linear_attn": "gdn",
+        "language_model.model.layers.3.self_attn.attn": "encoder",
+    }
+
+
+@patch(
+    "vllm_ascend.worker.v2.model_states._has_encoder_only_layers",
+    return_value=True,
+)
+def test_prompt_embeds_rejected_for_encoder_only_state(_mock_has_encoder_only):
+    """``init_asecnd_model_state`` replaces upstream ``init_model_state``, so it
+    has to repeat the ``--enable-prompt-embeds`` guard."""
+    vllm_config = MagicMock()
+    vllm_config.model_config.is_hybrid = False
+    vllm_config.model_config.enable_prompt_embeds = True
+
+    with (
+        patch(
+            "vllm_ascend.worker.v2.model_states.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A2),
+        ),
+        pytest.raises(ValueError, match="--enable-prompt-embeds not supported with AscendEncoderOnlyModelState"),
+    ):
+        init_asecnd_model_state(vllm_config, torch.nn.Module(), None, torch.device("cpu"))
 
 
 def test_init_model_state_uses_override_then_default():

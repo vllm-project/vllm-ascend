@@ -6,8 +6,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.compilation import backends
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import get_pcp_group
+from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
@@ -1002,6 +1003,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.rotary_emb = kwargs["rotary_emb"]
         self.fused_qkv_a_proj = kwargs.get("fused_qkv_a_proj")
         self.q_proj = kwargs["q_proj"] if self.q_lora_rank is None else kwargs["q_b_proj"]
+        self.dcp_q_replicate_enabled = getattr(self.q_proj, "qrep_active", False) is True
+        self.q_projection_heads = num_heads * (self.q_proj.group_size if self.dcp_q_replicate_enabled else 1)
         self.kv_b_proj = kwargs["kv_b_proj"]
         self.o_proj = kwargs["o_proj"]
         self.g_proj = kwargs.get("g_proj")
@@ -1035,7 +1038,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ring_mla_mask_size = 512
 
         self.speculative_config = self.vllm_config.speculative_config
-        self.is_draft_model = self.vllm_config.model_config.runner_type == "draft"
+        self.is_draft_model = self.vllm_config.model_config.runner_type == "draft" or backends.model_tag == "eagle_head"
         self.enable_mlapo = not self.is_draft_model and enabling_mlapo(self.vllm_config)
         if self.qkv_a_gate_fused and self.enable_mlapo:
             # MLAPO consumes the fused QKV-A projection as the latent q/kv pair
@@ -1251,7 +1254,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _q_proj_and_k_up_proj(self, x):
         q_nope, q_pe = (
             self.q_proj(x)[0]
-            .view(-1, self.num_heads, self.qk_head_dim)
+            .view(-1, self.q_projection_heads, self.qk_head_dim)
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
 
@@ -1309,6 +1312,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         # raise on a shape mismatch.
         w_uv = W_UV.transpose(0, 1).contiguous()  # (L, N, V) -> (N, L, V)
         w_uk_t = W_UK.permute(1, 2, 0).contiguous()  # (L, N, P) -> (N, P, L)
+        if self.dcp_q_replicate_enabled:
+            w_uk_t = get_dcp_group().all_gather(w_uk_t, dim=0)
         if vllm_version_is("0.32.0"):
             replace_parameter(self, "W_UV", w_uv, prefer_copy=True)
             replace_parameter(self, "W_UK_T", w_uk_t, prefer_copy=True)
@@ -2084,10 +2089,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                     self.qk_head_dim,
                 )
                 weight_uq_qr = F.pad(weight_uq_qr, (0, 0, 0, self.head_padding))
+                # NZ conversion needs a materialized 2-D matrix rather than
+                # a view retaining the padded 3-D base storage layout.
                 weight_uq_qr = weight_uq_qr.view(
                     self.q_lora_rank,
                     self.num_heads_padded * self.qk_head_dim,
-                )
+                ).clone()
                 if weight_uk.shape[0] == self.num_heads:
                     weight_uk = F.pad(weight_uk, (0, 0, 0, 0, 0, self.head_padding))
                 prolog_num_heads = self.num_heads_padded
@@ -3171,7 +3178,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_prefill_kv_tokens = self._get_num_prefill_kv_tokens(attn_metadata)
         prefill_kv_no_split = kv_no_split[num_decode_tokens : num_decode_tokens + num_prefill_kv_tokens]
         prefill_q_c = q_c[num_decode_tokens:num_actual_tokens]
-        prefill_q = self.q_proj(prefill_q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
+        prefill_q = self.q_proj(prefill_q_c)[0].view(-1, self.q_projection_heads, self.qk_head_dim)
+        if self.dcp_q_replicate_enabled:
+            prefill_q = self.q_proj._local_view(prefill_q)
         prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
         prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
         cos = attn_metadata.prefill.cos

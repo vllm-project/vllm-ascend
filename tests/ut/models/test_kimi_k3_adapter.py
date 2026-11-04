@@ -404,18 +404,21 @@ def test_kimi_dense_mlp_gathers_and_scatters_sequence_shards(monkeypatch):
     torch.testing.assert_close(output, torch.tensor([[2.0], [3.0]]))
 
 
-def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
+@pytest.mark.parametrize("fused_o_proj", [False, True])
+@pytest.mark.parametrize("block_boundary", [False, True])
+def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch, fused_o_proj, block_boundary):
     class IdentityAttention(nn.Module):
         def forward(self, *, hidden_states, positions):
             del positions
-            return hidden_states
+            return hidden_states.chunk(2, dim=0)[0] if fused_o_proj else hidden_states
 
     layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
     nn.Module.__init__(layer)
     layer.use_sequence_parallel = True
-    layer.fuse_o_proj_mm_reduce_scatter = False
+    layer.fuse_o_proj_mm_reduce_scatter = fused_o_proj
     layer.prev_valid_blocks = 0
-    layer.is_block_write_layer = False
+    layer.is_block_write_layer = block_boundary
+    layer.block_write_idx = 0
     # The main-contract fused path reads the norm/proj weights directly, so use
     # weight-bearing stand-ins rather than opaque sentinels.
     layer.input_layernorm = SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-5)
@@ -441,7 +444,9 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
     monkeypatch.setattr(kimi_k3, "sp_reduce_scatter", fake_reduce_scatter)
     layer.prepare_attn_residual = MethodType(lambda self, prefix, bank, **kwargs: (prefix, prefix, prefix), layer)
 
-    def fake_fused(prefix, addend, *_args, **_kwargs):
+    def fake_fused(prefix, addend, bank, *_args, **_kwargs):
+        assert prefix.shape == (bank.shape[0], bank.shape[2])
+        assert addend is None or addend.shape == prefix.shape
         raw = prefix if addend is None else prefix + addend
         return raw, raw, raw
 
@@ -456,11 +461,12 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
         prefix_delta=None,
     )
     assert output.shape == torch.Size([2, 2])
+    torch.testing.assert_close(output, hidden_states if block_boundary else hidden_states * 2)
 
-    assert collective_shapes == [
-        ("gather", torch.Size([2, 2])),
-        ("reduce_scatter", torch.Size([3, 2])),
-    ]
+    expected_collectives = [("gather", torch.Size([2, 2]))]
+    if not fused_o_proj:
+        expected_collectives.append(("reduce_scatter", torch.Size([3, 2])))
+    assert collective_shapes == expected_collectives
     assert returned_residual.shape == torch.Size([2, 1, 2])
 
 
