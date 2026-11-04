@@ -1219,6 +1219,16 @@
 #       gate_up/down with `sp_all_gather` / `sp_reduce_scatter` (MiniMax-M3 /
 #       DeepSeek-V4 pattern); MoE blocks keep the upstream
 #       `already_sequence_parallel=True` contract.
+#       MC2 fusion: prefill-sized unquantized batches run the boundary
+#       collectives fused into their GEMMs - `DenseSpAllGatherMmOp`
+#       (torch_npu.npu_all_gather_base_mm) on the column projections and
+#       `DenseSpMmReduceScatterOp` (torch_npu.npu_mm_reduce_scatter_base)
+#       on the row projections, installed as the projections' custom ops at
+#       `__init__` time; the decoder then skips its own gather /
+#       reduce-scatter for those layers. The GDN in-projections stay stock
+#       (their gather feeds several consumers inside the mixer core).
+#       Decode and ineligible configurations fall back to the unfused layout
+#       inside the same custom ops.
 #       The module-level patch applications are guarded by
 #       `STANDARD_WORKER_PATCHES` (mirroring `patch/worker/__init__.py`) so
 #       the lazy import from `utils.enable_sp` stays side-effect-free on
