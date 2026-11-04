@@ -54,7 +54,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
-      - '{"num_speculative_tokens":5,"method":"dspark","model":"Eco-Tech/GLM-5.2-DSpark-NPU-0805","enforce_eager":true,"kv_cache_dtype":"auto"}'
+      - '{"num_speculative_tokens":5,"method":"dspark","model":"/root/.cache/modelscope/hub/models/Eco-Tech/GLM-5.2-DSpark-NPU-0805","enforce_eager":true,"kv_cache_dtype":"auto"}'
       - "--kv-cache-dtype"
       - "fp8"
       - "--attention-config"
