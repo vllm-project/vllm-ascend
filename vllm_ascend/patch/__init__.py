@@ -1528,7 +1528,8 @@
 #       the upstream indexer backend is GPU-specific.
 #    How：
 #       Route SFA indexer cache layers to the existing
-#       `AscendSFAIndexerBackend`.
+#       `AscendSFAIndexerBackend`, or `AscendHiSparseIndexerBackend` when
+#       HiSparse is enabled. The model wrapper uses the cache's backend choice.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm-ascend/pull/13069
 #    Future Plan:

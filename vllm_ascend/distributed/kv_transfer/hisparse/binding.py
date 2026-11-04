@@ -161,8 +161,6 @@ def _bind_indexer_views(
         if spec.cache_sparse_li_c8:
             kv_caches[name] = _quantized_indexer_views(cache, spec)
             forward_context[name].hisparse_block_stride = 1
-            # Declare only after validating this allocation's actual K/scale views.
-            forward_context[name].hisparse_indexer_payload_format = "ascend_indexer_e4m3fn_key_fp32_scale_v1"
             continue
         block_size = cache.shape[2]
         page_elements = block_size * spec.num_kv_heads * spec.head_size
@@ -176,5 +174,4 @@ def _bind_indexer_views(
             stride=(page_elements, spec.num_kv_heads * spec.head_size, spec.head_size, 1),
         )
         forward_context[name].hisparse_block_stride = block_stride
-        forward_context[name].hisparse_indexer_payload_format = "bf16"
         kv_caches[name] = (indexer_cache,)

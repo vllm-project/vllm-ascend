@@ -31,7 +31,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
-from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 
@@ -66,7 +65,9 @@ class IndexerWrapper(nn.Module):
                 self.register_parameter(name, parameter)
 
         backend_factory = getattr(type(vllm_indexer), "get_ascend_indexer_backend_cls", None)
-        backend_cls = backend_factory(vllm_indexer) if backend_factory is not None else AscendSFAIndexerBackend
+        backend_cls = (
+            backend_factory(vllm_indexer) if backend_factory is not None else vllm_indexer.k_cache.get_attn_backend()
+        )
         self.impl = backend_cls(vllm_indexer, qk_rope_head_dim)
 
     # Interface consumed by the SFA impl - delegated to the backend impl.

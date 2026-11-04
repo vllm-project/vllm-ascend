@@ -10,15 +10,16 @@ import pytest
 import torch
 from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec, MLAAttentionSpec
 
+from vllm_ascend.attention.indexer import AscendHiSparseIndexerBackend
 from vllm_ascend.attention.sfa_hisparse import AscendHiSparseMetadataBuilder, finish_hisparse_kv_update
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.hisparse.backend import AscendHiSparseBackend
 from vllm_ascend.distributed.kv_transfer.hisparse.binding import (
     _bind_indexer_views,
     align_hisparse_indexer_specs,
     get_hisparse_indexer_specs,
-    write_hisparse_indexer_c8,
 )
 from vllm_ascend.ops import hisparse as hisparse_ops
 from vllm_ascend.ops.hisparse_c8 import (
@@ -227,7 +228,7 @@ def test_c8_compaction_preserves_duplicate_order_and_empty_rows():
 
 
 @pytest.mark.parametrize("padding", [0, 256])
-def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(indexer_spec, padding):
+def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(monkeypatch, indexer_spec, padding):
     spec = replace(
         indexer_spec,
         block_size=128,
@@ -250,7 +251,6 @@ def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(indexer_spe
     key, scale = caches["indexer"]
     assert key.untyped_storage().data_ptr() == scale.untyped_storage().data_ptr() == raw.data_ptr()
     assert layer.hisparse_block_stride == 1
-    assert layer.hisparse_indexer_payload_format == "ascend_indexer_e4m3fn_key_fp32_scale_v1"
     slots = torch.tensor([127, 0, 128, 383, -1, 256], dtype=torch.int32)
     values_raw = torch.arange(6 * 128).to(torch.uint8).reshape(6, 128)
     values = values_raw.view(torch.float8_e4m3fn)
@@ -261,6 +261,12 @@ def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(indexer_spe
         valid = indexes >= 0
         destination[indexes[valid].long()] = source[valid]
 
+    monkeypatch.setattr(DeviceOperator, "scatter_cache", scatter)
+    writer = AscendHiSparseIndexerBackend.__new__(AscendHiSparseIndexerBackend)
+    torch.nn.Module.__init__(writer)
+    writer.k_cache = NS(kv_cache=caches["indexer"])
+    writer.enable_sparse_li_c8 = True
+    writer.enable_sparse_li_c4 = False
     expected = raw.clone()
     scale_bytes = scales.view(torch.uint8).reshape(6, 4)
     for i, slot in enumerate(slots.tolist()):
@@ -271,5 +277,5 @@ def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(indexer_spe
         expected[start : start + 128] = values_raw[i]
         start = offset + page * stride + key_bytes + row * 4
         expected[start : start + 4] = scale_bytes[i]
-    write_hisparse_indexer_c8(key, scale, values, scales, slots, scatter)
+    writer.write_cache(values, scales, slots)
     torch.testing.assert_close(raw, expected, rtol=0, atol=0)
