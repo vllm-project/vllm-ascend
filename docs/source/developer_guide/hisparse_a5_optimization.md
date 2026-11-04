@@ -530,3 +530,57 @@ Full format.sh CI remains unqualified after the recorded actionlint installation
 stall. Retained native libraries match their frozen source/package hashes, but
 an independent full native rebuild, A3, final P/D and dataset accuracy still
 require separate qualification. N2 is not statistical significance.
+
+## Eager all-Resident C8 prefill using merged Core
+
+The same-node traces showed an additional Ascend routing cost: a mixed eager
+batch used separate decode and prefill Attention calls, with prefill KV staging
+and another logical-to-staging conversion. Merged Core already provides a
+stride-aware Resident converter. The Ascend wrapper now reuses it for fully
+Resident, real-row-only eager prefills larger than the decode workspace and
+uses one existing native C8 Attention call for the complete batch.
+
+Core performs current request-state/block-table indirection and stable TopK
+compaction. Its output already includes the Resident block stride; the private
+C8 adapter accepts those encoded physical rows without mapping them a second
+time. Cache contents, native Attention calculations, Host writes, HMA ownership,
+Coordinator admission/eviction, count-copy and MTP ordering are unchanged.
+Decode graphs, padding, nonresident batches, small prefills, BF16 and composite
+connectors retain their previous paths. This adds no native kernel or Core patch.
+
+The tested production-code commit is
+`6bbf813f3aa19eeda57baa3adc7496d3cd9ccb91`, with the same merged Core and
+configuration as the preceding current-main result. Both arms ran sequentially
+on the same A5 TP8 node with the same fixed bodies, primer, EvalScope protocol
+and N2. No profiler or observation hook was active during timing.
+
+| Round | OFF TPOT ms | ON TPOT ms | Increase |
+| --- | ---: | ---: | ---: |
+| 1 | 12.102582 | 12.456656 | 2.926% |
+| 2 | 12.105678 | 12.410819 | 2.521% |
+
+Mean TPOT is **12.104130 -> 12.433737 ms, +2.723097%**, meeting the 3% goal
+for this N2 and shape. All 16 requests succeeded with 8192 returned IDs each;
+input/output hashes and every MTP draft/accepted/per-position count matched.
+Acceptance remained 59.893611%. ON settled reported miss/H2D deltas and all
+eight-rank idle tails were zero, not a physical DMA measurement.
+
+Pooled sampled steady-decode throughput was 355.247 -> 352.767 tokens/s.
+Mean TTFT remained about 15.449 -> 19.020 seconds, so this does not establish
+lossless prefill performance. Compared with the preceding ON N2, mean TPOT
+decreased 1.18%; the larger change was in its first mixed round. The previous
++3.941303% result remains recorded, and neither round is discarded.
+
+Validation includes 18 CPU routing/current-state contracts, 16 real-NPU Core
+converter cases and six exact native-output cases covering strided Resident
+versus contiguous staging, split versus combined batches, changing request
+order, invalid entries and 129/257/8192 rows. Initial primitive failures are
+retained: its staging key domain was smaller than TopK, causing native length
+clipping; both key domains now satisfy the same contract and preserve opaque
+C8 bytes. The whole model verified the new route on all eight ranks/79 layers
+using a bounded natural request before removing the audit.
+
+Focused Ruff/format and CPU checks passed. Full CI was attempted again and
+stalled installing actionlint; the exact local invocation was interrupted.
+Miss workloads, final P/D, dataset accuracy, A3 and a clean native rebuild are
+still separate qualifications. AVSG remains excluded.
