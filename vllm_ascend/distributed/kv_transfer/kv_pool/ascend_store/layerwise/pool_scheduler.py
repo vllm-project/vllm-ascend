@@ -10,6 +10,9 @@ from vllm.v1.request import Request
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    get_group_block_size,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
@@ -17,14 +20,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-    LoadSpec,
-    RequestTracker,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LoadSpec
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_keys import (
     block_hash_to_str,
     get_block_hashes,
-    get_group_block_size,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.request_state import RequestTracker
 
 
 class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):

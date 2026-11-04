@@ -65,13 +65,15 @@ Bulk and layer addressing share one implementation over selected descriptors.
 
 ### Task 3: Separate save decisions and worker preparation state
 
-**Files:** Create `request_state.py` and `transfer_metadata.py`; update metadata,
+**Files:** Create `request_state.py`, `transfer_metadata.py`, and `cache_config.py`; update metadata,
 scheduler, worker, backend, and transfer consumers and their affected fixtures.
 
-**Interfaces:** A pure save-decision function returns immutable decisions.
+**Interfaces:** `RequestTracker.plan_save` returns immutable decisions without mutation.
 Tracker state changes remain at the current scheduling point. A per-request
 transfer state owns prepared arrays, keys, masks, and offsets. Existing metadata
 entry points remain available for callers while production uses explicit state.
+Configuration helpers move unchanged to their own module; production imports
+their owning modules while the old metadata import paths remain available.
 
 - [ ] Test decision computation without tracker mutation, hash-boundary saves,
   independent worker state, and group access after preparation.

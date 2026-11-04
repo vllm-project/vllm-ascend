@@ -16,6 +16,7 @@
 #
 
 import unittest
+from copy import copy
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -572,6 +573,30 @@ class TestRequestTracker(unittest.TestCase):
 
 
 class TestReqMeta(unittest.TestCase):
+    def test_save_decision_does_not_advance_tracker(self):
+        tracker = RequestTracker("r1", 256, allocated_block_ids=[1, 2], num_saved_tokens=0)
+        decision = tracker.plan_save(128, block_hash_count=1, save_partial_block=True)
+        self.assertEqual(decision.save_end_token, 128)
+        self.assertEqual(decision.target_token_len, 256)
+        self.assertEqual(decision.snapshot_start_block, 1)
+        self.assertEqual(decision.snapshot_block_index, 1)
+        self.assertEqual(tracker.num_saved_tokens, 0)
+        self.assertIsNone(tracker.last_layerwise_snapshot_end_token)
+
+    def test_transfer_preparation_is_independent_for_copied_views(self):
+        original = ReqMeta("r1", block_ids_np=np.array([1]), block_gvas_np=np.array([100]))
+        original.transfer.load_keys = ["original"]
+        view = copy(original)
+        view.transfer.load_keys = ["view"]
+        view.transfer.block_gvas_np = np.array([200])
+        other = ReqMeta("r2")
+        other.transfer.load_keys.append("other")
+        self.assertEqual(original.transfer.load_keys, ["original"])
+        self.assertEqual(view.transfer.load_keys, ["view"])
+        np.testing.assert_array_equal(original.get_transfer_arrays(0)[1], [100])
+        np.testing.assert_array_equal(view.get_transfer_arrays(0)[1], [200])
+        self.assertEqual(ReqMeta("r3").transfer.load_keys, [])
+
     def test_group_arrays_prefer_selected_group(self):
         meta = ReqMeta(
             "r1",

@@ -29,7 +29,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     LayerTransferTask,
     SharedBlockData,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase, ReqMeta
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    ReqMeta,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.token_database import (
+    ChunkedTokenDatabase,
+)
 
 _KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
 
@@ -247,14 +252,14 @@ class LayerBatchBuilder:
             request = block_range.request
             req_ids.append(request.req_id)
             is_last_chunks.append(request.is_last_chunk)
-            if request.save_keys:
-                all_save_keys.extend(request.save_keys)
-            if request.load_keys and id(request) not in collected_load_keys_request_ids:
+            if request.transfer.save_keys:
+                all_save_keys.extend(request.transfer.save_keys)
+            if request.transfer.load_keys and id(request) not in collected_load_keys_request_ids:
                 # Avoid collecting the same request's load_keys multiple times
                 collected_load_keys_request_ids.add(id(request))
-                all_load_keys.extend(request.load_keys)
+                all_load_keys.extend(request.transfer.load_keys)
             block_ids_np, block_gvas_np = self._require_request_arrays(block_range, is_save)
-            gva_block_offset = request.gva_block_offset if is_save else request.load_gva_block_offset
+            gva_block_offset = request.transfer.gva_block_offset if is_save else request.transfer.load_gva_block_offset
 
             num_blocks = block_range.end_block - block_range.start_block
             if num_blocks > 0:
@@ -274,7 +279,9 @@ class LayerBatchBuilder:
             if block_range.partial_block_index is not None:
                 partial_block_gva = None
                 partial_gva_per_group = (
-                    request.partial_save_gva_per_group if is_save else request.partial_load_gva_per_group
+                    request.transfer.partial_save_gva_per_group
+                    if is_save
+                    else request.transfer.partial_load_gva_per_group
                 )
                 if task.group_id < len(partial_gva_per_group):
                     partial_block_gva = partial_gva_per_group[task.group_id]
@@ -325,14 +332,14 @@ class LayerBatchBuilder:
     ) -> tuple[list[str | None], int, str | None]:
         if is_save:
             return (
-                request.save_block_keys,
-                request.save_key_block_offset,
-                request.save_last_block_key,
+                request.transfer.save_block_keys,
+                request.transfer.save_key_block_offset,
+                request.transfer.save_last_block_key,
             )
         return (
-            request.load_block_keys,
-            request.load_key_block_offset,
-            request.load_last_block_key,
+            request.transfer.load_block_keys,
+            request.transfer.load_key_block_offset,
+            request.transfer.load_last_block_key,
         )
 
     def _request_block_ids(self, request: ReqMeta) -> list[int]:
@@ -360,7 +367,7 @@ class LayerBatchBuilder:
             request = block_range.request
             req_ids.append(request.req_id)
             is_last_chunks.append(request.is_last_chunk)
-            all_load_keys.extend(request.load_keys)
+            all_load_keys.extend(request.transfer.load_keys)
             request_block_ids = self._request_block_ids(request)
             if (
                 block_range.start_block < 0

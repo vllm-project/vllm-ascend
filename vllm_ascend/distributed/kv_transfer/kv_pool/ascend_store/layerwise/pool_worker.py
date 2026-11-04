@@ -36,6 +36,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_l
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
     LayerwiseSessionTracker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    get_group_block_size,
+    infer_dcp_mismatch_info,
+    is_kv_save_role,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import (
     DSparkPrefixCache,
     DSparkPrefixKeys,
@@ -69,11 +74,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     ReqMeta,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_keys import (
     block_hash_to_str,
     get_block_hashes,
-    get_group_block_size,
-    infer_dcp_mismatch_info,
-    is_kv_save_role,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
@@ -897,8 +901,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         self._current_layerwise_last_chunk_req_ids.difference_update(req_ids)
 
     def _prepare_layerwise_put_session(self, request: ReqMeta) -> None:
-        request.save_block_keys = []
-        request.save_last_block_key = None
+        request.transfer.save_block_keys = []
+        request.transfer.save_last_block_key = None
         if not self._is_layerwise_save_owner() or not request.can_save:
             return
 
@@ -912,17 +916,17 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             )
             start_block = max(start_block, pool_hit_tokens // self.block_size)
         group_block_hashes = get_block_hashes(request.block_hashes, self.block_size, self.hash_block_size)
-        request.save_key_block_offset = start_block
-        request.save_block_keys = [None] * max(0, end_block - start_block)
+        request.transfer.save_key_block_offset = start_block
+        request.transfer.save_block_keys = [None] * max(0, end_block - start_block)
         key_slots: list[tuple[str, int | None, int]] = []
         for block_index in range(start_block, min(end_block, len(group_block_hashes))):
             key = self._make_mooncake_layerwise_key(block_hash_to_str(group_block_hashes[block_index]))
-            request.save_block_keys[block_index - start_block] = key
+            request.transfer.save_block_keys[block_index - start_block] = key
             key_slots.append((key, block_index - start_block, block_index))
 
         if request.partial_block_index is not None:
-            request.save_last_block_key = self._make_mooncake_layerwise_key(f"{request.req_id}_lastblock")
-            key_slots.append((request.save_last_block_key, None, request.partial_block_index))
+            request.transfer.save_last_block_key = self._make_mooncake_layerwise_key(f"{request.req_id}_lastblock")
+            key_slots.append((request.transfer.save_last_block_key, None, request.partial_block_index))
 
         requested_keys = list(dict.fromkeys(key for key, _, _ in key_slots))
         if not requested_keys:
@@ -949,20 +953,20 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         for key, slot, _ in key_slots:
             if key in started:
                 if slot is None:
-                    request.save_last_block_key = key
+                    request.transfer.save_last_block_key = key
             elif slot is None:
-                request.save_last_block_key = None
+                request.transfer.save_last_block_key = None
             else:
-                request.save_block_keys[slot] = None
+                request.transfer.save_block_keys[slot] = None
         self._layerwise_session_tracker.register_put_keys(
             request.req_id,
             ((key, block_index) for key, _, block_index in key_slots if key in started),
         )
 
     def _prepare_layerwise_get_session(self, request: ReqMeta) -> list[tuple[str, int, int | None]]:
-        request.load_block_keys = []
-        request.load_last_block_key = None
-        request.load_keys = []
+        request.transfer.load_block_keys = []
+        request.transfer.load_last_block_key = None
+        request.transfer.load_keys = []
         current_entries: list[tuple[str, int]] = []
         load_spec = request.load_spec
         if load_spec is not None and load_spec.can_load:
@@ -998,11 +1002,11 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         ]
         if not valid_entries:
             return []
-        request.load_key_block_offset = 0
-        request.load_block_keys = [None] * (max(block_index for _, block_index in valid_entries) + 1)
+        request.transfer.load_key_block_offset = 0
+        request.transfer.load_block_keys = [None] * (max(block_index for _, block_index in valid_entries) + 1)
         key_slots: list[tuple[str, int, int | None]] = []
         for key, block_index in valid_entries:
-            request.load_block_keys[block_index] = key
+            request.transfer.load_block_keys[block_index] = key
             key_slots.append((key, request.block_ids[block_index], block_index))
         return key_slots
 
@@ -1021,9 +1025,9 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             self._record_invalid_blocks_ids([block_id for _, _, block_id, _ in request_key_slots])
             for request, _, _, slot in request_key_slots:
                 if slot is None:
-                    request.load_last_block_key = None
+                    request.transfer.load_last_block_key = None
                 else:
-                    request.load_block_keys[slot] = None
+                    request.transfer.load_block_keys[slot] = None
             return
 
         results_by_key = dict(zip(keys, results, strict=True))
@@ -1044,11 +1048,11 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 continue
             self._record_invalid_blocks_ids([block_id])
             if slot is None:
-                request.load_last_block_key = None
+                request.transfer.load_last_block_key = None
             else:
-                request.load_block_keys[slot] = None
+                request.transfer.load_block_keys[slot] = None
         for request_identity, request in requests_by_id.items():
-            request.load_keys = request_load_keys[request_identity]
+            request.transfer.load_keys = request_load_keys[request_identity]
 
     def _prepare_block_key_layerwise_sessions(self, requests: list[ReqMeta]) -> None:
         self._layer_load_aborted.clear()
@@ -1114,8 +1118,9 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             if partial_block_index is None:
                 partial_block_index = request.partial_block_index
             num_allocated_blocks = (
-                len(request.block_ids_by_group_np[group_id])
-                if request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np)
+                len(request.transfer.block_ids_by_group_np[group_id])
+                if request.transfer.block_ids_by_group_np is not None
+                and group_id < len(request.transfer.block_ids_by_group_np)
                 else len(request.block_ids_by_group[group_id])
             )
             save_end_block = min(save_end_block, num_allocated_blocks)
@@ -1123,8 +1128,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             if partial_block_index is not None and partial_block_index >= num_allocated_blocks:
                 partial_block_index = None
             group_store_mask = (
-                request.store_masks[group_id]
-                if request.store_masks is not None and group_id < len(request.store_masks)
+                request.transfer.store_masks[group_id]
+                if request.transfer.store_masks is not None and group_id < len(request.transfer.store_masks)
                 else None
             )
             block_runs = self._masked_block_runs_cached(
@@ -1233,7 +1238,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 if self.layerwise_offload and request.can_save:
                     self._record_failed_request(request)
                 request.can_save = False
-                request.save_keys = []
+                request.transfer.save_keys = []
 
     def _alloc_gvas_for_save_for_request(self, requests: list[ReqMeta]) -> bool | None:
         """Allocate per-group GVA on the worker side right before batch_copy.
@@ -1260,7 +1265,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             all_group_gvas: list[np.ndarray] = []
             all_group_block_ids: list[np.ndarray] = []
             all_group_save_keys: list[str] = []
-            request.partial_save_gva_per_group = [0] * self.num_kv_cache_groups
+            request.transfer.partial_save_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
                 block_ids_by_group = request.get_block_ids_array(group_id)
                 if block_ids_by_group is None:
@@ -1293,8 +1298,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                     hit_full_blocks = pool_hit_tokens // effective_block_size
                     save_start_block = max(save_start_block, hit_full_blocks)
                 group_store_mask = (
-                    request.store_masks[group_id]
-                    if request.store_masks is not None and group_id < len(request.store_masks)
+                    request.transfer.store_masks[group_id]
+                    if request.transfer.store_masks is not None and group_id < len(request.transfer.store_masks)
                     else None
                 )
                 end_limit = min(save_end_block, len(block_ids_by_group))
@@ -1392,7 +1397,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                         )
                     if self.layerwise_offload and partial_gva <= 0:
                         return False
-                    request.partial_save_gva_per_group[group_id] = (
+                    request.transfer.partial_save_gva_per_group[group_id] = (
                         partial_gva if 0 < partial_gva < MEMCACHE_SSD_HIT_GVA else 0
                     )
 
@@ -1420,11 +1425,11 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
 
             if all_group_gvas:
-                request.save_keys = all_group_save_keys
-                request.block_gvas_by_group_np = all_group_gvas
-                request.block_ids_by_group_np = all_group_block_ids
-                request.block_gvas_np = all_group_gvas[0]
-                request.gva_block_offset = 0
+                request.transfer.save_keys = all_group_save_keys
+                request.transfer.block_gvas_by_group_np = all_group_gvas
+                request.transfer.block_ids_by_group_np = all_group_block_ids
+                request.transfer.block_gvas_np = all_group_gvas[0]
+                request.transfer.gva_block_offset = 0
         return None
 
     def _build_shared_save_data(self) -> None:
@@ -1561,7 +1566,9 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 # chunked-prefill steps.  A later chunk can therefore have no
                 # new load_spec while still needing to restore the previously
                 # committed prefix into its newly allocated local blocks.
-                populated_slots = [index for index, key in enumerate(request.load_block_keys) if key is not None]
+                populated_slots = [
+                    index for index, key in enumerate(request.transfer.load_block_keys) if key is not None
+                ]
                 if not populated_slots:
                     continue
                 request_block_ranges.append(
@@ -1611,8 +1618,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             if not self.layerwise_offload or layer_id in self.independent_layers:
                 partial_block_index = None
             partial_gva = (
-                request.partial_load_gva_per_group[group_id]
-                if group_id < len(request.partial_load_gva_per_group)
+                request.transfer.partial_load_gva_per_group[group_id]
+                if group_id < len(request.transfer.partial_load_gva_per_group)
                 else request.last_block_gva
             )
             if partial_gva is None or partial_gva <= 0:
@@ -1620,8 +1627,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             if partial_block_index is not None and partial_block_index < load_start_block:
                 partial_block_index = None
             group_load_mask = (
-                request.load_masks[group_id]
-                if request.load_masks is not None and group_id < len(request.load_masks)
+                request.transfer.load_masks[group_id]
+                if request.transfer.load_masks is not None and group_id < len(request.transfer.load_masks)
                 else None
             )
             block_runs = self._masked_block_runs_cached(
@@ -1781,11 +1788,11 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                     request.req_id,
                 )
             block_hashes = request.block_hashes
-            request.load_masks = self._compute_reachable_load_masks(request, cached_tokens)
+            request.transfer.load_masks = self._compute_reachable_load_masks(request, cached_tokens)
 
             all_group_load_gvas: list[np.ndarray] = []
             all_group_load_keys: list[str] = []
-            request.partial_load_gva_per_group = [0] * self.num_kv_cache_groups
+            request.transfer.partial_load_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
                 if group_id not in self.cacheable_group_ids:
                     all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
@@ -1826,8 +1833,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                     continue
 
                 group_load_mask = (
-                    request.load_masks[group_id]
-                    if request.load_masks is not None and group_id < len(request.load_masks)
+                    request.transfer.load_masks[group_id]
+                    if request.transfer.load_masks is not None and group_id < len(request.transfer.load_masks)
                     else None
                 )
                 block_indices = [
@@ -1989,13 +1996,13 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                         full_gvas[block_idx] = gvas[gva_index]
                 all_group_load_gvas.append(np.asarray(full_gvas, dtype=np.int64))
                 if has_partial_key and gvas:
-                    request.partial_load_gva_per_group[group_id] = gvas[-1]
+                    request.transfer.partial_load_gva_per_group[group_id] = gvas[-1]
 
             if all_group_load_gvas:
-                request.load_keys = all_group_load_keys
-                request.load_block_gvas_by_group_np = all_group_load_gvas
-                request.load_block_gvas_np = all_group_load_gvas[0]
-                request.load_gva_block_offset = 0
+                request.transfer.load_keys = all_group_load_keys
+                request.transfer.load_block_gvas_by_group_np = all_group_load_gvas
+                request.transfer.load_block_gvas_np = all_group_load_gvas[0]
+                request.transfer.load_gva_block_offset = 0
         return None
 
     def _check_hybrid_load_errors(self) -> None:
@@ -2112,7 +2119,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         else:
             num_local = self.num_layers
         for request in requests:
-            request.store_masks = self._compute_reachable_store_masks(request)
+            request.transfer.store_masks = self._compute_reachable_store_masks(request)
         group_requests = {}
         if self.use_block_key_layerwise:
             group_requests = self._prepare_layerwise_sessions(requests)

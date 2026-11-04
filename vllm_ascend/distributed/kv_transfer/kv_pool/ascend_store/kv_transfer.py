@@ -18,9 +18,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     MemcacheBackend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-    ChunkedTokenDatabase,
     ReqMeta,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_keys import (
     get_block_hashes,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.token_database import (
+    ChunkedTokenDatabase,
 )
 
 _TRANSFER_SHUTDOWN_POLL_S = 0.1

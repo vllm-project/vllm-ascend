@@ -9,8 +9,12 @@ import torch
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-    PoolKey,
     ReqMeta,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_keys import (
+    PoolKey,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.request_state import (
     normalize_block_ids_by_group,
 )
 

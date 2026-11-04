@@ -1,19 +1,51 @@
 from __future__ import annotations
 
-import math
-from collections.abc import Mapping, Sequence
+from copy import copy
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata, KVConnectorWorkerMetadata
 from vllm.logger import logger
-from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash
-from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    TPMismatchInfo as TPMismatchInfo,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    get_group_block_size as get_group_block_size,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    get_group_cache_family as get_group_cache_family,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    infer_cache_family_from_ratio as infer_cache_family_from_ratio,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    infer_cache_transfer_granularity as infer_cache_transfer_granularity,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    infer_cacheable_group_ids as infer_cacheable_group_ids,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    infer_dcp_mismatch_info as infer_dcp_mismatch_info,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    infer_group_block_sizes as infer_group_block_sizes,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    infer_group_cache_families as infer_group_cache_families,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    infer_tp_mismatch_info as infer_tp_mismatch_info,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    is_kv_save_role as is_kv_save_role,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    uses_hybrid_kv_cache as uses_hybrid_kv_cache,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_keys import (
     KeyMetadata as KeyMetadata,
 )
@@ -29,240 +61,16 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_keys import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_keys import (
     get_block_hashes as get_block_hashes,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.request_state import (
+    RequestTracker as RequestTracker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.request_state import (
+    normalize_block_ids_by_group as normalize_block_ids_by_group,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.token_database import (
     ChunkedTokenDatabase as ChunkedTokenDatabase,
 )
-
-
-def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
-    return kv_role in ("kv_producer", "kv_both") or consumer_is_to_put
-
-
-@dataclass(frozen=True)
-class TPMismatchInfo:
-    enabled: bool
-    peer_tp_size: int
-    effective_tp_size: int
-    local_heads_per_rank: int
-    effective_heads_per_rank: int
-    num_sub_keys: int
-
-
-def _as_positive_int(value: Any, default: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
-
-
-def infer_dcp_mismatch_info(
-    kv_role: str,
-    extra_config: Mapping[str, Any] | object,
-    local_dcp_size: int | object,
-    local_pcp_size: int | object = 1,
-) -> bool:
-    """Whether the peer P/D stage disagrees with this stage on CP layout.
-
-    Both the layerwise GVA shard stride and the per-shard save-leader rule
-    derive from the local dcp size/rank. In PD-disaggregation the producer
-    and consumer are separate worker groups, so when they are started with
-    unequal decode-context-parallel sizes they compute different shard
-    layouts for the SAME pool region and silently corrupt the KV pool.
-
-    The peer topology is carried through the flat peer keys used by the
-    store connector path (``prefill_dcp_size`` / ``decode_dcp_size``),
-    mirroring the existing ``prefill_tp_size`` / ``decode_tp_size``
-    convention. When the key is absent the single-group path is assumed and
-    the local layout is authoritative.
-    """
-    local_dcp_size = _as_positive_int(local_dcp_size, 1)
-    local_pcp_size = _as_positive_int(local_pcp_size, 1)
-    if not isinstance(extra_config, Mapping):
-        return False
-    if kv_role == "kv_consumer":
-        peer_dcp_key = "prefill_dcp_size"
-        peer_pcp_key = "prefill_pcp_size"
-    elif kv_role == "kv_producer":
-        peer_dcp_key = "decode_dcp_size"
-        peer_pcp_key = "decode_pcp_size"
-    else:
-        return False
-    peer_dcp_size = _as_positive_int(extra_config.get(peer_dcp_key, local_dcp_size), local_dcp_size)
-    peer_pcp_size = _as_positive_int(extra_config.get(peer_pcp_key, local_pcp_size), local_pcp_size)
-    return peer_dcp_size != local_dcp_size or peer_pcp_size != local_pcp_size
-
-
-def infer_tp_mismatch_info(
-    kv_role: str,
-    extra_config: Mapping[str, Any] | object,
-    local_tp_size: int | object,
-    num_kv_heads: int | object,
-    use_mla: bool,
-    use_hybrid: bool = False,
-) -> TPMismatchInfo:
-    local_tp_size = _as_positive_int(local_tp_size, 1)
-    num_kv_heads = _as_positive_int(num_kv_heads, 1)
-    peer_tp_size = local_tp_size
-    if isinstance(extra_config, Mapping):
-        peer_key = "prefill_tp_size" if kv_role == "kv_consumer" else "decode_tp_size"
-        peer_tp_size = _as_positive_int(extra_config.get(peer_key, local_tp_size), local_tp_size)
-
-    effective_tp_size = max(local_tp_size, peer_tp_size)
-    enabled = (
-        peer_tp_size != local_tp_size
-        and not use_mla
-        and not use_hybrid
-        and num_kv_heads >= effective_tp_size
-        and num_kv_heads % effective_tp_size == 0
-    )
-    local_heads_per_rank = num_kv_heads // local_tp_size if local_tp_size <= num_kv_heads else 1
-    effective_heads_per_rank = num_kv_heads // effective_tp_size if enabled else local_heads_per_rank
-    num_sub_keys = local_heads_per_rank // effective_heads_per_rank if enabled else 1
-    return TPMismatchInfo(
-        enabled=enabled,
-        peer_tp_size=peer_tp_size,
-        effective_tp_size=effective_tp_size,
-        local_heads_per_rank=local_heads_per_rank,
-        effective_heads_per_rank=effective_heads_per_rank,
-        num_sub_keys=num_sub_keys,
-    )
-
-
-def infer_cache_family_from_ratio(compress_ratio: int | None) -> str:
-    if compress_ratio is None:
-        return "default"
-    if compress_ratio <= 1:
-        return "c1"
-    return f"c{compress_ratio}"
-
-
-def _get_layer_compress_ratio(
-    layer_name: str,
-    compress_ratios: Sequence[int] | None,
-    hf_config: Any | None = None,
-) -> int | None:
-    if compress_ratios is None:
-        return None
-    if getattr(hf_config, "model_type", None) == "deepseek_v4":
-        from vllm_ascend.utils import extract_dsv4_layer_index, get_dsv4_compress_ratio
-
-        return get_dsv4_compress_ratio(hf_config, extract_dsv4_layer_index(hf_config, layer_name))
-    from vllm.model_executor.models.utils import extract_layer_index
-
-    return compress_ratios[extract_layer_index(layer_name)]
-
-
-def _get_group_spec_ratios(group: object) -> set[int | None]:
-    kv_cache_spec = getattr(group, "kv_cache_spec", None)
-    if kv_cache_spec is None:
-        return set()
-    kv_cache_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
-    if kv_cache_specs is not None:
-        return {getattr(spec, "compress_ratio", None) for spec in kv_cache_specs.values()}
-    return {getattr(kv_cache_spec, "compress_ratio", None)}
-
-
-def infer_group_cache_families(
-    kv_cache_groups: Sequence[object] | None,
-    compress_ratios: Sequence[int] | None,
-    hf_config: Any | None = None,
-) -> list[str]:
-    if kv_cache_groups is None:
-        return ["default"]
-
-    families: list[str] = []
-    for group in kv_cache_groups:
-        spec_ratios = _get_group_spec_ratios(group)
-        if len(spec_ratios) == 1:
-            families.append(infer_cache_family_from_ratio(next(iter(spec_ratios))))
-            continue
-        if len(spec_ratios) > 1:
-            families.append("mixed")
-            continue
-
-        layer_names = list(getattr(group, "layer_names", []))
-        if compress_ratios is None or not layer_names:
-            families.append("default")
-            continue
-
-        group_ratios = {_get_layer_compress_ratio(layer_name, compress_ratios, hf_config) for layer_name in layer_names}
-        if len(group_ratios) == 1:
-            families.append(infer_cache_family_from_ratio(next(iter(group_ratios))))
-        else:
-            logger.debug(
-                "KV cache group has mixed layer compress ratios %s for layers %s; using mixed cache family.",
-                sorted(group_ratios, key=lambda ratio: -1 if ratio is None else ratio),
-                layer_names,
-            )
-            families.append("mixed")
-    return families
-
-
-def uses_hybrid_kv_cache(scheduler_config: Any, kv_cache_groups: Sequence[Any] | None) -> bool:
-    return bool(
-        kv_cache_groups
-        and not getattr(scheduler_config, "disable_hybrid_kv_cache_manager", False)
-        and len(kv_cache_groups) > 1
-        and any(not isinstance(group.kv_cache_spec, FullAttentionSpec) for group in kv_cache_groups)
-    )
-
-
-def infer_group_block_sizes(
-    cache_block_size: int,
-    kv_cache_groups: Sequence[Any] | None,
-) -> list[int]:
-    if not kv_cache_groups:
-        return [cache_block_size]
-
-    block_sizes: list[int] = []
-    for group in kv_cache_groups:
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            spec = next(iter(spec.kv_cache_specs.values()))
-        block_sizes.append(spec.block_size)
-    return block_sizes
-
-
-def infer_cacheable_group_ids(kv_cache_groups: Sequence[Any] | None) -> list[int]:
-    if not kv_cache_groups:
-        return [0]
-    group_ids = [i for i, group in enumerate(kv_cache_groups) if is_prefix_cacheable(group.kv_cache_spec)]
-    assert group_ids, "AscendStore requires at least one prefix-cacheable KV cache group"
-    return group_ids
-
-
-def get_group_block_size(group_block_sizes: Sequence[int], group_id: int) -> int:
-    return group_block_sizes[group_id] if group_id < len(group_block_sizes) else group_block_sizes[0]
-
-
-def get_group_cache_family(group_cache_families: Sequence[str], group_id: int) -> str:
-    return group_cache_families[group_id] if group_id < len(group_cache_families) else "default"
-
-
-def infer_cache_transfer_granularity(
-    group_block_sizes: Sequence[int],
-    lcm_block_size: int,
-    kv_cache_group_ids: Sequence[int],
-) -> int:
-    granularities = [lcm_block_size]
-    for group_id in kv_cache_group_ids:
-        granularities.append(get_group_block_size(group_block_sizes, group_id))
-    return math.lcm(*granularities)
-
-
-def normalize_block_ids_by_group(block_ids: tuple[list[int], ...] | list[int] | list[list[int]]) -> list[list[int]]:
-    if isinstance(block_ids, tuple):
-        return [group.copy() for group in block_ids]
-    if isinstance(block_ids, list):
-        if not block_ids:
-            return [[]]
-        if isinstance(block_ids[0], list):
-            grouped_block_ids = cast(list[list[int]], block_ids)
-            return [group.copy() for group in grouped_block_ids]
-        flat_block_ids = cast(list[int], block_ids)
-        return [flat_block_ids.copy()]
-    raise ValueError(f"Unsupported block_ids type {type(block_ids)}")
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.transfer_metadata import RequestTransferState
 
 
 # Parameters related to the connector metadata
@@ -287,141 +95,6 @@ class LoadSpec:
     layerwise_previous_step: bool = False
     # First block stored under request-scoped keys, including unhashed full blocks.
     layerwise_snapshot_start_block: int | None = None
-
-
-@dataclass(init=False)
-class RequestTracker:
-    # Request id
-    req_id: str
-
-    token_len: int
-
-    # The block ids that has been allocated so far, grouped by KV cache group.
-    # NOTE: allocated blocks could be more than the number of tokens.
-    allocated_block_ids_by_group: list[list[int]]
-
-    # The number of tokens that has been savd
-    num_saved_tokens: int = 0
-
-    # The token ids that has been scheduled so far
-    # NOTE: This field will only be used when you enable kv-event
-    token_ids: list[int] | None = None
-
-    # Full prompt length before chunk truncation, used by sparse retention masks.
-    num_prompt_tokens: int | None = None
-
-    # End of the range being (re)prefilled. For a resumed request this also
-    # includes previously generated tokens, so decode-only offload does not
-    # publish intermediate recomputation state.
-    prefill_end_tokens: int | None = None
-    block_gvas: list[int] = field(default_factory=list)
-    block_gvas_by_group: list[list[int]] = field(default_factory=list)
-    gva_block_offset: int = 0
-    last_block_gva: int | None = None
-
-    # Identity of the latest request-scoped layerwise partial snapshot.
-    last_layerwise_snapshot_end_token: int | None = None
-    last_layerwise_snapshot_block_index: int | None = None
-    last_layerwise_snapshot_start_block: int | None = None
-
-    # Number of speculative scratch blocks for each Mamba cache group.
-    num_speculative_blocks_by_group: dict[int, int] | None = None
-
-    block_sizes: list[int] | None = None
-
-    def __init__(
-        self,
-        req_id: str,
-        token_len: int,
-        allocated_block_ids_by_group: list[list[int]] | None = None,
-        allocated_block_ids: list[int] | list[list[int]] | None = None,
-        num_saved_tokens: int = 0,
-        token_ids: list[int] | None = None,
-        num_prompt_tokens: int | None = None,
-        prefill_end_tokens: int | None = None,
-        block_gvas: list[int] | None = None,
-        block_gvas_by_group: list[list[int]] | None = None,
-        gva_block_offset: int = 0,
-        last_block_gva: int | None = None,
-        num_speculative_blocks_by_group: dict[int, int] | None = None,
-        block_sizes: list[int] | None = None,
-        last_layerwise_snapshot_end_token: int | None = None,
-        last_layerwise_snapshot_block_index: int | None = None,
-        last_layerwise_snapshot_start_block: int | None = None,
-    ) -> None:
-        self.req_id = req_id
-        self.token_len = token_len
-        self.num_speculative_blocks_by_group = num_speculative_blocks_by_group
-        block_ids = allocated_block_ids_by_group
-        if block_ids is None:
-            block_ids = normalize_block_ids_by_group(allocated_block_ids or [])
-        self.allocated_block_ids_by_group = block_ids
-        self.num_saved_tokens = num_saved_tokens
-        self.token_ids = token_ids
-        self.num_prompt_tokens = num_prompt_tokens
-        self.prefill_end_tokens = prefill_end_tokens
-        self.block_gvas = [] if block_gvas is None else block_gvas
-        self.block_gvas_by_group = block_gvas_by_group if block_gvas_by_group is not None else []
-        self.gva_block_offset = gva_block_offset
-        self.last_block_gva = last_block_gva
-        self.block_sizes = block_sizes
-        self.last_layerwise_snapshot_end_token = last_layerwise_snapshot_end_token
-        self.last_layerwise_snapshot_block_index = last_layerwise_snapshot_block_index
-        self.last_layerwise_snapshot_start_block = last_layerwise_snapshot_start_block
-
-    @property
-    def allocated_block_ids(self) -> list[int]:
-        return self.allocated_block_ids_by_group[0] if self.allocated_block_ids_by_group else []
-
-    @allocated_block_ids.setter
-    def allocated_block_ids(self, block_ids: list[int] | list[list[int]]) -> None:
-        self.allocated_block_ids_by_group = normalize_block_ids_by_group(block_ids)
-
-    def update(
-        self,
-        new_block_ids: tuple[list[int], ...] | list[int],
-        num_computed_tokens: int = 0,
-    ) -> None:
-        """Update the request tracker when a running request is scheduled again."""
-        normalized = normalize_block_ids_by_group(new_block_ids)
-        if len(normalized) > len(self.allocated_block_ids_by_group):
-            self.allocated_block_ids_by_group.extend(
-                [[] for _ in range(len(normalized) - len(self.allocated_block_ids_by_group))]
-            )
-        for group_id, ids in enumerate(normalized):
-            self.update_mamba_spec_blocks(ids, group_id, num_computed_tokens)
-            self.allocated_block_ids_by_group[group_id].extend(ids)
-
-    def update_mamba_spec_blocks(self, block_ids: list[int], kv_cache_group_id: int, num_computed_tokens: int):
-        """
-        for mamba align groups, each step will:
-            - Firstly, remove some previous blocks and append some necessary null blocks
-            - Secondly, move the speculative blocks(maybe all or partially) to the last position for reuse
-            - Finally, allocate a new block
-        so, if a speculative block is moved to last position and replaced with null block,
-        we also need to update the previous allocated_block_ids to 0.
-        """
-        if (
-            self.num_speculative_blocks_by_group is not None
-            and (num_speculative_blocks := self.num_speculative_blocks_by_group.get(kv_cache_group_id)) is not None
-        ):
-            assert self.block_sizes is not None and len(self.block_sizes) > kv_cache_group_id
-            num_skipped_blocks = (
-                max(num_computed_tokens - num_speculative_blocks - 1, 0) // self.block_sizes[kv_cache_group_id]
-            )
-            num_skipped_blocks = min(len(self.allocated_block_ids_by_group[kv_cache_group_id]), num_skipped_blocks)
-            if num_skipped_blocks > 0:
-                self.allocated_block_ids_by_group[kv_cache_group_id][:num_skipped_blocks] = [0] * num_skipped_blocks
-            if not block_ids or num_speculative_blocks <= 0:
-                return
-            mask_spec_count = min(len(block_ids) - 1, num_speculative_blocks)
-            group_block_ids = self.allocated_block_ids_by_group[kv_cache_group_id]
-            if mask_spec_count >= num_speculative_blocks:
-                group_block_ids[-num_speculative_blocks:] = [0] * num_speculative_blocks
-            else:
-                group_block_ids[-num_speculative_blocks : mask_spec_count - num_speculative_blocks] = [0] * (
-                    mask_spec_count
-                )
 
 
 @dataclass(init=False)
@@ -462,6 +135,7 @@ class ReqMeta:
     # operation cannot update the save progress of a new request generation
     # that happens to reuse the same req_id.
     store_job_id: int | None = None
+    transfer: RequestTransferState = field(default_factory=RequestTransferState)
 
     def __init__(
         self,
@@ -486,24 +160,12 @@ class ReqMeta:
         save_start_token: int = 0,
         last_block_gva: int | None = None,
         partial_block_index: int | None = None,
-        block_ids_np: np.ndarray | None = None,
-        block_ids_by_group_np: list[np.ndarray] | None = None,
-        block_gvas_np: np.ndarray | None = None,
-        block_gvas_by_group_np: list[np.ndarray] | None = None,
-        gva_block_offset: int = 0,
-        load_block_gvas_np: np.ndarray | None = None,
-        load_block_gvas_by_group_np: list[np.ndarray] | None = None,
-        load_gva_block_offset: int = 0,
-        partial_save_gva_per_group: list[int] | None = None,
-        partial_load_gva_per_group: list[int] | None = None,
-        save_block_keys: list[str | None] | None = None,
-        save_key_block_offset: int = 0,
-        save_last_block_key: str | None = None,
-        load_block_keys: list[str | None] | None = None,
-        load_key_block_offset: int = 0,
-        load_last_block_key: str | None = None,
-        load_keys: list[str] | None = None,
+        transfer: RequestTransferState | None = None,
+        **transfer_fields: Any,
     ) -> None:
+        if transfer is not None and transfer_fields:
+            raise TypeError("Use transfer or legacy transfer fields, not both")
+        self.transfer = transfer if transfer is not None else RequestTransferState.from_legacy_fields(**transfer_fields)
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
         self.req_id = req_id
@@ -528,23 +190,14 @@ class ReqMeta:
         self.store_job_id = store_job_id
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
-        self.block_ids_np = block_ids_np
-        self.block_ids_by_group_np = block_ids_by_group_np
-        self.block_gvas_np = block_gvas_np
-        self.block_gvas_by_group_np = block_gvas_by_group_np
-        self.gva_block_offset = gva_block_offset
-        self.load_block_gvas_np = load_block_gvas_np
-        self.load_block_gvas_by_group_np = load_block_gvas_by_group_np
-        self.load_gva_block_offset = load_gva_block_offset
-        self.partial_save_gva_per_group = partial_save_gva_per_group or []
-        self.partial_load_gva_per_group = partial_load_gva_per_group or []
-        self.save_block_keys = [] if save_block_keys is None else list(save_block_keys)
-        self.save_key_block_offset = save_key_block_offset
-        self.save_last_block_key = save_last_block_key
-        self.load_block_keys = [] if load_block_keys is None else list(load_block_keys)
-        self.load_key_block_offset = load_key_block_offset
-        self.load_last_block_key = load_last_block_key
-        self.load_keys = [] if load_keys is None else list(load_keys)
+
+    def __copy__(self) -> ReqMeta:
+        # Group views rebind prepared fields independently, while retaining the
+        # same shallow ownership of underlying arrays/lists as the old payload.
+        view = object.__new__(type(self))
+        view.__dict__ = self.__dict__.copy()
+        view.transfer = copy(self.transfer)
+        return view
 
     @property
     def block_ids(self) -> list[int]:
@@ -569,48 +222,13 @@ class ReqMeta:
         return self.token_ids[start - self.save_start_token : end - self.save_start_token]
 
     def get_block_ids_array(self, group_id: int) -> np.ndarray | None:
-        if self.block_ids_by_group_np is not None and group_id < len(self.block_ids_by_group_np):
-            return self.block_ids_by_group_np[group_id]
-        return self.block_ids_np
+        return self.transfer.get_block_ids_array(group_id)
 
     def get_transfer_arrays(self, group_id: int, is_save: bool = True) -> tuple[np.ndarray | None, np.ndarray | None]:
-        grouped_ids = self.block_ids_by_group_np
-        grouped_gvas = self.block_gvas_by_group_np if is_save else self.load_block_gvas_by_group_np
-        if (
-            grouped_ids is not None
-            and grouped_gvas is not None
-            and group_id < len(grouped_ids)
-            and group_id < len(grouped_gvas)
-        ):
-            return grouped_ids[group_id], grouped_gvas[group_id]
-        return self.block_ids_np, self.block_gvas_np if is_save else self.load_block_gvas_np
+        return self.transfer.get_transfer_arrays(group_id, is_save)
 
     last_block_gva: int | None = None
     partial_block_index: int | None = None
-    save_keys: list[str] | None = None
-    load_keys: list[str] = field(default_factory=list)
-    save_block_keys: list[str | None] = field(default_factory=list)
-    save_key_block_offset: int = 0
-    save_last_block_key: str | None = None
-    load_block_keys: list[str | None] = field(default_factory=list)
-    load_key_block_offset: int = 0
-    load_last_block_key: str | None = None
-
-    block_ids_np: np.ndarray | None = None
-    block_ids_by_group_np: list[np.ndarray] | None = None
-    block_gvas_np: np.ndarray | None = None
-    block_gvas_by_group_np: list[np.ndarray] | None = None
-    gva_block_offset: int = 0
-    load_block_gvas_np: np.ndarray | None = None
-    load_block_gvas_by_group_np: list[np.ndarray] | None = None
-    load_gva_block_offset: int = 0
-    partial_save_gva_per_group: list[int] = field(default_factory=list)
-    partial_load_gva_per_group: list[int] = field(default_factory=list)
-    # Per-group reachable masks for the layerwise transfer, computed once per
-    # scheduler step (None = no filtering, e.g. full-attention groups or when
-    # the coordinator is unavailable).
-    store_masks: tuple[Sequence[bool] | None, ...] | None = None
-    load_masks: tuple[Sequence[bool] | None, ...] | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -625,126 +243,50 @@ class ReqMeta:
         save_partial_block: bool = False,
         hash_block_size: int | None = None,
     ) -> ReqMeta | None:
-        """Create the request metadata from a request tracker."""
-        if block_hashes is None:
-            block_hashes = []
-        target_token_len = tracker.token_len
-        previous_saved_tokens = tracker.num_saved_tokens
-
-        # For save operation: do not save if the following condition is met
-        # 1. has already been saved before (num_saved_tokens > 0)
-        # 2. number of unsaved tokens is not reached the chunk boundary
-        chunk_boundary = (
-            cdiv(tracker.num_saved_tokens + 1, cache_transfer_granularity) * cache_transfer_granularity
-            if discard_partial_chunks
-            else 0
+        """Apply this step's save decision and snapshot the connector payload."""
+        block_hashes = [] if block_hashes is None else block_hashes
+        decision = tracker.plan_save(
+            cache_transfer_granularity,
+            len(block_hashes),
+            can_load=load_spec is not None and load_spec.can_load,
+            skip_save=skip_save,
+            discard_partial_chunks=discard_partial_chunks,
+            save_partial_block=save_partial_block,
+            hash_block_size=hash_block_size,
         )
-        num_tokens_to_save = (
-            (target_token_len // cache_transfer_granularity * cache_transfer_granularity)
-            if discard_partial_chunks
-            else target_token_len
-        )
-        hash_block_size = hash_block_size or cache_transfer_granularity
-        assert cache_transfer_granularity % hash_block_size == 0
-        # Request hashes use hash_block_size, which may be finer than the
-        # transfer granularity used to advance num_saved_tokens.
-        hashes_per_transfer_block = cache_transfer_granularity // hash_block_size
-        full_block_count = target_token_len // cache_transfer_granularity
-        available_full_block_count = len(block_hashes) // hashes_per_transfer_block
-        boundary_without_hash = (
-            target_token_len > 0
-            and target_token_len % cache_transfer_granularity == 0
-            and full_block_count > available_full_block_count
-        )
-        # Scheduled draft tokens can cross a page before that page has a
-        # committed request hash. Do not mark an unsent page as saved.
-        if full_block_count > available_full_block_count:
-            num_tokens_to_save = available_full_block_count * cache_transfer_granularity
-        if tracker.last_block_gva is not None and (
-            target_token_len % cache_transfer_granularity != 0 or boundary_without_hash
-        ):
-            partial_block_index = (
-                full_block_count if target_token_len % cache_transfer_granularity != 0 else full_block_count - 1
-            )
-        else:
-            partial_block_index = None
-
-        should_save_partial_block = save_partial_block and (
-            target_token_len % cache_transfer_granularity != 0 or full_block_count > available_full_block_count
-        )
-        skip_save = skip_save or (
-            num_tokens_to_save < chunk_boundary and partial_block_index is None and not should_save_partial_block
-        )
-        # A ReqMeta must never carry both a save AND a load.
-        # The save would also be wasted work — the bytes are being looked up
-        # in the store right now. Later cached_reqs steps save new tokens
-        # normally.
-        if load_spec is not None and load_spec.can_load and not save_partial_block:
-            skip_save = True
-        if skip_save and load_spec is None:
+        if decision.skip_save and load_spec is None:
             return None
-
-        if not skip_save:
-            tracker.num_saved_tokens = max(
-                tracker.num_saved_tokens,
-                num_tokens_to_save,
-            )
-            if should_save_partial_block:
-                tracker.last_layerwise_snapshot_end_token = target_token_len
-                tracker.last_layerwise_snapshot_start_block = min(full_block_count, available_full_block_count)
-                tracker.last_layerwise_snapshot_block_index = (
-                    full_block_count if target_token_len % cache_transfer_granularity != 0 else full_block_count - 1
-                )
-            elif save_partial_block:
-                tracker.last_layerwise_snapshot_end_token = None
-                tracker.last_layerwise_snapshot_block_index = None
-                tracker.last_layerwise_snapshot_start_block = None
-
+        tracker.apply_save_decision(decision)
         token_ids = None
-        if tracker.token_ids and not skip_save:
-            # The worker consumes metadata asynchronously. Own a stable,
-            # bounded snapshot rather than sharing the scheduler's growing
-            # full-history list.
-            token_ids_end = target_token_len if should_save_partial_block else num_tokens_to_save
-            token_ids = tracker.token_ids[previous_saved_tokens:token_ids_end].copy()
-
+        if tracker.token_ids and not decision.skip_save:
+            # The async worker owns only the newly savable suffix.
+            token_ids_end = decision.target_token_len if decision.should_save_partial_block else decision.save_end_token
+            token_ids = tracker.token_ids[decision.previous_saved_tokens : token_ids_end]
         if load_spec is not None and load_spec.can_load:
-            logger.debug(
-                "Scheduled to load %d tokens for request %s",
-                load_spec.kvpool_cached_tokens,
-                tracker.req_id,
-            )
+            logger.debug("Scheduled to load %d tokens for request %s", load_spec.kvpool_cached_tokens, tracker.req_id)
         else:
             load_spec = None
-        logger.debug("request:%s, meta save spec:%s, meta load spec:%s", tracker.req_id, not skip_save, load_spec)
+        logger.debug(
+            "request:%s, meta save spec:%s, meta load spec:%s", tracker.req_id, not decision.skip_save, load_spec
+        )
         return ReqMeta(
             req_id=tracker.req_id,
-            token_len_chunk=num_tokens_to_save,
-            save_end_token=num_tokens_to_save,
-            target_token_len=target_token_len,
-            save_start_token=previous_saved_tokens,
+            token_len_chunk=decision.save_end_token,
+            save_end_token=decision.save_end_token,
+            target_token_len=decision.target_token_len,
+            save_start_token=decision.previous_saved_tokens,
             block_ids_by_group=tracker.allocated_block_ids_by_group,
-            can_save=not skip_save,
+            can_save=not decision.skip_save,
             load_spec=load_spec,
             block_hashes=block_hashes,
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
-            # A resumed MRV2 request re-prefills prompt + previously generated
-            # tokens. Reachability masks must treat that complete range as the
-            # prefill boundary for this generation.
-            num_prompt_tokens=tracker.prefill_end_tokens or tracker.num_prompt_tokens or target_token_len,
+            # A resumed MRV2 request re-prefills prompt and generated tokens.
+            num_prompt_tokens=tracker.prefill_end_tokens or tracker.num_prompt_tokens or decision.target_token_len,
             original_block_size=original_block_size,
             last_block_gva=tracker.last_block_gva,
-            partial_block_index=partial_block_index,
-            block_ids_np=np.asarray(tracker.allocated_block_ids, dtype=np.int64),
-            block_ids_by_group_np=[np.asarray(ids, dtype=np.int64) for ids in tracker.allocated_block_ids_by_group]
-            if tracker.allocated_block_ids_by_group
-            else None,
-            block_gvas_np=np.asarray(tracker.block_gvas, dtype=np.int64),
-            block_gvas_by_group_np=[np.asarray(gvas, dtype=np.int64) for gvas in tracker.block_gvas_by_group]
-            if hasattr(tracker, "block_gvas_by_group") and tracker.block_gvas_by_group
-            else None,
-            gva_block_offset=tracker.gva_block_offset,
+            partial_block_index=decision.partial_block_index,
+            transfer=RequestTransferState.from_tracker(tracker),
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
         )
 

@@ -107,7 +107,7 @@ class TestMooncakeLayerBatchBuilder(unittest.TestCase):
 
     def test_key_major_ranges_use_full_object_offsets(self):
         request = ReqMeta("r1", block_ids=[2], block_hashes=[])
-        request.save_block_keys = ["key"]
+        request.transfer.save_block_keys = ["key"]
         task = LayerTransferTask(
             layer_id=1,
             layer_idx_in_group=1,
@@ -168,7 +168,7 @@ class TestMooncakeLayerSaveSession(unittest.TestCase):
             session_tracker=tracker,
         )
         request = ReqMeta("r1", block_ids=[2], block_hashes=[], is_last_chunk=True)
-        request.save_block_keys = ["key"]
+        request.transfer.save_block_keys = ["key"]
 
         for layer_id in range(2):
             task = LayerTransferTask(
@@ -252,8 +252,8 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker._prepare_layerwise_put_session(request)
 
         worker.m_store.batch_put_start.assert_called_once_with(["model@6831@0"], [60])
-        self.assertEqual(request.save_key_block_offset, 1)
-        self.assertEqual(request.save_block_keys, ["model@6831@0"])
+        self.assertEqual(request.transfer.save_key_block_offset, 1)
+        self.assertEqual(request.transfer.save_block_keys, ["model@6831@0"])
 
     def test_full_remote_hit_loads_last_block_even_when_vllm_keeps_one_token(self):
         worker = self._make_worker()
@@ -267,8 +267,8 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         slots = worker._prepare_layerwise_get_session(request)
 
         self.assertEqual(len(slots), 4)
-        self.assertEqual(request.load_block_keys[-1], "model@6833@0")
-        self.assertIsNone(request.load_last_block_key)
+        self.assertEqual(request.transfer.load_block_keys[-1], "model@6833@0")
+        self.assertIsNone(request.transfer.load_last_block_key)
 
     def test_next_chunk_reloads_committed_prefix_without_new_load_spec(self):
         worker = self._make_worker()
@@ -291,7 +291,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker._process_load_for_layer_batch([request], 0)
 
         self.assertEqual(slots, [("model@6830@0", 10, 0)])
-        self.assertEqual(request.load_block_keys, ["model@6830@0"])
+        self.assertEqual(request.transfer.load_block_keys, ["model@6830@0"])
         self.assertEqual(len(worker.layer_load_tasks[0]), 1)
         block_range = worker.layer_load_tasks[0][0].block_ranges[0]
         self.assertEqual((block_range.start_block, block_range.end_block), (0, 1))
@@ -309,10 +309,10 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         slots = worker._prepare_layerwise_get_session(request)
 
         self.assertEqual(
-            request.load_block_keys,
+            request.transfer.load_block_keys,
             ["model@6830@0", "model@r1_lastblock@0"],
         )
-        self.assertIsNone(request.load_last_block_key)
+        self.assertIsNone(request.transfer.load_last_block_key)
         self.assertEqual(slots[-1], ("model@r1_lastblock@0", 11, 1))
 
 

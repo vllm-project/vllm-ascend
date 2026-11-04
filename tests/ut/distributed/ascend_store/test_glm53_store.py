@@ -312,7 +312,7 @@ class TestGLM53Store(unittest.TestCase):
             worker.prepare_layerwise_step(metadata)
             task_groups = {task.group_id for tasks in worker.layer_save_tasks for task in tasks}
             self.assertEqual(task_groups, {0, 2, 3, 4} if rank == 0 else {2, 3, 4})
-            self.assertEqual(len(request.block_gvas_by_group_np), 5)
+            self.assertEqual(len(request.transfer.block_gvas_by_group_np), 5)
             self.finish_layerwise_step(worker, metadata)
             self.assertEqual(worker.current_layer, 4)
             workers.append((worker, caches))
@@ -337,8 +337,8 @@ class TestGLM53Store(unittest.TestCase):
             metadata = self.make_metadata(target, [block_hash], load=True)
             request = metadata.requests[0]
             worker.prepare_layerwise_step(metadata)
-            self.assertEqual(len(request.load_block_gvas_by_group_np), 5)
-            self.assertEqual(len(request.load_block_gvas_by_group_np[1]), 0)
+            self.assertEqual(len(request.transfer.load_block_gvas_by_group_np), 5)
+            self.assertEqual(len(request.transfer.load_block_gvas_by_group_np[1]), 0)
             self.finish_layerwise_step(worker, metadata, load=True)
             self.assert_restored(worker, caches, source, target)
         readable.remove(workers[1][0]._make_layerwise_full_key(4, block_hash.hex()))
@@ -445,10 +445,10 @@ class TestGLM53Store(unittest.TestCase):
         worker.prepare_layerwise_step(metadata)
         expected = {2: [False, True, False], 3: [True, False, False], 4: [False, False, True]}
         for group_id, mask in expected.items():
-            self.assertEqual(request.store_masks[group_id], mask)
+            self.assertEqual(request.transfer.store_masks[group_id], mask)
             for index, valid in enumerate(mask):
                 key = worker._make_layerwise_full_key(group_id, hashes[index].hex())
-                self.assertEqual(key in request.save_keys, valid)
+                self.assertEqual(key in request.transfer.save_keys, valid)
         for tasks in worker.layer_save_tasks:
             for task in tasks:
                 if task.group_id in expected:

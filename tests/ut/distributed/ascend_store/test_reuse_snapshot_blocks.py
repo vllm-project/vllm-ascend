@@ -100,8 +100,8 @@ def save(w, meta):
     w._alloc_gvas_for_save([meta])
     addresses = transferred(w, True)
     # Every key being committed must have a transfer, not just an allocation.
-    assert set(w.m_store.data[k] for k in meta.save_keys) == set(addresses.values())
-    w.m_store.committed.update(meta.save_keys)
+    assert set(w.m_store.data[k] for k in meta.transfer.save_keys) == set(addresses.values())
+    w.m_store.committed.update(meta.transfer.save_keys)
     return addresses
 
 
@@ -131,7 +131,7 @@ class SnapshotTests(unittest.TestCase):
         w._prepare_load_gvas([m])
         self.assertIn("full:h0", w.m_store.queries)
         save(w, m)
-        self.assertNotIn("full:h0", m.save_keys)
+        self.assertNotIn("full:h0", m.transfer.save_keys)
 
     def test_multiblock_snapshot_and_rollback(self):
         for end in (128, 129, 256, 385):
@@ -167,7 +167,7 @@ class SnapshotTests(unittest.TestCase):
         m = step(t, 129, ["h0"])
         m.load_spec = LoadSpec(128, 128, True)
         save(w, m)
-        self.assertNotIn("full:h0", m.save_keys)
+        self.assertNotIn("full:h0", m.transfer.save_keys)
 
     def test_independent_layer_does_not_reload_local_prefix(self):
         w = worker()
@@ -194,7 +194,7 @@ class SnapshotTests(unittest.TestCase):
         sleep.assert_not_called()
         self.assertEqual(w._invalid_block_ids, {1})
         self.assertFalse(m.can_save)
-        self.assertFalse(m.load_keys)
+        self.assertFalse(m.transfer.load_keys)
 
     def test_partial_lease_retry_is_bounded(self):
         for recover in (False, True):
@@ -220,7 +220,7 @@ class SnapshotTests(unittest.TestCase):
                 self.assertEqual(sleep.call_count, expected_retries)
                 self.assertTrue(all(call.args == (0.001,) for call in sleep.call_args_list))
                 self.assertEqual(w._invalid_block_ids, set() if recover else {1})
-                self.assertEqual(bool(m.load_keys), recover)
+                self.assertEqual(bool(m.transfer.load_keys), recover)
 
     def test_other_data_planes_keep_their_save_range(self):
         legacy = LoadSpec(1, 1, True, None, 0, 7, 0, True)

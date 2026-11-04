@@ -1332,8 +1332,8 @@ class TestLayerBatchBuilder(unittest.TestCase):
         np.testing.assert_array_equal(result.block_ids_arr, [3])
         np.testing.assert_array_equal(result.block_gvas_arr, [500])
 
-        request.load_block_gvas_by_group_np = None
-        request.load_block_gvas_np = None
+        request.transfer.load_block_gvas_by_group_np = None
+        request.transfer.load_block_gvas_np = None
         with self.assertRaises(RuntimeError):
             builder.build_shared(task, is_save=False)
 
