@@ -1861,14 +1861,3 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
-
-# ** File: worker/patch_hisparse_streams.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   Target: vllm.v1.hisparse.runtime and MLA index_group module-local Torch bindings.
-#   Why: PTA 2.10 generic event waits do not propagate graph capture to CANN
-#        workspace allocation in the same way as native NPU stream/event bindings.
-#   How: Install a module-local facade before HiSparse cache/graph construction.
-#        Preserve existing event points, algorithms and actual global Torch state.
-#   Related PR: HiSparse foundation split from #19109; no Core modification.
-#   Future Plan: Remove after PTA's generic bindings satisfy the same changing
-#        capture/replay and workspace contract, or Core exposes stream factories.

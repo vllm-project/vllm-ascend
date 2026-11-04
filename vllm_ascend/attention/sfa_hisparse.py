@@ -101,9 +101,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
             if self.topk_indices_buffer is None:
                 raise ValueError("Ascend HiSparse requires a model sparse-index group")
             builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
-        from vllm_ascend.patch.worker.patch_hisparse_streams import install
-
-        install()
         self.index_group, self.index_group_index = builder.register_layer(
             self.has_indexer and not self.skip_topk,
             self.vllm_config,

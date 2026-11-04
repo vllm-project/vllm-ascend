@@ -6,7 +6,7 @@ import json
 
 import pytest
 import torch
-import torch_npu  # noqa: F401
+import torch_npu
 
 from vllm_ascend.ops.hisparse import (
     HiSparseNPUOps,
@@ -23,6 +23,76 @@ def _require_mapped_host_device():
     if not torch.npu.is_available() or not torch.npu.get_device_name(0).startswith("Ascend950"):
         pytest.skip("HiSparse mapped-host operators currently target Ascend 950")
     torch.npu.set_device(0)
+
+
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("wait_event", [False, True])
+def test_generic_stream_waits_before_cann_workspace(capture, wait_event):
+    """Core's generic fork/join must propagate capture before CANN allocation."""
+    initial = (torch.arange(64 * 64).reshape(64, 64) % 23 + 1).bfloat16()
+    x = initial.npu()
+    weight = torch.eye(64, dtype=x.dtype, device=x.device)
+    gamma = torch.ones(64, dtype=x.dtype, device=x.device)
+    output = torch.empty_like(x)
+    copy = torch.Stream(device=x.device)
+    ready = torch.Event()
+    done = None
+    owners = []
+
+    def forward():
+        nonlocal done
+        compute = torch.accelerator.current_stream()
+        x.add_(1)
+        ready.record(compute)
+        if wait_event:
+            copy.wait_event(ready)
+        else:
+            copy.wait_stream(compute)
+        with copy:
+            # Keep allocation immediately after the wait. A synchronization or
+            # capture-state query here can hide a Host-queue propagation error.
+            product = torch.mm(x, weight)
+            normalized, _ = torch_npu.npu_rms_norm(product, gamma, epsilon=1e-6)
+            result = product + normalized
+            owners.extend((product, normalized, result))
+            if done is None:
+                done = torch.Event()
+            done.record(copy)
+        compute.wait_event(done)
+        consumed = torch.mm(result, weight)
+        owners.append(consumed)
+        output.copy_(consumed)
+
+    for _ in range(3):
+        forward()
+    torch.npu.synchronize()
+    owners.clear()
+    done = None  # Core also creates per-layer events lazily during capture.
+    graph = None
+    try:
+        if capture:
+            graph = torch.npu.NPUGraph()
+            with torch.npu.graph(graph):
+                forward()
+        for increment in (0, 3, 7, 11, 19):
+            values = initial + increment
+            x.copy_(values)
+            torch.npu.synchronize()
+            if graph is None:
+                forward()
+            else:
+                graph.replay()
+            torch.npu.synchronize()
+            product = values.float() + 1
+            normalized = (product * torch.rsqrt(product.square().mean(-1, keepdim=True) + 1e-6)).bfloat16()
+            expected = product.bfloat16() + normalized
+            torch.testing.assert_close(output.cpu(), expected, atol=0.25, rtol=0)
+            if graph is None:
+                owners.clear()
+    finally:
+        torch.npu.synchronize()
+        if graph is not None:
+            graph.reset()
 
 
 def reference(topk, requests, states, source, resident, hot_table, dgi, lru, block):
