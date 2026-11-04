@@ -14,6 +14,7 @@ import os
 import socket
 import statistics
 import time
+import unicodedata
 from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
@@ -296,6 +297,7 @@ def _benchmark_case(pipeline: NativeMxfp8AllReduce, source: torch.Tensor, args: 
             **summarize(samples),
             "round_medians_ms": [summarize(measurement["samples_ms"])["median_ms"] for measurement in rounds],
             "median_wall_ms_including_reset": statistics.median(item["wall_ms_including_reset"] for item in rounds),
+            "max_wall_ms_including_reset": max(item["wall_ms_including_reset"] for item in rounds),
             "extra_peak_allocated_mib": max(item["extra_peak_allocated_mib"] for item in rounds),
             "samples_ms": samples,
         }
@@ -311,6 +313,107 @@ def _benchmark_case(pipeline: NativeMxfp8AllReduce, source: torch.Tensor, args: 
     return case
 
 
+def _table(headers: list[str], rows: list[list[str]]) -> str:
+    """Render aligned Markdown columns, accounting for Chinese display width."""
+
+    def width(value):
+        return sum(2 if unicodedata.east_asian_width(char) in ("W", "F") else 1 for char in value)
+
+    widths = [max(width(row[index]) for row in [headers, *rows]) for index in range(len(headers))]
+
+    def line(row):
+        return "| " + " | ".join(value + " " * (size - width(value)) for value, size in zip(row, widths)) + " |"
+
+    return "\n".join([line(headers), line(["-" * size for size in widths]), *(line(row) for row in rows)])
+
+
+def format_report(report: dict, breakdown: bool = False) -> str:
+    groups: dict[int, list] = {}
+    for case in report["cases"]:
+        groups.setdefault(case["shape"][1], []).append(case)
+    mode = "精度检查" if report.get("mode") == "correctness_only" else "性能测试"
+    lines = ["", f"MXFP8 QuantAllReduce {mode}结果 | TP={report['world_size']} | device={report['device']}"]
+    has_performance = bool(report["cases"]) and all("mxfp8" in case for case in report["cases"])
+    if has_performance:
+        lines.append("耗时为完整路径的中位数；输入重置不计入；每个样本取最慢 rank。")
+    else:
+        lines.append("通信误差相对独立 MXFP8 反量化后 FP32 SUM；整体误差相对原始输入 FP32 SUM。")
+    for hidden, cases in groups.items():
+        lines.extend(["", f"hidden_size = {hidden}", ""])
+        if has_performance:
+            rows = []
+            for case in cases:
+                gain = case["latency_reduction_pct"]
+                change = f"{'下降' if gain > 0 else '增加'} {abs(gain):.2f}%" if gain != 0 else "持平"
+                rows.append(
+                    [
+                        str(case["shape"][0]),
+                        f"{case['bf16_payload_mib']:.2f}",
+                        f"{case['bf16']['median_ms']:.4f}",
+                        f"{case['mxfp8']['median_ms']:.4f}",
+                        f"{case['speedup']:.3f}x",
+                        change,
+                    ]
+                )
+            lines.append(
+                _table(
+                    ["Tokens", "BF16 通信量(MiB)", "BF16 耗时(ms)", "MXFP8 完整耗时(ms)", "加速比", "延迟变化"],
+                    rows,
+                )
+            )
+        lines.extend(["", "整体误差（相对原始输入 FP32 SUM）：", ""])
+        lines.append(
+            _table(
+                ["Tokens", "MXFP8 相对 L2", "量化相对 L2", "BF16 相对 L2", "MXFP8 最大绝对误差"],
+                [
+                    [
+                        str(case["shape"][0]),
+                        f"{case['accuracy']['mxfp8_relative_l2_vs_fp32'] * 100:.3f}%",
+                        f"{case['accuracy']['quantization_relative_l2_vs_fp32'] * 100:.3f}%",
+                        f"{case['accuracy']['bf16_relative_l2_vs_fp32'] * 100:.3f}%",
+                        f"{case['accuracy']['mxfp8_max_abs_vs_fp32']:.6f}",
+                    ]
+                    for case in cases
+                ],
+            )
+        )
+        lines.extend(["", "原生通信正确性（相对独立反量化 SUM）：", ""])
+        correctness_headers = ["Tokens", "BF16 最大误差", "FP32 最大误差", "完整路径最大误差"]
+        if has_performance:
+            correctness_headers.append("MXFP8 额外峰值(MiB)")
+        correctness_rows = []
+        for case in cases:
+            accuracy = case["accuracy"]
+            row = [
+                str(case["shape"][0]),
+                f"{accuracy['comm_bf16']['max_abs_vs_dequantized_sum']:.6f}",
+                f"{accuracy['comm_fp32']['max_abs_vs_dequantized_sum']:.6f}",
+                f"{accuracy['full_path']['max_abs_vs_dequantized_sum']:.6f}",
+            ]
+            if has_performance:
+                row.append(f"{case['mxfp8']['extra_peak_allocated_mib']:.2f}")
+            correctness_rows.append(row)
+        lines.append(_table(correctness_headers, correctness_rows))
+    if breakdown and has_performance:
+        lines.extend(["", "阶段耗时诊断（ms；独立测量，各列中位数之和不等于完整耗时）："])
+        for hidden, cases in groups.items():
+            diagnostic_cases = [case for case in cases if "stage_diagnostics" in case]
+            if not diagnostic_cases:
+                continue
+            lines.extend(["", f"hidden_size = {hidden}", ""])
+            lines.append(
+                _table(
+                    ["Tokens", "动态 MX 量化", "尺度布局", "原生量化通信", "结果写回"],
+                    [
+                        [str(case["shape"][0])]
+                        + [f"{case['stage_diagnostics'][stage]['median_ms']:.4f}" for stage in _STAGES]
+                        for case in diagnostic_cases
+                    ],
+                )
+            )
+    return "\n".join(lines)
+
+
 def _parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tokens", nargs="+", type=int, default=[512, 2048, 8192, 16384])
@@ -323,6 +426,9 @@ def _parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--timeout-seconds", type=int, default=300)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--report-json", type=Path, help="Print tables from an existing result JSON without running NPUs."
+    )
     args = parser.parse_args(argv)
     if any(value < 1 for value in args.tokens) or any(
         hidden < _MIN_HIDDEN or hidden > _MAX_HIDDEN or hidden % _HIDDEN_ALIGNMENT for hidden in args.hidden_sizes
@@ -333,30 +439,11 @@ def _parse_args(argv=None) -> argparse.Namespace:
     return args
 
 
-def _print_case(case: dict, check_only: bool) -> None:
-    tokens, hidden = case["shape"]
-    if check_only:
-        print(f"Correctness [{tokens},{hidden}]: PASS " + json.dumps(case["accuracy"]), flush=True)
-        return
-    print(
-        f"{tokens:>7} {hidden:>6} {case['bf16_payload_mib']:>9.2f} "
-        f"{case['bf16']['median_ms']:>9.4f} {case['mxfp8']['median_ms']:>13.4f} "
-        f"{case['speedup']:>7.3f} {case['latency_reduction_pct']:>+8.2f} "
-        f"{case['accuracy']['mxfp8_relative_l2_vs_fp32']:>12.6f} "
-        f"{case['accuracy']['bf16_relative_l2_vs_fp32']:>11.6f} "
-        f"{case['mxfp8']['extra_peak_allocated_mib']:>15.2f}",
-        flush=True,
-    )
-    if "stage_diagnostics" in case:
-        print(
-            "Stage medians (diagnostic): "
-            + json.dumps({key: value["median_ms"] for key, value in case["stage_diagnostics"].items()}),
-            flush=True,
-        )
-
-
 def main() -> None:
     args = _parse_args()
+    if args.report_json:
+        print(format_report(json.loads(args.report_json.read_text(encoding="utf-8")), args.breakdown), flush=True)
+        return
     # Load backend packages only in the NPU worker; CPU tests and --help do not
     # need torch_npu, CANN, or vLLM.
     torch_npu = importlib.import_module("torch_npu")
@@ -402,7 +489,13 @@ def main() -> None:
             "cases": [],
         }
         if rank == 0:
-            print(json.dumps({key: value for key, value in report.items() if key != "cases"}, indent=2), flush=True)
+            print(
+                f"device={report['device']} | TP={world_size} | mode={report['mode']}\n"
+                f"torch={report['torch']} | torch_npu={report['torch_npu']}\n"
+                f"operator={report['operator_module']} | ports={report['hccl_npu_socket_port_range']}\n"
+                f"warmup={args.warmup} | iterations={args.iterations} | rounds={args.rounds}",
+                flush=True,
+            )
         hidden = args.hidden_sizes[0]
         for name, value in (
             ("zeros", 0.0),
@@ -418,12 +511,7 @@ def main() -> None:
         report["sanity_checks"].append({"case": "rank_token_block_scales", "pass": True})
         if rank == 0:
             print("Correctness rank_token_block_scales: PASS", flush=True)
-            if not args.check_only:
-                print(
-                    " tokens hidden  BF16_MiB   BF16_ms MXFP8_full_ms speedup gain_pct "
-                    "MXFP8_rel_L2 BF16_rel_L2 extra_MXFP8_MiB",
-                    flush=True,
-                )
+        total_cases = len(args.hidden_sizes) * len(args.tokens)
         for hidden in args.hidden_sizes:
             for tokens in args.tokens:
                 torch.manual_seed(args.seed + rank)
@@ -432,12 +520,18 @@ def main() -> None:
                 report["cases"].append(case)
                 del source
                 if rank == 0:
-                    _print_case(case, args.check_only)
+                    print(
+                        f"完成 {len(report['cases'])}/{total_cases}：hidden_size={hidden}, tokens={tokens}",
+                        flush=True,
+                    )
                     if args.output:
                         args.output.parent.mkdir(parents=True, exist_ok=True)
                         args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
         if rank == 0:
+            print(format_report(report, args.breakdown), flush=True)
             print("PASS: all requested MXFP8 native communication and full-path checks passed.", flush=True)
+            if args.output:
+                print(f"\n完整结果已保存：{args.output}", flush=True)
     finally:
         if quant_group is not None:
             dist.destroy_process_group(quant_group)

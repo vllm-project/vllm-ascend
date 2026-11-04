@@ -32,8 +32,8 @@ export HCCL_NPU_SOCKET_PORT_RANGE="61000-61050"
 每个实际 payload 还会独立检查原生 BF16 输出、原生 FP32 输出和完整 BF16 路径。
 任何错误都会停止该次运行，不静默回退普通通信或旧 C++ 封装。
 
-通过时先输出四项 `Correctness ...: PASS`，随后输出实际形状的精度结果，
-最终打印 `PASS: all requested MXFP8 native communication and full-path checks passed.`。
+通过时先输出四项 `Correctness ...: PASS`，随后按 hidden size 输出整体误差和原生通信
+正确性表，最终打印 `PASS: all requested MXFP8 native communication and full-path checks passed.`。
 `--check-only` 不进行预热和性能测量，结果中不生成 `speedup`。
 
 ## 再与 BF16 比较性能
@@ -46,11 +46,17 @@ export HCCL_NPU_SOCKET_PORT_RANGE="61000-61050"
     --output native_mxfp8_tp2_smoke.json
 ```
 
-终端输出列为：
+测试期间只输出环境摘要、正确性结果和简短进度。全部 shape 完成后，按 hidden size
+分组输出完整路径性能表：
 
 ```text
-tokens hidden BF16_MiB BF16_ms MXFP8_full_ms speedup gain_pct MXFP8_rel_L2 BF16_rel_L2 extra_MXFP8_MiB
+| Tokens | BF16 通信量(MiB) | BF16 耗时(ms) | MXFP8 完整耗时(ms) | 加速比 | 延迟变化    |
+| ------ | ---------------- | ------------- | ------------------ | ------ | ----------- |
+| 512    | 2.00             | 0.0800        | 0.0500             | 1.600x | 下降 37.50% |
 ```
+
+上述数值仅示范输出格式。整体误差、原生 BF16/FP32 通信误差和额外内存分别成表；
+使用 `--breakdown` 时，四个阶段的中位数也单独成表，不再将 JSON 穿插到终端结果中。
 
 - `BF16_ms`：普通 BF16 SUM all-reduce 的中位数耗时。
 - `MXFP8_full_ms`：动态 MX 量化、尺度布局、原生 QuantAllReduce 和 BF16 写回的完整中位数耗时。
@@ -60,8 +66,15 @@ tokens hidden BF16_MiB BF16_ms MXFP8_full_ms speedup gain_pct MXFP8_rel_L2 BF16_
 - `extra_MXFP8_MiB`：相对测量起点，PyTorch allocator 的额外峰值分配内存。
 
 JSON 还包含原生 BF16/FP32 通信的误差、量化本身的误差、最大绝对误差、p95、
-各轮中位数、原始样本以及包含恢复输入的批量 wall time。
+各轮中位数、原始样本以及包含恢复输入的批量 wall time 中位数和最大值。
 原生通信 `pass=true` 代表结果满足诊断容差，量化误差默认报告，需结合模型判断是否可接受。
+
+已经保存的 JSON 可以直接重新生成表格，无需启动 NPU 或重跑通信：
+
+```bash
+python3 benchmarks/benchmark_native_mxfp8_all_reduce.py \
+    --report-json native_mxfp8_tp2_smoke.json --breakdown
+```
 
 ## 已验证结果
 
@@ -141,7 +154,8 @@ python3 -m pytest --noconftest -q \
 ```
 
 覆盖已知 FP8/E8M0 编码、2/4/8 rank 的不同尺度仿真、失败结果检测、通信域选择、
-输入恢复与计时边界、交替测量顺序及统计。只需 CPU PyTorch，不导入 torch_npu 或 vLLM。
+输入恢复与计时边界、交替测量顺序、表格报告和离线 JSON 重放。只需 CPU PyTorch，
+不导入 torch_npu、cann_ops_transformer 或 vLLM。
 CPU 仿真不证明原生算子、HCCL 或 NPU Event 已通过；A5 结果需由目标环境执行上述命令取得。
 
 参数依据 [官方 Python 封装](https://gitcode.com/cann/ops-transformer/blob/master/mc2/quant_all_reduce/torch_extension/quant_all_reduce.py)

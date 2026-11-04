@@ -2,10 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU checks for the native MXFP8 benchmark; no CANN/vLLM imports required."""
 
+import io
 import importlib.util
+import json
+import sys
+import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -283,6 +288,55 @@ class TestNativeMxfp8Benchmark(unittest.TestCase):
             checked = bench._benchmark_case(pipeline, torch.ones(2, 1024), args)
             self.assertEqual(calls, [])
             self.assertNotIn("speedup", checked)
+
+    def test_report_tables_and_offline_json_mode(self):
+        accuracy = {
+            "comm_bf16": {"pass": True, "max_abs_vs_dequantized_sum": 0.0},
+            "comm_fp32": {"pass": True, "max_abs_vs_dequantized_sum": 0.0},
+            "full_path": {"pass": True, "max_abs_vs_dequantized_sum": 0.0},
+            "mxfp8_relative_l2_vs_fp32": 0.02,
+            "mxfp8_max_abs_vs_fp32": 0.5,
+            "bf16_relative_l2_vs_fp32": 0.001,
+            "quantization_relative_l2_vs_fp32": 0.019,
+        }
+        correctness_report = {
+            "world_size": 2,
+            "device": "Ascend950DT_9582",
+            "mode": "correctness_only",
+            "cases": [{"shape": [128, 5120], "bf16_payload_mib": 1.25, "accuracy": accuracy}],
+        }
+        text = bench.format_report(correctness_report)
+        self.assertIn("MXFP8 QuantAllReduce 精度检查结果", text)
+        self.assertIn("2.000%", text)
+        self.assertIn("原生通信正确性", text)
+
+        performance_report = json.loads(json.dumps(correctness_report))
+        performance_report["mode"] = "benchmark"
+        case = performance_report["cases"][0]
+        case.update(
+            bf16={"median_ms": 4.0},
+            mxfp8={"median_ms": 2.0, "extra_peak_allocated_mib": 3.0},
+            speedup=2.0,
+            latency_reduction_pct=50.0,
+            stage_diagnostics={stage: {"median_ms": 0.1} for stage in bench._STAGES},
+        )
+        text = bench.format_report(performance_report, breakdown=True)
+        self.assertIn("MXFP8 QuantAllReduce 性能测试结果", text)
+        self.assertIn("2.000x", text)
+        self.assertIn("下降 50.00%", text)
+        self.assertIn("动态 MX 量化", text)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "result.json"
+            path.write_text(json.dumps(correctness_report), encoding="utf-8")
+            output = io.StringIO()
+            with (
+                patch.object(sys, "argv", ["benchmark", "--report-json", str(path)]),
+                patch.object(bench.importlib, "import_module", side_effect=AssertionError("NPU import attempted")),
+                redirect_stdout(output),
+            ):
+                bench.main()
+            self.assertIn("精度检查结果", output.getvalue())
 
     def test_percentiles(self):
         summary = bench.summarize(list(range(1, 21)))
