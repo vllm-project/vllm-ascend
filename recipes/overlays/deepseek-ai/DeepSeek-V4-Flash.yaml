@@ -1,42 +1,44 @@
-# Source: https://github.com/vllm-project/vllm/blob/52a65d7b19e9e3ad86bf1e3b6954e4e11eeec7da/recipes/models/deepseek-ai/DeepSeek-V4-Flash.yaml
-# Extracted with vllm-project/recipes@b08ad73889f9e33319d8ac9c887dec6a0975c55d.
 variants:
   ascend_w8a8:
     model_id: Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp
     label: W8A8 (Ascend A3)
     precision: int8
     vram_minimum_gb: 341
-    description: ModelSlim INT8 W8A8 checkpoint for one Atlas 800 A3 node (16× Ascend 910C), using DP2+TP8. Requires --quantization ascend.
+    description: ModelSlim INT8 W8A8 checkpoint for one Atlas 800T A3 node (16× Ascend 910C), using DP4+TP4 with expert parallelism. Requires --quantization ascend.
     supported_hardware:
       - ascend_910c
     tp:
-      ascend_910c: 8
-    min_vllm_version: 0.23.0
+      ascend_910c: 4
+    min_vllm_version: '0.30.0'
     extra_args:
       - '--data-parallel-size'
-      - '2'
+      - '4'
+      - '--enable-expert-parallel'
       - '--quantization'
       - ascend
       - '--max-num-seqs'
-      - '32'
+      - '64'
       - '--max-num-batched-tokens'
       - '10240'
+      - '--max-model-len'
+      - '1048576'
       - '--gpu-memory-utilization'
       - '0.90'
       - '--block-size'
-      - '128'
+      - '32'
+      - '--attention_config.indexer_kv_dtype'
+      - int8
+      - '--model-loader-extra-config'
+      - '{"enable_multithread_load": true, "num_threads": 128}'
       - '--compilation-config'
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - '--async-scheduling'
       - '--api-server-count'
       - '1'
-      - '--safetensors-load-strategy'
-      - prefetch
       - '--additional-config'
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true}'
     extra_env:
       HCCL_OP_EXPANSION_MODE: AIV
-      HCCL_BUFFSIZE: '2560'
+      HCCL_BUFFSIZE: '1024'
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
       OMP_PROC_BIND: 'false'
       OMP_NUM_THREADS: '10'
@@ -44,9 +46,10 @@ variants:
       LD_PRELOAD: /usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
       ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
       VLLM_USE_MODELSCOPE: 'True'
+      VLLM_PREFIX_CACHE_RETENTION_INTERVAL: '4096'
     hardware_overrides:
       ascend_910c:
-        docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a3
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc2-a3
         install:
           pip: false
   default:
@@ -100,7 +103,7 @@ hardware_notes:
       href: '#huawei-ascend-950pr-8x'
   ascend_910c:
     title: vLLM Ascend A3 image required
-    body: Single-node DP2+TP8 on all 16 NPUs using the W8A8 quantized checkpoint from Eco-Tech. TP8 shards the 284B weights to 35.5 GB per NPU (within the 64 GB limit). Pin quay.io/ascend/vllm-ascend:v0.23.0-a3 — the NVIDIA pip wheel cannot run here. Set HCCL_BUFFSIZE=2560 before launch. The A3 path uses ModelScope to download the W8A8 weights (pip install modelscope). Multi-node PD separation is also available; see the vllm-ascend tutorial.
+    body: Single-node DP4+TP4 with expert parallelism on all 16 NPUs of one Atlas 800T A3 node, using the ModelSlim W8A8 checkpoint from Eco-Tech. TP4 shards the weights across 4 dies per DP rank, and the int8 Lightning Indexer KV cache keeps the 1M context within 64 GB per die. Pin quay.io/ascend/vllm-ascend:v0.30.0rc2-a3 with vLLM 0.30.0 — the NVIDIA pip wheel cannot run here. Set HCCL_BUFFSIZE=1024 and VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096 before launch, and use --block-size 32 with --attention_config.indexer_kv_dtype int8. Verified on Atlas 800T A3 — MTP k=1 reaches GSM8K 96.44 and DSpark k=7 reaches 96.59 (AISBench, 1319 prompts). The A3 path uses ModelScope to download the W8A8 weights (pip install modelscope). Multi-node PD separation is also available; see the vllm-ascend tutorial.
     link:
       label: Ascend 910C A3 reference
       href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Flash.html
@@ -149,13 +152,13 @@ features:
     modes:
       mtp:
         hardware_overrides:
-          npu:
+          ascend_910c:
             args:
               - '--speculative-config'
               - '{"method":"mtp","num_speculative_tokens":1,"enforce_eager":true}'
       dspark:
         hardware_overrides:
-          npu:
+          ascend_910c:
             args:
               - '--speculative-config'
-              - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
+              - '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true}'
