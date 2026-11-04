@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
@@ -1243,7 +1244,9 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
     monkeypatch.setattr(
         indexer_module,
         "get_kv_cache_spec",
-        lambda _config: object(),
+        lambda _config: MLAAttentionSpec(
+            block_size=128, num_kv_heads=1, head_size=132, dtype=torch.uint8, cache_role=SparseCacheRole.INDEXER
+        ),
     )
     layers = {layer_name: indexer_module}
     if owner != "unpaired":
@@ -1296,6 +1299,7 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
     spec = specs[layer_name]
 
     assert isinstance(spec, AscendSFAIndexerCacheSpec)
+    assert spec.cache_role is SparseCacheRole.INDEXER
     assert spec.sfa_dcp_replicated_indexer_size == expected_size
     if li_c4:
         assert spec.head_size == 128 // 2
