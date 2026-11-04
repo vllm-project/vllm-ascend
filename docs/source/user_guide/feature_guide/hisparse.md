@@ -193,11 +193,19 @@ pytest --confcutdir=tests/e2e/pull_request/one_card \
   tests/e2e/pull_request/one_card/test_hisparse_prefill_staging.py
 ```
 
-The full modules have not been rerun on this new split. Isolated stream-boundary
-checks on Ascend 950 with Torch 2.10.0 / torch-npu 2.10.0.post7 passed for generic
-and native interfaces, including the merged Core methods' leader/follower and
-lazy-event paths. Those checks substitute small CANN work for resolver/refill;
-they do not qualify the complete HiSparse graph or model.
+On Ascend 950 with Torch 2.10.0, torch-npu 2.10.0.post7 and CANN 9.2.1,
+the standard CPU module passed all 20 cases. Running the four complete NPU
+modules passed 40 of 41 cases, including BF16/C8 Attention and changing graph
+replays. The run reused the compiled Ascend extension and vendor package;
+it was not an independent native rebuild.
+
+The remaining failure is `test_resident_prefill_plan_shared_layers[2-128]`.
+With the paired Core pin unchanged, `res_blocks[:, offsets]` in
+`HiSparsePrefillStagingPlan.ensure_gpu_sources` returned incorrect NPU rows
+for the tested singleton-column input. An isolated CPU/NPU comparison found
+the first difference at that indexing operation; equivalent `index_select`
+matched the CPU result. The failing test remains enabled. This device stack
+therefore has an unresolved mixed Resident/Host prefill correctness issue.
 
 Fresh full-model correctness, dataset accuracy, eager/Graph lifecycle and
 same-workload performance remain prerequisites for marking the foundation
