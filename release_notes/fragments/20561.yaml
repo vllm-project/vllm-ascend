@@ -1,0 +1,26 @@
+pr: 20561
+entries:
+  - category: feature
+    text: >-
+      Added the `lookup_rpc_timeout_ms` KV-connector extra-config parameter
+      (default 5000 ms) that bounds the AscendStore external KV lookup RPC with
+      one wall-clock deadline covering send, wait and response validation.
+      Non-positive or non-integer values are rejected at client construction
+      instead of being treated as an unbounded wait.
+  - category: feature
+    text: >-
+      The scheduler-side lookup now reports aggregated, rate-limited failure
+      metrics per stage and error code, with logs limited to counts and
+      durations so KV cache keys are never written to logs. The per-category
+      counts are also exported as the Prometheus series
+      `vllm:ascend_store_lookup_rpc_failures`: a Gauge set to the client's
+      running total, labelled by engine plus `failure="<stage>:<code>"`, so a
+      repeated scrape cannot double-count it. An engine with no failures
+      publishes nothing.
+  - category: breaking
+    text: >-
+      The AscendStore lookup RPC response is now a single-frame versioned
+      msgpack envelope instead of a bare 4-byte integer, which lets a genuine
+      zero-hit miss be distinguished from a worker-side failure. The socket is
+      strictly intra-instance, so scheduler and worker are always upgraded
+      together; the previous bare reply is rejected as a protocol error.
