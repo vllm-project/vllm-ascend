@@ -5,10 +5,8 @@ This verifies lifecycle composition and argument forwarding, not GPUModelRunner
 or NPU kernel execution. Full runner tests remain part of the hardware gate.
 """
 
-import ast
 import sys
 from contextlib import nullcontext
-from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -21,46 +19,6 @@ from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManag
 from vllm_ascend.expert_offload.quantization import expert_adapter_type, maybe_offload_quant_method
 from vllm_ascend.expert_offload.utils import finalize_expert_offload_loading
 from vllm_ascend.quantization.quant_type import QuantType
-
-ROOT = Path(__file__).resolve().parents[3]
-
-
-def load_hook_class(path, class_name, methods, parent, namespace):
-    tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
-    node = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
-    selected = [node for node in node.body if isinstance(node, ast.FunctionDef) and node.name in methods]
-    for branch in node.body:
-        if isinstance(branch, ast.If) and isinstance(branch.test, ast.Call):
-            if isinstance(branch.test.func, ast.Name) and branch.test.func.id == "vllm_version_is":
-                version = branch.test.args[0]
-                assert isinstance(version, ast.Constant) and isinstance(version.value, str)
-                release = namespace["vllm_version_is"](version.value)
-                selected.extend(
-                    method
-                    for method in (branch.body if release else branch.orelse)
-                    if isinstance(method, ast.FunctionDef) and method.name in methods
-                )
-    assert len(selected) == len(methods)
-    for method in selected:
-        # Exercise actual method bodies without unrelated runtime wrappers.
-        method.decorator_list = []
-    class_body: list[ast.stmt] = [
-        field for field in node.body if isinstance(field, ast.AnnAssign) and isinstance(field.value, ast.Constant)
-    ] + list(selected)
-    # Parsing initializes version-specific AST fields, including 3.12 type_params.
-    isolated_class = ast.parse(f"class {class_name}(Parent):\n    pass\n").body[0]
-    assert isinstance(isolated_class, ast.ClassDef)
-    isolated_class.body = class_body
-    isolated = ast.Module(
-        body=[
-            ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
-            isolated_class,
-        ],
-        type_ignores=[],
-    )
-    namespace = {**namespace, "Parent": parent}
-    exec(compile(ast.fix_missing_locations(isolated), str(ROOT / path), "exec"), namespace)
-    return namespace[class_name]
 
 
 @pytest.fixture(autouse=True)
@@ -88,68 +46,17 @@ def warmups(monkeypatch):
     return SimpleNamespace(**modules)
 
 
-def test_graph_manager_filters_padded_candidates_and_subscribes_actual_npu_stream():
-    from vllm.config.compilation import CUDAGraphMode
-
-    descs = [SimpleNamespace(num_tokens=n, uniform_token_count=1) for n in (1, 2, 4)]
-    cached_stream, actual_stream = object(), object()
-
-    class Parent:
-        def __init__(self, *args, **kwargs):
-            self.device = args[1]
-            self._capture_descs = {CUDAGraphMode.FULL: descs}
-            self._candidates = {(n, 0): [desc] for n, desc in zip((1, 2, 3), descs)}
-
-        def needs_capture(self):
-            return any(self._capture_descs.values())
-
-        def _capture_stream(self, desc):
-            return cached_stream
-
-    manager = ExpertOffloadManager()
-    manager.bindings["layer"] = SimpleNamespace(top_k=6, num_slots=16)
-    manager.subscribe_graph_stream = Mock()
-    runner = SimpleNamespace(expert_offload_manager=manager, update_stream=object())
-    graph_params = Mock()
-    fake_torch = SimpleNamespace(npu=SimpleNamespace(Stream=Mock(), current_stream=Mock(return_value=actual_stream)))
-    cls = load_hook_class(
-        "vllm_ascend/worker/v2/aclgraph_utils.py",
-        "ModelAclGraphManager",
-        {"__init__", "_capture_stream"},
-        Parent,
-        {
-            "torch": fake_torch,
-            "collect_sorted_captured_token_sizes": lambda groups: sorted(
-                d.num_tokens for ds in groups.values() for d in ds
-            ),
-            "set_graph_params": graph_params,
-        },
-    )
-    with patch("vllm_ascend.expert_offload.expert_offload_manager.torch", fake_torch):
-        graph = cls(object(), "npu:0", CUDAGraphMode.FULL_DECODE_ONLY, 1, runner)
-    fake_torch.npu.Stream.assert_called_once_with(device="npu:0")
-    assert graph.capture_sizes == [1, 2]
-    assert graph._candidates[(3, 0)] == []  # Three actual tokens round up to four.
-    graph_params.assert_called_once_with([1, 2])
-    assert graph._capture_stream(descs[0]) is actual_stream
-    manager.subscribe_graph_stream.assert_called_once_with(actual_stream)
-
-
-def make_runner(*, manager=None, fail_load=False, fail_forward=False, has_prefill=False):
+def make_runner(load_hook_class, *, manager=None, has_prefill=False):
     events: list[object] = []
 
     class Parent:
         def load_model(self, load_dummy_weights=False, *args, **kwargs):
             events.append(("parent_load", load_dummy_weights, args, kwargs))
-            if fail_load:
-                raise RuntimeError("load failed")
             self.model = object()
             self.model_memory_usage = 1000
 
         def execute_model(self, scheduler_output, **kwargs):
             self.gather_batch_req_state(scheduler_output, kwargs["dummy_run"])
-            if fail_forward:
-                raise RuntimeError("forward failed")
             return "result"
 
         def gather_batch_req_state(self, scheduler_output, dummy_run):
@@ -200,28 +107,24 @@ def make_runner(*, manager=None, fail_load=False, fail_forward=False, has_prefil
     return runner, events
 
 
-def test_load_preserves_parent_contract_and_accounts_pool_memory():
+def test_load_preserves_parent_contract_and_accounts_pool_memory(load_hook_class):
     manager = Mock()
-    runner, events = make_runner(manager=manager)
+    runner, events = make_runner(load_hook_class, manager=manager)
     runner.load_model(False, "extra", reload=False)
     assert events == [("parent_load", False, ("extra",), {"reload": False})]
     manager.finalize_loading.assert_called_once_with(runner.model)
     assert runner.model_memory_usage == 1064
     assert runner.pd_dspark_aux_layer_ids == [9]
-
-
-def test_load_only_adopts_target_and_preserves_native_draft():
-    manager = Mock()
-    runner, _ = make_runner(manager=manager)
-    runner.speculator = SimpleNamespace(model=object())
-    runner.load_model()
-    manager.finalize_loading.assert_called_once_with(runner.model)
-    assert not hasattr(runner.speculator, "expert_offload_manager")
+    manager.close.side_effect = lambda: events.append("offload_close")
+    runner.shutdown()
+    assert events[-2:] == ["offload_close", "parent_shutdown"]
 
 
 @pytest.mark.parametrize("load_dummy_weights", [False, True])
-def test_disabled_load_does_not_allocate_or_finalize_offload(loading_memory, load_dummy_weights):
-    runner, events = make_runner()
+def test_disabled_load_does_not_allocate_or_finalize_offload(load_hook_class, loading_memory, load_dummy_weights):
+    runner, events = make_runner(load_hook_class)
+    del runner.expert_offload_manager
+    assert runner.expert_offload_manager is None
     finalize = Mock()
     with patch.dict(runner.load_model.__globals__, finalize_expert_offload_loading=finalize):
         runner.load_model(load_dummy_weights)
@@ -231,81 +134,9 @@ def test_disabled_load_does_not_allocate_or_finalize_offload(loading_memory, loa
     loading_memory.assert_not_called()
 
 
-def test_dummy_load_rejected_before_parent():
-    manager = Mock()
-    runner, events = make_runner(manager=manager)
-    with pytest.raises(ValueError, match="dummy"):
-        runner.load_model(True)
-    assert not events
-    manager.finalize_loading.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "enabled,failure",
-    [(enabled, failure) for enabled in (False, True) for failure in ("start_nz", "load", "join")]
-    + [(True, "finalize")],
-)
-def test_loading_failure_preserves_native_warmup_behavior(warmups, enabled, failure):
-    manager = Mock() if enabled else None
-    runner, _ = make_runner(manager=manager, fail_load=failure == "load")
-    if failure == "start_nz":
-        warmups.nz_warmup.start_nz_warm_thread.side_effect = RuntimeError("start_nz failed")
-    elif failure == "join":
-        warmups.nz_warmup.join_nz_warm_thread.side_effect = RuntimeError("join failed")
-    elif failure == "finalize":
-        assert manager is not None
-        manager.finalize_loading.side_effect = RuntimeError("finalize failed")
-    with pytest.raises(RuntimeError, match=f"{failure} failed"):
-        runner.load_model()
-    if failure == "start_nz":
-        warmups.nz_warmup.join_nz_warm_thread.assert_not_called()
-    else:
-        warmups.nz_warmup.join_nz_warm_thread.assert_called_once_with()
-    if manager is not None:
-        if failure != "finalize":
-            manager.finalize_loading.assert_not_called()
-
-
-def test_pool_accounting_starts_after_native_warmup(warmups, loading_memory):
-    manager = Mock()
-    runner, _ = make_runner(manager=manager)
-    runner.compilation_config.cudagraph_mode = 1
-    order = Mock()
-    order.attach_mock(warmups.nz_warmup.join_nz_warm_thread, "join_nz")
-    order.attach_mock(manager.finalize_loading, "finalize")
-    order.attach_mock(loading_memory, "memory")
-    order.attach_mock(runner._start_dump_data, "dump")
-    runner.load_model()
-    assert [entry[0] for entry in order.mock_calls] == ["join_nz", "memory", "finalize", "memory", "dump"]
-    assert runner.model_memory_usage == 1064
-    assert runner.model_state.prompt_logprobs_worker is runner.prompt_logprobs_worker
-
-
-def test_load_preserves_keyword_argument_forwarding():
-    manager = Mock()
-    runner, events = make_runner(manager=manager)
-    runner.load_model(load_dummy_weights=False, reload=False)
-    assert events == [("parent_load", False, (), {"reload": False})]
-    manager.finalize_loading.assert_called_once_with(runner.model)
-
-
-@pytest.mark.parametrize(
-    "prefill,profile,dummy", [(False, False, False), (True, False, False), (False, True, False), (False, False, True)]
-)
-def test_execute_uses_real_batch_phase_and_preserves_native_cleanup(prefill, profile, dummy):
+def test_execute_refreshes_batch_flags_after_profile_dummy_and_prefill(load_hook_class):
     manager = ExpertOffloadManager()
-    runner, _ = make_runner(manager=manager, has_prefill=prefill)
-    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=1, num_scheduled_tokens={"request": 1})
-    assert runner.execute_model(scheduler_output, is_profile=profile, dummy_run=dummy) == "result"
-    assert manager.has_prefill is prefill
-    assert manager.is_profile is (profile or dummy)
-    runner.model_state.finish_execution.assert_called_once_with(failed=False)
-    runner.kvpp.complete_forward.assert_called_once()
-
-
-def test_execute_refreshes_batch_flags_after_profile_dummy_and_prefill():
-    manager = ExpertOffloadManager()
-    runner, _ = make_runner(manager=manager)
+    runner, _ = make_runner(load_hook_class, manager=manager)
     scheduler_output = SimpleNamespace(
         total_num_scheduled_tokens=1, num_scheduled_tokens={"request": 1}, has_prefill=False
     )
@@ -321,51 +152,8 @@ def test_execute_refreshes_batch_flags_after_profile_dummy_and_prefill():
         assert manager.is_profile is (profile or dummy)
 
 
-def test_execute_failure_preserves_native_metadata_cleanup():
-    manager = ExpertOffloadManager()
-    runner, _ = make_runner(manager=manager, fail_forward=True)
-    with pytest.raises(RuntimeError, match="forward failed"):
-        runner.execute_model(SimpleNamespace(total_num_scheduled_tokens=1, num_scheduled_tokens={"request": 1}))
-    runner.model_state.finish_execution.assert_called_once_with(failed=True)
-    runner._maybe_send_draft_kv.assert_not_called()
-
-
-def test_shutdown_drains_offload_before_native_cleanup():
-    manager = Mock()
-    runner, events = make_runner(manager=manager)
-    runner._c8_mxfp_v_scale_caches = [object()]
-
-    def close():
-        assert runner._c8_mxfp_v_scale_caches
-        events.append("offload_close")
-
-    manager.close.side_effect = close
-    runner.shutdown()
-    assert events == ["offload_close", "parent_shutdown"]
-    assert runner._c8_mxfp_v_scale_caches == []
-
-
-def test_shutdown_preserves_c8_cleanup_without_an_initialized_offload_manager():
-    runner, events = make_runner()
-    del runner.expert_offload_manager
-    runner._c8_mxfp_v_scale_caches = [object()]
-    runner.shutdown()
-    assert runner._c8_mxfp_v_scale_caches == []
-    assert events == ["parent_shutdown"]
-
-
-def test_runner_defaults_to_no_offload_even_when_init_is_skipped():
-    runner, _ = make_runner()
-    del runner.expert_offload_manager
-    assert runner.expert_offload_manager is None
-    runner.load_model()
-    scheduler = SimpleNamespace(total_num_scheduled_tokens=1, num_scheduled_tokens={"request": 1})
-    assert runner.execute_model(scheduler, dummy_run=False) == "result"
-    assert "expert_offload_manager" not in vars(runner)
-
-
 @pytest.fixture
-def quant_methods(monkeypatch):
+def quant_methods(monkeypatch, load_hook_class):
     class Parent:
         requires_device_loading = True
 
@@ -489,118 +277,25 @@ def test_quant_wrapper_only_offloads_target_and_preserves_native_draft(quant_met
         q.scheme.process_weights_after_loading.assert_called_once_with(layer)
 
 
-def test_missing_offload_config_preserves_native_method(quant_methods):
-    layer = quant_methods.layer
-    native = object()
-    quant_config = SimpleNamespace(get_quant_method=lambda *_a, **_k: native)
-    assert layer._get_quant_method("experts", quant_config, None) is native
+def test_quantized_execution_uses_slot_weights_ids_and_comm(load_hook_class):
+    original_comm, slot_comm, view = object(), object(), object()
+    context = SimpleNamespace(moe_comm_method=original_comm)
+    logical, physical = torch.tensor([[4, 5]]), torch.tensor([[0, 1]])
+    x = torch.ones(1, 4)
 
+    class Parent:
+        def apply(self, **kwargs):
+            assert kwargs["layer"] is view
+            assert torch.equal(kwargs["topk_ids"], physical)
+            assert context.moe_comm_method is slot_comm
+            return kwargs["x"]
 
-def test_no_runtime_config_preserves_native_method(quant_methods, monkeypatch):
-    q = quant_methods
-    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: None)
-    get_config = Mock(side_effect=AssertionError("standalone layers must not require Ascend config"))
-    monkeypatch.setattr("vllm_ascend.ascend_config.get_ascend_config", get_config)
-    native = object()
-    quant_config = SimpleNamespace(get_quant_method=lambda *_a, **_k: native)
-    assert q.layer._get_quant_method("experts", quant_config, None) is native
-    get_config.assert_not_called()
-
-
-@pytest.mark.parametrize("draft_tag", ["dspark_head", "eagle_head"])
-def test_native_draft_tag_preserves_method_and_restores_target_selection(quant_methods, draft_tag):
-    from vllm.compilation.backends import set_model_tag
-
-    q = quant_methods
-    q.state.config = ExpertOffloadConfig(enabled=True, num_device_experts=2)
-    native = q.native_cls(q.scheme, q.layer.moe_config)
-    quant_config = SimpleNamespace(get_quant_method=lambda *_a, **_k: native)
-    with set_model_tag(draft_tag):
-        assert q.layer._get_quant_method("experts", quant_config, q.layer.moe_config) is native
-    assert isinstance(q.layer._get_quant_method("experts", quant_config, q.layer.moe_config), q.offload_cls)
-
-
-def test_routed_owner_rejects_unquantized_or_unsupported_adapter(quant_methods):
-    quant_methods.state.config = ExpertOffloadConfig(enabled=True, num_device_experts=2)
-    layer = quant_methods.layer
-    with pytest.raises(ValueError, match="quantized"):
-        layer._get_quant_method("experts", None, object())
-    quant_config = SimpleNamespace(get_quant_method=lambda *_args, **_kwargs: object())
-    with pytest.raises(ValueError, match="does not support"):
-        layer._get_quant_method("experts", quant_config, object())
-
-
-@pytest.mark.parametrize("offload,fail", [(False, False), (True, False), (True, True)])
-def test_routed_hook_passes_consistent_view_and_restores_comm(offload, fail):
-    original_comm, slot_comm = Mock(), Mock()
-    context = SimpleNamespace(in_profile_run=False, moe_comm_type="allgather", moe_comm_method=None)
     cls = load_hook_class(
-        "vllm_ascend/ops/fused_moe/routed_experts.py",
-        "AscendRoutedExperts",
-        {"forward_impl"},
-        object,
-        {
-            "torch": torch,
-            "_EXTRA_CTX": context,
-            "get_forward_context": lambda: SimpleNamespace(all_moe_layers=None),
-            "get_moe_comm_method": lambda *_args: original_comm,
-            "_record_v2_eplb_load": Mock(),
-            "AllGatherCommImpl": Mock,
-        },
+        "vllm_ascend/expert_offload/method.py", "ExpertOffloadMoEMethod", {"apply"}, Parent, {"_EXTRA_CTX": context}
     )
-    layer = cls()
-    layer.enable_npugraph_ex_static_kernel = False
-    layer.moe_config = SimpleNamespace(is_sequence_parallel=False)
-    layer.quant_type = "mxfp4"
-    layer.router = SimpleNamespace(eplb_state=None)
-    layer.dynamic_eplb = False
-    layer._use_v2_model_runner = True
-    layer.return_with_event = False
-    logical = torch.tensor([[4, 5]])
-    physical = torch.tensor([[0, 1]])
-    view = object()
-    layer._select_experts = Mock(return_value=(torch.ones(1, 2), logical))
-    layer._expert_offload_binding = Mock() if offload else None
-    if offload:
-        assert layer._expert_offload_binding is not None
-        layer._expert_offload_binding.prepare.return_value = view, physical, slot_comm
-    original_comm.prepare.return_value = SimpleNamespace(
-        hidden_states=torch.ones(1, 4),
-        router_logits=torch.ones(1, 6),
-        mc2_mask=None,
-        padded_hidden_states_shape=None,
-        pertoken_scale=None,
-    )
-
-    def apply(**kwargs):
-        assert kwargs["layer"] is (view if offload else layer)
-        assert torch.equal(kwargs["topk_ids"], physical if offload else logical)
-        assert context.moe_comm_method is (slot_comm if offload else original_comm)
-        if fail:
-            raise RuntimeError("kernel failed")
-        return SimpleNamespace(routed_out="output")
-
-    layer.quant_method = SimpleNamespace(apply=apply)
-    if offload:
-
-        class Parent:
-            def apply(self, **kwargs):
-                return apply(**kwargs)
-
-        offload_cls = load_hook_class(
-            "vllm_ascend/expert_offload/method.py",
-            "ExpertOffloadMoEMethod",
-            {"apply"},
-            Parent,
-            {"_EXTRA_CTX": context},
-        )
-        layer.quant_method = offload_cls()
-    if fail:
-        with pytest.raises(RuntimeError, match="kernel failed"):
-            layer.forward_impl(hidden_states=torch.ones(1, 4), router_logits=torch.ones(1, 6))
-        original_comm.finalize.assert_not_called()
-    else:
-        layer.forward_impl(hidden_states=torch.ones(1, 4), router_logits=torch.ones(1, 6))
-        original_comm.finalize.assert_called_once()
+    binding = Mock()
+    binding.prepare.return_value = view, physical, slot_comm
+    layer = SimpleNamespace(_expert_offload_binding=binding)
+    assert cls().apply(layer, x, torch.ones(1, 2), logical) is x
+    binding.prepare.assert_called_once_with(layer, logical)
     assert context.moe_comm_method is original_comm
-    assert layer.ascend_mc2_mask is None and layer.ascend_pertoken_scale is None

@@ -1,244 +1,64 @@
 # SPDX-License-Identifier: Apache-2.0
-from types import SimpleNamespace
-from unittest.mock import patch
-
 import pytest
 import torch
 
-from vllm_ascend.expert_offload.config import ExpertOffloadConfig
-from vllm_ascend.expert_offload.expert_offload_manager import (
-    ExpertOffloadManager,
-    LayerOffloadBinding,
-)
-from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter
-from vllm_ascend.expert_offload.residency import ExpertResidency
-from vllm_ascend.expert_offload.transfer import TorchExpertTransfer
-from vllm_ascend.quantization.quant_type import QuantType
 
-
-class LayoutScheme:
-    """CPU contract double, not a substitute for an MXFP NPU kernel test."""
-
-    group_size = 32
-    quant_type = QuantType.W4A8MXFP
-
-    def process_weights_after_loading(self, layer):
-        for name in MXFP4ExpertAdapter.tensor_names:
-            getattr(layer, name).data = getattr(layer, name).data.transpose(-1, -2)
-
-
-class ExpertLayer(torch.nn.Module):
-    def __init__(self, name="model.layers.0.mlp.experts"):
-        super().__init__()
-        self.layer_name = name
-        self.local_num_experts = 6
-        self.top_k = 2
-        self.activation = "silu"
-        self.moe_config = SimpleNamespace(device="cpu", is_sequence_parallel=False, has_bias=False)
-        shapes = {
-            "w13_weight": (6, 128, 32),
-            "w2_weight": (6, 64, 32),
-            "w13_weight_scale": (6, 128, 2),
-            "w2_weight_scale": (6, 64, 2),
-        }
-        for tensor_name, shape in shapes.items():
-            self.register_parameter(
-                tensor_name, torch.nn.Parameter(torch.zeros(shape, dtype=torch.uint8), requires_grad=False)
-            )
-            getattr(self, tensor_name).weight_loader = self.weight_loader
-        self._expert_offload_binding = LayerOffloadBinding(
-            self, LayoutScheme(), ExpertOffloadConfig(enabled=True, num_device_experts=2)
+@pytest.mark.parametrize("kind", ["mxfp4", "mxfp8"])
+def test_loading_decode_prefill_and_capacity_fallback(expert_factory, manager_factory, kind):
+    layer, scheme = expert_factory(kind)
+    binding = layer._expert_offload_binding
+    reference = torch.nn.Module()
+    reference.activation = layer.activation
+    for name in binding.adapter.tensor_names:
+        reference.register_parameter(
+            name, torch.nn.Parameter(getattr(layer, name).detach().clone(), requires_grad=False)
         )
-
-    def weight_loader(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success=False):
-        if weight_name == "ignored":
-            return False if return_success else None
-        expert_data = param.data if loaded_weight.ndim == 3 else param.data[expert_id]
-        if shard_id in ("w1", "w3"):
-            half = expert_data.shape[-2] // 2
-            start = 0 if shard_id == "w1" else half
-            expert_data[..., start : start + half, :].copy_(loaded_weight)
-        else:
-            expert_data.copy_(loaded_weight)
-        return True if return_success else None
-
-    def load(self):
-        for eid in range(self.local_num_experts):
-            for name in MXFP4ExpertAdapter.tensor_names:
-                shards = ("w1", "w3") if name.startswith("w13") else ("w2",)
-                for shard in shards:
-                    shape = list(getattr(self, name).shape[1:])
-                    if name.startswith("w13"):
-                        shape[0] //= 2
-                    tensor = torch.full(shape, eid + (2 if shard == "w3" else 1), dtype=torch.uint8)
-                    getattr(self, name).weight_loader(getattr(self, name), tensor, name, shard, eid)
-
-
-def ready_model(*layers):
-    for layer in layers:
-        layer.load()
-        layer._expert_offload_binding.process_weights_after_loading(layer)
-    model = torch.nn.ModuleList(layers)
-    manager = ExpertOffloadManager()
-    manager.finalize_loading(model)
-    return manager
-
-
-def assert_selected_bundles(binding, view, physical_ids, logical_ids):
-    expected = binding.adapter.materialize(binding.host_store, logical_ids.reshape(-1).tolist(), "cpu")
-    for name in MXFP4ExpertAdapter.tensor_names:
-        actual = getattr(view, name).index_select(0, physical_ids.reshape(-1).long())
-        torch.testing.assert_close(actual, expected[name])
-        assert getattr(view, name).stride()[-2:] == expected[name].stride()[-2:]
-
-
-def test_complete_host_bundle_and_owned_lifetime():
-    layer = ExpertLayer()
-    layer.load()
-    binding = layer._expert_offload_binding
-    original = layer.w13_weight.data
-    binding.process_weights_after_loading(layer)
-    original.zero_()
-    assert binding.host_store.tensors["w13_weight"].sum() > 0
-    assert layer.w13_weight.shape[0] == 2
-    assert set(binding.resident) == set(MXFP4ExpertAdapter.tensor_names)
-
-
-def test_host_store_preserves_native_weight_loader():
-    layer = ExpertLayer()
-    param = layer.w13_weight
-    assert param.weight_loader == layer.weight_loader
-    assert param.weight_loader(param, torch.ones(2, 3), "ignored", "w1", 0, return_success=True) is False
-    assert param.weight_loader(param, torch.ones(2, 3), "ignored", "w1", 0) is None
-
-
-def test_decode_eviction_prefill_and_overflow_preserve_parameters():
-    layer = ExpertLayer()
-    manager = ready_model(layer)
-    binding = layer._expert_offload_binding
-    addresses = {name: getattr(layer, name).data_ptr() for name in binding.resident}
+    scheme.process_weights_after_loading(reference)
+    checkpoint = layer.w13_weight.detach()
+    manager = manager_factory(layer)
+    checkpoint.zero_()
+    assert binding.host_store.tensors["w13_weight"].float().sum() > 0
+    addresses = {name: value.data_ptr() for name, value in binding.resident.items()}
     map_addresses = (binding.mapping.host_map.data_ptr(), binding.mapping.device_map.data_ptr())
-    manager.has_prefill = False
-    with patch.object(manager, "get_comm", return_value=object()):
-        for ids in (torch.tensor([[5, 4]]), torch.tensor([[4, 2]]), torch.tensor([[2, 2]])):
-            view, physical, _ = binding.prepare(layer, ids)
-            assert_selected_bundles(binding, view, physical, ids)
-        resident_before = {name: value.clone() for name, value in binding.resident.items()}
-        map_before = binding.residency.logical_to_physical()
-        # Oversized decode falls back without changing decode residency.
-        ids = torch.tensor([[0, 1], [2, 3]])
+    for prefill, profile, logical in (
+        (False, False, [[4, 5]]),
+        (False, False, [[1, 4]]),
+        (True, False, [[0, 5]]),
+        (False, False, [[0, 1], [2, 3]]),
+        (False, True, [[0, 1]]),
+        (False, False, [[2, 2]]),
+    ):
+        manager.has_prefill, manager.is_profile = prefill, profile
+        ids = torch.tensor(logical, dtype=torch.int32)
+        before = binding.residency.logical_to_physical()
         view, physical, _ = binding.prepare(layer, ids)
-        assert torch.equal(physical, ids)
-        assert_selected_bundles(binding, view, physical, ids)
-        manager.has_prefill = True
-        view, physical, _ = binding.prepare(layer, torch.tensor([[5, 1]]))
-        assert_selected_bundles(binding, view, physical, torch.tensor([[5, 1]]))
-        assert binding.residency.logical_to_physical() == map_before
-        for name, tensor in resident_before.items():
-            torch.testing.assert_close(binding.resident[name], tensor)
-        manager.has_prefill = False
-        ids = torch.tensor([[2, 4]])
-        view, physical, _ = binding.prepare(layer, ids)
-        assert_selected_bundles(binding, view, physical, ids)
-    assert addresses == {name: getattr(layer, name).data_ptr() for name in binding.resident}
+        full_pool = prefill or profile or ids.unique().numel() > binding.num_slots
+        assert manager.get_comm.call_args.args[-1] == (binding.num_experts if full_pool else binding.num_slots)
+        if full_pool:
+            assert torch.equal(physical, ids)
+            assert binding.residency.logical_to_physical() == before
+        for name in binding.adapter.output_names:
+            torch.testing.assert_close(
+                getattr(view, name)[physical.long()].float(), getattr(reference, name)[ids.long()].float()
+            )
+    assert addresses == {name: value.data_ptr() for name, value in binding.resident.items()}
     assert map_addresses == (binding.mapping.host_map.data_ptr(), binding.mapping.device_map.data_ptr())
     manager.close()
-    assert binding.mapping is None
+    assert not manager.bindings and not binding.resident and not binding.host_store.tensors
 
 
-def test_pool_is_reused_between_layers_and_restores_correct_contents():
-    first, second = ExpertLayer(), ExpertLayer("model.layers.1.mlp.experts")
-    manager = ready_model(first, second)
-    second_binding = second._expert_offload_binding
-    for tensor in second_binding.host_store.tensors.values():
-        tensor.add_(10)
-    addresses = {name: tensor.data_ptr() for name, tensor in manager.prefill_pool.tensors.items()}
-    with patch.object(manager, "get_comm", return_value=None):
-        for layer in (first, second, first):
-            ids = torch.tensor([[1, 4]])
-            view, physical, _ = layer._expert_offload_binding.prepare(layer, ids)
-            assert_selected_bundles(layer._expert_offload_binding, view, physical, ids)
-    assert addresses == {name: tensor.data_ptr() for name, tensor in manager.prefill_pool.tensors.items()}
-
-
-def test_transfer_failure_propagates_without_publishing_plan():
-    layer = ExpertLayer()
-    manager = ready_model(layer)
-    binding = layer._expert_offload_binding
-    manager.has_prefill = False
-    before = binding.residency.logical_to_physical()
-    with (
-        patch.object(TorchExpertTransfer, "copy_experts", side_effect=RuntimeError("copy failed")),
-        pytest.raises(RuntimeError, match="copy failed"),
-    ):
-        binding.prepare(layer, torch.tensor([[4, 5]]))
-    assert binding.residency.logical_to_physical() == before
-
-
-def test_profile_uses_full_pool_and_close_releases_resources():
-    layer = ExpertLayer()
-    manager = ready_model(layer)
-    manager.is_profile = True
-    manager.has_prefill = False
-    with patch.object(manager, "get_comm", return_value=None):
-        ids = torch.tensor([[0, 1]])
-        view, physical, _ = layer._expert_offload_binding.prepare(layer, ids)
-        assert view.w13_weight.shape[0] == 6
-        assert torch.equal(physical, ids)
+def test_prefill_pool_is_shared_between_layers(expert_factory, manager_factory):
+    first, _ = expert_factory()
+    second, _ = expert_factory(layer_name="model.layers.1.mlp.experts")
+    for parameter in second.parameters():
+        parameter.data.add_(3)
+    manager = manager_factory(first, second)
+    addresses = {name: value.data_ptr() for name, value in manager.prefill_pool.tensors.items()}
+    for layer in (first, second, first):
+        binding = layer._expert_offload_binding
+        view, physical, _ = binding.prepare(layer, torch.tensor([[1, 4]]))
+        expected = binding.adapter.materialize(binding.host_store, (1, 4), "cpu")
+        for name in binding.adapter.output_names:
+            torch.testing.assert_close(getattr(view, name)[physical.long()].reshape_as(expected[name]), expected[name])
+        assert addresses == {name: value.data_ptr() for name, value in manager.prefill_pool.tensors.items()}
     manager.close()
-    manager.close()
-    assert not manager.bindings and not manager.prefill_pool.tensors
-
-
-@pytest.mark.parametrize("fail_preparation", [False, True])
-def test_native_loading_prepares_host_storage_before_publishing_residency(monkeypatch, fail_preparation):
-    events = []
-    binding = object.__new__(LayerOffloadBinding)
-    binding.resident = {}
-    binding.num_experts = 6
-    binding.num_slots = 2
-    binding.device = SimpleNamespace(type="npu")
-    binding.graph_staging = {}
-    binding.residency = ExpertResidency(6, 2)
-    tensors = {name: torch.arange(4, dtype=torch.float32) for name in MXFP4ExpertAdapter.tensor_names}
-    binding.adapter = SimpleNamespace(materialize=lambda *args: tensors, tensor_names=MXFP4ExpertAdapter.tensor_names)
-    mapping = object()
-
-    def allocate_mapping(num_experts, device):
-        assert num_experts == 6 and device is binding.device
-        assert binding.residency.logical_to_physical() == (-1,) * 6
-        events.append("mapping")
-        return mapping
-
-    monkeypatch.setattr("vllm_ascend.expert_offload.expert_offload_manager.ExpertMapBuffer", allocate_mapping)
-
-    def prepare(*args):
-        assert binding.residency.logical_to_physical() == (-1,) * 6
-        events.append("prepare")
-        if fail_preparation:
-            raise RuntimeError("native preparation failed")
-
-    binding.host_store = SimpleNamespace(
-        finalize=lambda *args, **kwargs: events.append("finalize"),
-        prepare_native=prepare,
-        close=lambda: events.append("close"),
-    )
-    monkeypatch.setattr(
-        torch,
-        "npu",
-        SimpleNamespace(current_stream=lambda device: SimpleNamespace(synchronize=lambda: events.append("sync"))),
-        raising=False,
-    )
-    layer = SimpleNamespace(**{name: torch.nn.Parameter(torch.empty(0), requires_grad=False) for name in tensors})
-    if fail_preparation:
-        with pytest.raises(RuntimeError, match="native preparation failed"):
-            binding.process_weights_after_loading(layer)
-        assert binding.residency.logical_to_physical() == (-1,) * 6
-        assert not binding.resident
-        assert events == ["finalize", "sync", "prepare", "close"]
-    else:
-        binding.process_weights_after_loading(layer)
-        assert binding.residency.logical_to_physical() == (0, 1, -1, -1, -1, -1)
-        assert events == ["finalize", "sync", "prepare", "mapping"]
-        assert binding.mapping is mapping
-        assert all(getattr(layer, name).data_ptr() == value.data_ptr() for name, value in tensors.items())

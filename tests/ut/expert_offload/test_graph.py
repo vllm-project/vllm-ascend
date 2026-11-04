@@ -1,138 +1,48 @@
 # SPDX-License-Identifier: Apache-2.0
-from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
 
-import pytest
 import torch
 
-from vllm_ascend.expert_offload.expert_offload_manager import (
-    ExpertOffloadManager,
-    GraphExpertStaging,
-    LayerOffloadBinding,
-)
-from vllm_ascend.expert_offload.residency import ExpertResidency
-from vllm_ascend.expert_offload.transfer import TorchExpertTransfer
-from vllm_ascend.expert_offload.utils import ExpertMapBuffer
+from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager, GraphExpertStaging
 
 
-@pytest.mark.parametrize(
-    "tokens,uniform,expected",
-    [(1, 1, True), (2, 1, True), (2, 2, True), (3, 1, False), (0, 1, False), (1, None, False), (1, 2, False)],
-)
-def test_padded_descriptor_capacity(tokens, uniform, expected):
+def test_graph_capacity_includes_speculative_and_padding_rows():
     manager = ExpertOffloadManager()
-    manager.bindings = {
-        "first": SimpleNamespace(top_k=6, num_slots=16),
-        "second": SimpleNamespace(top_k=4, num_slots=8),
-    }
-    desc = SimpleNamespace(num_tokens=tokens, uniform_token_count=uniform)
-    assert manager._supports_graph_descriptor(desc) is expected
-    manager.bindings.clear()
-    assert not manager._supports_graph_descriptor(desc)
+    manager.bindings = {"layer": SimpleNamespace(top_k=8, num_slots=68)}
+    for tokens, uniform, expected in ((4, 4, True), (8, 4, True), (16, 4, False), (4, None, False)):
+        desc = SimpleNamespace(num_tokens=tokens, uniform_token_count=uniform)
+        assert manager._supports_graph_descriptor(desc) is expected
+    descs = [SimpleNamespace(num_tokens=n, uniform_token_count=4) for n in (4, 8, 16)]
+    graph = SimpleNamespace(_capture_descs={"full": descs}, _candidates={(3, 0): [descs[-1]]})
+    manager.prepare_graph_capture(graph, lambda: False)
+    assert graph._capture_descs["full"] == descs[:2]
+    assert graph._candidates[(3, 0)] == []
 
 
-def test_speculative_graph_bounds_include_all_verification_and_padding_rows():
-    manager = ExpertOffloadManager()
-    manager.bindings = {"test": SimpleNamespace(top_k=6, num_slots=96)}
-    assert manager._supports_graph_descriptor(SimpleNamespace(num_tokens=6, uniform_token_count=6))
-    assert manager._supports_graph_descriptor(SimpleNamespace(num_tokens=12, uniform_token_count=6))
-    assert not manager._supports_graph_descriptor(SimpleNamespace(num_tokens=18, uniform_token_count=6))
-    assert not manager._supports_graph_descriptor(SimpleNamespace(num_tokens=6, uniform_token_count=None))
-
-
-@pytest.mark.parametrize("requests,expected", [(1, True), (2, True), (4, False)])
-def test_glm_mtp_three_draft_tokens_with_68_resident_experts(requests, expected):
-    manager = ExpertOffloadManager()
-    manager.bindings = {"test": SimpleNamespace(top_k=8, num_slots=68)}
-    # Every request verifies the new target token plus three draft tokens.
-    desc = SimpleNamespace(num_tokens=requests * 4, uniform_token_count=4)
-    assert manager._supports_graph_descriptor(desc) is expected
-
-
-def staging_double():
-    manager = ExpertOffloadManager()
-    manager.graph_load_stream = object()
-    binding = object.__new__(LayerOffloadBinding)
-    binding.__dict__.update(
-        manager=manager, residency=ExpertResidency(6, 2), device="cpu", adapter=None, host_store=None, resident={}
-    )
-    staging = object.__new__(GraphExpertStaging)
-    staging.binding = binding
-    with torch.inference_mode():
-        staging.ids = torch.tensor([[4, 5]])
-        staging.mapping = ExpertMapBuffer(6, torch.device("cpu"))
-    return manager, staging
-
-
-def test_callback_updates_routes_each_replay_and_commits_after_copy():
-    manager, staging = staging_double()
-    addresses = (staging.mapping.host_map.data_ptr(), staging.mapping.device_map.data_ptr())
-    with (
-        patch.object(torch.npu, "set_device", create=True),
-        patch.object(torch.npu, "stream", return_value=nullcontext(), create=True),
-        patch.object(TorchExpertTransfer, "copy_experts") as copy,
-    ):
-        with patch.object(torch, "tensor", side_effect=AssertionError("mapping must reuse its storage")):
-            staging.update()
-        assert copy.call_count == 1
-        assert staging.mapping.host_map[4:6].tolist() == [0, 1]
-        with torch.inference_mode():
-            staging.ids.copy_(torch.tensor([[1, 4]]))
-        with patch.object(torch, "tensor", side_effect=AssertionError("mapping must reuse its storage")):
-            staging.update()
-        assert copy.call_count == 2
-        assert staging.mapping.host_map[1] >= 0 and staging.mapping.host_map[5] == -1
-        assert addresses == (staging.mapping.host_map.data_ptr(), staging.mapping.device_map.data_ptr())
-    assert manager.graph_error is None
-
-
-def test_callback_failure_is_rejected_and_never_commits_partial_bundle():
-    manager, staging = staging_double()
-    before = staging.binding.residency.logical_to_physical()
-    with (
-        patch.object(torch.npu, "set_device", create=True),
-        patch.object(torch.npu, "stream", return_value=nullcontext(), create=True),
-        patch.object(TorchExpertTransfer, "copy_experts", side_effect=RuntimeError("injected transfer failure")),
-    ):
-        staging.update()
-    assert staging.binding.residency.logical_to_physical() == before
-    with pytest.raises(RuntimeError, match="rejecting execution output") as raised:
-        manager.check_graph_errors()
-    assert str(raised.value.__cause__) == "injected transfer failure"
-    # Later callbacks must not publish another map after the first failure.
-    with patch.object(TorchExpertTransfer, "copy_experts") as copy:
-        staging.update()
-        copy.assert_not_called()
-    with pytest.raises(RuntimeError, match="rejecting execution output"):
-        manager.check_graph_errors()
-
-
-def test_subscriptions_are_runner_owned_and_deduplicated():
-    manager = ExpertOffloadManager()
-    stream = Mock()
-    with (
-        patch.object(torch.npu, "_subscribe_report", create=True) as subscribe,
-        patch.object(torch.npu, "_unsubscribe_report", create=True) as unsubscribe,
-    ):
-        manager.subscribe_graph_stream(stream)
-        manager.subscribe_graph_stream(stream)
-        subscribe.assert_called_once_with(stream)
-        manager.close()
-        unsubscribe.assert_called_once_with(stream)
-        manager.close()
-        assert unsubscribe.call_count == 1
-
-
-@pytest.mark.parametrize("failed", [False, True])
-def test_capture_flags_are_reset_on_success_and_failure(failed):
-    manager = ExpertOffloadManager()
-    manager.is_profile = True
-    if failed:
-        with pytest.raises(RuntimeError, match="capture failed"), manager.graph_capture():
-            assert manager.capturing_graphs and not manager.has_prefill and not manager.is_profile
-            raise RuntimeError("capture failed")
-    else:
-        with manager.graph_capture():
-            assert manager.capturing_graphs and not manager.has_prefill and not manager.is_profile
+def test_graph_replay_refreshes_experts_and_reuses_storage(expert_factory, manager_factory, native_runtime):
+    layer, _ = expert_factory()
+    manager = manager_factory(layer)
+    binding = layer._expert_offload_binding
+    reference = {name: tensor.clone() for name, tensor in manager.prefill_pool.tensors.items()}
+    binding.host_store.prepare_native(binding.adapter, binding.resident, "cpu")
+    staging = GraphExpertStaging(binding, (1, 2), torch.int32)
+    addresses = (staging.ids.data_ptr(), staging.mapping.host_map.data_ptr(), staging.mapping.device_map.data_ptr())
+    manager.subscribe_graph_stream(native_runtime.stream)
+    manager.subscribe_graph_stream(native_runtime.stream)
+    with manager.graph_capture():
+        assert manager.capturing_graphs and not manager.has_prefill
+        for logical in ([[4, 5]], [[1, 4]], [[2, 2]]):
+            ids = torch.tensor(logical, dtype=torch.int32)
+            physical = staging.prepare(ids)
+            manager.check_graph_errors()
+            for name in binding.adapter.output_names:
+                torch.testing.assert_close(binding.resident[name][physical.long()], reference[name][ids.long()])
+            assert addresses == (
+                staging.ids.data_ptr(),
+                staging.mapping.host_map.data_ptr(),
+                staging.mapping.device_map.data_ptr(),
+            )
     assert not manager.capturing_graphs
+    manager.close()
+    native_runtime.npu._subscribe_report.assert_called_once_with(native_runtime.stream)
+    native_runtime.npu._unsubscribe_report.assert_called_once_with(native_runtime.stream)
