@@ -56,7 +56,7 @@ class TestMain2MainContracts(unittest.TestCase):
         path = "vllm_ascend/worker/v2/spec_decode/target_dependent_ar/aclgraph.py"
         for release in (False, True):
             with self.subTest(release=release):
-                calls = []
+                calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
                 class Parent:
                     def __init__(self, *args, _calls=calls, **kwargs):
@@ -87,7 +87,7 @@ class TestMain2MainContracts(unittest.TestCase):
 
     def test_dflash_accepts_new_keyword_and_release_scalar(self):
         for release in (False, True):
-            calls = []
+            calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
             class Parent:
                 def __init__(self, *args, _calls=calls, **kwargs):
@@ -107,7 +107,7 @@ class TestMain2MainContracts(unittest.TestCase):
                 },
                 bases=Parent,
             )
-            kwargs = {"decode_query_len": 2} if release else {"decode_query_lens": {2: 8}}
+            kwargs: dict[str, object] = {"decode_query_len": 2} if release else {"decode_query_lens": {2: 8}}
             cls(object(), object(), object(), **kwargs)
             self.assertEqual(calls[0][0][3], 2 if release else {2: 8})
 
