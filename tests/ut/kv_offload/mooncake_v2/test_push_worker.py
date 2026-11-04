@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_scheduler import M
 @pytest.fixture
 def worker(monkeypatch):
     def initialize(self, *args):
+        self.vllm_config = SimpleNamespace(speculative_config=None)
         self.engine_id = "d"
         self.pp_rank = self.pcp_rank = self.tp_rank = 0
         self.num_blocks = 100
@@ -36,7 +37,9 @@ def worker(monkeypatch):
 
     monkeypatch.setattr(MooncakeBaseConnectorWorker, "__init__", initialize)
     monkeypatch.setattr(MooncakeBaseConnectorWorker, "register_kv_caches", lambda *args: None)
-    obj = push_worker.MooncakePushConnectorWorker(None, "d", None)
+    obj = push_worker.MooncakePushConnectorWorker(
+        SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1)), "d", None
+    )
     obj.register_kv_caches({})
     yield obj
     obj.shutdown()
@@ -404,3 +407,15 @@ def test_partial_ready_failure_stops_the_request_without_releasing_blocks(worker
     assert worker._reqs_recv_state["t"].failed
     assert "t" not in worker._finished_transfers
     assert worker._stop_event.is_set()
+
+
+def test_undrained_write_failure_stops_d_without_releasing_blocks(worker, producer, monkeypatch):
+    address, messages = producer
+    monkeypatch.setattr(worker._sending_thread, "_get_remote_worker_addresses", lambda *args: {(0, 0, 0): address})
+    worker.start_load_kv(metadata())
+    ready = messages.get(timeout=3)
+    assert done(worker, ready, status="error", writes_drained=False, error="P WRITE timeout")["kind"] == "done_ack"
+    with pytest.raises(RuntimeError, match="Push control failed"):
+        finish(worker)
+    assert "t" in worker._reqs_recv_state
+    assert not worker._reqs_recv_state["t"].finished_ranks
