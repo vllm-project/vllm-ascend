@@ -1,0 +1,6 @@
+pr: 20977
+entries:
+  - category: bugfix
+    text: >-
+      Fixed concurrent static-kernel uninstallation during worker shutdown by retaining the
+      lock in the detached child and preserving the lock file for other workers.
