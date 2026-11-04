@@ -22,8 +22,11 @@ def load_platform(npu):
     tree = ast.parse(SOURCE.read_text())
     original = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "NPUPlatform")
     method = next(n for n in original.body if isinstance(n, ast.FunctionDef) and n.name == "num_compute_units")
-    cls = ast.ClassDef(name="NPUPlatform", bases=[], keywords=[], body=[method], decorator_list=[])
-    module = ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[]))
+    module = ast.parse("class NPUPlatform: pass")
+    cls = module.body[0]
+    assert isinstance(cls, ast.ClassDef)
+    cls.body = [method]
+    ast.fix_missing_locations(module)
     namespace = {"torch": SimpleNamespace(npu=npu)}
     exec(compile(module, str(SOURCE), "exec"), namespace)
     return namespace["NPUPlatform"]
