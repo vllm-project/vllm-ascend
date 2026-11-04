@@ -17,7 +17,11 @@ import pytest
 import torch
 from PIL import Image
 from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
-from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer, Qwen3VLMultiModalProcessor
+from vllm.model_executor.models import qwen3_vl as upstream_qwen3_vl
+from vllm.model_executor.models.qwen3_vl import (
+    Qwen3_VisionTransformer,
+    Qwen3VLMultiModalProcessor,
+)
 
 from vllm_ascend.models import qwen3_5_vl
 from vllm_ascend.models.qwen3_5_vl import (
@@ -157,6 +161,74 @@ def test_field_config_follows_emitted_keys(monkeypatch):
     raw_cfg = proc._get_mm_fields_config({"image_hw": torch.tensor([[56, 56], [28, 56]])}, {})
     assert raw_cfg["pixel_values"] is not base["pixel_values"]
     assert "image_hw" in raw_cfg
+
+
+# ---------------------------------------------------------------------------
+# EVS video placeholder replacement
+# ---------------------------------------------------------------------------
+
+
+def test_evs_replaces_complete_video_placeholder(monkeypatch):
+    """EVS frame wrappers must replace, not nest inside, Qwen3.5's wrapper."""
+    vision_start, video_pad, vision_end = 10, 11, 12
+    evs_replacement = [
+        vision_start,
+        101,
+        102,
+        vision_end,
+        vision_start,
+        201,
+        vision_end,
+    ]
+    proc = object.__new__(AscendQwen3_5VLProcessor)
+    hf_config = SimpleNamespace(
+        vision_start_token_id=vision_start,
+        video_token_id=video_pad,
+        vision_end_token_id=vision_end,
+        vision_config=SimpleNamespace(spatial_merge_size=1),
+    )
+
+    def call_hf_processor(_processor, data, _kwargs):
+        if "videos" in data:
+            return {
+                "input_ids": [[vision_start, video_pad, vision_end]],
+                "video_grid_thw": torch.tensor([[2, 1, 1]]),
+                "pixel_values_videos": torch.zeros(2, 1),
+            }
+        return {"input_ids": [[1, vision_start, video_pad, vision_end, 2]]}
+
+    proc.info = SimpleNamespace(
+        ctx=SimpleNamespace(
+            get_mm_config=lambda: SimpleNamespace(get_video_pruning_spec=lambda: ("evs", 0.75)),
+            call_hf_processor=call_hf_processor,
+        ),
+        _merge_and_resolve_mm_processor_kwargs=lambda kwargs: dict(kwargs),
+        _get_video_second_idx=lambda **kwargs: [0.0, 1.0],
+        get_hf_config=lambda: hf_config,
+        get_hf_processor=lambda **kwargs: object(),
+        get_tokenizer=lambda: object(),
+    )
+    proc._get_hf_mm_inputs = lambda mm_items, hf_kwargs: (
+        {"videos": [(object(), {"do_sample_frames": False})]},
+        hf_kwargs,
+        {},
+    )
+    proc._get_per_video_kwargs = lambda hf_kwargs, num_videos=None: {}
+    proc._finalize_hf_mm_data = lambda hf_data, hf_kwargs, passthrough, processed: processed
+    monkeypatch.setattr(upstream_qwen3_vl, "VideoMetadata", lambda **kwargs: kwargs)
+    monkeypatch.setattr(upstream_qwen3_vl, "compute_retained_tokens_count", lambda **kwargs: 2)
+    monkeypatch.setattr(
+        Qwen3VLMultiModalProcessor,
+        "get_video_repl",
+        staticmethod(lambda **kwargs: SimpleNamespace(full=evs_replacement)),
+    )
+
+    output = proc._apply_hf_processor_main(object(), {})
+    (expanded_ids,) = output["input_ids"]
+
+    assert expanded_ids == [1, *evs_replacement, 2]
+    assert expanded_ids.count(vision_start) == 2
+    assert expanded_ids.count(vision_end) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +516,11 @@ def _initialized_norm_probe(monkeypatch, enabled):
 
     class ModelBase:
         def __init__(self, *, vllm_config, prefix):
-            self.model_config = SimpleNamespace(multimodal_config=SimpleNamespace(mm_device_do_normalize=enabled))
+            self.multimodal_config = SimpleNamespace(
+                mm_device_do_normalize=enabled,
+                get_video_pruning_spec=lambda: None,
+            )
+            self.model_config = SimpleNamespace(multimodal_config=self.multimodal_config)
             self.config = SimpleNamespace(
                 vision_config=SimpleNamespace(
                     in_channels=C, patch_size=PS, temporal_patch_size=TPS, spatial_merge_size=MS
