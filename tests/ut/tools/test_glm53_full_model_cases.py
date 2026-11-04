@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU checks for full-model GLM PD allocation, dispatch and semantic failures."""
+"""CPU checks for full-model GLM PD allocation, role recipes and Weekly dispatch."""
 
 import base64
-import copy
 import json
 import os
 import subprocess
@@ -11,12 +10,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
 
-import requests
 import yaml
 
-from tests.e2e.cases.models.glm53_full_model_probe import run_probes, validate_response
 from tests.e2e.common.multi_node.external_dp.external_dp_config import ExternalDPConfigLoader, RankResolver
 from tests.e2e.common.multi_node.external_dp.runtime import build_all_server_commands
 
@@ -27,7 +23,7 @@ CONFIG_DIR = ROOT / "tests/e2e/cases/models/configs/GLM/full_model"
 class FullModelConfigTests(unittest.TestCase):
     def test_resolved_commands_fit_allocation_and_agree_on_transfer_topology(self):
         paths = sorted(CONFIG_DIR.glob("*.yaml"))
-        self.assertEqual(len(paths), 20)
+        self.assertEqual(len(paths), 12)
         for path in paths:
             with self.subTest(case=path.stem):
                 config = ExternalDPConfigLoader.from_yaml(
@@ -68,9 +64,52 @@ class FullModelConfigTests(unittest.TestCase):
                 self.assertTrue(all(topology == transfer_topologies[0] for topology in transfer_topologies))
                 self.assertTrue(all(len(devices) == config.npu_per_node for devices in devices_by_node.values()))
 
+    def test_role_recipes_and_workloads_remain_isolated(self):
+        for path in sorted(CONFIG_DIR.glob("*.yaml")):
+            with self.subTest(case=path.stem):
+                config = yaml.safe_load(path.read_text(encoding="utf-8"))
+                a5 = "-A5-" in path.stem
+                prefill_case = path.stem.endswith("PREFILL")
+                for template in config["templates"]:
+                    args = template["server_cmd_template"]
+                    additional = json.loads(args[args.index("--additional-config") + 1])
+                    max_len = int(args[args.index("--max-model-len") + 1])
+                    self.assertEqual(max_len, 135000 if a5 else 200000)
+                    self.assertNotIn("--enable-batch-sharded-sampling", args)
+                    if template["node_index"] < 2:
+                        self.assertEqual(additional["enable_fused_mc2"], 2)
+                        self.assertTrue(additional["enable_flashcomm1"])
+                        self.assertIn("--enforce-eager", args)
+                    else:
+                        self.assertIn("--no-enable-prefix-caching", args)
+                        self.assertTrue(additional["recompute_scheduler_enable"])
+                        if prefill_case:
+                            self.assertEqual(additional["enable_fused_mc2"], 1)
+                            self.assertNotIn("multistream_overlap_shared_expert", additional)
+                        else:
+                            self.assertNotIn("enable_fused_mc2", additional)
+                            self.assertTrue(additional["multistream_overlap_shared_expert"])
+                            compilation = additional["ascend_compilation_config"]
+                            self.assertTrue(compilation["enable_npugraph_ex"])
+                            self.assertEqual(compilation["enable_static_kernel"], not a5)
+                benchmarks = config["benchmarks"]
+                if path.stem.endswith("ACCURACY"):
+                    self.assertEqual(list(benchmarks), ["acc_gpqa"])
+                    continue
+                self.assertEqual(len(benchmarks), 8)
+                for name, bench in benchmarks.items():
+                    self.assertEqual(bench["max_out_len"], 1 if prefill_case else 1024)
+                    self.assertEqual(bench["request_rate"], 0)
+                    if name.endswith("_warmup"):
+                        measured = benchmarks[name.removesuffix("_warmup")]
+                        for key in ("dataset_path", "num_prompts", "batch_size", "max_out_len"):
+                            self.assertEqual(bench[key], measured[key])
+                    if prefill_case:
+                        self.assertNotIn("tpot_threshold", bench)
+
     def test_matrix_entries_resolve_to_correct_hardware(self):
         resolver = ROOT / ".github/workflows/scripts/resolve_nightly_tests.py"
-        for frequency, expected_counts in (("nightly", {"a5": 10}), ("weekly", {"a3": 4, "a5": 8})):
+        for frequency, expected_counts in (("weekly", {"a3": 4, "a5": 8}),):
             path = ROOT / f".github/workflows/configs/{frequency}_config.yaml"
             matrix = yaml.safe_load(path.read_text(encoding="utf-8"))
             for soc, expected_count in expected_counts.items():
@@ -103,6 +142,9 @@ class FullModelConfigTests(unittest.TestCase):
                                 [key for key, value in flags.items() if value == "true"], [f"dispatch_{soc}"]
                             )
 
+        nightly = (ROOT / ".github/workflows/configs/nightly_config.yaml").read_text(encoding="utf-8")
+        self.assertNotIn("/GLM/full_model", nightly)
+
     def test_weekly_a5_workflow_and_dispatch_are_connected(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/schedule_weekly_test_a5.yaml").read_text())
         jobs = workflow["jobs"]
@@ -114,52 +156,6 @@ class FullModelConfigTests(unittest.TestCase):
         self.assertIn("command == 'weekly'", dispatch_job["if"])
         self.assertIn("schedule_weekly_test_a5.yaml", str(dispatch_job["steps"]))
         self.assertIn("dispatch-weekly-a5", dispatch["jobs"]["post-links"]["needs"])
-
-
-class SemanticProbeTests(unittest.TestCase):
-    def setUp(self):
-        self.response = {
-            "choices": [{"finish_reason": "stop", "message": {"content": "391"}}],
-            "usage": {"prompt_tokens": 20, "completion_tokens": 3},
-        }
-
-    def test_correct_answer_passes(self):
-        validate_response(self.response, "391")
-
-    def test_incorrect_truncated_empty_or_unaccounted_answers_fail(self):
-        invalid = []
-        for content in ("392", "", None, "391 or 392"):
-            response = copy.deepcopy(self.response)
-            response["choices"][0]["message"]["content"] = content
-            invalid.append(response)
-        truncated = copy.deepcopy(self.response)
-        truncated["choices"][0]["finish_reason"] = "length"
-        invalid.extend((truncated, {"choices": []}, {**self.response, "usage": {}}))
-        for response in invalid:
-            with self.subTest(response=response), self.assertRaises(ValueError):
-                validate_response(response, "391")
-
-    def test_http_failure_propagates(self):
-        with patch("tests.e2e.cases.models.glm53_full_model_probe.requests.Session") as session:
-            client = session.return_value.__enter__.return_value
-            client.get.return_value.json.return_value = {"data": [{"id": "glm"}]}
-            client.post.return_value.raise_for_status.side_effect = requests.HTTPError("backend failed")
-            with self.assertRaises(requests.HTTPError):
-                run_probes("http://127.0.0.1:1999/v1")
-
-    def test_repeated_requests_validate_each_response(self):
-        with patch("tests.e2e.cases.models.glm53_full_model_probe.requests.Session") as session:
-            client = session.return_value.__enter__.return_value
-            client.get.return_value.json.return_value = {"data": [{"id": "glm"}]}
-            responses = []
-            for answer in ("391", "144", "391"):
-                payload = copy.deepcopy(self.response)
-                payload["choices"][0]["message"]["content"] = answer
-                responses.append(Mock(json=Mock(return_value=payload)))
-            client.post.side_effect = responses
-            with patch("builtins.print"):
-                run_probes("http://127.0.0.1:1999/v1")
-            self.assertEqual(client.post.call_count, 3)
 
 
 if __name__ == "__main__":
