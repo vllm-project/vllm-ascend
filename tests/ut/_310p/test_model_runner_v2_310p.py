@@ -1374,7 +1374,7 @@ def test_worker_selects_v2_runner_on_310p() -> None:
     worker.use_v2_model_runner = True
     worker.device = torch.device("cpu")
     with patch("vllm_ascend._310p.worker.v2.model_runner.NPUModelRunner310V2") as runner_cls:
-        worker.model_runner = worker._create_model_runner()
+        worker.model_runner = worker._make_model_runner()
     runner_cls.assert_called_once_with(worker.vllm_config, worker.device)
 
 

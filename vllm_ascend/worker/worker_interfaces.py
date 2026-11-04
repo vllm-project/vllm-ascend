@@ -15,6 +15,7 @@ class UnsupportedElasticEPExecutor:
 
 # These methods must continue resolving to vLLM after dependency upgrades.
 INHERITED_WORKER_METHODS = (
+    "get_simple_cpu_offload_num_cpu_blocks",
     "execute_model",
     "_check_weight_transfer_engine",
     "init_weight_transfer_engine",

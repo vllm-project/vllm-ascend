@@ -125,3 +125,89 @@ mutating the shared empty result. V2 never accesses V1 connector fields.
 The NPU sample_tokens override is retained for profiling-chunk execution-time
 statistics. execute_dummy_batch is retained for idle runtime-guard wave sync,
 current-config scope and GDN-state suppression. Neither is claimed as migrated.
+
+## Initialization, memory and lifecycle (phase 5)
+
+All ordinary NPU, 310P and Xlite runner construction now goes through
+`_make_model_runner`. The common Ascend workspace hook runs only after NPU device
+selection; it keeps one workspace rather than entering the GPU DBO policy.
+The 310P compile-mode setup and Xlite runner identity/warmup context are retained.
+Common usage reporting is performed after runner construction on rank zero.
+
+Shutdown delegates common teardown to GPUWorker, bracketed only by Ascend EPLB /
+PP draining and CaMem pool release. Duplicate initialization of profiler, sleep,
+weight-transfer, runner-version and PP-send state has been removed from the NPU
+constructor. The simple CPU-offload block-count RPC now resolves to the parent.
+
+Memory policy is deliberately unchanged: requested memory remains device total
+memory times gpu_memory_utilization, measured after NPU/HCCL initialization.
+Upstream request_memory and its external-weight accounting are not assumed to
+model CaMem, KVPP, sparse offload or layer-reuse allocations. Explicit KV budgets
+and all existing Ascend adjustments remain in the NPU profiler path. Adopting a
+new memory policy needs separate allocation evidence rather than an inheritance
+refactor. NPU Graph/ATB capture and TorchNPUProfilerWrapper remain device owned.
+
+### Remaining override rationale
+
+| Method | Concrete Ascend difference or explicit unsupported boundary |
+| --- | --- |
+| `__init__` | Register Ascend ops/patches/config, cache dtype, NPU graph state and sleep cleanup manager; shared state comes only from parent |
+| `_validate_profiler_config` | Validate torch NPU profiler instead of CUDA activities |
+| `_make_elastic_ep_executor` | Prevent CUDA/flashinfer import and unsupported elastic EP thread pool |
+| `checkpoint_prepare` | Reject CUDA distributed checkpoint API |
+| `checkpoint_restore` | Reject CUDA distributed checkpoint API |
+| `handle_ft_command` | Reject GPU fault-tolerance sentinel commands |
+| `save_tensorized_model` | Reject unqualified CUDA tensorizer export |
+| `_compile_or_warm_up_model` | Reject parent GPU compiler; use Ascend compile_or_warm_up_model |
+| `_get_cudagraph_capture_context` | Reject CUDA profiler graph capture; NPU graph capture remains local |
+| `_maybe_activate_jit_monitor` | Reject GPU-only JIT monitor |
+| `_scoped_allocator_max_split` | Reject CUDA allocator tuning |
+| `_init_workspace_and_model_runner` | Select one NPU workspace and construct via the common runner factory hook |
+| `_make_model_runner` | Select NPU V1/V2 or the encoder runner under torch_cuda_wrapper |
+| `start_draft_weight_update` | Reject draft transfer pending HCCL and runner qualification |
+| `supports_draft_weight_updates` | Do not advertise unqualified draft transfer |
+| `sleep_mode_backend` | Resolve CaMem rather than CuMem, reject foreign backend selection |
+| `_start_weight_update` | Check NZ policy then delegate ordinary state transitions |
+| `uninstall_static_kernel` | Uninstall CANN static kernels under the process lock |
+| `sleep` | NPU memory stats, saved buffers, connector registration and HCCL/graph extra-cleanup ordering |
+| `wake_up` | NZ policy, selective parameter/buffer restore and HCCL/graph extra-cleanup ordering |
+| `_check_nz_disabled` | Reject FRACTAL_NZ in RL weight updates |
+| `shutdown` | Stop EPLB and drain PP before parent teardown, release CaMem pools afterwards |
+| `initialize_cache` | Ascend legacy block-count RPC compatibility |
+| `_init_device` | NPU selection, DP isolation, HCCL, Triton device properties and NPU memory snapshot |
+| `init_device` | NPU device and FLA registration before workspace/runner construction |
+| `_apply_kv_offload_decode_memory_constraints` | Ascend sparse decode KV-offload memory plan |
+| `_apply_kvpp_memory_budget` | Ascend KVPP physical cache allocation budget |
+| `determine_available_memory` | NPU profiling plus KVPP, layer reuse and sparse-offload budget adjustments |
+| `_scale_kv_cache_memory_for_multi_group` | Ascend allocation and compressed/shared backing layouts |
+| `log_memory_stats` | NPU allocator statistics |
+| `_before_execute_model` | NPU memory logging and msMonitor iteration step |
+| `annotate_profile` | NPU profiler iteration step without CUDA annotations |
+| `_get_pp_all_gather_group` | V2 Ascend SP already owns the gathered layout |
+| `_after_pp_send` | V1 KV connector result propagation; V2 excludes V1-only fields |
+| `sample_tokens` | Ascend profiling-chunk execution-time statistics |
+| `load_model` | CaMem weights pool, NPU empty-cache protection, NPU transfer-engine setup and elastic-EP rejection |
+| `compile_or_warm_up_model` | NPU Graph capture, ATB warmup, CPU binding and NPU memory measurement |
+| `_warm_up_atb` | ATB extension initialization and warmup |
+| `profile_prefill_latency` | Ascend scheduler prefill latency profiling |
+| `get_kv_connector_handshake_metadata` | Ascend PCP tuple layout and connector metadata |
+| `_get_layerwise_kv_cache_memory_info` | Ascend layer-reuse physical allocation topology |
+| `get_kv_cache_spec` | KVPP draft registration, layer reuse and sparse offload bookkeeping |
+| `_maybe_get_memory_pool_context` | CaMem allocation pools |
+| `initialize_from_config` | Ascend KV allocation contexts, block sharing and zeroing metadata |
+| `profile` | TorchNPUProfilerWrapper construction and trace lifecycle |
+| `synchronize_device` | NPU synchronization primitive |
+| `get_encoder_cudagraph_stats` | Serializable NPU encoder graph diagnostics |
+| `execute_dummy_batch` | Idle runtime-guard wave sync, NPU GDN suppression and config context |
+| `_init_worker_distributed_environment` | HCCL and Ascend PCP/Engram group topology |
+| `get_supported_pooling_tasks` | Ascend pooling-task compatibility RPC |
+| `check_health` | npu-smi card health check |
+
+310P additionally retains RC-device memory accounting, 310P shared-cache sizing
+and quantized shard export. Xlite retains its device-init path and wrapper bypass
+during warmup. Each now supplies the same runner factory contract.
+
+This table records implementation boundaries, not a hardware qualification claim.
+Before merge, verify startup, serving, PP/SP, pooling, connectors and sleep on the
+applicable V1/V2/310P/Xlite runtime matrix. No remote NPU validation was performed
+for this stack.

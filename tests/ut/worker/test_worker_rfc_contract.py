@@ -18,9 +18,9 @@ ROOT = Path(__file__).resolve().parents[3]
 WORKER = ROOT / "vllm_ascend/worker/worker.py"
 
 
-def worker_method(name, **bindings):
-    tree = ast.parse(WORKER.read_text(encoding="utf-8"))
-    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "NPUWorker")
+def worker_method(name, *, source=WORKER, class_name="NPUWorker", **bindings):
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
     node = next((node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == name), None)
     if node is None:
         # Source-only local validation and the installed pinned vLLM in CI.
@@ -269,9 +269,10 @@ class WorkerAlignmentContract(unittest.TestCase):
                 _pp_send_work=[SimpleNamespace(wait=lambda events=events: events.append("pp"))],
             )
             worker.model_runner.eplb_state = EPLB(events, fail)
-            shutdown = worker_method(
-                "shutdown",
+            cls = contract_class(
+                {"shutdown"},
                 AscendEplbState=EPLB,
+                current_platform=SimpleNamespace(is_cuda_alike=lambda: False),
                 gc=SimpleNamespace(unfreeze=lambda events=events: events.append("gc")),
                 ensure_kv_transfer_shutdown=lambda events=events: events.append("kv"),
                 ensure_ec_transfer_shutdown=lambda events=events: events.append("ec"),
@@ -279,6 +280,10 @@ class WorkerAlignmentContract(unittest.TestCase):
                     instance=SimpleNamespace(release_pools=lambda events=events: events.append("pools"))
                 ),
             )
+            instance = cls()
+            instance.__dict__.update(vars(worker))
+            worker = instance
+            shutdown = cls.shutdown
             if fail:
                 with self.assertRaisesRegex(RuntimeError, "EPLB"):
                     shutdown(worker)
@@ -477,6 +482,73 @@ class WorkerAlignmentContract(unittest.TestCase):
         worker.use_v2_model_runner = False
         self.assertIs(execute(worker, SimpleNamespace(total_num_scheduled_tokens=1)), pooled)
         runner.pool.assert_not_called()
+
+    def test_runner_factories_cover_device_variants(self):
+        import builtins
+
+        class V1:
+            def __init__(self, config, device):
+                self.config, self.device = config, device
+
+        class V2(V1):
+            pass
+
+        class Encoder(V1):
+            pass
+
+        classes = {
+            "vllm_ascend.worker.v2.model_runner": SimpleNamespace(NPUModelRunner=V2),
+            "vllm.v1.worker.mm_encoder_model_runner": SimpleNamespace(MMEncoderModelRunner=Encoder),
+            "vllm_ascend.worker.v2.utils": SimpleNamespace(torch_cuda_wrapper=nullcontext),
+            "vllm_ascend._310p.worker.v2.model_runner": SimpleNamespace(NPUModelRunner310V2=V2),
+            "vllm_ascend.worker.v1._310p.model_runner_310p": SimpleNamespace(NPUModelRunner310=V1),
+            "vllm_ascend.worker.v1.xlite.xlite_model_runner": SimpleNamespace(XliteModelRunner=V1),
+        }
+
+        def import_factory(name, *args, **kwargs):
+            return classes[name] if name in classes else builtins.__import__(name, *args, **kwargs)
+
+        for file, name in (
+            (WORKER, "NPUWorker"),
+            (ROOT / "vllm_ascend/_310p/worker_310p.py", "NPUWorker310"),
+            (ROOT / "vllm_ascend/xlite/xlite_worker.py", "XliteWorker"),
+        ):
+            for v2 in (False, True):
+                worker = SimpleNamespace(
+                    use_v2_model_runner=v2, vllm_config=SimpleNamespace(is_mm_encoder_only=False), device="npu:0"
+                )
+                factory = worker_method(
+                    "_make_model_runner",
+                    source=file,
+                    class_name=name,
+                    __builtins__=dict(vars(builtins), __import__=import_factory),
+                    NPUModelRunner=V1,
+                    XliteModelRunnerV2=V2,
+                    logger=MagicMock(),
+                )
+                runner = factory(worker)
+                self.assertIs(type(runner), V2 if v2 else V1)
+                self.assertIs(runner.config, worker.vllm_config)
+                self.assertEqual(runner.device, "npu:0")
+                if name == "XliteWorker":
+                    self.assertIs(worker.xlite_runner, runner)
+                if name == "NPUWorker" and v2:
+                    worker.vllm_config.is_mm_encoder_only = True
+                    self.assertIs(type(factory(worker)), Encoder)
+
+    def test_workspace_constructs_runner_after_device_selection(self):
+        runner = object()
+        workspace, usage = MagicMock(), MagicMock()
+        worker = SimpleNamespace(
+            device="npu:2", rank=0, vllm_config=object(), _make_model_runner=MagicMock(return_value=runner)
+        )
+        initialize = worker_method(
+            "_init_workspace_and_model_runner", init_workspace_manager=workspace, report_usage_stats=usage
+        )
+        initialize(worker)
+        workspace.assert_called_once_with("npu:2", num_ubatches=1)
+        self.assertIs(worker.model_runner, runner)
+        usage.assert_called_once_with(worker.vllm_config)
 
     def test_execution_decorators(self):
         cls = next(
