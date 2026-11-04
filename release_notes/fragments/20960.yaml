@@ -1,0 +1,5 @@
+pr: 20960
+entries:
+  - category: bugfix
+    text: >-
+      Fixed Mamba checkpoint alignment for consumer prefill chunks after local or external prefix hits while preserving padded speculative verifier windows.
