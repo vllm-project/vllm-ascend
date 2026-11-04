@@ -70,8 +70,9 @@ Download the selected checkpoint to the same absolute path on every server,
 for example `/data/weights/DeepSeek-V4.1-Flash-1017-w4a8` or
 `/data/weights/DeepSeek-V4.1-Flash-1017-w8a8`. Set `MODEL_PATH` in each serving
 command to that checkpoint directory. The examples below use W4A8; to use
-W8A8, set `MODEL_PATH` to the W8A8 directory instead. For A3 PD deployment,
-also use the W8A8 topology described in Section 5.2.
+W8A8, set `MODEL_PATH` to the W8A8 directory instead. For A3 PD deployment
+with W8A8 weights, use Prefill DP4/TP4 and Decode DP8/TP2, as described in
+Section 5.2.
 
 Use one of the following hardware configurations:
 
@@ -1173,7 +1174,7 @@ export HCCL_IF_IP="$LOCAL_IP"
 export GLOO_SOCKET_IFNAME="$NIC_NAME"
 export TP_SOCKET_IFNAME="$NIC_NAME"
 export HCCL_SOCKET_IFNAME="$NIC_NAME"
-export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_ENGINE_READY_TIMEOUT_S=36000
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=1024
@@ -1193,6 +1194,7 @@ vllm serve "$MODEL_PATH" \
     --data-parallel-address $5 \
     --data-parallel-rpc-port $6 \
     --tensor-parallel-size $7 \
+    --prefill-context-parallel-size $8 \
     --enable-expert-parallel \
     --seed 1024 \
     --served-model-name dsv41 \
@@ -1210,14 +1212,15 @@ vllm serve "$MODEL_PATH" \
     --gpu-memory-utilization 0.9 \
     --quantization ascend \
     --enforce-eager \
+    --swa-bounded-replay \
     --enable-prefix-caching \
     --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
     --additional-config '{
         "enable_cpu_binding":true,
-        "enable_fused_mc2":1,
-        "enable_dsa_cp":true,
-        "enable_flashcomm1":true,
-        "enable_shared_expert_dp":true
+        "enable_fused_mc2":2,
+        "enable_flashcomm1":false,
+        "enable_shared_expert_dp":true,
+        "multistream_overlap_shared_expert":false
     }' \
     --kv-transfer-config '{
         "kv_connector":"MultiConnector",
@@ -1232,8 +1235,8 @@ vllm serve "$MODEL_PATH" \
                     "kv_port":"30000",
                     "engine_id":"0",
                     "kv_connector_extra_config":{
-                        "prefill":{"dp_size":4,"tp_size":4},
-                        "decode":{"dp_size":8,"tp_size":2}
+                        "prefill":{"dp_size":4,"tp_size":1},
+                        "decode":{"dp_size":16,"tp_size":1}
                     }
                 },
                 {
@@ -1250,7 +1253,9 @@ vllm serve "$MODEL_PATH" \
     }'
 ```
 
-Start the four DP4/TP4 Prefill engines with the launcher command from [Section 5.2.1.2](#5212-start-the-prefill-node) after all Decode engines are ready.
+Use the PCP-aware launcher from [Section 5.2.1.1](#5211-prepare-the-dp-launcher).
+Start the four DP4/PCP4/TP1 Prefill engines with the launcher command from
+[Section 5.2.1.2](#5212-start-the-prefill-node).
 
 #### 5.3.3 Start the Decode Node with Pooling
 
@@ -1270,14 +1275,14 @@ MODEL_PATH="<YOUR_MODEL_PATH>"
 MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
 MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 
-export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_ENGINE_READY_TIMEOUT_S=36000
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_IF_IP="$LOCAL_IP"
 export GLOO_SOCKET_IFNAME="$NIC_NAME"
 export TP_SOCKET_IFNAME="$NIC_NAME"
 export HCCL_SOCKET_IFNAME="$NIC_NAME"
-export HCCL_BUFFSIZE=1800
+export HCCL_BUFFSIZE=4096
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
 # Parameters required by the Memcache KV Cache Pool.
@@ -1293,6 +1298,7 @@ vllm serve "$MODEL_PATH" \
     --data-parallel-address $5 \
     --data-parallel-rpc-port $6 \
     --tensor-parallel-size $7 \
+    --prefill-context-parallel-size $8 \
     --enable-expert-parallel \
     --seed 1024 \
     --served-model-name dsv41 \
@@ -1302,6 +1308,7 @@ vllm serve "$MODEL_PATH" \
     --async-scheduling \
     --block-size 128 \
     --no-enable-prefix-caching \
+    --no-swa-bounded-replay \
     --trust-remote-code \
     --tokenizer-mode deepseek_v41 \
     --reasoning-parser deepseek_v41 \
@@ -1310,7 +1317,7 @@ vllm serve "$MODEL_PATH" \
     --safetensors-load-strategy lazy \
     --gpu-memory-utilization 0.95 \
     --quantization ascend \
-    --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
+    --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --kv-transfer-config '{
         "kv_connector":"MultiConnector",
@@ -1325,8 +1332,8 @@ vllm serve "$MODEL_PATH" \
                     "kv_port":"30100",
                     "engine_id":"1",
                     "kv_connector_extra_config":{
-                        "prefill":{"dp_size":4,"tp_size":4},
-                        "decode":{"dp_size":8,"tp_size":2}
+                        "prefill":{"dp_size":4,"tp_size":1},
+                        "decode":{"dp_size":16,"tp_size":1}
                     }
                 },
                 {
@@ -1353,19 +1360,18 @@ vllm serve "$MODEL_PATH" \
     }'
 ```
 
-Start the eight DP8/TP2 Decode engines with the launcher command from [Section
-5.2.1.3](#5213-start-the-decode-node).
+Start the sixteen DP16/TP1 Decode engines with the launcher command from
+[Section 5.2.1.3](#5213-start-the-decode-node).
 
 #### 5.3.4 Startup and Verification
 
-Start the components in this order: Memcache MetaService, standalone Memcache
-on both Prefill and Decode nodes, Decode engines, Prefill engines, and then the
-PD proxy.
+Start Memcache MetaService, then standalone Memcache on both Prefill and
+Decode nodes. Wait until both standalone Memcache processes report successful
+initialization, then start the Prefill and Decode engines in parallel.
 
-Wait until both standalone Memcache processes report successful initialization
-before starting the Decode engines. Then wait until every Decode engine reports
-`Application startup complete` before starting Prefill. After every Prefill engine is ready, start the proxy with the
-same endpoint mapping described in [Section 5.2.1.4](#5214-deploy-the-pd-proxy).
+After all Prefill and Decode engines report `Application startup complete`,
+start the proxy with the four Prefill and sixteen Decode endpoints described
+in [Section 5.2.1.4](#5214-deploy-the-pd-proxy).
 
 Send the same request twice with a reusable prefix. Confirm that Prefill logs
 show Memcache lookup, get, put, and hit activity, and that Decode logs still
