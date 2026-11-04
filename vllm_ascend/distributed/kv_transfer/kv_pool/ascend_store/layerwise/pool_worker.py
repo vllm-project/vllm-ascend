@@ -172,7 +172,8 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
 
     def _init_state_vars(self) -> None:
         super()._init_state_vars()
-        self.mamba_state = None
+        self.mamba_state: Any = None
+        self.mamba_layers_by_index: dict[int, list[str]] = {}
         self.deferred_mamba_groups: set[int] = set()
         self._mamba_save_requests: list[str] = []
         self._put_started_keys: set[str] = set()
@@ -2169,7 +2170,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             return masks
         # Preserve other groups' reachability masks. An aligned recurrent page
         # represents one endpoint; unaligned state uses the partial GVA path.
-        result = list(masks) if masks is not None else [None] * self.num_kv_cache_groups
+        result: list[Sequence[bool] | None] = list(masks) if masks is not None else [None] * self.num_kv_cache_groups
         for group_id in reused_state_groups:
             size = self.grouped_block_size[group_id]
             result[group_id] = [
@@ -2200,7 +2201,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         self.layer_load_tasks = [[] for _ in range(self.num_layers)]
         if not requests:
             return
-        deferred = getattr(self, "deferred_mamba_groups", set())
+        deferred: set[int] = getattr(self, "deferred_mamba_groups", set())
         if deferred:
             if self._mamba_save_requests:
                 raise RuntimeError("Previous Mamba saves have not completed")
@@ -2208,7 +2209,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             for req_id in self._mamba_save_requests:
                 # Use the existing send counter to keep completion pending
                 # until sampling decides whether a checkpoint can be saved.
-                self.kv_send_thread.add_stored_request(req_id)
+                cast(KVCacheStoreLayerSendingThread, self.kv_send_thread).add_stored_request(req_id)
         reused_state_groups = [
             group_id
             for group_id, uses_align in enumerate(self.group_uses_align_state)
@@ -2276,6 +2277,10 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         """
         if not getattr(self, "deferred_mamba_groups", ()) or not endpoints:
             return
+        assert self.kv_cache_config is not None
+        assert self.mamba_state is not None
+        assert self.layer_save_finished_events is not None
+        assert self.sync_save_events is not None
         self._masked_runs_cache.clear()
         self.layer_save_tasks = [[] for _ in range(self.num_layers)]
         checkpoint_requests = []
@@ -2315,7 +2320,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                             for cache in self.mamba_state.layerwise_mamba_checkpoints[name]
                         )
         self._build_shared_save_data()
-        sender = self.kv_send_thread
+        sender = cast(KVCacheStoreLayerSendingThread, self.kv_send_thread)
         for layer, tasks in enumerate(self.layer_save_tasks):
             self.layer_save_finished_events[layer].clear()
             self.sync_save_events[layer].record()

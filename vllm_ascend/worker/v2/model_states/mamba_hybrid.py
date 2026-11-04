@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from collections.abc import Sequence
 from copy import copy
 from dataclasses import dataclass
 from math import prod
@@ -112,8 +113,10 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self._layerwise_mamba_copy: _LayerwiseMambaCopyState | None = None
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
-        self._mamba_staging = {}
-        self._mamba_batch = None
+        self._mamba_staging: dict[str, list[torch.Tensor]] = {}
+        self._mamba_batch: tuple[tuple[str, ...], torch.Tensor, tuple[int, ...], tuple[torch.Tensor, ...]] | None = None
+        self._mamba_capture_pending: set[str] = set()
+        self._mamba_accepted = False
         self._mamba_staging_failed = False
 
     def initialize_kv_cache(self, kv_cache_config, block_tables) -> None:
@@ -142,6 +145,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         }
         if not groups:
             return
+        assert self._mamba_ctx is not None
         if not self._align_mode or self.recoverssm is not None:
             raise NotImplementedError("Shared speculative state requires the existing Mamba align copy contract")
         if self.vllm_config.parallel_config.pipeline_parallel_size > 1:
@@ -209,11 +213,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         for name, (start, end) in self._get_layer_state_ranges(kv_cache_config).items():
             if name not in reused:
                 continue
-            caches = self._mamba_staging[name]
+            staged_caches = self._mamba_staging[name]
             for field, values in (
-                ("state_base_addrs", [cache.data_ptr() for cache in caches]),
-                ("state_block_strides", [cache.stride(0) * cache.element_size() for cache in caches]),
-                ("state_dim_row_stride", [cache.stride(1) * cache.element_size() for cache in caches]),
+                ("state_base_addrs", [cache.data_ptr() for cache in staged_caches]),
+                ("state_block_strides", [cache.stride(0) * cache.element_size() for cache in staged_caches]),
+                ("state_dim_row_stride", [cache.stride(1) * cache.element_size() for cache in staged_caches]),
             ):
                 getattr(ctx, field)[start:end].copy_(torch.tensor(values, device=self.device, dtype=torch.int64))
             ctx.state_group_indices[start:end].fill_(self._mamba_ctx.num_groups)
@@ -238,6 +242,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                 self._mamba_checkpoint_tokens[rows[request.req_id]] = 0
 
     def _copy_layer_candidates(self, name, *, restore):
+        assert self._mamba_batch is not None
         _req_ids, mapping, _slots, tables = self._mamba_batch
         slots = mapping.long()
         columns = (self._mamba_src_col_gpu if restore else self._mamba_state_idx_gpu)[slots].long()
@@ -285,6 +290,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         aligned = computed // self._mamba_spec.block_size * self._mamba_spec.block_size
         ready = (aligned > 0) & (aligned >= computed - accepted + 1)
         column = (aligned // self._mamba_spec.block_size - 1).clamp_min(0).long()
+        sources: Sequence[torch.Tensor]
         for name, caches in self._mamba_original_caches.items():
             if name in self._mamba_reused:
                 # A same-column align copy updates candidate zero in place.
