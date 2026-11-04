@@ -177,13 +177,25 @@ class AscendSharedExperts:
         MegaMoe. Any unsupported configuration keeps the standalone
         shared-expert execution unchanged.
         """
-        if self.moe_layer is None or not use_cann_megamoe(get_current_vllm_config()):
-            return
+        ascend_config = get_ascend_config()
         # Only enable_fused_mc2=3 opts into fusing the shared expert into the
         # MegaMoe operator; =2 keeps the separate shared-expert forward.
-        if not get_ascend_config().megamoe_shared_expert_fusion:
+        if not ascend_config.megamoe_shared_expert_fusion:
+            return
+        if self.moe_layer is None:
+            return
+        if not use_cann_megamoe(get_current_vllm_config()):
+            logger.warning_once(
+                "enable_fused_mc2=3 was requested, but MegaMoe is inactive for this step "
+                "(expert parallelism, EP size, model or LoRA constraints); keeping the "
+                "separate shared-expert forward."
+            )
             return
         if not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+            logger.warning_once(
+                "enable_fused_mc2=3 requires an A5 device with CANN_MEGAMOE_MXFP; keeping "
+                "the separate shared-expert forward (enable_fused_mc2=2 behavior)."
+            )
             return
         if self.quant_type not in (QuantType.W8A8MXFP, QuantType.W4A4MXFP):
             # Only MXFP8 and MXFP4 are implemented. Their shared weights
@@ -191,32 +203,26 @@ class AscendSharedExperts:
             # needs an (out, in) transpose, packed MXFP4 additionally needs the
             # same FRACTAL_NZ (w1) / FRACTAL_NZ_C0_32 (w2) rebuild as the
             # routed experts.
-            logger.info_once(
-                "MegaMoe shared-expert fusion is not implemented for quant type %s; "
-                "keeping the separate shared-expert forward.",
-                self.quant_type,
+            self._disable_megamoe_shared_fusion(
+                f"shared-expert quant type {self.quant_type} is not implemented for "
+                "MegaMoe fusion (expected W8A8MXFP or W4A4MXFP)"
             )
-            self._megamoe_shared_fusion_disabled = True
             return
         # Output gating (e.g. Qwen3-Next expert_gate) happens outside the
         # operator and cannot be fused.
         if getattr(self.layer, "expert_gate", None) is not None:
-            logger.info_once(
-                "MegaMoe shared-expert fusion is not supported with expert gating; "
-                "keeping the separate shared-expert forward."
+            self._disable_megamoe_shared_fusion(
+                "the shared expert is gated by expert_gate, which runs outside the MegaMoe operator"
             )
-            self._megamoe_shared_fusion_disabled = True
             return
         # The operator consumes no shared bias.
         if (
             getattr(self.layer.gate_up_proj, "bias", None) is not None
             or getattr(self.layer.down_proj, "bias", None) is not None
         ):
-            logger.info_once(
-                "MegaMoe shared-expert fusion is not supported with shared-expert bias; "
-                "keeping the separate shared-expert forward."
+            self._disable_megamoe_shared_fusion(
+                "the shared expert has a bias, but the MegaMoe operator consumes no shared bias"
             )
-            self._megamoe_shared_fusion_disabled = True
             return
         # The operator exposes a single global activation/activation_params
         # pair that it applies to the shared experts too, so fusion is only
@@ -234,10 +240,20 @@ class AscendSharedExperts:
                 f"does not match the routed activation {routed_activation} executed by the MegaMoe operator"
             )
             return
-        # Sequence-parallel shared experts rely on split/gather layouts that
-        # the fused operator does not reproduce.
-        if self.is_sequence_parallel:
-            self._megamoe_shared_fusion_disabled = True
+        # The shared GMM inside MegaMoe runs on the local token shard and
+        # accumulates its output there: it cannot reduce across the TP group.
+        # Fusion is therefore only valid when every rank holds the full
+        # shared-expert weights, i.e. TP size 1 (pure EP) or
+        # enable_shared_expert_dp (replicated weights; also the SP+SEDP layout).
+        # TP-sharded weights (plain TP or SP without SEDP) keep the standalone
+        # forward, which applies the required all-reduce/reduce-scatter.
+        if self.moe_config.tp_group.world_size > 1 and not self.weights_replicated:
+            self._disable_megamoe_shared_fusion(
+                "shared-expert weights are sharded across the TP group and MegaMoe cannot "
+                "reduce them across ranks. Set additional_config.enable_shared_expert_dp=true "
+                "to replicate the weights, or set enable_fused_mc2=2 to keep the shared "
+                "expert separate."
+            )
             return
 
         for linear, slot in (
@@ -359,7 +375,8 @@ class AscendSharedExperts:
         if padding != (0, 0):
             self._disable_megamoe_shared_fusion(
                 f"padded shared-expert weights {padding} do not match the routed "
-                "intermediate size required by the MegaMoe layout"
+                "intermediate size required by the MegaMoe layout; set "
+                "enable_fused_mc2=2 to keep the shared expert separate"
             )
             return
         if linear.weight.data.dtype == torch.uint8:
@@ -415,7 +432,9 @@ class AscendSharedExperts:
         if tuple(weight.shape) != expected_weight_shape:
             self._disable_megamoe_shared_fusion(
                 f"shared-expert weight shape {tuple(weight.shape)} does not match the "
-                f"routed expert layout {expected_weight_shape}"
+                f"routed expert layout {expected_weight_shape}; check "
+                "enable_shared_expert_dp and the shared-expert TP padding, or set "
+                "enable_fused_mc2=2 to keep the shared expert separate"
             )
             return
         if packed_fp4:
@@ -469,8 +488,11 @@ class AscendSharedExperts:
             logger.info_once("Fused the shared expert into the A5 MegaMoe operator.")
 
     def _disable_megamoe_shared_fusion(self, reason: str) -> None:
+        # enable_fused_mc2=3 is opt-in, so falling back to the standalone shared
+        # expert is a user-visible behavior change and must be a warning, not
+        # an info message.
         if not self._megamoe_shared_fusion_disabled:
-            logger.info_once(
+            logger.warning_once(
                 "Disabling MegaMoe shared-expert fusion: %s; keeping the separate shared-expert forward.",
                 reason,
             )

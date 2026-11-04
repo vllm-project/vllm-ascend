@@ -818,8 +818,10 @@ class AscendConfig:
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
-                "enable_fused_mc2 and multistream_overlap_shared_expert "
-                "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
+                "enable_fused_mc2=1/2/3 runs the shared expert inside the fused MoE "
+                "path (dispatch_ffn_combine or MegaMoe) and cannot overlap it on a "
+                "second stream. Setting multistream_overlap_shared_expert to False; "
+                "remove it from additional_config to silence this warning."
             )
         if self.enable_fused_mc2 == 1 and is_mega_moe_supported() and not self._is_megamoe_supported_by_config(vc):
             self.enable_fused_mc2 = 0
@@ -945,6 +947,11 @@ class AscendConfig:
 
         # sparse KV offload vs packed SFA main cache mutex
         self._validate_sparse_packed_kv_offload_compatibility()
+
+        # enable_fused_mc2=3 preconditions that are knowable before the model is
+        # built. AscendSharedExperts owns the final decision (it also inspects
+        # model attributes), but an ineffective =3 must not stay silent.
+        self._resolve_megamoe_shared_expert_fusion(vc)
         return self
 
     @property
@@ -1023,6 +1030,59 @@ class AscendConfig:
         if self.mix_placement:
             if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
                 raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
+
+    def _resolve_megamoe_shared_expert_fusion(self, vllm_config: VllmConfig) -> None:
+        """Warn about enable_fused_mc2=3 combinations that cannot fuse.
+
+        ``AscendSharedExperts`` runs the authoritative probe at model build
+        time because it also needs model attributes (shared activation, expert
+        gating, bias, processed weight dtype and shape). The parallel-config and
+        hardware preconditions are already known here, so an unsupported =3
+        configuration is reported once at startup instead of silently behaving
+        like =2.
+        """
+        parallel_config = vllm_config.parallel_config
+        tp_size = parallel_config.tensor_parallel_size
+        if self.megamoe_shared_expert_fusion:
+            if not parallel_config.enable_expert_parallel:
+                logger.warning_once(
+                    "enable_fused_mc2=3 fuses the shared expert into the MegaMoe operator, "
+                    "which requires expert parallelism. MegaMoe is inactive, so the shared "
+                    "expert keeps its standalone forward. Add --enable-expert-parallel, or "
+                    "set enable_fused_mc2=0 to make the intent explicit."
+                )
+            elif not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+                logger.warning_once(
+                    "enable_fused_mc2=3 requires an A5 device with CANN_MEGAMOE_MXFP; this "
+                    "platform runs with enable_fused_mc2=2 semantics (MegaMoe with a separate "
+                    "shared-expert forward). Set enable_fused_mc2=2 to make the intent explicit."
+                )
+            elif tp_size > 1 and not self.enable_shared_expert_dp:
+                logger.warning_once(
+                    "enable_fused_mc2=3 requires the shared-expert weights to be replicated "
+                    "across the TP group, but tensor_parallel_size=%d and "
+                    "enable_shared_expert_dp is disabled. MegaMoe cannot reduce TP-sharded "
+                    "shared-expert partial sums, so the shared expert keeps its standalone "
+                    "forward. Set enable_shared_expert_dp=true to fuse it, or set "
+                    "enable_fused_mc2=2 to make the intent explicit.",
+                    tp_size,
+                )
+        if self.enable_fused_mc2 == 0:
+            fused_mode = "disabled"
+        elif is_mega_moe_supported():
+            fused_mode = "mega_moe+shared_fusion" if self.megamoe_shared_expert_fusion else "mega_moe"
+        else:
+            fused_mode = "dispatch_ffn_combine"
+        logger.info_once(
+            "MoE configuration resolved: TP=%d, EP=%s, SP=%s, fused_mc2=%s, "
+            "enable_shared_expert_dp=%s, multistream_overlap_shared_expert=%s",
+            tp_size,
+            parallel_config.enable_expert_parallel,
+            parallel_config.use_sequence_parallel_moe,
+            fused_mode,
+            self.enable_shared_expert_dp,
+            self.multistream_overlap_shared_expert,
+        )
 
     @staticmethod
     def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:

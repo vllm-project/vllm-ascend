@@ -345,6 +345,34 @@ llm = LLM(
 | top-level `"weight_nz_mode": 0` for RL | `"rl_config": {"enabled": true}` |
 | top-level `"enable_sleep_mode_extra_cleanup": true` | `"rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true}` |
 
+### MegaMoe shared-expert fusion (`enable_fused_mc2=3`)
+
+`enable_fused_mc2=3` runs the shared expert inside the A5 MegaMoe operator
+instead of issuing a separate shared-expert forward. It is an opt-in on top of
+`enable_fused_mc2=2` and is only effective when all of the following hold:
+
+| Requirement | Why | What happens otherwise |
+| ----------- | --- | ---------------------- |
+| A5 device (`CANN_MEGAMOE_MXFP`) | The fused shared GMM layout exists only on A5 | Falls back to `enable_fused_mc2=2` behavior with a warning |
+| Expert parallelism enabled and MegaMoe active | Fusion is part of the MegaMoe call | Falls back to the standalone shared-expert forward with a warning |
+| Shared expert quantized as W8A8MXFP or W4A4MXFP | Only the MXFP shared layouts are rebuilt for the operator | Falls back with a warning |
+| No `expert_gate`, no shared-expert bias, same activation as the routed experts | These run outside the operator or share its single activation | Falls back with a warning |
+| `tensor_parallel_size == 1`, or `enable_shared_expert_dp=true` | MegaMoe accumulates the shared result on the local token shard and cannot reduce TP-sharded weights | Falls back with a warning |
+
+`enable_flashcomm1` (SP MoE) is compatible: SP shards tokens, so with
+`enable_shared_expert_dp=true` the shared weights stay replicated and fusion
+remains valid. SP without `enable_shared_expert_dp` keeps TP-sharded shared
+weights and therefore keeps the standalone shared forward.
+
+`multistream_overlap_shared_expert` cannot be combined with any
+`enable_fused_mc2 != 0`: the shared expert either lives inside the fused MoE
+path or must be overlapped separately, so the option is forced to `False` with
+a warning.
+
+The resolved combination is logged once at startup as
+`MoE configuration resolved: ...`, and every disabled fusion path logs a
+`Disabling MegaMoe shared-expert fusion: ...` warning with the concrete reason.
+
 ### Example
 
 An example of additional configuration is as follows:
