@@ -11,7 +11,7 @@
   blocks; select TopK IDs and mask invalid entries; gather selected KV pages;
   compute attention. Decode uses split-K and combines partial attention outputs.
 - **Supported modes:** A2/A3 model path; runner-independent Triton implementation.
-  The A5 production implementation is documented in [msa_m3_triton_a5.md](msa_m3_triton_a5.md).
+  The A5 production implementation is documented in [msa_m3_index_topk.md](msa_m3_index_topk.md).
 
 ## Parameters
 

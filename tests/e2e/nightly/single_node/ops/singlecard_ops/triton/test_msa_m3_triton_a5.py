@@ -8,7 +8,7 @@ import torch_npu  # noqa: F401
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.msa import msa_m3_triton_a5 as ops
+from vllm_ascend.ops.triton.msa import msa_m3_index_topk as ops
 
 pytestmark = pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A5, reason="Requires Ascend A5")
 
@@ -58,6 +58,8 @@ def _check_index_result(indices, counts, expected):
         assert len(valid) == min(TOPK, len(scores))
         assert len(valid.unique()) == len(valid)
         assert torch.all(valid < len(scores))
+        if counts is not None:
+            assert torch.equal(valid, valid.sort().values)
         assert torch.all(ids[ids < 0] == -1)
         torch.testing.assert_close(
             scores[valid].sort().values, scores.topk(len(valid)).values.sort().values, rtol=0, atol=0
@@ -123,6 +125,7 @@ def test_decode_index_counts_and_output_buffer(query_len, replay):
             1,
             query_len,
             out=output,
+            sort_indices=True,
         )
 
     indices, counts = run()

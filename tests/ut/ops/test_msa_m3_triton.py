@@ -5,10 +5,10 @@
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.msa import msa_m3_triton, msa_m3_triton_a5
+from vllm_ascend.ops.triton.msa import msa_m3_index_topk, msa_m3_triton
 
 
-@pytest.fixture(params=[msa_m3_triton, msa_m3_triton_a5], ids=["a2-a3", "a5"])
+@pytest.fixture(params=[msa_m3_triton, msa_m3_index_topk], ids=["a2-a3", "a5"])
 def operator_module(request):
     return request.param
 
