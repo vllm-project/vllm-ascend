@@ -554,15 +554,7 @@ class NPUModelRunner(GPUModelRunner):
         if callable(initialize_cpu_lengths):
             initialize_cpu_lengths(self)
 
-        # Only target-model layers determine whether FIA is in use. This flag
-        # is used for adaptive verification handling.
-        draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
-        self.use_fia = any(
-            (group.backend is AscendAttentionBackend or group.backend is AscendMLABackend)
-            and any(layer_name not in draft_layer_names for layer_name in group.layer_names)
-            for groups in self.attn_groups
-            for group in groups
-        )
+        self.use_fia = self._requires_adaptive_cpu_lengths()
 
         self.kvpp = KVPPRuntime.create_from_kv_cache(
             vllm_config=self.vllm_config,
@@ -572,6 +564,21 @@ class NPUModelRunner(GPUModelRunner):
         self.model_state.kvpp_runtime = self.kvpp
 
         self._fill_c8_mxfp_v_scale_caches()
+
+    def _requires_adaptive_cpu_lengths(self) -> bool:
+        """Keep exact host lengths only for target groups using FIA decode."""
+        draft_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
+        for groups in self.attn_groups:
+            for group in groups:
+                if all(name in draft_names for name in group.layer_names):
+                    continue
+                if group.backend is AscendAttentionBackend:
+                    return True
+                if group.backend is AscendMLABackend:
+                    builder = group.get_metadata_builder(0)
+                    if getattr(builder, "flashmla_state", None) is None:
+                        return True
+        return False
 
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
         """Initialize C8 V scales and retain views for page reassignment."""

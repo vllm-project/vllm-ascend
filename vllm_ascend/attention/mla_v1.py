@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.compilation import backends
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.vllm import get_layers_from_vllm_config
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -23,6 +24,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
     MLAAttentionImpl,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
@@ -458,6 +460,22 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
         return AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls: type["AscendMLAMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> int | None:
+        layers = get_layers_from_vllm_config(vllm_config, MLAAttention)
+        target_impls = [
+            layer.impl
+            for layer in layers.values()
+            if not layer.is_draft_layer and isinstance(layer.impl, AscendMLAImpl)
+        ]
+        if not target_impls or not all(impl.use_flashmla for impl in target_impls):
+            return None
+        return max_decode_query_len(vllm_config)
 
     def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
         # We now want to reorder the batch so that the "decode" requests are at
