@@ -55,8 +55,7 @@ def test_c8_bytes_reuse_existing_scatter_with_padding_and_page_gaps(capture):
             else:
                 graph.replay()
             torch.npu.synchronize()
-            expected = torch.full_like(raw).cpu()
-            expected.fill_(165)
+            expected = torch.full_like(raw, 165).cpu()
             payload = values.cpu()
             for row, slot in enumerate(slots_cpu.tolist()):
                 if row < count and slot >= 0:
