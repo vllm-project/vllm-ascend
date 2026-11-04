@@ -153,12 +153,30 @@ class PushReqMeta:
     scheduler_port: int
 
 
+@dataclass(frozen=True)
+class PushSendReqMeta:
+    """P source blocks and the prefill range scheduled for this step.
+
+    num_computed_tokens includes the cached prefix; the worker may publish
+    that prefix immediately, but must wait for layer events for new tokens.
+    """
+
+    transfer_id: str
+    local_block_ids: tuple[tuple[int, ...], ...]
+    num_prompt_tokens: int
+    num_computed_tokens: int
+    num_scheduled_tokens: int
+
+
 class MooncakeConnectorMetadata(KVConnectorMetadata):
     """Scheduler-to-worker metadata for Mooncake KV transfers."""
 
     def __init__(self) -> None:
         self.requests: dict[str, ReqMeta] = {}
         self.push_requests: dict[str, PushReqMeta] = {}
+        self.push_send_requests: dict[str, PushSendReqMeta] = {}
+        # P request ID -> transfer ID, including aborts before first dispatch.
+        self.push_aborted_requests: dict[str, str] = {}
         self.requests_to_send: dict[str, float] = {}
         self.reqs_in_batch: set[str] = set()
 
@@ -210,6 +228,24 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             scheduler_port=scheduler_port,
         )
 
+    def add_new_push_send_req(
+        self,
+        request_id: str,
+        local_block_ids: BlockIds,
+        num_prompt_tokens: int,
+        num_computed_tokens: int,
+        num_scheduled_tokens: int,
+        kv_transfer_params: dict[str, Any],
+    ) -> None:
+        """Snapshot one scheduled P chunk for the layerwise worker."""
+        self.push_send_requests[request_id] = PushSendReqMeta(
+            transfer_id=kv_transfer_params["transfer_id"],
+            local_block_ids=tuple(tuple(group) for group in local_block_ids),
+            num_prompt_tokens=num_prompt_tokens,
+            num_computed_tokens=num_computed_tokens,
+            num_scheduled_tokens=num_scheduled_tokens,
+        )
+
 
 __all__ = [
     "MooncakeConnectorMetadata",
@@ -219,5 +255,6 @@ __all__ = [
     "MooncakeTransferMetadata",
     "MooncakeTransferMetadataGroups",
     "PushReqMeta",
+    "PushSendReqMeta",
     "ReqMeta",
 ]
