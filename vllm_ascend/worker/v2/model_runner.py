@@ -18,6 +18,7 @@
 #
 
 import inspect
+import logging
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
@@ -887,16 +888,32 @@ class NPUModelRunner(GPUModelRunner):
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
         if adaptive_verification_active:
+            num_scheduled_draft_tokens = total_num_draft_tokens
+            self._log_adaptive_verification_costs(adaptive_verification_manager)
             allocation = adaptive_verification_manager.reallocate_drafts(req_ids, idx_mapping)
             cu_num_logits, query_start_loc, total_num_draft_tokens = allocation[:3]
             if len(allocation) == 4:
                 admitted_draft_kwargs["num_admitted_draft_tokens"] = allocation[3]
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
+            logger.debug(
+                "Adaptive verification budget: requests=%d, scheduled_drafts=%d, admitted_drafts=%d, "
+                "padded_tokens=%d, graph_mode=%s",
+                num_reqs,
+                num_scheduled_draft_tokens,
+                total_num_draft_tokens,
+                num_tokens_after_padding,
+                batch_desc.cg_mode,
+            )
 
             # Non-fia backends skip padding query boundary when using adaptive verification
             if self.use_fia:
-                query_start_loc_np[: num_reqs + 1] = query_start_loc[: num_reqs + 1].cpu().numpy()
-                query_start_loc_np[num_reqs + 1 :] = int(query_start_loc_np[num_reqs])
+                self._sync_adaptive_fia_query_start_loc(
+                    query_start_loc_np,
+                    query_start_loc,
+                    num_reqs,
+                    num_scheduled_draft_tokens,
+                    total_num_draft_tokens,
+                )
 
         if self.use_fia and adaptive_verification_manager:
             if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -1453,6 +1470,51 @@ class NPUModelRunner(GPUModelRunner):
             self._debugger_started = False
 
         self.debugger.step(**kwargs)
+
+    @staticmethod
+    def _log_adaptive_verification_costs(manager: Any) -> None:
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        scheduled, non_draft, budget = manager._batch_budget
+        req_ids = list(scheduled)
+        slots = [manager.req_states.req_id_to_index[req_id] for req_id in req_ids]
+        confidence = manager._stale_confidences[manager._stale_idx].np[slots].astype(np.float64)
+        capacities = np.array(list(scheduled.values()))
+        valid = np.arange(manager.num_speculative_steps)[None, :] < capacities[:, None]
+        scores = np.sort(np.cumprod(confidence, axis=1)[valid])[::-1]
+        max_budget = min(len(scores), max(0, manager._max_total_logits - len(req_ids) * manager.num_bonus_tokens))
+        accepted = np.concatenate(([0.0], np.cumsum(scores[:max_budget])))
+        base_tokens = sum(non_draft.values())
+        draft_cost, verify_cost = manager.cost_tables
+        confidence_by_step = [
+            float(confidence[valid[:, i], i].mean()) for i in range(confidence.shape[1]) if valid[:, i].any()
+        ]
+        logger.debug(
+            "Adaptive verification costs: budget=%d/%d, base_tokens=%d, draft_ms=%.6f, "
+            "verify_ms(zero/chosen/full)=%s, expected_accepted_drafts(chosen/full)=%s, "
+            "mean_confidence_by_step=%s",
+            budget,
+            max_budget,
+            base_tokens,
+            float(draft_cost[len(req_ids)]),
+            [float(verify_cost[base_tokens + n]) for n in (0, budget, max_budget)],
+            [float(accepted[n]) for n in (budget, max_budget)],
+            confidence_by_step,
+        )
+
+    @staticmethod
+    def _sync_adaptive_fia_query_start_loc(
+        query_start_loc_np: np.ndarray,
+        query_start_loc: torch.Tensor,
+        num_reqs: int,
+        num_scheduled_draft_tokens: int,
+        num_admitted_draft_tokens: int,
+    ) -> None:
+        # compact_batch already gives exact host boundaries for full and zero
+        # budgets. Partial budgets may redistribute them on device.
+        if 0 < num_admitted_draft_tokens < num_scheduled_draft_tokens:
+            query_start_loc_np[: num_reqs + 1] = query_start_loc[: num_reqs + 1].cpu().numpy()
+        query_start_loc_np[num_reqs + 1 :] = int(query_start_loc_np[num_reqs])
 
     def _pad_adaptive_query_start_loc_for_fia(
         self,

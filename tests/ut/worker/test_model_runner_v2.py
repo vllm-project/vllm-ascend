@@ -2229,3 +2229,51 @@ def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected,
     runner.num_computed_tokens_event.record.assert_not_called()
     runner.num_computed_tokens_event.synchronize.assert_not_called()
     assert runner.num_computed_tokens_cpu.tolist() == [-99] * 4
+
+
+@pytest.mark.parametrize(
+    "scheduled,admitted,host,device,expected_sync",
+    [
+        (8, 8, [0, 5, 10], [0, 5, 10], False),
+        (8, 0, [0, 1, 2], [0, 1, 2], False),
+        (0, 0, [0, 9, 15], [0, 9, 15], False),
+        (8, 4, [0, 3, 6], [0, 1, 6], True),
+    ],
+)
+def test_adaptive_fia_syncs_only_partial_budget(scheduled, admitted, host, device, expected_sync):
+    num_reqs = len(host) - 1
+    host_queries = np.full(num_reqs + 3, -1, dtype=np.int32)
+    host_queries[: num_reqs + 1] = host
+    device_queries = MagicMock()
+    transfer = device_queries.__getitem__.return_value.cpu
+    transfer.return_value.numpy.return_value = np.array(device, dtype=np.int32)
+
+    NPUModelRunner._sync_adaptive_fia_query_start_loc(host_queries, device_queries, num_reqs, scheduled, admitted)
+
+    np.testing.assert_array_equal(host_queries, [*device, device[-1], device[-1]])
+    if expected_sync:
+        transfer.assert_called_once()
+    else:
+        device_queries.__getitem__.assert_not_called()
+
+
+def test_adaptive_cost_diagnostics_reads_only_cpu_budget_inputs():
+    manager = SimpleNamespace(
+        _batch_budget=({"a": 2, "b": 1}, {"a": 1, "b": 4}, 1),
+        req_states=SimpleNamespace(req_id_to_index={"a": 1, "b": 0}),
+        _stale_confidences=[SimpleNamespace(np=np.array([[0.5, 0.01], [0.9, 0.8]]))],
+        _stale_idx=0,
+        num_speculative_steps=2,
+        _max_total_logits=5,
+        num_bonus_tokens=1,
+        cost_tables=(np.array([0.0, 0.5, 1.0]), np.arange(20, dtype=float) + 1),
+    )
+    with patch("vllm_ascend.worker.v2.model_runner.logger") as log:
+        log.isEnabledFor.return_value = True
+        NPUModelRunner._log_adaptive_verification_costs(manager)
+
+    args = log.debug.call_args.args
+    assert args[1:5] == (1, 3, 5, 1.0)
+    assert args[5] == [6.0, 7.0, 9.0]
+    np.testing.assert_allclose(args[6], [0.9, 2.12])
+    np.testing.assert_allclose(args[7], [0.7, 0.8])

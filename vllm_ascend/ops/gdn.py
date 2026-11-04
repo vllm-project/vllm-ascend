@@ -49,7 +49,7 @@ from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
-from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
+from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen, extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 from vllm_ascend.utils import vllm_version_is
 
@@ -525,7 +525,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
             spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
             output_spec = torch.empty_like(mixed_qkv_spec)
-            output_spec = causal_conv1d_update(
+            conv_update = (
+                causal_conv1d_update_varlen
+                if attn_metadata.spec_decode_metadata.use_upstream_conv
+                else causal_conv1d_update
+            )
+            output_spec = conv_update(
                 mixed_qkv_spec,
                 self_kv_cache[0],
                 conv_weights_T,

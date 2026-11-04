@@ -729,6 +729,7 @@ def test_spec_rows_preserve_previous_accepted_state(builder_cls, graph_mode, cac
     assert slots[torch.arange(2), accepted - 1].tolist() == expected_slots
     assert metadata.spec_decode_metadata.actual_seq_lengths is None
     assert metadata.spec_decode_metadata.use_upstream_recurrent
+    assert metadata.spec_decode_metadata.use_upstream_conv
     assert metadata.spec_decode_metadata.spec_causal_conv1d.query_start_loc.tolist() == [0, query_len, 2 * query_len]
     if graph_mode == CUDAGraphMode.NONE:
         # Pure speculative rows reuse views rather than materializing a gather.
@@ -774,6 +775,25 @@ def test_adaptive_gdn_padding_preserves_device_query_boundaries(
     assert metadata.num_accepted_tokens.tolist() == [2, 3, 1]
     assert metadata.num_spec_decode_tokens == expected_queries[-1]
     assert torch.equal(common.query_start_loc, original_queries)
+
+
+@pytest.mark.parametrize("num_actual_reqs,shares_device_boundaries", [(2, True), (None, False)])
+def test_adaptive_gdn_padding_reuses_device_boundaries_when_suffix_is_unpadded(
+    num_actual_reqs, shares_device_boundaries
+):
+    common = create_common_attn_metadata(BatchSpec([64, 64, 0], [5, 5, 2]), 16, torch.device("cpu"))
+    common.query_start_loc = torch.tensor([0, 1, 10, 12], dtype=torch.int32)
+    original = common.query_start_loc.clone()
+
+    result = ascend_gdn_attn_builder._remove_spec_graph_padding_queries(
+        common,
+        torch.tensor([9, 9, -1], dtype=torch.int32),
+        num_actual_reqs=num_actual_reqs,
+    )
+
+    assert (result.query_start_loc.data_ptr() == common.query_start_loc.data_ptr()) is shares_device_boundaries
+    assert result.query_start_loc_cpu[-1] == 10
+    torch.testing.assert_close(common.query_start_loc, original)
 
 
 def test_310p_does_not_advertise_adaptive_recurrent_graphs():
@@ -1797,3 +1817,55 @@ def test_host_conv_indices_are_shared_and_refreshed(monkeypatch):
     refreshed = builder.build(0, common).non_spec_prefill_metadata.causal_conv1d.cache_indices
     assert refreshed.data_ptr() == indices.data_ptr()
     assert indices.tolist() == [40, 50]
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("num_speculative_tokens,expected_fused", [(7, False), (8, True)])
+def test_long_fixed_drafts_use_strided_recurrent_route(builder_cls, num_speculative_tokens, expected_fused):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=num_speculative_tokens,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        builder_cls=builder_cls,
+    )
+    query_len = num_speculative_tokens + 1
+    common = create_common_attn_metadata(BatchSpec([64, 64], [query_len, query_len]), 16, torch.device("cpu"))
+    metadata = builder.build_for_cudagraph_capture(common)
+    assert metadata.num_spec_decodes == 2
+    assert metadata.spec_decode_metadata.use_upstream_recurrent is expected_fused
+    assert not metadata.spec_decode_metadata.use_upstream_conv
+    assert (metadata.spec_decode_metadata.actual_seq_lengths is None) is expected_fused
+
+
+def test_adaptive_fused_descriptors_keep_prepared_conv_indices():
+    """The target branch's fused builder must select the migrated kernels too."""
+    builder = SimpleNamespace(
+        _USE_COMMON_KERNEL_METADATA=True,
+        speculative_config=SimpleNamespace(enable_adaptive_verification=True),
+        num_spec=8,
+        use_full_cuda_graph=True,
+        spec_actual_seq_lengths=torch.empty(3, dtype=torch.int32),
+    )
+    metadata = SimpleNamespace(
+        spec_sequence_masks=torch.tensor([True, False]),
+        spec_query_start_loc=torch.tensor([0, 9, 9], dtype=torch.int32),
+        spec_state_indices_tensor=torch.arange(18, dtype=torch.int32).reshape(2, 9),
+        num_accepted_tokens=torch.tensor([9, 1], dtype=torch.int32),
+        num_spec_decodes=1,
+        num_prefills=0,
+        num_decodes=0,
+    )
+    prepared_conv_indices = torch.tensor([1, 0], dtype=torch.int32)
+    native_lengths = torch.tensor([0, 9, 0], dtype=torch.int32)
+
+    AscendGDNAttentionMetadataBuilder._attach_spec_decode_metadata(
+        builder, metadata, native_lengths, prepared_conv_indices
+    )
+
+    spec = metadata.spec_decode_metadata
+    assert spec.use_upstream_conv and spec.use_upstream_recurrent
+    assert spec.actual_seq_lengths is None
+    assert spec.spec_causal_conv1d.cache_indices.data_ptr() == prepared_conv_indices.data_ptr()
+    assert spec.spec_causal_conv1d.query_start_loc is metadata.spec_query_start_loc
+    assert spec.spec_causal_conv1d.num_accepted_tokens.tolist() == [9, 1]

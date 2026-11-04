@@ -48,6 +48,9 @@ _GDN_CUMSUM_WORKING_SET = 2**18
 # Accepted-token counts are one-based. The zero-length query segment makes
 # graph-padding rows no-ops, while 1 keeps their count valid for GDN kernels.
 _GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT = 1
+# A2 native recurrent updates produced NaNs for 9-token fixed verification.
+# Use the validated strided route for these longer blocks as well.
+_FUSED_SPEC_RECURRENT_MIN_QUERY_LEN = 9
 
 
 def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
@@ -62,6 +65,8 @@ def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
 def _remove_spec_graph_padding_queries(
     common_attn_metadata: CommonAttentionMetadata,
     num_decode_draft_tokens_cpu: torch.Tensor | None,
+    *,
+    num_actual_reqs: int | None = None,
 ) -> CommonAttentionMetadata:
     """Remove inactive FIA graph rows from the GDN-local query view.
 
@@ -86,8 +91,10 @@ def _remove_spec_graph_padding_queries(
     query_start_loc_cpu[first_inactive + 1 :] = query_start_loc_cpu[first_inactive]
     # Adaptive verification can redistribute the CPU's even split on device.
     # Remove only padding; copying CPU boundaries would undo that allocation.
-    query_start_loc = common_attn_metadata.query_start_loc.clone()
-    query_start_loc[first_inactive + 1 :] = query_start_loc[first_inactive]
+    query_start_loc = common_attn_metadata.query_start_loc
+    if num_actual_reqs != first_inactive:
+        query_start_loc = query_start_loc.clone()
+        query_start_loc[first_inactive + 1 :] = query_start_loc[first_inactive]
     return common_attn_metadata.replace(
         query_start_loc_cpu=query_start_loc_cpu,
         query_start_loc=query_start_loc,
@@ -173,6 +180,8 @@ class GDNSpecDecodeMetadata:
     # Adaptive graphs must retain the state-table row stride independently
     # of the current query length, including accepted_prev > query_len.
     use_upstream_recurrent: bool = False
+    # Adaptive FULL graphs retain padded token tensors as query lengths vary.
+    use_upstream_conv: bool = False
 
 
 def _build_actual_seq_lengths(
@@ -374,8 +383,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
     @classmethod
     def get_varlen_cudagraph_max_query_len(cls, vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec) -> int | None:
-        # Only adaptive verification selects the strided recurrent kernel.
-        # Fixed-length graphs keep the native operator's query-length limits.
+        # Only adaptive verification advertises variable-length graph replay.
+        # Long fixed queries can share the strided recurrent kernel while
+        # retaining uniform graph dispatch.
         spec_config = vllm_config.speculative_config
         if spec_config is None or not spec_config.enable_adaptive_verification:
             return None
@@ -549,10 +559,18 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         use_upstream_recurrent = bool(
             self._USE_COMMON_KERNEL_METADATA
             and self.speculative_config
-            and getattr(self.speculative_config, "enable_adaptive_verification", False)
+            and (
+                getattr(self.speculative_config, "enable_adaptive_verification", False)
+                or self.num_spec + 1 >= _FUSED_SPEC_RECURRENT_MIN_QUERY_LEN
+            )
         )
         attn_metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
             use_upstream_recurrent=use_upstream_recurrent,
+            use_upstream_conv=bool(
+                self._USE_COMMON_KERNEL_METADATA
+                and self.speculative_config
+                and getattr(self.speculative_config, "enable_adaptive_verification", False)
+            ),
             spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
                 query_start_loc=attn_metadata.spec_query_start_loc,
                 cache_indices=(attn_metadata.spec_state_indices_tensor if cache_indices is None else cache_indices)[
@@ -749,6 +767,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             common_attn_metadata = _remove_spec_graph_padding_queries(
                 common_attn_metadata,
                 num_decode_draft_tokens_cpu,
+                num_actual_reqs=num_actual_reqs,
             )
         m = common_attn_metadata
         # Common metadata follows the padded graph shape. Build request-phase

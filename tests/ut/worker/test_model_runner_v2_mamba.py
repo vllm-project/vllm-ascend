@@ -1301,3 +1301,43 @@ def test_init_model_state_uses_override_then_default():
             device,
         )
     assert state is default_cls.return_value
+
+
+@patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
+def test_prepare_attn_uses_promised_varlen_capture_bound(mock_build_attn_metadata):
+    """A 16x1 dummy capture must allow a real 9-token verification query."""
+    state = SimpleNamespace(
+        vllm_config=SimpleNamespace(num_speculative_tokens=8, parallel_config=SimpleNamespace()),
+        max_model_len=32768,
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=16,
+        num_reqs_after_padding=16,
+        num_tokens=16,
+        num_tokens_after_padding=16,
+        is_prefilling_np=np.zeros(16, dtype=bool),
+        prefill_runs_as_decode_np=None,
+        num_scheduled_tokens=np.ones(16, dtype=np.int32),
+        max_query_len=9,
+        query_start_loc=torch.arange(17, dtype=torch.int32),
+        query_start_loc_np=np.arange(17, dtype=np.int32),
+        seq_lens=torch.ones(16, dtype=torch.int32),
+        dcp_local_seq_lens=None,
+        seq_lens_np=np.ones(16, dtype=np.int32),
+        positions=None,
+        attn_state=None,
+    )
+
+    AscendMambaHybridModelState._build_attn_metadata_for_batch(
+        state,
+        input_batch=input_batch,
+        cudagraph_mode=CUDAGraphMode.FULL,
+        block_tables=(),
+        slot_mappings=torch.empty(0, dtype=torch.int64),
+        attn_groups=[],
+        kv_cache_config=MagicMock(),
+        for_capture=True,
+        use_pcp_padding=False,
+    )
+
+    assert mock_build_attn_metadata.call_args.kwargs["max_query_len"] == 9

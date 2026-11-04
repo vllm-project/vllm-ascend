@@ -303,6 +303,7 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
         ),
         actual_seq_lengths=torch.tensor([0, 2, 2], dtype=torch.int32),
         use_upstream_recurrent=adaptive,
+        use_upstream_conv=adaptive,
     )
     if adaptive:
         metadata.spec_state_indices_tensor = torch.arange(1, 9, dtype=torch.int32).reshape(2, 4)
@@ -349,6 +350,9 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
         ),
         patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
         patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: x.clone()) as conv,
+        patch(
+            "vllm_ascend.ops.gdn.causal_conv1d_update_varlen", side_effect=lambda x, *a, **k: x.clone()
+        ) as varlen_conv,
         patch("vllm_ascend.ops.gdn.recurrent_gated_delta_rule", side_effect=recurrent),
         patch("vllm_ascend.ops.gdn.fused_recurrent_gated_delta_rule", side_effect=upstream_recurrent),
         patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
@@ -356,10 +360,16 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
         AscendGatedDeltaNetAttention._forward_core(layer, packed, torch.zeros(4, 1), torch.zeros(4, 1), output)
     torch.testing.assert_close(output, packed[:, 4:].reshape(4, 1, 2))
     if speculative:
+        selected_conv = varlen_conv if adaptive else conv
         torch.testing.assert_close(
-            conv.call_args.kwargs["num_accepted_tokens"],
+            selected_conv.call_args.kwargs["num_accepted_tokens"],
             torch.tensor([3, 2] if adaptive else [1, 2], dtype=torch.int32),
         )
+    if adaptive:
+        conv.assert_not_called()
+        varlen_conv.assert_called_once()
+    else:
+        varlen_conv.assert_not_called()
 
 
 @pytest.mark.parametrize("mixed,head_dim", [(False, 16), (True, 16), (False, 2)])

@@ -481,6 +481,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
+        # Varlen graphs capture evenly split dummy rows (possibly one token
+        # each), but must allow the descriptor's full K+1 replay query bound.
+        max_query_len = getattr(input_batch, "max_query_len", None)
+        if max_query_len is None:
+            max_query_len = input_batch.num_scheduled_tokens.max().item()
         return build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -490,7 +495,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             num_input_tokens=num_input_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
-            max_query_len=input_batch.num_scheduled_tokens.max().item(),
+            max_query_len=max_query_len,
             seq_lens=input_batch.seq_lens,
             max_seq_len=self.max_model_len,
             block_tables=block_tables,

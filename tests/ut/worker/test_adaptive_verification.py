@@ -18,7 +18,6 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.device.device_op import BaseDeviceAdaptor
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
@@ -92,13 +91,6 @@ def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypat
 
 def test_adaptive_verification_patch_preserves_budget_assignment(monkeypatch):
     import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
-
-    if not vllm_version_is("0.32.0"):
-        before = adaptive.assign_draft_token_budget
-        module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
-        importlib.reload(module)
-        assert adaptive.assign_draft_token_budget is before
-        return
 
     # Isolate this test from batch-invariant tests that patch torch.sum globally.
     monkeypatch.setattr(torch, "sum", _NATIVE_TORCH_SUM)

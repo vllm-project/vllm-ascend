@@ -10,6 +10,7 @@ from vllm.third_party.flash_linear_attention.ops.fused_recurrent import fused_re
 
 from vllm_ascend.models.qwen4_exp.cache_config import make_slab_view
 from vllm_ascend.ops.gdn_attn_builder import _build_actual_seq_lengths
+from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 
 
@@ -146,7 +147,10 @@ def _reference_gdn_recurrent(q, k, v, g, beta, state, slots, lengths, accepted):
 
 
 @pytest.mark.parametrize(
-    "states", [4, 10, (10, torch.bfloat16)], indirect=True, ids=["three-drafts", "nine-drafts", "bf16-state"]
+    "states",
+    [4, 9, 10, (10, torch.bfloat16)],
+    indirect=True,
+    ids=["three-drafts", "eight-drafts", "nine-drafts", "bf16-state"],
 )
 def test_adaptive_speculation_matches_independent_requests(states):
     """Retain accepted states when the next step trims to one token, with padding."""
@@ -160,6 +164,9 @@ def test_adaptive_speculation_matches_independent_requests(states):
     weight = torch.randn((4, 2560), dtype=conv.dtype, device=device) * 0.01
     steps = [
         ([max_query_len, max_query_len], [1, 1]),
+        # A fully accepted block followed by another full-width verification
+        # exercises the steady-state path that single-token tests miss.
+        ([max_query_len, max_query_len], [max_query_len, max_query_len]),
         ([1, max_query_len - 1], [max_query_len, max_query_len - 1]),
         ([1, 1], [1, max_query_len - 1]),
         ([max_query_len - 1, 1], [1, 1]),
@@ -208,8 +215,9 @@ def test_adaptive_speculation_matches_independent_requests(states):
         beta = torch.rand((1, total, 12), dtype=torch.bfloat16, device=device)
         expected = _reference_gdn_recurrent(q, k, v, g, beta, reference_state, slots, lengths, accepted)
         if max_query_len == 4 and lengths == [4, 4]:
-            # At the full-width shape both APIs are valid. Check numerical
-            # parity with the existing native operator before testing trims.
+            # The native kernel remains used for short fixed draft blocks.
+            # Long fixed blocks select the fused recurrent path: A2 produced
+            # NaNs with native full-width nine-token queries.
             native_state = ssm.clone()
             native_output = native_recurrent_gated_delta_rule(
                 q[0],
@@ -258,6 +266,102 @@ def test_adaptive_speculation_matches_independent_requests(states):
         torch.testing.assert_close(actual, torch.cat(reference, dim=1), rtol=0, atol=0)
         torch.testing.assert_close(ssm, dense_ssm, rtol=0, atol=0)
         torch.testing.assert_close(conv, dense_conv, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("states", [9], indirect=True)
+@pytest.mark.parametrize("component", ["conv", "recurrent"])
+def test_adaptive_single_token_capture_replays_multi_token_queries(states, component):
+    """Replay the actual 16x1 capture shape with a 9-token live request."""
+    _, conv, ssm, dense_conv, dense_ssm = states
+    device = ssm.device
+    tokens, rows, width = 16, 16, 9
+    slots = torch.zeros((rows, width), dtype=torch.int32, device=device)
+    slots[0] = torch.arange(1, width + 1, dtype=torch.int32, device=device)
+    accepted = torch.ones(rows, dtype=torch.int32, device=device)
+    qsl = torch.arange(rows + 1, dtype=torch.int32, device=device)
+    x = torch.randn((tokens, 2560), dtype=conv.dtype, device=device)
+    weight = torch.randn((4, 2560), dtype=conv.dtype, device=device) * 0.01
+    q = torch.nn.functional.normalize(torch.randn((1, tokens, 4, 128), device=device), dim=-1).bfloat16()
+    k = torch.nn.functional.normalize(torch.randn((1, tokens, 4, 128), device=device), dim=-1).bfloat16()
+    v = torch.randn((1, tokens, 12, 128), dtype=torch.bfloat16, device=device)
+    g = -torch.rand((1, tokens, 12), device=device)
+    beta = torch.rand((1, tokens, 12), dtype=torch.bfloat16, device=device)
+
+    def run(state, boundaries, table, counts, num_tokens, native_reference=False):
+        if component == "conv":
+            conv_update = causal_conv1d_update if native_reference else causal_conv1d_update_varlen
+            return conv_update(
+                x[:num_tokens].clone() if native_reference else x[:num_tokens],
+                state,
+                weight,
+                conv_state_indices=table[:, 0].contiguous(),
+                num_accepted_tokens=counts,
+                query_start_loc=boundaries,
+                max_query_len=width,
+                null_block_id=0,
+                activation="silu",
+                out=torch.empty_like(x[:num_tokens]),
+            )
+        output, _ = fused_recurrent_gated_delta_rule(
+            q[:, :num_tokens],
+            k[:, :num_tokens],
+            v[:, :num_tokens],
+            g[:, :num_tokens],
+            beta[:, :num_tokens],
+            initial_state=state,
+            cu_seqlens=boundaries,
+            ssm_state_indices=table,
+            num_accepted_tokens=counts,
+        )
+        return output[0]
+
+    state, reference_state = (conv, dense_conv) if component == "conv" else (ssm, dense_ssm)
+    run(state, qsl, slots, accepted, tokens)
+    torch.npu.synchronize()
+    state.copy_(reference_state)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        actual = run(state, qsl, slots, accepted, tokens)
+    state.copy_(reference_state)
+
+    for length, previous_accepted in ((9, 1), (1, 9), (4, 1), (9, 4)):
+        qsl[1:].fill_(length)
+        accepted[0] = previous_accepted
+        before = reference_state.clone()
+        expected = run(
+            reference_state,
+            torch.tensor([0, length], dtype=torch.int32, device=device),
+            slots[:1],
+            accepted[:1],
+            length,
+            native_reference=True,
+        )
+        padded_eager = run(state, qsl, slots, accepted, tokens)
+        torch.testing.assert_close(
+            padded_eager[:length],
+            expected,
+            rtol=1e-3,
+            atol=1e-3,
+            msg=f"{component}: padded eager output, length={length}, accepted={previous_accepted}",
+        )
+        torch.testing.assert_close(state, reference_state, rtol=1e-3, atol=1e-3)
+        state.copy_(before)
+        graph.replay()
+        torch.npu.synchronize()
+        torch.testing.assert_close(
+            actual[:length],
+            expected,
+            rtol=1e-3,
+            atol=1e-3,
+            msg=f"{component}: graph replay output, length={length}, accepted={previous_accepted}",
+        )
+        torch.testing.assert_close(
+            state,
+            reference_state,
+            rtol=1e-3,
+            atol=1e-3,
+            msg=f"{component}: graph replay state, length={length}, accepted={previous_accepted}",
+        )
 
 
 def test_adaptive_recurrent_reads_full_state_row_after_nine_drafts():

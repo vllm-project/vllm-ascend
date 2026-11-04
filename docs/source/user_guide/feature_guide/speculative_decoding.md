@@ -588,7 +588,8 @@ The variable-length graph bound is `1 + num_speculative_tokens` with adaptive
 verification enabled; the 310P backend explicitly rejects this capability.
 
 Use a matching vLLM revision with the strided recurrent API and adaptive-verification
-initialization hooks (including revision `544f182d`) and a DSpark checkpoint
+initialization hooks and the convolution kernel interface used by the paired
+vLLM checkout, together with a DSpark checkpoint
 trained for the target model. For Qwen hybrid targets, including
 Qwen3.8-27B, set `num_speculative_tokens` to the draft checkpoint's supported
 length and enable `enable_adaptive_verification` as above. Keep full decode graphs
@@ -604,8 +605,15 @@ Validate each target/draft pair on the intended NPU and CANN version. Compare
 plain decoding, fixed-length DSpark, and adaptive DSpark with the same precision,
 TP size, concurrency, prompt/output lengths, and cache settings, after warmup.
 Check output quality and actual admitted draft counts as well as throughput.
-The FIA path currently copies admitted query boundaries back to the host to
-prepare its attention metadata; include this synchronization cost in profiling.
+Adaptive GDN uses strided Triton convolution and recurrent updates with device
+query boundaries. This supports FULL-graph padding and a previously accepted
+block followed by a shorter verification query without copying the state cache.
+Fixed verification queries of at least nine tokens also use the strided recurrent
+update, following native recurrent numerical failures observed on A2.
+
+The FIA path copies admitted query boundaries back to the host for partial draft
+budgets. Full and zero budgets already have exact host boundaries and skip that
+synchronization; include the remaining synchronization cost in profiling.
 The upstream recurrent kernel may also have different performance from the native
 operator on each NPU generation; measure the complete target step, rather than
 inferring a speedup from the reduced verification token count alone.
@@ -624,6 +632,15 @@ inferring a speedup from the reduced verification token count alone.
 >
 > - **In high-throughput scenarios**, performance gains from adaptive verification may sometimes fall short of expectations.
 >   In such cases, start by investigating the cause at the actual serving concurrency.
+
+For DSpark on Ascend, DEBUG logs report scheduled and admitted draft counts,
+confidence estimates, and the profiled verification costs. The Ascend runtime
+configuration can reset worker logging to INFO; set
+`runtime_config.ascend_log.modules.vllm.logger` to `DEBUG` in
+`--additional-config` for a diagnostic run. Remove that override for performance
+measurements. If the confidence head produces non-finite estimates, they are
+treated as 1 for budget selection; compare adaptive outputs with fixed and
+non-speculative outputs on NPU before relying on performance results.
 
 For more details, see the
 [vLLM community documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
