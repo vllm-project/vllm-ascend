@@ -82,7 +82,7 @@ templates:
       - "glm47"
       - --no-enable-auto-tool-choice
       - --allowed-local-media-path
-      - /mnt/share/s00899273/mmmu_pro/MMMU_Pro_options10_images
+      - "/"
       - --reasoning-parser
       - "glm47"
       - --enable-prefix-caching
