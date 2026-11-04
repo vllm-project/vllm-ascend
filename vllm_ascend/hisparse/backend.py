@@ -15,6 +15,39 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
+class _CaptureAwareStream(torch.Stream):
+    """Propagate a captured dependency before PTA allocates CANN workspace.
+
+    PTA's native NPUEvent wait drains Host submission queues during capture;
+    its generic event binding does not. Keep generic event points and stream
+    identity, adding the missing submission boundary only during capture.
+    Remove when the supported PTA generic binding has the same behavior.
+    """
+
+    def _finish_capture_propagation(self) -> None:
+        if torch.npu.is_current_stream_capturing():
+            native = torch.npu.Stream(
+                stream_id=self.stream_id, device_index=self.device_index, device_type=self.device_type
+            )
+            # Obtaining the native handle drains its Host task queue. This is
+            # not a device synchronization and does not run during graph replay.
+            _ = native.npu_stream
+
+    def wait_event(self, event) -> None:
+        super().wait_event(event)
+        self._finish_capture_propagation()
+
+    def wait_stream(self, stream) -> None:
+        super().wait_stream(stream)
+        self._finish_capture_propagation()
+
+
+def capture_aware_stream(stream: torch.Stream) -> torch.Stream:
+    if stream.device.type != "npu" or isinstance(stream, _CaptureAwareStream):
+        return stream
+    return _CaptureAwareStream(stream.stream_id, stream.device_index, stream.device_type)
+
+
 class AscendHiSparseBackend(HiSparseBackend):
     # Inherit Core's private Host-pool policy; NPU event IPC is not implemented.
     stats_dtype = torch.int64

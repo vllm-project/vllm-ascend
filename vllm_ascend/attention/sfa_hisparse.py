@@ -123,6 +123,9 @@ class AscendHiSparseImpl(AscendSFAImpl):
         )
         if not isinstance(self.index_group, HiSparseMLAIndexGroup):
             raise RuntimeError("Ascend HiSparse was initialized without a HiSparse index group")
+        from vllm_ascend.hisparse.backend import capture_aware_stream
+
+        self.index_group.side_stream = capture_aware_stream(self.index_group.side_stream)
         self.hisparse_cache = self.index_group.cache(self.index_group_index)
         self.topk = self.index_group.logical_topk_indices.shape[-1]
         if self.topk % 128:
