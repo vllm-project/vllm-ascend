@@ -2278,6 +2278,7 @@ class TestNPUWorker(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock()
 
             worker.reload_weights(weights_path="/tmp/weights", is_checkpoint_format=True)
 

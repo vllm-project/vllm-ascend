@@ -53,6 +53,7 @@ from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.utils.gpu_sync_debug import with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -871,6 +872,8 @@ class NPUWorker(WorkerBase):
             self.torch_allocated / GiB_bytes,
         )
 
+    @torch.inference_mode()
+    @with_gpu_sync_check
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -918,10 +921,13 @@ class NPUWorker(WorkerBase):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
+        handles = get_pp_group().isend_tensor_dict(
             output.tensors,
             all_gather_group=all_gather_group,
         )
+
+        # Metadata work is owned by GroupCoordinator; retain only device work.
+        self._pp_send_work = handles[1:]
 
         # Align with upstream GPUWorker: Model Runner V2 has no
         # kv_connector_output to propagate from non-last PP ranks. Model Runner
@@ -942,6 +948,7 @@ class NPUWorker(WorkerBase):
         return output
 
     @torch.inference_mode()
+    @with_gpu_sync_check
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
         _attach_profiling_chunk_execution_time(
@@ -1482,7 +1489,8 @@ class NPUWorker(WorkerBase):
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
-        self.model_runner.reload_weights(*args, **kwargs)
+        with set_current_vllm_config(self.vllm_config):
+            self.model_runner.reload_weights(*args, **kwargs)
 
     def check_health(self) -> None:
         import subprocess
