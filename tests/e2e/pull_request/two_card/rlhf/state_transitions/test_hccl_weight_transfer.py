@@ -156,7 +156,10 @@ def _run_weight_transfer_transaction(
     if buffer_size_bytes == 1:
         # All BF16 weights exceed the threshold, so each is a separate chunk.
         # Require enough chunks to rotate through every slot more than twice.
-        chunk_count = sum(math.prod(meta.shape) * meta.dtype.itemsize > 1 for meta in source.metadata())
+        # v0.32 exposes a method; main exposes cached metadata.
+        metadata = source.metadata
+        metadata = metadata() if callable(metadata) else metadata
+        chunk_count = sum(math.prod(meta.shape) * meta.dtype.itemsize > 1 for meta in metadata)
         assert chunk_count > 2 * num_buffers, (
             f"{case.id}: {chunk_count} chunks must rotate through {num_buffers} slots more than twice"
         )
