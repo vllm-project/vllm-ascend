@@ -168,26 +168,28 @@ For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal
 
 ### 5.1 Single-Node Deployment
 
-Single-node deployment runs Prefill and Decode on the same host. Both examples use W8A8 weights and [DSpark speculative decoding](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark), which generates draft tokens and verifies them with the target model. They use all 16 NPUs on A3 or all eight NPUs on 950DT products.
+Single-node deployment runs Prefill and Decode on the same host. The A3 example uses W8A8 weights on all 16 NPUs, and the 950DT products example uses W8A8-MXFP8 weights on all eight NPUs. Both use [DSpark speculative decoding](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark), which generates draft tokens and verifies them with the target model.
 
 === "A3 series (W8A8)"
 
     **Start the Service**
 
-    Run the following inside the A3 container. It starts one API service with DP4 x TP4 / EP16 across all 16 NPUs, using W8A8 weights and DSpark speculative decoding with seven draft tokens.
+    Run the following inside the A3 container. It starts one API service with DP4 × TP4 / EP16 across all 16 NPUs, using W8A8 weights and DSpark speculative decoding with seven draft tokens.
 
-    Set `MODEL_PATH` to your model weight directory; the following example uses the container mount path configured in [Section 4](#4-installation).
+    Set `MODEL_PATH` to your model weight directory; the following example uses the container mount path configured in [Section 4](#4-installation). Set `HCCL_IF_IP` to the communication IP of the current host, that is, the IP used as `LOCAL_IP` in [Section 3.2](#32-verify-multi-node-communication).
 
     ```bash
     export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
     export MAX_MODEL_LEN=133000
+    export HCCL_IF_IP="<CURRENT_NODE_IP>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=1024
-    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_IF_BASE_PORT=61000
+    export HCCL_OP_EXPANSION_MODE=AIV
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    vllm serve ${MODEL_PATH} \
+    vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
       --port 11223 \
       --served-model-name minimax-m3.1-flash \
@@ -212,13 +214,13 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
           "enable_flashcomm1": true,
           "multistream_overlap_shared_expert": true,
           "enable_shared_expert_dp":true,
-          "weight_nz_mode": 2
+          "weight_nz_mode": 1
       }' \
       --speculative-config '{
           "method":"dspark",
           "num_speculative_tokens":7,
           "enforce_eager":true,
-          "draft_sample_method":"probabilistic"
+          "kv_cache_dtype":"bfloat16"
       }' \
       --safetensors-load-strategy prefetch
     ```
@@ -242,7 +244,7 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
 
     **Start the Service**
 
-    Run the following inside the 950DT products container. It uses DP2 x TP4 / EP8 across all eight NPUs, W8A8-MXFP8 weights, and DSpark speculative decoding with seven draft tokens.
+    Run the following inside the 950DT products container. It uses DP2 × TP4 / EP8 across all eight NPUs, W8A8-MXFP8 weights, and DSpark speculative decoding with seven draft tokens.
 
     Set `MODEL_PATH` to your model weight directory; the following example uses the container mount path configured in [Section 4](#4-installation).
 
@@ -255,7 +257,7 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
     export HCCL_OP_EXPANSION_MODE="CCU_SCHED"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    vllm serve ${MODEL_PATH} \
+    vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
       --port 11223 \
       --served-model-name minimax-m3.1-flash \
@@ -283,11 +285,12 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
           "method":"dspark",
           "num_speculative_tokens":7,
           "enforce_eager":true,
-          "kv_cache_dtype":"bfloat16",
-          "draft_sample_method":"probabilistic"
+          "kv_cache_dtype":"bfloat16"
       }' \
       --safetensors-load-strategy prefetch
     ```
+
+    The verified deployment used `--limit-mm-per-prompt '{"image":10,"video":0}'` for MMMU-Pro requests, which carry up to ten images. Set the value to the maximum number of images per request.
 
     Wait for the following startup messages, then check the health endpoint from another terminal in the container:
 
@@ -306,7 +309,7 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
 
 ### 5.2 Multi-Node Deployment
 
-Multi-Node deployment runs Prefill and Decode on the same host, but there are more than one host node. Both nodes use DSpark speculative decoding with seven draft tokens and probabilistic draft sampling. Configure the host-specific values at the beginning of each node script before starting the service.
+Multi-node deployment spreads one data-parallel group across multiple hosts. Every host runs Prefill and Decode in the same engine instance (PD colocation), and the hosts join one distributed group. Both nodes use DSpark speculative decoding with seven draft tokens. Configure the host-specific values at the beginning of each node script before starting the service.
 
 Monitor node log while weights load and graph capture completes. Startup duration depends on storage, hardware, and the selected configuration; use continuing log progress and `Application startup complete` to judge readiness. If logs stop progressing or report an error, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
 
@@ -386,8 +389,7 @@ Monitor node log while weights load and graph capture completes. Startup duratio
         --speculative-config '{
             "method":"dspark",
             "num_speculative_tokens":7,
-            "enforce_eager":true,
-            "draft_sample_method":"probabilistic"
+            "enforce_eager":true
         }'
     ```
 
@@ -462,8 +464,7 @@ Monitor node log while weights load and graph capture completes. Startup duratio
         --speculative-config '{
             "method":"dspark",
             "num_speculative_tokens":7,
-            "enforce_eager":true,
-            "draft_sample_method":"probabilistic"
+            "enforce_eager":true
         }'
     ```
 
@@ -490,13 +491,15 @@ Monitor node log while weights load and graph capture completes. Startup duratio
 
 ### 5.3 PD Disaggregation (1P2D)
 
-Both platforms use one Prefill node and two Decode nodes (1P2D), with Prefill and Decode on separate hosts. Both platforms use DSpark speculative decoding with seven draft tokens and probabilistic draft sampling. Configure the host-specific values at the beginning of each Prefill and Decode script before starting the service.
+Both platforms use one Prefill node and two Decode nodes (1P2D), with Prefill and Decode on separate hosts. Prefill processes the prompt, Decode generates tokens, and a proxy forwards requests between them while Mooncake transfers the KV cache. For the general workflow, refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md). Both platforms use DSpark speculative decoding with seven draft tokens. Configure the host-specific values at the beginning of each Prefill and Decode script before starting the service.
 
-Monitor the role logs while weights load and graph capture completes. Startup duration depends on storage, hardware, and the selected configuration; use continuing log progress to monitor initialization, and wait for `Application startup complete` on each HTTP-serving instance to judge readiness. Headless workers join the distributed Decode service without exposing their own HTTP API. If logs stop progressing or report an error, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails) before starting the proxy.
+Start Prefill, D1, and D2 within a few seconds of each other, and start the proxy only after every engine prints `Application startup complete`. Do not wait for one role to become ready before starting the next: a role that is still missing blocks the distributed rendezvous, and the roles started earlier fail when `VLLM_ENGINE_READY_TIMEOUT_S` expires before the group is complete.
+
+Monitor the role logs while weights load and graph capture completes. Startup duration depends on storage, hardware, and the selected configuration; use continuing log progress to monitor initialization, and wait for `Application startup complete` on every HTTP-serving instance to judge readiness. If logs stop progressing or report an error, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails) before starting the proxy.
 
 === "A3 series (W8A8)"
 
-    Use one Prefill node and two Decode nodes, each with all 16 NPUs. Prefill uses DP1 × TP4 × PP4. Decode uses DP8 × TP4 × PP1 across the two nodes: D1 runs global DP ranks 0–3, and D2 runs ranks 4–7. Each rank starts one TP4 service on four local NPUs. All eight Decode ranks share the D1 communication IP as their DP master address and use the same RPC port. Use the same image and weights on all three nodes.
+    Use one Prefill node and two Decode nodes, each with all 16 NPUs and the W8A8 weights. Prefill uses DP1 × TP4 × PP4. Decode uses DP8 × TP4 × PP1 across the two nodes: D1 runs global DP ranks 0–3 and D2 runs ranks 4–7, and each rank starts one TP4 service on four local NPUs. Every Decode rank exposes its own HTTP API, and the proxy registers all eight Decode endpoints. Use the same image and weights on all three nodes.
 
     The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles.
 
@@ -504,10 +507,15 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     | --- | --- | --- |
     | DP × TP × PP | 1 × 4 × 4 | 8 × 4 × 1 across two nodes |
     | Global DP ranks | 0 | D1: 0–3; D2: 4–7 |
+    | API port | 19100 | D1: 19200–19203; D2: 19300–19303 |
+    | DP RPC port | 16920 | 16920, D1 is the DP master |
+    | KV port | 24000 | 25000 + rank × 32 (D1); 26000 + local rank × 32 (D2) |
     | PP layer partition | 15,15,15,15 | — |
-    | max-num-seqs | 32 | 128 per replica |
+    | max-num-seqs | 8 | 128 per replica |
+    | max-num-batched-tokens | 8192 | 2048 |
+    | gpu-memory-utilization | 0.85 | 0.92 |
     | Execution mode | Eager | FULL_DECODE_ONLY |
-    | HCCL_BUFFSIZE (MB) | 512 | 2048 |
+    | HCCL_BUFFSIZE (MB) | 512 | 1024 |
 
     **Prefill Node (P)**
 
@@ -523,10 +531,10 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     NIC_NAME="<CURRENT_NODE_NIC>"
     SERVICE_PORT=19100
     KV_PORT=24000
-    MAX_NUM_SEQS=32
+    MAX_NUM_SEQS=8
     MAX_MODEL_LEN=263000
-    MAX_BATCHED_TOKENS=32768
-    GPU_MEMORY_UTILIZATION=0.92
+    MAX_BATCHED_TOKENS=8192
+    GPU_MEMORY_UTILIZATION=0.85
 
     # Fixed runtime configuration.
     export VLLM_PP_LAYER_PARTITION=15,15,15,15
@@ -539,6 +547,9 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
+    export VLLM_USE_FASTOKENS=1
+    export VLLM_SERVER_DEV_MODE=1
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -562,25 +573,19 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         --kv-cache-dtype bfloat16 \
         --enable-chunked-prefill \
         --enable-prefix-caching \
+        --disable-hybrid-kv-cache-manager \
+        --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true,"kv_cache_dtype":"bfloat16"}' \
         --reasoning-parser minimax_m3 \
-        --enable-auto-tool-choice \
-        --tool-call-parser minimax_m3 \
         --data-parallel-size 1 \
         --enforce-eager \
         --long-prefill-token-threshold 2048 \
-        --disable-hybrid-kv-cache-manager \
-        --speculative-config '{
-            "method":"dspark",
-            "num_speculative_tokens":7,
-            "enforce_eager":true,
-            "draft_sample_method":"probabilistic"
-        }' \
         --additional-config '{
             "enable_cpu_binding":true,
             "multistream_overlap_shared_expert":true,
             "enable_shared_expert_dp":true,
-            "weight_nz_mode":2,
-            "enable_flashcomm1":true
+            "weight_nz_mode":1,
+            "enable_flashcomm1":true,
+            "enable_fused_mc2":0
         }' \
         --kv-transfer-config '{
             "kv_connector":"MooncakeConnectorV1",
@@ -603,7 +608,7 @@ Monitor the role logs while weights load and graph capture completes. Startup du
 
     **Decode Node 1 (D1, DP ranks 0–3)**
 
-    Save the following as `run_decode_node1_rank.sh` on D1. Set `LOCAL_IP` and `NIC_NAME` for this host, and set `DECODE_HEAD_IP` to D1's reachable communication IP. Keep the image, weights, global parallelism, and RPC port identical on both Decode nodes. Each invocation starts one TP4 service; global DP ranks identify services across both nodes, while local ranks select the NPU group on the current node.
+    Save the following as `run_decode_d1.sh` on D1. Set `LOCAL_IP` and `NIC_NAME` for this host. The script also uses this IP as the Data Parallel master address of the global DP8 group, so D2 must point at the same IP. Keep the image, weights, global parallelism, and RPC port identical on both Decode nodes.
 
     ```bash
     #!/usr/bin/env bash
@@ -613,27 +618,27 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
     LOCAL_IP="<CURRENT_NODE_IP>"
     NIC_NAME="<CURRENT_NODE_NIC>"
-    DECODE_HEAD_IP="<DECODE1_NODE_IP>"
     DP_RANK=${1:-0}
-    LOCAL_DP_RANK=$DP_RANK
     SERVICE_PORT=$((19200 + DP_RANK))
     DP_RPC_PORT=16920
     KV_PORT=$((25000 + DP_RANK*32))
     MAX_NUM_SEQS=128
     MAX_MODEL_LEN=263000
-    MAX_BATCHED_TOKENS=32768
+    MAX_BATCHED_TOKENS=2048
     GPU_MEMORY_UTILIZATION=0.92
 
     # Fixed runtime configuration.
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export HCCL_BUFFSIZE=2048
+    export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP="$LOCAL_IP"
     unset HCCL_INTRA_ROCE_ENABLE
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export ASCEND_RT_VISIBLE_DEVICES="$((LOCAL_DP_RANK*4)),$((LOCAL_DP_RANK*4+1)),$((LOCAL_DP_RANK*4+2)),$((LOCAL_DP_RANK*4+3))"
+    export ASCEND_RT_VISIBLE_DEVICES="$((DP_RANK*4)),$((DP_RANK*4+1)),$((DP_RANK*4+2)),$((DP_RANK*4+3))"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
+    export VLLM_SERVER_DEV_MODE=1
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -657,28 +662,21 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         --kv-cache-dtype bfloat16 \
         --enable-chunked-prefill \
         --enable-prefix-caching \
+        --disable-hybrid-kv-cache-manager \
+        --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true,"kv_cache_dtype":"bfloat16"}' \
         --reasoning-parser minimax_m3 \
-        --enable-auto-tool-choice \
-        --tool-call-parser minimax_m3 \
         --data-parallel-size 8 \
         --data-parallel-size-local 1 \
         --data-parallel-rank "$DP_RANK" \
-        --data-parallel-address "$DECODE_HEAD_IP" \
+        --data-parallel-address "$LOCAL_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --disable-hybrid-kv-cache-manager \
-        --speculative-config '{
-            "method":"dspark",
-            "num_speculative_tokens":7,
-            "enforce_eager":true,
-            "draft_sample_method":"probabilistic"
-        }' \
         --additional-config '{
             "enable_cpu_binding":true,
             "multistream_overlap_shared_expert":true,
             "enable_shared_expert_dp":true,
             "enable_flashcomm1":true,
-            "weight_nz_mode":2
+            "weight_nz_mode":1
         }' \
         --kv-transfer-config '{
             "kv_connector":"MooncakeConnectorV1",
@@ -693,17 +691,17 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         }'
     ```
 
-    Start all four D1 services inside the D1 container, then start D2 without waiting for D1 to become ready:
+    Start all four D1 replicas; each replica serves one global DP rank:
 
     ```bash
     for rank in 0 1 2 3; do
-        nohup bash run_decode_node1_rank.sh "$rank" > "decode-$rank.log" 2>&1 &
+        nohup bash run_decode_d1.sh "$rank" > "decode-$rank.log" 2>&1 &
     done
     ```
 
     **Decode Node 2 (D2, DP ranks 4–7)**
 
-    Save the following as `run_decode_node2_rank.sh` on D2. Set `LOCAL_IP` and `NIC_NAME` for this host, and set `DECODE_HEAD_IP` to D1's reachable communication IP. Keep the image, weights, global parallelism, and RPC port identical on both Decode nodes. Each invocation starts one TP4 service; global DP ranks identify services across both nodes, while local ranks select the NPU group on the current node.
+    Save the following as `run_decode_d2.sh` on D2. Set `LOCAL_IP` and `NIC_NAME` for this host, and set `DECODE_HEAD_IP` to the D1 IP used above. The argument is the local rank on this node; global DP ranks are offset by four.
 
     ```bash
     #!/usr/bin/env bash
@@ -714,26 +712,28 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     LOCAL_IP="<CURRENT_NODE_IP>"
     NIC_NAME="<CURRENT_NODE_NIC>"
     DECODE_HEAD_IP="<DECODE1_NODE_IP>"
-    DP_RANK=${1:-4}
-    LOCAL_DP_RANK=$((DP_RANK - 4))
-    SERVICE_PORT=$((19200 + DP_RANK))
+    LOCAL_RANK=${1:-0}
+    DP_RANK=$((LOCAL_RANK + 4))
+    SERVICE_PORT=$((19300 + LOCAL_RANK))
     DP_RPC_PORT=16920
-    KV_PORT=$((25000 + DP_RANK*32))
+    KV_PORT=$((26000 + LOCAL_RANK*32))
     MAX_NUM_SEQS=128
     MAX_MODEL_LEN=263000
-    MAX_BATCHED_TOKENS=32768
+    MAX_BATCHED_TOKENS=2048
     GPU_MEMORY_UTILIZATION=0.92
 
     # Fixed runtime configuration.
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export HCCL_BUFFSIZE=2048
+    export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP="$LOCAL_IP"
     unset HCCL_INTRA_ROCE_ENABLE
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export ASCEND_RT_VISIBLE_DEVICES="$((LOCAL_DP_RANK*4)),$((LOCAL_DP_RANK*4+1)),$((LOCAL_DP_RANK*4+2)),$((LOCAL_DP_RANK*4+3))"
+    export ASCEND_RT_VISIBLE_DEVICES="$((LOCAL_RANK*4)),$((LOCAL_RANK*4+1)),$((LOCAL_RANK*4+2)),$((LOCAL_RANK*4+3))"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
+    export VLLM_SERVER_DEV_MODE=1
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -757,28 +757,21 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         --kv-cache-dtype bfloat16 \
         --enable-chunked-prefill \
         --enable-prefix-caching \
+        --disable-hybrid-kv-cache-manager \
+        --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true,"kv_cache_dtype":"bfloat16"}' \
         --reasoning-parser minimax_m3 \
-        --enable-auto-tool-choice \
-        --tool-call-parser minimax_m3 \
         --data-parallel-size 8 \
         --data-parallel-size-local 1 \
         --data-parallel-rank "$DP_RANK" \
         --data-parallel-address "$DECODE_HEAD_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --disable-hybrid-kv-cache-manager \
-        --speculative-config '{
-            "method":"dspark",
-            "num_speculative_tokens":7,
-            "enforce_eager":true,
-            "draft_sample_method":"probabilistic"
-        }' \
         --additional-config '{
             "enable_cpu_binding":true,
             "multistream_overlap_shared_expert":true,
             "enable_shared_expert_dp":true,
             "enable_flashcomm1":true,
-            "weight_nz_mode":2
+            "weight_nz_mode":1
         }' \
         --kv-transfer-config '{
             "kv_connector":"MooncakeConnectorV1",
@@ -793,22 +786,27 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         }'
     ```
 
-    Immediately start all four D2 services inside the D2 container. All eight global DP ranks must join before Decode initialization can complete:
+    Start all four D2 replicas:
 
     ```bash
-    for rank in 4 5 6 7; do
-        nohup bash run_decode_node2_rank.sh "$rank" > "decode-$rank.log" 2>&1 &
+    for rank in 0 1 2 3; do
+        nohup bash run_decode_d2.sh "$rank" > "decode-$((rank+4)).log" 2>&1 &
     done
     ```
 
     **Load-balance Proxy**
 
-    Download [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py) from the official repository and save it as `/workspace/load_balance_proxy_server_example.py` inside the Prefill container.
+    Download [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py) from the official repository and save it as `/workspace/load_balance_proxy_server_example.py` on a node that can reach all Prefill and Decode API ports.
 
-    After Prefill and all eight Decode services print `Application startup complete`, run the following
-    inside the Prefill container:
+    Save the following as `proxy_server.sh` and start it after Prefill and all eight Decode replicas print `Application startup complete`:
 
     ```bash
+    #!/usr/bin/env bash
+    set -e
+
+    export no_proxy="${no_proxy:+${no_proxy},}<PREFILL_NODE_IP>,<DECODE1_NODE_IP>,<DECODE2_NODE_IP>"
+    export NO_PROXY="$no_proxy"
+
     PREFILL_IP="<PREFILL_NODE_IP>"
     DECODE1_IP="<DECODE1_NODE_IP>"
     DECODE2_IP="<DECODE2_NODE_IP>"
@@ -823,30 +821,48 @@ Monitor the role logs while weights load and graph capture completes. Startup du
             "$DECODE2_IP" "$DECODE2_IP" "$DECODE2_IP" "$DECODE2_IP" \
         --decoder-ports \
             19200 19201 19202 19203 \
-            19204 19205 19206 19207
+            19300 19301 19302 19303
     ```
+
+    ```bash
+    bash proxy_server.sh
+    ```
+
+    Send requests to port `19080` with model name `minimax-m3.1-flash`.
 
 === "950DT products"
 
-    Use one Prefill node and two Decode nodes (1P2D), each with all eight NPUs. Prefill uses DP1 × TP4 × PP2. The two Decode nodes form one distributed DP4 × TP4 × PP1 / EP16 instance, with two local DP ranks per node. The Decode head runs ranks 0–1 and provides the HTTP API; the headless worker runs ranks 2–3.
+    Use one Prefill node and two Decode nodes (1P2D), each with all eight NPUs and the W8A8-MXFP8 weights. Prefill uses DP1 × TP4 × PP2. The two Decode nodes form one distributed DP4 × TP4 × PP1 / EP16 group with two local DP ranks per node: D1 runs ranks 0–1 and D2 runs ranks 2–3. Both Decode nodes serve the HTTP API and are registered separately as proxy endpoints, so do not add `--headless` to the D2 script. D1 is the Data Parallel master and the two Decode scripts must use the same `DECODE_HEAD_IP`, DP RPC port, and KV port.
 
-    The [reference deployment](https://github.com/CXY-Katrina/workspace/tree/6a00e8b246ebb9274f649956c59ccb2c5ec66adf/minimax_m3/minimax_m3.1_flash/deployments/2026-10-27-a5-1p2d) used `quay.io/atlas-ci/vllm-atlas-temp:minimax-m3.1-flash-a5-openeuler-40260585905-1-arm64-temp` and W8A8-MXFP8 QuaRot l32 weights. Set `IMAGE` and `MODEL_DIR` in Section 4.3 accordingly, keeping the documented container mount path. Use the same image and weights on all three nodes.
-
-    The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles.
+    The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles. They use 128K input and 1K output; see the configuration table after the role summary for the 16K input variant.
 
     | Parameter | Prefill | Decode |
     | --- | --- | --- |
     | DP × TP × PP | 1 × 4 × 2 | 4 × 4 × 1 across two nodes |
-    | Local DP ranks | 0 | Head: 0–1; worker: 2–3 |
-    | max-num-seqs | 128 | 256 per DP engine |
-    | max-num-batched-tokens | 16384 | 32768 |
+    | Local DP ranks | 0 | D1: 0–1; D2: 2–3 |
+    | API port | 31050 | 31060 on both nodes |
+    | DP RPC port | 6884 | 6885, D1 is the DP master |
+    | KV port | 30000 | 26900 |
+    | max-num-seqs | 128 | 128 per DP engine |
+    | max-num-batched-tokens | 8000 | 8000 |
     | gpu-memory-utilization | 0.85 | 0.92 |
     | HCCL_BUFFSIZE (MB) | 512 | 1024 |
-    | Main-model execution | Eager | FULL_DECODE_ONLY |
+    | Main-model execution | Eager | FULL_DECODE_ONLY with 1024-token graph capture |
+    | KV cache dtype | fp8 | fp8 (DSpark draft uses bfloat16) |
+
+    All three scripts use `MAX_MODEL_LEN=133000`, which covers a 128K prompt plus 1K generated tokens. For 16K input workloads, only the Decode side changes: lower the sequence limit and fall back to the default graph capture size, which is enough for 64 sequences × (1 + 7 draft tokens) = 512 tokens per step.
+
+    | Parameter | 128K input / 1K output | 16K input / 1K output |
+    | --- | --- | --- |
+    | Decode `MAX_NUM_SEQS` | 128 | 64 |
+    | Decode `--compilation-config` | `{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}` | `{"cudagraph_mode":"FULL_DECODE_ONLY"}` |
+    | All other parameters | Unchanged | Unchanged; keep `MAX_MODEL_LEN=133000` and `MAX_BATCHED_TOKENS=8000` |
+
+    The capture size is not cosmetic: with 128 sequences and seven draft tokens, one decode step holds 1024 tokens, and the default capture limit of 512 makes the scheduler fall back to eager execution for the oversized batch, which raises TPOT by an order of magnitude. With 64 sequences the default limit is sufficient.
 
     **Prefill Node (P)**
 
-    Save the following as `run_prefill.sh` on the Prefill node. Configure the model path, host IP address, and network interface at the beginning of the script.
+    Save the following as `run_prefill.sh` on the Prefill node.
 
     ```bash
     #!/usr/bin/env bash
@@ -861,9 +877,12 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     KV_PORT=30000
     MAX_NUM_SEQS=128
     MAX_MODEL_LEN=133000
-    MAX_BATCHED_TOKENS=16384
+    MAX_BATCHED_TOKENS=8000
     GPU_MEMORY_UTILIZATION=0.85
 
+    # Fixed runtime configuration.
+    export VLLM_SERVER_DEV_MODE=1
+    export VLLM_USE_FASTOKENS=1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ENGINE_READY_TIMEOUT_S=1800
     export HCCL_BUFFSIZE=512
@@ -903,18 +922,18 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         --enforce-eager \
         --enable-chunked-prefill \
         --enable-prefix-caching \
-        --speculative-config '{
-            "method":"dspark",
-            "num_speculative_tokens":7,
-            "enforce_eager":true,
-            "kv_cache_dtype":"bfloat16",
-            "draft_sample_method":"probabilistic"
-        }' \
         --additional-config '{
             "enable_cpu_binding": true,
             "multistream_overlap_shared_expert": true,
             "enable_shared_expert_dp": true,
-            "enable_flashcomm1": true
+            "enable_flashcomm1": true,
+            "enable_fused_mc2": 0
+        }' \
+        --speculative-config '{
+            "method":"dspark",
+            "num_speculative_tokens":7,
+            "enforce_eager":true,
+            "kv_cache_dtype":"bfloat16"
         }' \
         --kv-transfer-config '{
             "kv_connector": "MooncakeConnectorV1",
@@ -936,7 +955,7 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         }'
     ```
 
-    Start the Prefill engine inside the Prefill container:
+    Start the Prefill engine:
 
     ```bash
     nohup bash run_prefill.sh > prefill.log 2>&1 &
@@ -944,7 +963,7 @@ Monitor the role logs while weights load and graph capture completes. Startup du
 
     **Decode Head Node (D1, DP ranks 0–1)**
 
-    Save the following as `run_decode_head.sh` on D1. Set `LOCAL_IP` and `NIC_NAME` for this host, and set `DECODE_HEAD_IP` to its reachable communication IP. This node provides the Decode HTTP API. Ensure all three nodes' communication IPs resolve promptly; configure matching `/etc/hosts` entries if needed.
+    Save the following as `run_decode_head.sh` on D1. Set `LOCAL_IP` and `NIC_NAME` for this host. D1 is the Data Parallel master, so the script uses its own IP as `DECODE_HEAD_IP`; D2 must be configured with the same value.
 
     ```bash
     #!/usr/bin/env bash
@@ -954,15 +973,18 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
     LOCAL_IP="<CURRENT_NODE_IP>"
     NIC_NAME="<CURRENT_NODE_NIC>"
-    DECODE_HEAD_IP="<DECODE_HEAD_NODE_IP>"
+    # D1 is the Data Parallel master; D2 must use the same value.
+    DECODE_HEAD_IP="$LOCAL_IP"
     SERVICE_PORT=31060
     DP_RPC_PORT=6885
     KV_PORT=26900
-    MAX_NUM_SEQS=256
+    MAX_NUM_SEQS=128
     MAX_MODEL_LEN=133000
-    MAX_BATCHED_TOKENS=32768
+    MAX_BATCHED_TOKENS=8000
     GPU_MEMORY_UTILIZATION=0.92
 
+    # Fixed runtime configuration.
+    export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ENGINE_READY_TIMEOUT_S=1800
     export HCCL_BUFFSIZE=1024
@@ -1003,13 +1025,6 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         --enable-prefix-caching \
         --seed 1024 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}' \
-        --speculative-config '{
-            "method":"dspark",
-            "num_speculative_tokens":7,
-            "enforce_eager":true,
-            "kv_cache_dtype":"bfloat16",
-            "draft_sample_method":"probabilistic"
-        }' \
         --additional-config '{
             "enable_cpu_binding": true,
             "ascend_compilation_config": {
@@ -1019,6 +1034,12 @@ Monitor the role logs while weights load and graph capture completes. Startup du
             "multistream_overlap_shared_expert": true,
             "enable_shared_expert_dp": true,
             "enable_flashcomm1": true
+        }' \
+        --speculative-config '{
+            "method":"dspark",
+            "num_speculative_tokens":7,
+            "enforce_eager":true,
+            "kv_cache_dtype":"bfloat16"
         }' \
         --kv-transfer-config '{
             "kv_connector": "MooncakeConnectorV1",
@@ -1040,15 +1061,15 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         }'
     ```
 
-    Start the Decode head inside its container:
+    Start the Decode head:
 
     ```bash
     nohup bash run_decode_head.sh > decode.log 2>&1 &
     ```
 
-    **Decode Worker Node (D2, DP ranks 2–3, headless)**
+    **Decode Worker Node (D2, DP ranks 2–3)**
 
-    Save the following as `run_decode_worker.sh` on D2. Set `LOCAL_IP` and `NIC_NAME` for this host, and set `DECODE_HEAD_IP` to the same D1 communication IP used above. Keep the image, weights, RPC/KV ports, and global parallelism settings identical to D1. This headless node does not expose an HTTP API.
+    Save the following as `run_decode_worker.sh` on D2. Set `LOCAL_IP` and `NIC_NAME` for this host, and set `DECODE_HEAD_IP` to the same D1 IP used above. Keep the image, weights, parallelism, and RPC/KV ports identical to D1. This node also serves the HTTP API and is registered as the second Decode endpoint of the proxy; do not add `--headless`.
 
     ```bash
     #!/usr/bin/env bash
@@ -1058,15 +1079,17 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
     LOCAL_IP="<CURRENT_NODE_IP>"
     NIC_NAME="<CURRENT_NODE_NIC>"
-    DECODE_HEAD_IP="<DECODE_HEAD_NODE_IP>"
+    DECODE_HEAD_IP="<DECODE1_NODE_IP>"
     SERVICE_PORT=31060
     DP_RPC_PORT=6885
     KV_PORT=26900
-    MAX_NUM_SEQS=256
+    MAX_NUM_SEQS=128
     MAX_MODEL_LEN=133000
-    MAX_BATCHED_TOKENS=32768
+    MAX_BATCHED_TOKENS=8000
     GPU_MEMORY_UTILIZATION=0.92
 
+    # Fixed runtime configuration.
+    export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ENGINE_READY_TIMEOUT_S=1800
     export HCCL_BUFFSIZE=1024
@@ -1083,7 +1106,6 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         --data-parallel-size 4 \
         --data-parallel-size-local 2 \
         --data-parallel-start-rank 2 \
-        --headless \
         --data-parallel-address "$DECODE_HEAD_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --tensor-parallel-size 4 \
@@ -1108,13 +1130,6 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         --enable-prefix-caching \
         --seed 1024 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}' \
-        --speculative-config '{
-            "method":"dspark",
-            "num_speculative_tokens":7,
-            "enforce_eager":true,
-            "kv_cache_dtype":"bfloat16",
-            "draft_sample_method":"probabilistic"
-        }' \
         --additional-config '{
             "enable_cpu_binding": true,
             "ascend_compilation_config": {
@@ -1124,6 +1139,12 @@ Monitor the role logs while weights load and graph capture completes. Startup du
             "multistream_overlap_shared_expert": true,
             "enable_shared_expert_dp": true,
             "enable_flashcomm1": true
+        }' \
+        --speculative-config '{
+            "method":"dspark",
+            "num_speculative_tokens":7,
+            "enforce_eager":true,
+            "kv_cache_dtype":"bfloat16"
         }' \
         --kv-transfer-config '{
             "kv_connector": "MooncakeConnectorV1",
@@ -1145,22 +1166,27 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         }'
     ```
 
-    Immediately start the worker inside its container; do not wait for D1 to become ready first:
+    Start the Decode worker at the same time as D1:
 
     ```bash
     nohup bash run_decode_worker.sh > decode.log 2>&1 &
     ```
 
-    Both Decode nodes must join before the distributed Decode service can become ready.
+    Both Decode nodes must join before the distributed Decode group can become ready.
 
     **Load-balance Proxy**
 
-    Download [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py) from the official repository and save it as `/workspace/load_balance_proxy_server_example.py` inside the Prefill container.
+    Download [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py) from the official repository and save it as `/workspace/load_balance_proxy_server_example.py` on a node that can reach the Prefill and both Decode API ports.
 
-    After Prefill and the Decode head print `Application startup complete`, run the following
-    inside the Prefill container:
+    After Prefill, D1, and D2 print `Application startup complete`, save the following as `proxy_server.sh` and start it:
 
     ```bash
+    #!/usr/bin/env bash
+    set -e
+
+    export no_proxy="${no_proxy:+${no_proxy},}<PREFILL_NODE_IP>,<DECODE1_NODE_IP>,<DECODE2_NODE_IP>"
+    export NO_PROXY="$no_proxy"
+
     PREFILL_IP="<PREFILL_NODE_IP>"
     DECODE1_IP="<DECODE1_NODE_IP>"
     DECODE2_IP="<DECODE2_NODE_IP>"
@@ -1169,16 +1195,18 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         --host 0.0.0.0 \
         --port 19080 \
         --prefiller-hosts "$PREFILL_IP" \
-        --prefiller-ports 19100 \
-        --decoder-hosts \
-            "$DECODE1_IP" "$DECODE1_IP" "$DECODE1_IP" "$DECODE1_IP" \
-            "$DECODE2_IP" "$DECODE2_IP" "$DECODE2_IP" "$DECODE2_IP" \
-        --decoder-ports \
-            19200 19201 19202 19203 \
-            19204 19205 19206 19207 \
+        --prefiller-ports 31050 \
+        --decoder-hosts "$DECODE1_IP" "$DECODE2_IP" \
+        --decoder-ports 31060 31060 \
         --max-retries 0 \
         --workers 4
     ```
+
+    ```bash
+    bash proxy_server.sh
+    ```
+
+    Each Decode node registers one endpoint that fronts its two local DP ranks, so the proxy lists two Decode hosts even though the DP group has four ranks. Send requests to port `19080` with model name `minimax-m3.1-flash`.
 
 ## 6 Functional Verification
 
