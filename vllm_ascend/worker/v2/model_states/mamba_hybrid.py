@@ -102,12 +102,14 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         ``initialize_from_forward_context``)."""
         if self._layer_state_ranges is None:
             assert self._mamba_spec is not None
-            num_state_types = len(self.model.get_mamba_state_copy_func())
             ranges: dict[str, tuple[int, int]] = {}
             idx = 0
             for mamba_group_id in self._mamba_group_ids:
-                layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
-                for layer_name in layer_names:
+                group = kv_cache_config.kv_cache_groups[mamba_group_id]
+                for layer_name in group.layer_names:
+                    # Match the per-type rows populated by the existing copy context.
+                    spec = mamba_utils._get_mamba_spec_for_layer(group, layer_name)
+                    num_state_types = len(self._mamba_state_copy_funcs[spec.mamba_type])
                     ranges[layer_name] = (idx, idx + num_state_types)
                     idx += num_state_types
             self._layer_state_ranges = ranges
@@ -341,7 +343,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         pcp_manager = getattr(self, "pcp_manager", None)
         pcp_context = None
-        if pcp_manager is not None and model_uses_kpool_indexer(self.vllm_config.model_config):
+        if (
+            pcp_manager is not None
+            and model_uses_kpool_indexer(self.vllm_config.model_config)
+            and pcp_manager.is_target_attn_groups(attn_groups)
+        ):
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
         if pcp_context is not None and not input_batch.is_dummy:
             # PCP turns one prefill request into two rank-local segments. The
@@ -378,20 +384,19 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             )
             local_metadata.update(global_metadata)
             self.attn_metadata = local_metadata
-            return local_metadata
-
-        self.attn_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
-            self,
-            input_batch,
-            cudagraph_mode,
-            block_tables,
-            slot_mappings,
-            attn_groups,
-            kv_cache_config,
-            for_capture,
-            use_pcp_padding=pcp_context is not None,
-            pcp_context=pcp_context,
-        )
+        else:
+            self.attn_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
+                self,
+                input_batch,
+                cudagraph_mode,
+                block_tables,
+                slot_mappings,
+                attn_groups,
+                kv_cache_config,
+                for_capture,
+                use_pcp_padding=pcp_context is not None,
+                pcp_context=pcp_context,
+            )
         if self.recoverssm is not None:
             self.recoverssm.record_step(self.attn_metadata, attn_groups, for_capture=for_capture)
         return self.attn_metadata

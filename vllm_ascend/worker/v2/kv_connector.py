@@ -29,6 +29,9 @@ class MambaCopyKVConnector(KVConnector):
     def finish_forward(self) -> None:
         self._connector.finish_forward()
 
+    def finalize_step(self) -> None:
+        self._connector.finalize_step()
+
     def post_forward(self, finished_req_ids: set[str], *args: Any, **kwargs: Any) -> "KVConnectorOutput | None":
         return self._connector.post_forward(finished_req_ids, *args, **kwargs)
 

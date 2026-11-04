@@ -3,7 +3,7 @@
 """Exercise real Sink loaders, checkpoint mappings and layerwise reload on CPU.
 
 TP sharding belongs to load_weights, before the parameter's current loader is
-called. DSA CP keeps the full Sink. Direct copy_ bypasses the reload wrapper and
+called. Direct copy_ bypasses the reload wrapper and
 loses updates made while the parameter is on meta.
 """
 
@@ -99,12 +99,11 @@ def sink_path(request, monkeypatch):
     monkeypatch.setattr(target_module, "is_pp_missing_parameter", lambda *_: False)
     monkeypatch.setattr(dspark_module, "process_eagle_weight", lambda *_: None)
 
-    def build(*, tp_size, tp_rank, dsa_cp=False, with_weight_loader=False):
+    def build(*, tp_size, tp_rank, with_weight_loader=False):
         module = modules[path]
         monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: tp_size)
         monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: tp_rank)
-        monkeypatch.setattr(module, "enable_dsa_cp", lambda: dsa_cp)
-        attention = _SinkAttention(TOTAL_HEADS if dsa_cp else TOTAL_HEADS // tp_size, with_weight_loader)
+        attention = _SinkAttention(TOTAL_HEADS // tp_size, with_weight_loader)
         model = _SinkOnlyModel(attention, path)
         load_weights = loaders[path].__get__(model)
         return SimpleNamespace(
@@ -117,18 +116,16 @@ def sink_path(request, monkeypatch):
     return build
 
 
-def _expected_sink(weight, tp_size, tp_rank, dsa_cp):
-    if dsa_cp:
-        return weight
+def _expected_sink(weight, tp_size, tp_rank):
     heads_per_rank = TOTAL_HEADS // tp_size
     return weight[tp_rank * heads_per_rank : (tp_rank + 1) * heads_per_rank]
 
 
-def _check_load(case, *, tp_size, tp_rank, dsa_cp, with_weight_loader):
+def _check_load(case, *, tp_size, tp_rank, with_weight_loader):
     weight = torch.arange(TOTAL_HEADS, dtype=torch.float32)
     param = case.attention.attn_sink
     original_value = param.detach().clone()
-    expected = _expected_sink(weight, tp_size, tp_rank, dsa_cp)
+    expected = _expected_sink(weight, tp_size, tp_rank)
 
     assert case.load(weight) == {case.parameter_name}
     assert dict(case.model.named_parameters())[case.parameter_name] is param
@@ -148,26 +145,18 @@ def _check_load(case, *, tp_size, tp_rank, dsa_cp, with_weight_loader):
 @pytest.mark.parametrize("with_weight_loader", [True, False], ids=["custom", "default"])
 def test_attention_sink_tp_loading(sink_path, tp_size, tp_rank, with_weight_loader):
     case = sink_path(tp_size=tp_size, tp_rank=tp_rank, with_weight_loader=with_weight_loader)
-    _check_load(case, tp_size=tp_size, tp_rank=tp_rank, dsa_cp=False, with_weight_loader=with_weight_loader)
+    _check_load(case, tp_size=tp_size, tp_rank=tp_rank, with_weight_loader=with_weight_loader)
 
 
-@pytest.mark.parametrize("with_weight_loader", [True, False], ids=["custom", "default"])
-def test_attention_sink_dsa_cp_loading(sink_path, with_weight_loader):
-    # A nonzero rank distinguishes the complete Sink from the ordinary TP slice.
-    case = sink_path(tp_size=2, tp_rank=1, dsa_cp=True, with_weight_loader=with_weight_loader)
-    _check_load(case, tp_size=2, tp_rank=1, dsa_cp=True, with_weight_loader=with_weight_loader)
-
-
-@pytest.mark.parametrize("dsa_cp", [False, True], ids=["tp", "dsa_cp"])
-def test_attention_sink_layerwise_reload(sink_path, dsa_cp):
+def test_attention_sink_layerwise_reload(sink_path):
     """The real upstream wrapper must replay two updates into original storage."""
-    case = sink_path(tp_size=2, tp_rank=1, dsa_cp=dsa_cp)
+    case = sink_path(tp_size=2, tp_rank=1)
     initial_weight = torch.arange(TOTAL_HEADS, dtype=torch.float32)
     assert case.load(initial_weight) == {case.parameter_name}
     original_param = case.attention.attn_sink
     original_value = original_param.detach().clone()
     storage_ptr = original_param.untyped_storage().data_ptr()
-    torch.testing.assert_close(original_value, _expected_sink(initial_weight, 2, 1, dsa_cp))
+    torch.testing.assert_close(original_value, _expected_sink(initial_weight, 2, 1))
     record_metadata_for_reloading(case.model)
 
     for offset in (100, 200):
@@ -180,6 +169,6 @@ def test_attention_sink_layerwise_reload(sink_path, dsa_cp):
         sink = case.attention.attn_sink
         assert sink.device.type == "cpu"
         assert sink.untyped_storage().data_ptr() == storage_ptr
-        torch.testing.assert_close(sink.detach(), _expected_sink(new_weight, 2, 1, dsa_cp))
+        torch.testing.assert_close(sink.detach(), _expected_sink(new_weight, 2, 1))
         torch.testing.assert_close(original_param.detach(), sink.detach())
     assert not torch.equal(original_param.detach(), original_value)

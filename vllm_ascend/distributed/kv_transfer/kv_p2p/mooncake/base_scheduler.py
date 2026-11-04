@@ -212,6 +212,9 @@ class MooncakeBaseConnectorScheduler:
         request._all_token_ids.pop()
         request.num_prompt_tokens -= 1
         request.max_tokens = 1
+        # Request already hashed the full prompt. Rebuild for the shortened one.
+        request.block_hashes.clear()
+        request.update_block_hashes()
         params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:

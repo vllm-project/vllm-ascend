@@ -282,7 +282,7 @@ def rope_forward_oot(
         # npu_mrope handles both full and partial rotary internally:
         # it splits query into queryRot[..., :rotary_dim] and queryPass[..., rotary_dim:],
         # where rotary_dim is inferred from cos_sin_cache.shape[-1].
-        rotary_mode = "half" if is_neox_style else "interleaved"
+        rotary_mode = "half" if is_neox_style else "interleave"
         query, key = torch_npu.npu_mrope(
             positions,
             query.contiguous().view(query.shape[0], -1),
@@ -690,8 +690,22 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None = None,
     ):
+        if positions.ndim == 1 and key is None:
+            # DFlash rotates fused context keys through the query argument.
+            # For text positions M-RoPE equals RoPE; avoid a dummy key tensor.
+            return RotaryEmbedding.forward_static(
+                positions,
+                query,
+                None,
+                self.head_size,
+                self.rotary_dim,
+                self._match_cos_sin_cache_dtype(query),
+                self.is_neox_style,
+            )
+
+        assert key is not None
         if HAS_TRITON and positions.ndim == 2 and self.mrope_interleaved:
             # todo: need cann update in 8.5.0
             return self.forward_triton(positions, query, key)
