@@ -443,17 +443,31 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         FIA operator."""
         # vLLM #60335 added `num_speculative_steps` on main.
         with self._lmhead_pad_size_context(capture_num_reqs=num_reqs):
-            super()._generate_draft(
-                num_reqs,
-                num_tokens_padded,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                num_speculative_steps,
-            )
+            if vllm_version_is("0.33.0"):
+                super()._generate_draft(
+                    num_reqs,
+                    num_tokens_padded,
+                    attn_metadata,
+                    slot_mappings,
+                    num_tokens_across_dp,
+                    cudagraph_runtime_mode,
+                    num_speculative_steps,
+                )
+            else:
+                super()._decode(
+                    num_reqs,
+                    num_tokens_padded,
+                    attn_metadata,
+                    slot_mappings,
+                    num_tokens_across_dp,
+                    cudagraph_runtime_mode,
+                    num_speculative_steps,
+                )
         if attn_metadata is not None:
             self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
+
+    # #60989 invokes _decode through the new shared AR loop.
+    _decode = _generate_draft
 
     def _multi_step_decode(
         self,

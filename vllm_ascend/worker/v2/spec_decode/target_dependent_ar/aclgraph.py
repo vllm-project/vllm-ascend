@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -17,9 +17,6 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
-    SpeculatorCudaGraphManager,
-)
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -32,12 +29,17 @@ from vllm_ascend.compilation.updatable_graph import (
     SharedSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
 )
 from vllm_ascend.worker.v2.utils import communicator_switch
+
+if vllm_version_is("0.33.0"):
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import SpeculatorCudaGraphManager
+else:
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -64,21 +66,37 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
+        decode_query_len: int | Mapping[int, int] | None = None,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        *,
+        decode_query_lens: Mapping[int, int] | None = None,
+        decode_request_sizes: Sequence[int] | None = None,
     ):
         # Upstream uses num_speculative_steps + 1 as the draft-prefill query
         # length and 1 for draft decode.
+        # vLLM #63406 keys uniform decode graphs by request count.
+        graph_kwargs = {}
+        if vllm_version_is("0.33.0"):
+            query_shapes = decode_query_len
+        else:
+            if decode_query_lens is None:
+                assert isinstance(decode_query_len, Mapping)
+                decode_query_lens = decode_query_len
+            query_shapes = decode_query_lens
+            decode_query_len = max(decode_query_lens)
+            graph_kwargs["decode_request_sizes"] = decode_request_sizes
+        assert decode_query_len is not None
         if decode_query_len > 1:
             cudagraph_mode = get_draft_prefill_cudagraph_mode(vllm_config, cudagraph_mode)
         super().__init__(
             vllm_config,
             device,
             cudagraph_mode,
-            decode_query_len,
+            query_shapes,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
+            **graph_kwargs,
         )
 
         # Upstream constructs graph managers without a speculator reference.
