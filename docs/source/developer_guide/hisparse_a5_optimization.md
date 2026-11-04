@@ -47,6 +47,10 @@ failing startup because the specialization is unavailable. The 16/32/64-row
 grouped-sort branch likewise has an ordinary resolver fallback. These fallbacks
 do not constitute full-model qualification of every configuration.
 
+Persistent block-table prefix views are optional too. An unfamiliar Core method,
+missing source or another wrapper retains the original gather/preparation path;
+view reuse must not reject startup or replace someone else's wrapper.
+
 Packed C8 eager execution uses the NPU resolver; it must not enter the older
 BF16-only Resident shortcut. The reviewed builder uses merged Core's `row_width`
 interface and current `[group, state, page]` residency layout. Retired pre-merge
@@ -58,7 +62,7 @@ remain necessary. The P/D staging protocol still requires its reviewed 16MiB
 buffer; changing that bound requires a matching chunking and ownership review.
 Removing one assertion cannot establish a valid new format or lifetime contract.
 
-The configuration/source audit passed 51 CPU cases; one adjacent-Core adapter
+The configuration/source audit passed 61 CPU cases; one adjacent-Core adapter
 test module was skipped because that test's paired checkout was unavailable.
 The actual frozen Core also passed cold contract checks on Python 3.12:
 unchanged syntax was accepted, changed private behavior was rejected, and MTP2

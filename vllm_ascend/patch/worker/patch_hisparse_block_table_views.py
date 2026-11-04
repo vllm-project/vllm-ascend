@@ -4,8 +4,9 @@
 The original gather, current lengths, sliding-window mask and dirty-row
 clearing remain bytecode-equivalent. Only the returned Tensor view objects
 are reused. The reviewed SFA consumers treat these views' metadata as read-only.
-This detached candidate is inactive until explicitly installed before capture;
-remove it when upstream BlockTables retains its own persistent prefix views.
+The opt-in HiSparse preparation installs this before capture, retaining the
+original method for unfamiliar sources or wrappers. Remove it when upstream
+BlockTables retains its own persistent prefix views.
 """
 
 import ast
@@ -77,14 +78,21 @@ def bind(original):
 
 
 def install():
+    """Leave unfamiliar methods on their original, uncached preparation path."""
     from vllm.v1.worker.gpu.block_table import BlockTables
 
     original = BlockTables.gather_block_tables
     if getattr(original, "_ascend_hisparse_persistent_prefix_views", False):
         return
-    if (
-        hashlib.sha256(Path(inspect.getsourcefile(original)).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
-        != _BLOCK_TABLE_SHA256
-    ):
-        raise RuntimeError("Re-review prefix views for the actual BlockTables source")
+    if hasattr(original, "__wrapped__"):
+        return
+    try:
+        source = inspect.getsourcefile(original)
+        if source is None:
+            return
+        digest = hashlib.sha256(Path(source).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    except (OSError, TypeError):
+        return
+    if digest != _BLOCK_TABLE_SHA256:
+        return
     BlockTables.gather_block_tables = bind(original)

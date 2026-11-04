@@ -8,7 +8,7 @@ import ast
 import importlib.util
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -56,6 +56,34 @@ def test_rebound_or_custom_tables_do_not_reuse_old_allocation_views():
     assert torch.equal(rebound[0], replacement[0][:2])
     assert owner._ascend_hisparse_prefix_views[0][0] is original[0]
     assert torch.equal(old[0], torch.ones((2, 2)))
+
+
+@pytest.mark.parametrize("source_kind", ["unreviewed", "missing", "wrapped"])
+def test_optional_prefix_cache_keeps_unfamiliar_preparation_and_current_values(monkeypatch, source_kind):
+    class OtherBlockTables:
+        def __init__(self):
+            self.values = torch.arange(12).reshape(4, 3)
+            self.calls = []
+
+        def gather_block_tables(self, rows):
+            self.calls.append(rows)
+            return (self.values[:rows],)
+
+    original = OtherBlockTables.gather_block_tables
+    if source_kind == "missing":
+        monkeypatch.setattr(VIEWS.inspect, "getsourcefile", lambda function: None)
+    elif source_kind == "wrapped":
+        original.__wrapped__ = lambda: None
+    module = ModuleType("vllm.v1.worker.gpu.block_table")
+    module.BlockTables = OtherBlockTables
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    VIEWS.install()
+    assert OtherBlockTables.gather_block_tables is original
+    owner = OtherBlockTables()
+    torch.testing.assert_close(owner.gather_block_tables(3)[0], torch.arange(9).reshape(3, 3))
+    owner.values.fill_(73)
+    torch.testing.assert_close(owner.gather_block_tables(1)[0], torch.full((1, 3), 73))
+    assert owner.calls == [3, 1]
 
 
 def test_page_descriptors_match_scalar_oracle_and_preserve_duplicate_transfer_order():
