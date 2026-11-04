@@ -1423,6 +1423,18 @@ def _setup_compile_backend(
             set(compilation_config.cudagraph_capture_sizes or []) | {reduced_cg_cap}
         )
         compilation_config.max_cudagraph_capture_size = None
+        # Main resolves separate prefill/decode sizes on the first pass. They
+        # were derived from the truncated grid, so regenerate them alongside
+        # the restored off-stride default rather than mixing two size sets.
+        # Explicit split sizes never receive reduced_cg_cap (see below).
+        for name in (
+            "prefill_cudagraph_capture_token_sizes",
+            "max_prefill_cudagraph_capture_tokens",
+            "decode_cudagraph_capture_request_sizes",
+            "max_decode_cudagraph_capture_requests",
+        ):
+            if hasattr(compilation_config, name):
+                setattr(compilation_config, name, None)
         delattr(compilation_config, "reduced_cg_cap")
 
     # Recompute cudagraph sizes before extending splitting_ops (honors the
@@ -1799,6 +1811,17 @@ def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:
     if compilation_config.max_cudagraph_capture_size is not None:
         return None
     if compilation_config.cudagraph_capture_sizes is not None:
+        return None
+    if any(
+        getattr(compilation_config, name, None) is not None
+        for name in (
+            "prefill_cudagraph_capture_token_sizes",
+            "max_prefill_cudagraph_capture_tokens",
+            "decode_cudagraph_capture_request_sizes",
+            "max_decode_cudagraph_capture_requests",
+            "max_decode_cudagraph_capture_tokens",
+        )
+    ):
         return None
 
     scheduler_config = getattr(vllm_config, "scheduler_config", None)
