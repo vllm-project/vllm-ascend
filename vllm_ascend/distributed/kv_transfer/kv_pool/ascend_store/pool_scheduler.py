@@ -3,7 +3,6 @@ import math
 from abc import ABC, abstractmethod
 from typing import Any
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
