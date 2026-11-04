@@ -163,6 +163,22 @@ class WorkerAlignmentContract(unittest.TestCase):
                     expected["randomize_inputs"] = dp_size > 1
                 runner._dummy_run.assert_called_once_with(4, **expected)
 
+    def test_parent_constructor_and_elastic_boundary(self):
+        tree = ast.parse(WORKER.read_text(encoding="utf-8"))
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "NPUWorker")
+        self.assertEqual([ast.unparse(base) for base in cls.bases], ["GPUWorker"])
+        constructor = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+        calls = [ast.unparse(n.func) for n in ast.walk(constructor) if isinstance(n, ast.Call)]
+        self.assertIn("super().__init__", calls)
+        self.assertNotIn("WorkerBase.__init__", calls)
+        scope = {}
+        path = ROOT / "vllm_ascend/worker/worker_interfaces.py"
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), scope)
+        executor = scope["UnsupportedElasticEPExecutor"]()
+        with self.assertRaisesRegex(NotImplementedError, "elastic"):
+            executor.execute("load_model")
+        executor.shutdown()
+
     def test_execution_decorators(self):
         cls = next(
             n for n in ast.parse(WORKER.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "NPUWorker"

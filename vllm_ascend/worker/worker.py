@@ -69,11 +69,12 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
+from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
-from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
+from vllm.v1.worker.worker_base import CompilationTimes
 from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
@@ -159,7 +160,7 @@ class _V1ModelRunnerFactory:
 NPUModelRunner = _V1ModelRunnerFactory()
 
 
-class NPUWorker(WorkerBase):
+class NPUWorker(GPUWorker):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -206,6 +207,14 @@ class NPUWorker(WorkerBase):
 
         configure_ascend_file_logging()
         check_ascend_device_type()
+
+        if not hasattr(GPUWorker, "_make_elastic_ep_executor"):
+            raise RuntimeError(
+                "NPUWorker inheritance requires the vLLM Worker platform hooks. "
+                "Install the vLLM commit pinned in .github/vllm-main-verified.commit."
+            )
+        if vllm_config.parallel_config.enable_fault_tolerance:
+            raise NotImplementedError("Ascend does not support the GPU fault-tolerance sentinel.")
 
         super().__init__(
             vllm_config=vllm_config,
@@ -261,6 +270,17 @@ class NPUWorker(WorkerBase):
 
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
+
+    def _validate_profiler_config(self) -> None:
+        # NPU uses TorchNPUProfilerWrapper rather than CUDA activity validation.
+        if self.profiler_config.profiler not in (None, "torch"):
+            raise ValueError("Ascend supports only the torch NPU profiler.")
+
+    def _make_elastic_ep_executor(self):
+        # Avoid the CUDA/flashinfer import chain and its thread pool entirely.
+        from vllm_ascend.worker.worker_interfaces import UnsupportedElasticEPExecutor
+
+        return UnsupportedElasticEPExecutor()
 
     def uninstall_static_kernel(self):
         import fcntl
