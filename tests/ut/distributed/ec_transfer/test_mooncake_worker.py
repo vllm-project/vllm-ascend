@@ -406,7 +406,7 @@ def test_slow_previous_put_does_not_block_next_p2p_with_shared_payload(independe
     second_key = make_embedding_key("namespace", second.spec.mm_hash)
     store.batch_is_exist.side_effect = lambda keys: [int(second_exists and key == second_key) for key in keys]
     put_started, finish_put = Event(), Event()
-    put_addresses = {}
+    put_addresses: dict[str, list[int]] = {}
 
     def put(keys, addresses, sizes, config):
         put_addresses.update(zip(keys, addresses, strict=True))
@@ -588,8 +588,10 @@ def test_only_required_waves_wait_for_a_previous_put_lease(independent, store_on
         push.source_tensor = torch.ones((1, 128))
     _admit_outputs(backend, pushes)
     if store_only:
+        cached_shard: dict[str, object] = {"cached": True}
+        writable_shard = _make_writable_shard("peer", 1000, 512)
         worker._producer_pushes.resolve_reservations.side_effect = lambda push: (
-            [{"cached": True}] if push is pushes[1] else [_make_writable_shard("peer", 1000, 512)]
+            [cached_shard] if push is pushes[1] else [writable_shard]
         )
     put_started, finish_put, waiting = Event(), Event(), Event()
 

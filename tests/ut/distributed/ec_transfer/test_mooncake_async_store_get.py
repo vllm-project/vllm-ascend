@@ -143,7 +143,7 @@ def test_cancelled_async_store_get_is_discarded_after_worker_completion():
     ):
         assert not scheduler.ensure_cache_available(request, 0)
         dispatched = scheduler.build_connector_meta(MagicMock())
-        completion = Future()
+        completion: Future[_StoreGetResult] = Future()
         # Control native GET completion deterministically; keep real worker
         # polling, outcome reporting, command delivery and result disposal.
         worker._pending.append(_PendingStoreGet(set(dispatched.store_get_requests), completion))
@@ -167,7 +167,7 @@ def test_cancelled_async_store_get_is_discarded_after_worker_completion():
 
         metadata = scheduler.build_connector_meta(MagicMock())
         assert metadata.store_get_discard == {"image"}
-        cache = {}
+        cache: dict[str, torch.Tensor] = {}
         assert worker.consume(metadata, cache) == set()
         assert worker._ready == {} and cache == {}
         assert target_ref() is None
@@ -227,7 +227,7 @@ def test_new_waiter_reuses_abandoned_get_until_terminal(cancel_new_waiter, outco
 def test_rank_outcomes_persist_across_steps_until_all_terminal_and_acknowledged(outcomes, cancelled):
     scheduler, request = _scheduler(), _request()
     workers = [AsyncStoreGetExecutor(enabled=False, device="cpu") for _ in outcomes]
-    completions = [Future() for _ in outcomes]
+    completions: list[Future[_StoreGetResult]] = [Future() for _ in outcomes]
     with (
         patch.object(module.ECMooncakeScheduler, "ensure_cache_available", return_value=True),
         patch.object(module.ECMooncakeScheduler, "request_finished", return_value=(False, None)),
@@ -271,7 +271,7 @@ def test_rank_outcomes_persist_across_steps_until_all_terminal_and_acknowledged(
         assert command.store_get_recompute == ({"image"} if not cancelled and not all_hit else set())
         for worker, report in zip(workers, reports, strict=True):
             before = (set(report.store_get_hits), set(report.store_get_misses), set(report.store_get_failures))
-            cache = {}
+            cache: dict[str, torch.Tensor] = {}
             worker.consume(command, cache)
             assert set(cache) == ({"image"} if not cancelled and all_hit else set())
             assert not worker._ready

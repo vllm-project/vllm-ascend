@@ -3,6 +3,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from threading import Event
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -73,7 +74,8 @@ def test_direct_get_delivery_failure_releases_only_confirmed_readers(failure_sta
     from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.worker import AscendProducerPushManager
 
     client, pool, _ = _client(256)
-    send, other = Future(), Future()
+    send: Future[None] = Future()
+    other: Future[None] = Future()
     client.on_get_payloads = lambda payloads: [send, other]
     loaded, _ = _get(client, ["key"])
     worker = _make_lifecycle_worker()
@@ -82,7 +84,7 @@ def test_direct_get_delivery_failure_releases_only_confirmed_readers(failure_sta
     worker._notify_completions = MagicMock()
     worker._abandon_pushes = MagicMock()
     worker._run_fanout = lambda tasks, on_submit: [task() for task in tasks]
-    reservation = Future()
+    reservation: Future[list[dict[str, Any]]] = Future()
     push, _ = manager.reserve(
         ECMooncakePushSpec("key", 32, (2, 4), "float32", "consumer", "transfer"), lambda: reservation
     )
