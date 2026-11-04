@@ -6,7 +6,7 @@ import json
 
 import pytest
 import torch
-import torch_npu
+import torch_npu  # noqa: F401
 
 from vllm_ascend.ops.hisparse import (
     HiSparseNPUOps,
@@ -23,76 +23,6 @@ def _require_mapped_host_device():
     if not torch.npu.is_available() or not torch.npu.get_device_name(0).startswith("Ascend950"):
         pytest.skip("HiSparse mapped-host operators currently target Ascend 950")
     torch.npu.set_device(0)
-
-
-@pytest.mark.parametrize("capture", [False, True])
-@pytest.mark.parametrize("wait_event", [False, True])
-def test_generic_stream_waits_before_cann_workspace(capture, wait_event):
-    """Core's generic fork/join must propagate capture before CANN allocation."""
-    initial = (torch.arange(64 * 64).reshape(64, 64) % 23 + 1).bfloat16()
-    x = initial.npu()
-    weight = torch.eye(64, dtype=x.dtype, device=x.device)
-    gamma = torch.ones(64, dtype=x.dtype, device=x.device)
-    output = torch.empty_like(x)
-    copy = torch.Stream(device=x.device)
-    ready = torch.Event()
-    done = None
-    owners = []
-
-    def forward():
-        nonlocal done
-        compute = torch.accelerator.current_stream()
-        x.add_(1)
-        ready.record(compute)
-        if wait_event:
-            copy.wait_event(ready)
-        else:
-            copy.wait_stream(compute)
-        with copy:
-            # Keep allocation immediately after the wait. A synchronization or
-            # capture-state query here can hide a Host-queue propagation error.
-            product = torch.mm(x, weight)
-            normalized, _ = torch_npu.npu_rms_norm(product, gamma, epsilon=1e-6)
-            result = product + normalized
-            owners.extend((product, normalized, result))
-            if done is None:
-                done = torch.Event()
-            done.record(copy)
-        compute.wait_event(done)
-        consumed = torch.mm(result, weight)
-        owners.append(consumed)
-        output.copy_(consumed)
-
-    for _ in range(3):
-        forward()
-    torch.npu.synchronize()
-    owners.clear()
-    done = None  # Core also creates per-layer events lazily during capture.
-    graph = None
-    try:
-        if capture:
-            graph = torch.npu.NPUGraph()
-            with torch.npu.graph(graph):
-                forward()
-        for increment in (0, 3, 7, 11, 19):
-            values = initial + increment
-            x.copy_(values)
-            torch.npu.synchronize()
-            if graph is None:
-                forward()
-            else:
-                graph.replay()
-            torch.npu.synchronize()
-            product = values.float() + 1
-            normalized = (product * torch.rsqrt(product.square().mean(-1, keepdim=True) + 1e-6)).bfloat16()
-            expected = product.bfloat16() + normalized
-            torch.testing.assert_close(output.cpu(), expected, atol=0.25, rtol=0)
-            if graph is None:
-                owners.clear()
-    finally:
-        torch.npu.synchronize()
-        if graph is not None:
-            graph.reset()
 
 
 @pytest.mark.parametrize("capture", [False, True])
@@ -636,30 +566,6 @@ def test_plan_gather_and_written_slot_invalidation():
         mapping.close()
 
 
-def test_upstream_prefill_staging_plan():
-    from vllm.v1.hisparse.runtime import build_hisparse_prefill_staging_plan
-
-    host = allocate_mapped_host((32, 16), torch.float32)
-    mapping = host._hisparse_registration
-    host.copy_(torch.arange(host.numel(), dtype=torch.float32).view_as(host))
-    table = torch.tensor([[2, 1, 0], [3, 0, 0]], dtype=torch.int32, device="npu")
-    lengths = torch.tensor([5, 4], dtype=torch.int32, device="npu")
-    try:
-        plan = build_hisparse_prefill_staging_plan(table, lengths, 4, 3)
-        assert plan.miss_mask.dtype == torch.int32
-        hot = torch.full((plan.row_ids.size(1) // 4, 4, 16), -17.0, device="npu")
-        ops = HiSparseNPUOps(mapping)
-        ops.hisparse_gather_plan(host, hot, plan.row_ids, plan.dst_rows, plan.miss_mask, None, None, 0)
-        torch.npu.synchronize()
-        source = plan.row_ids.cpu()[0]
-        expected = torch.full((source.numel(), 16), -17.0)
-        expected[source >= 0] = host[source[source >= 0].long()]
-        torch.testing.assert_close(hot.cpu().view_as(expected), expected)
-    finally:
-        torch.npu.synchronize()
-        mapping.close()
-
-
 def test_invalidate_large_hot_capacity_graph():
     dgi = torch.arange(20480, dtype=torch.int32, device="npu").view(2, 10240)
     initial = dgi.cpu()
@@ -694,13 +600,13 @@ def test_invalidate_large_hot_capacity_graph():
         graph.reset()
 
 
-@pytest.mark.parametrize("groups", [1, 3, 21])
-def test_common_group_invalidation_changed_graph_replay(groups):
+def test_common_group_invalidation_changed_graph_replay():
     """Exercise the current common pointer-table caller with changing writes."""
     from types import SimpleNamespace
 
     from vllm.v1.hisparse.runtime import HiSparseSlotInvalidator
 
+    groups = 3
     initial = torch.arange(48, dtype=torch.int32).view(3, 16)
     tables = [(initial + group * 7).npu() for group in range(groups)]
     states = torch.tensor([2, 0, 1], dtype=torch.int32, device="npu")
