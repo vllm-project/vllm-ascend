@@ -52,7 +52,7 @@ The following example uses the AArch64 image and exposes 16 devices on an A3 ser
 
     docker run --rm \
         --name vllm-ascend-qwen38-flash-next \
-        --shm-size=16g \
+        --shm-size=128g \
         --net=host \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
@@ -250,7 +250,7 @@ Select the hardware tab below.
     Before starting:
 
     - Install compatible vLLM, vLLM-Ascend, and [Mooncake](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Adjust the Mooncake library path if it differs from the Python 3.12.16 path shown below.
-    - Expose the devices used by each host and mount the same checkpoint and `/etc/hccn.conf`. Replace the example IP addresses, `eth0`, and model path with your environment settings; provide sufficient host memory for Engram CPU offload.
+    - Expose the devices used by each host and mount the same checkpoint and `/etc/hccn.conf`. Use `--shm-size=128g` for the A3 series container and each A2 series container to accommodate Engram CPU offload with DP shared memory. Ensure the host has enough available RAM; the shared-memory limit does not reserve physical memory. Replace the example IP addresses, `eth0`, and model path with your environment settings.
     - Run P and D in separate terminals. After both APIs are ready, start the proxy from the vLLM-Ascend repository root.
 
     For A2 series, run P on `192.168.0.1` and D on `192.168.0.2`, keeping each role's four DP replicas on its own host:
