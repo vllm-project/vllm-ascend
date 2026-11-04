@@ -18,8 +18,6 @@ Prefill and 16B during Decode.
 For 950DT products (A5), this guide covers single-node deployment, ordinary
 1P1D with SWA bounded replay on Prefill, and 1P1D with a Memcache DRAM pool.
 Section 5.2 also covers experimental PCP8 Prefill and multi-node EP16 Decode.
-For 950DT, use the image built from `releases/v0.32.0rc` in the
-[950DT installation tab](#41-docker-image-installation).
 
 The model introduces Compressed Sparse Attention 2 (CSA2), FP4 main KV cache,
 SWA Bounded Replay, Single-Pass mHC, Engram conditional memory, and DSpark
@@ -42,10 +40,6 @@ For source builds, use the upstream vLLM tag recorded in
 
 ## 2 Supported Features
 
-For 950DT products, the examples use model runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`)
-and the original MXFP checkpoint. Single-node deployment and both roles in
-ordinary 1P1D use DP8/TP1/EP8.
-
 Refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md)
 for the complete support matrix and the
 [Feature Guide](../../user_guide/feature_guide/index.md) for feature
@@ -56,6 +50,10 @@ and model runner V2. The single-node colocated configuration uses DP4/TP4.
 The PD configuration uses DP4/PCP4/TP1 on the Prefill node, DP16/TP1 on the
 Decode node, SWA bounded replay and MegaMoE on Prefill, DSpark speculative
 decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode.
+
+For 950DT products, the examples use model runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`)
+and the original MXFP checkpoint. Single-node deployment and both roles in
+ordinary 1P1D use DP8/TP1/EP8.
 
 ## 3 Prerequisites
 
@@ -73,6 +71,10 @@ Download the quantized checkpoint from ModelScope for the hardware shown below.
 | `DeepSeek-V4.1-Flash-1017-w8a8` | A3 series (64GB × 16) | 1 node for single-node deployment; 2 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8) | Also supported. For PD, use Prefill DP4/TP4 and Decode DP8/TP2. |
 | `DeepSeek-V4.1-Flash-1017-w4a8` | A2 series (64GB × 8 per node) | 2 nodes for colocated deployment; 4 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8) | / |
 | `DeepSeek-V4.1-Flash-1017-w8a8` | A2 series (64GB × 8 per node) | 2 nodes for colocated deployment; 4 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8) | / |
+
+For 950DT products, use the original MXFP checkpoint, including the DSpark
+parameters and Engram tables. Set `<YOUR_MODEL_PATH>` to its local directory
+and use `--quantization deepseek_v4_fp8`.
 
 Alternatively, use [ModelSlim](https://github.com/Ascend/msmodelslim) to
 prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
@@ -95,19 +97,13 @@ Use one of the following hardware configurations:
 - **A5 single-node colocated** uses one server with eight Ascend950DT NPUs
   and 96 GiB of HBM per NPU (DP8/TP1/EP8).
 - **A5 1P1D** uses two such servers, one per role. Memcache pooling also
-  needs host DRAM alongside Engram offload. The optional EP16 Decode example
-  uses a second Decode server.
+  needs host DRAM alongside Engram offload.
 - **A3 single-node colocated**: one Atlas 800I A3 server with 8 NPUs and 128GB
   memory per NPU. The server exposes 16 logical devices to the container.
 - **A3 1P1D**: two Atlas 800I A3 servers with the same device configuration.
 - **A2 series**: two Atlas 800I A2 servers. Each server has 8 NPUs with 64GB
   memory per NPU and exposes 8 devices to the container.
 - **A2 1P1D**: four Atlas 800I A2 servers with the same device configuration.
-
-For 950DT products, use the original DeepSeek-V4.1-Flash MXFP checkpoint
-with `--quantization deepseek_v4_fp8`, including its DSpark parameters and
-Engram tables. Use its actual local directory as `<YOUR_MODEL_PATH>`; the
-ModelSlim checkpoints are for the A2/A3 examples.
 
 Store the checkpoint in a shared directory or copy it to the same absolute
 path on every server.
@@ -211,33 +207,18 @@ separate images from the v0.32.0 release branch.
 
 === "950DT products"
 
-    From the root of your vLLM Ascend checkout, build the A5 image with the
-    upstream vLLM revision selected by this branch:
+    On each participating server, pull the A5 Ubuntu image for the
+    `releases/v0.32.0rc` branch. Set `MODEL_ROOT` to the parent directory of the checkpoint.
 
     ```bash
-    export IMAGE="vllm-ascend-a5:$(git rev-parse --short HEAD)"
-    docker build -f Dockerfile.a5 \
-      --build-arg VLLM_TAG="$(cat .github/vllm-release-tag.commit)" \
-      -t "$IMAGE" .
-    ```
-
-    On each participating server, set `IMAGE` to the tag of the image you
-    built or the reference or digest of a matching prebuilt image. Set
-    `MODEL_ROOT` to the parent directory of the checkpoint on each host.
-    Prepare the host driver for the selected image and verify it with
-    `npu-smi info`; see the [installation guide](../../getting_started/installation.md).
-    The complete driver mount includes the A5 topology files. The PD scripts
-    use `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` for automatic UB resource
-    generation; see the [PD communication guide](../features/pd_disaggregation_mooncake_multi_node.md#atlas-850850e950-superpod-communication-configuration).
-
-    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-releases-v0.32.0rc-a5
     export MODEL_ROOT="/data/weights"
     export NPU_SMI="$(command -v npu-smi)"
 
+    docker pull "$IMAGE"
     docker run --rm -it \
       --name deepseek-v41-950dt \
       --net=host \
-      --ulimit nofile=65536:524288 \
       --shm-size=512g \
       --privileged=true \
       --device /dev/davinci0 \
@@ -277,9 +258,6 @@ Change `MODEL_ROOT` if the checkpoint is stored elsewhere. Keep the same
 absolute path inside and outside every container.
 
 ### 4.2 Source Code Installation
-
-For 950DT products, use the Dockerfile and vLLM revision from the
-[950DT installation tab](#41-docker-image-installation).
 
 To build from source, follow the
 [software environment installation guide](../../getting_started/installation.md#installation-software-environment)
@@ -600,7 +578,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         --reasoning-parser deepseek_v41 \
         --enable-auto-tool-choice \
         --trust-remote-code \
-        --enable-prefix-caching \
+        --no-enable-prefix-caching \
         --no-swa-bounded-replay \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":false}' \
@@ -811,7 +789,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     - On Prefill, enable local prefix caching and `--swa-bounded-replay`.
       After a prefix hit, the engine reuses cached non-SWA blocks and
       recomputes the trailing SWA window.
-    - On Decode, enable local prefix caching and set
+    - On Decode, disable local prefix caching and set
       `scheduler_config.recompute_scheduler_enable` to `true`. The recompute
       scheduler cannot perform bounded replay, so use `--no-swa-bounded-replay`.
     - Set `--max-num-batched-tokens` to `5120` on Prefill and `1024` on Decode.
@@ -2033,7 +2011,7 @@ uses bulk pool access: set `use_layerwise` to `false` on both roles.
 
 Set `--max-num-batched-tokens` to `4096` on Prefill and disable local prefix
 caching so that repeated-prefix requests exercise the external pool. On
-Decode, use `1024` batch tokens and enable local prefix caching.
+Decode, use `1024` batch tokens and disable local prefix caching.
 
 ##### 5.3.5.1 Prepare Memcache
 
@@ -2170,7 +2148,7 @@ exec vllm serve "$MODEL_PATH" \
     --reasoning-parser deepseek_v41 \
     --enable-auto-tool-choice \
     --trust-remote-code \
-    --enable-prefix-caching \
+    --no-enable-prefix-caching \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":false}' \
     --additional-config '{
@@ -2902,10 +2880,11 @@ extensions in [A5 Deployment Extensions](#a5-deployment-extensions).
 | 1P1D Decode | 8 | 8 / 1 / 1 | 64 | 1024 | 0.92 | FULL_DECODE_ONLY |
 
 These configurations use DSpark with five speculative tokens and Engram
-host offloading. Ordinary 1P1D enables local prefix caching on both roles
-and SWA bounded replay on Prefill. The [Memcache example](#535-950dt-products-with-memcache-kv-cache-pool)
+host offloading. In ordinary 1P1D, Prefill enables local prefix caching
+and SWA bounded replay. The [Memcache example](#535-950dt-products-with-memcache-kv-cache-pool)
 uses `4096` batch tokens on Prefill with local prefix caching disabled to
-measure external hits. Decode uses `1024` in both examples.
+measure external hits. In both examples, Decode uses `1024` batch tokens
+and disables local prefix caching.
 
 #### Workload-Specific Tuning
 
