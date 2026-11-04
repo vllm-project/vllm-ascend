@@ -37,7 +37,9 @@ from vllm_ascend.worker.v2.aclgraph_utils import (
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 if vllm_version_is("0.33.0"):
-    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import SpeculatorCudaGraphManager
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (  # type: ignore[import-not-found]
+        SpeculatorCudaGraphManager,
+    )
 else:
     from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
 
@@ -86,7 +88,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             query_shapes = decode_query_lens
             decode_query_len = max(decode_query_lens)
             graph_kwargs["decode_request_sizes"] = decode_request_sizes
-        assert decode_query_len is not None
+        assert isinstance(decode_query_len, int)
         if decode_query_len > 1:
             cudagraph_mode = get_draft_prefill_cudagraph_mode(vllm_config, cudagraph_mode)
         super().__init__(
