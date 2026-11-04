@@ -179,6 +179,63 @@ class WorkerAlignmentContract(unittest.TestCase):
             executor.execute("load_model")
         executor.shutdown()
 
+    def test_unsupported_interfaces_raise(self):
+        for name in (
+            "checkpoint_prepare",
+            "checkpoint_restore",
+            "handle_ft_command",
+            "save_tensorized_model",
+            "_compile_or_warm_up_model",
+            "_get_cudagraph_capture_context",
+            "start_draft_weight_update",
+        ):
+            with self.subTest(interface=name), self.assertRaisesRegex(NotImplementedError, "Ascend"):
+                worker_method(name)(SimpleNamespace())
+
+    def test_shutdown_order_and_eplb_failure(self):
+        class EPLB:
+            def __init__(self, events, fail):
+                self.events, self.fail = events, fail
+
+            def close(self):
+                self.events.append("eplb")
+                if self.fail:
+                    raise RuntimeError("EPLB still running")
+
+        for fail in (False, True):
+            events = []
+
+            def resource(name, events=events):
+                return SimpleNamespace(shutdown=lambda events=events: events.append(name))
+
+            worker = SimpleNamespace(
+                model_runner=resource("runner"),
+                profiler=resource("profiler"),
+                weight_transfer_engine=resource("engine"),
+                elastic_ep_executor=resource("elastic"),
+                _pp_send_work=[SimpleNamespace(wait=lambda events=events: events.append("pp"))],
+            )
+            worker.model_runner.eplb_state = EPLB(events, fail)
+            shutdown = worker_method(
+                "shutdown",
+                AscendEplbState=EPLB,
+                gc=SimpleNamespace(unfreeze=lambda events=events: events.append("gc")),
+                ensure_kv_transfer_shutdown=lambda events=events: events.append("kv"),
+                ensure_ec_transfer_shutdown=lambda events=events: events.append("ec"),
+                CaMemAllocator=SimpleNamespace(
+                    instance=SimpleNamespace(release_pools=lambda events=events: events.append("pools"))
+                ),
+            )
+            if fail:
+                with self.assertRaisesRegex(RuntimeError, "EPLB"):
+                    shutdown(worker)
+                self.assertEqual(events, ["eplb"])
+            else:
+                shutdown(worker)
+                self.assertEqual(
+                    events, ["eplb", "pp", "gc", "kv", "ec", "profiler", "engine", "elastic", "runner", "pools"]
+                )
+
     def test_execution_decorators(self):
         cls = next(
             n for n in ast.parse(WORKER.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "NPUWorker"

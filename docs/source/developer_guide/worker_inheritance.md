@@ -31,3 +31,49 @@ V1/V2, 310P and Xlite retain NPU device initialization and their existing runner
 construction paths in this phase. Parent `init_device` is never called.
 Runtime startup and serving qualification remain required before merging this
 stack; portable contract tests are not a substitute for those checks.
+
+## Newly visible interfaces (phase 1b)
+
+Every method newly reachable at phase 1a is listed below. Private helpers are
+listed too; a helper kept for a future migration is not an advertised RPC.
+
+| Interface | Classification | Contract |
+| --- | --- | --- |
+| `_after_pp_send` | Deferred to phase 4 | GPU default is unused until Ascend supplies connector output handling |
+| `_before_execute_model` | Deferred to phase 4 | Default empty extension point, not an RPC capability |
+| `_compile_or_warm_up_model` | Unsupported | GPU compilation and warmup raises explicitly |
+| `_get_cudagraph_capture_context` | Unsupported | CUDA graph capture profiling raises explicitly |
+| `_get_pp_all_gather_group` | Deferred to phase 4 | Default TP transport; NPU execution still overrides it |
+| `_get_sleep_parameters` | Conditional | CPU parameter inventory; NPU sleep uses its own retention policy |
+| `_init_workspace_and_model_runner` | Unsupported | GPU workspace and model-runner initialization raises explicitly |
+| `_make_model_runner` | Unsupported | GPU model-runner construction raises explicitly |
+| `_maybe_activate_jit_monitor` | Unsupported | GPU JIT monitoring raises explicitly |
+| `_scoped_allocator_max_split` | Unsupported | CUDA allocator split tuning raises explicitly |
+| `_set_draft_weight_update_target` | Conditional | Requires verified runner and engine draft support |
+| `_start_weight_update` | Deferred to phase 3 | Internal helper only; public NPU update overrides remain in place |
+| `_weight_checksum_prefix` | Supported | Device-independent runner forwarding or tensor/rank bookkeeping |
+| `annotate_profile` | Conditional | Profiler wrapper annotations; phase 4 retains NPU iteration behavior |
+| `checkpoint_prepare` | Unsupported | CUDA distributed checkpoint preparation raises explicitly |
+| `checkpoint_restore` | Unsupported | CUDA distributed checkpoint restore raises explicitly |
+| `compute_weight_checksums` | Supported | Device-independent runner forwarding or tensor/rank bookkeeping |
+| `discard` | Unsupported until phase 3 | Fails via the explicit sleep backend boundary |
+| `elastic_ep_execute` | Unsupported | Executor raises without CUDA imports |
+| `get_compilation_match_table` | Supported | Device-independent runner forwarding or tensor/rank bookkeeping |
+| `get_draft_model` | Conditional | V1/V2 runner returns the draft module or None |
+| `get_encoder_timing_stats` | Supported | Device-independent runner forwarding or tensor/rank bookkeeping |
+| `handle_ft_command` | Unsupported | GPU fault-tolerance commands raises explicitly |
+| `randomize_dummy_inputs` | Supported | DP configuration and upstream randomization setting |
+| `reset_mm_cache` | Supported | Both runners expose the upstream cache reset contract |
+| `reset_weights` | Supported | Device-independent runner forwarding or tensor/rank bookkeeping |
+| `save_sharded_state` | Conditional | Generic CPU state export; 310P retains its custom serializer |
+| `save_tensorized_model` | Unsupported | CUDA tensorized model export raises explicitly |
+| `shutdown_weight_transfer_engine` | Supported | Close transfer connection through engine shutdown |
+| `sleep_mode_backend` | Unsupported until phase 3 | Never select CuMem on NPU |
+| `start_draft_weight_update` | Unsupported | draft weight updates before transfer contract migration raises explicitly |
+| `supports_draft_weight_updates` | Unsupported until phase 3 | Returns False rather than advertising unverified draft updates |
+
+Shutdown order is: stop Ascend EPLB, drain PP device sends, unfreeze GC, stop KV
+and encoder connectors, profiler, transfer engine, elastic executor, model
+runner, then release existing CaMem pools. An EPLB close failure prevents
+releasing resources it may still be using. No CaMem instance is created during
+shutdown. GPU sentinel and executor resources are never allocated on NPU.

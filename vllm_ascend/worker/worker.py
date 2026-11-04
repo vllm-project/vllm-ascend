@@ -282,6 +282,46 @@ class NPUWorker(GPUWorker):
 
         return UnsupportedElasticEPExecutor()
 
+    def checkpoint_prepare(self, *args, **kwargs):
+        raise NotImplementedError("Ascend does not support CUDA distributed checkpoint preparation.")
+
+    def checkpoint_restore(self, *args, **kwargs):
+        raise NotImplementedError("Ascend does not support CUDA distributed checkpoint restore.")
+
+    def handle_ft_command(self, *args, **kwargs):
+        raise NotImplementedError("Ascend does not support GPU fault-tolerance commands.")
+
+    def save_tensorized_model(self, *args, **kwargs):
+        raise NotImplementedError("Ascend does not support CUDA tensorized model export.")
+
+    def _compile_or_warm_up_model(self, *args, **kwargs):
+        raise NotImplementedError("Ascend does not support GPU compilation and warmup.")
+
+    def _get_cudagraph_capture_context(self, *args, **kwargs):
+        raise NotImplementedError("Ascend does not support CUDA graph capture profiling.")
+
+    def _maybe_activate_jit_monitor(self, *args, **kwargs):
+        raise NotImplementedError("Ascend does not support GPU JIT monitoring.")
+
+    def _scoped_allocator_max_split(self, *args, **kwargs):
+        raise NotImplementedError("Ascend does not support CUDA allocator split tuning.")
+
+    def _init_workspace_and_model_runner(self, *args, **kwargs):
+        raise NotImplementedError("Ascend does not support GPU workspace and model-runner initialization.")
+
+    def _make_model_runner(self, *args, **kwargs):
+        raise NotImplementedError("Ascend does not support GPU model-runner construction.")
+
+    def start_draft_weight_update(self, *args, **kwargs):
+        raise NotImplementedError("Ascend does not support draft weight updates before transfer contract migration.")
+
+    def supports_draft_weight_updates(self) -> bool:
+        return False
+
+    @property
+    def sleep_mode_backend(self):
+        raise NotImplementedError("Ascend sleep requires the CaMem backend; the GPU backend is unsupported.")
+
     def uninstall_static_kernel(self):
         import fcntl
         import os
@@ -473,6 +513,10 @@ class NPUWorker(GPUWorker):
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
         if isinstance(state, AscendEplbState):
             state.close()
+        for handle in getattr(self, "_pp_send_work", ()):
+            handle.wait()
+        self._pp_send_work = []
+        gc.unfreeze()
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
         if ensure_ec_transfer_shutdown is not None:
@@ -484,10 +528,16 @@ class NPUWorker(GPUWorker):
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
 
+        if executor := getattr(self, "elastic_ep_executor", None):
+            executor.shutdown()
+
         if model_runner := getattr(self, "model_runner", None):
             shutdown_fn = getattr(model_runner, "shutdown", None)
             if callable(shutdown_fn):
                 shutdown_fn()
+
+        if CaMemAllocator.instance is not None:
+            CaMemAllocator.instance.release_pools()
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks

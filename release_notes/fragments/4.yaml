@@ -1,0 +1,4 @@
+pr: 4
+entries:
+  - category: bugfix
+    text: Unsupported GPU Worker interfaces now fail explicitly and shutdown drains pipeline work before releasing NPU resources.
