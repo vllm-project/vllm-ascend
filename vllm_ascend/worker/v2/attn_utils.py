@@ -1243,7 +1243,13 @@ def _allocate_kv_cache(
     # backing allocation. The group count is derived from kv_cache_config
     # below rather than being fixed here.
     text_config = getattr(getattr(vllm_config, "model_config", None), "hf_text_config", None)
-    is_step_model = getattr(text_config, "model_type", None) in ("step3p5", "step3p7")
+    is_step_model = getattr(text_config, "model_type", None) in (
+        "step3p5",
+        "step3p7",
+        "step5",
+        "step5_vl",
+        "step5_mtp",
+    )
 
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next): use the model-owned planner and
     # build the layout from the cache groups themselves. Allocate
@@ -1319,7 +1325,7 @@ def _allocate_kv_cache(
 
     # Hybrid groups share one backing; descriptors carry per-layer offsets.
     hybrid_backing: torch.Tensor | None = None
-    step_backing: torch.Tensor | None = None
+    step_backings: dict[tuple[int, int], torch.Tensor] = {}
     # Match the paired planner's model scope. Generic DeepSeek/GLM SFA groups
     # also contain MLA and indexer specs, but retain independent allocations.
     # K3.1 PP ranks with only recurrent or draft layers still use paired backing.
@@ -1411,15 +1417,17 @@ def _allocate_kv_cache(
 
         if is_step_model:
             # Step-3.5/3.7 describe interleaved full/sliding groups with
-            # descriptors that all start at offset zero. They therefore need
-            # one backing allocation, with each layer receiving its own
-            # contiguous view inside it. Allocating per layer multiplies the
-            # budget by the group count and causes KV cache initialization OOM.
+            # descriptors that all start at offset zero. Step5 additionally
+            # splits the pool by page size (main 96 KiB pages alias one
+            # backing exactly as before; the 32 KiB CSA tail ring and 4 KiB
+            # sparse summary get their own).
+            backing_key = kv_cache_tensor.size
+            step_backing = step_backings.get(backing_key)
             if step_backing is None:
-                tensor_sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
-                if len(tensor_sizes) != 1:
-                    raise ValueError("Step KV cache tensors must share one backing allocation.")
-                step_backing = _allocate_int8_cache_tensor(tensor_sizes.pop(), alignment, device)
+                step_backing = _allocate_int8_cache_tensor(
+                    kv_cache_tensor.size, alignment, device
+                )
+                step_backings[backing_key] = step_backing
             for layer_idx, layer_name in enumerate(shared_names):
                 layer_spec = layer_kv_cache_spec[layer_name]
                 layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
@@ -2122,6 +2130,79 @@ def _reshape_kv_cache_v2(
                 )
                 continue
 
+            # --- Ascend Step5 DSA auxiliary caches -------------------------
+            # The per-request CSA tail ring (CircularBufferSpec) and the
+            # per-block FP8 sparse summary page reuse the vLLM 0.33 upstream
+            # layouts; the layers unpack the raw allocation themselves in
+            # bind_kv_cache, so this only hands over the typed page view.
+            if layer_name.endswith(".csa_tail_ring"):
+                from vllm.v1.kv_cache_interface import CircularBufferSpec
+
+                if not isinstance(kv_cache_spec, CircularBufferSpec):
+                    raise TypeError(
+                        f"Step5 CSA tail ring layer {layer_name} must use a "
+                        f"CircularBufferSpec, got {type(kv_cache_spec).__name__}."
+                    )
+                if not isinstance(raw_cache, torch.Tensor):
+                    raise ValueError(
+                        f"Step5 CSA tail ring for {layer_name} must use one raw tensor."
+                    )
+                page_bytes = kv_cache_spec.page_size_bytes
+                total_bytes = raw_cache.numel() * raw_cache.element_size()
+                if total_bytes % page_bytes:
+                    raise ValueError(
+                        f"Step5 CSA tail ring for {layer_name} is not a whole number of pages."
+                    )
+                num_ring_blocks = total_bytes // page_bytes
+                if num_ring_blocks < kv_cache_config.num_blocks:
+                    raise ValueError(
+                        f"Step5 CSA tail ring for {layer_name} has fewer blocks than KVCacheManager."
+                    )
+                # One bf16 [index_k | index_z] row is 512 elements / 1024 bytes.
+                rows_per_page = page_bytes // 1024
+                kv_caches[layer_name] = raw_cache.view(torch.bfloat16).view(
+                    num_ring_blocks, rows_per_page, 512
+                )
+                continue
+            if layer_name.endswith(".sparse_summary_cache"):
+                from vllm_ascend.models.step5.sparse_attention import AscendStep5SummarySpec
+
+                if not isinstance(kv_cache_spec, AscendStep5SummarySpec) or (
+                    kv_cache_spec.dtype,
+                    kv_cache_spec.tokens_per_state,
+                    kv_cache_spec.head_size,
+                ) != (torch.uint8, 8, 256):
+                    raise TypeError(
+                        f"Step5 summary layer {layer_name} must use the uint8 "
+                        "8-token 256-wide AscendStep5SummarySpec, got "
+                        f"{type(kv_cache_spec).__name__}."
+                    )
+                if not isinstance(raw_cache, torch.Tensor):
+                    raise ValueError(
+                        f"Step5 summary cache for {layer_name} must use one raw tensor."
+                    )
+                page_bytes = kv_cache_spec.page_size_bytes
+                total_bytes = raw_cache.numel() * raw_cache.element_size()
+                if total_bytes % page_bytes:
+                    raise ValueError(
+                        f"Step5 summary cache for {layer_name} is not a whole number of pages."
+                    )
+                num_summary_blocks = total_bytes // page_bytes
+                if num_summary_blocks < kv_cache_config.num_blocks:
+                    raise ValueError(
+                        f"Step5 summary cache for {layer_name} has fewer blocks than KVCacheManager."
+                    )
+                # Real content: block_size/tokens_per_state FP8 rows at the
+                # start of each padded page (block_size stays 128 tokens); the
+                # block-strided view is the layout upstream
+                # Step5SparseSummaryCache documents as legal.
+                states_per_block = kv_cache_spec.block_size // kv_cache_spec.tokens_per_state
+                rows_per_page = page_bytes // 256
+                paged = raw_cache.view(torch.uint8).view(
+                    num_summary_blocks, rows_per_page, 256
+                )
+                kv_caches[layer_name] = paged[:, :states_per_block, :].unsqueeze(1)
+                continue
             if not isinstance(kv_cache_spec, AttentionSpec):
                 raise TypeError(f"Unsupported KV cache spec: {type(kv_cache_spec).__name__}.")
 

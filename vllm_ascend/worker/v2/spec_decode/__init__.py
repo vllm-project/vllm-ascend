@@ -89,16 +89,16 @@ def init_speculator(
         )
 
         return AscendGemma4Speculator(vllm_config, device)
-    if speculative_config.method == "mtp" and not speculative_config.use_step3p5_mtp():
+    if speculative_config.use_multi_module_mtp():
+        from vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator import AscendMultiModuleMTPSpeculator
+
+        return AscendMultiModuleMTPSpeculator(vllm_config, device)
+    if speculative_config.method == "mtp":
         from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
             AscendMTPSpeculator,
         )
 
         return AscendMTPSpeculator(vllm_config, device)
-    if speculative_config.use_multi_module_mtp():
-        from vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator import AscendMultiModuleMTPSpeculator
-
-        return AscendMultiModuleMTPSpeculator(vllm_config, device)
     if speculative_config.use_eagle():
         from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 

@@ -858,6 +858,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         AscendQuickGELU,
         AscendSiluAndMul,
         AscendSiluAndMulWithClamp,
+        AscendSwigluStepAndMul,
     )
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
@@ -895,6 +896,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
         "SiluAndMulWithClamp": AscendSiluAndMulWithClamp,
+        "SwigluStepAndMul": AscendSwigluStepAndMul,
         "RotaryEmbedding": AscendRotaryEmbedding,
         "Gemma4RotaryEmbedding": AscendGemma4RotaryEmbedding,
         "MRotaryEmbedding": AscendMRotaryEmbedding,
