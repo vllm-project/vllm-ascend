@@ -1,0 +1,6 @@
+pr: 20758
+entries:
+  - category: bugfix
+    text: >-
+      Updated Ascend V2 block-table and metadata handling to follow the vLLM
+      AttentionGroup contract for manager pages and per-backend kernel blocks.
