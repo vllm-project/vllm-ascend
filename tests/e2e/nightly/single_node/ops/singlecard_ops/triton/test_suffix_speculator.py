@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-
 from vllm.platforms import current_platform
 
 if current_platform.device_type != "npu":
@@ -58,9 +57,7 @@ def _make(k, depth, max_reqs, max_len, corpus_tokens, adaptive=False):
     )
 
     def buf(*shape):
-        return SimpleNamespace(
-            gpu=torch.zeros(*shape, dtype=torch.int32, device=DEVICE)
-        )
+        return SimpleNamespace(gpu=torch.zeros(*shape, dtype=torch.int32, device=DEVICE))
 
     req_states = SimpleNamespace(
         all_token_ids=buf(max_reqs, max_len),
@@ -508,4 +505,3 @@ def test_observe_reduces_all_requests_in_the_same_bucket():
     # First request: accept two, observe the third rejection. Second:
     # reject immediately. Third: no verdict this step.
     assert spec.accept_stats.sum(dim=0).tolist() == [[1, 2], [1, 1], [0, 1]]
-

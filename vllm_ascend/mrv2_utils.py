@@ -55,10 +55,6 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
 
     if _is_configured(spec_config):
         method = getattr(spec_config, "method", None)
-        if method == "suffix":
-            # Explicit V2 opt-in is available. Keep the default fallback until
-            # current-pin NPU E2E / TP / throughput qualification (RFC #20832).
-            reasons.append("suffix speculative decoding")
         if method in _NGRAM_SPEC_METHODS:
             reasons.append("ngram speculative decoding")
         # V2 init_speculator has no draft_model branch. Parallel drafting with
@@ -81,7 +77,6 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
 
     * VL encoder graph (``compilation_config.cudagraph_mm_encoder``)
     * draft_window_size
-    * suffix speculative decoding
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
     * draft_model speculative decoding
     * p-eagle (``eagle`` / ``eagle3`` with ``parallel_drafting``)

@@ -144,7 +144,6 @@ def test_dflash2_defaults_to_v2_and_honors_environment(monkeypatch, enforce_eage
     [
         SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mm_encoder=True)),
         SimpleNamespace(additional_config={"draft_window_size": 512}),
-        SimpleNamespace(speculative_config=SimpleNamespace(method="suffix")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram_gpu")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="draft_model", parallel_drafting=True)),
@@ -154,7 +153,6 @@ def test_dflash2_defaults_to_v2_and_honors_environment(monkeypatch, enforce_eage
     ids=[
         "vl-encoder-graph",
         "draft-window-size",
-        "suffix-speculative-decoding",
         "ngram-speculative-decoding",
         "ngram-gpu-speculative-decoding",
         "draft-model-speculative-decoding",
@@ -225,10 +223,10 @@ def test_blacklist_logs_fallback(monkeypatch):
     monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
     monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args, **kwargs: warning_calls.append(args))
 
-    config = SimpleNamespace(speculative_config=SimpleNamespace(method="suffix"))
+    config = SimpleNamespace(speculative_config=SimpleNamespace(method="ngram_gpu"))
     assert use_v2_model_runner(config) is False
     assert len(warning_calls) == 1
-    assert "suffix speculative decoding" in warning_calls[0][1]
+    assert "ngram speculative decoding" in warning_calls[0][1]
 
 
 def test_validation_is_decoupled_from_upstream():

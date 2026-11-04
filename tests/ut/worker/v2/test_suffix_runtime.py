@@ -36,17 +36,32 @@ def test_complete_upstream_protocol_is_accepted(monkeypatch):
     validate_suffix_runtime(SimpleNamespace(suffix_decoding_corpus_tokens=0))
 
 
-def test_forced_v2_fails_before_runner_construction_on_old_upstream(monkeypatch):
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
+@pytest.mark.parametrize("env_value", [None, True])
+def test_v2_fails_before_runner_construction_on_old_upstream(monkeypatch, env_value):
+    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", env_value)
     monkeypatch.setattr(upstream, "BaseSpeculator", SimpleNamespace())
     config = SimpleNamespace(speculative_config=SimpleNamespace(method="suffix"))
     with pytest.raises(ValueError, match="requires vLLM #60339"):
         mrv2_utils._validate_v2_model_runner(config)
 
 
-def test_v1_fallback_does_not_require_the_new_protocol(monkeypatch):
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+def test_explicit_v1_does_not_require_the_new_protocol(monkeypatch):
+    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", False)
     monkeypatch.setattr(upstream, "BaseSpeculator", SimpleNamespace())
     config = SimpleNamespace(speculative_config=SimpleNamespace(method="suffix"))
     mrv2_utils._validate_v2_model_runner(config)
     assert not mrv2_utils.use_v2_model_runner(config)
+
+
+@pytest.mark.parametrize("env_value", [None, False, True])
+def test_suffix_defaults_to_v2_and_honors_explicit_v1(monkeypatch, env_value):
+    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", env_value)
+    config = SimpleNamespace(speculative_config=SimpleNamespace(method="suffix", suffix_decoding_corpus_tokens=0))
+    assert mrv2_utils.use_v2_model_runner(config) is (env_value is not False)
+
+
+def test_default_v2_validates_the_complete_protocol(monkeypatch):
+    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(upstream, "BaseSpeculator", _with_hooks())
+    config = SimpleNamespace(speculative_config=SimpleNamespace(method="suffix", suffix_decoding_corpus_tokens=0))
+    mrv2_utils._validate_v2_model_runner(config)
