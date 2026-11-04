@@ -50,7 +50,8 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
-from vllm_ascend.attention.suffix_bsh_attention import capture_bsh, eligible as suffix_bsh_eligible
+from vllm_ascend.attention.suffix_bsh_attention import capture_bsh
+from vllm_ascend.attention.suffix_bsh_attention import eligible as suffix_bsh_eligible
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
@@ -280,11 +281,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.decode_threshold += spec_token_num
-            assert self.decode_threshold <= 16, (
-                f"decode_threshold exceeded \
+            assert self.decode_threshold <= 16, f"decode_threshold exceeded \
                 npu_fused_infer_attention_score TND layout's limit of 16, \
                 got {self.decode_threshold}"
-            )
 
         self.reorder_batch_threshold = self.decode_threshold
 
@@ -699,7 +698,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and output.device == query.device
         ):
             return capture_bsh(
-                self, query, key, value, attn_metadata, output,
+                self,
+                query,
+                key,
+                value,
+                attn_metadata,
+                output,
                 layer_name=self._graph_metadata_layer_name(layer),
             )
 
@@ -1303,8 +1307,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 from vllm_ascend.ops.triton.spec_decode.suffix_kv_cache import scatter
 
                 scatter(
-                    key_to_cache, value_to_cache, self.key_cache, self.value_cache,
-                    slots_to_cache, head_major=True,
+                    key_to_cache,
+                    value_to_cache,
+                    self.key_cache,
+                    self.value_cache,
+                    slots_to_cache,
+                    head_major=True,
                 )
             else:
                 DeviceOperator.reshape_and_cache(
@@ -1724,9 +1732,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
         if num_decode_tokens > 0:
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
-            assert block_size % 32 == 0, (
-                f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
-            )
+            assert (
+                block_size % 32 == 0
+            ), f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
             kv_k = self._nz_5d_view(self.key_cache, block_size)
             kv_v = self._nz_5d_view(self.value_cache, block_size)
 

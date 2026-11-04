@@ -26,9 +26,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -50,7 +49,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.sample.states import SamplingStates
     from vllm.v1.worker.gpu.states import RequestState
 
-logger = init_logger(__name__)
 
 # Odd 64-bit multiplier (golden ratio), as a signed int64.
 _HASH_MUL = 0x9E3779B97F4A7C15 - (1 << 64)
@@ -169,9 +167,7 @@ def _corpus_draft(
     tail_pos = seq_len - 1 - d_iota
     _tp = tl.where(tail_pos < 0, 0, tail_pos)
     _tp = tl.where(_tp >= row_stride, row_stride - 1, _tp)
-    tail = tl.load(
-        row + _tp, mask=(d_iota < MAX_DEPTH) & (tail_pos >= 0), other=-2
-    )
+    tail = tl.load(row + _tp, mask=(d_iota < MAX_DEPTH) & (tail_pos >= 0), other=-2)
     # Hash the trailing tokens newest-first, as ingestion does.
     hv = tl.zeros((), tl.int64)
     for d in tl.static_range(4):
@@ -183,9 +179,7 @@ def _corpus_draft(
     bucket4 = _bucket(hv, NUM_BUCKETS)
     is4 = c_iota < SLOTS
     key_len = tl.where(is4, 4, 2)
-    slot = tl.where(
-        is4, bucket4 * SLOTS + c_iota, (NUM_BUCKETS + bucket2) * SLOTS + c_iota - SLOTS
-    )
+    slot = tl.where(is4, bucket4 * SLOTS + c_iota, (NUM_BUCKETS + bucket2) * SLOTS + c_iota - SLOTS)
     vals = tl.load(table_ptr + slot)
     cpos = vals & 0xFFFFFFFF
 
@@ -198,10 +192,7 @@ def _corpus_draft(
     src_pos = tl.where(src_pos >= corpus_len, corpus_len - 1, src_pos)
     src = tl.load(
         corpus_ptr + src_pos,
-        mask=(vals[:, None] >= 0)
-        & (cpos[:, None] >= 1)
-        & (raw_src_pos >= 0)
-        & (d_iota[None, :] < MAX_DEPTH),
+        mask=(vals[:, None] >= 0) & (cpos[:, None] >= 1) & (raw_src_pos >= 0) & (d_iota[None, :] < MAX_DEPTH),
         other=-1,
     )
     miss = (src != tail[None, :]).to(tl.int32)
@@ -209,11 +200,7 @@ def _corpus_draft(
     nxt = tl.load(corpus_ptr + _cpos, mask=(vals >= 0) & (cpos >= 0) & (cpos < corpus_len), other=-1)
     ok = (vals >= 0) & (nxt >= 0) & (c_len >= key_len) & (seq_len >= key_len)
     # Both buckets often hold the same position; count it once.
-    dup = (
-        (cpos[:, None] == cpos[None, :])
-        & ok[:, None]
-        & (c_iota[:, None] < c_iota[None, :])
-    )
+    dup = (cpos[:, None] == cpos[None, :]) & ok[:, None] & (c_iota[:, None] < c_iota[None, :])
     ok = ok & (tl.max(dup.to(tl.int32), axis=0) == 0)
 
     # Continuations, cut at the first document separator.
@@ -228,11 +215,7 @@ def _corpus_draft(
 
     # Candidates sharing a match length draft identical chains; score each
     # distinct length once.
-    same_len = (
-        (c_len[:, None] == c_len[None, :])
-        & ok[:, None]
-        & (c_iota[:, None] < c_iota[None, :])
-    )
+    same_len = (c_len[:, None] == c_len[None, :]) & ok[:, None] & (c_iota[:, None] < c_iota[None, :])
     first = ok & (tl.max(same_len.to(tl.int32), axis=0) == 0)
 
     # A token's probability is its vote count over the candidates still
@@ -257,9 +240,7 @@ def _corpus_draft(
             for d in tl.static_range(K):
                 col = tl.sum(tl.where(k_iota[None, :] == d, cont, 0), axis=1)
                 has = alive & (col >= 0)
-                cnt = tl.sum(
-                    ((col[:, None] == col[None, :]) & has[None, :]).to(tl.int32), axis=1
-                )
+                cnt = tl.sum(((col[:, None] == col[None, :]) & has[None, :]).to(tl.int32), axis=1)
                 cnt = tl.where(has, cnt, 0)
                 cmax = tl.max(cnt, axis=0)
                 # Most frequent next token; ties go to the newest candidate.
@@ -387,9 +368,7 @@ def _suffix_finalize_kernel(
         observed = tl.load(stat + 1, mask=k_mask, other=0).to(tl.float32)
         conf = tl.where(draft_ok, (accepted + 1.0) / (observed + 2.0), 0.0)
         tl.store(conf_ptr + b * K + k_iota, conf, mask=k_mask)
-        tl.store(
-            last_bucket_ptr + req, tl.where(num_valid > 0, bucket, -1).to(tl.int32)
-        )
+        tl.store(last_bucket_ptr + req, tl.where(num_valid > 0, bucket, -1).to(tl.int32))
         tl.store(last_valid_ptr + req, num_valid)
 
 
@@ -420,12 +399,7 @@ def _suffix_observe_kernel(
     num_valid = tl.load(last_valid_ptr + req).to(tl.int64)
     k_iota = tl.arange(0, K_PO2).to(tl.int64)
     # Accepted positions plus the first rejected one were observed.
-    observed = (
-        (k_iota < K)
-        & (k_iota <= num_accepted)
-        & (k_iota < num_verified)
-        & (k_iota < num_valid)
-    )
+    observed = (k_iota < K) & (k_iota <= num_accepted) & (k_iota < num_verified) & (k_iota < num_valid)
     stat = stats_ptr + (bucket * K + k_iota) * 2
     tl.atomic_add(stat, (k_iota < num_accepted).to(tl.int64), mask=observed)
     tl.atomic_add(stat + 1, tl.full([K_PO2], 1, tl.int64), mask=observed)
@@ -469,9 +443,7 @@ class SuffixSpeculator(BaseSpeculator):
         # keyed on the last 4 and last 2 tokens before each position. A
         # capacity of 0 disables it.
         self.corpus_len: int = (
-            spec.suffix_decoding_corpus_tokens
-            if spec.suffix_decoding_max_cached_requests != 0
-            else 0
+            spec.suffix_decoding_corpus_tokens if spec.suffix_decoding_max_cached_requests != 0 else 0
         )
         if self.corpus_len > 0 and self.max_depth < 2:
             # Corpus matches need the 2-token hash key.
@@ -493,12 +465,8 @@ class SuffixSpeculator(BaseSpeculator):
             )
         # Validate before allocating the corpus, table, or configuration-sized
         # scratch, including when Python assertions are disabled.
-        self.scratch = torch.zeros(
-            (self.max_num_reqs, self.n_blocks), dtype=torch.int64, device=device
-        )
-        self.corpus = torch.full(
-            (max(self.corpus_len, 1),), -1, dtype=torch.int32, device=device
-        )
+        self.scratch = torch.zeros((self.max_num_reqs, self.n_blocks), dtype=torch.int64, device=device)
+        self.corpus = torch.full((max(self.corpus_len, 1),), -1, dtype=torch.int32, device=device)
         self.table = torch.full(
             (2, self.num_buckets if self.has_corpus else 1, _BUCKET_SLOTS),
             -1,
@@ -516,21 +484,15 @@ class SuffixSpeculator(BaseSpeculator):
         # Allocated only when the corpus is enabled; a disabled corpus never
         # runs the ingest chain, so no full-size buffers are held.
         if self.has_corpus:
-            self.emit_p = (
-                triton.cdiv(self.max_model_len, _INGEST_BLOCK) * _INGEST_BLOCK
-            )
+            self.emit_p = triton.cdiv(self.max_model_len, _INGEST_BLOCK) * _INGEST_BLOCK
             self.emit_c_max = 2 * self.max_num_reqs * self.emit_p
             cmax = max(self.emit_c_max, 1)
             self.emit_keys = torch.zeros(cmax, dtype=torch.float32, device=device)
             self.emit_values = torch.zeros(cmax, dtype=torch.int64, device=device)
             self.emit_prefixes = torch.zeros(cmax, dtype=torch.int64, device=device)
             t_max = triton.cdiv(cmax, _INGEST_BLOCK)
-            self.emit_summary_values = torch.zeros(
-                t_max, dtype=torch.int64, device=device
-            )
-            self.emit_summary_heads = torch.zeros(
-                t_max, dtype=torch.int32, device=device
-            )
+            self.emit_summary_values = torch.zeros(t_max, dtype=torch.int64, device=device)
+            self.emit_summary_heads = torch.zeros(t_max, dtype=torch.int32, device=device)
             self.emit_carries = torch.zeros(t_max, dtype=torch.int64, device=device)
 
         # Batch-ordered draft output, scattered into RequestState.draft_tokens
@@ -541,9 +503,7 @@ class SuffixSpeculator(BaseSpeculator):
             device=device,
         )
         # Number of real (non-filler) draft tokens per batch row.
-        self.num_valid = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
-        )
+        self.num_valid = torch.zeros(self.max_num_reqs, dtype=torch.int32, device=device)
 
         # Adaptive verification (optional): per-slot confidences from
         # acceptance statistics learned online.
@@ -558,20 +518,14 @@ class SuffixSpeculator(BaseSpeculator):
             dtype=torch.int64,
             device=device,
         )
-        self.last_bucket = torch.full(
-            (self.max_num_reqs,), -1, dtype=torch.int32, device=device
-        )
-        self.last_valid = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
-        )
+        self.last_bucket = torch.full((self.max_num_reqs,), -1, dtype=torch.int32, device=device)
+        self.last_valid = torch.zeros(self.max_num_reqs, dtype=torch.int32, device=device)
         self.num_steps = 0
         # Slots reassigned since the last propose; their stats bookkeeping
         # still belongs to the previous request.
         self.new_slots: list[int] = []
         self.sampling_states: SamplingStates | None = None
-        self.not_seeded = torch.zeros(
-            self.max_num_reqs, dtype=torch.bool, device=device
-        )
+        self.not_seeded = torch.zeros(self.max_num_reqs, dtype=torch.bool, device=device)
 
     def set_sampling_states(self, sampling_states: SamplingStates) -> None:
         self.sampling_states = sampling_states
@@ -584,9 +538,7 @@ class SuffixSpeculator(BaseSpeculator):
         states = self.sampling_states
         if states is None or not states.any_explicit_seed(req_indices):
             return None
-        seeded = states.seeds_set[req_indices] & (
-            states.temperature.np[req_indices] != 0.0
-        )
+        seeded = states.seeds_set[req_indices] & (states.temperature.np[req_indices] != 0.0)
         return seeded if seeded.any() else None
 
     def add_request(self, req_index: int) -> None:
@@ -647,9 +599,7 @@ class SuffixSpeculator(BaseSpeculator):
         # at this batch's F (num_docs), not at max_num_reqs.
         C = 2 * num_docs * self.emit_p
         T = triton.cdiv(C, _INGEST_BLOCK)
-        _suffix_ingest_emit_kernel[
-            (num_docs, triton.cdiv(self.max_model_len, _INGEST_BLOCK))
-        ](
+        _suffix_ingest_emit_kernel[(num_docs, triton.cdiv(self.max_model_len, _INGEST_BLOCK))](
             token_ids,
             token_ids.stride(0),
             docs_gpu,

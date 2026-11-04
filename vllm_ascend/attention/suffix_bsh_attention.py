@@ -11,7 +11,6 @@ from typing import Any
 
 import torch
 
-
 _BLOCK_SIZE = 128
 
 
@@ -25,12 +24,13 @@ _METADATA_CACHE = "_suffix_bsh_metadata_cache"
 
 
 def _metadata_geometry(metadata, capacity: int, width: int, max_model_len: int):
-    if type(capacity) is not int or capacity <= 0 or type(width) is not int or width != _WIDTH:
+    # Exact Python integers exclude bool and numeric cache-key aliases.
+    if type(capacity) is not int or capacity <= 0 or type(width) is not int or width != _WIDTH:  # noqa: E721
         raise ValueError("suffix BSH requires positive capacity and query width 5")
-    if type(max_model_len) is not int or max_model_len < width:
+    if type(max_model_len) is not int or max_model_len < width:  # noqa: E721
         raise ValueError("suffix BSH max_model_len must be an integer at least query width")
     num_tokens = metadata.num_actual_tokens
-    if type(num_tokens) is not int or num_tokens <= 0 or num_tokens % width:
+    if type(num_tokens) is not int or num_tokens <= 0 or num_tokens % width:  # noqa: E721
         raise ValueError("suffix BSH actual tokens must be a positive multiple of query width")
     real_rows = num_tokens // width
     if real_rows > capacity:
@@ -41,11 +41,11 @@ def _metadata_geometry(metadata, capacity: int, width: int, max_model_len: int):
         raise ValueError("suffix BSH query boundaries must cover real rows within captured capacity")
     for row in range(real_rows):
         boundary = boundaries[row]
-        if type(boundary) is not int or boundary != (row + 1) * width:
+        if type(boundary) is not int or boundary != (row + 1) * width:  # noqa: E721
             raise ValueError("suffix BSH real query boundaries must have uniform width 5")
     previous_boundary = num_tokens
     for boundary in boundaries[real_rows:]:
-        if type(boundary) is not int or not previous_boundary <= boundary <= capacity * width:
+        if type(boundary) is not int or not previous_boundary <= boundary <= capacity * width:  # noqa: E721
             raise ValueError("suffix BSH padded query boundaries must be monotone and bounded")
         previous_boundary = boundary
     if len(boundaries) > real_rows and previous_boundary != capacity * width:
@@ -66,14 +66,12 @@ def _metadata_geometry(metadata, capacity: int, width: int, max_model_len: int):
         raise ValueError("suffix BSH requires a contiguous int32 block table covering all real rows")
     kv_limit = min(max_model_len, table.shape[1] * _BLOCK_SIZE)
     real_lengths = list(lengths[:real_rows])
-    if any(type(length) is not int or not width <= length <= kv_limit for length in real_lengths):
+    if any(type(length) is not int or not width <= length <= kv_limit for length in real_lengths):  # noqa: E721
         raise ValueError("suffix BSH KV lengths exceed query/model/block-table bounds")
     return real_rows, real_lengths, table
 
 
-def prepare_metadata(
-    metadata, capacity: int, width: int, *, max_model_len: int
-) -> tuple[list[int], torch.Tensor]:
+def prepare_metadata(metadata, capacity: int, width: int, *, max_model_len: int) -> tuple[list[int], torch.Tensor]:
     """Return one immutable CPU-length/device-table snapshot per metadata build.
 
     A TND synthetic tail can cover several BSH rows. Only num_actual_tokens /
@@ -84,7 +82,7 @@ def prepare_metadata(
     """
     # bool/float keys compare equal to integers in a dict; do not let a cached
     # valid shape turn an invalid subsequent API argument into a cache hit.
-    if type(capacity) is not int or type(width) is not int or type(max_model_len) is not int:
+    if type(capacity) is not int or type(width) is not int or type(max_model_len) is not int:  # noqa: E721
         raise ValueError("suffix BSH capacity, width, and max_model_len must be integers")
     cache_key = (capacity, width, max_model_len)
     cache = getattr(metadata, _METADATA_CACHE, None)
@@ -143,7 +141,8 @@ def eligible(impl, query, metadata, width: int = _WIDTH) -> bool:
     if (
         width != _WIDTH
         or getattr(metadata, "uses_pcp_sharded_layout", False)
-        or metadata.attn_state not in (
+        or metadata.attn_state
+        not in (
             AscendAttentionState.DecodeOnly,
             AscendAttentionState.SpecDecoding,
             AscendAttentionState.ChunkedPrefill,
@@ -187,6 +186,7 @@ def capture_bsh(impl, query, key, value, metadata, output, width: int = _WIDTH, 
     operator tests may call it directly with explicit geometry and layer identity.
     """
     import torch_npu
+
     from vllm_ascend.compilation.updatable_graph import get_capture_resource, register_task
 
     if (
@@ -211,8 +211,11 @@ def capture_bsh(impl, query, key, value, metadata, output, width: int = _WIDTH, 
     key, value, block_size, original_table, _ = impl._get_fia_params(key, value, metadata)
     if block_size != _BLOCK_SIZE or original_table is not metadata.block_tables:
         raise ValueError("suffix BSH requires the original paged block table and 128-token blocks")
-    cache_shape = ((impl.num_kv_heads, block_size, impl.head_size) if impl.use_bnsd_kv_cache
-                   else (block_size, impl.num_kv_heads * impl.head_size))
+    cache_shape = (
+        (impl.num_kv_heads, block_size, impl.head_size)
+        if impl.use_bnsd_kv_cache
+        else (block_size, impl.num_kv_heads * impl.head_size)
+    )
     for cache in (key, value):
         if (
             cache.ndim != len(cache_shape) + 1
@@ -254,9 +257,18 @@ def capture_bsh(impl, query, key, value, metadata, output, width: int = _WIDTH, 
     workspace_limit = min(max_model_len, table.shape[1] * block_size)
     workspace_key = (
         "suffix_bsh_attention.workspace",
-        capacity, width, impl.num_heads, impl.num_kv_heads, impl.head_size,
-        query.dtype, query.device, tuple(key.shape), tuple(value.shape),
-        tuple(metadata.attn_mask.shape), table.shape[1], workspace_limit,
+        capacity,
+        width,
+        impl.num_heads,
+        impl.num_kv_heads,
+        impl.head_size,
+        query.dtype,
+        query.device,
+        tuple(key.shape),
+        tuple(value.shape),
+        tuple(metadata.attn_mask.shape),
+        table.shape[1],
+        workspace_limit,
     )
     workspace = get_capture_resource(
         workspace_key,
@@ -267,7 +279,8 @@ def capture_bsh(impl, query, key, value, metadata, output, width: int = _WIDTH, 
     register_task(
         torch_npu.npu_fused_infer_attention_score.out,
         {**kwargs, "workspace": workspace, "out": [packed_output, softmax_lse]},
-        BSHParamProvider(layer_name if layer_name is not None else impl._layer_name,
-                         capacity, width, max_model_len, table.shape[1]),
+        BSHParamProvider(
+            layer_name if layer_name is not None else impl._layer_name, capacity, width, max_model_len, table.shape[1]
+        ),
     )
     return output, num_tokens
