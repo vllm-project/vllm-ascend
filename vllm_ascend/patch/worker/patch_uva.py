@@ -389,7 +389,15 @@ class MonitoredTorchTensor:
         if name == "__array__":
 
             def _array(dtype=None, copy=None):
-                array = self._tensor.__array__(dtype) if dtype is not None else self._tensor.__array__()
+                array = self._tensor.__array__()
+                if dtype is not None and np.dtype(dtype) != array.dtype:
+                    # A dtype conversion is always a copy. Do it here instead
+                    # of delegating to ``Tensor.__array__(dtype)``, whose
+                    # behaviour differs across torch versions: older ones ignore
+                    # the dtype and hand back the mirror unchanged.
+                    if copy is False:
+                        raise ValueError("Unable to avoid copy while creating an array as requested.")
+                    return array.astype(dtype, copy=True)
                 shares_mirror = self._array_shares_mirror(array)
                 if copy is False and not shares_mirror:
                     # NumPy 2 asks ``__array__(copy=False)`` and expects a
