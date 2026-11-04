@@ -1,0 +1,6 @@
+pr: 20982
+entries:
+  - category: bugfix
+    text: >-
+      Fixed SFA and DSA projection scratch pools retaining buffers after their final model
+      owner is released, while preserving sharing between live owners.
