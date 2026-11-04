@@ -649,7 +649,7 @@ def test_common_group_invalidation_changed_graph_replay():
 def test_page_strided_indexer_write_preserves_bits_and_padding(capture):
     from types import SimpleNamespace
 
-    from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+    from vllm_ascend.attention.indexer import AscendHiSparseIndexerBackend
     from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
     from vllm_ascend.distributed.kv_transfer.hisparse.binding import _quantized_indexer_views
 
@@ -677,11 +677,9 @@ def test_page_strided_indexer_write_preserves_bits_and_padding(capture):
     key, scale = _quantized_indexer_views(packed, spec)
     with pytest.raises(RuntimeError, match="view size"):
         key.view(-1, width)
-    writer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+    writer = AscendHiSparseIndexerBackend.__new__(AscendHiSparseIndexerBackend)
     torch.nn.Module.__init__(writer)
-    writer.k_cache = SimpleNamespace(
-        kv_cache=(key, scale), hisparse_indexer_payload_format="ascend_indexer_e4m3fn_key_fp32_scale_v1"
-    )
+    writer.k_cache = SimpleNamespace(kv_cache=(key, scale))
     writer.enable_sparse_li_c8 = True
     writer.enable_sparse_li_c4 = False
     values = torch.zeros((5, width), dtype=torch.uint8, device="npu").view(torch.float8_e4m3fn)

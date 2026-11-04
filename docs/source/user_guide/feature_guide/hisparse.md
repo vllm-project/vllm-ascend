@@ -87,6 +87,13 @@ Use existing interfaces, rather than adding unused placeholder hooks:
 | `validate_kv_cache_config` / `prepare_kv_cache_views` | Core validates BF16/C8 before allocation and binds views inside rollback scope | Additional payload formats with layout tests |
 | Backend `pin_tensor` / `unpin_tensor` / `swap_blocks_batch` | Core owns completion, explicit registration release and transfer lifetime | DMA implementation and supported memory capabilities |
 | `AscendHiSparseMetadataBuilder` / `AscendHiSparseImpl` | SFA factories select metadata and the BF16/C8 layout bridge | A smaller layout-conversion cost |
+| `AscendHiSparseIndexerBackend.write_cache` | The existing cache backend interface selects HiSparse once; its override handles C8 page strides | Other Indexer payload layouts |
+
+The model's Indexer wrapper reuses the cache layer's `get_attn_backend()` choice,
+preserving model-specific backend factories. HiSparse owns its metadata builder
+and C8 write override. The ordinary Indexer write path remains unchanged, and
+BF16 HiSparse writes reuse it after metadata remaps the slots. Cache binding
+creates the key/scale views; it does not attach payload-format routing strings.
 
 `ops/hisparse.py` owns operation validation and persistent per-group workspace;
 `ops/triton/hisparse.py` implements the reference NPU path. Followers share their

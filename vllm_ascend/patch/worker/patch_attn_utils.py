@@ -4,10 +4,11 @@ import torch
 import vllm
 import vllm.v1.worker.utils as v1_worker_utils
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, AttentionInterface
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.worker.gpu import model_runner as gpu_model_runner_v2
 
-from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.indexer import AscendHiSparseIndexerBackend, AscendSFAIndexerBackend
 from vllm_ascend.patch.worker.patch_bind_kv_cache import (
     bind_kv_cache,
     bind_kv_cache_to_layers,
@@ -23,6 +24,8 @@ from vllm_ascend.worker.v2.attn_utils import (
 
 
 def _get_ascend_sfa_indexer_backend(_self):
+    if get_current_vllm_config().attention_config.hisparse_config is not None:
+        return AscendHiSparseIndexerBackend
     return AscendSFAIndexerBackend
 
 
