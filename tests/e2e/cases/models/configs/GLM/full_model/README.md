@@ -1,121 +1,123 @@
-# GLM-5.3 full-model PD coverage
+# GLM-5.3 Weekly PD coverage
 
-These cases load complete GLM-5.3 checkpoints on main. They do not override
-`num_hidden_layers`, modify checkpoints, or use dummy weights. P uses PCP,
-both roles use Model Runner V2 and MooncakeConnectorV2, and neither role enables
-DSA CP. The existing measured A3 PP case is unchanged.
+These 12 full-checkpoint cases implement the first Weekly coverage batch on
+main: A3 W8A8C8, A5 W8A8C8 and A5 W4A4C8, each with `ALL-PREFILL`,
+`ALL-DECODE`, `ALL-E2E` and `ACCURACY`. They retain all 78 layers and real
+weights. Nightly, reduced-layer cases and **1M are outside this scope**.
 
-## Coverage and scheduling
+## Recipe sources and migration
 
-| Frequency | Hardware / weights | Case suffixes | Entries |
-| --- | --- | --- | --- |
-| Nightly | A5 W8A8C8, A5 W4A4C8 | `16K-PREFILL`, `16K-DECODE`, `16K-E2E`, `ACCURACY`, `FUNCTION` | 10 |
-| Weekly | A3 W8A8C8, A5 W8A8C8, A5 W4A4C8 | `ALL-PREFILL`, `ALL-DECODE`, `ALL-E2E`, `ACCURACY` | 12 |
+The starting point is the [official GLM-5.3 ordinary PD tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/GLM5.2.html),
+specifically the A3 and 950DT tabs, accuracy records and workload inventory.
+The [source revision used for this adaptation](https://github.com/vllm-project/vllm-ascend/blob/bee583c95f7e3222fd79a4deba206a6b2d9694b3/docs/source/tutorials/models/GLM5.2.md)
+distinguishes GLM-5.3 from older GLM-5.2 recipes. The P PCP migration follows
+[PR #20228](https://github.com/vllm-project/vllm-ascend/pull/20228).
+These are main-branch adaptations; the tutorial's older runner/DSA CP settings
+are not copied unchanged.
 
-Names use `GLM-5.3-<quantization>-<hardware>-<suffix>`. Accuracy files are
-shared between Nightly and Weekly, so there are 20 YAML files for 22 entries.
-The five reduced-layer feature-disable variants per A5 quantization are excluded.
+| Platform | Allocation | P: nodes 0–1 | D: nodes 2–3 | Cache | Max context |
+| --- | --- | --- | --- | --- | --- |
+| A3 W8A8C8 | 4 × 16 logical devices | PP2, PCP16, TP1 | DP16, TP2 | INT8 | 200000 |
+| A5 W8A8C8 / W4A4C8 | 4 × 8 devices | PP2, PCP8, TP1 | DP16, TP1 | FP8 | 135000 |
 
-The Weekly-A5 workflow dispatches only the new multi-node matrix. Existing
-single-node entries are not activated by that workflow. After the workflow
-lands on main, authorized maintainers can select individual entries, for example:
+The A3 runner counts logical devices (two dies per physical card), giving
+32 physical cards. A5 uses 32 devices. Both are one P instance spanning two
+nodes and one D group spanning two nodes. The official A5 example has two P
+instances; this batch retains one to match the four-node 1P1D allocation.
+A5 PCP8 is an adaptation of the A3 PCP recipe and needs hardware validation.
+
+- Both roles set `VLLM_USE_V2_MODEL_RUNNER=1`, use `MooncakeConnectorV2`,
+  and omit DSA CP. Connector metadata agrees with the actual PP/TP/DP topology.
+- P uses the `42,36` PP partition, eager execution, MTP1, FlashComm1 and
+  fused MC2 mode 2. Its HCCL buffer is 2560 MiB, following the PCP reference.
+  `enable_shared_expert_dp=true` is retained from that reference, but main
+  disables it for TP1; it is not claimed as an effective optimization.
+- D uses MTP5, recompute scheduling and `FULL_DECODE_ONLY`. For the
+  PREFILL-dominated case it uses fused MC2 mode 1, following the RP3 script.
+  DECODE/E2E/ACCURACY instead use shared-expert overlap and `npugraph_ex`.
+  A3 enables static kernels; A5 disables static/super kernels and uses MLAPO
+  and LM-head TP8, following the platform-specific tutorial settings.
+- A3 retains the PCP reference's scheduler settings: P batch tokens 16384,
+  D 256, 64 sequences and memory utilization 0.92. A5 follows the ordinary
+  PD tutorial: P 16384/500/0.9 and D 60/10/0.95, respectively. A5 uses local
+  communication resource version 1.3 and a 1200 MiB D HCCL buffer.
+- P prefix caching is enabled only for DECODE. D prefix caching is disabled
+  to keep each decode request's KV-transfer path active. This mode-specific
+  choice follows the RP3 reference rather than the tutorial's general caching
+  defaults. Separate YAMLs start separate server lifecycles.
+
+Fused MC2 mode 2 can fall back or be disabled by main's capability checks.
+Verify effective flags in startup logs and traces; a requested flag alone
+does not prove that an optimization executed. W4A4 PD and graph/MTP behavior
+remain unmeasured; the tutorial's W4A4 accuracy record uses colocated GSM8K,
+not this PD GPQA stack.
+
+## Workloads and initial gates
+
+Ordinary PD workload lengths follow the official inventory: PREFILL requests
+16K/1 and 128K/1; DECODE requests 16K/1K and 128K/1K after warming P's prompt
+cache. E2E requests 16K/1K and extends the same uncached workload to 128K/1K
+for the long-context coverage category. No pooling or 1M case is included.
+
+The scope's short/long latency categories are instantiated below. Concurrency
+and request counts are initial commissioning values, not official measured
+capacity points. TPOT limits are target gates and require hardware calibration.
+
+| Profile | Input tokens (dataset label) | Concurrency | Requests per phase | D / E2E average TPOT limit |
+| --- | --- | --- | --- | --- |
+| Short 20 ms | 16384 | 16 | 32 | 20 ms |
+| Short 50 ms | 16384 | 32 | 64 | 50 ms |
+| Long 30 ms | 131072 | 8 | 16 | 30 ms |
+| Long 50 ms | 131072 | 16 | 32 | 50 ms |
+
+The existing datasets are `vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8`
+and `vllm-ascend/GSM8K_prefix90_in131072_bs100_glm`. The long dataset has a
+shared prefix; only DECODE enables its reuse. Record actual tokenizer lengths
+and generated lengths rather than assuming dataset labels or output maxima
+equal observed lengths.
+
+Each profile warms up and measures the same prompt set with closed-loop
+traffic (`request_rate: 0`). Profiles within a YAML share the warmed service.
+Confirm cache-hit metrics and retained cache capacity before interpreting
+DECODE as a 100%-prefix-hit workload. PREFILL remains a prefill-dominated
+request through PD; its one output token cannot measure TPOT. Throughput is
+collected without a regression gate until measured baselines are available.
+
+ACCURACY runs GPQA with maximum output 65536, temperature 1.0, top-p 0.95
+and concurrency 32. The provisional floor 86.92 is the existing A3 reference
+91.92 minus five points; it is not an official tolerance or an A5 measurement.
+Calibrate each quantization before enabling this as a regression gate.
+The scope's tentative deepSwe ten-question item has no supplied dataset or
+scoring protocol and is not implemented by these GPQA cases.
+
+## Dispatch and commissioning
+
+The A3 cases join the existing Weekly matrix. A dedicated Weekly-A5 workflow
+runs the eight A5 cases sequentially and uses `KUBECONFIG_A5_B64`. The workflow
+supports manual dispatch and the existing authorized `/weekly` route, without
+activating legacy A5 single-node cases. It must land on main before that route
+can dispatch it by filename. This change adds no new timer schedule.
+
+Start with E2E and GPQA for A3 W8A8C8, then A5 W8A8C8 and A5 W4A4C8. After
+startup, memory, transfer and accuracy checks pass, run PREFILL and DECODE
+for each platform. Authorized maintainers can select an individual entry:
 
 ```text
-/nightly GLM-5.3-W8A8C8-A5-16K-E2E
-/nightly GLM-5.3-W4A4C8-A5-FUNCTION
 /weekly GLM-5.3-W8A8C8-A3-ALL-E2E
+/weekly GLM-5.3-W8A8C8-A5-ACCURACY
 /weekly GLM-5.3-W4A4C8-A5-ALL-DECODE
 ```
 
-## Resources and enabled features
-
-| Platform | Allocation | P: nodes 0–1 | D: nodes 2–3 | Cache format |
-| --- | --- | --- | --- | --- |
-| A3 W8A8C8 | 4 × 16 logical devices | PP2, PCP16, TP1 | DP16, TP2 | INT8 |
-| A5 W8A8C8 / W4A4C8 | 4 × 8 devices | PP2, PCP8, TP1 | DP16, TP1 | FP8 |
-
-P retains all 78 layers with a `42,36` PP partition. Both roles enable expert
-parallelism, chunked prefill, asynchronous scheduling and C8 caches. P uses eager
-execution, FlashComm1 and one MTP token; D uses `FULL_DECODE_ONLY`, recompute
-scheduling and five MTP tokens. Both select fused MC2 mode 1 from the existing
-main PP configuration. PCP replaces the reference script's DSA CP path.
-Flags alone do not establish that an optimization executes on a given platform;
-inspect the startup configuration and runtime traces during hardware validation.
-
-All cases, including FUNCTION, initially reserve four nodes. On A5 this is
-32 devices, exceeding the scope sheet's 16-card function target. A 16-device
-full-model PD function topology is **not validated by this change**. In
-particular, the W8A8 checkpoint's documented colocated footprint already spans
-two A5 nodes. Validate memory capacity before reducing the allocation.
-On A3 the runner counts logical devices; do not equate 64 logical devices with
-64 physical cards. The allocation and routing above are the executable contract.
-
-## Workloads and gates
-
-The feature stacking sheet specifies short context at most 16K, long context at
-least 64K, and short TPOT 20/50 ms and long TPOT 30/50 ms. The following are
-initial concrete workloads within those ranges, not measured capacity points:
-
-| Profile | Input dataset length | Concurrency | Requests per phase | TPOT limit for D / E2E |
-| --- | --- | --- | --- | --- |
-| Nightly 16K | 16384 | 16 | 32 | Collect only |
-| Weekly short 20 ms | 16384 | 16 | 32 | 20 ms |
-| Weekly short 50 ms | 16384 | 32 | 64 | 50 ms |
-| Weekly long 30 ms | 131072 | 8 | 16 | 30 ms |
-| Weekly long 50 ms | 131072 | 16 | 32 | 50 ms |
-
-The short workload uses the existing
-`vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8` dataset; the long
-workload uses `vllm-ascend/GSM8K_prefix90_in131072_bs100_glm`. Lengths are dataset
-labels; record actual token counts for each checkpoint/tokenizer. The long dataset
-has a shared prefix, which only benefits the DECODE cases with P prefix caching.
-
-- PREFILL requests one output token and records TTFT and input throughput. It
-  still traverses PD; this is a prefill-dominated workload, not a P-only engine
-  microbenchmark. A one-token output cannot measure TPOT, so it has no TPOT gate.
-- DECODE enables P prefix caching and repeats each workload after a warmup of
-  the same size. It requests 1024 output tokens. Confirm cache hits and cache
-  capacity on hardware before interpreting the result as decode dominated;
-  warmup alone does not guarantee all requests remain cached.
-- E2E requests 1024 output tokens with P prefix caching disabled. PREFILL and
-  E2E warm up execution without reusing prompt KV. Each YAML starts a separate
-  server lifecycle; Weekly profiles within a YAML share the warmed server.
-- Warmup and measurement use closed-loop traffic (`request_rate: 0`). Output
-  lengths are requested maxima. The AISBench stream performance template controls
-  EOS handling; verify actual generated lengths in the artifacts.
-- Weekly D/E2E checks average TPOT against the sheet's targets. Throughput
-  baselines are deliberately absent until calibrated; a passing run is not
-  evidence of a throughput regression gate. Record input/output throughput,
-  TTFT, TPOT and actual token counts, then add measured throughput thresholds.
-- ACCURACY evaluates GPQA with 65536 maximum output tokens, temperature 1.0 and
-  top-p 0.95. Its initial acceptance floor, 86.92, is derived from the existing
-  A3 GLM-5.3 reference (91.92 minus 5 points), not an A5 measurement. Validate this
-  floor for both A5 quantizations before merge. No deepSwe10 coverage is claimed.
-- FUNCTION sends three arithmetic requests, including a repeat, through the PD
-  proxy. It checks exact final answers, normal completion and positive token
-  usage under the configured stack. This smoke test does not establish every
-  optional optimization, tool calling or long-context correctness.
-
-The `ALL` names map the scope sheet's four RP3 latency/context categories to the
-four workloads above. They do **not** claim every RP3 workload or 1M capacity.
-The server limit is 200000; 1M acceptance needs its own topology, dataset and
-capacity run. The original table does not specify exact output length or batch
-size, so the values above must be calibrated, not treated as product requirements.
-
-## Validation before merge
-
-Run the CPU topology/command and semantic-probe tests:
+Run CPU configuration, command-rendering and dispatch checks before NPU runs:
 
 ```bash
 python -m unittest tests.ut.tools.test_glm53_full_model_cases
 bash format.sh ci
 ```
 
-Then run one FUNCTION and ACCURACY case for each A5 quantization, followed by
-the isolated Nightly performance cases and the Weekly profiles on A3 and A5.
-Capture vLLM/vLLM-Ascend commits, image digest, CANN/driver versions, checkpoint
-revision, device allocation, resolved commands, startup logs, memory use, cache
-hit metrics and AISBench artifacts. Confirm all 78 layers, PCP and Model Runner
-V2 are active, and DSA CP is absent. Check graph/MTP compatibility on A5 and
-calibrate throughput and accuracy gates before treating these cases as regression
-coverage. CPU validation cannot replace these NPU runs.
+Capture vLLM/vLLM-Ascend commits, image digest, CANN/driver and checkpoint
+versions, resolved commands, effective flags, memory use, cache-hit metrics
+and AISBench artifacts. Confirm all 78 layers, PCP, MRV2 and connector V2,
+and the absence of DSA CP. Hardware execution and calibrated throughput and
+accuracy thresholds are required before merging this draft as regression
+coverage; CPU checks cannot establish NPU correctness.

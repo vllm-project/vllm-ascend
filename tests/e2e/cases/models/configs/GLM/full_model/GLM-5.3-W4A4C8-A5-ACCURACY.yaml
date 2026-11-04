@@ -69,11 +69,11 @@ env_common: &env_common
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_OP_EXPANSION_MODE: "AIV"
-  HCCL_BUFFSIZE: "1024"
+  HCCL_BUFFSIZE: "1200"
   TASK_QUEUE_ENABLE: "1"
   VLLM_USE_V2_MODEL_RUNNER: "1"
   ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config.protocol_desc":["hccs:device"]}'
-  ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
+  ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
   HCCL_EXEC_TIMEOUT: "1800"
   HCCL_CONNECT_TIMEOUT: "1800"
@@ -123,14 +123,14 @@ templates:
       - "--seed"
       - "1024"
       - "--max-model-len"
-      - "200000"
+      - "135000"
       - "--max-num-batched-tokens"
       - "16384"
       - "--trust-remote-code"
       - "--max-num-seqs"
-      - "64"
+      - "500"
       - "--gpu-memory-utilization"
-      - "0.92"
+      - "0.9"
       - "--quantization"
       - "ascend"
       - "--safetensors-load-strategy"
@@ -146,7 +146,7 @@ templates:
       - "--attention_config.indexer_kv_dtype"
       - "fp8"
       - "--additional-config"
-      - '{"enable_fused_mc2": 1, "enable_flashcomm1": true}'
+      - '{"enable_fused_mc2": 2, "enable_flashcomm1": true, "enable_shared_expert_dp": true, "enable_cpu_binding": true}'
       - "--speculative-config"
       - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
       - "--kv-transfer-config"
@@ -184,14 +184,14 @@ templates:
       - "--seed"
       - "1024"
       - "--max-model-len"
-      - "200000"
+      - "135000"
       - "--max-num-batched-tokens"
       - "16384"
       - "--trust-remote-code"
       - "--max-num-seqs"
-      - "64"
+      - "500"
       - "--gpu-memory-utilization"
-      - "0.92"
+      - "0.9"
       - "--quantization"
       - "ascend"
       - "--safetensors-load-strategy"
@@ -207,7 +207,7 @@ templates:
       - "--attention_config.indexer_kv_dtype"
       - "fp8"
       - "--additional-config"
-      - '{"enable_fused_mc2": 1, "enable_flashcomm1": true}'
+      - '{"enable_fused_mc2": 2, "enable_flashcomm1": true, "enable_shared_expert_dp": true, "enable_cpu_binding": true}'
       - "--speculative-config"
       - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
       - "--kv-transfer-config"
@@ -237,14 +237,14 @@ templates:
       - "--seed"
       - "1024"
       - "--max-model-len"
-      - "200000"
+      - "135000"
       - "--max-num-batched-tokens"
-      - "256"
+      - "60"
       - "--trust-remote-code"
       - "--max-num-seqs"
-      - "64"
+      - "10"
       - "--gpu-memory-utilization"
-      - "0.92"
+      - "0.95"
       - "--async-scheduling"
       - "--quantization"
       - "ascend"
@@ -260,7 +260,7 @@ templates:
       - "--attention_config.indexer_kv_dtype"
       - "fp8"
       - "--additional-config"
-      - '{"recompute_scheduler_enable": true, "enable_fused_mc2": 1}'
+      - '{"recompute_scheduler_enable": true, "enable_cpu_binding": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false, "enable_super_kernel": false}, "multistream_overlap_shared_expert": true, "finegrained_tp_config": {"lmhead_tensor_parallel_size": 8}, "enable_mlapo": true}'
       - "--speculative-config"
       - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
       - "--compilation-config"
@@ -292,14 +292,14 @@ templates:
       - "--seed"
       - "1024"
       - "--max-model-len"
-      - "200000"
+      - "135000"
       - "--max-num-batched-tokens"
-      - "256"
+      - "60"
       - "--trust-remote-code"
       - "--max-num-seqs"
-      - "64"
+      - "10"
       - "--gpu-memory-utilization"
-      - "0.92"
+      - "0.95"
       - "--async-scheduling"
       - "--quantization"
       - "ascend"
@@ -315,7 +315,7 @@ templates:
       - "--attention_config.indexer_kv_dtype"
       - "fp8"
       - "--additional-config"
-      - '{"recompute_scheduler_enable": true, "enable_fused_mc2": 1}'
+      - '{"recompute_scheduler_enable": true, "enable_cpu_binding": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false, "enable_super_kernel": false}, "multistream_overlap_shared_expert": true, "finegrained_tp_config": {"lmhead_tensor_parallel_size": 8}, "enable_mlapo": true}'
       - "--speculative-config"
       - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
       - "--compilation-config"
