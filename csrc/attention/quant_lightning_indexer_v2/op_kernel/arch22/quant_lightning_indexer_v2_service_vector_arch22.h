@@ -1456,40 +1456,50 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ConsumeCandScoreToken(
     LocalTensor<float> scaleF = tmpBuf_.Get<float>()[6144];   // [512] 去填充后的 kscale
     LocalTensor<half> scalePad = tmpBuf_.Get<half>()[2 * 6656];  // 2KB：64 块 × 16 half（含填充）
     LocalTensor<float> scalePadF = tmpBuf_.Get<float>()[7680];   // [1024] 填充 kscale 的 fp32 视图
+    // v9: score/kscale 双缓冲预取（奇数 tile 用 Ping 槽）——DMA 提前一拍下发，
+    // 与上一 tile 的 SortAll/MergeSort 重叠，消费侧 MTE2_V 等待≈0
+    LocalTensor<float> scorePing = tmpBuf_.Get<float>()[8704];      // [1024] score 512 + idx 512
+    LocalTensor<half> scalePadPing = tmpBuf_.Get<half>()[2 * 9728]; // 2KB
+    LocalTensor<float> scalePadFPing = tmpBuf_.Get<float>()[10240]; // [1024]
     LocalTensor<int32_t> idxTokI = tmpBuf_.Get<int32_t>()[CAND_TILE_TOKENS]; // 排序索引区（逻辑 token）
     InitSortOutBuf(globalTopkUb_[inner * topkPairWidth_], topkPairWidth_);
     PipeBarrier<PIPE_V>();
     const uint64_t candRowOff =
         (static_cast<uint64_t>(row) * static_cast<uint64_t>(kHeadNum_) + n2Idx) *
         constInfo_.candidateTopkBlocks;
+    // DMA 参数（score 2KB / kscale 2KB，整 token 复用）
+    AscendC::DataCopyPadExtParams<float> padParams{false, 0, 0, 0};
+    AscendC::DataCopyExtParams copyParams;
+    copyParams.blockCount = 1;
+    copyParams.blockLen = CAND_TILE_TOKENS * sizeof(float);
+    copyParams.srcStride = 0;
+    copyParams.dstStride = 0;
+    copyParams.rsv = 0;
+    AscendC::DataCopyPadExtParams<half> sPad{false, 0, 0, 0};
+    AscendC::DataCopyExtParams sParams;
+    sParams.blockCount = 1;
+    sParams.blockLen = QLIV2Common::CAND_AUX_SCALE_HALVES_PER_TILE * sizeof(half); // 2KB
+    sParams.srcStride = 0;
+    sParams.dstStride = 0;
+    sParams.rsv = 0;
+    const uint64_t scoreBase0 =
+        scoreSlotBase + static_cast<uint64_t>(tokenIdx * maxTiles) * CAND_TILE_TOKENS;
+    // tile 0 预取：sortBuff 的上个读者是上一 token 的 SortAll/MergeSort（V_MTE2 覆盖全部先前排队的 V 读）
+    SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
+    AscendC::DataCopyPad(sortBuff, candScoreGm_[scoreBase0], copyParams, padParams);
+    AscendC::DataCopyPad(scalePad, candAuxScaleGm_[2ULL * scoreBase0], sParams, sPad);
     for (uint32_t tile = 0U; tile < maxTiles; tile++) {
         if (static_cast<int32_t>(tile * CAND_BLOCKS_PER_TILE) >= L) {
             break;
         }
-        const uint64_t scoreBase =
-            scoreSlotBase + (static_cast<uint64_t>(tokenIdx) * maxTiles + tile) * CAND_TILE_TOKENS;
-        AscendC::DataCopyPadExtParams<float> padParams{false, 0, 0, 0};
-        AscendC::DataCopyExtParams copyParams;
-        copyParams.blockCount = 1;
-        copyParams.blockLen = CAND_TILE_TOKENS * sizeof(float);
-        copyParams.srcStride = 0;
-        copyParams.dstStride = 0;
-        copyParams.rsv = 0;
-        // 上一 tile 的 V 读（SortAll/MergeSort）完成后才能覆盖 sortBuff
-        SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
-        AscendC::DataCopyPad(sortBuff, candScoreGm_[scoreBase], copyParams, padParams);
-        // v5: 本 tile 的 kscale 一次 1KB 读回（32 块 × 16 half，前 8 个有效、后 8 个为 UB 对齐填充）
-        AscendC::DataCopyPadExtParams<half> sPad{false, 0, 0, 0};
-        AscendC::DataCopyExtParams sParams;
-        sParams.blockCount = 1;
-        sParams.blockLen = QLIV2Common::CAND_AUX_SCALE_HALVES_PER_TILE * sizeof(half); // 1KB
-        sParams.srcStride = 0;
-        sParams.dstStride = 0;
-        sParams.rsv = 0;
-        AscendC::DataCopyPad(scalePad, candAuxScaleGm_[2ULL * scoreBase], sParams, sPad);
-        SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V); // DMA（分数 / kscale）→ 向量
-        // 填充 512 half → fp32 视图（每块 16 个，前 8 个有效）
-        AscendC::Cast(scalePadF, scalePad, RoundMode::CAST_NONE,
+        const uint64_t scoreBase = scoreBase0 + static_cast<uint64_t>(tile) * CAND_TILE_TOKENS;
+        // v9: 奇数 tile 用 Ping 槽（score+idx 一体，SortAll 的索引区在 +512）
+        LocalTensor<float> curScore = (tile & 1U) ? scorePing : sortBuff;
+        LocalTensor<half> curPad = (tile & 1U) ? scalePadPing : scalePad;
+        LocalTensor<float> curPadF = (tile & 1U) ? scalePadFPing : scalePadF;
+        SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V); // 本 tile 的 DMA（上轮预取）→ 向量，等待≈0
+        // 填充 1024 half → fp32 视图（每块 16 个，前 8 个有效）
+        AscendC::Cast(curPadF, curPad, RoundMode::CAST_NONE,
                       QLIV2Common::CAND_AUX_SCALE_HALVES_PER_TILE);
         PipeBarrier<PIPE_V>();
         // 每 tile 32 个候选块：块内 8 个位置 = 32B，天然满足向量操作的对齐要求。
@@ -1506,7 +1516,7 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ConsumeCandScoreToken(
             const float seed = (c >= 0) ? static_cast<float>(c * static_cast<int32_t>(BLOCK_TOKENS)) : -8.0f;
             AscendC::Adds(idxTokF[b * 8U], posPatternF[b * 8U], seed, blkMask,
                           static_cast<uint8_t>(1), QLIV2ServiceVec::B32RepeatParams());
-            AscendC::Adds(scaleF[b * 8U], scalePadF[b * 16U], 0.0f, blkMask,
+            AscendC::Adds(scaleF[b * 8U], curPadF[b * 16U], 0.0f, blkMask,
                           static_cast<uint8_t>(1), QLIV2ServiceVec::B32RepeatParams());
         }
         PipeBarrier<PIPE_V>();
@@ -1538,18 +1548,33 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ConsumeCandScoreToken(
         PipeBarrier<PIPE_V>();
         Sub(idxTokF, idxTokF, penF, CAND_TILE_TOKENS);
         PipeBarrier<PIPE_V>();
-        AscendC::Cast(idxTokI, idxTokF, RoundMode::CAST_RINT, CAND_TILE_TOKENS);
+        // v9: 索引直接落到本 tile 缓冲的 idx 半区（与 score 相邻，SortAll 约定 layout）
+        {
+            LocalTensor<int32_t> idxSlot = tmpBuf_.Get<int32_t>()[((tile & 1U) ? 8704U : 0U) +
+                                                                    CAND_TILE_TOKENS];
+            AscendC::Cast(idxSlot, idxTokF, RoundMode::CAST_RINT, CAND_TILE_TOKENS);
+        }
         PipeBarrier<PIPE_V>();
         // 分数 = 原始分数 × kscale - 1e30 × (1 - valid)
-        Mul(sortBuff, sortBuff, scaleF, CAND_TILE_TOKENS);
+        Mul(curScore, curScore, scaleF, CAND_TILE_TOKENS);
         PipeBarrier<PIPE_V>();
         Muls(penF, penF, 1.0e30f, CAND_TILE_TOKENS);
         PipeBarrier<PIPE_V>();
-        Sub(sortBuff, sortBuff, penF, CAND_TILE_TOKENS);
+        Sub(curScore, curScore, penF, CAND_TILE_TOKENS);
         PipeBarrier<PIPE_V>();
-        QLIV2ServiceVec::SortAll(sortBuff, sortTmp, CAND_TILE_TOKENS);
+        // v9: 预取 tile+1（奇偶换槽）。其缓冲的上读者是 tile-1 的 SortAll（顺序核已退休），等待≈0
+        if ((tile + 1U < maxTiles) &&
+            (static_cast<int32_t>((tile + 1U) * CAND_BLOCKS_PER_TILE) < L)) {
+            SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
+            const uint64_t nextBase = scoreBase + CAND_TILE_TOKENS;
+            LocalTensor<float> nextScore = ((tile + 1U) & 1U) ? scorePing : sortBuff;
+            LocalTensor<half> nextPad = ((tile + 1U) & 1U) ? scalePadPing : scalePad;
+            AscendC::DataCopyPad(nextScore, candScoreGm_[nextBase], copyParams, padParams);
+            AscendC::DataCopyPad(nextPad, candAuxScaleGm_[2ULL * nextBase], sParams, sPad);
+        }
+        QLIV2ServiceVec::SortAll(curScore, sortTmp, CAND_TILE_TOKENS);
         PipeBarrier<PIPE_V>();
-        QLIV2ServiceVec::MergeSort(globalTopkUb_[inner * topkPairWidth_], topkWidth_, sortBuff,
+        QLIV2ServiceVec::MergeSort(globalTopkUb_[inner * topkPairWidth_], topkWidth_, curScore,
                                    CAND_TILE_TOKENS, sortTmp);
         PipeBarrier<PIPE_V>();
     }
