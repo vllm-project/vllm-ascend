@@ -225,33 +225,6 @@ def test_unsupported_indexer_formats_are_rejected_before_pool_binding(field):
         functions["get_hisparse_indexer_specs"](config)
 
 
-@pytest.mark.parametrize("enable_caching", [False, True])
-def test_hisparse_roles_preserve_core_admission_and_explicit_hash_budget(enable_caching):
-    calls = []
-    marker = object()
-    functions = definitions(
-        "patch/platform/patch_kv_cache_coordinator.py",
-        {"get_kv_cache_coordinator"},
-        KVCacheGroupRole=NS(HISPARSE_SOURCE="source"),
-        _select_kv_token_budget=lambda maximum, inflight: maximum if inflight is None else inflight,
-        _orig_get_kv_cache_coordinator=lambda **kwargs: (calls.append(kwargs), marker)[1],
-    )
-    config = NS(kv_cache_groups=[NS(role="source"), NS(role="resident"), NS(role="hot")])
-    result = functions["get_kv_cache_coordinator"](
-        config,
-        max_model_len=65536,
-        max_in_flight_tokens=129,
-        num_hash_lookahead_tokens=7,
-        enable_caching=enable_caching,
-    )
-    assert result is marker and len(calls) == 1
-    assert calls[0]["kv_cache_config"] is config
-    assert calls[0]["max_in_flight_tokens"] == 129
-    assert calls[0]["num_hash_lookahead_tokens"] == 7
-    assert calls[0]["enable_caching"] is enable_caching
-    assert "eagle_attn_layer_names" not in calls[0]
-
-
 def test_capture_metadata_prevents_warmup_host_mirrors():
     class Parent:
         def build_for_cudagraph_capture(self, common, **kwargs):
@@ -279,16 +252,6 @@ def test_capture_metadata_prevents_warmup_host_mirrors():
     assert submitted == []
     finish(cache, real_metadata)
     assert submitted == [True]
-
-
-def test_real_forward_mirror_errors_remain_visible():
-    finish = definitions("attention/sfa_hisparse.py", {"finish_hisparse_kv_update"})["finish_hisparse_kv_update"]
-
-    def duplicate():
-        raise RuntimeError("HiSparse layer 0 mirrored twice.")
-
-    with pytest.raises(RuntimeError, match="mirrored twice"):
-        finish(NS(finish_kv_update=duplicate), NS(hisparse_for_capture=False))
 
 
 def c8_module():

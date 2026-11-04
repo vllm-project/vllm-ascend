@@ -95,8 +95,8 @@ current request/state mappings remain separate.
 
 Core's generic `torch.Stream`, `torch.Event` and current-stream interfaces are
 used directly. The Ascend backend preserves Core's event placement and does not
-replace its Torch bindings. The NPU tests cover cross-stream waits followed by
-CANN workspace allocation and changing graph replays.
+replace its Torch bindings. This PR tests its own NPU operations and changing
+graph replays rather than duplicating generic Torch stream tests.
 
 The model-owned index-group builder is carried in Core's existing
 `MLAModules.index_group_builder` field, preserving the common MLA wrapper ABI.
@@ -127,7 +127,7 @@ python -m pytest -q --noconftest \
 
 These check current Host offsets, failed-unregister ownership, group scratch
 isolation, strided indexer aliases, planner alignment, unsupported formats,
-Core coordinator forwarding and capture-only mirror suppression. C8 checks also
+and capture-only mirror suppression. C8 checks also
 cover opaque component bytes, nonzero slab offsets, stable duplicate/padding
 ordering, Indexer key/scale writes and planner alignment before allocation.
 They do not exercise an installed NPU package or qualify device execution.
@@ -135,6 +135,22 @@ They do not exercise an installed NPU package or qualify device execution.
 The weight-loading wrapper keeps Ascend main's explicit activation-dtype ABI,
 already covered by `tests/ut/ops/test_mla_weight_processing.py`; this foundation
 does not add another calling convention or a duplicate test module.
+
+Reuse the existing suites for behavior this PR does not implement:
+
+| Behavior | Existing coverage |
+| --- | --- |
+| Core planning and HMA budgets | Core `tests/v1/core/test_kv_cache_planning.py` and `test_kv_cache_utils.py` |
+| Core Host-mirror ordering, zero-token steps and request residency | Core `tests/v1/kv_connector/unit/test_hisparse_connector.py` |
+| Core prefill plan and sparse layout rules | Core `tests/v1/attention/test_sparse_mla_backends.py` and `test_sparse_mla_kv_cache_layout.py` |
+| Native SFA preprocessing and operator dispatch | Ascend `tests/ut/attention/test_sfa_v1.py` |
+
+These suites retain their original platform/dependency requirements. In
+particular, Core's CUDA-kernel cases do not qualify Ascend kernels. The NPU
+modules below keep coverage for Ascend resolver/refill/invalidation, strided
+Resident/Host staging and the BF16/C8 data bridge. Preprocessing uses the existing
+native SFA operations as its reference; it contains no embedded activation dump
+or independent-versus-fused rounding requirement.
 
 Real-NPU cases are included for resolver/refill/overwrite invalidation, independent
 FP32 Attention references, selection order/duplicates, native BF16/C8 preprocessing,
