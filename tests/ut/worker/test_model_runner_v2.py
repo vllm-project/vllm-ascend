@@ -14,6 +14,7 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.offloader.base import NoopOffloader
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
@@ -1281,6 +1282,23 @@ def test_sample_tokens_leaves_draft_broadcast_to_upstream():
     with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
         assert runner.sample_tokens("g") == "out"
     runner.pp_handler.broadcast_drafts.assert_not_called()
+
+
+def test_sample_tokens_forwards_physical_k_recommendation():
+    runner = _make_runner()
+    runner.is_last_pp_rank = True
+    runner.use_spec_pp = False
+    runner.pcp_manager = None
+    runner.adaptive_verification = SimpleNamespace(_physical_k_recommendation=(4, 3), _physical_k_cost_saving=3)
+    model_output = ModelRunnerOutput(req_ids=["req-0"], req_id_to_index={"req-0": 0})
+    assert not hasattr(model_output, "physical_k_recommendation")
+    async_output = SimpleNamespace(model_runner_output=model_output)
+    with patch.object(GPUModelRunner, "sample_tokens", return_value=async_output):
+        assert runner.sample_tokens(None) is async_output
+    assert model_output.physical_k_recommendation == (4, 3)
+    assert model_output.physical_k_cost_saving == 3
+    assert runner.adaptive_verification._physical_k_recommendation is None
+    assert runner.adaptive_verification._physical_k_cost_saving is None
 
 
 @pytest.mark.parametrize("a5", [False, True])

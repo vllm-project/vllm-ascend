@@ -261,6 +261,44 @@ For Model Runner V2, enable Entropy Verify with `enable_entropy_verify=true` and
 | `budget_threshold` | float | `0.3` | Cumulative survival-probability threshold used when estimating the mean verify budget. |
 | `min_verify_tokens` | int | `1` | Minimum number of draft tokens verified per request. |
 
+**V2 hardware-aware physical K**
+
+The V1 configuration above selects verification lengths. On model runner V2,
+`physical_k` additionally controls how many draft tokens are actually
+generated. Upstream adaptive verification still selects verification budgets.
+Enable adaptive verification in `speculative_config` and opt in with the
+following minimal configuration:
+
+```json
+{
+  "dynamic_spec_config": {
+    "method": "dspark",
+    "physical_k": {}
+  }
+}
+```
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `physical_k.min_k` | int | `3` | Lowest candidate K. Maximum K comes from `speculative_config.num_speculative_tokens`. |
+| `physical_k.auto_tune` | bool | `True` | Select physical K from AV startup-profiled NPU costs and confidence estimates. Set to `False` to use the acceptance-based fallback. |
+
+Candidate and capture widths default to the range from `min_k` to maximum K.
+The worker preserves the full upstream profile for maximum K and profiles two
+timing samples per graph shape for lower candidate K values, then sends compact
+K recommendations from TP rank 0 to the scheduler. Costs are never extrapolated
+beyond the measured batch range. The scheduler applies profiled recommendations
+per power-of-two batch bucket; empirical acceptance is used only when profiling
+cannot recommend a K or auto-tuning is disabled. This keeps large RL rollout
+batches adaptive while preventing K oscillation as the active batch shrinks
+after EOS. Small-batch protection,
+batch-bucket switching, K hysteresis, minimum dwell, and periodic full-K probes
+use built-in defaults. A shorter K is never
+selected when a wider profiled graph has equal or lower draft cost, and a
+narrowed runtime step cannot overwrite the last full-width recommendation.
+Candidate and capture widths are derived from `min_k`; a candidate without a
+compatible FULL graph may execute eagerly.
+
 **scheduler_config.short_request_first_config**
 
 ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous scheduling on prefill and PD-mixed paths. It can be combined with profiling-chunk scheduling, but it does not support batch-job-aware or PD-disaggregated D-node scheduling. See [ShortRequestFirst Prefill Scheduling](../feature_guide/short_request_first.md) for usage, behavior, and tuning guidance.
