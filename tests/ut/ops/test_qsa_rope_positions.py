@@ -12,6 +12,7 @@ def validate():
     # This shape-only helper intentionally has no vLLM, Triton or NPU dependency.
     path = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/triton/linearnorm/qsa_rope_utils.py"
     spec = importlib.util.spec_from_file_location("qsa_rope_utils", path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.validate_qsa_rope_positions
