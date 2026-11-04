@@ -263,7 +263,7 @@ def _measure_split_k_case(
             graph.replay()
         graphs[name] = graph
     torch.npu.synchronize()
-    raw = {name: [] for name in schedules}
+    raw: dict[str, list[float]] = {name: [] for name in schedules}
     start, end = torch.npu.Event(enable_timing=True), torch.npu.Event(enable_timing=True)
     for iteration in range(samples):
         # 交替测量顺序，减小频率和温度漂移对两种调度的偏置。
