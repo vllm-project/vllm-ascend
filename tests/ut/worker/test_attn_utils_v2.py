@@ -1183,12 +1183,14 @@ def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_lay
     ("model_type", "expected_num_heads"),
     [("kimi_linear", 1), ("deepseek_v3", 12)],
 )
-def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type, expected_num_heads):
+@pytest.mark.parametrize("dcp_sharded", [False, True])
+def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type, expected_num_heads, dcp_sharded):
     source_spec = MLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16,
+        dcp_sharded=dcp_sharded,
     )
     layer = MLAAttention.__new__(MLAAttention)
     layer.impl = SimpleNamespace(
@@ -1224,6 +1226,7 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type,
 
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.num_heads == expected_num_heads
+    assert spec.dcp_sharded is dcp_sharded
     assert spec.page_size_bytes == source_spec.page_size_bytes
 
 
@@ -1234,8 +1237,9 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(monkeypatch, model_type,
 @pytest.mark.parametrize("li_c8", [False, True])
 @pytest.mark.parametrize("li_c4", [False, True])
 @pytest.mark.parametrize("owner", ["unpaired", "static_shared", "mtp", "regular"])
+@pytest.mark.parametrize("dcp_sharded", [False, True])
 def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
-    monkeypatch, replicated_indexer, expected_size, li_c8, li_c4, owner
+    monkeypatch, replicated_indexer, expected_size, li_c8, li_c4, owner, dcp_sharded
 ):
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
     indexer_module = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
@@ -1243,7 +1247,9 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
     monkeypatch.setattr(
         indexer_module,
         "get_kv_cache_spec",
-        lambda _config: object(),
+        lambda _config: FullAttentionSpec(
+            block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, dcp_sharded=dcp_sharded
+        ),
     )
     layers = {layer_name: indexer_module}
     if owner != "unpaired":
@@ -1296,6 +1302,7 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
     spec = specs[layer_name]
 
     assert isinstance(spec, AscendSFAIndexerCacheSpec)
+    assert spec.dcp_sharded is dcp_sharded
     assert spec.sfa_dcp_replicated_indexer_size == expected_size
     if li_c4:
         assert spec.head_size == 128 // 2
@@ -2307,11 +2314,10 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
         enable_sparse_sfa_turboquant=False,
         dtype=torch.bfloat16,
     )
-    layer.get_kv_cache_spec = lambda _cfg: SimpleNamespace(
+    layer.get_kv_cache_spec = lambda _cfg: MLAAttentionSpec(
         block_size=16,
         # vLLM's generic MLA spec exposes cache head slots here, not local
         # query heads. The Ascend spec must deliberately use the module count.
-        num_heads=1,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,

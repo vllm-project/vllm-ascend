@@ -1635,7 +1635,9 @@ def test_native_replicated_draft_owns_separate_group_and_block_span(dcp):
 
 
 @pytest.mark.parametrize("dcp", [1, 2, 8])
-def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp):
+@pytest.mark.parametrize("layout", ["LBHNC", "BLHNC"])
+@pytest.mark.parametrize("num_blocks_override", [None, 5])
+def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp, layout, num_blocks_override):
     from vllm.config import CacheConfig
 
     target = AscendMLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
@@ -1660,28 +1662,32 @@ def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp):
         KVCacheGroupSpec(["state"], state),
     ]
     config = SimpleNamespace(
-        cache_config=CacheConfig(block_size=4),
+        cache_config=CacheConfig(block_size=4, num_gpu_blocks_override=num_blocks_override),
         attention_config=SimpleNamespace(hisparse_config=None),
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
     )
-    config.cache_config.kv_cache_layout = "LBHNC"
+    config.cache_config.kv_cache_layout = layout
     bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(config, groups)
     assert bytes_per_block == target.page_size_bytes + draft.page_size_bytes
     assert kv_cache_utils_patch._has_ascend_multi_allocation_kv_cache_layout(groups)
     assert kv_cache_utils_patch._ascend_builder_pool_bytes_per_block(object(), config, groups) == bytes_per_block
-    planned = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(config, groups, 11 * bytes_per_block)
-    assert planned.num_blocks == 11
+    budget = 11 * bytes_per_block + bytes_per_block // 2
+    planned = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(config, groups, budget)
+    expected_blocks = 11 if num_blocks_override is None else num_blocks_override
+    assert planned.num_blocks == expected_blocks
     assert planned.kv_cache_groups is groups
+    assert {tensor.size for tensor in planned.kv_cache_tensors} == {expected_blocks * bytes_per_block}
+    assert all(tensor.size <= budget for tensor in planned.kv_cache_tensors)
     regions = {tensor.layers[0]: tensor for tensor in planned.kv_cache_tensors}
     assert regions["target"].offset == regions["state"].offset == 0
-    assert regions["draft"].offset == 11 * target.page_size_bytes
-    backing = torch.zeros(11 * bytes_per_block, dtype=torch.uint8)
+    assert regions["draft"].offset == expected_blocks * target.page_size_bytes
+    backing = torch.zeros(expected_blocks * bytes_per_block, dtype=torch.uint8)
     # Reproduce the contiguous K/V tail view, including padding in the spec.
-    draft_end = regions["draft"].offset + 11 * draft.page_size_bytes
-    draft_start = draft_end - 11 * draft.real_page_size_bytes
+    draft_end = regions["draft"].offset + expected_blocks * draft.page_size_bytes
+    draft_start = draft_end - expected_blocks * draft.real_page_size_bytes
     backing[draft_start:draft_end].fill_(91)
-    assert not backing[: 11 * target.page_size_bytes].any()
+    assert not backing[: expected_blocks * target.page_size_bytes].any()
     assert backing[draft_start:draft_end].eq(91).all()
     # Rank re-planning must retain exactly the agreed block count.
     replanned = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(config, groups, 7 * bytes_per_block)
-    assert replanned.num_blocks == 7
+    assert replanned.num_blocks == (7 if num_blocks_override is None else num_blocks_override)

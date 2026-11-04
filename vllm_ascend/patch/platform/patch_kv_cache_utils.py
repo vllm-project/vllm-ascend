@@ -846,7 +846,33 @@ def _ascend_get_kv_cache_config_from_groups(
         if vllm_version_is("0.28.0")
         else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     )
-    if qwen_config is not None:
+    pools = _get_replicated_draft_pools(kv_cache_groups)
+    if pools is not None:
+        # Every physical pool shares the scheduler's block count, but owns a
+        # disjoint byte range. Use the same aggregate divisor as admission and
+        # rank re-planning, then retain upstream's per-pool stride descriptors.
+        pool_bytes = [_orig_pool_bytes_per_block(vllm_config, pool) for pool in pools]
+        bytes_per_block = sum(pool_bytes)
+        num_blocks = may_override_num_blocks(vllm_config, available_memory // bytes_per_block)
+        total_size = num_blocks * bytes_per_block
+        tensors: list[KVCacheTensor] = []
+        offset = 0
+        for pool, pool_bytes_per_block in zip(pools, pool_bytes):
+            pool_size = num_blocks * pool_bytes_per_block
+            pool_config = _orig_get_kv_cache_config_from_groups(vllm_config, pool, pool_size)
+            assert pool_config.num_blocks == num_blocks
+            tensors.extend(
+                replace(tensor, size=total_size, offset=offset + tensor.offset)
+                for tensor in pool_config.kv_cache_tensors
+            )
+            offset += pool_size
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=tensors,
+            kv_cache_groups=kv_cache_groups,
+            prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+        )
+    elif qwen_config is not None:
         kv_cache_config = qwen_config
     elif is_deepseek_v41_cache(kv_cache_groups):
         kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
