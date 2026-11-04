@@ -90,7 +90,7 @@ exactness and trace coverage are reported separately.
 The full A5 module also has direct producer/attention regression coverage:
 
 ```bash
-python -m pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_msa_m3_triton_a5.py
+python -m pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_msa_m3_index_and_attention.py
 ```
 
 These cases use production-shaped TopK16 and 128-wide heads, checking prefill
