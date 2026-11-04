@@ -542,7 +542,7 @@ def test_graph_plans_are_recaptured_after_warmup_and_shared_only_within_graph(mo
     # Emulate separate capture resource lifetimes. Reusing the warmup metadata
     # must still record length normalization and tiling in each new graph.
     for graph_index in range(2):
-        resources = {}
+        resources: dict[tuple, object] = {}
 
         def capture_resource(key, factory, resources=resources):
             if key not in resources:
