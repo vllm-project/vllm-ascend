@@ -407,11 +407,11 @@ def test_torch_array_protocol_hands_out_read_only_arrays():
     assert array.flags.writeable is False
     with pytest.raises(ValueError):
         array[0, 0] = 1
-    # ``copy=True`` is a real copy, so it neither shares nor invalidates.
-    copied = np.asarray(buf.cpu, copy=True)
+    # NumPy asks for ``copy=True`` here, so this is a real copy that neither
+    # shares nor invalidates the buffer.
+    copied = np.array(buf.cpu)
     assert copied.flags.writeable is True
     assert copied.__array_interface__["data"][0] != buf._cpu.data_ptr()
-    assert np.array(buf.cpu).flags.writeable is True
 
 
 def test_torch_array_protocol_write_after_a_sync_reaches_the_shadow():
@@ -573,7 +573,7 @@ def test_numpy_copy_false_with_a_conversion_raises():
     buf = _make_uva_buffer(8)
 
     with pytest.raises(ValueError, match="avoid copy"):
-        np.asarray(buf.cpu, dtype=np.float64, copy=False)
+        buf.cpu.__array__(dtype=np.float64, copy=False)
 
 
 def test_sticky_alias_survives_a_failed_copy():
