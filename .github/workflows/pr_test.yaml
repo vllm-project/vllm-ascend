@@ -205,6 +205,13 @@ jobs:
       - name: Install and run Gitleaks Secret Scan
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+            if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+              git fetch --no-tags --unshallow origin "$(git rev-parse HEAD)"
+            fi
+            git fetch --no-tags origin \
+              "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
+          fi
           chmod +x .github/workflows/scripts/gitleaks.sh
           .github/workflows/scripts/gitleaks.sh
 
