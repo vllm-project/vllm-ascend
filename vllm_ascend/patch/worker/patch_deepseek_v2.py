@@ -268,6 +268,7 @@ def _deepseek_v2_mla_attention_init(
         indexer_rotary_emb=self.indexer_rope_emb,
         is_sparse=self.is_v32,
         topk_indices_buffer=topk_indices_buffer,
+        index_group_builder=index_group_builder,
     )
 
     self.mla_attn = MultiHeadLatentAttentionWrapper(
@@ -284,7 +285,6 @@ def _deepseek_v2_mla_attention_init(
         quant_config,
         prefix,
         skip_topk=_skip_topk and not mtp_layer,
-        index_group_builder=index_group_builder,
         non_causal_multi_token_decode=non_causal_multi_token_decode,
     )
 

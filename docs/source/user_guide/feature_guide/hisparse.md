@@ -77,6 +77,9 @@ used directly. The Ascend backend preserves Core's event placement and does not
 replace its Torch bindings. The NPU tests cover cross-stream waits followed by
 CANN workspace allocation and changing graph replays.
 
+The model-owned index-group builder is carried in Core's existing
+`MLAModules.index_group_builder` field, preserving the common MLA wrapper ABI.
+
 Follow-up contributions should be separate and measurable: packed C8/indexer
 formats, native resolver/refill improvements, Host-writeback optimization, metadata
 reuse, additional hardware and P/D transport. PR19109 retains these experiments.
