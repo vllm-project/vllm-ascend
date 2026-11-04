@@ -702,6 +702,8 @@ class NPUModelRunner(GPUModelRunner):
         """Write draft KV on P, then let D pull the exact allocated cache pages."""
         if not getattr(self, "pd_dspark_aux_layer_ids", ()) or not self.is_last_pp_rank:
             return
+        for request_id in getattr(scheduler_output, "finished_req_ids", ()) or ():
+            self._dspark_prefill_progress.pop(request_id, None)
         connector, metadata = find_dspark_context_connector(
             get_kv_transfer_group(), scheduler_output.kv_connector_metadata
         )
