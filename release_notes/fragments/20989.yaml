@@ -1,0 +1,6 @@
+pr: 20989
+entries:
+  - category: feature
+    text: >-
+      Added bounded staging and accepted checkpoint publication for shared
+      recurrent cache state during speculative decoding with layerwise offload.
