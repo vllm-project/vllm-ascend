@@ -205,6 +205,7 @@ from vllm_ascend.utils import (
     model_uses_kpool_indexer,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
     weak_ref_tensor,
     weak_ref_tensors,
 )
@@ -842,7 +843,11 @@ class NPUModelRunner(GPUModelRunner):
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and (
                 self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                or breakable_cudagraph.is_breakable_cudagraph_enabled()
+                or (
+                    breakable_cudagraph.is_breakable_cudagraph_enabled()
+                    if vllm_version_is("0.33.0")
+                    else breakable_cudagraph.is_breakable_cudagraph_enabled(self.compilation_config)
+                )
             )
             and not self.model_config.enforce_eager
         )
@@ -4831,7 +4836,11 @@ class NPUModelRunner(GPUModelRunner):
 
         with _torch_cuda_wrapper():
             if (
-                breakable_cudagraph.is_breakable_cudagraph_enabled()
+                (
+                    breakable_cudagraph.is_breakable_cudagraph_enabled()
+                    if vllm_version_is("0.33.0")
+                    else breakable_cudagraph.is_breakable_cudagraph_enabled(self.compilation_config)
+                )
                 and cudagraph_mode != CUDAGraphMode.NONE
             ):
                 self.model = BreakableACLGraphWrapper(

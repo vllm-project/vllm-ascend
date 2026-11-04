@@ -9,12 +9,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
-    SpeculatorCudaGraphManager,
-)
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
+    SpeculatorCudaGraphManager,
 )
 
 
@@ -26,6 +25,7 @@ def _parent_init(
     decode_query_len,
     lora_capture_cases=None,
     varlen_decode=False,
+    **kwargs,
 ):
     """Mock the parent graph manager initialization."""
     self._capture_descs = [object()]
@@ -34,6 +34,12 @@ def _parent_init(
 
 def _graph_config(pcp_size: int = 1) -> SimpleNamespace:
     return SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size))
+
+
+def _query_shape(query_len):
+    if vllm_version_is("0.33.0"):
+        return {"decode_query_len": query_len}
+    return {"decode_query_lens": {query_len: 8}}
 
 
 def test_init_draft_prefill_graph():
@@ -51,7 +57,7 @@ def test_init_draft_prefill_graph():
         patch("vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.set_draft_graph_params") as set_decode,
     ):
         manager = AutoRegressiveAclGraphManager(
-            _graph_config(), torch.device("cpu"), CUDAGraphMode.FULL, decode_query_len=2
+            _graph_config(), torch.device("cpu"), CUDAGraphMode.FULL, **_query_shape(2)
         )
     assert manager.capture_sizes == [4, 8]
     assert manager.is_draft_model_prefill is True
@@ -79,7 +85,7 @@ def test_sharded_pcp_draft_prefill_avoids_full_graphs(decode_query_len, mode, ex
         ),
     ):
         manager = AutoRegressiveAclGraphManager(
-            _graph_config(pcp_size=2), torch.device("cpu"), mode, decode_query_len=decode_query_len
+            _graph_config(pcp_size=2), torch.device("cpu"), mode, **_query_shape(decode_query_len)
         )
     assert manager.cudagraph_mode == expected
 
@@ -98,7 +104,7 @@ def test_init_draft_decode_graph():
         ) as set_prefill,
         patch("vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.set_draft_graph_params") as set_decode,
     ):
-        manager = AutoRegressiveAclGraphManager(object(), torch.device("cpu"), CUDAGraphMode.FULL, decode_query_len=1)
+        manager = AutoRegressiveAclGraphManager(object(), torch.device("cpu"), CUDAGraphMode.FULL, **_query_shape(1))
     assert manager.is_draft_model_prefill is False
     set_decode.assert_called_once_with([4, 8])
     set_prefill.assert_not_called()

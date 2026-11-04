@@ -19,6 +19,7 @@
 
 import inspect
 import logging
+from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
@@ -159,6 +160,8 @@ class NPUModelRunner(GPUModelRunner):
         # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
         self._uses_flashmla = False
+        # #56492: inherited dummy runs inspect this even on non-VMM platforms.
+        self.extensible_kv_cache = None
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -195,7 +198,11 @@ class NPUModelRunner(GPUModelRunner):
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and (
                 self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                or breakable_cudagraph.is_breakable_cudagraph_enabled()
+                or (
+                    breakable_cudagraph.is_breakable_cudagraph_enabled()
+                    if vllm_version_is("0.33.0")
+                    else breakable_cudagraph.is_breakable_cudagraph_enabled(self.compilation_config)
+                )
             )
             and not self.model_config.enforce_eager
         )
@@ -1578,16 +1585,19 @@ def graph_manager_wrapper(model_runner):
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
+        decode_query_len: int | None = None,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
-        ubatch_runner: Any = None,  # vLLM main (#51700)
+        ubatch_runner: Any = None,
+        *,
+        decode_query_lens: Mapping[int, int] | None = None,
     ):
+        query_shapes = decode_query_len if vllm_version_is("0.33.0") else decode_query_lens
         return ModelAclGraphManager(
             vllm_config,
             device,
             cudagraph_mode,
-            decode_query_len,
+            query_shapes,
             model_runner,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
