@@ -121,12 +121,19 @@ separate images from the v0.32.0 release branch.
 
 === "950DT products"
 
-    Build the A5 runtime with `Dockerfile.a5` from your vLLM Ascend checkout.
-    On `main`, use the upstream vLLM revision in `.github/vllm-main-verified.commit`.
-    On `releases/v0.32.0rc`, use the vLLM tag in `.github/vllm-release-tag.commit`.
+    From the root of your vLLM Ascend checkout, build the A5 image with the
+    upstream vLLM revision selected by this branch:
 
-    On each participating server, set `IMAGE` to the A5 image reference or
-    digest and `MODEL_ROOT` to the parent directory of the checkpoint.
+    ```bash
+    export IMAGE="vllm-ascend-a5:$(git rev-parse --short HEAD)"
+    docker build -f Dockerfile.a5 \
+      --build-arg VLLM_TAG="$(cat .github/vllm-release-tag.commit)" \
+      -t "$IMAGE" .
+    ```
+
+    On each participating server, set `IMAGE` to the tag of the image you
+    built or the reference or digest of a matching prebuilt image. Set
+    `MODEL_ROOT` to the parent directory of the checkpoint on each host.
     Prepare the host driver for the selected image and verify it with
     `npu-smi info`; see the [installation guide](../../getting_started/installation.md).
     The complete driver mount includes the A5 topology files. The PD scripts
@@ -134,7 +141,6 @@ separate images from the v0.32.0 release branch.
     generation; see the [PD communication guide](../features/pd_disaggregation_mooncake_multi_node.md#atlas-850850e950-superpod-communication-configuration).
 
     ```bash
-    export IMAGE="<A5_IMAGE_REFERENCE_OR_DIGEST>"
     export MODEL_ROOT="/data/weights"
     export NPU_SMI="$(command -v npu-smi)"
 
@@ -164,6 +170,9 @@ separate images from the v0.32.0 release branch.
       -v "$MODEL_ROOT:$MODEL_ROOT" \
       "$IMAGE" bash
     ```
+
+    Inside the container, run `npu-smi info` and confirm that all eight NPUs
+    are visible. Run `vllm --version` to check the installed vLLM version.
 
     Reserve enough host memory and shared memory for Engram CPU offload and
     local DP sharing. Use the same image and absolute checkpoint path on
@@ -442,14 +451,12 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     launcher from there. Each node needs its own role-specific template.
 
     The launcher divides the local NPUs among DP ranks and starts one vLLM
-    process per rank.
+    process per rank. If a rank fails, the launcher reports its global rank and
+    exit status, stops the other local engines, and exits with an error.
 
     ```python
     import argparse
-    import multiprocessing
-    import os
-    import subprocess
-    import sys
+    import asyncio
 
 
     def parse_args():
@@ -464,48 +471,38 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         return parser.parse_args()
 
 
-    args = parse_args()
-    dp_size = args.dp_size
-    tp_size = args.tp_size
-    dp_size_local = args.dp_size if args.dp_size_local == -1 else args.dp_size_local
+    async def run_rank(args, local_rank):
+        dp_rank = args.dp_rank_start + local_rank
+        first_device = local_rank * args.tp_size
+        devices = ",".join(str(i) for i in range(first_device, first_device + args.tp_size))
+        process = await asyncio.create_subprocess_exec(
+            "bash", "./run_dp_template.sh", devices,
+            str(args.vllm_start_port + local_rank), str(args.dp_size), str(dp_rank),
+            args.dp_address, args.dp_rpc_port, str(args.tp_size),
+        )
+        try:
+            status = await process.wait()
+        finally:
+            if process.returncode is None:
+                process.terminate()
+                await process.wait()
+        if status:
+            raise RuntimeError(f"DP rank {dp_rank} exited with status {status}")
 
 
-    def run_command(visible_devices, dp_rank, vllm_engine_port):
-        command = [
-            "bash",
-            "./run_dp_template.sh",
-            visible_devices,
-            str(vllm_engine_port),
-            str(dp_size),
-            str(dp_rank),
-            args.dp_address,
-            args.dp_rpc_port,
-            str(tp_size),
-        ]
-        subprocess.run(command, check=True)
+    async def main():
+        args = parse_args()
+        local_size = args.dp_size if args.dp_size_local == -1 else args.dp_size_local
+        last_rank = args.dp_rank_start + local_size - 1
+        if min(local_size, args.tp_size) < 1 or not 0 <= args.dp_rank_start <= last_rank < args.dp_size:
+            raise ValueError("Check the DP size, local size, starting rank, and TP size.")
+        async with asyncio.TaskGroup() as ranks:
+            for local_rank in range(local_size):
+                ranks.create_task(run_rank(args, local_rank))
 
 
     if __name__ == "__main__":
-        if not os.path.exists("./run_dp_template.sh"):
-            print("Template file ./run_dp_template.sh does not exist.")
-            sys.exit(1)
-
-        processes = []
-        for i in range(dp_size_local):
-            dp_rank = args.dp_rank_start + i
-            vllm_engine_port = args.vllm_start_port + i
-            visible_devices = ",".join(
-                str(device) for device in range(i * tp_size, (i + 1) * tp_size)
-            )
-            process = multiprocessing.Process(
-                target=run_command,
-                args=(visible_devices, dp_rank, vllm_engine_port),
-            )
-            processes.append(process)
-            process.start()
-
-        for process in processes:
-            process.join()
+        asyncio.run(main())
     ```
 
     The launcher arguments are:
@@ -570,7 +567,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     export ASCEND_RT_VISIBLE_DEVICES="$1"
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
-    vllm serve "$MODEL_PATH" \
+    exec vllm serve "$MODEL_PATH" \
         --host "$local_ip" \
         --port "$2" \
         --served-model-name dsv41 \
@@ -686,7 +683,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     export ASCEND_RT_VISIBLE_DEVICES="$1"
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
-    vllm serve "$MODEL_PATH" \
+    exec vllm serve "$MODEL_PATH" \
         --host "$local_ip" \
         --port "$2" \
         --served-model-name dsv41 \
@@ -766,15 +763,15 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
     Each Prefill and Decode engine reports `Application startup complete.` in
     its terminal when startup is complete. Once all engines are ready, start
-    the proxy in a separate terminal on a node that can reach both servers,
-    with all eight endpoints from each role. Use the non-layerwise
-    proxy below for the Hybrid Connector configuration in this section:
+    the proxy inside the A5 container in a separate terminal on a node that
+    can reach both servers. The image contains the non-layerwise proxy used
+    by the Hybrid Connector. Register all eight endpoints from each role:
 
     ```bash
     P_IP="<PREFILL_IP>"
     D_IP="<DECODE_IP>"
 
-    python3 <VLLM_ASCEND_PATH>/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    python3 /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 \
         --port 1999 \
         --prefiller-hosts "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" "$P_IP" \
@@ -2140,7 +2137,7 @@ MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
 export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-vllm serve "$MODEL_PATH" \
+exec vllm serve "$MODEL_PATH" \
     --host "$local_ip" \
     --port "$2" \
     --served-model-name dsv41 \
@@ -2279,7 +2276,7 @@ MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
 export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-vllm serve "$MODEL_PATH" \
+exec vllm serve "$MODEL_PATH" \
     --host "$local_ip" \
     --port "$2" \
     --served-model-name dsv41 \
@@ -2882,7 +2879,8 @@ Keep DP4/TP4 for A3 single-node deployment,
 or Prefill DP4/PCP4/TP1 and Decode DP16/TP1 for A3 PD deployment, until an
 alternative configuration has been validated.
 
-The 950DT products configurations are summarized below. `max-num-seqs` and
+Use the 950DT configurations below as starting points. Compare latency and
+throughput on your own workload before changing the limits. `max-num-seqs` and
 `max-num-batched-tokens` apply per DP engine. The recommended 1P1D layout
 uses eight DP ranks on each node; PCP and wider Decode EP groups are optional
 extensions in [A5 Deployment Extensions](#a5-deployment-extensions).
