@@ -52,6 +52,11 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_fused,
 )
+from vllm_ascend.utils import (
+    attention_calculation_stream,
+    current_stream,
+    npu_stream_switch,
+)
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
@@ -272,6 +277,21 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 return out
             return result
 
+        prepared = self.prepare_prolog(hidden_states, positions, metadata)
+        return self.select_prepared(prepared, out)
+
+    def prepare_prolog(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        metadata: tuple[QSAForwardMetadata, QSAForwardMetadata] | None = None,
+    ) -> tuple[torch.Tensor, QSAForwardMetadata]:
+        """Prepare the Indexer query and side caches before token selection."""
+        if metadata is None:
+            metadata = self._metadata()
+        if metadata is None:
+            raise RuntimeError("QSA indexer prolog requires runtime metadata")
+
         raw_metadata, compressed_metadata = metadata
         num_tokens = raw_metadata.num_actual_tokens
         hidden_states = hidden_states[:num_tokens]
@@ -283,11 +303,19 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             raw_metadata,
             compressed_metadata,
         )
+        return query, compressed_metadata
 
+    def select_prepared(
+        self,
+        prepared: tuple[torch.Tensor, QSAForwardMetadata],
+        out: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Select sparse tokens after :meth:`prepare_prolog` has completed."""
         if self.skip_topk:
             if out is None:
                 raise RuntimeError("QSA top-k reuse requires an output buffer")
             return out
+        query, compressed_metadata = prepared
         return self._select(query, compressed_metadata, out)
 
     def project_qk(
@@ -567,6 +595,17 @@ qsa_cache.build_qsa_metadata = qsa_cache._build_qsa_metadata_torch
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
 
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        # Share one process-local auxiliary stream across QSA layers. Every
+        # layer joins it before attention, so no work remains queued when the
+        # next layer starts using the same stream.
+        self.indexer_prolog_stream = attention_calculation_stream()
+
+    @staticmethod
+    def _supports_indexer_prolog_overlap(qkv: torch.Tensor | None) -> bool:
+        return qkv is not None and qkv.device.type == "npu"
+
     def _main_fused_norm_rope_eligible(
         self,
         qkv: torch.Tensor,
@@ -664,6 +703,28 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         if side_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
 
+        # The main Q/K preparation and the Indexer prolog consume independent
+        # projections. Run the Indexer branch on an auxiliary stream while the
+        # main stream normalizes/rotates Q/K and writes the main KV cache. Join
+        # only before LightningIndexer consumes the prepared query and cache.
+        prepared_indexer: tuple[torch.Tensor, QSAForwardMetadata] | None = None
+        indexer_prolog_done = None
+        main_stream = None
+        # Keep ``_run_qsa`` callable with the lightweight owner doubles used by
+        # the upstream ABI tests; real layer instances resolve the bound helper.
+        overlap_check = getattr(
+            self,
+            "_supports_indexer_prolog_overlap",
+            AscendQwen4ExpQSAAttention._supports_indexer_prolog_overlap,
+        )
+        if overlap_check(qkv):
+            main_stream = current_stream()
+            indexer_inputs_ready = main_stream.record_event()
+            with npu_stream_switch(self.indexer_prolog_stream):
+                self.indexer_prolog_stream.wait_event(indexer_inputs_ready)
+                prepared_indexer = self.indexer.prepare_prolog(hidden_states, positions)
+                indexer_prolog_done = self.indexer_prolog_stream.record_event()
+
         # Newer vLLM revisions call the owner with the packed projection when
         # ``use_fused_qsa_prepare`` is enabled. The upstream indexer consumes
         # that projection itself; Ascend keeps its independently fused main
@@ -678,15 +739,17 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                 raise RuntimeError("Fused QSA preparation requires an output gate")
             gate.copy_(projected_gate.view_as(gate))
 
-        selected = self.indexer(
-            hidden_states,
-            positions,
-            self.topk_indices_buffer[:num_tokens],
-        )
-        if selected.shape != (num_tokens, self.indexer.output_width):
-            raise RuntimeError("QSA indexer returned an invalid selection shape")
         if query is None or key is None or value is None:
             raise RuntimeError("QSA preparation did not produce Q/K/V tensors")
+        # Preserve the original serialized ordering for CPU/eager fallbacks.
+        # The overlapped NPU path defers only the selection until after the
+        # independent main-cache update has had a chance to hide the prolog.
+        if prepared_indexer is None:
+            selected = self.indexer(
+                hidden_states,
+                positions,
+                self.topk_indices_buffer[:num_tokens],
+            )
         self.impl.do_kv_cache_update(
             self,
             key,
@@ -694,6 +757,16 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             self.kv_cache,
             main_metadata.slot_mapping,
         )
+        if prepared_indexer is not None:
+            if main_stream is None or indexer_prolog_done is None:
+                raise RuntimeError("QSA indexer overlap did not record its completion")
+            main_stream.wait_event(indexer_prolog_done)
+            selected = self.indexer.select_prepared(
+                prepared_indexer,
+                self.topk_indices_buffer[:num_tokens],
+            )
+        if selected.shape != (num_tokens, self.indexer.output_width):
+            raise RuntimeError("QSA indexer returned an invalid selection shape")
         with attention_transfer_window():
             self.impl.forward_qsa(
                 self,
