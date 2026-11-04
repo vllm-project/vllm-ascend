@@ -4,12 +4,57 @@
 
 from dataclasses import dataclass
 
+import httpx
+import msgspec
 from fastapi import HTTPException
 from pydantic import Field, model_validator
+from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
+from vllm.utils.network_utils import make_zmq_path
+
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeTransferMetadataGroups
+
+
+def register_workers_with_bootstrap(
+    host: str,
+    port: int,
+    engine_id: str,
+    dp_rank: int,
+    tp_size: int,
+    pp_size: int,
+    pcp_size: int,
+    dcp_size: int,
+    encoded_metadata: bytes,
+) -> None:
+    """Register one P engine's workers with the shared bootstrap server."""
+    groups = msgspec.msgpack.decode(encoded_metadata, type=MooncakeTransferMetadataGroups)
+    registrations = []
+    for pp_rank, pp_metadata in groups.metadata_by_pp_rank.items():
+        for pcp_rank, pcp_metadata in pp_metadata.metadata_by_pcp_rank.items():
+            for tp_rank, worker in pcp_metadata.metadata_by_tp_rank.items():
+                if not worker.local_ip or not 1 <= worker.handshake_port <= 65535:
+                    raise ValueError("P worker must advertise its Ready listener address")
+                registrations.append(
+                    {
+                        "engine_id": engine_id,
+                        "dp_rank": dp_rank,
+                        "pp_rank": pp_rank,
+                        "pcp_rank": pcp_rank,
+                        "tp_rank": tp_rank,
+                        "pp_size": pp_size,
+                        "pcp_size": pcp_size,
+                        "tp_size": tp_size,
+                        "dcp_size": dcp_size,
+                        "addr": make_zmq_path("tcp", worker.local_ip, worker.handshake_port),
+                    }
+                )
+    with httpx.Client(timeout=envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT) as client:
+        for payload in registrations:
+            response = client.post(make_zmq_path("http", host, port) + "/register", json=payload)
+            response.raise_for_status()
 
 
 class AscendRegisterWorkerPayload(RegisterWorkerPayload):
