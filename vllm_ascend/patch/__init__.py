@@ -813,9 +813,9 @@
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
 #       Ascend uses the NPU v2 runner by default. Features that are not
-#       V2-ready (pooling KV, draft_window_size, suffix
+#       V2-ready (draft_window_size, suffix
 #       speculative decoding, ngram speculative decoding, draft_model
-#       speculative decoding, dflash2 graph, and p-eagle)
+#       speculative decoding, and p-eagle)
 #       default to v1.
 #       Upstream GPU-specific architecture, feature, and Triton gates must not
 #       silently switch an
@@ -887,9 +887,9 @@
 #       At worker patch time, if ``register_kv_cache_dtype`` cannot be
 #       imported from ``vllm.config.cache``, mutate
 #       ``vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"]`` to
-#       ``torch.float8_e4m3fn`` in place. No-op on vLLM builds that already
-#       provide the pluggable mechanism (kvquant_27 / future main), where the
-#       eager handler import already flipped the dtype.
+#       ``torch.float8_e4m3fn`` in place. When the API exists, also replace
+#       the upstream ``torch.uint8`` default if no handler updated it yet.
+#       Preserve any other dtype supplied by a registered handler.
 #    Related PR (if no, explain why):
 #       vLLM commit ``dd7e350c9 pluggable kv quant dtype`` (on kvquant_27).
 #    Future Plan:
@@ -1200,13 +1200,33 @@
 # ** 15. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3Model.precompute_and_store_context_kv`
+#   2. `vllm.model_executor.models.lilicorr.DFlash2Qwen3DecoderLayer`
+#   3. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3ForCausalLM._read_mask_embedding`
 #    Why:
 #       The function directly calls the ops.rms_norm and ops.rotary_imbedding operators,
 #       but NPU does not have a corresponding implementation.
+#       LiLiCorr's optional convolutional backbone otherwise resolves to the CUDA-oriented
+#       upstream DFlash2 layer rather than the Ascend implementation.
+#       Its constructor overwrites self.decoder_layer_cls with a module-level
+#       import, so a subclass factory alone cannot select the Ascend layer.
+#       ModelScope raises NotExistError when optional mask_embedding.pt is absent,
+#       instead of returning None as the upstream helper expects.
 #    How：
 #       Replace ops.* with the internal implementation of vllm-ascend.
+#       Consume returned RoPE keys for both in-place and out-of-place NPU backends,
+#       using a key-only call to avoid cloning the entire context buffer.
+#       When the paired vLLM revision provides LiLiCorr, bind its decoder factory to the
+#       Ascend DFlash2 layer while retaining the upstream LiLiCorr head and weight loader.
+#       This binding is applied once per worker before model construction;
+#       it adds no tensor operations or synchronization to inference.
+#       Treat only ModelScope's missing mask_embedding.pt error as an absent
+#       override; preserve errors for malformed data and other missing files.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/57934
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for ops.*.
+#       Remove the LiLiCorr binding when upstream exposes a platform decoder factory.
+#       Remove the mask file wrapper when vLLM handles ModelScope's absence error.
 #
 # ** 16. File: worker/patch_spec_decode_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1459,17 +1479,22 @@
 #       keep mask directly also returns one per tile instead of the finite-logit
 #       count on Triton-Ascend. The upstream row-wise bit packing additionally
 #       lowers to scalar-heavy variable shifts and width-8 reductions.
+#       Speculative decoding also requires a separate mask for each committed
+#       token in the upstream request-major output layout.
 #    How:
 #       Make logits contiguous only when the vocabulary dimension is strided,
 #       cast the keep mask to int32 before reducing it, and use a 4096-element
-#       tile to keep the corrected reduction within the NPU UB limit. Support
-#       both the release three-field bitmask API and the verified-main
-#       four-field compact-ID plus bitmask API with the same packing kernel.
-#       For the four-field API, return a zero-width `token_ids` tensor so its
-#       existing `tolists()` method uses the exact bitmask fallback. Pack bits by
-#       transposing `[512, 8]` to `[8, 512]`, multiplying by compile-time bit
-#       weights, and reducing the contiguous 8-row axis so the backend emits
-#       vector transpose, multiply, and reduction instructions.
+#       tile to keep the corrected reduction within the NPU UB limit. Accept
+#       `cu_num_logits` and `rows_per_request` for the upstream request-major
+#       API, reading logits row `cu_num_logits[req_idx] + slot_idx` and writing
+#       output row `req_idx * rows_per_request + slot_idx`. Mask inactive-slot
+#       loads so their masks and counts are zero. Read offsets and sampled counts
+#       on device for graph replay, and skip the kernel launch for empty batches.
+#       Return the five-field `SamplingMaskTensors`, including `rows_per_request`,
+#       with zero-width `token_ids` so upstream `tolists()` uses the exact bitmask
+#       fallback. Pack bits by transposing `[512, 8]` to `[8, 512]`, multiplying
+#       by compile-time bit weights, and reducing the contiguous 8-row axis so
+#       the backend emits vector transpose, multiply, and reduction instructions.
 #    Test:
 #       Regression coverage is in
 #       `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py`.

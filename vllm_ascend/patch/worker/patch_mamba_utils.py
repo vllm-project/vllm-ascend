@@ -3,7 +3,7 @@
 from vllm.v1.worker import mamba_utils
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
+from vllm_ascend.ops.triton.v1.mamba.postprocess import postprocess_mamba_fused_kernel
 
 # Upstream uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
 # exposes 138 independent state programs per request, while Triton-Ascend

@@ -18,7 +18,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.device.device_op import BaseDeviceAdaptor
-from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
@@ -44,18 +44,6 @@ def test_adaptive_verification_cudagraph_support(builder_cls, speculative_config
     assert builder_cls.get_cudagraph_support(config, Mock()) is expected
 
 
-def test_aclgraph_model_forwards_confidence_computation():
-    model = Mock()
-    expected = torch.tensor([0.25, 0.75])
-    model.compute_confidence.return_value = expected
-    wrapped = ModelWithContext(model, is_draft_model=True, is_draft_model_prefill=False)
-    hidden = torch.randn(2, 4)
-    markov = torch.randn(2, 4)
-
-    assert wrapped.compute_confidence(hidden, markov) is expected
-    model.compute_confidence.assert_called_once_with(hidden, markov)
-
-
 @pytest.mark.parametrize(
     ("adaptive_verification", "context_len", "expected"),
     [
@@ -66,7 +54,7 @@ def test_aclgraph_model_forwards_confidence_computation():
 )
 def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, context_len, expected):
     runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
+    runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)  # type: ignore[assignment]
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.debugger = None
     runner.adaptive_verification = adaptive_verification
@@ -92,6 +80,15 @@ def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, con
 def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypatch):
     import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
 
+    if not vllm_version_is("0.32.0"):
+        # Main trims the budget in a Triton kernel, so the patch must leave
+        # the allocator untouched.
+        before = adaptive.assign_draft_token_budget
+        module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
+        importlib.reload(module)
+        assert adaptive.assign_draft_token_budget is before
+        return
+
     monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object())
     module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
     importlib.reload(module)
@@ -102,6 +99,13 @@ def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypat
 
 def test_adaptive_verification_patch_preserves_budget_assignment(monkeypatch):
     import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
+
+    if not vllm_version_is("0.32.0"):
+        before = adaptive.assign_draft_token_budget
+        module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
+        importlib.reload(module)
+        assert adaptive.assign_draft_token_budget is before
+        return
 
     # Isolate this test from batch-invariant tests that patch torch.sum globally.
     monkeypatch.setattr(torch, "sum", _NATIVE_TORCH_SUM)
@@ -127,7 +131,7 @@ def test_adaptive_verification_patch_preserves_budget_assignment(monkeypatch):
 def test_index_fill_mode_can_reenter_native_device_adaptor(monkeypatch):
     import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
 
-    monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object())
+    monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object(), raising=False)
     module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
     importlib.reload(module)
     tensor = torch.zeros(5)
@@ -145,6 +149,7 @@ def test_index_fill_mode_can_reenter_native_device_adaptor(monkeypatch):
 @pytest.mark.parametrize("dummy_run", [False, True])
 def test_propose_adaptive_draft_negotiates_its_own_dp_shape(monkeypatch, adaptive, is_profile, dummy_run):
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.pcp_manager = None
     spec.use_dcp = False
     spec.replicated_pcp = False
     spec.input_buffers = SimpleNamespace(positions=torch.arange(20))
@@ -162,8 +167,8 @@ def test_propose_adaptive_draft_negotiates_its_own_dp_shape(monkeypatch, adaptiv
 
     result = spec.propose(
         input_batch=batch,
-        attn_metadata=None,
-        slot_mappings=None,
+        attn_metadata=None,  # type: ignore[arg-type]
+        slot_mappings=None,  # type: ignore[arg-type]
         last_hidden_states=None,
         aux_hidden_states=None,
         num_sampled=None,
@@ -172,7 +177,7 @@ def test_propose_adaptive_draft_negotiates_its_own_dp_shape(monkeypatch, adaptiv
         next_prefill_tokens=None,
         temperature=None,
         seeds=None,
-        **{"dp_sync_state": target_sync},
+        **{"dp_sync_state": target_sync},  # type: ignore[arg-type]
         dummy_run=dummy_run,
         is_profile=is_profile,
     )
@@ -205,7 +210,7 @@ def test_adaptive_idle_dp_restores_request_count_after_target_forward(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))
     )
     runner.vllm_config = SimpleNamespace()
-    runner.kvpp = SimpleNamespace(complete_forward=Mock())
+    runner.kvpp = SimpleNamespace(complete_forward=Mock())  # type: ignore[assignment]
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False, finish_execution=Mock())
     runner.adaptive_verification = object() if adaptive else None
     buffers = AscendInputBuffers(16, 64, torch.device("cpu"))

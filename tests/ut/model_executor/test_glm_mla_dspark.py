@@ -74,7 +74,12 @@ def test_mla_cache_spec_matches_bidirectional_query_metadata(monkeypatch):
         patch_deepseek_v2, "MultiHeadLatentAttentionWrapper", return_value=SimpleNamespace(mla_attn=attention)
     ) as initialize:
         Glm5DSparkMLAAttention.__init__(
-            model, vllm_config=SimpleNamespace(cache_config=object()), config=config, prefix="draft.layers.0.self_attn"
+            model,
+            vllm_config=SimpleNamespace(
+                cache_config=object(), parallel_config=SimpleNamespace(decode_context_parallel_size=1)
+            ),
+            config=config,
+            prefix="draft.layers.0.self_attn",
         )
     assert initialize.call_args.kwargs.get("non_causal_multi_token_decode", False) is True
     assert model.attn is attention
@@ -102,7 +107,10 @@ def context_model():
             q_lora_rank=2,
             fused_qkv_a_proj=MagicMock(return_value=(output, None)),
             rotary_emb=SimpleNamespace(cos_sin_cache=torch.arange(16).view(4, 4)),
-            attn=SimpleNamespace(impl=SimpleNamespace(exec_kv_prefill=MagicMock()), kv_cache=object()),
+            attn=SimpleNamespace(
+                impl=SimpleNamespace(exec_kv_prefill=MagicMock(), _cache_requires_prolog_v3_writer=lambda _: False),
+                kv_cache=object(),
+            ),
         )
         layers.append(SimpleNamespace(self_attn=attn))
     return SimpleNamespace(layers=layers), context

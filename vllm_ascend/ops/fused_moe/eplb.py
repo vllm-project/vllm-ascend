@@ -4,34 +4,18 @@
 import torch
 from vllm.utils.torch_utils import direct_register_custom_op
 
-EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS = 1024
+from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
+from vllm_ascend.distributed.eplb.tensor_ops import EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS
 
 
-def build_expert_replica_routing_table(
-    logical_to_physical_map: torch.Tensor,
-    logical_replica_count: torch.Tensor,
-    ep_rank: int,
-) -> torch.Tensor:
-    """Build a rank-aware table for routing logical experts to replicas."""
-    if logical_to_physical_map.ndim != 2:
-        raise ValueError("logical_to_physical_map must be a 2D tensor.")
-    if logical_replica_count.ndim != 1:
-        raise ValueError("logical_replica_count must be a 1D tensor.")
-    if logical_to_physical_map.shape[0] != logical_replica_count.shape[0]:
-        raise ValueError("Logical expert dimensions must match.")
+def use_allgather_eplb() -> bool:
+    # The forward context imports the MoE implementations during setup.
+    from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 
-    num_logical_experts = logical_replica_count.shape[0]
-    device = logical_to_physical_map.device
-    table_rows = torch.arange(
-        EXPERT_REPLICA_ROUTING_TABLE_NUM_ROWS,
-        dtype=torch.int64,
-        device=device,
-    )[:, None]
-    logical_expert_ids = torch.arange(num_logical_experts, dtype=torch.int64, device=device)[None, :]
-    replica_count = logical_replica_count.to(torch.int64).clamp_min(1)[None, :]
-    replica_indices = (table_rows + ep_rank + logical_expert_ids) % replica_count
-    routing_table = logical_to_physical_map.gather(1, replica_indices.T).T
-    return routing_table.to(torch.int32).contiguous()
+    return (
+        get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE
+        and _EXTRA_CTX.moe_comm_type is MoECommType.ALLGATHER
+    )
 
 
 def map_to_physical(

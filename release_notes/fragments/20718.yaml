@@ -1,0 +1,6 @@
+pr: 20718
+entries:
+  - category: bugfix
+    text: >-
+      Fixed GLM-5.3-Flash EPLB initialization by registering target MoE metadata
+      and MegaMoE's prepared MXFP8 expert weights and scales.

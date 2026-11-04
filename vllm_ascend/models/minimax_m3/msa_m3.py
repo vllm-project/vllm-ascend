@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+from importlib import import_module
+from importlib.util import find_spec
 from typing import Any, ClassVar
 
 import torch
@@ -40,38 +43,78 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import (
+    DeviceAdaptorFamily,
+    HardwareCapability,
+    get_current_hardware_profile,
+)
+from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
+    _MSA_INDEX_BLOCK_SIZE,
+    _decode_gbsa_metadata_key,
+    minimax_m3_sparse_attn,
+    minimax_m3_sparse_attn_decode,
+    prepare_decode_gbsa_metadata,
+)
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_index_decode as minimax_m3_index_decode_ascendc,
 )
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_index_prefill as minimax_m3_index_prefill_ascendc,
 )
-from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
-    minimax_m3_sparse_attn,
-    minimax_m3_sparse_attn_decode,
-)
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
-)
 
 # Minimum used by heterogeneous-KV alignment; the final FP8 cache block is 128.
 _MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE = 64
 
-# Use CANN MsaIndexScore for prefill on all devices and decode on A2/A3.
-# A5 decode keeps its lower-latency Triton path.
-_USE_ASCENDC_INDEX_SCORE_PREFILL = True
-_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5
 
-if get_ascend_device_type() == AscendDeviceType.A5:
-    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
+@lru_cache
+def _cann_index_score_available() -> bool:
+    """Whether the installed CANN ops-transformer package ships MsaIndexScore.
+
+    This is a toolchain/dependency question, not a vLLM-version one: newer
+    CANN wheels provide the op, older ones keep the Triton path.
+    """
+    if find_spec("cann_ops_transformer") is None:
+        return False
+    try:
+        _ = import_module("cann_ops_transformer.ops").msa_index_score
+    except Exception:  # noqa: BLE001 -- optional toolchain, any failure -> Triton
+        return False
+    return True
+
+
+# MiniMax-M3 index-score kernels select the CANN path when the op is installed.
+_CANN_INDEX_SCORE_AVAILABLE = _cann_index_score_available()
+
+# Use CANN MsaIndexScore for prefill and decode on every device when the
+# installed CANN package provides the op, keeping A5 aligned with A3. Triton
+# kernels stay importable as a fallback/rollback path.
+_USE_ASCENDC_INDEX_SCORE_PREFILL = _CANN_INDEX_SCORE_AVAILABLE
+_USE_ASCENDC_INDEX_SCORE_DECODE = _CANN_INDEX_SCORE_AVAILABLE
+
+if get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED:
+    from vllm_ascend.ops.triton.msa.msa_m3_index_topk import (
         minimax_m3_index_decode,
         minimax_m3_index_score,
         minimax_m3_index_topk,
     )
+
+    _TRITON_DECODE_SUPPORTS_SORTED_INDICES = True
+else:
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
+        minimax_m3_index_decode,
+        minimax_m3_index_score,
+        minimax_m3_index_topk,
+    )
+
+    # The legacy A2/A3 producer returns unsorted IDs and has no sort_indices
+    # argument. Its GBSA consumer must retain valid-prefix normalization.
+    _TRITON_DECODE_SUPPORTS_SORTED_INDICES = False
+
+
+# CANN GenericBlockSparseAttentionMetadata returns exactly 1024 int32 values.
+_GBSA_METADATA_SIZE = 1024
 
 
 def _active_decode_num_reqs(
@@ -499,21 +542,48 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                     init_blocks=self.init_blocks,
                     local_blocks=self.local_blocks,
                     decode_query_len=d.decode_query_len,
+                    sort_indices=True,
                 )
             else:
-                decode_topk, decode_select_num_idx = minimax_m3_index_decode(
-                    decode_iq,
-                    kv,
-                    d.block_table,
-                    d.seq_lens,
-                    d.max_seq_len,
-                    self.topk_blocks,
-                    self.init_blocks,
-                    self.local_blocks,
-                    self.num_kv_heads,
-                    d.decode_query_len,
-                    sm_scale=self.scale,
-                )
+                if _TRITON_DECODE_SUPPORTS_SORTED_INDICES:
+                    decode_result = minimax_m3_index_decode(
+                        decode_iq,
+                        kv,
+                        d.block_table,
+                        d.seq_lens,
+                        d.max_seq_len,
+                        self.topk_blocks,
+                        self.init_blocks,
+                        self.local_blocks,
+                        self.num_kv_heads,
+                        d.decode_query_len,
+                        sm_scale=self.scale,
+                        sort_indices=True,
+                    )
+                else:
+                    decode_result = minimax_m3_index_decode(
+                        decode_iq,
+                        kv,
+                        d.block_table,
+                        d.seq_lens,
+                        d.max_seq_len,
+                        self.topk_blocks,
+                        self.init_blocks,
+                        self.local_blocks,
+                        self.num_kv_heads,
+                        d.decode_query_len,
+                        sm_scale=self.scale,
+                    )
+                # The A3 Triton decode returns the upstream single-tensor
+                # contract, while the A5 Triton decode returns
+                # (topk_idx, select_num_idx). The sparse decode op derives the
+                # per-query selected counts from ``topk_idx`` when they are not
+                # supplied (see _select_num_idx_from_topk).
+                if isinstance(decode_result, tuple):
+                    decode_topk, decode_select_num_idx = decode_result
+                else:
+                    decode_topk = decode_result
+                    decode_select_num_idx = None
         if index_md.num_prefills > 0:
             p = index_md.prefill
             assert p is not None
@@ -706,6 +776,10 @@ class AscendMiniMaxM3SparseDecodeMetadata:
     block_table: torch.Tensor
     max_seq_len: int
     decode_query_len: int
+    cu_seqlens_q: torch.Tensor | None = None
+    gbsa_metadata_cache: dict[tuple[Any, ...], torch.Tensor] | None = None
+    gbsa_metadata_first_layer: str | None = None
+    gbsa_metadata_prepared: bool = False
 
 
 @dataclass
@@ -742,6 +816,114 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
             device=device,
         )
         self.prefill_cu_seqlens_q_buffer = torch.empty_like(self.context_len_buffer)
+        # Retain buffers for the builder lifetime: captured graphs keep these
+        # addresses. Different speculative query lengths must not overwrite one
+        # another's prefix. Uniform padding follows the previous decode path.
+        # Reordering already derives this bound from the speculative config,
+        # including variable drafting widths. Prepare every uniform decode
+        # length in that range before capture, rather than naming draft models.
+        self.decode_gbsa_query_lengths = range(1, self.reorder_batch_threshold + 1)
+        self.decode_cu_seqlens_q_buffers = {
+            query_len: torch.arange(
+                0,
+                ((self.context_len_buffer.numel() + query_len - 1) // query_len + 1) * query_len,
+                query_len,
+                dtype=torch.int64,
+                device=device,
+            )
+            for query_len in self.decode_gbsa_query_lengths
+        }
+        hardware_profile = get_current_hardware_profile()
+        self.reuse_decode_gbsa_metadata = hardware_profile.supports(HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE)
+        self.decode_gbsa_kv_dtype = kv_cache_spec.dtype
+        self.decode_gbsa_configs: set[tuple[int, int, int, int]] = set()
+        if (
+            self.reuse_decode_gbsa_metadata
+            and self.block_size == _MSA_INDEX_BLOCK_SIZE
+            and (
+                kv_cache_spec.dtype == torch.bfloat16
+                or (
+                    kv_cache_spec.dtype == torch.float8_e4m3fn
+                    and hardware_profile.supports(HardwareCapability.FP8_ATTENTION)
+                )
+            )
+            and vllm_config.model_config.dtype == torch.bfloat16
+        ):
+            context = vllm_config.compilation_config.static_forward_context
+            for name in layer_names:
+                layer = context[name]
+                self.decode_gbsa_configs.add((layer.num_heads, layer.num_kv_heads, layer.head_dim, layer.topk_blocks))
+        # CANN's fixed output layout is independent of batch size. Each layer
+        # configuration/query length can share one persistent buffer across
+        # graph sizes: build and forward use the same stream, so copy_ finishes
+        # after the preceding forward and before this forward's consumers.
+        self.decode_gbsa_metadata_buffers = {
+            (*config, query_len): torch.empty(_GBSA_METADATA_SIZE, dtype=torch.int32, device=device)
+            for config in self.decode_gbsa_configs
+            for query_len in self.decode_gbsa_query_lengths
+        }
+
+    def _get_decode_cu_seqlens_q(self, num_reqs: int, query_len: int) -> torch.Tensor:
+        if (
+            query_len not in self.decode_cu_seqlens_q_buffers
+            or num_reqs < 0
+            or num_reqs >= self.decode_cu_seqlens_q_buffers[query_len].numel()
+        ):
+            raise ValueError("Invalid uniform decode batch or query length")
+        return self.decode_cu_seqlens_q_buffers[query_len][: num_reqs + 1]
+
+    def _prepare_decode_gbsa_metadata(
+        self,
+        metadata: AscendMiniMaxM3SparseDecodeMetadata,
+        common_attn_metadata: CommonAttentionMetadata,
+        *,
+        num_prefills: int = 0,
+    ) -> None:
+        if metadata.decode_query_len not in self.decode_gbsa_query_lengths or metadata.seq_lens.numel() == 0:
+            return
+        assert metadata.cu_seqlens_q is not None
+        assert metadata.gbsa_metadata_cache is not None
+        seq_lens = metadata.seq_lens
+        cu_seqlens_q = metadata.cu_seqlens_q
+        if num_prefills == 0 and (
+            getattr(common_attn_metadata, "graph_pad_size", -1) > 0
+            or common_attn_metadata.num_reqs > metadata.seq_lens.numel()
+        ):
+            # FULL graphs retain the schedule for their padded query shape.
+            # MRV2 pads the request dimension without setting graph_pad_size.
+            # Piecewise/eager keep the actual request count. Mixed batches
+            # include prefill requests and must keep the decode-only schedule.
+            num_reqs = common_attn_metadata.num_reqs
+            seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+            cu_seqlens_q = self._get_decode_cu_seqlens_q(num_reqs, metadata.decode_query_len)
+        num_tokens = seq_lens.numel() * metadata.decode_query_len
+        for num_heads, num_kv_heads, head_size, topk in self.decode_gbsa_configs:
+            key = _decode_gbsa_metadata_key(
+                num_tokens,
+                num_heads,
+                num_kv_heads,
+                head_size,
+                topk,
+                metadata.decode_query_len,
+                self.decode_gbsa_kv_dtype,
+            )
+            schedule = prepare_decode_gbsa_metadata(
+                seq_lens,
+                cu_seqlens_q,
+                metadata.decode_query_len,
+                num_heads,
+                num_kv_heads,
+                head_size,
+                topk,
+                metadata.block_table.shape[-1],
+                self.decode_gbsa_kv_dtype,
+            )
+            buffer = self.decode_gbsa_metadata_buffers[
+                (num_heads, num_kv_heads, head_size, topk, metadata.decode_query_len)
+            ]
+            buffer.copy_(schedule)
+            metadata.gbsa_metadata_cache[key] = buffer
+        metadata.gbsa_metadata_prepared = bool(self.decode_gbsa_configs)
 
     def build(
         self,
@@ -818,7 +1000,15 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
                 block_table=block_table[:active_decodes],
                 max_seq_len=common_attn_metadata.max_seq_len,
                 decode_query_len=decode_query_len,
+                cu_seqlens_q=(
+                    self._get_decode_cu_seqlens_q(active_decodes, decode_query_len) if active_decodes > 0 else None
+                ),
+                # Each build publishes this forward's schedules. Unsupported
+                # paths retain the existing first-layer metadata fallback.
+                gbsa_metadata_cache={} if self.reuse_decode_gbsa_metadata else None,
             )
+            if self.decode_gbsa_configs:
+                self._prepare_decode_gbsa_metadata(decode_metadata, common_attn_metadata, num_prefills=num_prefills)
 
         return AscendMiniMaxM3SparseMetadata(
             seq_lens=seq_lens,
@@ -884,6 +1074,14 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         if main_md.num_decodes > 0:
             d = main_md.decode
             assert d is not None and decode_topk is not None
+            # Warmup and graph capture may reuse a metadata object. Starting
+            # its first sparse layer again must record a fresh metadata op,
+            # rather than capturing a schedule left by an earlier warmup.
+            if d.gbsa_metadata_cache is not None and not d.gbsa_metadata_prepared:
+                if d.gbsa_metadata_first_layer is None:
+                    d.gbsa_metadata_first_layer = layer.layer_name
+                elif d.gbsa_metadata_first_layer == layer.layer_name:
+                    d.gbsa_metadata_cache.clear()
             if self.kv_cache_dtype.startswith("fp8") and self._dequant_scale is None:
                 self._dequant_scale = torch.ones(
                     (1, 1, 1, 1),
@@ -903,6 +1101,9 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 block_size=self.block_size,
                 select_num_idx=decode_select_num_idx,
                 dequant_scale=self._dequant_scale,
+                cu_seqlens_q=d.cu_seqlens_q,
+                gbsa_metadata_cache=d.gbsa_metadata_cache,
+                indices_are_sorted=_USE_ASCENDC_INDEX_SCORE_DECODE or _TRITON_DECODE_SUPPORTS_SORTED_INDICES,
             )
 
         if main_md.num_prefills > 0:
