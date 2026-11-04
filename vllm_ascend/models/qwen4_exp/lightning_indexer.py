@@ -7,16 +7,14 @@
 
 from __future__ import annotations
 
-import math
-
 import torch
 
+from vllm_ascend.ops.triton.qwen4_exp.lightning_prepare import prepare_qsa_lightning_inputs
 from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
 
 _HEAD_DIM = 128
 _COMPRESS_RATIO = 4
 _TOKEN_TOPK = 2048
-_SUPPORTED_HEAD_COUNTS = (8, 16, 24, 32, 64)
 
 
 def is_qsa_lightning_cache_compatible(cache: torch.Tensor) -> bool:
@@ -98,51 +96,9 @@ def qsa_select_paged_tokens_lightning(
     out.fill_(-1)
     block_topk = token_topk // compress_ratio
     packed_width = block_topk + compress_ratio - 1
-    score_weight = 1.0 / math.sqrt(query.shape[2])
-    row_requests = token_to_req.to(torch.int64)
-    row_sequence_lengths = sequence_lengths[row_requests]
-    visible_groups = torch.minimum(
-        (query_positions + 1).floor_divide(compress_ratio),
-        row_sequence_lengths.floor_divide(compress_ratio),
-    ).to(torch.int32)
-    row_block_table = block_table[row_requests]
-    query_cu_seqlens = torch.arange(
-        1,
-        rows + 1,
-        dtype=torch.int32,
-        device=query.device,
+    query, weights, visible_groups, query_cu_seqlens, row_block_table = prepare_qsa_lightning_inputs(
+        query, query_positions, sequence_lengths, token_to_req, block_table
     )
-    original_heads = query.shape[1]
-    padded_heads = next(heads for heads in _SUPPORTED_HEAD_COUNTS if heads >= original_heads)
-    weights = torch.full(
-        (rows, original_heads),
-        score_weight,
-        dtype=query.dtype,
-        device=query.device,
-    )
-    if padded_heads != original_heads:
-        query = torch.cat(
-            (
-                query,
-                torch.zeros(
-                    (rows, padded_heads - original_heads, query.shape[2]),
-                    dtype=query.dtype,
-                    device=query.device,
-                ),
-            ),
-            dim=1,
-        )
-        weights = torch.cat(
-            (
-                weights,
-                torch.zeros(
-                    (rows, padded_heads - original_heads),
-                    dtype=query.dtype,
-                    device=query.device,
-                ),
-            ),
-            dim=1,
-        )
     groups, _ = torch.ops.npu.npu_lightning_indexer.default(
         query,
         compressed_key_cache,
