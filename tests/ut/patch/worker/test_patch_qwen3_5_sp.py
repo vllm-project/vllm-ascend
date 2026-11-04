@@ -8,7 +8,8 @@ import pytest
 import torch
 
 from vllm_ascend.patch.worker import patch_qwen3_5
-from vllm_ascend.utils import enable_dense_sp, enable_sp
+from vllm_ascend.patch.worker.patch_qwen3_5 import enable_dense_sp
+from vllm_ascend.utils import enable_sp
 
 
 def _make_vllm_config(
