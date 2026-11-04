@@ -1,0 +1,6 @@
+pr: 19919
+entries:
+  - category: bugfix
+    text: Fixed pooling models with bidirectional (ENCODER_ONLY) full-attention layers in hybrid architectures, such as Qwen3.5-based models, running causal attention on Ascend and returning incorrect results.
+  - category: bugfix
+    text: Pooling models with bidirectional (ENCODER_ONLY) attention layers now fail at startup when prefill context parallelism is enabled, instead of silently attending only to the rank-local tokens.
