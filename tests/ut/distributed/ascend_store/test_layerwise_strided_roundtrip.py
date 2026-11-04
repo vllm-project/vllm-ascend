@@ -33,7 +33,8 @@ def addresses(database, mode, scale, tokens, token_count=None, layer_id=0, token
     if mode == "legacy":
         addr, size, _ = database.prepare_value_layer(start, end, [0, 1], layer_id)
         return addr, size, None
-    builder = LayerBatchBuilder(database, sum(database.group_block_len[0]), database.group_num_layers["kv"][0])
+    layout = database.group_layouts[0]
+    builder = LayerBatchBuilder(database, sum(layout.block_lengths), layout.num_layers)
     shared = SharedBlockData(
         block_ids_arr=np.array([1], dtype=np.int64),
         block_gvas_arr=np.array([4096], dtype=np.int64) if mode == "gva" else None,

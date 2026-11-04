@@ -410,6 +410,30 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(addr[0], 1000 + 5 * 160)
         self.assertEqual(addr[1], 2000 + 5 * 320)
 
+    def test_prepare_value_layer_selects_group_with_segmented_partial_range(self):
+        db = ChunkedTokenDatabase([self.meta, self.meta], [16, 16], None)
+        db.set_group_buffers(
+            {1: [1000, 2000, 3000]},
+            {1: [80, 80, 160]},
+            {1: [100, 100, 200]},
+            group_num_layers={1: 2},
+            group_layer_cache_entry_offsets={1: [0, 2, 3]},
+            group_cache_entry_segments={1: [(0, 2), (1, 2), (0, 1)]},
+        )
+        self.assertEqual(db.prepare_value_layer(4, 12, [2], 0, kv_cache_group_id=1), ([1240, 2200], [40, 40], 2))
+        self.assertEqual(db.prepare_value_layer(4, 12, [2], 1, kv_cache_group_id=1), ([3440], [80], 2))
+        self.assertEqual(db.prepare_value(4, 12, [2], kv_cache_group_id=1), ([1240, 2200, 3440], [40, 40, 80], 2))
+
+    def test_prepare_value_layer_broadcasts_descriptor_lengths_and_strides(self):
+        db = ChunkedTokenDatabase([self.meta, self.meta], [16, 16], None)
+        db.set_group_buffers(
+            {1: [1000, 2000, 3000, 4000]},
+            {1: [160]},
+            {1: [200]},
+            group_num_layers={1: 2},
+        )
+        self.assertEqual(db.prepare_value_layer(0, 8, [2], 1, kv_cache_group_id=1), ([3400, 4400], [80, 80], 2))
+
     def test_decode_adaptor_prefill_pp_no_partitions(self):
         key, addr, size = self.db.decode_adaptor_prefill_pp(["k1"], [[1, 2]], [[10, 20]])
         self.assertEqual(key, ["k1"])

@@ -110,14 +110,14 @@ class LayerBatchBuilder:
         self.num_layers = num_layers
         self.group_id = group_id
         self.layer_byte_offset = layer_byte_offset
-        self._block_len_np = np.asarray(token_database.group_block_len[group_id], dtype=np.int64)
+        layout = token_database.group_layouts[group_id]
+        self._block_len_np = np.asarray(layout.block_lengths, dtype=np.int64)
         self._kv_caches_base_addr_np = np.asarray(
-            token_database.group_kv_caches_base_addr[group_id],
+            layout.base_addresses,
             dtype=np.int64,
         )
-        group_block_stride = token_database.group_block_stride.get(group_id, token_database.group_block_len[group_id])
-        self._block_stride_np = np.asarray(group_block_stride, dtype=np.int64)
-        layer_cache_entry_offsets = token_database.group_layer_cache_entry_offsets.get(group_id)
+        self._block_stride_np = np.asarray(layout.block_strides, dtype=np.int64)
+        layer_cache_entry_offsets = layout.layer_offsets
         if layer_cache_entry_offsets is None:
             caches_per_layer = max(1, self._block_len_np.shape[0] // max(1, num_layers))
             layer_cache_entry_offsets = [

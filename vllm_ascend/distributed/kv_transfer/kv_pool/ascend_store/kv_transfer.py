@@ -49,7 +49,7 @@ class KVTransferThread(threading.Thread):
         self.tp_size = tp_size
         self.dcp_size = dcp_size
         self.token_database = token_database
-        self.num_addrs_per_block = len(token_database.group_block_len[0])
+        self.num_addrs_per_block = len(token_database.group_layouts[0].block_lengths)
         self.done_task_lock = threading.Lock()
         # Serialize request submission with the transition to a fatal state.
         # Otherwise a producer can enqueue immediately after the failed

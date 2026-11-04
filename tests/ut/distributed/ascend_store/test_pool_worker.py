@@ -35,6 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     AscendStoreConnector,
     create_kv_pool_worker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_layout import GroupBufferLayout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreSendingThread,
 )
@@ -2234,10 +2235,10 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 )
                 worker.layer_load_tasks = [[first], [second], [third]]
                 database = SimpleNamespace(
-                    group_block_len={0: [8, 8, 8], 1: [8, 8, 8]},
-                    group_kv_caches_base_addr={0: [1000, 2000, 3000], 1: [4000, 5000, 6000]},
-                    group_block_stride={},
-                    group_layer_cache_entry_offsets={},
+                    group_layouts={
+                        0: GroupBufferLayout.from_buffers([1000, 2000, 3000], [8, 8, 8]),
+                        1: GroupBufferLayout.from_buffers([4000, 5000, 6000], [8, 8, 8]),
+                    },
                 )
                 receiver = object.__new__(KVCacheStoreLayerRecvingThread)
                 receiver.group_builders = {
@@ -2393,10 +2394,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                         self.assertTrue(all(r.partial_block_index is None for r in ranges))
                         self.assertEqual(request.block_gvas_by_group_np[0].shape, (8,))
                         database = SimpleNamespace(
-                            group_block_len={0: [64]},
-                            group_kv_caches_base_addr={0: [1024]},
-                            group_block_stride={0: [64]},
-                            group_layer_cache_entry_offsets={0: [0, 1]},
+                            group_layouts={0: GroupBufferLayout.from_buffers([1024], [64], [64], layer_offsets=[0, 1])},
                         )
                         builder = LayerBatchBuilder(database, page_size_bytes=64, num_layers=1)
                         task = worker.layer_save_tasks[0][0]
