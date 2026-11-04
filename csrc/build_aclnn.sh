@@ -125,8 +125,9 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "chunk_fwd_o_vllm"
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
-        "sparse_attention_score"
         "k2q_csr"
+        "generic_block_sparse_attention"
+        "generic_block_sparse_attention_metadata"
         "mla_preprocess"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
@@ -176,8 +177,9 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "chunk_fwd_o_vllm"
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
-        "sparse_attention_score"
         "k2q_csr"
+        "generic_block_sparse_attention"
+        "generic_block_sparse_attention_metadata"
         "mla_preprocess"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
@@ -219,6 +221,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "kda_layout_swap12"
         "k2q_csr"
         "sparse_attention_score"
+        "generic_block_sparse_attention"
+        "generic_block_sparse_attention_metadata"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
