@@ -39,7 +39,7 @@ using namespace optiling::detail;
         templateClass<QLIV2Type<__VA_ARGS__>> op; \
         op.Init(query, key, weights, queryScale, keyScale, cuSeqlensQ, cuSeqlensK, sequsedQ, sequsedK, cmpResidualK, \
                 blockTable, outputIdxOffset, metadata, candidateTopkIndex, candidateBlockLength, sparseIndices, \
-                sparseValues, candidateTopkIndexOut, user, tiling_data, &tPipe); \
+                sparseValues, candidateTopkIndexOut, candidateBlockLengthOut, user, tiling_data, &tPipe); \
         op.Process(); \
     } while (0)
 
@@ -50,7 +50,7 @@ __global__ __aicore__ void quant_lightning_indexer_v2(
     __gm__ uint8_t *sequsedK, __gm__ uint8_t *cmpResidualK, __gm__ uint8_t *blockTable, __gm__ uint8_t *outputIdxOffset,
     __gm__ uint8_t *metadata, __gm__ uint8_t *candidateTopkIndex, __gm__ uint8_t *candidateBlockLength,
     __gm__ uint8_t *sparseIndices, __gm__ uint8_t *sparseValues, __gm__ uint8_t *candidateTopkIndexOut,
-    __gm__ uint8_t *workspace, __gm__ uint8_t *tiling)
+    __gm__ uint8_t *candidateBlockLengthOut, __gm__ uint8_t *workspace, __gm__ uint8_t *tiling)
 {
     TPipe tPipe;
     __gm__ uint8_t *user = GetUserWorkspace(workspace);

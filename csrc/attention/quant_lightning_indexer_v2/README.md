@@ -49,6 +49,8 @@
 | return_value      |  可选属性     | 表示是否输出`sparse_values`，默认值0。 | INT32          | -         |
 | sparse_indices     | 输出      | 公式中的输出Out，参与稀疏attention计算的token索引值。 | INT32          | ND         |
 | sparse_values           | 输出      | 公式中的Indices输出对应的value值。`return_value`为1时shape与`sparse_indices`一致，`return_value`为0时shape为(0,) | BFLOAT16         | ND          |
+| candidate_topk_index_out | 可选输出 | `candidate_mode=1`（candidate source）时的块级候选块索引，shape 为 `sparse_indices` 的前缀维 + `candidate_topk_blocks`；其余模式为空 Tensor | INT32 | ND |
+| candidate_block_length_out | 可选输出 | `candidate_mode=1` 时每行的**有效候选块数**（DSL `candidate_length` 语义：`min(ceil(可见 key 长度 / candidate_block_size), candidate_topk_blocks)`），shape `[行数, N2]`，空行/无效行为 0；其余模式为空 Tensor | INT32 | ND |
 
 ## 约束说明
 

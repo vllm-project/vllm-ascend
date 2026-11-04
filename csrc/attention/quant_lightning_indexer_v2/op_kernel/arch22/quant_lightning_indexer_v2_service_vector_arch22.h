@@ -57,6 +57,8 @@ public:
                                                   GlobalTensor<float> blockVec1ResGm);
     __aicore__ inline void InitVecCandidateTensor(GlobalTensor<int32_t> candidateTopkIndexInGm,
                                                   GlobalTensor<int32_t> candidateTopkIndexOutGm,
+                                                  GlobalTensor<int32_t> candidateBlockLengthOutGm,
+                                                  bool candidateBlockLengthOutValid,
                                                   GlobalTensor<int32_t> outputIdxOffsetGm,
                                                   bool outputIdxOffsetValid);
     // D3a: 候选 gather —— 每个 AIV 搬 16 个候选块（8 token × 128B）到 UB，再写 GM staging ring。
@@ -101,6 +103,9 @@ protected:
     GlobalTensor<int32_t> indiceOutGm;
     GlobalTensor<int32_t> candidateTopkIndexInGm;
     GlobalTensor<int32_t> candidateTopkIndexOutGm;
+    // mode=1（source）每行有效候选块数输出（int32 [T1, N2]，DSL candidate_length = 块数）
+    GlobalTensor<int32_t> candidateBlockLengthOutGm_;
+    bool candLenOutValid_ = false;   // mode=1 且调用方传了 candidate_block_length_out 时为真
     GlobalTensor<int32_t> blockTableGm;
     // D3a 候选 gather：K 源、GM staging（K/scale）与使能标志
     GlobalTensor<typename QLIV2T::keyType> keyGmCand_;
@@ -148,6 +153,12 @@ private:
     __aicore__ inline void ProcessCandBlockTopk(const QLIV2Common::RunInfo &info, int32_t cuS1Idx, int32_t cuS2Len,
                                                 int32_t cuS2LenVecAlign, int32_t cuRealAcSeq, int32_t innerS1Idx);
     __aicore__ inline void CopyOutCandTopkIndex(const QLIV2Common::RunInfo &info, int32_t cuS1Idx, int32_t innerS1Idx);
+    // mode=1: 每行有效候选块数 = min(ceil(V / candidateBlockSize), candidateTopkBlocks)，
+    // V 为该行 mask 调整后的可见 key 长度（与 ConsumeCandScoreToken / ProcessVec1 同一公式）
+    __aicore__ inline int32_t CalcCandBlockLen(int32_t actS1Size, int32_t actS2Size, int32_t actS2SizeOrig,
+                                               int32_t rowInBatch) const;
+    // mode=1: 把长度写到 candidate_block_length_out（lenOffset = 行号 × N2 + n2）
+    __aicore__ inline void WriteCandBlockLen(uint64_t lenOffset, int32_t len);
     // mode=1 + LD：把本行块级累积器溢写到 GM，供跨核归约侧（ProcessLD）读取
     __aicore__ inline void SpillBlockTopkToGm(const QLIV2Common::RunInfo &info, int32_t blockRowIdx,
                                               int32_t innerS1Idx);
@@ -405,11 +416,15 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::InitVecWorkspaceTensor(GlobalTensor<
 template <typename QLIV2T>
 __aicore__ inline void QLIV2Vector<QLIV2T>::InitVecCandidateTensor(GlobalTensor<int32_t> candidateTopkIndexInGm,
                                                                    GlobalTensor<int32_t> candidateTopkIndexOutGm,
+                                                                   GlobalTensor<int32_t> candidateBlockLengthOutGm,
+                                                                   bool candidateBlockLengthOutValid,
                                                                    GlobalTensor<int32_t> outputIdxOffsetGm,
                                                                    bool outputIdxOffsetValid)
 {
     this->candidateTopkIndexInGm = candidateTopkIndexInGm;
     this->candidateTopkIndexOutGm = candidateTopkIndexOutGm;
+    this->candidateBlockLengthOutGm_ = candidateBlockLengthOutGm;
+    this->candLenOutValid_ = candidateBlockLengthOutValid;
     this->outputIdxOffsetGm_ = outputIdxOffsetGm;  // A15
     this->isOutputIdxOffsetValid_ = outputIdxOffsetValid;
 }
@@ -433,6 +448,10 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::CleanInvalidOutput(int64_t invalidS1
     valueULocal = outQueue_.DeQue<float>();
     QLIV2ServiceVec::CopyOut(indiceOutGm[invalidS1offset], idxULocal1, constInfo_.sparseCount);
     outQueue_.FreeTensor(valueULocal);
+    // mode=1: candidate_block_length 同步填 0（空行/无效行），行偏移 = sparse 偏移 / sparseCount
+    if (candLenOutValid_) {
+        WriteCandBlockLen(static_cast<uint64_t>(invalidS1offset) / constInfo_.sparseCount, 0);
+    }
     // mode=1: candidate_topk_index 同步填 -1 (行偏移 = sparse 偏移 / sparseCount * candidateTopkBlocks)
     if (constInfo_.candidateMode == CANDIDATE_MODE_SOURCE) {
         uint64_t candOffset = static_cast<uint64_t>(invalidS1offset) / constInfo_.sparseCount *
@@ -1022,6 +1041,54 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::CopyOutCandTopkIndex(const QLIV2Comm
                                                      cuS1Idx * constInfo_.candidateTopkBlocks],
                              candIdxULocal.template ReinterpretCast<int32_t>(), constInfo_.candidateTopkBlocks);
     outQueue_.FreeTensor(candIdxULocal);
+    // mode=1: 同步写该行的有效候选块数（行偏移 = 块级偏移 / candidateTopkBlocks，即 (行, n2) 布局）
+    const uint64_t candLenRow = info.candidateOutOffset /
+                                static_cast<uint64_t>(constInfo_.candidateTopkBlocks) +
+                                static_cast<uint64_t>(cuS1Idx) * constInfo_.kHeadNum;
+    WriteCandBlockLen(candLenRow, CalcCandBlockLen(static_cast<int32_t>(info.actS1Size),
+                                                   static_cast<int32_t>(info.actS2Size),
+                                                   static_cast<int32_t>(info.actS2SizeOrig), cuS1Idx));
+}
+
+template <typename QLIV2T>
+__aicore__ inline int32_t QLIV2Vector<QLIV2T>::CalcCandBlockLen(int32_t actS1Size, int32_t actS2Size,
+                                                               int32_t actS2SizeOrig, int32_t rowInBatch) const
+{
+    // 可见 key 长度：mask_mode=3（causal）按右下对齐，其余模式取整段 key 长度
+    int32_t visible = actS2Size;
+    if (constInfo_.attenMaskFlag) {
+        visible = (actS2SizeOrig - actS1Size + rowInBatch + 1) / static_cast<int32_t>(constInfo_.cmpRatio);
+    }
+    if (visible <= 0) {
+        return 0; // 空行 / 全无效行：候选块数 0（DSL store_empty_candidate_lengths 同语义）
+    }
+    if (visible > actS2Size) {
+        visible = actS2Size; // 与 seqused_k 取小（cmp_residual 造成的越界保护）
+    }
+    int32_t blkSize = static_cast<int32_t>(constInfo_.candidateBlockSize);
+    if (blkSize <= 0) {
+        blkSize = 8;
+    }
+    int32_t len = (visible + blkSize - 1) / blkSize; // ceil
+    const int32_t cap = static_cast<int32_t>(constInfo_.candidateTopkBlocks);
+    return (len > cap) ? cap : len;
+}
+
+template <typename QLIV2T>
+__aicore__ inline void QLIV2Vector<QLIV2T>::WriteCandBlockLen(uint64_t lenOffset, int32_t len)
+{
+    if (!candLenOutValid_) {
+        return; // 调用方未提供该输出
+    }
+    // 走 DMA（UB → GM）而不是 GM 标量 SetValue：标量写在本架构上未见落地（实测全 0），
+    // 且 DMA 与其它输出共用同一条 MTE3 通路，时序语义与 CopyOut 一致。
+    LocalTensor<int32_t> lenUb = outQueue_.AllocTensor<int32_t>();
+    Duplicate(lenUb, len, B32_VEC_ELM_NUM);
+    PipeBarrier<PIPE_V>();
+    outQueue_.EnQue<int32_t>(lenUb);
+    lenUb = outQueue_.DeQue<int32_t>();
+    QLIV2ServiceVec::CopyOut(candidateBlockLengthOutGm_[lenOffset], lenUb, 1);
+    outQueue_.FreeTensor(lenUb);
 }
 
 // mode=1 + LD：块级 topk 累积器溢写到 GM（与位置级 globalTopkUb_ → vec1ResGm 完全对称）。
@@ -1866,6 +1933,13 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ReduceBlockTopkRow(uint32_t rowInBlo
                          static_cast<uint64_t>(rowInBlock) * constInfo_.kHeadNum * candBlocks;
     QLIV2ServiceVec::CopyOut(candidateTopkIndexOutGm[outOffset], outIdxCand.template ReinterpretCast<int32_t>(),
                              static_cast<int64_t>(candBlocks));
+    // mode=1: LD 归约核是该行块级输出的唯一写者，长度也在这里写
+    int32_t globalRow = static_cast<int32_t>(ldInfo_.mIdx * s1BaseSize_ + rowInBlock);
+    const uint64_t candLenRow = ldInfo_.candidateOutCoreOffset / static_cast<uint64_t>(candBlocks) +
+                                static_cast<uint64_t>(rowInBlock) * constInfo_.kHeadNum;
+    WriteCandBlockLen(candLenRow, CalcCandBlockLen(static_cast<int32_t>(ldInfo_.actS1Size),
+                                                   static_cast<int32_t>(ldInfo_.actS2Size),
+                                                   static_cast<int32_t>(ldInfo_.actS2SizeOrig), globalRow));
     SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
 }
 

@@ -190,6 +190,10 @@ struct LdSplitCoreInfo {
     uint32_t workspaceNum = 0U; // 当前AIV核上规约任务的S2切分数量
     uint32_t mStart = 0U;
     uint32_t mNum = 0U;
+    // mode=1 输出"每行有效候选块数"需要本 batch 的可见长度参数（LD 归约侧原本没有这些量）
+    uint32_t actS1Size = 0U;
+    uint32_t actS2Size = 0U;
+    uint32_t actS2SizeOrig = 0U;
     uint64_t indiceOutCoreOffset = 0U; // 最终输出索引搬出Topk的初始偏移地址
     // mode=1（candidate source，候选块来源）块级输出 candidate_topk_index 的初始偏移地址；
     // 结构与 indiceOutCoreOffset 同构，只是每行的宽度从 sparseCount（最终 topk 数）换成

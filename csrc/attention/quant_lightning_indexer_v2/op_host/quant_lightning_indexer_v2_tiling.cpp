@@ -506,6 +506,39 @@ ge::graphStatus QLIV2InfoParser::CheckAttrParaInfo()
                                 std::to_string(expectRows).c_str()),
                         return ge::GRAPH_FAILED);
         }
+        // candidate_block_length_out（mode=1 输出，DSL candidate_length 语义：每行有效候选块数）：
+        //   int32、形状 [行数, N2]。可选：调用方未传时 kernel 侧指针为空、跳过写入。
+        if (candidateMode == CANDIDATE_MODE_SOURCE) {
+            const gert::CompileTimeTensorDesc *candLenOutDesc =
+                context_->GetOutputDesc(CANDIDATE_BLOCK_LENGTH_OUTPUT_INDEX);
+            if (candLenOutDesc != nullptr) {
+                OP_CHECK_IF(candLenOutDesc->GetDataType() != ge::DT_INT32,
+                            OP_LOGE(opName_, "candidate_block_length_out dtype only supports int32."),
+                            return ge::GRAPH_FAILED);
+                const gert::StorageShape *candLenOutShape =
+                    context_->GetOutputShape(CANDIDATE_BLOCK_LENGTH_OUTPUT_INDEX);
+                if (candLenOutShape != nullptr && candLenOutShape->GetStorageShape().GetShapeSize() > 0) {
+                    int64_t expectRows = 0;
+                    if (std::string(opParamInfo_.layOutQuery) == "TND") {
+                        expectRows = opParamInfo_.query.shape->GetStorageShape().GetDim(0);
+                    } else {
+                        expectRows = opParamInfo_.query.shape->GetStorageShape().GetDim(0) *
+                                     opParamInfo_.query.shape->GetStorageShape().GetDim(1);
+                    }
+                    // N2 口径与 infershape 一致：layout_k=TND 取 key.dim1，PA_BBND 取 key.dim2
+                    const int64_t keyHeadNum = (std::string(opParamInfo_.layOutKey) == "TND") ?
+                        opParamInfo_.key.shape->GetStorageShape().GetDim(1) :
+                        opParamInfo_.key.shape->GetStorageShape().GetDim(2);
+                    const int64_t expectNumel = expectRows * keyHeadNum;
+                    OP_CHECK_IF(candLenOutShape->GetStorageShape().GetShapeSize() != expectNumel,
+                                OP_LOGE(opName_,
+                                        "candidate_block_length_out numel (%s) must equal rows x N2 (%s).",
+                                        std::to_string(candLenOutShape->GetStorageShape().GetShapeSize()).c_str(),
+                                        std::to_string(expectNumel).c_str()),
+                                return ge::GRAPH_FAILED);
+                }
+            }
+        }
     }
 
     return ge::GRAPH_SUCCESS;

@@ -89,6 +89,10 @@ public:
         this->Output("sparse_indices").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
         this->Output("sparse_values").ParamType(REQUIRED).DataTypeList({ge::DT_BF16}).FormatList({ge::FORMAT_ND});
         this->Output("candidate_topk_index_out").ParamType(OPTIONAL).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
+        // mode=1（candidate source）的每行有效候选块数（DSL candidate_length 语义：
+        // min(ceil(可见 key 长度 / candidate_block_size), candidate_topk_blocks)），
+        // int32、形状 [T1, N2]；候选功能关闭时为空 Tensor。
+        this->Output("candidate_block_length_out").ParamType(OPTIONAL).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
         this->Attr("topk").AttrType(REQUIRED).Int(2048);       // 2048: 筛选前2048个作为输出index
         this->Attr("quant_mode").AttrType(REQUIRED).Int(1);    // 1: per-token-head
         this->Attr("max_seqlen_q").AttrType(OPTIONAL).Int(-1); // -1: 默认值，表示任意可能长度

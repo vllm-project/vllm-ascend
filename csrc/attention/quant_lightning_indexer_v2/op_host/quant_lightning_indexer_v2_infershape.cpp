@@ -31,6 +31,7 @@ constexpr uint32_t ATTR_CANDIDATE_MODE_INDEX = 8;
 constexpr uint32_t ATTR_CANDIDATE_TOPK_BLOCKS_INDEX = 9;
 constexpr uint32_t CANDIDATE_MODE_SOURCE = 1;
 constexpr uint32_t CANDIDATE_TOPK_INDEX_OUTPUT_INDEX = 2;
+constexpr uint32_t CANDIDATE_BLOCK_LENGTH_OUTPUT_INDEX = 3;
 constexpr uint32_t CANDIDATE_TOPK_BLOCKS_FIX = 2048;
 constexpr uint32_t DIM_NUM_3 = 3;
 constexpr uint32_t DIM_NUM_4 = 4;
@@ -108,6 +109,23 @@ static ge::graphStatus InferShapeQuantLightningIndexerV2(gert::InferShapeContext
         candidateTopkIndexShape->SetDim(0, 0);
     }
 
+    // candidate_block_length_out: 仅 candidate_mode=1(source) 时输出每行有效候选块数，
+    // int32 [T1, N2]（N2 = kHeadNum）；其它模式为空 Tensor（rank 1, dim0 = 0）。
+    gert::Shape *candidateBlockLenShape = context->GetOutputShape(CANDIDATE_BLOCK_LENGTH_OUTPUT_INDEX);
+    OP_CHECK_NULL_WITH_CONTEXT(context, candidateBlockLenShape);
+    if (candidateMode == CANDIDATE_MODE_SOURCE) {
+        // 行数口径与 tiling 的 rows 一致：TND = T1(=q.dim0)；BSND = B*S1(=q.dim0*q.dim1)
+        int64_t lenRows = (inputLayoutQueryPtrStr == "TND") ?
+                          queryShape->GetDim(0) :
+                          queryShape->GetDim(0) * queryShape->GetDim(1);
+        candidateBlockLenShape->SetDimNum(2);
+        candidateBlockLenShape->SetDim(0, lenRows);
+        candidateBlockLenShape->SetDim(1, keyHeadNum);
+    } else {
+        candidateBlockLenShape->SetDimNum(1);
+        candidateBlockLenShape->SetDim(0, 0);
+    }
+
     OP_LOGD(context->GetNodeName(), "QuantLightningIndexerV2 InferShape end.");
     return ge::GRAPH_SUCCESS;
 }
@@ -123,6 +141,7 @@ static ge::graphStatus InferDataTypeQuantLightningIndexerV2(gert::InferDataTypeC
     ge::DataType outputType = ge::DT_INT32;
     context->SetOutputDataType(0, outputType);
     context->SetOutputDataType(CANDIDATE_TOPK_INDEX_OUTPUT_INDEX, outputType);
+    context->SetOutputDataType(CANDIDATE_BLOCK_LENGTH_OUTPUT_INDEX, outputType);
     OP_LOGD(context->GetNodeName(), "QuantLightningIndexerV2 InferDataType end.");
     return GRAPH_SUCCESS;
 }

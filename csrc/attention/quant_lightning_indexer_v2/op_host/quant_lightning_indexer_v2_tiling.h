@@ -62,6 +62,7 @@ constexpr uint32_t CANDIDATE_BLOCK_LENGTH_INDEX = 14; // 每行有效候选块�
 constexpr uint32_t SPARSE_INDICES_INDEX = 0;
 constexpr uint32_t SPARSE_VALUES_INDEX = 1;
 constexpr uint32_t CANDIDATE_TOPK_INDEX_OUTPUT_INDEX = 2;
+constexpr uint32_t CANDIDATE_BLOCK_LENGTH_OUTPUT_INDEX = 3; // mode=1 每行有效候选块数 (int32 [T1,N2])
 // Attributes Index
 constexpr uint32_t ATTR_TOPK_INDEX = 0;
 constexpr uint32_t ATTR_QUANT_MODE_INDEX = 1;

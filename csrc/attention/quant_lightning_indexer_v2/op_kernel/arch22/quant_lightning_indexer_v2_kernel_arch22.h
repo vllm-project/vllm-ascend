@@ -73,7 +73,8 @@ public:
                                 __gm__ uint8_t *outputIdxOffset, __gm__ uint8_t *metadata,
                                 __gm__ uint8_t *candidateTopkIndex, __gm__ uint8_t *candidateBlockLength,
                                 __gm__ uint8_t *sparseIndices, __gm__ uint8_t *sparseValues,
-                                __gm__ uint8_t *candidateTopkIndexOut, __gm__ uint8_t *workspace,
+                                __gm__ uint8_t *candidateTopkIndexOut, __gm__ uint8_t *candidateBlockLengthOut,
+                                __gm__ uint8_t *workspace,
                                 const QLIV2TilingData *__restrict tiling, TPipe *tPipe);
     __aicore__ inline void Process();
 
@@ -132,6 +133,8 @@ protected:
     GlobalTensor<int32_t> indiceOutGm;
     GlobalTensor<int32_t> candidateTopkIndexInGm;
     GlobalTensor<int32_t> candidateTopkIndexOutGm;
+    // mode=1（source）每行有效候选块数（DSL candidate_length 语义：min(ceil(V/8), candidateTopkBlocks)）
+    GlobalTensor<int32_t> candidateBlockLengthOutGm;
     GlobalTensor<int32_t> candidateBlockLengthGm; // 每行有效候选块数 (可选输入)
     // D3a: 候选 K/scale staging（每个 AIC 私有：4 槽 × 256 token × 128B K + 4 槽 × 256 × 2B scale）
     GlobalTensor<int8_t> candStagingKeyGm;
@@ -421,6 +424,8 @@ __aicore__ void inline QLIV2Preload<QLIV2T>::SplitCore()
         ldInfo.workspaceNum = metadataGm.GetValue(ldWorkspaceNumINDEX);
         ldInfo.mStart = metadataGm.GetValue(ldMstartIndex);
         ldInfo.mNum = metadataGm.GetValue(ldMNumIndex);
+        // mode=1 长度输出：取本 batch 的可见长度参数（与 CalcGS1LoopParams 同源）
+        GetS1S2ActualSeqLen(ldInfo.bIdx, ldInfo.actS1Size, ldInfo.actS2Size, ldInfo.actS2SizeOrig);
         uint64_t actualSeqQPrefixSum = 0;
         if constexpr (Q_LAYOUT_T == LI_LAYOUT::TND) {
             actualSeqQPrefixSum = (ldInfo.bIdx <= 0) ? 0 : actualSeqLengthsGmQ.GetValue(ldInfo.bIdx);
@@ -476,7 +481,8 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Init(
     __gm__ uint8_t *sequsedK, __gm__ uint8_t *cmpResidualK, __gm__ uint8_t *blockTable, __gm__ uint8_t *outputIdxOffset,
     __gm__ uint8_t *metadata, __gm__ uint8_t *candidateTopkIndex, __gm__ uint8_t *candidateBlockLength,
     __gm__ uint8_t *sparseIndices, __gm__ uint8_t *sparseValues, __gm__ uint8_t *candidateTopkIndexOut,
-    __gm__ uint8_t *workspace, const QLIV2TilingData *__restrict tiling, TPipe *tPipe)
+    __gm__ uint8_t *candidateBlockLengthOut, __gm__ uint8_t *workspace,
+    const QLIV2TilingData *__restrict tiling, TPipe *tPipe)
 {
     if ASCEND_IS_AIV {
         tmpBlockIdx = GetBlockIdx(); // vec:0-47
@@ -573,14 +579,18 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Init(
         if (constInfo.candidateMode == CANDIDATE_MODE_SOURCE && candidateTopkIndexOut != nullptr) {
             candidateTopkIndexOutGm.SetGlobalBuffer((__gm__ int32_t *)candidateTopkIndexOut);
         }
+        if (constInfo.candidateMode == CANDIDATE_MODE_SOURCE && candidateBlockLengthOut != nullptr) {
+            candidateBlockLengthOutGm.SetGlobalBuffer((__gm__ int32_t *)candidateBlockLengthOut);
+        }
         if (outputIdxOffset != nullptr) {  // A15: 使能 output_idx_offset (参照 arch35)
             outputIdxOffsetGm.SetGlobalBuffer((__gm__ int32_t *)outputIdxOffset);
         }
         // A15: 有效标志须与 tensor 一并传给 vector (InitParams 已先值拷贝 constInfo, 此处再改标志不生效)
         bool outputIdxOffsetValid = (outputIdxOffset != nullptr);
         vectorService.InitVecInputTensor(weightsGm, qScaleGm, kScaleGm, indiceOutGm, blockTableGm);
-        vectorService.InitVecCandidateTensor(candidateTopkIndexInGm, candidateTopkIndexOutGm, outputIdxOffsetGm,
-                                             outputIdxOffsetValid);
+        vectorService.InitVecCandidateTensor(candidateTopkIndexInGm, candidateTopkIndexOutGm,
+                                             candidateBlockLengthOutGm, (candidateBlockLengthOut != nullptr),
+                                             outputIdxOffsetGm, outputIdxOffsetValid);
         // D3a: 候选 gather 使能 = mode=2 且传入长度张量（V1 探针：cube 暂不消费 staging）
         vectorService.InitVecCandidateGatherTensor(
             keyGm, candStagingKeyGm, candStagingScaleGm, candidateBlockLengthGm, candScoreGm, candAuxScaleGm,

@@ -50,7 +50,7 @@ def test_qli_candidate_vector_repeats(queries, context, ratio, mode, topk):
     metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
         heads, 1, width, topk, 2, batch_size=1, max_seqlen_k=context, device="npu:0", **common
     )
-    selected, _, candidate_output = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
+    selected, _, candidate_output, _candidate_len = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
         query_cpu.npu(),
         key,
         weights_cpu.npu(),

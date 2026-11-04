@@ -46,7 +46,7 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
             "Tensor? block_table=None, Tensor? output_idx_offset=None, Tensor? metadata=None, "
             'int max_seqlen_q=-1, str layout_q="BSND", str layout_k="BSND", int mask_mode=0, '
             "int cmp_ratio=1, int candidate_mode=3, int candidate_topk_blocks=2048, "
-            "int candidate_block_size=8, Tensor? candidate_block_length=None) -> (Tensor, Tensor, Tensor)",
+            "int candidate_block_size=8, Tensor? candidate_block_length=None) -> (Tensor, Tensor, Tensor, Tensor)",
         ]
 
     def register_meta(self):
@@ -184,15 +184,22 @@ class QuantLightningIndexerOpBuilder(OpBuilder):
                         dtype=torch.int32,
                         device="meta",
                     )
+                    cand_len_out = torch.empty(
+                        [query.shape[0] * query.shape[1], key_head_num],
+                        dtype=torch.int32,
+                        device="meta",
+                    )
                 else:
                     cand_out = torch.empty(
                         [query.shape[0], key_head_num, candidate_topk_blocks],
                         dtype=torch.int32,
                         device="meta",
                     )
+                    cand_len_out = torch.empty([query.shape[0], key_head_num], dtype=torch.int32, device="meta")
             else:
                 cand_out = torch.empty([0], dtype=torch.int32, device="meta")
-            return (sparse_indices_out, sparse_values_out, cand_out)
+                cand_len_out = torch.empty([0], dtype=torch.int32, device="meta")
+            return (sparse_indices_out, sparse_values_out, cand_out, cand_len_out)
 
 
 # Instantiate the builder
@@ -484,35 +491,6 @@ def _qli_newapi_build_metadata(
     )
 
 
-def _qli_newapi_block_length(q, k, cu_seqlens_q, seqused_k, cmp_residual_k, cmp_ratio, mask_mode):
-    # source 第 4 输出 (T1, N2): 每行实际参与搜索的 key 长度 (mask 规则与 key 长度取小)。
-    # mask_mode=3 (causal): vl(i) = clamp((act_k - S1 + i + 1) // cmp_ratio, 0, K),
-    #   act_k = K * cmp_ratio + residual 为未压缩原始 key 长度, i 为 batch 内行号 (与 golden 同公式);
-    # mask_mode=0 (无 mask): 恒为 K。全程张量化, 不引入主机同步。
-    device = q.device
-    t1 = int(q.shape[0])
-    n2 = int(k.shape[2])
-    s2_t = seqused_k.to(torch.int64)  # (B,) 每 batch key 有效长度
-    res_t = cmp_residual_k.to(torch.int64) if cmp_residual_k is not None else torch.zeros_like(s2_t)
-    act_k_t = s2_t * int(cmp_ratio) + res_t
-    if cu_seqlens_q is not None:  # TND 变长拼接
-        cu_q = cu_seqlens_q.to(torch.int64)
-        row_b = torch.repeat_interleave(torch.arange(s2_t.numel(), device=device), cu_q[1:] - cu_q[:-1])
-        i_in_b = torch.arange(t1, device=device) - cu_q[row_b]  # batch 内行号
-        s1_row = (cu_q[1:] - cu_q[:-1])[row_b]  # 所在 batch 的 query 行数
-    else:  # B=1 BSND
-        row_b = torch.zeros(t1, dtype=torch.int64, device=device)
-        i_in_b = torch.arange(t1, device=device)
-        s1_row = torch.full((t1,), t1, dtype=torch.int64, device=device)
-    if int(mask_mode) == 3:
-        vl = (act_k_t[row_b] - s1_row + i_in_b + 1) // int(cmp_ratio)
-        vl = torch.clamp(vl, min=0)  # 全无效行 (vl < 0) 记 0
-        vl = torch.minimum(vl, s2_t[row_b])  # 与 key 长度取小
-    else:
-        vl = s2_t[row_b]
-    return vl.to(torch.int32).unsqueeze(-1).expand(t1, n2).contiguous()
-
-
 def quant_lightning_indexer_candidate_source(
     q,
     k,
@@ -569,7 +547,7 @@ def quant_lightning_indexer_candidate_source(
         metadata = _qli_newapi_build_metadata(
             q, k, layout_q, "PA_BBND", cu_seqlens_q, seqused_q, cmp_residual_k, topk, quant_mode, mask_mode, cmp_ratio
         )
-    idx, vals, cand = quant_lightning_indexer_candidate(
+    idx, vals, cand, block_length = quant_lightning_indexer_candidate(
         q_in,
         k,
         w_in,
@@ -597,7 +575,8 @@ def quant_lightning_indexer_candidate_source(
     )
     if not is_tnd:
         idx, cand = idx.squeeze(0), cand.squeeze(0)  # (1,T1,N2,*) -> (T1,N2,*)
-    block_length = _qli_newapi_block_length(q, k, cu_seqlens_q, seqused_q, cmp_residual_k, cmp_ratio, mask_mode)
+    # block_length 由主算子 mode=1 直接输出（DSL candidate_length 语义：块数 = min(ceil(可见key/8), 2048)），
+    # 不再在 host 侧按 token 数计算
     return idx, vals, cand, block_length
 
 
@@ -659,7 +638,7 @@ def quant_lightning_indexer_candidate_consumer(
         metadata = _qli_newapi_build_metadata(
             q, k, layout_q, "PA_BBND", cu_seqlens_q, seqused_q, cmp_residual_k, topk, quant_mode, mask_mode, cmp_ratio
         )
-    idx, vals, _ = quant_lightning_indexer_candidate(
+    idx, vals, _, _ = quant_lightning_indexer_candidate(
         q_in,
         k,
         w_in,
