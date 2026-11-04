@@ -808,22 +808,12 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
-#       Ascend uses the NPU v2 runner by default. Features that are not
-#       V2-ready (draft_window_size, suffix
-#       speculative decoding, ngram speculative decoding, draft_model
-#       speculative decoding, and p-eagle)
-#       default to v1.
-#       Upstream GPU-specific architecture, feature, and Triton gates must not
-#       silently switch an
-#       Ascend request back to v1. VLLM_USE_V2_MODEL_RUNNER=0 remains the
-#       explicit v1 escape hatch.
+#       Ascend always uses the V2 runner; Model Runner V1 has been removed, so
+#       nothing selects a runner at runtime any more.
 #    How:
-#       Call apply_v2_model_runner_config_patch() to install the Ascend
-#       default-v2 use_v2_model_runner property (with the V2 feature
-#       blacklist) and neutralize upstream V2 validation. Spec+PP is
-#       native upstream, so this patch no longer rewrites that unsupported
-#       list. Keep the Ascend-supported V1 feature allowlist
-#       (dspark / dflash2).
+#       Call apply_v2_model_runner_config_patch() to install a
+#       use_v2_model_runner property that always selects V2. An explicit
+#       VLLM_USE_V2_MODEL_RUNNER=0 raises instead of being ignored.
 #       worker/patch_use_v2_model_runner.py reuses this platform
 #       patch so EngineCore and worker processes share the same behavior.
 #    Related PR (if no, explain why):
@@ -842,18 +832,6 @@
 #    Related PR: https://github.com/vllm-project/vllm/pull/54523
 #    Future Plan:
 #       Re-add only if a supported pin rejects PCP+DP.
-#
-#   3. `vllm.config.vllm.VllmConfig._get_v1_model_runner_unsupported_features`
-#    Why:
-#       Both supported vLLM lanes reject V1 PP with async scheduling for a GPU runner
-#       limitation. Ascend has separate PP communication and scheduler patches.
-#    How:
-#       Add this feature to the existing Ascend V1 allowlist, preserving
-#       unrelated upstream restrictions.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/issues/45014 describes the GPU issue.
-#    Future Plan:
-#       Remove with the V1 runner compatibility patch when Ascend uses V2 only.
 #
 # * Worker Patch:
 # ========#
@@ -892,22 +870,6 @@
 #       Remove this patch once the pluggable kv-cache-dtype mechanism lands on
 #       the vLLM release vllm-ascend targets, so the handler path alone
 #       handles the dtype flip.
-#
-# ** 1. File: worker/patch_v1/patch_cudagraph.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.cudagraph_dispatcher.CudagraphDispatcher._create_padded_batch_descriptor`
-#      (MRv1-only: `CudagraphDispatcher` is instantiated exclusively by
-#      `vllm.v1.worker.gpu_model_runner` and `vllm.v1.spec_decode.*`.)
-#    Why:
-#       vllm's FULL mode will cause error, we use a patch to avoid it.
-#       After that, FULL can be enable now.
-#    How：
-#       Dynamically replace the `_create_padded_batch_descriptor` function at runtime,
-#       and change the condition of if.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/34880
-#    Future Plan:
-#       Remove this patch when vLLM merges the PR.
 #
 # ** 2. File: worker/patch_deepseek_v2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -977,27 +939,6 @@
 #       Remove this patch once upstream Eagle3 draft models compute
 #       `target_layer_num` from the total (not per-stage) hidden layer count.
 #
-# ** 5. File: worker/patch_v1/patch_eagle3_pp_aux.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. Eagle3 target inner models (`DeepseekV2Model`, EagleModelMixin-based models)
-#      `forward`, `make_empty_intermediate_tensors`
-#    Why:
-#       In Eagle3 speculative decoding with Pipeline Parallelism (PP), auxiliary
-#       hidden states are collected from specific target model layers (e.g.,
-#       layers 2, N/2, N-3). When these layers span multiple PP stages, the last
-#       PP rank (where the drafter runs) only sees a subset of aux states, causing
-#       `combine_hidden_states` to fail with a k-axis shape mismatch.
-#    How：
-#       Wrap the inner model's `forward` and `make_empty_intermediate_tensors` to
-#       transparently pass aux hidden states through IntermediateTensors across PP
-#       stages. Each PP stage carries forward all aux states from previous stages,
-#       and the last PP rank merges them into a single list for the drafter.
-#    Related PR (if no, explain why):
-#       No, vllm-ascend-specific Eagle3 + PP aux-state propagation.
-#    Future Plan:
-#       Remove this patch once upstream Eagle3 supports collecting aux hidden
-#       states that span PP stages without cross-stage propagation.
-#
 # ** 6. File: worker/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
@@ -1017,22 +958,13 @@
 #
 # ** 7. File: worker/patch_idex_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   MRv1-only item `2` lives in `worker/patch_v1/patch_idex_310.py`; the
-#   model/backend level items `1`, `3`, `4` below stay in `worker/`.
+#   Model and attention-backend level patches are listed below.
 #   1. `vllm.model_executor.layers.fla.ops.index.prepare_chunk_indices`
 #      `vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets`
 #    Why:
 #       310P uses Ascend-friendly chunk index helpers for Qwen GDN prefill.
 #    How:
 #       Replace upstream FLA chunk index helper functions with 310P implementations.
-#
-#   2. `vllm_ascend.worker.v1.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer.set_inputs_first_pass`
-#      (MRv1-only, file: `worker/patch_v1/patch_idex_310.py`)
-#    Why:
-#       310P needs to protect the tail slot during MTP input_ids shift to avoid
-#       GatherV2 corruption from persistent drafter input buffers.
-#    How:
-#       Reuse the 310P proposer implementation for the first-pass input shift.
 #
 #   3. `vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.QwenGatedDeltaNetAttention`
 #    Why:
@@ -1072,43 +1004,30 @@
 #
 # ** 9. File: worker/patch_mamba_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   Shared: `mamba_utils._TEMPORAL_TILES = 1` (read by the V2 Mamba-Hybrid
-#   state kernels). The MRv1-only state-copy overrides (`batch_memcpy*`,
-#   `collect_mamba_copy_meta`, `do_mamba_copy_block`, `postprocess_mamba_*`,
-#   `MambaCopyBuffers.create`, `preprocess_mamba`, layerwise helpers) live in
-#   `worker/patch_v1/patch_mamba_utils.py`.
-#   1. `vllm.v1.worker.mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel`
+#   Both overrides below are read by the V2 Mamba-Hybrid state at call time:
+#   `_TEMPORAL_TILES` by the preprocess/precopy kernels (the precopy kernel
+#   itself is rebound by `worker/patch_triton.py`), and
+#   `postprocess_mamba_fused_kernel` by
+#   `MambaSpecDecodeGPUContext.run_fused_postprocess_align`.
+#   1. `vllm.v1.worker.mamba_utils._TEMPORAL_TILES = 1`
 #    Why:
-#       Oringnal batch_memcpy_kernel implemented in vLLM might encounter bugs when running on
-#       Ascend hardwares.
+#       vLLM uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
+#       exposes 138 independent state programs per request, while Triton-Ascend
+#       flattens all grid dimensions into a coreDim that cannot exceed 65535.
 #    How：
-#       patch to fix related bugs.
+#       Keep the pre-tiling launch shape on Ascend.
 #    Future Plan:
-#       Remove this patch when:
-#       (1) oringnal batch_memcpy_kernel can run on Ascend hardware.
-#       or
-#       (2) design a dispatch mechanism for batch_memcpy_kernel.
-#   2. `vllm.v1.worker.mamba_utils.batch_memcpy = batch_memcpy`
+#       Remove this patch when triton-ascend accepts the tiled grid.
+#   2. `vllm.v1.worker.mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel`
 #    Why:
-#       vLLM use BLOCK_SIZE 1024 for batch_memcpy_kernel. This results in suboptimal performance
-#       on Ascend hardwares.
+#       Upstream's kernel is CUDA-specific; it fails on Ascend when prefix
+#       caching is active during decode.
 #    How：
-#       patch to change BLOCK_SIZE to 8192.
+#       Replace it with the Ascend implementation in
+#       `ops/triton/mamba/postprocess.py`, gated on the `TRITON_BATCH_MEMCPY`
+#       capability.
 #    Future Plan:
-#       Remove this patch when:
-#       design a dispatch mechanism for batch_memcpy_kernel.
-#   3. `mamba_utils.preprocess_mamba = preprocess_mamba`
-#    Why:
-#       1. preprocess_mamba has a assert logic, cause kv transfer call fails
-#       2. preprocess_mamba copy the state of previous step to the last block before kv transfer load
-#    How:
-#       1. patch to remove assert
-#       2. patch to collect per-layer copy metadata in preprocess_mamba. With
-#          layerwise KV transfer, copy each layer's state only after that
-#          layer finishes loading; otherwise keep the original batched copy.
-#    Future Plan:
-#       Remove this patch when:
-#       vLLM itself supports kv transfer for mamba
+#       Remove this patch when the upstream kernel can run on Ascend hardware.
 #
 # ** 10. File: worker/patch_minimax_m2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1261,7 +1180,7 @@
 #   `vllm.v1.worker.utils` binding is consumed by the V1 Model Runner and by the
 #   310P V2 Model Runner (`vllm_ascend/_310p/worker/v2/model_runner.py` imports
 #   `bind_kv_cache` from it by name), so it is installed from
-#   `worker/patch_attn_utils.py`, not from the MRv1-only `patch_v1` package.
+#   `worker/patch_attn_utils.py`.
 #   1. `vllm.v1.worker.utils.bind_kv_cache`
 #    Why:
 #       'bind_kv_cache' func will raise an exception when current_platform is npu.
@@ -1634,8 +1553,8 @@
 #    Why:
 #       EngineCore subprocesses only load global/platform patches, while workers
 #       also import this compatibility module. The actual monkey-patch is defined
-#       in `platform/patch_use_v2_model_runner.py` (default-v2 selection plus
-#       remaining V2/V1 feature patches).
+#       in `platform/patch_use_v2_model_runner.py` (V2-only selection plus the
+#       Ascend unsupported-feature check).
 #    How：
 #       Reuse the platform patch so EngineCore and worker processes share the
 #       same `use_v2_model_runner` behavior.

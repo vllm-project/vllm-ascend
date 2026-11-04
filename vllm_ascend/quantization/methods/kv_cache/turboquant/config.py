@@ -61,8 +61,6 @@ def _validate_turboquant_dsa(vllm_config) -> None:
         hf = getattr(model, "hf_config", None)
     if hf is None or getattr(hf, "model_type", None) != "deepseek_v4":
         raise ValueError(f"Ascend {TURBOQUANT_CACHE_DTYPE} currently requires DeepSeek V4")
-    if not vllm_config.use_v2_model_runner:
-        raise ValueError("DeepSeek V4 TurboQuant requires VLLM_USE_V2_MODEL_RUNNER=1")
     head_dims = (getattr(hf, "head_dim", None), getattr(hf, "qk_rope_head_dim", None))
     if head_dims != (512, 64):
         raise ValueError("DeepSeek V4 TurboQuant requires head_dim=512 and qk_rope_head_dim=64")

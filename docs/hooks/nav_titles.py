@@ -47,10 +47,6 @@ TITLES = {
         "zh": "动态分块流水线并行",
     },
     "developer_guide/Design_Documents/kvpp.md": {"en": "KVPP Design", "zh": "KVPP 设计方案"},
-    "developer_guide/Design_Documents/model_runner_v1_eplb.md": {
-        "en": "Model Runner V1 EPLB Architecture",
-        "zh": "Model Runner V1 EPLB 架构",
-    },
     "developer_guide/Design_Documents/model_runner_v2_eplb.md": {
         "en": "Model Runner V2 EPLB Architecture",
         "zh": "Model Runner V2 EPLB 架构",
@@ -99,10 +95,6 @@ TITLES = {
         "zh": "PD 分离（Mooncake，单节点）",
     },
     "tutorials/features/ray.md": {"en": "Ray", "zh": "Ray"},
-    "tutorials/features/suffix_speculative_decoding.md": {
-        "en": "Suffix Speculative Decoding",
-        "zh": "后缀推测解码",
-    },
     "tutorials/models/Cohere-Transcribe.md": {"en": "Cohere Transcribe", "zh": "Cohere Transcribe"},
     "tutorials/models/DeepSeek-R1.md": {"en": "DeepSeek-R1", "zh": "DeepSeek-R1"},
     "tutorials/models/DeepSeek-V3.1.md": {"en": "DeepSeek-V3 & 3.1", "zh": "DeepSeek-V3 & 3.1"},
