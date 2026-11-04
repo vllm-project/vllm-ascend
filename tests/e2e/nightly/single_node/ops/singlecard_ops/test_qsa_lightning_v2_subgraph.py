@@ -13,7 +13,8 @@ import pytest
 import torch
 
 pytest.importorskip("torch_npu")
-import vllm_ascend.vllm_ascend_C  # noqa: E402,F401
+import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: E402,F401
+
 from vllm_ascend.models.qwen4_exp.gbsa import qsa_gbsa_attention  # noqa: E402
 from vllm_ascend.models.qwen4_exp.lightning_indexer import (  # noqa: E402
     qsa_select_paged_tokens_lightning,
@@ -59,7 +60,7 @@ def make_main_attention(case, uniform_tail):
             request_positions = case.positions_cpu[case.requests_cpu == request]
             for position in request_positions.tolist():
                 start = (position + 1) // COMPRESS_RATIO * COMPRESS_RATIO
-                v[start:position + 1].fill_(TAIL_VALUE)
+                v[start : position + 1].fill_(TAIL_VALUE)
         logical_keys.append(k)
         logical_values.append(v)
         tokens = torch.arange(length)
@@ -67,10 +68,13 @@ def make_main_attention(case, uniform_tail):
         keys[physical, tokens % MAIN_PAGE_SIZE] = k
         values[physical, tokens % MAIN_PAGE_SIZE] = v
     shape = (len(case.query), MAIN_QUERY_HEADS, HEAD_DIM)
-    query = torch.zeros(shape, dtype=torch.bfloat16) if uniform_tail else torch.randn(shape, generator=generator).to(torch.bfloat16)
+    query = (
+        torch.zeros(shape, dtype=torch.bfloat16)
+        if uniform_tail
+        else torch.randn(shape, generator=generator).to(torch.bfloat16)
+    )
     device = case.query.device
-    return (query.to(device), keys.to(device), values.to(device), table.to(device),
-            query, logical_keys, logical_values)
+    return (query.to(device), keys.to(device), values.to(device), table.to(device), query, logical_keys, logical_values)
 
 
 def reference_attention(case, query, logical_keys, logical_values):
@@ -108,8 +112,15 @@ def test_old_and_native_selection_feed_same_gbsa(heads, page_size, uniform_tail)
         assert_selection(case, selected)
         output = torch.full_like(query, float("nan"))
         result = qsa_gbsa_attention(
-            query, keys, values, selected[:, :PACKED_WIDTH], table,
-            case.requests, case.positions, case.lengths, output,
+            query,
+            keys,
+            values,
+            selected[:, :PACKED_WIDTH],
+            table,
+            case.requests,
+            case.positions,
+            case.lengths,
+            output,
         )
         assert result is output
         assert torch.isfinite(output).all()
@@ -150,8 +161,8 @@ def test_qsa_entry_padding_and_mtp_buffer_reuse(monkeypatch):
     # Mirror MTP's target-row compaction and execute the real forward skip path.
     keep = torch.tensor([1, rows - 1], dtype=torch.int64, device=device)
     saved = selected.index_select(0, keep).clone()
-    selected[:len(keep)].copy_(saved)
-    reused = selected[:len(keep)]
+    selected[: len(keep)].copy_(saved)
+    reused = selected[: len(keep)]
     calls = []
     reuse_metadata = SimpleNamespace(num_actual_tokens=len(keep))
     monkeypatch.setattr(indexer, "_metadata", lambda: (reuse_metadata, reuse_metadata))
@@ -159,7 +170,11 @@ def test_qsa_entry_padding_and_mtp_buffer_reuse(monkeypatch):
     monkeypatch.setattr(indexer, "_update_and_compress", lambda *args: calls.append("update_cache"))
     monkeypatch.setattr(indexer, "_select", lambda *args: pytest.fail("MTP reuse must not invoke selection"))
     indexer.skip_topk = True
-    result = indexer.forward(torch.zeros(len(keep), HEAD_DIM, device=device), torch.arange(len(keep), device=device), reused)
+    result = indexer.forward(
+        torch.zeros(len(keep), HEAD_DIM, device=device),
+        torch.arange(len(keep), device=device),
+        reused,
+    )
     assert result is reused
     torch.testing.assert_close(result, saved)
     assert calls == ["update_cache"]

@@ -24,14 +24,14 @@ import math
 import platform
 import statistics
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Callable
 
 import torch
 import torch_npu
-import vllm_ascend.vllm_ascend_C  # noqa: F401
+import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 
 from vllm_ascend.models.qwen4_exp.lightning_indexer import (
     qsa_select_paged_tokens_lightning,
@@ -84,32 +84,33 @@ def make_inputs(shape: Shape, heads: int, page_size: int, page_stride: int, devi
     for size in shape.query_lengths:
         boundaries.append(boundaries[-1] + size)
     generator = torch.Generator().manual_seed(SEED)
-    page_counts = tuple(
-        max(1, math.ceil((length // COMPRESS_RATIO) / page_size))
-        for length in shape.sequence_lengths
-    )
+    page_counts = tuple(max(1, math.ceil((length // COMPRESS_RATIO) / page_size)) for length in shape.sequence_lengths)
     page_count = sum(page_counts)
     table_cpu = torch.zeros(len(page_counts), max(page_counts), dtype=torch.int32)
     permutation = torch.randperm(page_count, generator=generator).to(torch.int32)
     offset = 0
     for request, count in enumerate(page_counts):
-        table_cpu[request, :count] = permutation[offset:offset + count]
+        table_cpu[request, :count] = permutation[offset : offset + count]
         offset += count
     # Keep the backing allocation dense before taking a strided page view.
     # Only the page axis has gaps, matching the cache ABI both selectors accept.
     storage = torch.randn(
-        page_count * page_stride, page_size, 1, HEAD_DIM,
-        dtype=torch.bfloat16, device=device,
+        page_count * page_stride,
+        page_size,
+        1,
+        HEAD_DIM,
+        dtype=torch.bfloat16,
+        device=device,
     )
     cache = storage[::page_stride]
     query = torch.randn(boundaries[-1], heads, HEAD_DIM, dtype=torch.bfloat16, device=device)
     requests_cpu = torch.repeat_interleave(
-        torch.arange(len(shape.query_lengths)), torch.tensor(shape.query_lengths),
+        torch.arange(len(shape.query_lengths)),
+        torch.tensor(shape.query_lengths),
     )
-    positions_cpu = torch.cat([
-        torch.arange(length - count, length)
-        for length, count in zip(shape.sequence_lengths, shape.query_lengths)
-    ])
+    positions_cpu = torch.cat(
+        [torch.arange(length - count, length) for length, count in zip(shape.sequence_lengths, shape.query_lengths)]
+    )
     arguments = (
         query,
         cache,
@@ -122,8 +123,7 @@ def make_inputs(shape: Shape, heads: int, page_size: int, page_stride: int, devi
         COMPRESS_RATIO,
     )
     buffers = {
-        name: torch.empty(boundaries[-1], OUTPUT_WIDTH, dtype=torch.int32, device=device)
-        for name in ("old", "v2")
+        name: torch.empty(boundaries[-1], OUTPUT_WIDTH, dtype=torch.int32, device=device) for name in ("old", "v2")
     }
     functions = {
         "old": partial(qsa_select_paged_tokens_lightning, *arguments, out=buffers["old"]),
@@ -189,7 +189,7 @@ def benchmark(functions: dict[str, Callable], warmup: int, iterations: int, roun
         functions["old"]()
         functions["v2"]()
     torch.npu.synchronize()
-    samples = {"old": [], "v2": []}
+    samples: dict[str, list[float]] = {"old": [], "v2": []}
     for index in range(rounds):
         # Reverse order every round to reduce systematic first/second bias.
         order = ("old", "v2") if index % 2 == 0 else ("v2", "old")
@@ -242,11 +242,13 @@ def main() -> None:
     device = torch.device(f"npu:{args.device}")
     torch.npu.set_device(device)
     torch.manual_seed(SEED)
+    shapes: tuple[Shape, ...]
     if args.seq_lens is not None:
         shapes = (Shape("custom", args.seq_lens, args.query_lens),)
     else:
         shapes = tuple(
-            shape for shape in DEFAULT_SHAPES
+            shape
+            for shape in DEFAULT_SHAPES
             if not args.cases or any(shape.name.startswith(name) for name in args.cases)
         )
     modes = ("latency", "throughput") if args.mode == "both" else (args.mode,)

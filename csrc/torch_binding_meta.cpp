@@ -307,7 +307,7 @@ at::Tensor npu_lightning_indexer_v2_metadata_meta(int64_t numHeadsQ, int64_t num
                                     int64_t maxSeqlenQ, int64_t maxSeqlenK, c10::string_view layoutQ,
                                     c10::string_view layoutK, int64_t maskMode, int64_t cmpRatio)
 {
-    return at::empty({2048}, at::TensorOptions().dtype(at::kInt).device(c10::kMeta));
+    return at::empty_symint(c10::SymDimVector{2048}, at::TensorOptions().dtype(at::kInt).device(c10::kMeta));
 }
 
 std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_v2_meta(
@@ -332,7 +332,7 @@ std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_v2_meta(
     auto indices = at::empty_symint(shape, q.options().dtype(at::kInt).device(c10::kMeta));
     auto values = returnValue
         ? at::empty_symint(shape, q.options().dtype(at::kFloat).device(c10::kMeta))
-        : at::empty({0}, q.options().dtype(at::kFloat).device(c10::kMeta));
+        : at::empty_symint(c10::SymDimVector{0}, q.options().dtype(at::kFloat).device(c10::kMeta));
     return {indices, values};
 }
 

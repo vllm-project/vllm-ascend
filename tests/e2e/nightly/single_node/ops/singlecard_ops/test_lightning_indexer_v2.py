@@ -5,7 +5,8 @@ import pytest
 import torch
 
 pytest.importorskip("torch_npu")
-import vllm_ascend.vllm_ascend_C  # noqa: E402,F401
+import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: E402,F401
+
 from vllm_ascend.ops.lightning_indexer_v2 import (  # noqa: E402
     lightning_indexer_v2,
     lightning_indexer_v2_metadata,
@@ -34,15 +35,21 @@ def test_paged_values_and_causal_mask(return_value, strided, cmp_ratio):
     cu_q = torch.arange(0, 17, 4, dtype=torch.int32, device=device)
     used_k = groups.to(device)
     residual = (lengths % cmp_ratio).to(device) if cmp_ratio != 1 else None
-    common = dict(cu_seqlens_q=cu_q, seqused_k=used_k,
-                  cmp_residual_k=residual, layout_q="TND", layout_k="PA_BBND",
-                  mask_mode=3, cmp_ratio=cmp_ratio)
+    common = dict(
+        cu_seqlens_q=cu_q,
+        seqused_k=used_k,
+        cmp_residual_k=residual,
+        layout_q="TND",
+        layout_k="PA_BBND",
+        mask_mode=3,
+        cmp_ratio=cmp_ratio,
+    )
     metadata = lightning_indexer_v2_metadata(4, 1, 128, 16, batch_size=4, **common)
     assert metadata.shape == (2048,)
     assert metadata.dtype == torch.int32
     indices, values = lightning_indexer_v2(
-        q, cache, w, 16, metadata=metadata, block_table=table,
-        return_value=return_value, **common)
+        q, cache, w, 16, metadata=metadata, block_table=table, return_value=return_value, **common
+    )
     actual = indices.cpu().squeeze(1)
     assert actual.shape == (16, 16)
     assert actual.dtype == torch.int32
@@ -57,12 +64,10 @@ def test_paged_values_and_causal_mask(return_value, strided, cmp_ratio):
             assert (selected == -1).sum().item() == 16 - count
             if return_value:
                 scores = values.cpu()[request * query_lengths + row, 0]
-                torch.testing.assert_close(scores[selected >= 0],
-                                           selected[selected >= 0].float() + 1)
+                torch.testing.assert_close(scores[selected >= 0], selected[selected >= 0].float() + 1)
                 assert torch.isneginf(scores[selected < 0]).all()
     if not return_value:
         assert values.shape == (0,)
-
 
 
 @pytest.mark.parametrize("layout_q,layout_k", [("TND", "PA_BBND"), ("TND", "TND"), ("BSND", "BSND")])
@@ -73,8 +78,7 @@ def test_meta_outputs(layout_q, layout_k, return_value):
     q = torch.empty(qshape, device="meta", dtype=torch.bfloat16)
     k = torch.empty(kshape, device="meta", dtype=torch.bfloat16)
     w = torch.empty(qshape[:-1], device="meta", dtype=torch.float32)
-    indices, values = lightning_indexer_v2(q, k, w, 16, layout_q=layout_q,
-                                          layout_k=layout_k, return_value=return_value)
+    indices, values = lightning_indexer_v2(q, k, w, 16, layout_q=layout_q, layout_k=layout_k, return_value=return_value)
     expected = (7, 1, 16) if layout_q == "TND" else (2, 7, 1, 16)
     assert indices.shape == expected
     assert indices.dtype == torch.int32
@@ -101,12 +105,10 @@ def test_dense_layout_and_graph_replay(layout):
     # BSND has no cumulative lengths, but metadata still needs an NPU tensor
     # for device dispatch. Explicit K usage preserves the full 32-token range.
     used_k = torch.tensor([32], dtype=torch.int32, device=q.device) if layout == "BSND" else None
-    common = dict(cu_seqlens_q=cu_q, cu_seqlens_k=cu_k, seqused_k=used_k,
-                  layout_q=layout, layout_k=layout)
+    common = dict(cu_seqlens_q=cu_q, cu_seqlens_k=cu_k, seqused_k=used_k, layout_q=layout, layout_k=layout)
 
     def call():
-        metadata = lightning_indexer_v2_metadata(4, 1, 128, 8, batch_size=1,
-                                                max_seqlen_q=2, max_seqlen_k=32, **common)
+        metadata = lightning_indexer_v2_metadata(4, 1, 128, 8, batch_size=1, max_seqlen_q=2, max_seqlen_k=32, **common)
         return lightning_indexer_v2(q, k, w, 8, metadata=metadata, return_value=1, **common)
 
     def check(result, scale):
@@ -137,6 +139,7 @@ def test_wrapper_rejects_invalid_inputs(case):
     k = torch.zeros((1, 16, 1, 128), dtype=torch.bfloat16, device=q.device)
     w = torch.ones((1, 4), dtype=torch.float32, device=q.device)
     options = dict(layout_q="TND", layout_k="PA_BBND")
+    return_value = 0
     if case == "empty_query":
         q = q[:0]
         w = w[:0]
@@ -145,7 +148,7 @@ def test_wrapper_rejects_invalid_inputs(case):
         options["layout_q"] = "INVALID"
         message = "Unsupported query layout"
     else:
-        options["return_value"] = 2
+        return_value = 2
         message = "return_value must be 0 or 1"
     with pytest.raises(RuntimeError, match=message):
-        lightning_indexer_v2(q, k, w, 16, **options)
+        lightning_indexer_v2(q, k, w, 16, return_value=return_value, **options)

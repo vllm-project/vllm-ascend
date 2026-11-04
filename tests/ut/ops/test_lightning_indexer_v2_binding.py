@@ -7,20 +7,19 @@ No vLLM or torch-npu installation is required.
 
 import importlib.util
 import json
-import re
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import regex as re
 import torch
 
 
 @pytest.fixture
 def bridge(monkeypatch):
     root = Path(__file__).resolve().parents[3]
-    spec = importlib.util.spec_from_file_location(
-        "li_v2_bridge", root / "vllm_ascend/ops/lightning_indexer_v2.py"
-    )
+    spec = importlib.util.spec_from_file_location("li_v2_bridge", root / "vllm_ascend/ops/lightning_indexer_v2.py")
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     library = torch.library.Library("li_v2_contract_test", "FRAGMENT")
@@ -45,9 +44,11 @@ def bridge(monkeypatch):
 
     library.impl("npu_lightning_indexer_v2_metadata", metadata, "CPU")
     library.impl("npu_lightning_indexer_v2", compute, "CPU")
-    monkeypatch.setattr(torch.ops, "_C_ascend", SimpleNamespace(**{
-        name: getattr(torch.ops.li_v2_contract_test, name) for name in names
-    }))
+    monkeypatch.setattr(
+        torch.ops,
+        "_C_ascend",
+        SimpleNamespace(**{name: getattr(torch.ops.li_v2_contract_test, name) for name in names}),
+    )
     yield module, calls
     library._destroy()
 
@@ -56,8 +57,18 @@ def test_metadata_none_scalar_defaults(bridge):
     module, calls = bridge
     cu_q = torch.tensor([0, 1], dtype=torch.int32)
     output = module.lightning_indexer_v2_metadata(
-        4, 1, 128, 512, cu_seqlens_q=cu_q, batch_size=None, max_seqlen_q=None,
-        max_seqlen_k=None, layout_q=None, layout_k=None, mask_mode=None, cmp_ratio=None,
+        4,
+        1,
+        128,
+        512,
+        cu_seqlens_q=cu_q,
+        batch_size=None,
+        max_seqlen_q=None,
+        max_seqlen_k=None,
+        layout_q=None,
+        layout_k=None,
+        mask_mode=None,
+        cmp_ratio=None,
     )
     assert output.shape == (2048,)
     assert output.dtype == torch.int32
@@ -72,12 +83,22 @@ def test_compute_transports_every_optional_input(bridge):
     q = torch.zeros(2, 4, 128, dtype=torch.bfloat16)
     k = torch.zeros(1, 16, 1, 128, dtype=torch.bfloat16)
     w = torch.ones(2, 4, dtype=torch.float32)
-    tensors = {name: torch.tensor([index], dtype=torch.int32) for index, name in enumerate([
-        "cu_seqlens_q", "cu_seqlens_k", "seqused_q", "seqused_k", "cmp_residual_k",
-        "block_table", "output_idx_offset", "metadata",
-    ])}
-    options = dict(max_seqlen_q=2, layout_q="TND", layout_k="PA_BBND",
-                   mask_mode=3, cmp_ratio=4, return_value=1)
+    tensors = {
+        name: torch.tensor([index], dtype=torch.int32)
+        for index, name in enumerate(
+            [
+                "cu_seqlens_q",
+                "cu_seqlens_k",
+                "seqused_q",
+                "seqused_k",
+                "cmp_residual_k",
+                "block_table",
+                "output_idx_offset",
+                "metadata",
+            ]
+        )
+    }
+    options = dict(max_seqlen_q=2, layout_q="TND", layout_k="PA_BBND", mask_mode=3, cmp_ratio=4, return_value=1)
     module.lightning_indexer_v2(q, k, w, 512, **tensors, **options)
     args, kwargs = calls[0]
     assert all(actual is expected for actual, expected in zip(args[:3], (q, k, w)))

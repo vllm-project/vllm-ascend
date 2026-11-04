@@ -14,7 +14,8 @@ import pytest
 import torch
 
 pytest.importorskip("torch_npu")
-import vllm_ascend.vllm_ascend_C  # noqa: E402,F401
+import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: E402,F401
+
 from vllm_ascend.models.qwen4_exp.lightning_indexer import (  # noqa: E402
     qsa_select_paged_tokens_lightning,
     qsa_select_paged_tokens_lightning_v2,
@@ -47,8 +48,17 @@ class SelectionCase:
     lengths_cpu: tuple[int, ...]
 
     def arguments(self):
-        return (self.query, self.cache, self.table, self.requests, self.positions,
-                self.lengths, self.boundaries, TOKEN_TOPK, COMPRESS_RATIO)
+        return (
+            self.query,
+            self.cache,
+            self.table,
+            self.requests,
+            self.positions,
+            self.lengths,
+            self.boundaries,
+            TOKEN_TOPK,
+            COMPRESS_RATIO,
+        )
 
 
 def make_selection_case(lengths, query_lengths, *, heads=4, page_size=192, random_scores=False):
@@ -92,10 +102,18 @@ def make_selection_case(lengths, query_lengths, *, heads=4, page_size=192, rando
         query_cpu[:, 1, :2] = -query_cpu[:, 0, :2]
     device = "npu:0"
     return SelectionCase(
-        query_cpu.to(device), storage_cpu.to(device)[::2], table.to(device),
-        requests.to(device), positions.to(device), torch.tensor(lengths, dtype=torch.int32, device=device),
-        torch.tensor(boundaries, dtype=torch.int32, device=device), query_cpu, logical_keys,
-        positions, requests, tuple(lengths),
+        query_cpu.to(device),
+        storage_cpu.to(device)[::2],
+        table.to(device),
+        requests.to(device),
+        positions.to(device),
+        torch.tensor(lengths, dtype=torch.int32, device=device),
+        torch.tensor(boundaries, dtype=torch.int32, device=device),
+        query_cpu,
+        logical_keys,
+        positions,
+        requests,
+        tuple(lengths),
     )
 
 
@@ -148,17 +166,20 @@ def assert_selection(case, result, *, score_atol=0.0):
         tail_start = (position + 1) // COMPRESS_RATIO * COMPRESS_RATIO
         tail_end = min(position + 1, case.lengths_cpu[int(case.requests_cpu[row])])
         tail = list(range(tail_start, tail_end))
-        assert actual[row, GROUP_TOPK:GROUP_TOPK + len(tail)].tolist() == tail
-        assert (actual[row, GROUP_TOPK + len(tail):] == -1).all()
+        assert actual[row, GROUP_TOPK : GROUP_TOPK + len(tail)].tolist() == tail
+        assert (actual[row, GROUP_TOPK + len(tail) :] == -1).all()
     return actual
 
 
-@pytest.mark.parametrize("lengths,query_lengths", [
-    ((1, 2, 3, 4, 7, 11), (1, 2, 3, 4, 7, 11)),  # prefill, including zero complete groups
-    ((3, 4, 7, 8, 9, 2044, 2048, 2052), (1, 1, 1, 1, 1, 1, 1, 1)),  # decode
-    ((7, 11, 2053, 2056), (1, 4, 3, 2)),  # mixed / chunked suffixes / multi-token decode
-    ((2047, 2048, 2049, 2051), (3, 3, 3, 3)),  # 511/512/513 visibility and tails
-])
+@pytest.mark.parametrize(
+    "lengths,query_lengths",
+    [
+        ((1, 2, 3, 4, 7, 11), (1, 2, 3, 4, 7, 11)),  # prefill, including zero complete groups
+        ((3, 4, 7, 8, 9, 2044, 2048, 2052), (1, 1, 1, 1, 1, 1, 1, 1)),  # decode
+        ((7, 11, 2053, 2056), (1, 4, 3, 2)),  # mixed / chunked suffixes / multi-token decode
+        ((2047, 2048, 2049, 2051), (3, 3, 3, 3)),  # 511/512/513 visibility and tails
+    ],
+)
 @pytest.mark.parametrize("heads,page_size", [(4, 192), (12, 384)])
 def test_selectors_match_position_reference(lengths, query_lengths, heads, page_size):
     case = make_selection_case(lengths, query_lengths, heads=heads, page_size=page_size)
@@ -193,15 +214,31 @@ def test_v2_padding_and_empty_batch():
     padded_boundaries = torch.cat((case.boundaries, case.boundaries[-1:] + extra_rows))
     buffer = torch.full((len(padded_query), OUTPUT_WIDTH), 99, dtype=torch.int32, device=case.query.device)
     result = qsa_select_paged_tokens_lightning_v2(
-        padded_query, case.cache, padded_table, padded_requests, padded_positions,
-        padded_lengths, padded_boundaries, TOKEN_TOPK, COMPRESS_RATIO, buffer,
-        num_actual_requests=2, num_actual_tokens=len(case.query),
+        padded_query,
+        case.cache,
+        padded_table,
+        padded_requests,
+        padded_positions,
+        padded_lengths,
+        padded_boundaries,
+        TOKEN_TOPK,
+        COMPRESS_RATIO,
+        buffer,
+        num_actual_requests=2,
+        num_actual_tokens=len(case.query),
     )
     assert result is buffer
-    torch.testing.assert_close(result[:len(case.query)], expected)
-    assert (result[len(case.query):] == -1).all()
+    torch.testing.assert_close(result[: len(case.query)], expected)
+    assert (result[len(case.query) :] == -1).all()
     empty = qsa_select_paged_tokens_lightning_v2(
-        case.query[:0], case.cache, case.table[:0], case.requests[:0], case.positions[:0],
-        case.lengths[:0], case.boundaries[:1], TOKEN_TOPK, COMPRESS_RATIO,
+        case.query[:0],
+        case.cache,
+        case.table[:0],
+        case.requests[:0],
+        case.positions[:0],
+        case.lengths[:0],
+        case.boundaries[:1],
+        TOKEN_TOPK,
+        COMPRESS_RATIO,
     )
     assert empty.shape == (0, OUTPUT_WIDTH)

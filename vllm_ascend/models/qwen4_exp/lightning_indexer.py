@@ -175,6 +175,7 @@ def qsa_select_paged_tokens_lightning(
     )
     return out
 
+
 # LI V2 accepts page sizes that are multiples of 16 in [16, 1024].
 _LI_V2_MIN_PAGE_SIZE = 16
 _LI_V2_MAX_PAGE_SIZE = 1024
@@ -227,12 +228,10 @@ def _validate_qsa_lightning_v2_inputs(
     rows = query.shape[0]
     if token_to_req.shape != (rows,) or query_positions.shape != (rows,):
         raise ValueError("QSA LI V2 row metadata must match query rows")
-    tensors = (compressed_key_cache, block_table, token_to_req, query_positions,
-               sequence_lengths, query_start_loc)
+    tensors = (compressed_key_cache, block_table, token_to_req, query_positions, sequence_lengths, query_start_loc)
     if any(t.device != query.device for t in tensors):
         raise ValueError("QSA LI V2 inputs must be on the same device")
-    if any(count is not None and not isinstance(count, int)
-           for count in (num_actual_requests, num_actual_tokens)):
+    if any(count is not None and not isinstance(count, int) for count in (num_actual_requests, num_actual_tokens)):
         raise ValueError("QSA LI V2 live counts must be host integers")
     requests = sequence_lengths.shape[0] if num_actual_requests is None else num_actual_requests
     live_rows = rows if num_actual_tokens is None else num_actual_tokens
@@ -294,8 +293,16 @@ def qsa_select_paged_tokens_lightning_v2(
     # preserving storage, storage offset and the physical stride between pages.
     compressed_key_cache = canonicalize_singleton_dim_strides(compressed_key_cache)
     requests, live_rows = _validate_qsa_lightning_v2_inputs(
-        query, compressed_key_cache, block_table, token_to_req, query_positions,
-        sequence_lengths, query_start_loc, token_topk, compress_ratio, out,
+        query,
+        compressed_key_cache,
+        block_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+        query_start_loc,
+        token_topk,
+        compress_ratio,
+        out,
         num_actual_requests=num_actual_requests,
         num_actual_tokens=num_actual_tokens,
     )
@@ -313,7 +320,7 @@ def qsa_select_paged_tokens_lightning_v2(
     compressed_lengths = lengths.floor_divide(compress_ratio)
     residual_lengths = lengths.remainder(compress_ratio)
     common = dict(
-        cu_seqlens_q=query_start_loc[:requests + 1],
+        cu_seqlens_q=query_start_loc[: requests + 1],
         seqused_k=compressed_lengths,
         cmp_residual_k=residual_lengths,
         layout_q="TND",
@@ -323,7 +330,10 @@ def qsa_select_paged_tokens_lightning_v2(
     )
     block_topk = token_topk // compress_ratio
     metadata = lightning_indexer_v2_metadata(
-        query.shape[1], 1, _HEAD_DIM, block_topk,
+        query.shape[1],
+        1,
+        _HEAD_DIM,
+        block_topk,
         batch_size=requests,
         **common,
     )
@@ -334,11 +344,16 @@ def qsa_select_paged_tokens_lightning_v2(
         -_LI_V2_WEIGHT_FRACTION_BITS,
     )
     weights = torch.full(
-        (live_rows, query.shape[1]), score_weight,
-        dtype=torch.float32, device=query.device,
+        (live_rows, query.shape[1]),
+        score_weight,
+        dtype=torch.float32,
+        device=query.device,
     )
     groups, _ = lightning_indexer_v2(
-        query[:live_rows], compressed_key_cache, weights, block_topk,
+        query[:live_rows],
+        compressed_key_cache,
+        weights,
+        block_topk,
         block_table=block_table[:requests],
         metadata=metadata,
         return_value=0,
@@ -346,8 +361,12 @@ def qsa_select_paged_tokens_lightning_v2(
     )
     packed_width = block_topk + compress_ratio - 1
     pack_qsa_group_indices_npu(
-        groups.squeeze(1), query_positions[:live_rows], lengths,
-        token_to_req[:live_rows], compress_ratio, token_topk,
+        groups.squeeze(1),
+        query_positions[:live_rows],
+        lengths,
+        token_to_req[:live_rows],
+        compress_ratio,
+        token_topk,
         out[:live_rows, :packed_width],
     )
     return out

@@ -33,9 +33,7 @@ def lightning_indexer_v2_metadata(
     At least one NPU length tensor is required for device dispatch. TND query
     boundaries include the initial zero. Length tensors must be INT32.
     """
-    if all(tensor is None for tensor in (
-        cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k
-    )):
+    if all(tensor is None for tensor in (cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k)):
         raise ValueError("LightningIndexerV2 metadata requires at least one NPU length tensor")
     # Match upstream Python defaults before entering the typed C++ schema.
     batch_size = 0 if batch_size is None else batch_size
@@ -46,7 +44,10 @@ def lightning_indexer_v2_metadata(
     mask_mode = 0 if mask_mode is None else mask_mode
     cmp_ratio = 1 if cmp_ratio is None else cmp_ratio
     return torch.ops._C_ascend.npu_lightning_indexer_v2_metadata(
-        num_heads_q, num_heads_k, head_dim, topk,
+        num_heads_q,
+        num_heads_k,
+        head_dim,
+        topk,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens_k,
         seqused_q=seqused_q,
@@ -92,7 +93,10 @@ def lightning_indexer_v2(
     parameter constraints are enforced by CANN. No candidate/V3 mode is used.
     """
     return torch.ops._C_ascend.npu_lightning_indexer_v2(
-        q, k, w, topk,
+        q,
+        k,
+        w,
+        topk,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens_k,
         seqused_q=seqused_q,
