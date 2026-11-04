@@ -49,6 +49,9 @@ DEEPSEEK_V4_MODEL = os.environ.get(
 
 # 16,384 tokens = 128 full blocks at block_size=128.
 POOL_PROMPT_TOKENS = 16384
+# Chunked prefill cap: 4096 = 32 blocks of 128. Keeps the 16K dummy prefill
+# activation peak small enough to leave room for the 4.35GiB KV budget.
+POOL_BATCHED_TOKENS = 4096
 POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
 
 POOL_KV_TRANSFER_CONFIG = {
@@ -145,12 +148,12 @@ def test_deepseek_v4_dspark_pp_accuracy() -> None:
             DEEPSEEK_V4_MODEL,
             max_model_len=POOL_MAX_MODEL_LEN,
             max_num_seqs=2,
-            max_num_batched_tokens=POOL_PROMPT_TOKENS,
+            max_num_batched_tokens=POOL_BATCHED_TOKENS,
             tensor_parallel_size=2,
             pipeline_parallel_size=2,
             enable_expert_parallel=True,
             distributed_executor_backend="mp",
-            gpu_memory_utilization=0.9,  # was 0.8; 16K prompt needs 4.35GiB KV
+            gpu_memory_utilization=0.9,
             quantization="ascend",
             tokenizer_mode="deepseek_v4",
             block_size=128,
