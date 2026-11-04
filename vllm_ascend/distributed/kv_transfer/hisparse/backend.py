@@ -19,7 +19,6 @@ class AscendHiSparseBackend(HiSparseBackend):
     # NPU event IPC is not implemented here. Keep private pools per TP rank;
     # the common connector still owns transfer completion and TP coordination.
     supports_shared_host_pool = False
-    supports_speculative_group_prefetch = True
     stats_dtype = torch.int64
 
     def check_available(self) -> None:
@@ -59,15 +58,20 @@ class AscendHiSparseBackend(HiSparseBackend):
         from vllm_ascend.ops.hisparse import HiSparseNPUOps, ResolverWorkspace
 
         group = runtime.index_group
-        if group.backend_state is None:
-            group.backend_state = ResolverWorkspace(
+        if runtime is group.leader:
+            workspace = ResolverWorkspace(
                 max_rows=runtime.max_swap_rows,
                 hot_size=runtime.region_stride,
                 max_union_rows=runtime.max_union_rows,
                 device=runtime.device,
             )
+        else:
+            leader_ops = group.leader.cache_ops
+            if not isinstance(leader_ops, HiSparseNPUOps):
+                raise RuntimeError("Bind the HiSparse leader before follower caches.")
+            workspace = leader_ops.workspace
         mapping = runtime.registered_host_pool._hisparse_registration
-        return HiSparseNPUOps(mapping, group.backend_state)
+        return HiSparseNPUOps(mapping, workspace)
 
     def validate_kv_cache_config(self, kv_cache_config: KVCacheConfig) -> None:
         from .binding import get_hisparse_indexer_specs
@@ -84,19 +88,8 @@ class AscendHiSparseBackend(HiSparseBackend):
 
         _bind_indexer_views(kv_caches, get_hisparse_indexer_specs(kv_cache_config), forward_context)
 
-    def create_stream(self, device: torch.device, *, generic: bool = False) -> Any:
-        return torch.npu.Stream(device=device)
-
-    def create_lru_init(self, size: int, device: torch.device) -> torch.Tensor:
-        # CANN Range does not support int16 outputs. This runs only at allocation.
-        return torch.arange(size, dtype=torch.int32, device=device).to(torch.int16)
-
-    def create_event(self, *, interprocess: bool = False) -> Any:
-        if interprocess:
-            raise NotImplementedError(
-                "Ascend HiSparse requires private per-rank host pools; NPU event IPC is unavailable."
-            )
-        return torch.npu.Event()
+    def create_ipc_event(self) -> Any:
+        raise NotImplementedError("Ascend HiSparse requires private per-rank host pools; NPU event IPC is unavailable.")
 
     def export_event(self, event: Any) -> Any:
         raise NotImplementedError("Ascend HiSparse does not export NPU IPC events.")
@@ -130,25 +123,6 @@ class AscendHiSparseBackend(HiSparseBackend):
         if payload.dtype != destination.dtype:
             payload = payload.contiguous().view(destination.dtype)
         destination.copy_(payload)
-
-    def gather_fp8_prefill(
-        self,
-        source: torch.Tensor,
-        destination: torch.Tensor,
-        block_table: torch.Tensor,
-        workspace_starts: torch.Tensor,
-        batch_size: int,
-        *,
-        host_cache: torch.Tensor,
-        host_row_ids: torch.Tensor,
-        device_row_ids: torch.Tensor,
-    ) -> None:
-        # Native SFA stages opaque rows via gather_prefill_cache and consumes
-        # the Ascend C8 layout directly; CUDA fp8_ds_mla has a different layout.
-        raise NotImplementedError(
-            "Ascend HiSparse uses native SFA prefill with packed KV rows; "
-            "the CUDA fp8_ds_mla prefill conversion path is unsupported."
-        )
 
     def current_stream(self) -> Any:
         # HiSparse switches between model and copy streams. Query the active

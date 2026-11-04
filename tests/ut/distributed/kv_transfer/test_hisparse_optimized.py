@@ -54,22 +54,6 @@ def test_explicit_dma_extension_load_keeps_global_op_policy(monkeypatch):
     loader.assert_called_once_with("vllm_ascend.vllm_ascend_C")
 
 
-def test_lru_init_avoids_unsupported_int16_range(monkeypatch):
-    original = torch.arange
-    dtypes = []
-
-    def arange(*args, **kwargs):
-        dtypes.append(kwargs["dtype"])
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(torch, "arange", arange)
-    values = AscendHiSparseBackend().create_lru_init(8, torch.device("cpu"))
-
-    assert dtypes == [torch.int32]
-    assert values.dtype == torch.int16
-    assert values.tolist() == list(range(8))
-
-
 def test_backend_current_stream_tracks_context_changes(monkeypatch):
     active = [object()]
     monkeypatch.setattr(torch.npu, "current_stream", lambda: active[0])
@@ -129,14 +113,43 @@ def test_registration_retains_mapping_until_explicit_release(monkeypatch):
 
 
 def test_group_layers_share_one_resolver_workspace(monkeypatch):
-    workspace_type = MagicMock()
-    ops_type = MagicMock()
+    workspaces = [torch.zeros(4), torch.ones(4)]
+    workspace_type = MagicMock(side_effect=workspaces)
+
+    class Ops:
+        def __init__(self, mapping, workspace):
+            self.mapping = mapping
+            self.workspace = workspace
+
     monkeypatch.setitem(
         sys.modules,
         "vllm_ascend.ops.hisparse_optimized",
-        SimpleNamespace(ResolverWorkspace=workspace_type, HiSparseNPUOps=ops_type),
+        SimpleNamespace(ResolverWorkspace=workspace_type, HiSparseNPUOps=Ops),
     )
-    group = SimpleNamespace(backend_state=None)
+    # This test isolates workspace ownership from separately tested installers.
+    noop = lambda *args, **kwargs: None
+    monkeypatch.setitem(
+        sys.modules, "vllm_ascend.patch.worker.patch_hisparse_invalidation", SimpleNamespace(install=noop)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.distributed.kv_transfer.hisparse.runtime_adapter",
+        SimpleNamespace(install_call_sites=noop),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.distributed.kv_transfer.hisparse.page_dma_descriptors_optimized",
+        SimpleNamespace(install=noop),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.distributed.kv_transfer.hisparse.resident_update_installer",
+        SimpleNamespace(install=noop),
+    )
+    monkeypatch.setitem(
+        sys.modules, "vllm_ascend.patch.worker.patch_hisparse_recycled_groups", SimpleNamespace(install=noop)
+    )
+    group = SimpleNamespace()
     mapping = object()
     runtime = SimpleNamespace(
         index_group=group,
@@ -145,15 +158,23 @@ def test_group_layers_share_one_resolver_workspace(monkeypatch):
         max_union_rows=4,
         device=torch.device("cpu"),
         registered_host_pool=SimpleNamespace(_hisparse_registration=mapping),
+        eager_host_mirror=True,
     )
+    group.leader = runtime
     backend = AscendHiSparseBackend()
-
-    backend.create_cache_ops(runtime)
-    backend.create_cache_ops(runtime)
-
-    workspace_type.assert_called_once()
-    assert group.backend_state is workspace_type.return_value
-    assert all(call.args == (mapping, group.backend_state) for call in ops_type.call_args_list)
+    first = backend.create_cache_ops(runtime)
+    runtime.cache_ops = first
+    follower = SimpleNamespace(**vars(runtime))
+    second = backend.create_cache_ops(follower)
+    first.workspace.fill_(7)
+    assert second.workspace is first.workspace
+    assert second.workspace.tolist() == [7] * 4
+    assert first.mapping is second.mapping is mapping
+    assert not hasattr(group, "backend_state")
+    rebound = backend.create_cache_ops(runtime)
+    assert rebound.workspace is not first.workspace
+    assert rebound.workspace.tolist() == [1] * 4
+    assert first.workspace.tolist() == [7] * 4
 
 
 def test_indexer_expanded_view_addresses_shared_hma_pages():

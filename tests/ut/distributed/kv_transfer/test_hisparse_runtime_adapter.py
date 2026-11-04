@@ -26,11 +26,13 @@ COMMON = COMMON_ROOT / "v1/hisparse/runtime.py"
 WORKER = COMMON_ROOT / "distributed/kv_transfer/kv_connector/v1/hisparse/worker.py"
 
 
-def load_definitions(path, class_name=None):
+def load_definitions(path, class_name=None, names=None):
     tree = ast.parse(path.read_bytes())
     nodes = tree.body
     if class_name:
         nodes = next(n for n in nodes if isinstance(n, ast.ClassDef) and n.name == class_name).body
+    if names:
+        nodes = [node for node in nodes if getattr(node, "name", None) in names]
     body = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
     body += [n for n in nodes if isinstance(n, (ast.ClassDef, ast.FunctionDef))]
     namespace = {
@@ -72,7 +74,7 @@ def test_prefill_resident_mapping_matches_common(resident_block, state_order):
 
 
 def test_group_invalidation_updates_all_leaders_and_reuses_pointer_storage():
-    cls = load_definitions(ADAPTER)["AscendHiSparseSlotInvalidator"]
+    cls = load_definitions(COMMON, names={"HiSparseSlotInvalidator"})["HiSparseSlotInvalidator"]
     states = torch.tensor([1, 0], dtype=torch.int32)
     requests = torch.tensor([0, 1, 1], dtype=torch.int32)
     slots = torch.tensor([3, 5, -1], dtype=torch.int32)
@@ -115,7 +117,7 @@ def test_group_invalidation_updates_all_leaders_and_reuses_pointer_storage():
 @pytest.mark.parametrize("decode", [False, True])
 @pytest.mark.parametrize("logical_event", [False, True])
 def test_stage_keeps_dependency_and_follower_event_order(decode, logical_event):
-    ns = load_definitions(ADAPTER)
+    ns = load_definitions(COMMON, "HiSparseRuntime")
     events = []
 
     class Stream:
@@ -135,7 +137,10 @@ def test_stage_keeps_dependency_and_follower_event_order(decode, logical_event):
         def record(self, stream):
             events.append(("record",))
 
-    ns.update(native_current_stream=lambda: "compute", in_piecewise_cudagraph=lambda: False, create_event=Event)
+    ns.update(
+        torch=types.SimpleNamespace(accelerator=types.SimpleNamespace(current_stream=lambda: "compute"), Event=Event),
+        in_piecewise_cudagraph=lambda: False,
+    )
     follower = types.SimpleNamespace(
         _swap_rows=lambda rows: events.append(("swap_follower",)), _layer_ready_event=None, _swap_staged=False
     )
@@ -152,7 +157,7 @@ def test_stage_keeps_dependency_and_follower_event_order(decode, logical_event):
     valid = torch.tensor([3], dtype=torch.int32)
     ns["_resolve_and_stage_group"](
         runtime,
-        resident=types.SimpleNamespace(decode_batch=decode),
+        resident=types.SimpleNamespace(prefetch_decode_group=decode),
         req_id_per_token=torch.tensor([0, 0, 0, 0], dtype=torch.int32),
         block_table=None,
         logical_topk_indices=torch.empty((4, 8), dtype=torch.int32),
@@ -177,7 +182,7 @@ def test_stage_keeps_dependency_and_follower_event_order(decode, logical_event):
 
 
 def test_worker_mirror_preserves_dma_and_batches_only_active_group_leaders():
-    ns = load_definitions(ADAPTER)
+    ns = load_definitions(WORKER, "HiSparseConnectorWorker")
     events = []
     slots = torch.tensor([1, 2, 3], dtype=torch.int32)
     requests = torch.tensor([0, 0, 0], dtype=torch.int32)
@@ -201,7 +206,7 @@ def test_worker_mirror_preserves_dma_and_batches_only_active_group_leaders():
         _per_layer_mirrored=set(),
         _submitted_mirror_layers=set(),
         _enqueue_row_dma=lambda layers, ready_event: events.append(("dma", layers, ready_event)),
-        _ascend_slot_invalidator=lambda leaders, written, reqs: events.append(("invalidate", leaders, written, reqs)),
+        _invalidate_written_slots=lambda leaders, written, reqs: events.append(("invalidate", leaders, written, reqs)),
     )
     ns["_enqueue_host_mirror"](worker, ready_event="ready")
     assert events[0] == ("dma", (0, 1), "ready")
@@ -227,19 +232,24 @@ def install_fixture(monkeypatch):
     worker_module.HiSparseConnectorWorker = Worker
     monkeypatch.setitem(sys.modules, runtime_module.__name__, runtime_module)
     monkeypatch.setitem(sys.modules, worker_module.__name__, worker_module)
+    profile_name = "vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile"
+    profile_spec = importlib.util.spec_from_file_location(profile_name, ADAPTER.with_name("optimization_profile.py"))
+    assert profile_spec is not None and profile_spec.loader is not None
+    profile = importlib.util.module_from_spec(profile_spec)
+    profile_spec.loader.exec_module(profile)
+    monkeypatch.setitem(sys.modules, profile_name, profile)
     ns.update(
         wraps=wraps,
         hashlib=hashlib,
         inspect=inspect,
         Path=Path,
-        MethodType=types.MethodType,
-        COMMON_RUNTIME_SHA256=hashlib.sha256(COMMON.read_bytes()).hexdigest(),
-        COMMON_WORKER_SHA256=hashlib.sha256(WORKER.read_bytes()).hexdigest(),
+        COMMON_RUNTIME_SHA256="89b940424066b62bf042bcdade3b7efacf03968d9f449888c12b351c636cb926",
+        COMMON_WORKER_SHA256=hashlib.sha256(WORKER.read_bytes().replace(b"\r\n", b"\n")).hexdigest(),
     )
     return ns, Plan, Worker, Runtime
 
 
-def test_call_site_installation_is_idempotent_and_cpu_worker_keeps_original(monkeypatch):
+def test_call_site_installation_is_idempotent_and_keeps_common_mirror(monkeypatch):
     ns, Plan, Worker, _ = install_fixture(monkeypatch)
     original = Worker._enqueue_host_mirror
     ns["install_call_sites"]()
@@ -248,7 +258,7 @@ def test_call_site_installation_is_idempotent_and_cpu_worker_keeps_original(monk
     ns["install_call_sites"]()
     assert Worker._enqueue_host_mirror is wrapper
     assert Plan.ensure_gpu_sources is ensure
-    assert wrapper._ascend_original is original
+    assert wrapper is original
     worker = Worker()
     worker.cache_handles = [
         types.SimpleNamespace(
@@ -259,27 +269,17 @@ def test_call_site_installation_is_idempotent_and_cpu_worker_keeps_original(monk
     assert not hasattr(worker, "_ascend_slot_invalidator")
 
 
-def test_backend_binding_changes_only_selected_runtime_instance(monkeypatch):
+def test_prefill_adapter_keeps_common_runtime_method(monkeypatch):
     ns, _, _, Runtime = install_fixture(monkeypatch)
-    first, second = Runtime(), Runtime()
-    first.device = types.SimpleNamespace(type="npu")
-    ns["bind_runtime"](first)
-    selected = first._resolve_residency
-    ns["bind_runtime"](first)
-    assert first._resolve_residency is selected
-    assert first._resolve_residency.__self__ is first
-    assert first._resolve_residency.__func__ is ns["_resolve_residency"]
-    assert second._resolve_residency.__func__ is Runtime._resolve_residency
-    assert not hasattr(second, "_ascend_runtime_backend_bound")
+    original = Runtime._resolve_residency
+    ns["install_call_sites"]()
+    assert Runtime._resolve_residency is original
 
 
-def test_unreviewed_common_source_rejected_before_binding(monkeypatch):
+def test_unreviewed_common_source_rejected_before_installation(monkeypatch):
     ns, _, Worker, Runtime = install_fixture(monkeypatch)
     original = Worker._enqueue_host_mirror
     ns["COMMON_RUNTIME_SHA256"] = "0" * 64
-    runtime = Runtime()
-    runtime.device = types.SimpleNamespace(type="npu")
     with pytest.raises(RuntimeError, match="Unreviewed HiSparse"):
-        ns["bind_runtime"](runtime)
-    assert not hasattr(runtime, "_ascend_runtime_backend_bound")
+        ns["install_call_sites"]()
     assert Worker._enqueue_host_mirror is original

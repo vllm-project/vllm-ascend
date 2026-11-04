@@ -33,23 +33,23 @@ def test_exact_source_pairing_before_any_import(tmp_path, monkeypatch, changed):
         path = tmp_path / relative
         path.write_bytes(relative.encode())
         expected[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
-    monkeypatch.setattr(MODULE, "CORE_SOURCES", expected)
+    monkeypatch.setattr(MODULE, "MAIN_CORE_SOURCES", expected)
     if changed == "missing":
         (tmp_path / "worker.py").unlink()
     elif changed:
         (tmp_path / (changed + ".py")).write_bytes(b"a different source contract")
     if changed:
         with pytest.raises(RuntimeError):
-            MODULE.select_profile("a5_c8_62592", tmp_path)
+            MODULE.select_profile("a5_c8_main", tmp_path)
     else:
-        assert MODULE.select_profile("a5_c8_62592", tmp_path) == "a5_c8_62592"
+        assert MODULE.select_profile("a5_c8_main", tmp_path) == "a5_c8_main"
 
 
 def test_source_pairing_accepts_windows_checkout_line_endings(tmp_path, monkeypatch):
     original = b"# same public source\nvalue = 1\n"
-    monkeypatch.setattr(MODULE, "CORE_SOURCES", {"worker.py": hashlib.sha256(original).hexdigest()})
+    monkeypatch.setattr(MODULE, "MAIN_CORE_SOURCES", {"worker.py": hashlib.sha256(original).hexdigest()})
     (tmp_path / "worker.py").write_bytes(original.replace(b"\n", b"\r\n"))
-    assert MODULE.select_profile("a5_c8_62592", tmp_path) == "a5_c8_62592"
+    assert MODULE.select_profile("a5_c8_main", tmp_path) == "a5_c8_main"
 
 
 @pytest.mark.parametrize("changed", [None, "runtime", "worker", "missing"])
@@ -79,7 +79,7 @@ def test_main_pairing_rejects_partial_or_different_source_sets(tmp_path, monkeyp
     else:
         assert MODULE.select_profile("a5_c8_main", tmp_path) == "a5_c8_main"
         MODULE.verify_core_source(tmp_path / "v1/hisparse/runtime.py", legacy["v1/hisparse/runtime.py"])
-        with pytest.raises(RuntimeError):
+        with pytest.raises(ValueError):
             MODULE.select_profile("a5_c8_62592", tmp_path)
 
 

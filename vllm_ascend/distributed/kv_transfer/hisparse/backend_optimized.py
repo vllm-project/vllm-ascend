@@ -101,9 +101,9 @@ class AscendHiSparseBackend(HiSparseBackend):
         mapping = runtime.registered_host_pool._hisparse_registration
         ops = HiSparseNPUOps(mapping, workspace)
         ops.prefetch_gather_global_workers = 56
-        from .runtime_adapter import bind_runtime
+        from .runtime_adapter import install_call_sites
 
-        bind_runtime(runtime)
+        install_call_sites()
         from .page_dma_descriptors_optimized import install as install_page_descriptors
         from .resident_update_installer import install as install_resident_updates
 
@@ -166,20 +166,6 @@ class AscendHiSparseBackend(HiSparseBackend):
 
     def import_event(self, device: torch.device, handle: Any) -> Any:
         raise NotImplementedError("Ascend HiSparse does not import NPU IPC events.")
-
-    def create_stream(self, device: torch.device, *, generic: bool = False) -> Any:
-        from vllm_ascend.patch.worker.patch_hisparse_streams import HiSparseStream
-
-        return HiSparseStream(device=device)
-
-    def create_lru_init(self, size: int, device: torch.device) -> torch.Tensor:
-        # CANN Range does not support int16 outputs. This runs only at allocation.
-        return torch.arange(size, dtype=torch.int32, device=device).to(torch.int16)
-
-    def create_event(self) -> Any:
-        from vllm_ascend.patch.worker.patch_hisparse_streams import create_event
-
-        return create_event()
 
     def current_stream(self) -> Any:
         # HiSparse switches between model and copy streams. Query the active

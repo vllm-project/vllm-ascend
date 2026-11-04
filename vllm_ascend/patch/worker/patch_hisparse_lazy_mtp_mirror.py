@@ -229,13 +229,8 @@ def install(config: Any) -> None:
         if num_rows == 0:
             return result
         assert cache.req_id_per_token is not None
-        # The reviewed backend creates this owner before its mirror early
-        # return. Preserve one grouped submission rather than expanding it
-        # back into per-leader launches in the lazy path.
-        invalidator = getattr(self, "_ascend_slot_invalidator", None)
-        if not callable(invalidator):
-            raise RuntimeError("Missing reviewed Ascend grouped invalidation owner.")
-        invalidator(
+        # Core owns the grouped invalidator, including its per-binding tables.
+        self._invalidate_written_slots(
             [handle.runtime for handle in active if handle.runtime.is_group_leader],
             slots[:num_rows],
             cache.req_id_per_token[:num_rows],

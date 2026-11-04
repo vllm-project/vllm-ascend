@@ -25,15 +25,16 @@ def validate_checkpoint(model: str, contract: dict) -> None:
 
 
 def arguments_for_profile(config: dict, arm: str, profile: str) -> list[str]:
+    if profile != "a5_c8_main":
+        raise ValueError("Reproduction requires the reviewed merged-main profile")
     argv = list(config[arm])
-    if profile == "a5_c8_main":
-        index = argv.index("--additional-config")
-        additional = json.loads(argv[index + 1])
-        # Current Ascend selects Indexer C8 layers from checkpoint metadata.
-        additional.pop("sparse_li_c8_layer_policy", None)
-        # Match the reviewed MXFP Prolog path's original final NZ operands.
-        additional["weight_nz_mode"] = 1
-        argv[index + 1] = json.dumps(additional)
+    index = argv.index("--additional-config")
+    additional = json.loads(argv[index + 1])
+    # Current Ascend selects Indexer C8 layers from checkpoint metadata.
+    additional.pop("sparse_li_c8_layer_policy", None)
+    # Match the reviewed MXFP Prolog path's original final NZ operands.
+    additional["weight_nz_mode"] = 1
+    argv[index + 1] = json.dumps(additional)
     return argv
 
 

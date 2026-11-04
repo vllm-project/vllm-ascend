@@ -12,8 +12,9 @@ the experimental directory over an installation.
 - `a5_c8_main`: the merged-main A5 optimization implementation. Exact normalized Core
   source hashes are checked before adapters are installed. Unknown versions fail
   explicitly. Restart workers after changing the profile or source.
-- `a5_c8_62592` records an older pre-merge integration for historical evidence;
-  new reproduction uses merged main only.
+
+The former `a5_c8_62592` pre-merge profile is rejected. Its historical results
+remain recorded; new reproduction uses merged main only.
 
 The A5 profile includes mapped Host writeback and lifetime ownership, CPU page
 descriptors, Resident updates, grouped/recycled invalidation, lazy MTP and row-map
@@ -34,10 +35,44 @@ the historical A5 result.
 
 Use an A5 environment with CANN 9.2, Torch 2.10, torch-npu 2.10.post7 and a
 matching triton-ascend installation. The preparer checks out the upstream-main
-commit `5c8ae7c74aaa99d1f7fbeea942fd7282e3413810` and verifies tree
-`a387331db771f0ad04bbd7bdbbd0e872198b4ed3`. It fetches no PR head and creates no
-local merge. PR62592 and PR60103 are already merged at this revision; unmerged
+commit `d3fb7166e0ac9db82158129face12ae28209757a` and verifies tree
+`d7eb5822d87cc449f1377cf59bf499116832bb9f`. It fetches no PR head and creates no
+local merge. PR62592, PR60103, PR63801 and PR64989 are merged at this revision; unmerged
 vLLM proposals, including the private Host allocation hook, are not dependencies.
+
+This is the source pair under integration review after the November 4 cleanup.
+CPU checks do not qualify NPU execution. Historical measurements below retain
+their original Core versions and do not qualify this newer pair.
+
+## Common ownership after upstream merges
+
+The plugin uses Core's speculative group prefetch from PR63801. Core decides
+bounded decode eligibility, queues follower layers on the existing copy stream
+and records one completion event per layer. The copied Ascend staging method
+has been removed. The NPU gather implementation remains a device operation.
+
+Core also owns Host mirror completion and the grouped invalidator's pointer
+table. The duplicated Ascend mirror method and invalidator manager are removed;
+the optional lazy-MTP policy calls Core's existing invalidator. The NPU kernel
+still compares rewritten row IDs and invalidates Hot entries.
+
+PR64989 detaches temporary handle/runtime bindings during profiling cleanup and
+cleans partial initialization and shutdown through the same ownership boundary.
+The plugin adds no second unbind/reset path. Native DMA tickets, pending payload
+owners, registration and completion fences remain Ascend responsibilities;
+detaching a view alone does not establish completion of an in-flight copy.
+
+Unused backend stream/event/LRU factory methods and the obsolete prefetch flag
+are removed. Core already creates ordinary streams/events and initializes LRU
+through int32 before casting. The actual backend IPC-event contract is retained.
+The baseline resolver workspace is owned by leader cache operations and shared
+by followers, matching the optimized backend without Core `backend_state`.
+
+The resolver uses Core's common control flow after aligning the Python cache-op
+signature. NPU kernel bodies are unchanged; optional diagnostic outputs are
+keyword-only. The remaining stream capture adapter and packed prefill mapping
+address device differences. Attention arithmetic, HMA and Coordinator policy
+are unchanged.
 
 ```bash
 python tools/hisparse/prepare_paired_core.py --output /path/to/vllm-main-pinned
@@ -287,8 +322,9 @@ pass.
 
 ### Reviewed current-main C8 port
 
-`a5_c8_main` is a separate explicit profile for the five reviewed Core files
-at `5c8ae7c74aaa99d1f7fbeea942fd7282e3413810`. It checks the entire file set;
+The initial `a5_c8_main` port used the five reviewed Core files at
+`5c8ae7c74aaa99d1f7fbeea942fd7282e3413810`. The current profile pins the newer
+merged revision in the checkout instructions above. It checks the entire file set;
 mixing old/new files or moving to another main revision is rejected. Use
 `tools/hisparse/serve_reproduction.py --profile a5_c8_main` with either arm.
 That launcher removes the obsolete Indexer C8 layer flag and retains the

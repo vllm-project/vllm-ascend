@@ -21,18 +21,19 @@ CORE_SOURCES = {
     CORE_CONNECTOR_PATH: "78610e02ebdd622dc8272a98d75c2a75a41d8b19ce1e72ac582bdedd19d11f13",
 }
 MAIN_CORE_SOURCES = {
-    "v1/hisparse/runtime.py": "16e33814eb5d6b44093429fbb74aaf436e8994b11b43b07d1c39851baf563759",
+    "v1/hisparse/runtime.py": "29659727cd515cb6ed496e254e6bbe174d33ed61f6479e96d61d47dac6afc0dd",
     "v1/attention/backends/mla/index_group.py": "0a25c4558357f568144ac17d74c9fc796b576bf5c94817c95623c36fc9b860ba",
-    CORE_WORKER_PATH: "864e2c7ce4e2cff320b4f68f8dccc9691adb829f0e50fdf6a27dc9c7885040e5",
-    "v1/hisparse/coordinator.py": "28a75c07cac66e74211a9ec899a26aa0447dfe58089c1d162e760687cdb4c2e9",
+    CORE_WORKER_PATH: "e07bfb44260b30a506208fd180b7530584338f9d6156acbc788ed794d3bd18f4",
+    "v1/hisparse/coordinator.py": "141edbeb85bb051ad296970ccc67c48e1f49d85a0cc25e196d59ed775e46dcf9",
     CORE_CONNECTOR_PATH: "b49518f82b1976919a3f50f21430279810473d1c657629b693d121ab3b9a76e7",
 }
 
 
-def validate_core_sources(package: Path, profile: str = "a5_c8_62592") -> None:
+def validate_core_sources(package: Path, profile: str = "a5_c8_main") -> None:
     """Reject a partial/different pairing before any common module is patched."""
-    sources = MAIN_CORE_SOURCES if profile == "a5_c8_main" else CORE_SOURCES
-    for relative, expected in sources.items():
+    if profile != "a5_c8_main":
+        raise ValueError("HiSparse optimization requires the reviewed merged-main profile")
+    for relative, expected in MAIN_CORE_SOURCES.items():
         try:
             digest = hashlib.sha256((package / relative).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
         except OSError as error:
@@ -44,13 +45,10 @@ def validate_core_sources(package: Path, profile: str = "a5_c8_62592") -> None:
 def verify_core_source(path: Path, legacy_digest: str) -> None:
     """Accept one reviewed variant, never a mixture of current-main files.
 
-    Existing paired adapters retain their exact legacy contract. A current-main
-    file additionally requires all five reviewed main files, including the
-    changed Resident layout and import-reservation lifetime contracts.
+    Historical adapter digests identify their corresponding Core file. They
+    never permit the pre-merge implementation to bypass the current source set.
     """
     actual = hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
-    if actual == legacy_digest:
-        return
     relative = next((name for name, digest in CORE_SOURCES.items() if digest == legacy_digest), None)
     if relative is None or actual != MAIN_CORE_SOURCES[relative]:
         raise RuntimeError(f"Unreviewed HiSparse source: {path.name}")
@@ -63,8 +61,8 @@ def verify_core_source(path: Path, legacy_digest: str) -> None:
 def select_profile(requested: str, package: Path | None = None) -> str:
     if requested == "baseline":
         return requested
-    if requested not in ("a5_c8_62592", "a5_c8_main"):
-        raise ValueError("VLLM_ASCEND_HISPARSE_PROFILE must be baseline, a5_c8_62592 or a5_c8_main")
+    if requested != "a5_c8_main":
+        raise ValueError("VLLM_ASCEND_HISPARSE_PROFILE must be baseline or a5_c8_main")
     if package is None:
         spec = importlib.util.find_spec("vllm")
         if spec is None or spec.origin is None:

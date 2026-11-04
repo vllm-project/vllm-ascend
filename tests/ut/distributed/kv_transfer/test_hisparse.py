@@ -57,22 +57,6 @@ def test_explicit_dma_extension_load_keeps_global_op_policy(monkeypatch):
     assert descriptor_patch.install.call_count == 2
 
 
-def test_lru_init_avoids_unsupported_int16_range(monkeypatch):
-    original = torch.arange
-    dtypes = []
-
-    def arange(*args, **kwargs):
-        dtypes.append(kwargs["dtype"])
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(torch, "arange", arange)
-    values = AscendHiSparseBackend().create_lru_init(8, torch.device("cpu"))
-
-    assert dtypes == [torch.int32]
-    assert values.dtype == torch.int16
-    assert values.tolist() == list(range(8))
-
-
 def test_backend_current_stream_tracks_context_changes(monkeypatch):
     active = [object()]
     monkeypatch.setattr(torch.npu, "current_stream", lambda: active[0])
@@ -130,14 +114,19 @@ def test_registration_retains_mapping_until_explicit_release(monkeypatch):
 
 
 def test_group_layers_share_one_resolver_workspace(monkeypatch):
-    workspace_type = MagicMock()
-    ops_type = MagicMock()
+    workspaces = [torch.zeros(4), torch.ones(4)]
+    workspace_type = MagicMock(side_effect=workspaces)
+
+    class Ops:
+        def __init__(self, mapping, workspace):
+            self.mapping = mapping
+            self.workspace = workspace
+
     monkeypatch.setitem(
-        sys.modules,
-        "vllm_ascend.ops.hisparse",
-        SimpleNamespace(ResolverWorkspace=workspace_type, HiSparseNPUOps=ops_type),
+        sys.modules, "vllm_ascend.ops.hisparse", SimpleNamespace(ResolverWorkspace=workspace_type, HiSparseNPUOps=Ops)
     )
-    group = SimpleNamespace(backend_state=None)
+
+    group = SimpleNamespace()
     mapping = object()
     runtime = SimpleNamespace(
         index_group=group,
@@ -146,15 +135,23 @@ def test_group_layers_share_one_resolver_workspace(monkeypatch):
         max_union_rows=4,
         device=torch.device("cpu"),
         registered_host_pool=SimpleNamespace(_hisparse_registration=mapping),
+        eager_host_mirror=True,
     )
+    group.leader = runtime
     backend = AscendHiSparseBackend()
-
-    backend.create_cache_ops(runtime)
-    backend.create_cache_ops(runtime)
-
-    workspace_type.assert_called_once()
-    assert group.backend_state is workspace_type.return_value
-    assert all(call.args == (mapping, group.backend_state) for call in ops_type.call_args_list)
+    first = backend.create_cache_ops(runtime)
+    runtime.cache_ops = first
+    follower = SimpleNamespace(**vars(runtime))
+    second = backend.create_cache_ops(follower)
+    first.workspace.fill_(7)
+    assert second.workspace is first.workspace
+    assert second.workspace.tolist() == [7] * 4
+    assert first.mapping is second.mapping is mapping
+    assert not hasattr(group, "backend_state")
+    rebound = backend.create_cache_ops(runtime)
+    assert rebound.workspace is not first.workspace
+    assert rebound.workspace.tolist() == [1] * 4
+    assert first.workspace.tolist() == [7] * 4
 
 
 def test_indexer_expanded_view_addresses_shared_hma_pages():
@@ -421,32 +418,13 @@ def test_backend_keeps_private_events_and_rejects_unsupported_ipc(monkeypatch):
     monkeypatch.setattr(torch.npu, "Event", events)
     backend = AscendHiSparseBackend()
     assert not backend.supports_shared_host_pool
-    assert backend.create_event() is events.return_value
-    assert backend.create_event(interprocess=False) is events.return_value
     with pytest.raises(NotImplementedError, match="private per-rank"):
-        backend.create_event(interprocess=True)
+        backend.create_ipc_event()
     with pytest.raises(NotImplementedError, match="export"):
         backend.export_event(object())
     with pytest.raises(NotImplementedError, match="import"):
         backend.import_event(torch.device("cpu"), b"invalid-handle")
-    assert events.call_count == 2
-
-
-def test_backend_rejects_cuda_prefill_layout_without_touching_payloads():
-    payload = torch.arange(656, dtype=torch.int64).to(torch.uint8)
-    before = payload.clone()
-    with pytest.raises(NotImplementedError, match="native SFA prefill"):
-        AscendHiSparseBackend().gather_fp8_prefill(
-            payload,
-            payload,
-            payload,
-            payload,
-            1,
-            host_cache=payload,
-            host_row_ids=payload,
-            device_row_ids=payload,
-        )
-    assert torch.equal(payload, before)
+    events.assert_not_called()
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])

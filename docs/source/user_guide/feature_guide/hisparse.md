@@ -83,16 +83,18 @@ The KV preprocessing tests include a fixed BF16 activation row that exposes a ro
 
 ## Platform backend dependency
 
-The original baseline targets vLLM PR [#62592](https://github.com/vllm-project/vllm/pull/62592),
-commit `d9f25459725c8fd9db07b7d9571a3f5be39db592`. The builder adapter accepts
+The platform interface is provided by merged vLLM PR [#62592](https://github.com/vllm-project/vllm/pull/62592).
+The reviewed main revision also includes [#63801](https://github.com/vllm-project/vllm/pull/63801)
+group prefetch and [#64989](https://github.com/vllm-project/vllm/pull/64989) profiling-binding cleanup.
+The builder adapter accepts
 the original `head_size` and merged `row_width` keyword. Resolver workspace is
 owned by the group's leader cache operations, without requiring a Core
 `backend_state` field. These interface fixes alone do not qualify a different
 Core revision for serving; pin and validate the complete paired revisions.
 
-The experimental `a5_c8_62592` and `a5_c8_main` profiles still require their
-exact reviewed Core source hashes. Their names do not imply support for an
-arbitrary latest main. Do not bypass the source guards after updating Core.
+The `a5_c8_main` profile requires the exact reviewed Core source hashes.
+Its name does not imply support for an arbitrary latest main. The former
+`a5_c8_62592` pre-merge profile is rejected. Do not bypass the source guards.
 
 A proposed Core `allocate_host_backing` hook lets the optimized backend supply
 PTA-pinned storage before Core aligns and registers it. When that hook is
