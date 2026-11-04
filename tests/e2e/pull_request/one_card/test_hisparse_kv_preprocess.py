@@ -40,6 +40,76 @@ def _setup():
 
 
 @pytest.mark.parametrize("capture", [False, True])
+def test_c8_preprocess_writes_hisparse_mapping_once(capture):
+    _setup()
+    from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
+    from vllm_ascend.attention.sfa_v1 import custom_kv_rmsnorm_rope
+
+    rows, block = 5, 128
+    values = torch.randn(rows, 576, dtype=torch.bfloat16, device="npu")
+    gamma = torch.ones(512, dtype=torch.bfloat16, device="npu")
+    cos = torch.ones(rows, 1, 1, 64, dtype=torch.bfloat16, device="npu")
+    sin = torch.zeros_like(cos)
+    raw = torch.full((3, 2, block, 656), 90, dtype=torch.uint8, device="npu")
+    destination = raw[:, 1].view(torch.float8_e4m3fn)
+    logical = [-1, 129, 0, 257, 128]
+    slots = torch.tensor(logical, dtype=torch.int64, device="npu")
+    metadata = SimpleNamespace(
+        query_start_loc=torch.tensor([0, 4], dtype=torch.int32, device="npu"), hisparse_for_capture=True
+    )
+    impl = SimpleNamespace(
+        enable_sparse_sfa_c8=True,
+        c8_cache_dtype=torch.float8_e4m3fn,
+        sfa_qsfa_tile_size=128,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        num_kv_heads=1,
+        kv_a_layernorm=SimpleNamespace(weight=gamma, variance_epsilon=1e-5),
+        hisparse_cache=SimpleNamespace(write_target=lambda count, slot_count: (destination, slots, count)),
+    )
+    # The ordinary source cache has no Resident/Hot addressing. It must never
+    # receive the parent's second C8 store after exec_kv has used write_target.
+    source_cache = (torch.empty(0, device="npu"),)
+
+    def forward():
+        rope, latent, scales = AscendHiSparseImpl.exec_kv(impl, values, cos, sin, source_cache, slots, metadata)
+        AscendHiSparseImpl._store_parallel_kv(impl, rope, latent, scales, source_cache, slots, metadata)
+
+    graph = None
+    try:
+        forward()
+        torch.npu.synchronize()
+        if capture:
+            graph = torch.npu.NPUGraph()
+            with torch.npu.graph(graph):
+                forward()
+        for count in (4, 2):
+            values.neg_()
+            metadata.query_start_loc[-1:].fill_(count)
+            raw.fill_(90)
+            if graph is None:
+                forward()
+            else:
+                graph.replay()
+            torch.npu.synchronize()
+            rope, latent, scales = custom_kv_rmsnorm_rope(
+                values.reshape(rows, 1, 1, 576), gamma, cos, sin, 512, 64, tile_size=128
+            )
+            payload = torch.cat(
+                [part.contiguous().view(torch.uint8).reshape(rows, -1).cpu() for part in (latent, rope, scales)], -1
+            )
+            expected = torch.full(raw.shape, 90, dtype=torch.uint8)
+            for row, slot in enumerate(logical):
+                if row < count and slot >= 0:
+                    expected[slot // block, 1, slot % block] = payload[row]
+            torch.testing.assert_close(raw.cpu(), expected, rtol=0, atol=0)
+    finally:
+        torch.npu.synchronize()
+        if graph is not None:
+            graph.reset()
+
+
+@pytest.mark.parametrize("capture", [False, True])
 def test_fused_preprocess_preserves_native_rounding_and_packed_writes(monkeypatch, capture):
     _setup()
     from vllm_ascend.attention import sfa_hisparse
@@ -100,6 +170,7 @@ def test_fused_preprocess_preserves_native_rounding_and_packed_writes(monkeypatc
         finish_kv_update=lambda: mirrored.append(True),
     )
     impl = SimpleNamespace(
+        enable_sparse_sfa_c8=False,
         kv_lora_rank=512,
         qk_rope_head_dim=64,
         num_kv_heads=1,
@@ -181,6 +252,7 @@ def test_nope_preprocess_uses_native_layernorm(monkeypatch):
 
     monkeypatch.setattr(torch_npu, "npu_kv_rmsnorm_rope_cache", unexpected)
     impl = SimpleNamespace(
+        enable_sparse_sfa_c8=False,
         kv_lora_rank=512,
         qk_rope_head_dim=0,
         kv_a_layernorm=norm,

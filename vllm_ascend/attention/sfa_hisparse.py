@@ -91,8 +91,15 @@ class AscendHiSparseImpl(AscendSFAImpl):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if self.enable_sparse_sfa_c8 or self.enable_sparse_sfa_turboquant:
-            raise ValueError("Ascend HiSparse currently requires an unquantized main MLA KV cache")
+        if self.enable_sparse_sfa_turboquant:
+            raise ValueError("Ascend HiSparse does not support TurboQuant")
+        if self.enable_sparse_sfa_c8:
+            if (
+                self.c8_cache_dtype != torch.float8_e4m3fn
+                or (self.kv_lora_rank, self.qk_rope_head_dim) != (512, 64)
+                or self.sfa_qsfa_tile_size != 128
+            ):
+                raise ValueError("HiSparse C8 requires native E4M3FN NoPE512/RoPE64 with FP32 scales")
         parallel = self.vllm_config.parallel_config
         if parallel.prefill_context_parallel_size > 1 or parallel.decode_context_parallel_size > 1:
             raise ValueError("Ascend HiSparse does not support context parallelism")
@@ -101,10 +108,16 @@ class AscendHiSparseImpl(AscendSFAImpl):
             if self.topk_indices_buffer is None:
                 raise ValueError("Ascend HiSparse requires a model sparse-index group")
             builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
+        if self.enable_sparse_sfa_c8:
+            from vllm_ascend.ops.hisparse_c8 import C8_ROW_BYTES
+
+            row_width = C8_ROW_BYTES
+        else:
+            row_width = self.kv_lora_rank + self.qk_rope_head_dim
         self.index_group, self.index_group_index = builder.register_layer(
             self.has_indexer and not self.skip_topk,
             self.vllm_config,
-            row_width=self.kv_lora_rank + self.qk_rope_head_dim,
+            row_width=row_width,
             kv_cache_dtype=self.vllm_config.cache_config.cache_dtype,
         )
         if not isinstance(self.index_group, HiSparseMLAIndexGroup):
@@ -167,9 +180,19 @@ class AscendHiSparseImpl(AscendSFAImpl):
 
         return current_workspace_manager().get_persistent_resource(key, allocate)
 
+    def _c8_length_workspace(self):
+        def allocate():
+            device = self.index_group.logical_topk_indices.device
+            return tuple(torch.empty(1, dtype=torch.int32, device=device) for _ in range(2))
+
+        return current_workspace_manager().get_persistent_resource(("ascend_hisparse_c8_lengths",), allocate)
+
     def forward(self, layer_name, hidden_states, kv_cache, attn_metadata, output=None):
-        self._workspace(hidden_states.dtype)
-        if self.qk_rope_head_dim:
+        if self.enable_sparse_sfa_c8:
+            self._c8_length_workspace()
+        else:
+            self._workspace(hidden_states.dtype)
+        if self.qk_rope_head_dim and not self.enable_sparse_sfa_c8:
             # Include preprocessing scratch in profiling and allocate it before
             # graph capture, including dummy forwards without attention metadata.
             self._kv_workspace(hidden_states.dtype)
@@ -180,6 +203,34 @@ class AscendHiSparseImpl(AscendSFAImpl):
         from vllm_ascend.ops.hisparse import scatter_packed_kv
 
         assert self.kv_a_layernorm is not None
+        if self.enable_sparse_sfa_c8:
+            from vllm_ascend.attention.sfa_v1 import custom_kv_rmsnorm_rope
+            from vllm_ascend.ops.hisparse_c8 import pack_c8_components
+
+            values = kv_no_split.reshape(-1, self.num_kv_heads, 1, self.kv_lora_rank + self.qk_rope_head_dim)
+            rope, latent, scales = custom_kv_rmsnorm_rope(
+                values,
+                self.kv_a_layernorm.weight,
+                cos,
+                sin,
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                epsilon=self.kv_a_layernorm.variance_epsilon,
+                dst_type=self.c8_cache_dtype,
+                tile_size=self.sfa_qsfa_tile_size,
+            )
+            rows = latent.numel() // self.kv_lora_rank
+            packed = pack_c8_components(latent.contiguous(), rope.contiguous(), scales.contiguous())
+            cache = self.hisparse_cache
+            destination, mapping, count = cache.write_target(rows, slots.numel())
+            packed = packed[:count]
+            # Reuse the existing byte-capable scatter; no fused C8 kernel or
+            # payload conversion is needed for the baseline data path.
+            scatter_packed_kv(
+                packed, packed[:, :0], destination.view(torch.uint8), mapping, attn_metadata.query_start_loc[-1:]
+            )
+            finish_hisparse_kv_update(cache, attn_metadata)
+            return rope, latent, scales
         values = kv_no_split.reshape(-1, self.kv_lora_rank + self.qk_rope_head_dim)
         num_tokens = values.shape[0]
         if self.qk_rope_head_dim:
@@ -216,7 +267,18 @@ class AscendHiSparseImpl(AscendSFAImpl):
         finish_hisparse_kv_update(cache, attn_metadata)
         return rope, latent
 
+    def _store_parallel_kv(self, k_pe, k_nope, knope_scale, kv_cache, slot_mapping_sfa, attn_metadata):
+        # exec_kv has already written through the current HiSparse destination
+        # and row mapping. The ordinary C8 store uses source slots instead,
+        # which would duplicate the write and can overwrite unrelated slab rows.
+        return k_pe, k_nope
+
     def _attention_physical(self, query, query_rope, packed_cache, physical_topk):
+        if self.enable_sparse_sfa_c8:
+            from vllm_ascend.ops.hisparse_c8 import c8_physical_attention
+
+            lengths = self._c8_length_workspace()
+            return c8_physical_attention(query, query_rope, packed_cache, physical_topk, self.scale, *lengths)
         from vllm_ascend.ops.hisparse import pack_attention_rows
 
         latent, rope, block_table, indices, query_ends, seq_lens = self._workspace(query.dtype)

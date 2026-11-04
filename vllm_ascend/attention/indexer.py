@@ -286,6 +286,20 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         with a different cache layout should override it.
         """
         indexer_k_cache = self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT]
+        if getattr(self.k_cache, "hisparse_indexer_payload_format", None) == "ascend_indexer_e4m3fn_key_fp32_scale_v1":
+            if not self.enable_sparse_li_c8 or self.enable_sparse_li_c4 or k_li_scale is None:
+                raise ValueError("HiSparse's page-strided Indexer requires native C8 values and FP32 scales")
+            from vllm_ascend.distributed.kv_transfer.hisparse.binding import write_hisparse_indexer_c8
+
+            write_hisparse_indexer_c8(
+                indexer_k_cache,
+                self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
+                k_li,
+                k_li_scale,
+                slot_mapping.reshape(-1),
+                DeviceOperator.scatter_cache,
+            )
+            return
         # float4_e2m1fn_x2 / float8_e8m0fnu are not supported by the scatter
         # kernel; view as uint8 (same 1-byte layout) for the cache write.
         if k_li.dtype == torch_npu.float4_e2m1fn_x2:

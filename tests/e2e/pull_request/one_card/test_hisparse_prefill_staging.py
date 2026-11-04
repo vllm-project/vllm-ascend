@@ -88,11 +88,11 @@ def test_resident_prefill_plan_shared_layers(resident_block_size, host_pages):
         host._hisparse_registration.close()
 
 
-def test_backend_resident_payload_graph_replay():
+@pytest.mark.parametrize("dtype,width", [(torch.bfloat16, 576), (torch.float8_e4m3fn, 656)])
+def test_backend_resident_payload_graph_replay(dtype, width):
     if not torch.npu.is_available() or not torch.npu.get_device_name(0).startswith("Ascend950"):
         pytest.skip("HiSparse resident gather currently targets Ascend 950")
     torch.npu.set_device(0)
-    dtype, width = torch.bfloat16, 576
     stride = 3 * width
     raw = torch.arange(7 * width * dtype.itemsize, dtype=torch.int64).to(torch.uint8).to("npu:0")
     source = raw.view(dtype).as_strided((2, 2, width), (stride, width, 1), storage_offset=width)
