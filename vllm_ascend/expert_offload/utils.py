@@ -77,11 +77,8 @@ class ExpertWeightView:
 
 
 def finalize_expert_offload_loading(runner: NPUModelRunner) -> None:
-    """Finalize after native warmup joins, before the runner initializes its dumper."""
-    manager = runner.expert_offload_manager
-    if manager is None:
-        return
+    """Finalize enabled offload after native warmup joins, before dumper setup."""
     allocated_before = torch.npu.memory_allocated(runner.device)
-    manager.finalize_loading(runner.model)
+    runner.expert_offload_manager.finalize_loading(runner.model)
     # The shared pool is allocated after the parent's loading profiler.
     runner.model_memory_usage += torch.npu.memory_allocated(runner.device) - allocated_before

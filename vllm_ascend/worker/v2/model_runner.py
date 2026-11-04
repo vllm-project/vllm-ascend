@@ -321,7 +321,8 @@ class NPUModelRunner(GPUModelRunner):
             # memory profiling.
             join_nz_warm_thread()
 
-        finalize_expert_offload_loading(self)
+        if offload is not None:
+            finalize_expert_offload_loading(self)
 
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts

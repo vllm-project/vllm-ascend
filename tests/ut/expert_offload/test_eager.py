@@ -118,14 +118,6 @@ def test_rejected_loader_input_does_not_mark_completion():
     assert not layer._expert_offload_binding.host_store.loaded["w13_weight"]
 
 
-def test_weight_reload_is_rejected_even_after_close():
-    layer = ExpertLayer()
-    manager = ready_model(layer)
-    manager.close()
-    with pytest.raises(RuntimeError, match="reload"):
-        layer.w2_weight.weight_loader(layer.w2_weight, torch.ones(4, 3), "w2_weight", "w2", 0)
-
-
 def test_decode_eviction_prefill_and_overflow_preserve_parameters():
     layer = ExpertLayer()
     manager = ready_model(layer)
@@ -202,21 +194,6 @@ def test_profile_uses_full_pool_and_close_releases_resources():
     manager.close()
     manager.close()
     assert not manager.bindings and not manager.prefill_pool.tensors
-
-
-def test_missing_and_duplicate_layers_are_rejected():
-    with pytest.raises(RuntimeError, match="no supported"):
-        ExpertOffloadManager().finalize_loading(torch.nn.Module())
-    first, second = ExpertLayer(), ExpertLayer()
-    with pytest.raises(RuntimeError, match="duplicate"):
-        ready_model(first, second)
-
-
-def test_incompatible_pool_layout_is_rejected_at_initialization():
-    first, second = ExpertLayer(), ExpertLayer("model.layers.1.mlp.experts")
-    second._expert_offload_binding.adapter.activation = "situ"
-    with pytest.raises(ValueError, match="homogeneous"):
-        ready_model(first, second)
 
 
 @pytest.mark.parametrize("fail_preparation", [False, True])

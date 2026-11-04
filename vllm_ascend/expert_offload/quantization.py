@@ -94,8 +94,6 @@ class MXFP4ExpertAdapter:
                 )
 
     def materialize(self, host_store, expert_ids, device) -> dict[str, torch.Tensor]:
-        if host_store.prepared:
-            raise RuntimeError("prepared experts must be copied directly from native host storage")
         indices = torch.tensor(expert_ids, dtype=torch.long, device="cpu")
         view = torch.nn.Module()
         view.activation = self.activation
@@ -118,9 +116,6 @@ class MXFP4ExpertAdapter:
             setattr(view, name, torch.nn.Parameter(raw, requires_grad=False))
         self.scheme.process_weights_after_loading(view)
         return {name: getattr(view, name).detach() for name in self.output_names}
-
-    def signature(self, host_store):
-        return (type(self), str(self.activation), self.scheme.group_size, host_store.specs)
 
 
 class MXFP8ExpertAdapter(MXFP4ExpertAdapter):
@@ -173,9 +168,6 @@ class W8A8ExpertAdapter(MXFP4ExpertAdapter):
         if hidden <= 0 or intermediate <= 0:
             raise ValueError("W8A8 expert offload requires positive hidden and intermediate sizes")
 
-    def signature(self, host_store):
-        return (type(self), str(self.activation), host_store.specs)
-
 
 class BlockFP8ExpertAdapter(MXFP8ExpertAdapter):
     """Resolve checkpoint block scales through the native scheme in bounded chunks."""
@@ -224,9 +216,6 @@ class BlockFP8ExpertAdapter(MXFP8ExpertAdapter):
                 shape, dtype = shapes[name], torch.float8_e4m3fn
             if not isinstance(tensor, torch.Tensor) or tuple(tensor.shape) != shape or tensor.dtype != dtype:
                 raise ValueError(f"unsupported block FP8 expert tensor {name}; expected shape={shape}, dtype={dtype}")
-
-    def signature(self, host_store):
-        return (type(self), str(self.activation), self.scheme.block_n, self.scheme.block_k, host_store.specs)
 
 
 def expert_adapter_type(scheme):

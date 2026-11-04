@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm_ascend.expert_offload.expert_offload_manager import PrefillExpertPool
 from vllm_ascend.expert_offload.host_store import HostExpertStore
-from vllm_ascend.expert_offload.prefill import PrefillExpertPool
 from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter
 from vllm_ascend.expert_offload.transfer import TorchExpertTransfer
 
@@ -19,7 +19,6 @@ def preparation_double(monkeypatch, *, fail_copy=None):
     store.tensors = {name: torch.arange(18, dtype=torch.float32).reshape(3, 2, 3) for name in store.names}
     store.prepared = {}
     store.prototypes = {}
-    store.finalized = True
     calls = []
 
     class Scheme:
@@ -79,10 +78,6 @@ def test_prepare_once_owns_physical_bytes_and_retires_raw_layer(monkeypatch):
     original.zero_()
     torch.testing.assert_close(store.prepared["w13_weight"].data, expected)
     assert store.prototypes["w13_weight"].sum() > 0
-    with pytest.raises(RuntimeError, match="copied directly"):
-        adapter.materialize(store, [1], "cpu")
-    with pytest.raises(RuntimeError, match="finalized raw"):
-        store.prepare_native(adapter, destination, "cpu")
     store.close()
     assert not store.prepared and not store.prototypes
 
@@ -137,7 +132,6 @@ def test_prepared_bytes_roundtrip_into_transposed_slots_without_conversion(monke
 def test_native_prefill_refill_reuses_addresses_and_restores_every_tensor(monkeypatch):
     store, adapter, destination, calls = preparation_double(monkeypatch)
     expected = {name: tensor.transpose(-1, -2).clone() for name, tensor in store.tensors.items()}
-    store.specs = ()
     store.prepare_native(adapter, destination, "cpu")
     binding = SimpleNamespace(adapter=adapter, host_store=store, num_experts=store.num_experts, device="cpu")
     pool = PrefillExpertPool()
@@ -170,4 +164,4 @@ def test_native_prefill_refill_reuses_addresses_and_restores_every_tensor(monkey
             torch.testing.assert_close(tensor, expected[name])
     assert calls == (["H2D"] * (store.num_experts * len(store.names)) + ["sync"]) * 2
     pool.close()
-    assert not pool.tensors and pool.signature is None
+    assert not pool.tensors

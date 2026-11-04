@@ -25,14 +25,11 @@ class HostExpertStore:
         self.tensors: dict[str, torch.Tensor] = {}
         self.prepared: dict[str, PreparedExpertTensor] = {}
         self.prototypes: dict[str, torch.Tensor] = {}
-        self.finalized = False
         original_loader = layer.weight_loader
         parameter_names = {id(getattr(layer, name)): name for name in names}
 
         @wraps(original_loader)
         def tracked_loader(param, loaded_weight, weight_name, shard_id, expert_id, return_success=False):
-            if self.finalized:
-                raise RuntimeError("expert offload does not support online weight reload")
             # Ask the original loader whether it accepted the tensor, even when
             # the caller does not need that return value.
             success = original_loader(param, loaded_weight, weight_name, shard_id, expert_id, return_success=True)
@@ -54,8 +51,6 @@ class HostExpertStore:
             getattr(layer, name).weight_loader = tracked_loader
 
     def finalize(self, layer, *, pin_memory: bool = True) -> None:
-        if self.finalized:
-            raise RuntimeError("expert host store can only finalize once")
         for spec in self.specs:
             shards = ("w1", "w3") if spec.name.startswith("w13") else ("w2",)
             expected = {(eid, shard) for eid in range(self.num_experts) for shard in shards}
@@ -67,7 +62,6 @@ class HostExpertStore:
             # Registered CPU Parameters already own loader copies. Pinning
             # creates a new owned allocation, independent of checkpoint mmap.
             self.tensors[spec.name] = tensor.pin_memory() if pin_memory else tensor.clone()
-        self.finalized = True
 
     def prepare_native(self, adapter, destination, device) -> None:
         """Convert each expert once, retaining its complete physical storage on CPU.
@@ -79,8 +73,6 @@ class HostExpertStore:
         import acl  # type: ignore[import-not-found]
         import torch_npu
 
-        if not self.finalized or self.prepared:
-            raise RuntimeError("native expert preparation requires a finalized raw host store")
         prepared = {}
         for expert_id in range(self.num_experts):
             bundle = adapter.materialize(self, (expert_id,), device)

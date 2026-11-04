@@ -7,7 +7,6 @@ from dataclasses import replace
 import torch
 
 from .host_store import HostExpertStore
-from .prefill import PrefillExpertPool
 from .quantization import expert_adapter_type
 from .residency import ExpertResidency
 from .transfer import TorchExpertTransfer
@@ -38,8 +37,6 @@ class LayerOffloadBinding:
         self.graph_staging = {}
 
     def process_weights_after_loading(self, layer) -> None:
-        if self.resident:
-            raise RuntimeError("expert offload does not support weight reload or repeated post-processing")
         try:
             self.host_store.finalize(layer, pin_memory=self.device.type == "npu")
             self.resident = self.adapter.materialize(self.host_store, range(self.num_slots), self.device)
@@ -63,14 +60,10 @@ class LayerOffloadBinding:
 
     def prepare(self, layer, selected_ids):
         manager = self.manager
-        if manager is None or self.mapping is None:
-            raise RuntimeError("expert offload layer must be finalized before execution")
         if self.device.type == "npu" and torch.npu.is_current_stream_capturing():
             from .graph import GraphExpertStaging
 
             key = (tuple(selected_ids.shape), selected_ids.dtype)
-            if key not in self.graph_staging:
-                raise RuntimeError("expert graph staging must be initialized before capture")
             staging: GraphExpertStaging = self.graph_staging[key]
             physical_ids = staging.prepare(selected_ids)
             return (
@@ -111,6 +104,30 @@ class LayerOffloadBinding:
         self.mapping = None
         self.graph_staging.clear()
         self.manager = None
+
+
+class PrefillExpertPool:
+    """One reusable full layer shared by the manager's homogeneous expert layers."""
+
+    def __init__(self):
+        self.tensors: dict[str, torch.Tensor] = {}
+
+    def initialize(self, binding) -> None:
+        # Allocate in the scheme's native format, including scale strides.
+        self.tensors = binding.adapter.allocate_pool(binding.host_store, binding.num_experts, binding.device)
+
+    def fill(self, binding):
+        TorchExpertTransfer.copy_experts(
+            binding.adapter,
+            binding.host_store,
+            self.tensors,
+            tuple((eid, eid) for eid in range(binding.num_experts)),
+            binding.device,
+        )
+        return self.tensors
+
+    def close(self) -> None:
+        self.tensors.clear()
 
 
 class ExpertOffloadManager:
@@ -166,29 +183,17 @@ class ExpertOffloadManager:
             self.capturing_graphs = False
 
     def finalize_loading(self, model) -> None:
-        if self.bindings:
-            raise RuntimeError("expert offload can only finalize once")
-        discovered = [
-            binding
+        self.bindings = {
+            binding.layer_name: binding
             for layer in model.modules()
             if (binding := getattr(layer, "_expert_offload_binding", None)) is not None
-        ]
+        }
         try:
-            for binding in discovered:
-                if not binding.resident or binding.layer_name in self.bindings:
-                    raise RuntimeError("incomplete or duplicate expert offload layer registration")
-                self.bindings[binding.layer_name] = binding
+            for binding in self.bindings.values():
                 binding.manager = self
-                self.prefill_pool.initialize(binding)
-            if not self.bindings:
-                raise RuntimeError("expert offload found no supported target-model expert layers")
+            self.prefill_pool.initialize(next(iter(self.bindings.values())))
         except Exception:
-            try:
-                self.close()
-            finally:
-                # Also release layers not yet adopted when registration failed.
-                for binding in discovered:
-                    binding.close()
+            self.close()
             raise
 
     def get_comm(self, binding, moe_config, count):

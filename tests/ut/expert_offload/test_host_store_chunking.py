@@ -41,7 +41,7 @@ def test_native_copy_resolves_chunk_boundaries_and_partial_tail(monkeypatch):
 def test_preparation_bounds_pinned_allocations_and_owns_every_chunk(monkeypatch):
     raw = torch.arange(71 * 8, dtype=torch.int32).to(torch.uint8).reshape(71, 2, 4)
     store = object.__new__(HostExpertStore)
-    store.num_experts, store.finalized = 71, True
+    store.num_experts = 71
     store.prepared, store.prototypes = {}, {}
     store.tensors = {"w13_weight": raw}
     runtime = SimpleNamespace(get_storage_size=lambda tensor: tensor.numel(), get_npu_format=lambda _: 2)

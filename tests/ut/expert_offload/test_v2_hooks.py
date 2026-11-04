@@ -218,10 +218,14 @@ def test_load_only_adopts_target_and_preserves_native_draft():
     assert not hasattr(runner.speculator, "expert_offload_manager")
 
 
-def test_disabled_load_does_not_allocate_or_finalize_offload(loading_memory):
+@pytest.mark.parametrize("load_dummy_weights", [False, True])
+def test_disabled_load_does_not_allocate_or_finalize_offload(loading_memory, load_dummy_weights):
     runner, events = make_runner()
-    runner.load_model(True)
-    assert events == [("parent_load", True, (), {})]
+    finalize = Mock()
+    with patch.dict(runner.load_model.__globals__, finalize_expert_offload_loading=finalize):
+        runner.load_model(load_dummy_weights)
+    assert events == [("parent_load", load_dummy_weights, (), {})]
+    finalize.assert_not_called()
     assert runner.model_memory_usage == 1000
     loading_memory.assert_not_called()
 
