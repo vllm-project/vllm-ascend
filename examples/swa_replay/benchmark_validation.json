@@ -1,0 +1,44 @@
+{
+  "date": "2026-11-04",
+  "parent_revision": "75baeeda44c5fc3074cfee79f681559e4bf740cc",
+  "upstream_vllm_pin": "ced6857afa0ea7b2e3f0846a62e1394e90f15607",
+  "purpose": "Single-node streaming SWA replay OFF/ON benchmark wrapper and HTML/CSV comparison",
+  "cpu_tests": {
+    "command": "TORCH_DEVICE_BACKEND_AUTOLOAD=0 VLLM_VERSION=0.30.0 VLLM_PLUGINS= OMP_NUM_THREADS=1 python -m pytest -q tests/ut/examples/test_swa_bench.py",
+    "passed": 9,
+    "log": "/tmp/swa-bench-tests.log",
+    "junit": "/tmp/swa-bench-tests.xml"
+  },
+  "native_cli_integration": {
+    "method": "Real pinned vLLM 0.30 CLI, generated local tokenizer, simulated HTTP SSE service; no model inference or NPU execution",
+    "exercised": [
+      "Native CLI argument parsing, random dataset with random-range-ratio=0",
+      "Streaming completions, usage lengths and per-request ITL arrays",
+      "Native TTFT, TPOT, ITL and throughput result schema",
+      "OFF and ON raw result files and final HTML/CSV/JSON rendering"
+    ],
+    "status": "passed",
+    "log": "/tmp/swa-bench-native-validation.log",
+    "simulation_script": "/tmp/check_swa_bench_native.py",
+    "report": "/tmp/swa-bench-native-validation/results/comparison/report.html"
+  },
+  "checks": {
+    "ruff_check": "passed",
+    "ruff_format": "passed",
+    "codespell": "passed",
+    "typos": "passed",
+    "git_diff_check": "passed",
+    "markdown_local_links": "passed",
+    "format_sh_ci": "blocked before hooks: nodeenv cannot parse fetched Node version 0-alpha"
+  },
+  "not_validated": [
+    "A3 real-weight benchmark",
+    "Actual SWA replay speedup",
+    "Model accuracy under replay"
+  ],
+  "source_sha256": {
+    "examples/swa_replay/bench.py": "cff503a0a704baac9b589fd0fdc28de503356bacfbe8675d86cdbec1a5eb78f2",
+    "examples/swa_replay/BENCHMARK.md": "efbd4321ba6bbb47fbfaf3157674f215cdf310c795e384f22a373d4c16fb9f74",
+    "tests/ut/examples/test_swa_bench.py": "3fa9ed6ec807087bceb7f389a417c33dc6568b87d9494f09546f40b7e9e47470"
+  }
+}

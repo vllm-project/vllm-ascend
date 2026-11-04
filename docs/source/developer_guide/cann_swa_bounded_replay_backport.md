@@ -113,6 +113,9 @@ AISBench 比较任务指标、异常输出、请求成功率和生成长度。
 
 ## 性能对照
 
+可直接使用[单机流式 benchmark 脚本](../../../examples/swa_replay/BENCHMARK.md)，
+按相同矩阵跑 OFF/ON，保存原生逐请求数据并生成 HTML/CSV 对照报告。
+
 冷 prefill 实验先关闭 prefix caching；分别测试 4K、16K、32K 输入和固定输出长度。
 确保 `max-model-len` 覆盖输入加输出长度，并固定 `max-num-batched-tokens`。
 每组 OFF/ON 交替至少三轮，固定随机种子、模型、runner、并行、图模式、batch token

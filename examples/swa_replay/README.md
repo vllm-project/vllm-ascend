@@ -1,5 +1,8 @@
 # SWA replay curl 测试
 
+测量 TTFT、ITL、TPOT 和 OFF/ON 性能差异，请使用
+[单机 streaming benchmark 脚本与报告](BENCHMARK.md)。下列 curl 脚本用于功能检查。
+
 面向当前 CANN 回移分支、DeepSeek V4.1、A3 单机合设。默认访问
 `http://127.0.0.1:8989`，服务别名为 `dsv41`，对应现有 DP4/TP4 服务。
 只需要 Bash、curl、Python 3 标准库；无需 jq、requests 或额外 Python 包。
