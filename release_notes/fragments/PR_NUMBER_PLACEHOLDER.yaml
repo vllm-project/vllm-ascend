@@ -1,0 +1,5 @@
+pr: <PR number>
+entries:
+  - category: performance
+    text: Optimized the pooling SFA (fused_sparse_attention_overlap) kernel on A3, improving decode/update performance by up to 42% on the selection-update path and by 10-12% at typical selection hit ratios.
+    hardware: [A2, A3]
