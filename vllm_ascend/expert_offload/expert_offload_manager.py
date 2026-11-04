@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
+from typing import cast
 
 import torch
 
@@ -145,7 +146,9 @@ class LayerOffloadBinding:
             raise
 
     def prepare(self, layer, selected_ids):
-        manager = self.manager
+        # Loading attaches the manager and creates the map before any forward.
+        manager = cast(ExpertOffloadManager, self.manager)
+        mapping = cast(ExpertMapBuffer, self.mapping)
         if self.device.type == "npu" and torch.npu.is_current_stream_capturing():
             key = (tuple(selected_ids.shape), selected_ids.dtype)
             staging: GraphExpertStaging = self.graph_staging[key]
@@ -171,8 +174,8 @@ class LayerOffloadBinding:
             count = self.num_experts
         else:
             # The blocking route D2H above also fences the previous use of this host map.
-            self.load_resident(plan, self.mapping)
-            physical_ids = self.mapping.remap(selected_ids)
+            self.load_resident(plan, mapping)
+            physical_ids = mapping.remap(selected_ids)
             tensors = self.resident
             count = self.num_slots
         # A private comm instance avoids mutating the cached full-layer dispatcher.

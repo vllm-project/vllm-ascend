@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 
 from .residency import ExpertResidency
 
 if TYPE_CHECKING:
+    from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
@@ -71,7 +72,8 @@ class ExpertWeightView:
 
 def finalize_expert_offload_loading(runner: NPUModelRunner) -> None:
     """Finalize enabled offload after native warmup joins, before dumper setup."""
+    manager = cast("ExpertOffloadManager", runner.expert_offload_manager)
     allocated_before = torch.npu.memory_allocated(runner.device)
-    runner.expert_offload_manager.finalize_loading(runner.model)
+    manager.finalize_loading(runner.model)
     # The shared pool is allocated after the parent's loading profiler.
     runner.model_memory_usage += torch.npu.memory_allocated(runner.device) - allocated_before
