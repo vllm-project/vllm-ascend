@@ -23,7 +23,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy
-from dataclasses import replace
+from dataclasses import fields, replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -82,6 +82,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
+    declared_kwarg,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
     requires_padded_page_layout,
@@ -218,6 +219,79 @@ def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec]) -
                 block_size=spec.block_size * ratio,
                 page_size_padded=max(spec.page_size_padded, page_size) if spec.page_size_padded is not None else None,
             )
+
+
+def apply_draft_kv_window_to_spec(
+    spec: KVCacheSpec,
+    window: int,
+    extra_retained_tokens: int,
+    layer_name: str = "",
+) -> KVCacheSpec:
+    """Convert a draft layer's full-attention KV spec to a sliding-window spec.
+
+    The draft model only needs the most recent ``window`` tokens to propose
+    speculative tokens; verification still runs against the target model's
+    full KV cache. Swapping ``FullAttentionSpec`` for the upstream
+    ``SlidingWindowSpec`` lets the KV
+    cache manager retain only O(window) blocks per request for the draft
+    group instead of O(max_model_len). Fields the two spec classes share are
+    carried over (including the ``is_draft`` tag on vLLM main); fields only
+    ``FullAttentionSpec`` has (``attention_chunk_size``, ``non_causal``) do
+    not exist on ``SlidingWindowSpec`` and are dropped.
+    """
+    if isinstance(spec, SlidingWindowSpec):
+        # A natively sliding-window draft keeps its own window.
+        return spec
+    if isinstance(spec, MLAAttentionSpec):
+        raise ValueError(
+            f"draft_kv_window does not support MLA draft attention (layer {layer_name!r}); only GQA "
+            "EAGLE/EAGLE3/MTP drafts are supported. DSpark/Kimi-K3 mixed target+draft KV grouping "
+            "and DeepSeek-style MLA MTP drafts are explicitly not supported yet."
+        )
+    if not isinstance(spec, FullAttentionSpec):
+        raise ValueError(
+            f"draft_kv_window only supports full-attention (GQA) draft layers, got "
+            f"{type(spec).__name__} for layer {layer_name!r}."
+        )
+    sw_init_fields = {f.name for f in fields(SlidingWindowSpec) if f.init}
+    kwargs = {f.name: getattr(spec, f.name) for f in fields(spec) if f.init and f.name in sw_init_fields}
+    kwargs["sliding_window"] = window
+    # EAGLE re-runs the draft over the accepted tokens after each verify step;
+    # retain one speculative step below the window edge so those blocks stay
+    # alive (upstream added ``extra_retained_tokens`` for exactly this).
+    kwargs.update(declared_kwarg(SlidingWindowSpec, "extra_retained_tokens", extra_retained_tokens))
+    return SlidingWindowSpec(**kwargs)
+
+
+def _maybe_window_draft_spec(
+    spec: KVCacheSpec,
+    attn_module: AttentionLayerBase,
+    vllm_config: VllmConfig,
+    layer_name: str,
+) -> KVCacheSpec:
+    """Apply the configured draft KV sliding window to draft attention layers."""
+    if not getattr(attn_module, "is_draft_layer", False):
+        return spec
+    try:
+        window = getattr(get_ascend_config(), "draft_kv_window", None)
+    except RuntimeError:
+        window = None
+    if window is None:
+        return spec
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    num_speculative_tokens = (
+        getattr(speculative_config, "num_speculative_tokens", None) or 0 if speculative_config is not None else 0
+    )
+    windowed_spec = apply_draft_kv_window_to_spec(spec, window, num_speculative_tokens, layer_name)
+    if windowed_spec is not spec:
+        logger.info_once(
+            "Draft KV sliding window enabled: layer %s uses window=%d tokens "
+            "(plus %d extra retained tokens for speculative re-prefill).",
+            layer_name,
+            window,
+            num_speculative_tokens,
+        )
+    return windowed_spec
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -379,6 +453,11 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         # EAGLE groups too.
         if not vllm_version_is("0.32.0") and getattr(attn_module, "is_draft_layer", False):
             spec = replace(spec, is_draft=True)
+        # Draft KV windowing (additional_config["draft_kv_window"]): convert the
+        # draft attention layers' FullAttentionSpec to SlidingWindowSpec so the
+        # KV cache manager retains only the trailing window per request. Runs
+        # after the is_draft tag so the tag is carried onto the windowed spec.
+        spec = _maybe_window_draft_spec(spec, attn_module, vllm_config, layer_name)
         kv_cache_spec[layer_name] = spec
         if isinstance(spec, AttentionSpec) and getattr(attn_module, "align_kv_cache_with_mamba", True):
             attention_layer_names.append(layer_name)
@@ -1048,18 +1127,23 @@ def _uses_single_raw_mla_cache(
 
 
 def can_share_full_and_sliding_kv_cache(vllm_config: VllmConfig, specs: Iterable[KVCacheSpec]) -> bool:
-    """Keep Gemma 4's budget and the V2 runner on the same dense layout.
+    """Keep supported full/sliding layouts on one shared dense allocation.
 
     Equal physical pages let full and sliding-window groups overlay the same
     pool even when their head dimensions and tokens per block differ. Keep
     specialized/quantized caches and distributed transfer on their existing
-    allocation paths. Limit this regression fix to Gemma 4 so other models
-    retain their existing allocation behavior.
+    allocation paths. Besides Gemma 4, enable this for explicitly configured
+    draft KV windows so their target and draft groups share the block pool.
     """
     model_config = getattr(vllm_config, "model_config", None)
     text_config = getattr(model_config, "hf_text_config", None)
     if getattr(text_config, "model_type", None) != "gemma4_text":
-        return False
+        try:
+            uses_draft_kv_window = getattr(get_ascend_config(), "draft_kv_window", None) is not None
+        except RuntimeError:
+            uses_draft_kv_window = False
+        if not uses_draft_kv_window:
+            return False
     if vllm_config.cache_config.cache_dtype not in ("auto", "float16", "bfloat16"):
         return False
     specs = tuple(specs)
@@ -1168,7 +1252,7 @@ def _allocate_kv_cache(
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     attn_layers: dict[str, AttentionLayerBase] | None = None
-    # Gemma 4 full/sliding groups share one pool while retaining contiguous
+    # Supported full/sliding groups share one pool while retaining contiguous
     # K/V views. The worker keeps the full budget only for this V2 path.
     if not enable_sfa(vllm_config) and can_share_full_and_sliding_kv_cache(vllm_config, layer_kv_cache_spec.values()):
         return allocate_shared_attention_kv_cache(

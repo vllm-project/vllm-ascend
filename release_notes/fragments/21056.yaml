@@ -1,0 +1,12 @@
+pr: 21056
+entries:
+  - category: feature
+    text: >-
+      Added additional_config["draft_kv_window"] to bound the EAGLE/EAGLE3/MTP draft
+      model's KV cache to a sliding window of the most recent W tokens on Model
+      Runner V2, cutting draft KV memory from O(max_model_len) to O(W) per request.
+      Target-model verification continues to use the full KV cache. DSpark/Kimi-K3
+      mixed KV grouping, MLA drafts and DCP are rejected with an explicit error
+      in this version.
+    model: Qwen3-8B
+    hardware: [A2]

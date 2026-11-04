@@ -198,7 +198,58 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             target_attn_layer_names,
         )
         self._maybe_remove_d2t(draft_model)
+        self._apply_draft_kv_window(draft_model)
         return draft_model
+
+    def _apply_draft_kv_window(self, draft_model: torch.nn.Module) -> None:
+        """Point the draft GQA attention impls at the configured KV window.
+
+        The KV-side windowing already happened when the draft layers'
+        FullAttentionSpec was converted to SlidingWindowSpec (see
+        ``worker/v2/attn_utils.apply_draft_kv_window_to_spec``); the impl flag
+        makes the FIA kernel apply the matching band mask (sparse_mode=4,
+        pre_tokens=W). W is a compile-time constant, so masks and block-table
+        shapes stay static and ACL graph capture is unaffected. The metadata
+        path needs no changes: FIA derives the band from the full sequence
+        length, and the sliding-window KV manager nulls out-of-window block
+        table entries.
+        """
+        try:
+            window = getattr(get_ascend_config(), "draft_kv_window", None)
+        except RuntimeError:
+            window = None
+        if window is None:
+            return
+        from vllm.model_executor.layers.attention.attention import Attention
+
+        num_attention = 0
+        num_windowed = 0
+        for module_name, module in draft_model.named_modules():
+            if not isinstance(module, Attention):
+                continue
+            num_attention += 1
+            impl = getattr(module, "impl", None)
+            if impl is None or not hasattr(impl, "sliding_window"):
+                raise RuntimeError(
+                    "draft_kv_window requires draft attention impls with sliding-window "
+                    f"support (GQA); {module_name} uses {type(impl).__name__}."
+                )
+            # A natively sliding-window draft keeps its own (training-time) window.
+            if impl.sliding_window is None:
+                impl.sliding_window = window
+                num_windowed += 1
+        if num_attention == 0:
+            logger.warning(
+                "draft_kv_window=%d is set but the draft model has no GQA attention layers; the window has no effect.",
+                window,
+            )
+        else:
+            logger.info(
+                "Applied draft_kv_window=%d to %d/%d draft attention layers.",
+                window,
+                num_windowed,
+                num_attention,
+            )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
