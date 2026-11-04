@@ -30,6 +30,30 @@ from vllm_ascend.hisparse.c8 import (
 )
 
 
+@pytest.mark.parametrize("hisparse", [False, True])
+def test_indexer_backend_choice_survives_model_construction_context(hisparse):
+    from vllm.config import CacheConfig, VllmConfig, set_current_vllm_config
+    from vllm.config.attention import HiSparseConfig
+    from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+
+    from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+    from vllm_ascend.patch.worker import patch_attn_utils  # noqa: F401
+
+    config = VllmConfig()
+    config.attention_config.hisparse_config = HiSparseConfig() if hisparse else None
+    expected = AscendHiSparseIndexerBackend if hisparse else AscendSFAIndexerBackend
+    with set_current_vllm_config(config):
+        cache = DeepseekV32IndexerCache(132, torch.uint8, "regression.indexer.k_cache", CacheConfig())
+        assert cache.get_attn_backend() is expected
+    # Core's post-load block-size discovery runs after the construction context
+    # exits. A later model's context must not change an existing cache either.
+    assert cache.get_attn_backend() is expected
+    other = VllmConfig()
+    other.attention_config.hisparse_config = None if hisparse else HiSparseConfig()
+    with set_current_vllm_config(other):
+        assert cache.get_attn_backend() is expected
+
+
 def test_failed_unregister_retains_host_owner_for_safe_retry(monkeypatch):
     tensor = torch.empty(64, dtype=torch.uint8)
     events = []
