@@ -8,6 +8,7 @@ entries:
   - category: bugfix
     text: >-
       Fixed the emulated UVA host shadow for empty index lists and
-      multi-dimensional boolean keys, and made a failed host-to-device copy keep
-      the unrefreshed rows dirty so the next sync retries them instead of leaving
-      stale device data.
+      multi-dimensional boolean keys, made a failed host-to-device copy keep the
+      unrefreshed rows dirty so the next sync retries them instead of leaving
+      stale device data, and made a buffer whose mirror handed out a writable
+      alias publish the whole buffer on every later sync.
