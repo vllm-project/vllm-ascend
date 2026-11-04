@@ -95,10 +95,28 @@ and C8 write override. The ordinary Indexer write path remains unchanged, and
 BF16 HiSparse writes reuse it after metadata remaps the slots. Cache binding
 creates the key/scale views; it does not attach payload-format routing strings.
 
-`ops/hisparse.py` owns operation validation and persistent per-group workspace;
+`hisparse/cache_ops.py` owns operation validation and persistent per-group workspace;
 `ops/triton/hisparse.py` implements the reference NPU path. Followers share their
 leader's scratch only on that group's ordered stream. Independent groups and
 current request/state mappings remain separate.
+
+Code ownership follows these boundaries:
+
+```text
+vllm_ascend/
+  attention/sfa_hisparse.py   # Attention dispatch, C8 adaptation and native calls
+  hisparse/
+    backend.py               # Core backend interface, registration and DMA
+    binding.py               # Shared-slab specs and key/scale views
+    cache_ops.py             # Residency, refill, invalidation and byte copies
+    c8.py                    # C8 packing, views and physical-index helpers
+  ops/triton/hisparse.py     # Cache-operation kernels; no Attention arithmetic
+```
+
+The common package contains no Attention invocation. The HiSparse Attention
+implementation owns query preparation, current length tensors and the call to
+the existing native SFA operation. The Triton and native Attention kernels are
+unchanged by this organization.
 
 Core's generic `torch.Stream`, `torch.Event` and current-stream interfaces are
 used directly. The Ascend backend preserves Core's event placement and does not

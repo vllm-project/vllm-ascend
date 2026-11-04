@@ -116,8 +116,9 @@ def test_c8_attention_uses_existing_native_operator(strided, capture):
 
     if not is_950():
         pytest.skip("This case uses the native A5 E4M3FN C8 payload; A2/A3 use an INT8 format")
+    from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
     from vllm_ascend.attention.sfa_v1 import custom_kv_rmsnorm_rope
-    from vllm_ascend.ops.hisparse_c8 import c8_physical_attention, pack_c8_components
+    from vllm_ascend.hisparse.c8 import pack_c8_components
 
     torch.manual_seed(71)
     rows, heads, blocks, block, topk = 3, 8, 2, 128, 128
@@ -142,9 +143,14 @@ def test_c8_attention_uses_existing_native_operator(strided, capture):
     indices[-1] = -1
     selected = indices.to(device)
     query_end, key_length = (torch.empty(1, dtype=torch.int32, device=device) for _ in range(2))
+    impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
+    impl.enable_sparse_sfa_c8 = True
+    impl.kv_lora_rank = 512
+    impl.scale = 1 / math.sqrt(576)
+    impl._c8_length_workspace = lambda: (query_end, key_length)
 
     def forward():
-        return c8_physical_attention(q, qr, cache, selected, 1 / math.sqrt(576), query_end, key_length)
+        return impl._attention_physical(q, qr, cache, selected)
 
     graph = None
     try:

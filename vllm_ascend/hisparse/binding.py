@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Bind Ascend indexer views while retaining upstream HiSparse allocation."""
+"""Bind shared-slab views while retaining Core HiSparse allocation."""
 
 import math
 from dataclasses import replace

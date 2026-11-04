@@ -15,14 +15,14 @@ from vllm_ascend.attention.sfa_hisparse import AscendHiSparseMetadataBuilder, fi
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.distributed.kv_transfer.hisparse.backend import AscendHiSparseBackend
-from vllm_ascend.distributed.kv_transfer.hisparse.binding import (
+from vllm_ascend.hisparse import cache_ops as hisparse_ops
+from vllm_ascend.hisparse.backend import AscendHiSparseBackend
+from vllm_ascend.hisparse.binding import (
     _bind_indexer_views,
     align_hisparse_indexer_specs,
     get_hisparse_indexer_specs,
 )
-from vllm_ascend.ops import hisparse as hisparse_ops
-from vllm_ascend.ops.hisparse_c8 import (
+from vllm_ascend.hisparse.c8 import (
     c8_storage_view,
     compact_c8_indices,
     map_c8_physical_indices,

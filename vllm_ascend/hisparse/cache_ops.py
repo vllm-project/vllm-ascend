@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Ascend HiSparse operators and explicit mapped-host memory ownership.
+"""Shared HiSparse cache operations and explicit mapped-host memory ownership.
 
 Mapping and scratch allocation happen at cache initialization. Decode planning
 and payload copies stay on the NPU, including during ACL graph replay.
