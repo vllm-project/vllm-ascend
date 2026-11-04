@@ -55,6 +55,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
     is_dcp_enabled,
+    is_suffix_fia_cache_enabled,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -1287,14 +1288,33 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # quick fix to make sure slots is int32 for cross attention case.
             # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
             slots_to_cache = slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32)
-            DeviceOperator.reshape_and_cache(
-                key=key_to_cache,
-                value=value_to_cache,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                slot_mapping=slots_to_cache,
-                use_bnsd=self.use_bnsd_kv_cache,
-            )
+            if (
+                self.use_bnsd_kv_cache
+                and is_suffix_fia_cache_enabled(self.vllm_config, self)
+                and self.key_cache.ndim == 4
+                and self.key_cache.shape[0] > 0
+                and tuple(self.key_cache.shape[1:]) == (8, 128, 128)
+                and self.key_cache.shape == self.value_cache.shape
+                and self.key_cache.is_contiguous()
+                and self.value_cache.is_contiguous()
+                and slots_to_cache.ndim == 1
+                and slots_to_cache.stride(0) == 1
+            ):
+                from vllm_ascend.ops.triton.spec_decode.suffix_kv_cache import scatter
+
+                scatter(
+                    key_to_cache, value_to_cache, self.key_cache, self.value_cache,
+                    slots_to_cache, head_major=True,
+                )
+            else:
+                DeviceOperator.reshape_and_cache(
+                    key=key_to_cache,
+                    value=value_to_cache,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    slot_mapping=slots_to_cache,
+                    use_bnsd=self.use_bnsd_kv_cache,
+                )
             notify_kv_cache_written()
         return query, key, value, output
 
