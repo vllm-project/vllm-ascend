@@ -72,10 +72,10 @@ Use existing interfaces, rather than adding unused placeholder hooks:
 leader's scratch only on that group's ordered stream. Independent groups and
 current request/state mappings remain separate.
 
-The stream facade is an isolated PTA compatibility adapter in the two common
-HiSparse modules. It preserves event placement and does not replace the actual
-global Torch module. Remove it when generic PTA capture/workspace behavior is
-equivalent or Core provides the matching factories.
+Core's generic `torch.Stream`, `torch.Event` and current-stream interfaces are
+used directly. The Ascend backend preserves Core's event placement and does not
+replace its Torch bindings. The NPU tests cover cross-stream waits followed by
+CANN workspace allocation and changing graph replays.
 
 Follow-up contributions should be separate and measurable: packed C8/indexer
 formats, native resolver/refill improvements, Host-writeback optimization, metadata
@@ -116,8 +116,13 @@ pytest --confcutdir=tests/e2e/pull_request/one_card \
   tests/e2e/pull_request/one_card/test_hisparse_selection_order.py
 ```
 
-These cases require an appropriate NPU environment and are not claimed to have
-passed on this new split. Fresh full-model correctness, dataset accuracy,
-eager/Graph lifecycle and same-workload performance remain prerequisites for
-marking the foundation ready. Existing C8 benchmark results are intentionally
-not presented as this implementation's performance.
+The full modules have not been rerun on this new split. Isolated stream-boundary
+checks on Ascend 950 with Torch 2.10.0 / torch-npu 2.10.0.post7 passed for generic
+and native interfaces, including the merged Core methods' leader/follower and
+lazy-event paths. Those checks substitute small CANN work for resolver/refill;
+they do not qualify the complete HiSparse graph or model.
+
+Fresh full-model correctness, dataset accuracy, eager/Graph lifecycle and
+same-workload performance remain prerequisites for marking the foundation
+ready. Existing C8 benchmark results are intentionally not presented as this
+implementation's performance.
