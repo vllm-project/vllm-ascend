@@ -94,6 +94,9 @@ class AscendHiSparseBackend(HiSparseBackend):
         from vllm_ascend.hisparse.cache_ops import HiSparseNPUOps, ResolverWorkspace
 
         group = runtime.index_group
+        # Runtime copied the model group's stream reference at layer creation.
+        # Adapt the live runtime binding before any graph captures use it.
+        group.copy_stream = capture_aware_stream(group.copy_stream)
         if runtime is group.leader:
             workspace = ResolverWorkspace(
                 max_rows=runtime.max_swap_rows,

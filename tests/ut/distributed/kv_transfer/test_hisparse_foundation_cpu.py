@@ -129,7 +129,7 @@ def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups
     backend = AscendHiSparseBackend()
 
     def group():
-        owner = NS()
+        owner = NS(copy_stream=NS(device=torch.device("cpu")))
         leader = NS(
             index_group=owner,
             max_swap_rows=max_rows,
