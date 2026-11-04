@@ -161,6 +161,7 @@ For descriptions of the standard `vllm serve` arguments used in the deployment e
 | PD colocation, A2 | 133000 |
 | PD disaggregation, A3 | 263000 |
 | PD disaggregation, 950DT products | 133000 |
+| 1M PD disaggregation, A3 ([Section 5.5](#55-1m-token-context-deployment-a3-1p2d)) | 1050624 |
 
 These values belong to different deployment profiles. Weights, communication buffers, parallelism, and KV caches share device memory, so a context budget that fits one profile may not fit another. Select a value that covers the prompt and generated tokens together, and check available KV cache capacity at the intended concurrency. The `1M` model limit in the support matrix does not mean every example configuration reserves enough memory for 1M-token requests. To use the `263000` setting reported in [Text Evaluation](#72-text-evaluation), update `MAX_MODEL_LEN` in the serving scripts, including both roles for PD deployment, and recheck memory capacity before evaluation.
 
@@ -1755,6 +1756,269 @@ Proxy (:19080)
 4. Warm up with a repeated-prefix request, then send again and check Prefill logs for KV Pool lookup/get/put and hit information.
 5. Confirm Decode logs still show a normal Mooncake P→D KV transfer.
 6. Confirm SSD storage initializes under `ssd_offload_path` for each contributing worker. Use a working set larger than the memory pool to verify SSD offload and subsequent reads; a memory-pool hit alone does not exercise the SSD tier.
+
+### 5.5 1M-Token Context Deployment (A3, 1P2D)
+
+This text-only W8A8 profile uses three Atlas 800I A3 nodes, each with 16 visible 64 GB NPU devices. Here, 1M means **1,048,576 input tokens**. The total context limit is `1050624`, reserving 2048 positions for generation; the verification request below caps generation at 256 tokens. Use the model image and W8A8 checkpoint from Sections 3 and 4 on every node. The validated runtime uses vLLM 0.32.0, torch_npu 2.10.0.post7, and CANN 9.2.0, with the M3.1 operators and selected-parameter prefetch options shown below available in the image.
+
+| Role | Global DP / TP / PP | Local DP ranks | API ports | Batched-token budget |
+| --- | --- | --- | --- | --- |
+| Prefill | 1 / 8 / 2 | 0 | 31050 | 8192 |
+| First Decode node | 4 / 8 / 1 | 0–1 | 31260, 31261 | 1 |
+| Second Decode node | 4 / 8 / 1 | 2–3 | 31260, 31261 | 1 |
+
+This is a functional long-context configuration with one sequence per Decode replica. Both roles use eager execution, Model Runner V2, BF16 KV caches, and chunked prefill. Speculative decoding, prefix caching, asynchronous scheduling, and static kernels are disabled. The batched-token budget limits each iteration; it does not limit the total input length.
+
+Decode reserves `48421142528` bytes (about 45.1 GiB) of KV cache per worker. To retain workspace for the attention operators, it prefetches router and attention-projection weights from CPU using `gate.weight`, `qkv_proj.weight`, and `o_proj.weight`. Other weights remain on NPU. Decode uses `weight_nz_mode=0` so the selected projection weights use ordinary layouts for prefetching. Allow for these CPU-to-NPU transfers when evaluating latency; tune performance separately.
+
+#### 5.5.1 Prepare the Role Script
+
+Complete the communication checks in [Section 3.2](#32-verify-multi-node-communication). All four Decode ranks form one distributed service and must start together. Ensure that the service, DP RPC, and KV handshake ports below are available. On multi-NIC hosts, set `VLLM_HOST_IP` as well as the HCCL/GLOO interfaces so that KV-transfer endpoints advertise the intended communication network.
+
+Create `/workspace/m31-1m` inside each container. Save the following as `pd_1m.env` in that directory, replacing the host-specific IP and NIC on each node. `DECODE_HEAD_IP` is the first Decode node's communication IP and must match on both Decode nodes.
+
+```bash
+export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+export LOCAL_IP="<CURRENT_NODE_IP>"
+export NIC_NAME="<CURRENT_NODE_NIC>"
+export DECODE_HEAD_IP="<FIRST_DECODE_NODE_IP>"
+export SERVED_MODEL_NAME=minimax-m3.1-flash
+```
+
+Save this common script as `run_1m_rank.sh` on all three nodes. Adjust the CANN environment-script path if needed.
+
+```bash
+#!/usr/bin/env bash
+set -eo pipefail
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source ./pd_1m.env
+
+ROLE=${1:?Use prefill or decode}
+DP_RANK=${2:-0}
+LOCAL_RANK=${3:-0}
+export VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=7200
+export VLLM_HOST_IP="$LOCAL_IP"
+export ASCEND_ENABLE_USE_FABRIC_MEM=1
+export HCCL_IF_IP="$LOCAL_IP"
+export HCCL_SOCKET_IFNAME="$NIC_NAME"
+export GLOO_SOCKET_IFNAME="$NIC_NAME"
+export HCCL_OP_EXPANSION_MODE=AIV
+export HCCL_CONNECT_TIMEOUT=120
+export HCCL_EXEC_TIMEOUT=1800
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+ROLE_ARGS=()
+if [[ "$ROLE" == prefill ]]; then
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+    export VLLM_PP_LAYER_PARTITION=30,30
+    export HCCL_BUFFSIZE=256
+    DP_SIZE=1
+    PP_SIZE=2
+    SERVICE_PORT=31050
+    KV_PORT=20000
+    KV_ROLE=kv_producer
+    ROLE_ARGS=(--max-num-batched-tokens 8192
+               --long-prefill-token-threshold 8192
+               --gpu-memory-utilization 0.95)
+elif [[ "$ROLE" == decode ]]; then
+    FIRST_DEVICE=$((LOCAL_RANK * 8))
+    export ASCEND_RT_VISIBLE_DEVICES
+    ASCEND_RT_VISIBLE_DEVICES=$(seq -s, "$FIRST_DEVICE" "$((FIRST_DEVICE + 7))")
+    unset VLLM_PP_LAYER_PARTITION
+    export HCCL_BUFFSIZE=8
+    DP_SIZE=4
+    PP_SIZE=1
+    SERVICE_PORT=$((31260 + LOCAL_RANK))
+    KV_PORT=$((21000 + DP_RANK * 64))
+    KV_ROLE=kv_consumer
+    ROLE_ARGS=(--data-parallel-size-local 1
+               --data-parallel-rank "$DP_RANK"
+               --data-parallel-address "$DECODE_HEAD_IP"
+               --data-parallel-rpc-port 31422
+               --max-num-batched-tokens 1
+               --long-prefill-token-threshold 1
+               --gpu-memory-utilization 0.99
+               --kv-cache-memory-bytes 48421142528
+               --offload-backend prefetch
+               --offload-group-size 1
+               --offload-num-in-group 1
+               --offload-prefetch-step 1
+               --offload-params gate.weight qkv_proj.weight o_proj.weight)
+else
+    echo "Unknown role: $ROLE" >&2
+    exit 1
+fi
+
+KV_CONFIG=$(python3 - "$KV_ROLE" "$KV_PORT" "$ROLE" "$DP_RANK" <<'PYCODE'
+import json
+import sys
+print(json.dumps({
+    "kv_connector": "MooncakeConnectorV1",
+    "kv_buffer_device": "npu",
+    "kv_role": sys.argv[1],
+    "kv_port": int(sys.argv[2]),
+    "engine_id": f"m31-1m-{sys.argv[3]}-{sys.argv[4]}",
+    "kv_connector_extra_config": {
+        "use_ascend_direct": True,
+        "prefill": {"dp_size": 1, "tp_size": 8, "pp_size": 2,
+                    "pp_layer_partition": "30,30"},
+        "decode": {"dp_size": 4, "tp_size": 8, "pp_size": 1},
+    },
+}))
+PYCODE
+)
+ADDITIONAL_CONFIG=$(python3 - "$ROLE" <<'PYCODE'
+import json
+import sys
+prefill = sys.argv[1] == "prefill"
+print(json.dumps({
+    "enable_cpu_binding": True,
+    "ascend_compilation_config": {
+        "enable_static_kernel": False,
+        "fuse_norm_quant": False,
+        "fuse_qknorm_rope": False,
+    },
+    "multistream_overlap_shared_expert": prefill,
+    "weight_nz_mode": 1 if prefill else 0,
+    "enable_shared_expert_dp": False,
+    "enable_flashcomm1": prefill,
+}))
+PYCODE
+)
+
+exec vllm serve "$MODEL_PATH" \
+    --host 0.0.0.0 --port "$SERVICE_PORT" \
+    --served-model-name "$SERVED_MODEL_NAME" \
+    --trust-remote-code --language-model-only \
+    --hf-overrides '{"architectures":["MiniMaxM3SparseForCausalLM"]}' \
+    --quantization ascend --dtype bfloat16 \
+    --tensor-parallel-size 8 --pipeline-parallel-size "$PP_SIZE" \
+    --data-parallel-size "$DP_SIZE" \
+    --distributed-executor-backend mp --enable-expert-parallel \
+    --seed 1024 --max-model-len 1050624 --max-num-seqs 1 \
+    --block-size 128 --kv-cache-dtype bfloat16 \
+    --enforce-eager --compilation-config '{"cudagraph_mode":"NONE"}' \
+    --enable-chunked-prefill --no-enable-prefix-caching \
+    --no-async-scheduling "${ROLE_ARGS[@]}" \
+    --additional-config "$ADDITIONAL_CONFIG" \
+    --kv-transfer-config "$KV_CONFIG"
+```
+
+#### 5.5.2 Start Prefill and Decode
+
+Run inside the Prefill container:
+
+```bash
+cd /workspace/m31-1m
+nohup bash run_1m_rank.sh prefill 0 0 > prefill.log 2>&1 &
+```
+
+Run inside the first Decode container:
+
+```bash
+cd /workspace/m31-1m
+nohup bash run_1m_rank.sh decode 0 0 > decode-dp0.log 2>&1 &
+nohup bash run_1m_rank.sh decode 1 1 > decode-dp1.log 2>&1 &
+```
+
+Run inside the second Decode container:
+
+```bash
+cd /workspace/m31-1m
+nohup bash run_1m_rank.sh decode 2 0 > decode-dp2.log 2>&1 &
+nohup bash run_1m_rank.sh decode 3 1 > decode-dp3.log 2>&1 &
+```
+
+Wait for all five HTTP-serving instances to report `Application startup complete`. Check that each engine reports enough KV-cache tokens for `1050624` total tokens and that Decode logs confirm weight prefetching. Cache capacity alone does not establish functional readiness: retain operator workspace and complete the long-input test below before using a different image, checkpoint, or memory budget.
+
+Reuse the proxy prepared in Section 5.3. Set the three host IPs and start it inside the Prefill container:
+
+```bash
+PREFILL_IP="<PREFILL_NODE_IP>"
+DECODE1_IP="<FIRST_DECODE_NODE_IP>"
+DECODE2_IP="<SECOND_DECODE_NODE_IP>"
+python3 /workspace/load_balance_proxy_server_example.py \
+    --host 0.0.0.0 --port 19080 \
+    --prefiller-hosts "$PREFILL_IP" --prefiller-ports 31050 \
+    --decoder-hosts "$DECODE1_IP" "$DECODE1_IP" "$DECODE2_IP" "$DECODE2_IP" \
+    --decoder-ports 31260 31261 31260 31261 \
+    --workers 1
+```
+
+#### 5.5.3 Verify the 1M Input
+
+Send requests to the proxy so that the test exercises KV transfer. First run the text request in Section 6.1 and check that the response is coherent. Then generate an exact 1M-token input with three distinct records near 5%, 50%, and 95% of the context. Run the following from `/workspace/m31-1m` in a container with the checkpoint tokenizer:
+
+```bash
+source ./pd_1m.env
+python3 - <<'PYCODE'
+import json
+import os
+import random
+from pathlib import Path
+from transformers import AutoTokenizer
+
+n = 1048576
+tokenizer = AutoTokenizer.from_pretrained(
+    os.environ["MODEL_PATH"], trust_remote_code=True, local_files_only=True)
+marker = "UNIQUE_LONG_ARCHIVE_PLACEHOLDER_741b"
+rendered = tokenizer.apply_chat_template(
+    [{"role": "user", "content": marker}], tokenize=False,
+    add_generation_prompt=True, thinking_mode="disabled")
+prefix, suffix = rendered.split(marker)
+encode = lambda text: tokenizer.encode(text, add_special_tokens=False)
+values = {"alpha": "8f3a31a57f3ea87f", "beta": "5c4af4dc5228aa06",
+          "gamma": "5345ade0b95e93dc"}
+head = encode(prefix) + encode(
+    "Read the archive. Retrieve the exact secret values for alpha, beta, gamma.\n")
+tail = encode("\nReturn only a JSON object with keys alpha, beta, gamma.\n") + encode(suffix)
+needles = [encode(f"\nUNIQUE SECRET RECORD: {key} = {value}\n")
+           for key, value in values.items()]
+rng = random.Random(1104)
+pool = encode("".join(
+    f"Ordinary archive record {i:06d}: storage code {rng.randrange(10**8):08d}; "
+    "this record contains no secret value.\n" for i in range(4096)))
+budget = n - len(head) - len(tail) - sum(map(len, needles))
+body, previous = [], 0
+for index, stop in enumerate([budget // 20, budget // 2, budget * 19 // 20, budget]):
+    size = stop - previous
+    body.extend((pool * (size // len(pool) + 1))[:size])
+    if index < len(needles):
+        body.extend(needles[index])
+    previous = stop
+ids = head + body + tail
+assert len(ids) == n
+Path("request-1m.json").write_text(json.dumps({
+    "model": os.environ["SERVED_MODEL_NAME"], "prompt": ids,
+    "max_tokens": 256, "temperature": 0, "stream": False,
+    "add_special_tokens": False,
+}))
+Path("expected-1m.json").write_text(json.dumps(values))
+print(f"Prepared {len(ids)} input tokens")
+PYCODE
+
+curl --noproxy '*' --fail-with-body --max-time 1800 \
+    "http://<PROXY_IP>:19080/v1/completions" \
+    -H 'Content-Type: application/json' \
+    --data-binary @request-1m.json -o response-1m.json
+
+python3 - <<'PYCODE'
+import json
+from pathlib import Path
+response = json.loads(Path("response-1m.json").read_text())
+expected = json.loads(Path("expected-1m.json").read_text())
+text = response["choices"][0]["text"]
+assert response["usage"]["prompt_tokens"] == 1048576
+assert response["choices"][0]["finish_reason"] == "stop"
+assert all(value in text for value in expected.values())
+assert "\ufffd" not in text
+print("PASS: 1,048,576 input tokens; all three records retrieved")
+PYCODE
+```
+
+Also compare backend `/metrics` snapshots before and after the request: the Prefill `vllm:prompt_tokens_total` counter and the receiving Decode `vllm:external_prefix_cache_hits_total` counter should both increase by `1048576`. Repeat against a replica on the other Decode host when validating a new deployment.
 
 ## 6 Functional Verification
 
