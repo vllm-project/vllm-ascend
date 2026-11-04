@@ -261,6 +261,8 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     ) -> torch.Tensor:
         self.input_batch = input_batch
         sync_state = dp_sync_state
+        if self.enable_adaptive_verification and not is_profile:
+            sync_state = None
         if dummy_run and skip_attn_for_dummy_run:
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate

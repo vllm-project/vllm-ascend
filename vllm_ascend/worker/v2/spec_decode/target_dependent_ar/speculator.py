@@ -367,7 +367,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         self._eplb_dummy_run = dummy_run
         # Replicated drafts use global tokens, unlike the PCP-local target.
         # Every DP rank must take the draft sync, including decode and idle ranks.
-        sync_state = None if self.replicated_pcp else dp_sync_state
+        sync_state = dp_sync_state
+        if self.replicated_pcp or (self.enable_adaptive_verification and not is_profile):
+            sync_state = None
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with (
