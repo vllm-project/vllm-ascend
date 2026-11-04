@@ -93,7 +93,6 @@ configuration rather than the V1/V2 runner input or sampling interface.
 | [batch_invariant/softmax.py](batch_invariant/softmax.py) | Batch-invariant operations |
 | [build_window_indices.py](build_window_indices.py) | Model/attention primitive or shared utility |
 | [c2_ring_metadata.py](c2_ring_metadata.py) | Model/attention primitive or shared utility |
-| [compressor/compressor_triton.py](compressor/compressor_triton.py) | Model compression |
 | [dcp/dcp_a2a.py](dcp/dcp_a2a.py) | Distributed attention |
 | [dcp/dcp_a2a_batched.py](dcp/dcp_a2a_batched.py) | Distributed attention |
 | [dcp/sfa_dcp_exchange.py](dcp/sfa_dcp_exchange.py) | Model/attention primitive or shared utility |

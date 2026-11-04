@@ -32,7 +32,6 @@ layout or operation; it does not enable a kernel on additional hardware.
 | `fold_indexer_cache.py` | A5 folded packed indexer cache. |
 | `prepare_indexer_indices.py` | Shared index preparation, including the A3 non-packed indexer path. |
 | `spec_decode/dspark_swa_indices.py` | Shared DSpark logical-index fast path; selected by request and Triton/NPU conditions, with no A5-only gate. |
-| `compressor/compressor_triton.py` | Shared compressor cache reads and updates, including A3. |
 
 The packed cache backend is selected through `DSV41_PACKED_CACHE`, currently
 provided by the A5 hardware profile. Shared call paths still require their
@@ -49,9 +48,3 @@ part of the contract, because stale rows can otherwise overwrite a live cache.
 The physical byte strides in cache writers and folding use 64-bit arithmetic.
 Compression ratio and page size are compile-time layout parameters; token counts
 and request lengths may change between steps.
-
-## Compressor ring address regression
-
-`compressor/compressor_triton.py` reads and updates ring pages with 64-bit
-physical page offsets. Each FP32 page contains `32 * 2 * head_dim` elements;
-with head dimension 512, page 65536 crosses INT32_MAX in element coordinates.
