@@ -56,7 +56,7 @@ class TransferThreadStartupTest(unittest.TestCase):
 
     def test_successful_start_keeps_normal_handshake(self):
         run = load_method(POOL / "kv_transfer.py", "KVTransferThread", "run", {"logger": MagicMock()})
-        requests = queue.Queue()
+        requests: queue.Queue[object] = queue.Queue()
         requests.put(None)
         state = SimpleNamespace(
             _set_os_thread_name=lambda: None,
