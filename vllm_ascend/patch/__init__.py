@@ -1861,3 +1861,19 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+
+# ** File: platform/patch_shm_notify.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.device_communicators.shm_broadcast.SpinCondition.__init__`
+#   2. `vllm.distributed.device_communicators.shm_broadcast.SpinCondition.record_read`
+#    Why:
+#       The supported vLLM v0.32.0 tag predates the upstream fix. Sustained
+#       SHM fast-path reads leave libzmq notification commands unconsumed.
+#    How:
+#       Backport the two-second reader-side poll/recv from Ascend PR #19140.
+#       SHM slot ownership, cancellation, and idle wake-ups remain unchanged.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/63165
+#       https://github.com/vllm-project/vllm-ascend/pull/19140
+#    Future Plan:
+#       Remove when every supported vLLM pin includes upstream PR #63165.
