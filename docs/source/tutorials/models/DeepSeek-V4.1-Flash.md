@@ -517,7 +517,7 @@ the selected revision.
         --safetensors-load-strategy lazy \
         --gpu-memory-utilization 0.95 \
         --quantization ascend \
-        --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":false}' \
+        --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --kv-transfer-config '{
             "kv_connector":"MooncakeHybridConnector",
@@ -535,7 +535,6 @@ the selected revision.
                 "enable_static_kernel":false
             },
             "enable_cpu_binding":true,
-            "enable_flashcomm1":false,
             "multistream_overlap_shared_expert":true,
             "recompute_scheduler_enable":true
         }'
@@ -595,9 +594,8 @@ the selected revision.
       connector configuration. Keep both connector layouts identical in the
       Prefill and Decode commands.
     - Both roles use DSpark with five speculative tokens. Prefill runs the target
-      model in eager mode. Decode uses `FULL_DECODE_ONLY` for the target model,
-      and sets `enforce_eager: false` inside `--speculative-config` to allow the
-      DSpark draft model to use graph execution as well.
+      model in eager mode. Decode uses `FULL_DECODE_ONLY` for the target model
+      and allows graph execution for the DSpark draft model as well.
     - `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
       Engram table in host memory and lets local DP ranks share the host-memory
       allocation. `dp_shared_memory` is required on A3 because the model's 24
@@ -628,7 +626,6 @@ the selected revision.
         kernel generation while retaining the enhanced ACL Graph path.
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
         processes and runtime threads.
-        - `enable_flashcomm1: false` disables FlashComm on Decode as on Prefill.
         - `multistream_overlap_shared_expert: true` overlaps shared-expert execution
         with routed-expert computation on separate streams to improve Decode MoE
         throughput.
