@@ -26,8 +26,11 @@ def load_platform():
     method = next(
         n for n in original.body if isinstance(n, ast.FunctionDef) and n.name == "set_additional_forward_context"
     )
-    cls = ast.ClassDef(name="NPUPlatform", bases=[], keywords=[], body=[method], decorator_list=[])
-    module = ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[]))
+    module = ast.parse("class NPUPlatform: pass")
+    cls = module.body[0]
+    assert isinstance(cls, ast.ClassDef)
+    cls.body = [method]
+    ast.fix_missing_locations(module)
     namespace = {"math": math, "is_moe_model": lambda config: False}
     exec(compile(module, str(SOURCE), "exec", flags=__future__.annotations.compiler_flag), namespace)
     return namespace["NPUPlatform"]
