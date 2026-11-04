@@ -623,6 +623,7 @@ the selected revision.
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
         processes and runtime threads.
         - `enable_fused_mc2: 2` selects the MegaMoE path on Prefill.
+        - `enable_flashcomm1: false` disables FlashComm for compatibility with SWA bounded replay.
         - `enable_shared_expert_dp: true` uses data parallelism for shared experts.
         - `multistream_overlap_shared_expert: false` disables shared-expert
         multistream overlap on Prefill, where MegaMoE is enabled.
