@@ -4,6 +4,7 @@
 
 import ast
 import ctypes
+import importlib.util
 import math
 import sys
 from dataclasses import dataclass, replace
@@ -126,23 +127,39 @@ class IndexerSpec:
     scale_dim: int = 0
     cache_sparse_li_c8: bool = False
     cache_sparse_li_c4: bool = False
+    dtype: torch.dtype = torch.float32
+    scale_dtype: torch.dtype = torch.float32
+    sfa_dcp_replicated_indexer_size: int = 1
+    page_size_padded: int | None = None
 
     @property
     def page_size_bytes(self):
-        return self.block_size * self.num_kv_heads * self.head_size * torch.float32.itemsize
+        return (
+            self.block_size
+            * self.num_kv_heads
+            * (self.head_size * self.dtype.itemsize + self.scale_dim * self.scale_dtype.itemsize)
+        )
 
     def get_block_stride_alignment(self):
         return self.block_stride_alignment
 
 
-def binding_functions():
+def binding_functions(**bindings):
     return definitions(
         "distributed/kv_transfer/hisparse/binding.py",
-        {"align_hisparse_indexer_specs", "get_hisparse_indexer_specs", "_bind_indexer_views"},
+        {
+            "align_hisparse_indexer_specs",
+            "get_hisparse_indexer_specs",
+            "_bind_indexer_views",
+            "_validate_indexer_spec",
+            "_quantized_indexer_views",
+            "write_hisparse_indexer_c8",
+        },
         AscendSFAIndexerCacheSpec=IndexerSpec,
         UniformTypeKVCacheSpecs=type("Uniform", (), {}),
         math=math,
         replace=replace,
+        **bindings,
     )
 
 
@@ -169,7 +186,7 @@ def test_expanded_indexer_alias_preserves_shared_slab_offsets(blocks, stride):
 
 def test_alignment_updates_only_indexer_specs_without_changing_inputs():
     functions = binding_functions()
-    source, indexer = object(), IndexerSpec()
+    source, indexer = NS(get_block_stride_alignment=lambda: 1), IndexerSpec()
     values = {"source": source, "indexer": indexer}
     result = functions["align_hisparse_indexer_specs"](values)
     assert result["source"] is source
@@ -177,12 +194,34 @@ def test_alignment_updates_only_indexer_specs_without_changing_inputs():
     assert values["indexer"] is indexer and indexer.block_stride_alignment == 3
 
 
+def test_c8_page_alignment_reserves_scale_bytes_and_whole_main_rows():
+    @dataclass(frozen=True)
+    class StorageSpec:
+        block_stride_alignment: int = 128
+
+        def get_block_stride_alignment(self):
+            return self.block_stride_alignment
+
+    functions = binding_functions(HiSparseResidentSpec=StorageSpec, HiSparseHotSpec=StorageSpec)
+    storage = StorageSpec()
+    indexer = IndexerSpec(
+        block_size=128, head_size=128, dtype=torch.float8_e4m3fn, scale_dim=1, cache_sparse_li_c8=True
+    )
+    result = functions["align_hisparse_indexer_specs"](
+        {"resident": storage, "hot": storage, "indexer": indexer}, packed_row_bytes=656
+    )
+    stride_alignment = math.lcm(*(spec.get_block_stride_alignment() for spec in result.values()))
+    assert stride_alignment % 656 == 0 and stride_alignment % 128 == 0
+    assert result["indexer"].page_size_padded == 128 * (128 + 4)
+    assert storage.block_stride_alignment == 128 and indexer.page_size_padded is None
+
+
 @pytest.mark.parametrize("field", ["scale_dim", "cache_sparse_li_c8", "cache_sparse_li_c4"])
 def test_unsupported_indexer_formats_are_rejected_before_pool_binding(field):
     functions = binding_functions()
     spec = replace(IndexerSpec(), **{field: 1})
     config = NS(kv_cache_groups=[NS(layer_names=["indexer"], kv_cache_spec=spec)])
-    with pytest.raises(ValueError, match="unquantized"):
+    with pytest.raises(ValueError, match="C4|C8|scales"):
         functions["get_hisparse_indexer_specs"](config)
 
 
@@ -250,3 +289,93 @@ def test_real_forward_mirror_errors_remain_visible():
 
     with pytest.raises(RuntimeError, match="mirrored twice"):
         finish(NS(finish_kv_update=duplicate), NS(hisparse_for_capture=False))
+
+
+def c8_module():
+    path = ROOT / "vllm_ascend/ops/hisparse_c8.py"
+    spec = importlib.util.spec_from_file_location("hisparse_c8_test_module", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_c8_packing_preserves_opaque_rope_scale_and_nan_payloads():
+    module = c8_module()
+    rows = 3
+    raw = [torch.arange(rows * width).to(torch.uint8).reshape(rows, width) for width in (512, 128, 16)]
+    components = [values.view(torch.float8_e4m3fn) for values in raw]
+    packed = module.pack_c8_components(*components)
+    assert packed.dtype == torch.uint8 and packed.shape == (rows, 656)
+    torch.testing.assert_close(packed, torch.cat(raw, dim=-1), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("stride_rows", [128, 136])
+def test_c8_storage_mapping_preserves_shared_slab_offsets(stride_rows):
+    module = c8_module()
+    pages, block, width, offset = 3, 128, 656, 1312
+    backing = torch.full((offset + pages * stride_rows * width,), 17, dtype=torch.uint8)
+    cache = backing.view(torch.float8_e4m3fn).as_strided(
+        (pages, block, width), (stride_rows * width, width, 1), storage_offset=offset
+    )
+    view, actual_block, actual_stride, capacity = module.c8_storage_view(cache)
+    assert (actual_block, actual_stride, capacity) == (block, stride_rows, pages * block)
+    assert view.data_ptr() == cache.data_ptr()
+    assert view.untyped_storage().data_ptr() == backing.data_ptr()
+    indices = torch.tensor([[0, 127, 128, 255, 256, 383, -1, 384]], dtype=torch.int32)
+    mapped = module.map_c8_physical_indices(indices, actual_block, actual_stride, capacity)
+    expected = torch.tensor(
+        [[0, 127, stride_rows, stride_rows + 127, 2 * stride_rows, 2 * stride_rows + 127, -1, -1]],
+        dtype=torch.int32,
+    )
+    torch.testing.assert_close(mapped, expected, rtol=0, atol=0)
+    view[2 * stride_rows, 0, 1:2].view(torch.uint8).fill_(123)
+    assert backing[offset + 2 * stride_rows * width + 1] == 123
+
+
+def test_c8_compaction_preserves_duplicate_order_and_empty_rows():
+    module = c8_module()
+    indices = torch.tensor([[7, -1, 2, 7, -1, 0], [-1, -1, -1, -1, -1, -1]], dtype=torch.int32)
+    expected = torch.tensor([[7, 2, 7, 0, -1, -1], [-1, -1, -1, -1, -1, -1]], dtype=torch.int32)
+    torch.testing.assert_close(module.compact_c8_indices(indices), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("padding", [0, 256])
+def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(padding):
+    functions = binding_functions()
+    spec = IndexerSpec(block_size=128, head_size=128, dtype=torch.float8_e4m3fn, scale_dim=1, cache_sparse_li_c8=True)
+    pages, offset = 3, 256
+    key_bytes = 128 * 128
+    stride = spec.page_size_bytes + padding
+    raw = torch.full((offset + pages * stride + 256,), 165, dtype=torch.uint8)
+    cache = raw.view(torch.float8_e4m3fn).as_strided(
+        (pages, 1, 128, 128), (stride, key_bytes, 128, 1), storage_offset=offset
+    )
+    layer = NS()
+    caches = {"indexer": cache}
+    functions["_bind_indexer_views"](caches, {"indexer": spec}, {"indexer": layer})
+    key, scale = caches["indexer"]
+    assert key.untyped_storage().data_ptr() == scale.untyped_storage().data_ptr() == raw.data_ptr()
+    assert layer.hisparse_block_stride == 1
+    assert layer.hisparse_indexer_payload_format == "ascend_indexer_e4m3fn_key_fp32_scale_v1"
+    slots = torch.tensor([127, 0, 128, 383, -1, 256], dtype=torch.int32)
+    values_raw = torch.arange(6 * 128).to(torch.uint8).reshape(6, 128)
+    values = values_raw.view(torch.float8_e4m3fn)
+    scales = torch.arange(6, dtype=torch.float32).reshape(6, 1) + 0.5
+
+    def scatter(destination, indexes, source):
+        indexes = indexes.flatten()
+        valid = indexes >= 0
+        destination[indexes[valid].long()] = source[valid]
+
+    expected = raw.clone()
+    scale_bytes = scales.view(torch.uint8).reshape(6, 4)
+    for i, slot in enumerate(slots.tolist()):
+        if slot < 0:
+            continue
+        page, row = divmod(slot, 128)
+        start = offset + page * stride + row * 128
+        expected[start : start + 128] = values_raw[i]
+        start = offset + page * stride + key_bytes + row * 4
+        expected[start : start + 4] = scale_bytes[i]
+    functions["write_hisparse_indexer_c8"](key, scale, values, scales, slots, scatter)
+    torch.testing.assert_close(raw, expected, rtol=0, atol=0)

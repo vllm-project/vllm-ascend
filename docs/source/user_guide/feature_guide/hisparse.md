@@ -21,8 +21,8 @@ Core sparse index group -> logical TopK -> NPU residency/refill plan
                        packed KV -> existing native SFA operation
 ```
 
-This first data path covers unquantized main/indexer KV with the RoPE SFA
-layout and Model Runner V2. Model-weight quantization is independent. Private
+The data path covers unquantized KV and the native Ascend 950 C8 format with
+the RoPE SFA layout and Model Runner V2. Model-weight quantization is independent. Private
 Host pools are used per rank because NPU IPC events are not implemented.
 The mapped-Host capability is checked at registration; hardware evidence for
 the original primitives is from Ascend 950. A3 and the new source pair still
@@ -55,6 +55,27 @@ The example reserves 4 GiB Host storage per rank. Size it for the model and cont
 budget; it is not a model capacity claim. Keep Core's eager mirror policy for
 this foundation. External P/D transfer is not provided by this PR.
 
+For native A5 C8, replace the two dtype options above with:
+
+```bash
+--kv-cache-dtype fp8 \
+--attention-config '{"indexer_kv_dtype":"fp8","hisparse_config":{"eager_host_mirror":true}}'
+```
+
+The existing SFA quantizer produces each main KV row: 512 E4M3FN NoPE bytes,
+64 BF16 RoPE values and four FP32 block scales, totaling 656 bytes. The adapter
+copies these components as opaque bytes and calls the existing quantized SFA
+Attention operation. Indexer C8 uses 128 E4M3FN keys and one FP32 scale per token.
+Main and Indexer dtypes remain independently selectable. C4, TurboQuant,
+INT8-format C8 and other payload geometries are not implemented by this bridge.
+
+Core's planner receives the complete key/scale page size and packed-row stride
+alignment before choosing the shared-slab capacity. Strided views preserve the
+original allocation and layer offset. The existing scatter handles packed bytes;
+prefill Resident gathers reinterpret FP8 as bytes before using Core's gather.
+HiSparse writes through its own current destination once; the ordinary SFA C8
+source-slot store is skipped. No new fused scatter or Attention kernel is added.
+
 ## Extension points for contributors
 
 Use existing interfaces, rather than adding unused placeholder hooks:
@@ -63,9 +84,9 @@ Use existing interfaces, rather than adding unused placeholder hooks:
 | --- | --- | --- |
 | `NPUPlatform.get_hisparse_backend_cls` | Core selects the device backend only for HiSparse | Backend capability/version support |
 | `HiSparseBackend.create_cache_ops` | Runtime invokes resolver, refill and invalidation operations | Faster resolver/refill, vectorization and balancing |
-| `validate_kv_cache_config` / `prepare_kv_cache_views` | Core validates before allocation and binds views inside rollback scope | Packed/quantized KV formats with layout tests |
+| `validate_kv_cache_config` / `prepare_kv_cache_views` | Core validates BF16/C8 before allocation and binds views inside rollback scope | Additional payload formats with layout tests |
 | Backend `pin_tensor` / `unpin_tensor` / `swap_blocks_batch` | Core owns completion, explicit registration release and transfer lifetime | DMA implementation and supported memory capabilities |
-| `AscendHiSparseMetadataBuilder` / `AscendHiSparseImpl` | SFA factories select metadata and the layout bridge | C8 and a smaller layout-conversion cost |
+| `AscendHiSparseMetadataBuilder` / `AscendHiSparseImpl` | SFA factories select metadata and the BF16/C8 layout bridge | A smaller layout-conversion cost |
 
 `ops/hisparse.py` owns operation validation and persistent per-group workspace;
 `ops/triton/hisparse.py` implements the reference NPU path. Followers share their
@@ -85,8 +106,8 @@ existing private-buffer budget correction and hybrid coordinator are bypassed
 for those groups. V2 retains Core's source/group ownership and skips metadata
 construction for Resident/Hot groups that have no Attention consumer.
 
-Follow-up contributions should be separate and measurable: packed C8/indexer
-formats, native resolver/refill improvements, Host-writeback optimization, metadata
+Follow-up contributions should be separate and measurable: other packed formats,
+native resolver/refill improvements, Host-writeback optimization, metadata
 reuse, additional hardware and P/D transport. PR19109 retains these experiments.
 AVSG, lazy-MTP policy, native optimized kernels, private Core adapters and
 machine-specific benchmarking tools are excluded here.
@@ -106,7 +127,9 @@ python -m pytest -q --noconftest \
 
 These check current Host offsets, failed-unregister ownership, group scratch
 isolation, strided indexer aliases, planner alignment, unsupported formats,
-Core coordinator forwarding and capture-only mirror suppression.
+Core coordinator forwarding and capture-only mirror suppression. C8 checks also
+cover opaque component bytes, nonzero slab offsets, stable duplicate/padding
+ordering, Indexer key/scale writes and planner alignment before allocation.
 They do not exercise an installed NPU package or qualify device execution.
 
 The weight-loading wrapper keeps Ascend main's explicit activation-dtype ABI,
@@ -114,8 +137,9 @@ already covered by `tests/ut/ops/test_mla_weight_processing.py`; this foundation
 does not add another calling convention or a duplicate test module.
 
 Real-NPU cases are included for resolver/refill/overwrite invalidation, independent
-FP32 Attention references, selection order/duplicates, native BF16 preprocessing
-and Resident/Host prefill staging, in eager and changing-graph cases:
+FP32 Attention references, selection order/duplicates, native BF16/C8 preprocessing,
+C8 key/scale writes, packed-byte scatter and Resident/Host prefill staging, in
+eager and changing-graph cases:
 
 ```bash
 pytest --confcutdir=tests/e2e/pull_request/one_card \
