@@ -369,45 +369,9 @@ A few important things to consider when using DFlash2 draft models:
       --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens": 8}'
     ```
 
-2. **Model runner V2 draft graphs**: DFlash2 uses full ACL graphs when the
+2. **Model runner V2 draft graphs**: DFlash2 supports full ACL graphs when the
    target enables `FULL_DECODE_ONLY` or `FULL_AND_PIECEWISE` and the draft's
-   `enforce_eager` is unset or false. The draft backbone and candidate selector
-   retain the configured Dynamo compilation path, with a separate compilation
-   cache namespace for the selector. Candidate scoring runs without a local
-   forward context. Such calls bypass any internal `ACLGraphWrapper`'s own
-   capture/replay, while device operations still participate in an active outer
-   draft ACL capture, together with candidate TopK, path sampling, and
-   proposal-cache updates. Pure `FULL_DECODE_ONLY` skips the selector's internal
-   graph wrapper; configurations containing piecewise graphs can install it.
-   Calls with a forward context retain the existing graph-mode dispatch. No
-   additional configuration flag is needed. Set `"enforce_eager": true`
-   to compare against eager drafting. Validate graph/eager equivalence and
-   request reuse on the intended NPU configuration before deployment.
-
-   Non-causal draft layers with sliding-window size `W` use FIA band mode
-   (`sparse_mode=4`) with a cached compressed mask and
-   `pre_tokens=next_tokens=W-1`, matching upstream FlashAttention's symmetric
-   window. Both eager execution and graph capture preserve this window;
-   layers without a window retain full attention. This replaces the earlier
-   workaround that ignored non-causal sliding windows, including in eager
-   execution. The compressed mask is a band-mode template, not a causal
-   restriction on draft tokens.
-
-   The model-level acceptance test uses `VLLM_COMPILE` with
-   `FULL_AND_PIECEWISE` on two NPUs and initializes the engine once. After the
-   initial acceptance request, it completes two single-request generations
-   sequentially, then submits the same two prompts together.
-   With `K=7` and capture sizes `[8, 16]`, the 9-token prompt exercises target
-   PIECEWISE prefill, while the 32-token prompt exceeds the captured range and
-   exercises eager prefill. Both use 8-token FULL decode, and the DFlash2 draft
-   stays within its FULL graph bucket. Fixed token-ID inputs and a sufficient
-   prefill token budget keep the two single-request prefill paths distinct.
-   Acceptance metrics are collected after all generations and include the
-   initial request, both single-request runs, and the joint submission:
-
-   ```shell
-   pytest -sv tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py -k test_dflash2_v2_acceptance
-   ```
+   `enforce_eager` is unset or false.
 
 3. **Graph capture sizes**: each decode step runs `(1 + K)` tokens per
    request, so every capture size must be `n * (num_speculative_tokens + 1)`
