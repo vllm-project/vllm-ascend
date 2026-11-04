@@ -1319,7 +1319,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_swiglu_group_quant_outp
     const at::Tensor& x,
     int64_t dst_type,
     int64_t quant_mode,
-    bool ue8m0_scale)
+    bool ue8m0_scale,
+    bool output_origin)
 {
     constexpr int64_t SWIGLU_FACTOR = 2;
     constexpr int64_t PER_BLOCK_FP16 = 128;
@@ -1355,7 +1356,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_swiglu_group_quant_outp
         scale_type = at::kFloat8_e8m0fnu;
     }
     at::Tensor scale = at::empty_symint(scale_size, x.options().dtype(scale_type));
-    at::Tensor y_origin = at::empty_symint(y_size, x.options().dtype(x.dtype()));
+    // Match the Native output contract, including the unrequested MX origin.
+    at::Tensor y_origin = quant_mode == MX_QUANT && !output_origin
+        ? at::empty_symint(c10::SymDimVector{0}, x.options())
+        : at::empty_symint(y_size, x.options());
 
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, scale, y_origin);
 }
@@ -1374,7 +1378,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_swiglu_group_quant_meta(
     double clamp_value = 0.0)
 {
     int64_t dst_type_code = get_type_code(dst_type);
-    return construct_swiglu_group_quant_output_tensor(x, dst_type_code, quant_mode, ue8m0_scale);
+    return construct_swiglu_group_quant_output_tensor(x, dst_type_code, quant_mode, ue8m0_scale, output_origin);
 }
 
 void indexer_compress_epilog_v2_meta(

@@ -1854,7 +1854,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_swiglu_group_quant_outp
     const at::Tensor& x,
     int64_t dst_type,
     int64_t quant_mode,
-    bool ue8m0_scale)
+    bool ue8m0_scale,
+    bool output_origin)
 {
     constexpr int64_t SIZE = 8;
     constexpr int64_t SWIGLU_FACTOR = 2;
@@ -1903,7 +1904,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_swiglu_group_quant_outp
         scale_type = at::kFloat8_e8m0fnu;
     }
     at::Tensor scale = at::empty(scale_size, x.options().dtype(scale_type));
-    at::Tensor y_origin = at::empty(y_size, x.options().dtype(x.dtype()));
+    // The MX kernel does not consume the unrequested origin output. Keep a
+    // defined empty tensor without reserving another full BF16/FP16 activation.
+    at::Tensor y_origin = quant_mode == MX_QUANT && !output_origin
+        ? at::empty({0}, x.options())
+        : at::empty(y_size, x.options());
 
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, scale, y_origin);
 }
@@ -1922,7 +1927,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_swiglu_group_quant_npu(
     double clamp_value = 0.0)
 {
     int64_t dst_type_code = get_type_code(dst_type);
-    auto output_tensors = construct_swiglu_group_quant_output_tensor(x, dst_type_code, quant_mode, ue8m0_scale);
+    auto output_tensors = construct_swiglu_group_quant_output_tensor(x, dst_type_code, quant_mode, ue8m0_scale, output_origin);
     at::Tensor y = std::get<0>(output_tensors);
     at::Tensor scale = std::get<1>(output_tensors);
     at::Tensor y_origin = std::get<2>(output_tensors);
