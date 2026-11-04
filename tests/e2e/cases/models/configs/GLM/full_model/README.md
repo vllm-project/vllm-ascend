@@ -52,16 +52,47 @@ does not prove that an optimization executed. W4A4 PD and graph/MTP behavior
 remain unmeasured; the tutorial's W4A4 accuracy record uses colocated GSM8K,
 not this PD GPQA stack.
 
-## Workloads and initial gates
+## A3 release comparison: one 16K profile per mode
 
-Ordinary PD workload lengths follow the official inventory: PREFILL requests
-16K/1 and 128K/1; DECODE requests 16K/1K and 128K/1K after warming P's prompt
-cache. E2E requests 16K/1K and extends the same uncached workload to 128K/1K
-for the long-context coverage category. No pooling or 1M case is included.
+The A3 performance cases use the ordinary PD rows 104, 124 and 135 from the
+`A3_发布` sheet in `测试-推理解决方案26.2.0性能一览表 (2).xlsx`.
+Row 124 selects the low-latency DECODE point. Each YAML contains one warmup
+and one measured workload. Existing `ALL-*` dispatch names are retained;
+for A3 they now cover only the selected 16K comparison point, not all lengths.
+4K, 64K, 128K, pooling, dedicated datasets and 1M are outside this A3 batch.
 
-The scope's short/long latency categories are instantiated below. Concurrency
-and request counts are initial commissioning values, not official measured
-capacity points. TPOT limits are target gates and require hardware calibration.
+| A3 mode | Input / output tokens | Concurrency | Measured requests | Request rate | P / D prefix caching | Average TPOT limit |
+| --- | --- | --- | --- | --- | --- | --- |
+| PREFILL (row 104) | 16384 / 1 | 7 | 28 | 0 (closed loop) | Off / Off | Not applicable |
+| DECODE (row 124) | 16384 / 1024 | 80 | 320 | 0 (closed loop) | On / Off | 20 ms |
+| E2E (row 135) | 16384 / 1024 | 40 | 160 | 1.8 req/s | Off / Off | 20 ms |
+
+All three reuse `vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8`.
+The earlier [successful A3 job](https://github.com/vllm-project/vllm-ascend/actions/runs/40859196273/job/123400043943)
+checked out `d74a7178421715e3d1166965258be5578dab14ea`; its
+[configuration](https://github.com/vllm-project/vllm-ascend/blob/d74a7178421715e3d1166965258be5578dab14ea/tests/e2e/cases/features/pp/GLM-5.3-W8A8C8-A3-200k-PP-PD.yaml)
+uses this dataset. The log records 48/48 successful warmup requests and
+96/96 successful measured requests, zero failures and 1122.6822 output tokens/s.
+That run used concurrency 24 and 1.4 req/s; its throughput is evidence for
+dataset usability, not a comparable baseline for the new release workloads.
+The release spreadsheet does not identify its original dataset files, so
+this change aligns load values and cache policy without claiming identical
+prompt content to the release run.
+
+PREFILL warms 14 requests and E2E warms 80 before their separate measured
+phases. These warmup counts are commissioning choices, not values specified
+by the release sheet. DECODE first warms all 320 measured prompts with P
+caching enabled, then replays the same workload. The dataset itself has
+distinct prompts (prefix0); warmup/replay supplies the intended 100% P hit
+scenario. Verify actual prompt reuse, cache hits and retained KV capacity
+before comparing DECODE results. D caching stays off, matching the release
+script. Each YAML starts a separate server lifecycle.
+
+## A5 initial workloads and common gates
+
+A5 retains its initial 16K/128K profiles below; A3 release values are not
+treated as A5 capacity measurements. Concurrency and request counts are
+commissioning values. TPOT limits require hardware calibration.
 
 | Profile | Input tokens (dataset label) | Concurrency | Requests per phase | D / E2E average TPOT limit |
 | --- | --- | --- | --- | --- |
@@ -76,7 +107,7 @@ shared prefix; only DECODE enables its reuse. Record actual tokenizer lengths
 and generated lengths rather than assuming dataset labels or output maxima
 equal observed lengths.
 
-Each profile warms up and measures the same prompt set with closed-loop
+Each A5 profile warms up and measures the same prompt set with closed-loop
 traffic (`request_rate: 0`). Profiles within a YAML share the warmed service.
 Confirm cache-hit metrics and retained cache capacity before interpreting
 DECODE as a 100%-prefix-hit workload. PREFILL remains a prefill-dominated

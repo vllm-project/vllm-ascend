@@ -323,80 +323,25 @@ templates:
       - "--kv-transfer-config"
       - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}'
 
+# A3 release comparison: A3_发布 row 135; one measured 16K profile.
+# Source dataset succeeded in run 40859196273; its throughput gate is not reused.
 benchmarks:
-  short_20ms_warmup:
+  perf_16k_warmup:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 32
+    num_prompts: 80
     max_out_len: 1024
-    batch_size: 16
-    request_rate: 0
-  short_20ms:
+    batch_size: 40
+    request_rate: 1.8
+  perf_16k:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 32
+    num_prompts: 160
     max_out_len: 1024
-    batch_size: 16
-    request_rate: 0
+    batch_size: 40
+    request_rate: 1.8
     tpot_threshold: 20
-  short_50ms_warmup:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 64
-    max_out_len: 1024
-    batch_size: 32
-    request_rate: 0
-  short_50ms:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 64
-    max_out_len: 1024
-    batch_size: 32
-    request_rate: 0
-    tpot_threshold: 50
-  long_30ms_warmup:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 16
-    max_out_len: 1024
-    batch_size: 8
-    request_rate: 0
-  long_30ms:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 16
-    max_out_len: 1024
-    batch_size: 8
-    request_rate: 0
-    tpot_threshold: 30
-  long_50ms_warmup:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 32
-    max_out_len: 1024
-    batch_size: 16
-    request_rate: 0
-  long_50ms:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 32
-    max_out_len: 1024
-    batch_size: 16
-    request_rate: 0
-    tpot_threshold: 50
