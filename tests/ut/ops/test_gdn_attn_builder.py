@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from vllm.config import set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.third_party.flash_linear_attention.ops import index as _fla_index
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -189,6 +190,8 @@ def _make_vllm_config(
         speculative_config = SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
             parallel_drafting=False,
+            use_eagle_block_drop=lambda: False,
+            enable_adaptive_verification=False,
         )
 
     model_config = SimpleNamespace(max_model_len=max_model_len, hf_text_config=SimpleNamespace())
@@ -201,6 +204,7 @@ def _make_vllm_config(
             max_cudagraph_capture_size=None,
         ),
         speculative_config=speculative_config,
+        num_hash_lookahead_tokens=0,
         use_v2_model_runner=False,
         scheduler_config=SimpleNamespace(
             max_num_seqs=max_num_seqs,
@@ -366,11 +370,36 @@ def test_ascend_gdn_attention_uses_ascend_backend():
     from vllm_ascend.models.glm5next.kda import Glm5NextGDNHostMetadataBackend, Glm5NextLinearAttention
     from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
 
-    assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNFusedAttentionBackend
-    assert AscendKimiK3DeltaAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
-    assert Glm5NextLinearAttention.get_attn_backend(object()) is Glm5NextGDNHostMetadataBackend
+    fused_backend = AscendGatedDeltaNetAttention.get_attn_backend(object())  # type: ignore[arg-type]
+    kimi_backend = AscendKimiK3DeltaAttention.get_attn_backend(object())  # type: ignore[arg-type]
+    glm_backend = Glm5NextLinearAttention.get_attn_backend(object())  # type: ignore[arg-type]
+    assert fused_backend is AscendGDNFusedAttentionBackend
+    assert kimi_backend is AscendGDNHostMetadataBackend
+    assert glm_backend is Glm5NextGDNHostMetadataBackend
     assert Glm5NextLinearAttention.use_contiguous_conv_indices
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
+
+
+@pytest.mark.parametrize(
+    "model_type,enabled,recover",
+    [
+        ("glm5_next", True, True),
+        ("glm5_next_text", True, True),
+        ("glm5_next_text", False, False),
+        ("kimi_k3", True, False),
+    ],
+)
+def test_host_backend_selects_recoverssm_only_for_opted_in_glm(model_type, enabled, recover):
+    from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
+        cache_config=SimpleNamespace(use_replayssm=enabled, use_kda_recoverssm=False),
+    )
+    expected = AscendKDARecoverSSMMetadataBuilder if recover else AscendGDNHostMetadataBuilder
+    with set_current_vllm_config(config):
+        assert AscendGDNHostMetadataBackend.get_builder_cls() is expected
+        assert not config.cache_config.use_kda_recoverssm
 
 
 def test_fused_backend_selects_host_metadata_only_when_supported(monkeypatch):

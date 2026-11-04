@@ -31,10 +31,9 @@ class TestAscendSFAIndexerBackend(TestBase):
         mock_indexer.k_cache.prefix = "model.layers.0.indexer"
         return mock_indexer
 
-    @patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=False)
     @patch("vllm_ascend.attention.indexer.get_current_vllm_config")
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    def test_initialization(self, mock_get_ascend_config, mock_get_vllm_config, _mock_enable_dsa_cp):
+    def test_initialization(self, mock_get_ascend_config, mock_get_vllm_config):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = False
         mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
@@ -59,10 +58,9 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertTrue(indexer.is_rope_neox_style)
         self.assertFalse(indexer.use_torch_npu_lightning_indexer)
 
-    @patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=False)
     @patch("vllm_ascend.attention.indexer.get_current_vllm_config")
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    def test_glm_model_type_flags(self, mock_get_ascend_config, mock_get_vllm_config, _mock_enable_dsa_cp):
+    def test_glm_model_type_flags(self, mock_get_ascend_config, mock_get_vllm_config):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = False
         mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "glm_moe_dsa"
@@ -73,10 +71,9 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertFalse(indexer.is_rope_neox_style)
         self.assertTrue(indexer.use_torch_npu_lightning_indexer)
 
-    @patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=False)
     @patch("vllm_ascend.attention.indexer.get_current_vllm_config")
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    def test_li_c8_dtypes(self, mock_get_ascend_config, mock_get_vllm_config, _mock_enable_dsa_cp):
+    def test_li_c8_dtypes(self, mock_get_ascend_config, mock_get_vllm_config):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = True
         mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
@@ -120,11 +117,11 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.enable_sparse_li_c8 = False
         indexer.enable_sparse_li_c4 = False
         indexer.use_torch_npu_lightning_indexer = False
+        indexer._use_fused_cache_store = False
         indexer.wk_weights_proj = MagicMock(return_value=(torch.zeros(2, 128 + 4), None))
         indexer.wq_b = MagicMock(return_value=(torch.zeros(2, 2 * 128), None))
         indexer.use_pcp = False
         indexer._is_pcp_decode_sharded = False
-        indexer._dsa_cp_active = False
         indexer_k_cache = MagicMock(name="indexer_k_cache")
         indexer.k_cache = SimpleNamespace(kv_cache=(indexer_k_cache,))
         return indexer
@@ -274,28 +271,6 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertIsNone(out_scale)
         torch.testing.assert_close(out_slots, slots[:1])
 
-    def test_gather_cache_inputs_dsa_cp_all_gathers_k(self):
-        indexer = self._make_forward_indexer()
-        indexer._dsa_cp_active = True
-        k_li = MagicMock(name="k_li")
-        gathered_k_li = MagicMock(name="gathered_k_li")
-        indexer_metadata = self._make_indexer_metadata()
-
-        with (
-            patch(
-                "vllm_ascend.attention.indexer.all_gather_async",
-                return_value=(gathered_k_li, None),
-            ) as gather,
-            patch("vllm_ascend.attention.indexer.get_tp_group"),
-        ):
-            out_k, out_scale, out_slots = indexer._gather_cache_inputs(k_li, None, indexer_metadata)
-
-        gather.assert_called_once()
-        self.assertIs(gather.call_args.args[0], k_li)
-        self.assertIs(out_k, gathered_k_li)
-        self.assertIsNone(out_scale)
-        self.assertIs(out_slots, indexer_metadata.slot_mapping)
-
     @patch("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache")
     def test_write_cache_scatter_path(self, mock_scatter):
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
@@ -353,7 +328,7 @@ class TestIndexerWrapper(TestBase):
         self.assertIs(wrapper.k_cache, wrapper.impl.k_cache)
 
         wrapper("hidden", "q_c", "k_hidden", "meta", False)
-        wrapper.impl.assert_called_once_with("hidden", "q_c", "k_hidden", "meta", False, attn_q_gather_handle=None)
+        wrapper.impl.assert_called_once_with("hidden", "q_c", "k_hidden", "meta", False)
 
         wrapper.process_weights_after_loading()
         wrapper.impl.process_weights_after_loading.assert_called_once_with()

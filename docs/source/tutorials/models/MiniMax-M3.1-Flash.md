@@ -31,7 +31,7 @@ The official release of MiniMax-M3.1-Flash is available on [Hugging Face](https:
 
 | Weight Version | Deployment | Model Path |
 | --- | --- | --- |
-| MiniMax-M3.1-Flash-W8A8 | Atlas 800I A3, three-node PD disaggregation (1P2D) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8) |
+| MiniMax-M3.1-Flash-W8A8 | Atlas 800I A2, tow-node PD colocation <br> Atlas 800I A3, three-node PD disaggregation (1P2D) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8) |
 | MiniMax-M3.1-Flash-MXFP8 | 950DT products, three-node PD disaggregation (1P2D) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8-mxfp8) |
 
 Download the weight variant used by the serving commands to the same model directory on all participating nodes. It is recommended to place the model weight in a shared cache directory.
@@ -45,7 +45,39 @@ On each host, use `ip addr` or `ifconfig` to identify the host communication IP 
 
 ## 4 Installation
 
-### 4.1 A3 Docker Container
+### 4.1 A2 Docker Container
+
+Run the following on each A2 host. Set the model path to the W8A8 checkpoint.
+
+```bash
+export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-flash"
+export CONTAINER_NAME=minimax_m31_flash
+export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_PATH>"
+export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
+mkdir -p "$WORK_DIR"
+
+docker run -it --name "$CONTAINER_NAME" \
+    --network host --privileged --shm-size=100g \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    --device /dev/davinci0 --device /dev/davinci1 \
+    --device /dev/davinci2 --device /dev/davinci3 \
+    --device /dev/davinci4 --device /dev/davinci5 \
+    --device /dev/davinci6 --device /dev/davinci7 \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+    -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
+    -v /usr/local/sbin:/usr/local/sbin:ro \
+    -v /etc/hccn.conf:/etc/hccn.conf:ro \
+    -v /usr/local/dcmi:/usr/local/dcmi:ro \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+    -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
+    -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8:ro \
+    -v "$WORK_DIR":/workspace \
+    -w /workspace "$IMAGE" bash
+```
+
+### 4.2 A3 Docker Container
 
 Run the following on each A3 host. Set the model path to the W8A8 checkpoint.
 
@@ -81,7 +113,7 @@ docker run -it --name "$CONTAINER_NAME" \
     -w /workspace "$IMAGE" bash
 ```
 
-### 4.2 950DT products Docker Container
+### 4.3 950DT products Docker Container
 
 Run the following on each 950DT products host. Set the model path to the W8A8-MXFP8 checkpoint.
 
@@ -126,6 +158,7 @@ For descriptions of the standard `vllm serve` arguments used in the deployment e
 | Deployment | MAX_MODEL_LEN |
 | --- | --- |
 | Single-node, A3 or 950DT products | 133000 |
+| PD colocation, A2 | 133000 |
 | PD disaggregation, A3 | 263000 |
 | PD disaggregation, 950DT products | 133000 |
 
@@ -271,7 +304,191 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
 
     Expected output: `200`. Send requests to port `11223` with model name `minimax-m3.1-flash`. If startup is still in progress or fails, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
 
-### 5.2 PD Disaggregation (1P2D)
+### 5.2 Multi-Node Deployment
+
+Multi-Node deployment runs Prefill and Decode on the same host, but there are more than one host node. Both nodes use DSpark speculative decoding with seven draft tokens and probabilistic draft sampling. Configure the host-specific values at the beginning of each node script before starting the service.
+
+Monitor node log while weights load and graph capture completes. Startup duration depends on storage, hardware, and the selected configuration; use continuing log progress and `Application startup complete` to judge readiness. If logs stop progressing or report an error, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
+
+=== "A2 series (W8A8)"
+
+    There are two A2 nodes, DP4 × TP4 / EP16 in total. The following values match the configurations in the node scripts below and summarize the differences between the two nodes.
+
+    | Parameter | Node 0 | Node 1 |
+    | --- | --- | --- |
+    | Role | API server | Headless worker |
+    | DP × TP | 2 × 4 | 2 × 4 |
+    | Data-parallel rank | 0, 1 | 2, 3 |
+    | Tool-call parsing | Enabled | — |
+    | max-num-seqs | 32 | 32 |
+
+    **Node 0**
+
+    Save the following as `run_node0.sh` on node 0.
+
+    ```bash
+    #!/usr/bin/env bash
+    set -e
+
+    # Configure these values for the current host.
+    MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+    LOCAL_IP="<CURRENT_NODE_IP>"
+    NIC_NAME="<CURRENT_NODE_NIC>"
+    SERVICE_PORT=11223
+    MAX_MODEL_LEN=133000
+    MAX_NUM_SEQS=32
+    MAX_NUM_BATCHED_TOKENS=4096
+    GPU_MEMORY_UTILIZATION=0.92
+
+    # Fixed runtime configuration.
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_IF_IP="$LOCAL_IP"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export VLLM_ENGINE_READY_TIMEOUT_S=3600
+    export HCCL_CONNECT_TIMEOUT=600
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port "$SERVICE_PORT" \
+        --served-model-name minimax-m3.1-flash \
+        --trust-remote-code \
+        --quantization ascend \
+        --max-model-len "$MAX_MODEL_LEN" \
+        --tensor-parallel-size 4 \
+        --enable-expert-parallel \
+        --max-num-seqs "$MAX_NUM_SEQS" \
+        --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS" \
+        --distributed-executor-backend mp \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+        --reasoning-parser minimax_m3 \
+        --limit-mm-per-prompt '{"image":1,"video":0}' \
+        --enable-chunked-prefill \
+        --enable-prefix-caching \
+        --disable-hybrid-kv-cache-manager \
+        --additional-config '{
+            "enable_cpu_binding": true,
+            "enable_flashcomm1": true,
+            "multistream_overlap_shared_expert": true,
+            "enable_shared_expert_dp": true,
+            "weight_nz_mode": 2
+        }' \
+        --safetensors-load-strategy prefetch \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --enable-auto-tool-choice \
+        --tool-call-parser minimax_m3 \
+        --data-parallel-size 4 \
+        --data-parallel-size-local 2 \
+        --data-parallel-address "$LOCAL_IP" \
+        --speculative-config '{
+            "method":"dspark",
+            "num_speculative_tokens":7,
+            "enforce_eager":true,
+            "draft_sample_method":"probabilistic"
+        }'
+    ```
+
+    Start the engine inside the node 0 container:
+
+    ```bash
+    nohup bash run_node0.sh > node0.log 2>&1 &
+    ```
+
+    **Node 1**
+
+    Save the following as `run_node1.sh` on node 1. `HEAD_NODE_IP` is the business network IP of node 0.
+
+    ```bash
+    #!/usr/bin/env bash
+    set -e
+
+    # Configure these values for the current host.
+    MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+    LOCAL_IP="<CURRENT_NODE_IP>"
+    HEAD_NODE_IP="<NODE0_IP>"
+    NIC_NAME="<CURRENT_NODE_NIC>"
+    SERVICE_PORT=11223
+    MAX_MODEL_LEN=133000
+    MAX_NUM_SEQS=32
+    MAX_NUM_BATCHED_TOKENS=4096
+    GPU_MEMORY_UTILIZATION=0.92
+
+    # Fixed runtime configuration.
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_IF_IP="$LOCAL_IP"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export VLLM_ENGINE_READY_TIMEOUT_S=3600
+    export HCCL_CONNECT_TIMEOUT=600
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port "$SERVICE_PORT" \
+        --served-model-name minimax-m3.1-flash \
+        --trust-remote-code \
+        --quantization ascend \
+        --max-model-len "$MAX_MODEL_LEN" \
+        --tensor-parallel-size 4 \
+        --enable-expert-parallel \
+        --max-num-seqs "$MAX_NUM_SEQS" \
+        --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS" \
+        --distributed-executor-backend mp \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+        --reasoning-parser minimax_m3 \
+        --limit-mm-per-prompt '{"image":1,"video":0}' \
+        --enable-chunked-prefill \
+        --enable-prefix-caching \
+        --disable-hybrid-kv-cache-manager \
+        --additional-config '{
+            "enable_cpu_binding": true,
+            "enable_flashcomm1": true,
+            "multistream_overlap_shared_expert": true,
+            "enable_shared_expert_dp": true,
+            "weight_nz_mode": 2
+        }' \
+        --safetensors-load-strategy prefetch \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --headless \
+        --data-parallel-size 4 \
+        --data-parallel-size-local 2 \
+        --data-parallel-start-rank 2 \
+        --data-parallel-address "$HEAD_NODE_IP" \
+        --speculative-config '{
+            "method":"dspark",
+            "num_speculative_tokens":7,
+            "enforce_eager":true,
+            "draft_sample_method":"probabilistic"
+        }'
+    ```
+
+    Start the engine inside the node 1 container:
+
+    ```bash
+    nohup bash run_node1.sh > node1.log 2>&1 &
+    ```
+
+    Node 1 is headless and does not open an HTTP server. After node 0 prints the following startup messages, check the health endpoint from another terminal in the node 0 container:
+
+    ```text
+    INFO:     Started server process
+    INFO:     Waiting for application startup.
+    INFO:     Application startup complete.
+    ```
+
+    ```bash
+    curl --noproxy '*' --fail --silent --show-error --output /dev/null \
+        --write-out '%{http_code}\n' http://127.0.0.1:11223/health
+    ```
+
+    Expected output: `200`. Send requests to port `11223` on node 0 with model name `minimax-m3.1-flash`.
+
+### 5.3 PD Disaggregation (1P2D)
 
 Both platforms use one Prefill node and two Decode nodes (1P2D), with Prefill and Decode on separate hosts. Both platforms use DSpark speculative decoding with seven draft tokens and probabilistic draft sampling. Configure the host-specific values at the beginning of each Prefill and Decode script before starting the service.
 
@@ -613,7 +830,7 @@ Monitor the role logs while weights load and graph capture completes. Startup du
 
     Use one Prefill node and two Decode nodes (1P2D), each with all eight NPUs. Prefill uses DP1 × TP4 × PP2. The two Decode nodes form one distributed DP4 × TP4 × PP1 / EP16 instance, with two local DP ranks per node. The Decode head runs ranks 0–1 and provides the HTTP API; the headless worker runs ranks 2–3.
 
-    The [reference deployment](https://github.com/CXY-Katrina/workspace/tree/6a00e8b246ebb9274f649956c59ccb2c5ec66adf/minimax_m3/minimax_m3.1_flash/deployments/2026-10-27-a5-1p2d) used `quay.io/atlas-ci/vllm-atlas-temp:minimax-m3.1-flash-a5-openeuler-40260585905-1-arm64-temp` and W8A8-MXFP8 QuaRot l32 weights. Set `IMAGE` and `MODEL_DIR` in Section 4.2 accordingly, keeping the documented container mount path. Use the same image and weights on all three nodes.
+    The [reference deployment](https://github.com/CXY-Katrina/workspace/tree/6a00e8b246ebb9274f649956c59ccb2c5ec66adf/minimax_m3/minimax_m3.1_flash/deployments/2026-10-27-a5-1p2d) used `quay.io/atlas-ci/vllm-atlas-temp:minimax-m3.1-flash-a5-openeuler-40260585905-1-arm64-temp` and W8A8-MXFP8 QuaRot l32 weights. Set `IMAGE` and `MODEL_DIR` in Section 4.3 accordingly, keeping the documented container mount path. Use the same image and weights on all three nodes.
 
     The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles.
 
@@ -1094,6 +1311,7 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
 | AIME2026 | Ascend 950DT products | 93.33@repeat4 | 263000 | 32 | 81920 | 32 | temperature=1.0, top_p=0.95, reasoning_effort="max", chat_template_kwargs={"thinking_mode":"enabled"} |
 | AIME2026 | A3 | 93.33@repeat1 | 263000 | 32 | 81920 | 32 | temperature=1.0, top_p=0.95, reasoning_effort="max", chat_template_kwargs={"thinking_mode":"enabled"} |
+| AIME2026 | A2 | 93.33@repeat1 | 133000 | 32 | 81920 | 32 | temperature=1.0, top_p=0.95, reasoning_effort="max", chat_template_kwargs={"thinking_mode":"enabled"} |
 
 ## 8 Performance Evaluation
 
@@ -1148,7 +1366,7 @@ Use the commands in [Section 5](#5-online-service-deployment) as starting config
 | --- | --- | --- | --- |
 | Long context | A3 PD example with `MAX_MODEL_LEN=263000`; the other examples start at `133000`. | Set `MAX_MODEL_LEN` for the combined input/output budget and reduce `--max-num-seqs` if KV cache capacity is insufficient. | Confirm the requested context fits at the target concurrency before increasing load. |
 | Low latency | Single-node examples in Section 5.1. | Reduce request concurrency and compare `--max-num-seqs` and `--max-num-batched-tokens` settings. | Compare TTFT and TPOT alongside output-token throughput. |
-| High throughput | PD examples in Section 5.2. | Adjust `MAX_NUM_SEQS` and `MAX_BATCHED_TOKENS` on Prefill and Decode separately while keeping both connector topology declarations consistent. | Increase offered load gradually and check throughput, latency, and failed requests. |
+| High throughput | PD examples in Section 5.3. | Adjust `MAX_NUM_SEQS` and `MAX_BATCHED_TOKENS` on Prefill and Decode separately while keeping both connector topology declarations consistent. | Increase offered load gradually and check throughput, latency, and failed requests. |
 
 ### 9.2 Tuning Guidelines
 
@@ -1178,7 +1396,7 @@ For common environment, installation, and general parameter issues, refer to the
 }
 ```
 
-The scripts in Section 5.2 already include this setting. It changes only the draft KV cache dtype.
+The scripts in Section 5.3 already include this setting. It changes only the draft KV cache dtype.
 
 ### 10.2 Model Loading Is Still in Progress or Startup Fails
 

@@ -601,6 +601,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
     ) -> None:
+        self._log_mamba_request_allocation(request.request_id, blocks)
         params = request.kv_transfer_params
         logger.debug(
             "MooncakeConnector update_state_after_alloc: num_external_tokens=%s, kv_transfer_params=%s",
@@ -681,6 +682,27 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             request.status,
             params,
         )
+
+        if params is not None and params.get("do_remote_prefill"):
+            required_remote_fields = (
+                "remote_host",
+                "remote_port",
+                "remote_request_id",
+            )
+            if all(field in params for field in required_remote_fields):
+                remote = (
+                    params["remote_host"],
+                    params["remote_port"],
+                    params["remote_request_id"],
+                )
+                if self._recving_thread is None:
+                    raise RuntimeError("Producer Mooncake scheduler cannot acknowledge a receive request")
+                self._recving_thread.add_request(*remote)
+            else:
+                logger.warning("Got invalid KVTransferParams. params=%s.", params)
+
+            params["do_remote_prefill"] = False
+            return False, None
 
         if (
             params is None
