@@ -131,12 +131,12 @@ def test_expert_mapping_rejected(kwargs):
 
 
 @pytest.mark.parametrize("activation", ["swiglu", "situ"])
-def test_640_to_768_preserves_expert_output_and_gate_up_order(activation):
+def test_native_640_views_preserve_expert_output_and_gate_up_order(activation):
     torch.manual_seed(17)
     w1 = (torch.randn(2, 16, 1280) * 0.1).bfloat16()
     w2 = (torch.randn(2, 640, 16) * 0.1).bfloat16()
     before1, before2 = w1.clone(), w2.clone()
-    first, second = MODULE.pad_bf16_expert_weights(w1, w2)
+    first, second = MODULE.prepare_bf16_expert_weights(w1, w2)
     x = torch.randn(5, 16, dtype=torch.float64)
 
     def expert(up_gate, down):
@@ -148,13 +148,12 @@ def test_640_to_768_preserves_expert_output_and_gate_up_order(activation):
         return activated @ down.double()
 
     for index in range(2):
-        assert first[index].shape == (16, 1536)
-        assert second[index].shape == (768, 16)
+        assert first[index].shape == (16, 1280)
+        assert second[index].shape == (640, 16)
         torch.testing.assert_close(first[index][:, :640], w1[index, :, :640], rtol=0, atol=0)
-        torch.testing.assert_close(first[index][:, 768:1408], w1[index, :, 640:], rtol=0, atol=0)
-        assert torch.count_nonzero(first[index][:, 640:768]) == 0
-        assert torch.count_nonzero(first[index][:, 1408:]) == 0
-        assert torch.count_nonzero(second[index][640:]) == 0
+        torch.testing.assert_close(first[index][:, 640:], w1[index, :, 640:], rtol=0, atol=0)
+        assert first[index].data_ptr() == w1[index].data_ptr()
+        assert second[index].data_ptr() == w2[index].data_ptr()
         torch.testing.assert_close(
             expert(first[index], second[index]), expert(w1[index], w2[index]), rtol=1e-10, atol=1e-10
         )
@@ -262,7 +261,7 @@ def test_real_capacity_uses_scheduler_without_a_token_policy_limit():
     assert policy.select_moe_comm_method(4096, cfg).name == "ALLGATHER"
 
 
-def test_real_weight_producer_uses_one_padded_list_for_both_backends(monkeypatch):
+def test_real_weight_producer_shares_native_views_for_both_backends(monkeypatch):
     source = ast.parse((ROOT / "vllm_ascend/ops/fused_moe/routed_experts.py").read_text())
     owner = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == "AscendUnquantizedFusedMoEMethod")
     methods = [
@@ -288,7 +287,7 @@ def test_real_weight_producer_uses_one_padded_list_for_both_backends(monkeypatch
         get_current_hardware_profile=lambda: SimpleNamespace(supports=lambda _: False),
         HardwareCapability=SimpleNamespace(CANN_MEGAMOE_MXFP=0),
         replace_parameter=lambda layer, name, data: setattr(layer, name, torch.nn.Parameter(data)),
-        pad_bf16_expert_weights=MODULE.pad_bf16_expert_weights,
+        prepare_bf16_expert_weights=MODULE.prepare_bf16_expert_weights,
         _EXTRA_CTX=SimpleNamespace(use_mega_moe=True),
         MoEWeights=SimpleNamespace,
     )
@@ -302,12 +301,12 @@ def test_real_weight_producer_uses_one_padded_list_for_both_backends(monkeypatch
     layer.w13_weight = torch.nn.Parameter(torch.randn(2, 1280, 16).bfloat16())
     layer.w2_weight = torch.nn.Parameter(torch.randn(2, 16, 640).bfloat16())
     producer.process_weights_after_loading(layer)
-    assert layer.a2_mega_moe_intermediate_size == 768
+    assert layer.a2_mega_moe_intermediate_size == 640
     assert not hasattr(layer, "w13_weight") and not hasattr(layer, "w2_weight")
     w1, w2 = producer.get_mlp_weights(layer)
     payload = producer.get_fused_mc2_weights(layer)
     assert w1 is payload.w1 and w2 is payload.w2
-    assert w1[0].shape == (16, 1536) and w2[0].shape == (768, 16)
+    assert w1[0].shape == (16, 1280) and w2[0].shape == (640, 16)
 
 
 def test_real_a2_buffer_uses_physical_width_and_safe_route_capacity():
@@ -336,11 +335,11 @@ def test_real_a2_buffer_uses_physical_width_and_safe_route_capacity():
         ),
         get_symm_buffer_for_mega_moe=Mock(),
     )
-    namespace[method.name](instance, is_decode_only_node=False, physical_intermediate_size=768)
+    namespace[method.name](instance, is_decode_only_node=False, physical_intermediate_size=640)
     args, kwargs = instance.get_symm_buffer_for_mega_moe.call_args
     assert args == ("ep8", 512, 4096, 10)
     assert kwargs["max_recv_token_num"] == 327680
-    assert kwargs["intermediate_hidden"] == 768
+    assert kwargs["intermediate_hidden"] == 640
 
 
 def test_real_config_requires_explicit_cann_backend_and_package():
@@ -394,33 +393,33 @@ def test_quantized_checkpoint_checked_at_resolved_scheme():
             MODULE.validate_a2_expert_quantization(kind)
 
 
-@pytest.mark.parametrize("activation", ["silu", "situ"])
-def test_w8_padding_preserves_per_channel_gmm_and_dynamic_activation_quantization(activation):
-    w1, w2, s1, o1, s2, o2 = make_w8_weights()
-    padded1, padded2, ps1, po1 = MODULE.pad_w8a8_expert_weights(w1, w2, s1, o1, s2, o2)
-    assert padded1.shape == (2, 16, 1536) and padded2.shape == (2, 768, 16)
-    torch.testing.assert_close(ps1[:, :640], s1[:, :640, 0], rtol=0, atol=0)
-    torch.testing.assert_close(ps1[:, 768:1408], s1[:, 640:, 0], rtol=0, atol=0)
-    assert torch.all(ps1[:, 640:768] == 1) and torch.all(ps1[:, 1408:] == 1)
-    assert torch.count_nonzero(po1) == 0
-    x = torch.randint(-16, 16, (5, 16), dtype=torch.int32)
+def test_w8_validation_keeps_native_weight_and_scale_storage():
+    values = make_w8_weights()
+    before = [tensor.clone() for tensor in values]
+    pointers = [tensor.data_ptr() for tensor in values]
+    MODULE.validate_w8a8_expert_weights(*values)
+    for tensor, original, pointer in zip(values, before, pointers):
+        torch.testing.assert_close(tensor, original, rtol=0, atol=0)
+        assert tensor.data_ptr() == pointer
+    assert values[0].shape == (2, 16, 1280)
+    assert values[1].shape == (2, 640, 16)
+    assert values[2].shape == (2, 1280, 1)
 
-    def expert(first, second, first_scale, second_scale):
-        gate, up = ((x @ first.int()).double() * first_scale.double()).chunk(2, -1)
-        if activation == "silu":
-            activated = torch.nn.functional.silu(gate) * up
-        else:
-            activated = 4 * torch.tanh(gate / 4) * torch.sigmoid(gate) * (25 * torch.tanh(up / 25))
-        scale = activated.abs().amax(-1, keepdim=True) / 127
-        quantized = (activated / scale).round().clamp(-127, 127).int()
-        return (quantized @ second.int()).double() * scale * second_scale.double()
 
-    for i in range(2):
-        torch.testing.assert_close(
-            expert(padded1[i], padded2[i], ps1[i], s2[i, :, 0]),
-            expert(w1[i], w2[i], s1[i, :, 0], s2[i, :, 0]),
-            rtol=0,
-            atol=0,
+@pytest.mark.parametrize("intermediate", [384, 576])
+def test_native_weights_reject_unsupported_intermediate_width(intermediate):
+    w1 = torch.zeros(1, 8, 2 * intermediate, dtype=torch.bfloat16)
+    w2 = torch.zeros(1, intermediate, 8, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="aligned to 128"):
+        MODULE.prepare_bf16_expert_weights(w1, w2)
+    with pytest.raises(ValueError, match="aligned to 128"):
+        MODULE.validate_w8a8_expert_weights(
+            w1.to(torch.int8),
+            w2.to(torch.int8),
+            torch.ones(1, 2 * intermediate),
+            torch.zeros(1, 2 * intermediate),
+            torch.ones(1, 8),
+            torch.zeros(1, 8),
         )
 
 
@@ -430,11 +429,11 @@ def test_w8_rejects_asymmetric_offsets_and_invalid_scales(slot, bad):
     values[slot] = values[slot].clone()
     values[slot].flatten()[0] = bad
     with pytest.raises(ValueError):
-        MODULE.pad_w8a8_expert_weights(*values)
+        MODULE.validate_w8a8_expert_weights(*values)
 
 
 @pytest.mark.parametrize("activation", ["silu", "situ", "swigluoai_uninterleave"])
-def test_real_w8_producer_pads_before_nz_and_retains_fallback_scale(activation):
+def test_real_w8_producer_keeps_native_width_before_nz_and_retains_fallback_scale(activation):
     source = ast.parse((ROOT / "vllm_ascend/quantization/methods/w8a8/w8a8_dynamic.py").read_text())
     owner = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == "AscendW8A8DynamicFusedMoEMethod")
     names = {"process_weights_after_loading", "_get_mlp_weights", "get_fused_mc2_weights"}
@@ -449,7 +448,7 @@ def test_real_w8_producer_pads_before_nz_and_retains_fallback_scale(activation):
         get_ascend_config=lambda: SimpleNamespace(enable_fused_mc2=1, a2_mega_moe_prefill=Settings(enabled=True)),
         QuantType=quant,
         ACL_FORMAT_FRACTAL_NZ=29,
-        pad_w8a8_expert_weights=MODULE.pad_w8a8_expert_weights,
+        validate_w8a8_expert_weights=MODULE.validate_w8a8_expert_weights,
         scale_from_float_to_int64=lambda scale: scale.float().contiguous().view(torch.int32).to(torch.int64),
         use_cann_megamoe=lambda _: True,
         get_current_vllm_config=make_config,
@@ -471,16 +470,18 @@ def test_real_w8_producer_pads_before_nz_and_retains_fallback_scale(activation):
     layer.activation = activation
     producer.process_weights_after_loading(layer)
     assert cast.call_count == 2
-    assert cast.call_args_list[0].args[0].shape == (2, 16, 1536)
-    assert cast.call_args_list[1].args[0].shape == (2, 768, 16)
-    assert layer.a2_mega_moe_intermediate_size == 768
+    assert cast.call_args_list[0].args[0].shape == (2, 16, 1280)
+    assert cast.call_args_list[1].args[0].shape == (2, 640, 16)
+    assert layer.a2_mega_moe_intermediate_size == 640
     fused = producer.get_fused_mc2_weights(layer)
-    assert len(fused.w1) == 2 and fused.w1_scale[0].shape == (1536,)
+    assert len(fused.w1) == 2 and fused.w1_scale[0].shape == (1280,)
+    assert fused.w1[0].data_ptr() == layer.w13_weight[0].data_ptr()
+    assert fused.w2[0].data_ptr() == layer.w2_weight[0].data_ptr()
     assert fused.w2_scale[0].shape == (16,) and fused.w1_scale[0].dtype == torch.int64
     sf = layer.w13_weight_scale.float().contiguous().view(torch.int32).to(torch.int64)
     torch.testing.assert_close(fused.w1_scale[0], sf[0], rtol=0, atol=0)
     context.moe_comm_type = comm.ALLGATHER
     w1, scale1, w2, scale2 = producer._get_mlp_weights(layer)
     assert w1[0] is layer.w13_weight and w2[0] is layer.w2_weight
-    assert scale1[0].dtype == torch.float32 and scale1[0].shape == (2, 1536)
+    assert scale1[0].dtype == torch.float32 and scale1[0].shape == (2, 1280)
     assert scale2[0].shape == (2, 16)

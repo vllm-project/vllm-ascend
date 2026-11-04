@@ -8,6 +8,11 @@ maximum token threshold for selecting the backend.
 
 Install a compatible `cann_ops_transformer` build including the 910B
 `MegaMoe` operator and its communication extension in every worker environment.
+The operator must support A2 intermediate sizes aligned to 128 (native I=640),
+such as ops-transformer commit `9adf80d98` on
+[`qwen3p8/a2-megamoe-align128`](https://gitcode.com/workice/ops-transformer/tree/qwen3p8/a2-megamoe-align128).
+Older A2 operators requiring 256 alignment cannot execute this path; there is
+no automatic padding or fallback to the old 768-wide weight layout.
 The integration targets BF16 or dynamic INT8 W8A8 Qwen3.8-Flash-Next, registered as
 `Qwen4ExpForCausalLM` or `Qwen4ExpForConditionalGeneration`, with H=2560,
 intermediate size=640, 512 experts and top-k=10.
@@ -43,13 +48,12 @@ offsets must be zero and scales finite and positive. Nonzero offsets fail during
 weight loading because this MegaMoE INT8 API has no weight zero-point input.
 The check runs only while loading, not on the forward hot path.
 
-Gate/up INT8 weights and their scales/offsets are padded independently to the
-768-wide execution layout before NZ conversion. Padded weights/offsets are zero,
-padded scales are one. W2 input rows are padded, but W2 output-channel scales
-and offsets retain their H-wide shape. Existing packed int64 scale encoding and
-per-expert NZ lists feed MegaMoE. Ordinary mixed/decode execution keeps its
-stacked NZ weights and FP32 first-layer scale copy; no per-forward repacking is
-introduced. Both paths use the same physical width and INT8 weight storage.
+Gate/up INT8 weights and their scales/offsets retain the native 640-wide
+intermediate dimension before NZ conversion. W1 has 1280 output channels and
+W2 has 640 input rows; W2 output-channel scales and offsets remain H-wide.
+Existing packed int64 scale encoding and per-expert NZ views feed MegaMoE.
+Ordinary mixed/decode execution keeps the same native-width stacked NZ weights
+and FP32 first-layer scale copy. No per-forward repacking is introduced.
 
 ## Selection
 
@@ -76,21 +80,21 @@ allocation log alone is not evidence of real-request coverage.
 
 ## Weight layout and memory
 
-The local 910B operator requires the intermediate size to be divisible by 256.
-The loader pads 640 to 768, separately for the gate and up halves of W1, and pads
-the corresponding W2 rows with zeros. BF16 creates per-expert ND TensorLists; W8A8 creates stacked NZ weights with
-per-expert views for the fused call.
-Checkpoint mathematics and output dimensions are preserved; ordinary MoE
-fallback uses the same padded lists. Padding happens only during weight loading.
+The compatible 910B operator accepts intermediate sizes divisible by 128.
+The loader keeps I=640 for both fused prefill and ordinary mixed/decode GMM:
+W1 is `[H,1280]` and W2 is `[640,H]` per expert. It does not append zero
+channels or pad scales/offsets to 768.
 
-Only one execution copy of the expert weights remains after loading; the
-original tensors are released. A transient loading peak is still possible.
-For 48 MoE layers and EP8, routed BF16 weight payload increases from about
-28.125 GiB to 33.750 GiB per rank, excluding other model weights and buffers.
-W8A8 pure INT8 routed-weight payload is about 16.875 GiB per rank after
-padding (14.063 GiB before), excluding scales, NZ padding and other buffers.
-Both fused prefill and ordinary fallback pay the physical 768-wide GEMM cost.
-This can affect decode performance even though decode never selects MegaMoE.
+BF16 uses per-expert ND views sharing the native-width execution storage.
+W8A8 uses stacked NZ weights with per-expert views for the fused call.
+No complete second execution-weight copy is retained after loading; a transient
+loading/conversion peak remains possible.
+
+For 48 MoE layers and EP8, raw routed BF16 weight payload is about 28.125 GiB
+per rank and INT8 payload about 14.063 GiB, excluding other model weights,
+scales, NZ layout overhead and buffers. Neither backend incurs the old explicit
+768-wide GMM shape expansion. BF16 fallback still uses ND TensorLists, so
+matching the original width alone does not establish identical performance.
 The existing fused-MC2 configuration disables shared-expert multistream overlap.
 Benchmark the complete model against the original configuration before rollout.
 
@@ -126,4 +130,4 @@ rank's outputs and counts, TTFT, TPOT, throughput and peak memory.
 
 Set `enable_fused_mc2=0` and `a2_mega_moe_prefill.enabled=false`, then restart the
 workers, to restore the original weight-loading and communication paths. Merely
-avoiding pure-prefill requests does not undo the padded weight layout.
+avoiding pure-prefill requests does not restore the original weight-loading configuration.

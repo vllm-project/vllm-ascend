@@ -12,6 +12,9 @@ from pydantic.dataclasses import dataclass
 if TYPE_CHECKING:
     import torch
 
+_A2_INTERMEDIATE_SIZE_MIN = 512
+_A2_INTERMEDIATE_SIZE_ALIGNMENT = 128
+
 
 @dataclass(config=ConfigDict(extra="forbid", frozen=True))
 class A2MegaMoEPrefillConfig:
@@ -84,12 +87,8 @@ def validate_a2_prefill_model(config: Any, *, dynamic_eplb: bool, redundant_expe
         raise ValueError("a2_mega_moe_prefill requires H=2560, I=640, E=512 and top_k=10")
 
 
-def pad_bf16_expert_weights(w1: torch.Tensor, w2: torch.Tensor) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-    """Build one shared ND TensorList for fused prefill and ordinary fallback.
-
-    GMM direction is [E,H,2I] and [E,I,H]. Pad gate and up separately;
-    appending to the concatenated W1 would move its gate/up split.
-    """
+def prepare_bf16_expert_weights(w1: torch.Tensor, w2: torch.Tensor) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Share native-width ND expert views between MegaMoE and ordinary GMM."""
     # Defer torch during config/platform discovery; weights are processed in the worker.
     import torch
 
@@ -100,17 +99,9 @@ def pad_bf16_expert_weights(w1: torch.Tensor, w2: torch.Tensor) -> tuple[list[to
     intermediate = w2.shape[1]
     if w1.shape[2] != 2 * intermediate:
         raise ValueError("W1 must contain equal gate and up halves")
-    physical = (intermediate + 255) // 256 * 256
-    first, second = [], []
-    for gate_up, down in zip(w1.unbind(0), w2.unbind(0)):
-        padded = gate_up.new_zeros((gate_up.shape[0], 2 * physical))
-        padded[:, :intermediate].copy_(gate_up[:, :intermediate])
-        padded[:, physical : physical + intermediate].copy_(gate_up[:, intermediate:])
-        padded_down = down.new_zeros((physical, down.shape[1]))
-        padded_down[:intermediate].copy_(down)
-        first.append(padded)
-        second.append(padded_down)
-    return first, second
+    if intermediate < _A2_INTERMEDIATE_SIZE_MIN or intermediate % _A2_INTERMEDIATE_SIZE_ALIGNMENT != 0:
+        raise ValueError("A2 MegaMoE requires intermediate size >= 512 and aligned to 128")
+    return list(w1.unbind(0)), list(w2.unbind(0))
 
 
 def validate_a2_expert_quantization(quant_type: Any) -> None:
@@ -119,13 +110,13 @@ def validate_a2_expert_quantization(quant_type: Any) -> None:
         raise ValueError("A2 MegaMoE prefill supports only BF16 or dynamic INT8 W8A8 routed experts")
 
 
-def pad_w8a8_expert_weights(w1, w2, scale1, offset1, scale2, offset2):
-    """Pad symmetric per-channel INT8 before any NZ conversion.
+def validate_w8a8_expert_weights(w1, w2, scale1, offset1, scale2, offset2) -> None:
+    """Validate native-width symmetric per-channel INT8 before NZ conversion.
 
     Weights are in GMM direction. Scale1/offset1 have 2I output channels;
-    scale2/offset2 have H output channels and must not be padded along I.
-    Neutral scales on padded zero-weight channels keep dynamic quantization
-    and the original channels unchanged. Called only during weight loading.
+    scale2/offset2 have H output channels. No weight or scale padding is needed
+    with an A2 operator supporting 128-aligned intermediate sizes.
+    Called only during weight loading.
     """
     import torch
 
@@ -137,6 +128,8 @@ def pad_w8a8_expert_weights(w1, w2, scale1, offset1, scale2, offset2):
     intermediate = w2.shape[1]
     if two_i != 2 * intermediate:
         raise ValueError("W1 must contain equal gate and up halves")
+    if intermediate < _A2_INTERMEDIATE_SIZE_MIN or intermediate % _A2_INTERMEDIATE_SIZE_ALIGNMENT != 0:
+        raise ValueError("A2 MegaMoE requires intermediate size >= 512 and aligned to 128")
     parameters = (scale1, offset1, scale2, offset2)
     for parameter, channels in zip(parameters, (two_i, two_i, hidden, hidden)):
         if parameter.shape[0] != experts or parameter.numel() != experts * channels:
@@ -146,14 +139,3 @@ def pad_w8a8_expert_weights(w1, w2, scale1, offset1, scale2, offset2):
         raise ValueError("A2 MegaMoE W8A8 requires symmetric weights (zero weight offsets)")
     if any(not torch.isfinite(scale).all().item() or not (scale > 0).all().item() for scale in (scale1, scale2)):
         raise ValueError("W8A8 scales must be finite and positive")
-    physical = (intermediate + 255) // 256 * 256
-    padded_w1 = w1.new_zeros((experts, hidden, 2 * physical))
-    padded_w1[:, :, :intermediate].copy_(w1[:, :, :intermediate])
-    padded_w1[:, :, physical : physical + intermediate].copy_(w1[:, :, intermediate:])
-    padded_w2 = w2.new_zeros((experts, physical, hidden))
-    padded_w2[:, :intermediate].copy_(w2)
-    padded_scale1 = scale1.new_ones((experts, 2 * physical))
-    source_scale1 = scale1.reshape(experts, two_i)
-    padded_scale1[:, :intermediate].copy_(source_scale1[:, :intermediate])
-    padded_scale1[:, physical : physical + intermediate].copy_(source_scale1[:, intermediate:])
-    return padded_w1, padded_w2, padded_scale1, offset1.new_zeros((experts, 2 * physical))
