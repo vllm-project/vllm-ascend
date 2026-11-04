@@ -26,3 +26,4 @@ coverage:
       default:
         # non-voting
         informational: true
+        a: b
