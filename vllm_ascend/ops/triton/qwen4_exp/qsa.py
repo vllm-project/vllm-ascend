@@ -450,7 +450,7 @@ def qsa_compress_groups_with_ratio(
     if rows and (not all(compressor_state_cache.shape) or not all(compressor_state_block_table.shape)):
         raise ValueError("QSA compressor-state cache and block table must be nonempty")
     fuse_norm_store = compressed_cache is not None
-    if fuse_norm_store:
+    if compressed_cache is not None:
         if norm_weight is None or rotary_cache is None:
             raise ValueError("QSA fused compression requires norm weight and rotary cache")
         if (
@@ -531,13 +531,15 @@ def qsa_compress_groups_with_ratio(
         norm_weight_ptr=norm_weight,
         rotary_cache_ptr=rotary_cache,
         compressed_cache_ptr=compressed_cache,
-        rotary_cache_rows=rotary_cache.shape[0] if fuse_norm_store else 0,
-        rotary_cache_stride=rotary_cache.stride(0) if fuse_norm_store else 0,
-        compressed_stride_block=compressed_cache.stride(0) if fuse_norm_store else 0,
-        compressed_stride_token=compressed_cache.stride(1) if fuse_norm_store else 0,
-        compressed_stride_dim=compressed_cache.stride(3) if fuse_norm_store else 0,
-        compressed_page_size=compressed_cache.shape[1] if fuse_norm_store else 1,
-        compressed_num_slots=compressed_cache.shape[0] * compressed_cache.shape[1] if fuse_norm_store else 0,
+        rotary_cache_rows=rotary_cache.shape[0] if rotary_cache is not None else 0,
+        rotary_cache_stride=rotary_cache.stride(0) if rotary_cache is not None else 0,
+        compressed_stride_block=compressed_cache.stride(0) if compressed_cache is not None else 0,
+        compressed_stride_token=compressed_cache.stride(1) if compressed_cache is not None else 0,
+        compressed_stride_dim=compressed_cache.stride(3) if compressed_cache is not None else 0,
+        compressed_page_size=compressed_cache.shape[1] if compressed_cache is not None else 1,
+        compressed_num_slots=compressed_cache.shape[0] * compressed_cache.shape[1]
+        if compressed_cache is not None
+        else 0,
         norm_eps=norm_eps,
         FUSE_NORM_STORE=fuse_norm_store,
         rotary_dim=_FUSED_ROPE_DIM,
