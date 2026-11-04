@@ -47,8 +47,8 @@ DEEPSEEK_V4_MODEL = os.environ.get(
     "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test",
 )
 
-# 16,384 tokens = 128 full blocks at block_size=128.
-POOL_PROMPT_TOKENS = 16384
+# 16,388 tokens = 128 full blocks plus a 4-token tail at block_size=128.
+POOL_PROMPT_TOKENS = 16388
 # Chunked prefill cap: 4096 = 32 blocks of 128. Keeps the 16K dummy prefill
 # activation peak small enough to leave room for the 4.35GiB KV budget.
 POOL_BATCHED_TOKENS = 4096

@@ -40,8 +40,10 @@ PROMPTS = [
 ]
 
 DATA_PARALLEL_SIZE = 2
-# 16,384 tokens = 128 full blocks at block_size=128.
-POOL_PROMPT_TOKENS = 16384
+# 16,388 tokens = 128 full blocks plus a 4-token tail at block_size=128.
+POOL_PROMPT_TOKENS = 16388
+# Chunked prefill cap: 4096 = 32 blocks of 128, keeps the activation peak low.
+POOL_BATCHED_TOKENS = 4096
 POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
 
 POOL_KV_TRANSFER_CONFIG = {
@@ -102,7 +104,7 @@ def test_deepseek_v4_dspark_spec_decoding_dp4_full_graph() -> None:
             tensor_parallel_size=2,
             max_model_len=POOL_MAX_MODEL_LEN,
             max_num_seqs=2,
-            max_num_batched_tokens=POOL_PROMPT_TOKENS,
+            max_num_batched_tokens=POOL_BATCHED_TOKENS,
             enable_expert_parallel=True,
             tokenizer_mode="deepseek_v4",
             block_size=128,
