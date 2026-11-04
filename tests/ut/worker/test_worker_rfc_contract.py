@@ -416,6 +416,11 @@ class WorkerAlignmentContract(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "allocation failed"):
             backend.resume(None)
         self.assertEqual(backend._state, "SUSPENDED")
+        backend._state = "RUNNING"
+        allocator.sleep.side_effect = RuntimeError("partial unmap")
+        with self.assertRaisesRegex(RuntimeError, "partial unmap"):
+            backend.suspend(1)
+        self.assertEqual(backend._state, "SUSPENDED")
 
     def test_v1_connector_output_and_v2_boundary(self):
         empty = SimpleNamespace(kv_connector_output=None)
