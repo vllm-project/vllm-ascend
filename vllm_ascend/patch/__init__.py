@@ -326,8 +326,9 @@
 #       its physical width smaller than the advertised speculative placeholder
 #       count.
 #    How:
-#       Return the complete requested width on KV consumers. Delegate producers
-#       and non-PD deployments to the original upstream method unchanged.
+#       Preserve the complete width only for a padded final-token EAGLE window
+#       on KV consumers. Align ordinary consumer/kv_both prefill chunks so
+#       their recurrent checkpoints remain available to the external KV pool.
 #    Related issue:
 #       https://github.com/vllm-project/vllm/issues/54392
 #    Future Plan:
