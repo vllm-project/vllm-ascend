@@ -123,20 +123,21 @@ class TestMain2MainContracts(unittest.TestCase):
 
                 namespace = {
                     "Mapping": Mapping,
+                    "CUDAGraphMode": SimpleNamespace(FULL="full"),
+                    "is_drafter_moe_model": lambda _: False,
                     "vllm_version_is": lambda _, release=release: release,
                     "get_draft_prefill_cudagraph_mode": lambda config, mode: mode,
                     "collect_sorted_captured_token_sizes": lambda _: [],
                 }
                 cls = _method(path, "AutoRegressiveAclGraphManager", "__init__", namespace, bases=Parent)
+                mode = SimpleNamespace(decode_mode=lambda: "full")
                 shape = 3 if release else {2: 8, 3: 4}
-                manager = cls(object(), object(), object(), shape)
+                manager = cls(object(), object(), mode, shape)
                 self.assertTrue(manager.is_draft_model_prefill)
                 self.assertEqual(calls[0][0][3], shape)
                 if not release:
                     calls.clear()
-                    manager = cls(
-                        object(), object(), object(), decode_query_lens={1: 12}, decode_request_sizes=[1, 4, 12]
-                    )
+                    manager = cls(object(), object(), mode, decode_query_lens={1: 12}, decode_request_sizes=[1, 4, 12])
                     self.assertFalse(manager.is_draft_model_prefill)
                     self.assertEqual(calls[0][1]["decode_request_sizes"], [1, 4, 12])
 

@@ -10,9 +10,11 @@ import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
+    CudaGraphManager,
     SpeculatorCudaGraphManager,
 )
 
@@ -108,6 +110,99 @@ def test_init_draft_decode_graph():
     assert manager.is_draft_model_prefill is False
     set_decode.assert_called_once_with([4, 8])
     set_prefill.assert_not_called()
+
+
+@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="Independent draft request grids require main's graph API")
+@pytest.mark.parametrize(
+    "draft_moe,method,query_len,mode,limit,expected_max_requests",
+    [
+        (True, MoECommType.MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 16, 16),
+        (True, MoECommType.MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 8, 8),
+        (True, MoECommType.FUSED_MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 512, 512),
+        (True, MoECommType.ALLGATHER, 1, CUDAGraphMode.FULL_DECODE_ONLY, 512, 512),
+        (False, MoECommType.MC2, 1, CUDAGraphMode.FULL_DECODE_ONLY, 16, 512),
+        (True, MoECommType.MC2, 4, CUDAGraphMode.FULL_DECODE_ONLY, 16, 512),
+        (True, MoECommType.MC2, 1, CUDAGraphMode.NONE, 16, 512),
+        (True, MoECommType.ALLTOALL, 1, CUDAGraphMode.FULL_DECODE_ONLY, 512, 0),
+    ],
+)
+def test_draft_decode_capture_respects_moe_comm_policy(
+    draft_moe, method, query_len, mode, limit, expected_max_requests
+):
+    sizes = [1, 4, 8, 16, 32, 512]
+    original_sizes = sizes.copy()
+    parent_kwargs: dict[str, Any] = {}
+
+    def parent_init(self, *args, **kwargs):
+        parent_kwargs.update(kwargs)
+        _parent_init(self, *args, **kwargs)
+
+    with (
+        patch.object(SpeculatorCudaGraphManager, "__init__", parent_init),
+        patch.object(SpeculatorCudaGraphManager, "needs_capture", return_value=False),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.collect_sorted_captured_token_sizes",
+            return_value=[],
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.is_drafter_moe_model",
+            return_value=draft_moe,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.select_moe_comm_method",
+            side_effect=lambda size, _: method if size <= limit else MoECommType.ALLTOALL,
+        ),
+    ):
+        AutoRegressiveAclGraphManager(
+            _graph_config(),
+            torch.device("cpu"),
+            mode,
+            decode_query_lens={query_len: 512},
+            decode_request_sizes=sizes,
+        )
+    compatible_sizes = parent_kwargs["decode_request_sizes"]
+    assert max(compatible_sizes, default=0) == expected_max_requests
+    assert sizes == original_sizes
+
+    # Exercise native descriptor creation and dispatch, including the eager
+    # boundary, without allocating a device graph or changing the config grid.
+    compilation = SimpleNamespace(
+        prefill_cudagraph_capture_token_sizes=[4, 8, 12, 16],
+        decode_cudagraph_capture_request_sizes=[1, 2, 3, 4],
+        max_decode_cudagraph_capture_tokens=None,
+        max_cudagraph_capture_size=4096,
+    )
+    native: Any = SimpleNamespace(
+        compilation_config=compilation,
+        cudagraph_mode=mode,
+        max_num_reqs=512,
+        decode_query_len=query_len,
+        decode_max_reqs={query_len: 512},
+        decode_request_sizes=compatible_sizes,
+        varlen_decode=False,
+        lora_capture_cases=[0],
+        vllm_config=SimpleNamespace(uniform_decode_query_len=4, cache_config=SimpleNamespace(use_kda_recoverssm=False)),
+        _capture_descs={},
+        _decode_descs={},
+        _candidates={},
+        _graphs_captured=True,
+        _maybe_ubatch_twin=lambda _: None,
+        _resolve_effective_loras=lambda count: count,
+    )
+    CudaGraphManager._init_candidates(native)
+    captured = [desc for descs in native._capture_descs.values() for desc in descs]
+    if mode == CUDAGraphMode.NONE:
+        assert not captured
+    else:
+        assert max((desc.num_reqs for desc in captured), default=0) == expected_max_requests
+    if draft_moe and query_len == 1 and method == MoECommType.MC2 and mode != CUDAGraphMode.NONE:
+        at_limit = CudaGraphManager.dispatch(native, limit, limit, uniform_token_count=1, num_active_loras=0)
+        above_limit = CudaGraphManager.dispatch(native, limit + 1, limit + 1, uniform_token_count=1, num_active_loras=0)
+        assert at_limit.cg_mode == CUDAGraphMode.FULL
+        assert above_limit.cg_mode == CUDAGraphMode.NONE
+        assert above_limit.num_reqs == limit + 1
+        assert above_limit.num_tokens == limit + 1
+    assert compilation.decode_cudagraph_capture_request_sizes == [1, 2, 3, 4]
 
 
 def test_run_fullgraph_uses_updatable_graph():
