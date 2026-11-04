@@ -1593,6 +1593,7 @@ def graph_manager_wrapper(model_runner):
         decode_query_lens: Mapping[int, int] | None = None,
     ):
         query_shapes = decode_query_len if vllm_version_is("0.33.0") else decode_query_lens
+        assert query_shapes is not None
         return ModelAclGraphManager(
             vllm_config,
             device,
