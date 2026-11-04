@@ -335,6 +335,13 @@ class SparseKVOffloadManager:
         self.block_size = self._infer_group_block_sizes(self.kv_cache_config)
         self.topk_buffer_size = sparse_kv_offload_config.topk_buffer_size
         self.topk = sparse_kv_offload_config.topk
+        self.eviction_policy = sparse_kv_offload_config.eviction_policy
+        self.probation_age = sparse_kv_offload_config.probation_age
+        logger.info(
+            "Sparse KV offload eviction policy: %s, probation_age=%s",
+            self.eviction_policy,
+            self.probation_age,
+        )
 
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -673,6 +680,23 @@ class SparseKVOffloadManager:
             .pin_memory()
             for _ in range(self.num_layers)
         ]
+        # Age follows logical lru_slots order. The default policy needs no age allocation.
+        self.lru_stamps_cpu_list = []
+        self.lru_age_workspace = None
+        if self.eviction_policy == "reuse_prioritized_lru":
+            self.lru_stamps_cpu_list = [
+                torch.zeros(slots.shape, dtype=torch.int32, device="cpu", pin_memory=True)
+                for slots in self.lru_slots_cpu_list
+            ]
+            self.lru_age_workspace = torch.empty(
+                [self.lru_workspace_threads, self.topk_buffer_size],
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=True,
+            )
+        self.lru_stamps_ptrs = [stamps.data_ptr() for stamps in self.lru_stamps_cpu_list]
+        self.lru_age_workspace_ptr = self.lru_age_workspace.data_ptr() if self.lru_age_workspace is not None else 0
+
         self.lru_current_slots_cpu = torch.empty(
             [self.max_num_topk_rows, self.topk],
             dtype=torch.int32,
@@ -1035,7 +1059,7 @@ class SparseKVOffloadManager:
             num_tokens_buffer,
             layer_id,
         ) = args
-        self.sparse_kv_offload_cpp.lru_resident_compact(
+        planner_args = (
             lru_req_ids_ptr,
             lru_last_req_ids_ptr,
             lru_topk_indices_ptr,
@@ -1058,6 +1082,15 @@ class SparseKVOffloadManager:
             self.lru_workspace_threads,
             self.lru_workspace_threads,
         )
+        if self.eviction_policy == "reuse_prioritized_lru":
+            self.sparse_kv_offload_cpp.reuse_prioritized_lru_resident_compact(
+                *planner_args,
+                self.lru_stamps_ptrs[layer_id],
+                self.lru_age_workspace_ptr,
+                self.probation_age,
+            )
+        else:
+            self.sparse_kv_offload_cpp.lru_resident_compact(*planner_args)
         self.sparse_kv_offload_cpp.compute_lru_resident_addrs(
             miss_count,
             miss_tokens,

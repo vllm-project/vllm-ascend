@@ -1044,6 +1044,8 @@ class SparseKVOffloadConfig:
     Configuration for the Sparse KV cache offloading.
     """
 
+    MAX_RESIDENT_AGE = (1 << 31) - 2
+
     def __init__(self, vllm_config: "VllmConfig", user_config: dict[str, Any]):
         self.enabled = bool(user_config.get("enabled", False))
         if not self.enabled:
@@ -1053,6 +1055,14 @@ class SparseKVOffloadConfig:
         self.dram_size_per_dp_GB = int(user_config.get("dram_size_per_dp_GB", 128))
         self.keep_device_kv_cache = bool(user_config.get("keep_device_kv_cache", False))
         self.lru_max_threads = int(user_config.get("lru_max_threads", 8))
+
+        self.eviction_policy = user_config.get("eviction_policy", "lru")
+        if self.eviction_policy not in ("lru", "reuse_prioritized_lru"):
+            raise ValueError("sparse_kv_offload_config.eviction_policy must be lru or reuse_prioritized_lru")
+        # Keep this bound aligned with MAX_RESIDENT_AGE in lru_resident.h.
+        self.probation_age = user_config.get("probation_age", 4)
+        if type(self.probation_age) is not int or not 0 <= self.probation_age <= self.MAX_RESIDENT_AGE:
+            raise ValueError("sparse_kv_offload_config.probation_age must be an integer in [0, 2147483646]")
 
         if hasattr(vllm_config.model_config.hf_text_config, "compress_ratios"):
             raise ValueError("Sparse KV offload don't support compress now.")
