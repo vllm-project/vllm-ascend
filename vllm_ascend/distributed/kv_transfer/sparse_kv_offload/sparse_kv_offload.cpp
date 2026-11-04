@@ -284,6 +284,9 @@ FORCE_INLINE void process_one_reuse_prioritized_lru_resident_row(
   int32_t free_count = 0;
   for (int32_t order = 0; order < capacity; ++order) {
     const int32_t slot = slots[order];
+    if (UNLIKELY(slot < 0 || slot >= capacity)) {
+      continue;
+    }
     const int32_t token = tokens[slot];
     // Invalidate rewritten speculative KV before checking reuse, even for age=0.
     if (!is_valid_lru_resident_token(token, max_token) || token >= stable) {
