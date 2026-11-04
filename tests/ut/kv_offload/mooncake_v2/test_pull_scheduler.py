@@ -479,50 +479,103 @@ def test_zero_external_tokens_acknowledges_without_worker_transfer() -> None:
     scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
 
 
-def test_request_finished_acks_unallocated_remote_prefill() -> None:
+@pytest.mark.parametrize("status", [RequestStatus.FINISHED_ABORTED, RequestStatus.FINISHED_ERROR])
+@pytest.mark.parametrize("block_ids", [([],), ([], [])])
+def test_request_finished_rejected_remote_prefill_notifies_producer_once(status, block_ids) -> None:
     scheduler = make_pull_scheduler()
-    scheduler._recving_thread = MagicMock()
+    scheduler._recving_thread = MooncakeSchedulerRecvingThread(threading.Event())
     request = make_request(
         request_id="request-d",
-        status=RequestStatus.FINISHED_ABORTED,
+        status=status,
         kv_transfer_params={
             "do_remote_prefill": True,
+            "do_remote_decode": False,
+            "remote_block_ids": tuple([20] for _ in block_ids),
+            "remote_engine_id": "engine-p",
             "remote_host": "10.0.0.1",
             "remote_port": 6000,
             "remote_request_id": "request-p",
-            "remote_block_ids": ([20, 21],),
         },
     )
 
-    delay_free, params = scheduler.request_finished(request, ([],))
-
-    assert delay_free is False
-    assert params is None
+    assert scheduler.request_finished(request, block_ids) == (False, None)
     assert request.kv_transfer_params["do_remote_prefill"] is False
-    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
-    assert "request-d" not in scheduler._reqs_need_recv
+    assert scheduler.request_finished(request, block_ids) == (False, None)
+
+    notification_queue = scheduler._recving_thread.request_queue
+    assert notification_queue.get_nowait() == ("10.0.0.1", 6000, "request-p")
+    notification_queue.task_done()
+    assert notification_queue.empty()
+    metadata = scheduler.build_connector_meta(MagicMock())
+    assert not metadata.requests
+    assert not metadata.reqs_in_batch
+    assert not scheduler._reqs_recv_info
 
 
-def test_request_finished_does_not_ack_prefill_already_queued_for_workers() -> None:
+@pytest.mark.parametrize("missing_field", ["remote_host", "remote_port", "remote_request_id"])
+def test_request_finished_rejected_remote_prefill_with_incomplete_params(missing_field) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    params = {
+        "do_remote_prefill": True,
+        "remote_host": "10.0.0.1",
+        "remote_port": 6000,
+        "remote_request_id": "request-p",
+    }
+    del params[missing_field]
+    request = make_request(status=RequestStatus.FINISHED_ABORTED, kv_transfer_params=params)
+
+    assert scheduler.request_finished(request, ([],)) == (False, None)
+
+    scheduler._recving_thread.add_request.assert_not_called()
+    assert params["do_remote_prefill"] is False
+
+
+@pytest.mark.parametrize("params", [None, {}, {"do_remote_prefill": False}, {"do_remote_decode": True}])
+def test_request_finished_aborted_without_pending_remote_prefill(params) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    request = make_request(status=RequestStatus.FINISHED_ABORTED, kv_transfer_params=params)
+
+    assert scheduler.request_finished(request, ([],)) == (False, None)
+
+    scheduler._recving_thread.add_request.assert_not_called()
+
+
+@pytest.mark.parametrize("dispatched", [False, True])
+def test_request_finished_after_alloc_waits_for_worker_completion(dispatched: bool) -> None:
     scheduler = make_pull_scheduler()
     scheduler._recving_thread = MagicMock()
     request = make_request(
         request_id="request-d",
-        status=RequestStatus.FINISHED_ABORTED,
         kv_transfer_params={
-            "do_remote_prefill": False,
+            "do_remote_prefill": True,
+            "remote_block_ids": ([20, 21],),
+            "remote_engine_id": "engine-p",
             "remote_host": "10.0.0.1",
             "remote_port": 6000,
             "remote_request_id": "request-p",
+            "remote_num_prompt_tokens": 32,
         },
     )
-    scheduler._reqs_need_recv["request-d"] = (request, ([10],), ([10],), 16)
+    scheduler.update_state_after_alloc(request, make_blocks(), num_external_tokens=16)
+    if dispatched:
+        scheduler.build_connector_meta(MagicMock())
 
-    delay_free, params = scheduler.request_finished(request, ([],))
-
-    assert (delay_free, params) == (False, None)
+    request.status = RequestStatus.FINISHED_ABORTED
+    assert scheduler.request_finished(request, ([],)) == (False, None)
     scheduler._recving_thread.add_request.assert_not_called()
-    assert scheduler._reqs_need_recv["request-d"][3] == 16
+    assert "request-d" in scheduler._reqs_recv_info
+    if not dispatched:
+        metadata = scheduler.build_connector_meta(MagicMock())
+        assert metadata.requests["request-d"].num_external_tokens == 16
+
+    output = SimpleNamespace(finished_recving={"request-d"}, finished_sending=None, failed_recving=set())
+    scheduler.update_connector_output(output)
+    scheduler.update_connector_output(output)
+
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+    assert not scheduler._reqs_recv_info
 
 
 def test_request_finished_delays_blocks_and_builds_remote_params() -> None:
