@@ -276,7 +276,12 @@ sets. See the upstream
 [Sampling Mask (Distribution Replay) guide](https://docs.vllm.ai/en/latest/training/sampling_mask/)
 for training-side usage.
 
-Start a tokens-only server with model runner V2 and processed logprobs:
+`--return-sampling-mask` enables the feature and is disabled by default.
+Model runner V2 and `--logprobs-mode processed_logprobs` are required.
+The following example also uses `--tokens-only` to expose the token-in/token-out
+API and skip tokenizer initialization; this is an API serving option, not a
+sampling-mask feature switch. Use `--enable-scale-out` instead to expose the
+same endpoint while retaining the normal serving setup and tokenizer.
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=1 \
@@ -286,7 +291,7 @@ vllm serve Qwen/Qwen3-0.6B \
     --logprobs-mode processed_logprobs
 ```
 
-Capture is disabled by default. When enabled, requests must use
+With sampling-mask capture enabled, requests must use
 `temperature > 0` and `top_k > 0`. Send pre-tokenized input to
 `/inference/v1/generate`:
 
