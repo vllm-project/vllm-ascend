@@ -982,10 +982,10 @@ class TestProfilingChunkAsyncScheduler(TestBase):
         first_output = scheduler.schedule()
 
         self.assertIn(request.request_id, first_output.num_scheduled_tokens)
-        self.assertEqual(scheduler.pp_size, scheduler.parallel_config.pipeline_parallel_size)
+        self.assertEqual(scheduler.parallel_config.pipeline_parallel_size, 2)
         self.assertEqual(
             request.next_decode_eligible_step,
-            scheduler.current_step + scheduler.pp_size,
+            scheduler.current_step + scheduler.parallel_config.pipeline_parallel_size,
         )
 
         # The next step is inside the PP cadence window: the request is skipped.

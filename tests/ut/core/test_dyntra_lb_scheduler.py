@@ -922,8 +922,10 @@ def test_dyntra_lb_async_v2_sets_pp_decode_cadence():
     scheduler_output = scheduler.schedule()
 
     assert request.request_id in scheduler_output.num_scheduled_tokens
-    assert scheduler.pp_size == 2
-    assert request.next_decode_eligible_step == scheduler.current_step + scheduler.pp_size
+    assert scheduler.parallel_config.pipeline_parallel_size == 2
+    assert (
+        request.next_decode_eligible_step == scheduler.current_step + scheduler.parallel_config.pipeline_parallel_size
+    )
 
 
 def test_dyntra_lb_sync_skips_until_previous_output_arrives():
