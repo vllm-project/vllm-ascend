@@ -41,6 +41,7 @@ class _ReceiveState:
     expected_ranks: set[WorkerRank] = field(default_factory=set)
     finished_ranks: set[WorkerRank] = field(default_factory=set)
     failed: bool = False
+    ready_sent: bool = False
 
 
 class MooncakeReadySendingThread(threading.Thread):
@@ -190,6 +191,9 @@ class MooncakeReadySendingThread(threading.Thread):
                 # From this point a lost ACK cannot prove P won't WRITE.
                 issued = True
                 self._send_ready(address, message)
+            # DONE may arrive before the last Ready ACK. Do not report success
+            # until both the sender outcome and all source outcomes are known.
+            self.result_queue.put(("ready_sent", metadata.transfer_id, None))
         except Exception as exc:
             if not self.stop_event.is_set():
                 self.result_queue.put(("uncertain" if issued else "failed", metadata.transfer_id, exc))
@@ -249,6 +253,7 @@ class MooncakeCompletionThread(threading.Thread):
         delimiter = [b""] if payload and payload[0] == b"" else []
         if delimiter:
             payload = payload[1:]
+        completion = None
         try:
             if len(payload) != 1:
                 raise ValueError("Expected one completion payload")
@@ -265,15 +270,20 @@ class MooncakeCompletionThread(threading.Thread):
                     raise ValueError(f"Missing completion identity: {key}")
             if message.get("status") not in ("ok", "error") or message.get("writes_drained") is not True:
                 raise ValueError("DONE must certify all source WRITEs are drained")
-            self.result_queue.put(("done", message["transfer_id"], message))
+            completion = message
             reply = {"kind": "done_ack", "transfer_id": message["transfer_id"]}
         except (ValueError, msgspec.DecodeError) as exc:
             reply = {"kind": "error", "error": str(exc)}
         try:
             sock.send_multipart([identity, *delimiter, msgspec.msgpack.encode(reply)])
-        except zmq.Again:
-            # P may retry DONE; main-thread source accounting is idempotent.
-            logger.warning("Timed out acknowledging Push completion")
+        except zmq.ZMQError:
+            logger.exception("Failed to acknowledge Push completion")
+            if completion is not None:
+                # Source WRITEs are already drained, so this request can fail
+                # safely after all other sources have also finished.
+                completion["status"] = "error"
+        if completion is not None:
+            self.result_queue.put(("done", completion["transfer_id"], completion))
 
 
 class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
@@ -339,6 +349,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             if thread is not None and thread.error is not None:
                 self._control_error = thread.error
         if self._control_error is not None:
+            # Stop publishing destinations once the control path is fatal.
+            self._stop_event.set()
             raise RuntimeError(
                 "Push control failed with possible outstanding WRITEs; do not recycle destination blocks"
             ) from self._control_error
@@ -359,6 +371,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     continue  # Duplicate completion for an already retired transfer.
                 if kind == "peers":
                     state.expected_ranks = payload
+                elif kind == "ready_sent":
+                    state.ready_sent = True
                 elif kind == "done":
                     if (
                         payload["producer_engine_id"] != state.metadata.remote_engine_id
@@ -375,9 +389,18 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     state.failed = True
                     logger.error("Push discovery failed for %s: %s", state.request_id, payload)
                 elif kind == "uncertain":
-                    self._control_error = payload
-                    self.maybe_raise_thread_error()
-                if kind == "failed" or (state.expected_ranks and state.finished_ranks == state.expected_ranks):
+                    state.failed = True
+                    if state.expected_ranks and state.finished_ranks == state.expected_ranks:
+                        # Ready failed, but every P has already certified that
+                        # its WRITEs ended. Report failure rather than success.
+                        state.ready_sent = True
+                        logger.error("Push Ready failed for %s: %s", state.request_id, payload)
+                    else:
+                        self._control_error = payload
+                        self.maybe_raise_thread_error()
+                if kind == "failed" or (
+                    state.ready_sent and state.expected_ranks and state.finished_ranks == state.expected_ranks
+                ):
                     results.finished_recving.add(state.request_id)
                     if state.failed:
                         results.failed_recving.add(state.request_id)
@@ -385,6 +408,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                     del self._reqs_recv_state[transfer_id]
             for state in self._reqs_recv_state.values():
                 if time.monotonic() - state.start_time > envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
+                    state.failed = True
                     self._control_error = TimeoutError(f"Missing terminal Push completion for {state.request_id}")
                     self.maybe_raise_thread_error()
         return results
