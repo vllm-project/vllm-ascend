@@ -1468,24 +1468,17 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
                 scheduler._block_pool.free_blocks.assert_called_once()
                 self.assertNotIn(1, tracker.sending_blocks)
 
-    def test_store_job_pins_swa_blocks_until_all_workers_finish(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-            AscendStoreKVConnectorWorkerMetadata,
-        )
-
+    def test_sync_swa_blocks_uses_current_request_table(self):
         scheduler = self._make_scheduler()
         scheduler.swa_group_ids = {0}
-        scheduler._block_pool.blocks = [MagicMock(block_id=i) for i in range(4)]
-        req_meta = ReqMeta("r1", token_len_chunk=16, block_ids_by_group=[[0, 1, 2]], can_save=True)
+        scheduler._kv_cache_manager = MagicMock()
+        scheduler._kv_cache_manager.get_block_ids.return_value = ([0, 2, 3],)
+        tracker = RequestTracker("r1", token_len=48, allocated_block_ids_by_group=[[1, 2, 3]])
 
-        scheduler.retain_blocks_for_save(req_meta)
+        scheduler._sync_swa_block_ids(tracker)
 
-        pinned_blocks = scheduler._block_pool.blocks[1:3]
-        scheduler._block_pool.touch.assert_called_once_with(pinned_blocks)
-        self.assertEqual(scheduler._in_flight_save_blocks.sending_blocks, {0: [1, 2]})
-        output = MagicMock(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({0: 2}))
-        scheduler.update_connector_output(output)
-        scheduler._block_pool.free_blocks.assert_called_once_with(list(reversed(pinned_blocks)))
+        self.assertEqual(tracker.allocated_block_ids_by_group, [[0, 2, 3]])
+        scheduler._kv_cache_manager.get_block_ids.assert_called_once_with("r1")
 
     def test_store_job_pins_mamba_blocks_until_all_workers_finish(self):
         scheduler = self._make_scheduler()

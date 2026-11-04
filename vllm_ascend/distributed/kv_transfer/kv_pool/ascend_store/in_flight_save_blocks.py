@@ -17,10 +17,9 @@ class InFlightSaveBlockTracker:
         self,
         req_meta: ReqMeta,
         speculative_blocks_by_group: dict[int, int],
-        swa_group_ids: set[int],
         block_pool: BlockPool | None,
     ) -> None:
-        if not req_meta.can_save or (not speculative_blocks_by_group and not swa_group_ids):
+        if not req_meta.can_save or not speculative_blocks_by_group:
             return
 
         block_ids: list[int] = []
@@ -31,11 +30,6 @@ class InFlightSaveBlockTracker:
                 group_block_ids[:-num_speculative_blocks] if num_speculative_blocks > 0 else group_block_ids
             )
             block_ids.extend(block_id for block_id in non_spec_block_ids if block_id > 0)
-        # A subsequent scheduler step may release a SWA block while this
-        # asynchronous save still reads its physical slot.
-        for group_id in swa_group_ids:
-            if group_id < len(req_meta.block_ids_by_group):
-                block_ids.extend(block_id for block_id in req_meta.block_ids_by_group[group_id] if block_id > 0)
 
         assert block_pool is not None
         event_id = self.next_event_id
