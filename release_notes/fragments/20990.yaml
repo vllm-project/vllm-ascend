@@ -1,0 +1,6 @@
+pr: 20990
+entries:
+  - category: performance
+    text: >-
+      Reduced layerwise GVA allocation calls by batching full and partial pages
+      across cache groups while preserving their payload sizes and destinations.
