@@ -360,7 +360,7 @@ Select the hardware tab below.
 
     Before starting:
 
-    - Install compatible vLLM, vLLM-Ascend, and [Mooncake](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake).
+    - Install compatible vLLM and vLLM-Ascend, and follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake).
     - Expose the devices used by each host and mount `/etc/hccn.conf`. Use `--shm-size=128g` and provide sufficient host memory for Engram CPU offload with DP shared memory. Replace the example IP addresses and `eth0` with your environment settings.
     - Run P and D in separate terminals. After both APIs are ready, start the proxy on the prefill host from the vLLM-Ascend repository root.
 
@@ -506,7 +506,7 @@ Select the hardware tab below.
 
     Before starting:
 
-    - Install compatible vLLM, vLLM-Ascend, and [Mooncake](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake).
+    - Install compatible vLLM and vLLM-Ascend, and follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake).
     - Expose the devices used by each host and mount `/etc/hccn.conf`. Use `--shm-size=128g` and provide sufficient host memory for Engram CPU offload with DP shared memory. Replace the example IP addresses and `eth0` with your environment settings.
     - Run P and D in separate terminals. After both APIs are ready, start the proxy on the prefill host from the vLLM-Ascend repository root.
 
@@ -911,7 +911,7 @@ Select the hardware tab below.
     - Decode enables prefix caching, `FULL_DECODE_ONLY`, static kernels, and recompute scheduling.
     - Both roles enable CPU binding, shared expert DP, FlashComm1, shared expert multistream overlap, and NPU graph extension. Fused MC2, norm/quantization fusion, and super kernels are disabled.
     - Both roles use three MTP draft tokens.
-    - Keep the Mooncake DP2 / TP2 declarations synchronized with the service topology and route both ranks of each role through the proxy. `kv_port` is a base port shared by ranks of the same role: the connector adds the DP serving index × TP × PP × PCP, then the local device index. With TP2 and PP=PCP=1, prefill rank 0 uses ports 30000–30001 and rank 1 uses 30002–30003; decode uses 30100–30103. Do not increment the configured base port for rank 1.
+    - Keep the Mooncake DP2 / TP2 declarations synchronized with the service topology and route both ranks of each role through the proxy. `kv_port` is a base port shared by ranks of the same role: the connector adds the DP serving index × TP × PP × PCP, then the local device index. With TP2 and PP = PCP = 1, prefill rank 0 uses ports 30000–30001 and rank 1 uses 30002–30003; decode uses 30100–30103. Do not increment the configured base port for rank 1.
     - For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to all four model commands and verify proxy forwarding. Validate multimodal input and thinking control through the proxy with the selected checkpoint.
 
 ## 6 Functional Verification
@@ -1097,6 +1097,8 @@ The following result was recorded for the original A3 series W8A8 TP8 × DP1 con
 
 ## 8 Performance Evaluation
 
+Use the endpoint and served model name for the deployment under test. Record request throughput, output token throughput, time to first token (TTFT), and time per output token (TPOT). Compare configurations using the same input/output lengths and request concurrency.
+
 ### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
@@ -1137,9 +1139,9 @@ For the complete, step-by-step usage guide, please refer to **[Optix-for-PD-disa
 
 ### 9.3 Model Runner V2 Decode Submission
 
-Audited Qwen3.8 Flash Next Model Runner V2 consumers automatically use optimistic CPU length bounds while exact execution lengths remain on device. This capability is enabled by default for supported consumers and requires no configuration switch. The resolved target architecture must be `Qwen4ExpForCausalLM` or `Qwen4ExpForConditionalGeneration`. Other models retain their existing behavior.
+For supported Qwen3.8-Flash-Next attention implementations, Model Runner V2 reduces CPU synchronization during decode by keeping exact token counts on the device and using estimated upper bounds on the CPU. This optimization is enabled automatically and requires no configuration switch. The resolved target architecture must be `Qwen4ExpForCausalLM` or `Qwen4ExpForConditionalGeneration`. Other models retain their existing behavior.
 
-The model checks the initialized target and MTP draft attention consumers once after KV initialization. A supported model skips both the corrected-count D2H copy and its CPU synchronization, using the runner's existing paired exemption. Exact positions, accepted counts, KV slots and recurrent state still use device state. Existing connector loads, waits, acknowledgements and errors are unchanged.
+After KV cache initialization, the model checks whether the target and MTP draft attention implementations support this optimization. If supported, it skips copying corrected token counts from the device to the host and the CPU wait for that copy. Exact positions, accepted token counts, KV cache slots, and recurrent state continue to use device-side values. KV-transfer connector behavior is unchanged.
 
 The same capability covers text and ordinary non-realtime multimodal requests. Completed prompts use the existing encoder gather fast path; there are no extra media certificates or PD observers.
 
