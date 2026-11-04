@@ -1081,7 +1081,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
 === "950DT Products"
 
-    950DT Products 1M deployment uses the basic eight-node 4P4D topology: DP1 / PP4 / PCP8 / TP1 on Prefill and DP4 / TP8 / DCP8 on Decode. Set `--max-model-len 1048574` on both Prefill and Decode and retain the other basic settings.
+    950DT Products 1M deployment uses the basic eight-node 4P4D topology: DP1 / PP4 / PCP8 / TP1 on Prefill and DP4 / TP8 / DCP8 on Decode. Set `--max-model-len 1048576` on both Prefill and Decode and retain the other basic settings.
 
     The 1M limit includes both input and output tokens. Reserve space for the generated response.
 
@@ -1166,7 +1166,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
             --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
             --enable-expert-parallel \
             --max-num-seqs 64 \
-            --max-model-len 1048574 \
+            --max-model-len 1048576 \
             --max-num-batched-tokens 16384 \
             --gpu-memory-utilization 0.90 \
             --enable-prefix-caching \
@@ -1261,7 +1261,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
             --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
             --enable-expert-parallel \
             --max-num-seqs 64 \
-            --max-model-len 1048574 \
+            --max-model-len 1048576 \
             --max-num-batched-tokens 768 \
             --gpu-memory-utilization 0.92 \
             --enable-prefix-caching \
@@ -1305,7 +1305,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
 === "950DT Products"
 
-    Using the 1M templates above, follow [Section 5.1.2](#512-start-the-engines-and-proxy) to run Bash directly on each P node and the Python launcher on each D node, then start the Proxy. Check maximum length `1048574` on both roles and DCP8 on Decode; validate a short request before testing long sequences through the Proxy.
+    Using the 1M templates above, follow [Section 5.1.2](#512-start-the-engines-and-proxy) to run Bash directly on each P node and the Python launcher on each D node, then start the Proxy. Check maximum length `1048576` on both roles and DCP8 on Decode; validate a short request before testing long sequences through the Proxy.
 
 ### 5.3 Pooled PD Separation Deployment {#53-pooled-pd}
 
