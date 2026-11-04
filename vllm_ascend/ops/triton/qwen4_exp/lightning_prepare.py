@@ -48,7 +48,8 @@ def _prepare_lightning_kernel(
     # Match advanced indexing for valid negative request indices as well.
     owner = tl.where(owner < 0, owner + requests, owner)
     valid = (owner >= 0) & (owner < requests)
-    length = tl.load(lengths + owner * stride_len, mask=valid, other=0).to(tl.int64)
+    safe_owner = tl.minimum(tl.maximum(owner, 0), requests - 1)
+    length = tl.load(lengths + safe_owner * stride_len, mask=valid, other=0).to(tl.int64)
     position_end = tl.load(positions + row * stride_pos).to(tl.int64) + 1
     # Triton's signed division truncates; torch.floor_divide rounds down.
     position_groups = position_end // compress_ratio - ((position_end < 0) & (position_end % compress_ratio != 0)).to(
@@ -58,7 +59,9 @@ def _prepare_lightning_kernel(
     tl.store(visible + row, tl.where(valid, tl.minimum(position_groups, length_groups), 0))
     tl.store(cu_query + row, row + 1)
     cols = tl.arange(0, block_table)
-    blocks = tl.load(table + owner * stride_table_row + cols * stride_table_col, mask=valid & (cols < columns), other=0)
+    blocks = tl.load(
+        table + safe_owner * stride_table_row + cols * stride_table_col, mask=valid & (cols < columns), other=0
+    )
     tl.store(row_table + row * columns + cols, blocks, mask=cols < columns)
     head = tl.arange(0, block_heads)
     tl.store(weights + row * padded_heads + head, tl.where(head < heads, score_weight, 0), mask=head < padded_heads)

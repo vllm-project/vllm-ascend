@@ -44,6 +44,28 @@ def test_lightning_prepare_matches_torch(heads, rows):
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("owner_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("heads", [4, 8])
+def test_lightning_prepare_masks_invalid_owners(owner_dtype, heads):
+    owners = torch.tensor([0, -1, -3, 3, -4, 2**31 - 1, -(2**31)], dtype=owner_dtype, device="npu")
+    rows = owners.numel()
+    query = torch.randn(rows, heads, 128, dtype=torch.bfloat16, device="npu")
+    positions = torch.full((rows,), 31, dtype=torch.int64, device="npu")
+    lengths = torch.tensor([16, 24, 32], dtype=torch.int32, device="npu")
+    table = torch.arange(21, dtype=torch.int32, device="npu").view(3, 7)
+    normalized = torch.where(owners < 0, owners + lengths.numel(), owners)
+    valid = (normalized >= 0) & (normalized < lengths.numel())
+    safe_owners = normalized.clamp(0, lengths.numel() - 1)
+    expected = list(_reference(query, positions, lengths, safe_owners, table))
+    expected[2] = torch.where(valid, expected[2], 0)
+    expected[4] = torch.where(valid[:, None], expected[4], 0)
+
+    actual = prepare_qsa_lightning_inputs(query, positions, lengths, owners, table)
+    for output, reference in zip(actual, expected):
+        torch.testing.assert_close(output, reference, rtol=0, atol=0)
+
+
+@torch.inference_mode()
 def test_lightning_prepare_replay_updates_metadata():
     query = torch.randn(32, 4, 128, dtype=torch.bfloat16, device="npu")
     positions = torch.arange(32, dtype=torch.int64, device="npu") * 17

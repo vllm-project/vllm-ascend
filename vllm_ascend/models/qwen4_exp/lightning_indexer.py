@@ -7,17 +7,15 @@
 
 from __future__ import annotations
 
-import math
-from typing import Protocol
-
 import torch
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 
+from vllm_ascend.ops.triton.qwen4_exp.lightning_prepare import prepare_qsa_lightning_inputs
 from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
 
 _HEAD_DIM = 128
-# BF16 spacing at the old weight 1/sqrt(128) is 2**-11.
-_LI_V2_WEIGHT_FRACTION_BITS = 11
+_COMPRESS_RATIO = 4
+_TOKEN_TOPK = 2048
 
 
 class QSAIndexerMetadataProtocol(Protocol):
@@ -95,31 +93,11 @@ def qsa_select_paged_tokens_lightning_v2(
         cmp_ratio=compress_ratio,
     )
     block_topk = token_topk // compress_ratio
-    # MRV2 prepares one schedule outside the layer loop. A caller that trims
-    # the query further must regenerate it for the new boundary instead.
-    metadata = getattr(attn_metadata, "qsa_lightning_v2_metadata", None)
-    if metadata is None or rows != attn_metadata.num_actual_tokens:
-        metadata = torch.ops.cann_ops_transformer.lightning_indexer_metadata(
-            query.shape[1],
-            1,
-            _HEAD_DIM,
-            block_topk,
-            batch_size=requests,
-            **common,
-        )
-    # Promote the old BF16-representable uniform weight to FP32. Keep its
-    # effective value while removing zero-head padding supported by native V2.
-    score_weight = math.ldexp(
-        round(math.ldexp(1.0 / math.sqrt(_HEAD_DIM), _LI_V2_WEIGHT_FRACTION_BITS)),
-        -_LI_V2_WEIGHT_FRACTION_BITS,
+    packed_width = block_topk + compress_ratio - 1
+    query, weights, visible_groups, query_cu_seqlens, row_block_table = prepare_qsa_lightning_inputs(
+        query, query_positions, sequence_lengths, token_to_req, block_table
     )
-    weights = torch.full(
-        (rows, query.shape[1]),
-        score_weight,
-        dtype=torch.float32,
-        device=query.device,
-    )
-    groups, _ = torch.ops.cann_ops_transformer.lightning_indexer(
+    groups, _ = torch.ops.npu.npu_lightning_indexer.default(
         query,
         compressed_key_cache,
         weights,
