@@ -2,12 +2,6 @@
 
 ## 1 Introduction
 
-!!! note
-
-    The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
-
-    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM Ascend is recommended.**
-
 [DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)
 is a native multimodal Mixture-of-Experts (MoE) model with 552B backbone
 parameters and a context length of up to one million tokens. It uses a
@@ -22,8 +16,11 @@ speculative decoding. These designs reduce the global KV cache footprint to
 one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports
 a continuously adjustable reasoning effort from 1 to 100.
 
-This guide describes W4A8 deployment with **vLLM Ascend v0.32.0** on Atlas
-800 A3 and A2 servers. It provides a single-node colocated A3 configuration,
+DeepSeek-V4.1-Flash deployment on Ascend includes A2, A3, and 950 series.
+This guide describes W4A8 deployment with **vLLM Ascend v0.32.0**. The
+examples below cover Atlas 800 A3 and A2 servers; use the corresponding
+hardware-specific image and configuration for 950 series. They include a
+single-node colocated A3 configuration,
 a two-node A3 Prefill-Decode (PD) disaggregated configuration, a two-node
 hybrid A2 configuration, and a four-node A2 PD disaggregated configuration.
 
@@ -49,11 +46,8 @@ their explicitly configured model-runner settings.
 
 ### 3.1 Model Weights and Hardware
 
-The official DeepSeek-V4.1-Flash checkpoint is available from
-[Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) and
-[ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4.1-Flash).
-
-Use the Ascend W4A8 checkpoint `DeepSeek-V4.1-Flash-1017-w4a8`, including
+Download the Ascend W4A8 checkpoint
+[DeepSeek-V4.1-Flash-1017-w4a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8), including
 its DSpark draft parameters and Engram tables. Download or copy it to the
 same absolute path on every server and set `MODEL_PATH` in each serving
 command to that checkpoint directory.
@@ -83,6 +77,9 @@ interfaces, and the service ports must not be blocked.
 
 Select the tab for the target hardware. A2 and A3 use separate images from
 the v0.32.0 release branch.
+
+These nightly images are temporary images for v0.32.0rc. Official release
+image addresses will be published when the release is available.
 
 === "A3 series"
 
@@ -277,15 +274,16 @@ the selected revision.
     servers. Mooncake transfers KV cache from the Prefill engines to the Decode
     engines.
 
-    !!! note
+    This A3 example requires model runner V2, SWA bounded replay with
+    PCP, and the MegaMoE operator package (`cann_ops_transformer`). Keep
+    `--net=host` and `--ipc=host` in the Docker command in Section 4.1.
+    Set `MODEL_PATH` on both nodes to the W4A8 checkpoint specified in
+    Section 3.1. Check startup logs to confirm that MegaMoE is enabled;
+    requesting `enable_fused_mc2: 2` alone does not confirm that the path is active.
 
-        This A3 example requires model runner V2, SWA bounded replay with
-        PCP, and the MegaMoE operator package (`cann_ops_transformer`). Keep
-        `--net=host` and `--ipc=host` in the Docker command in Section 4.1.
-        Set `MODEL_PATH` on both nodes to the W4A8 checkpoint specified in
-        Section 3.1.
-        Check startup logs to confirm that MegaMoE is enabled; requesting
-        `enable_fused_mc2: 2` alone does not confirm that the path is active.
+    Set PCP through `--prefill-context-parallel-size` in the launcher. The
+    connector obtains the remote PCP size from request metadata; it does not
+    read a `pcp_size` field in the `prefill` or `decode` extra configuration.
 
     Start the Prefill and Decode launchers on their respective nodes in parallel.
     Start the proxy only after all engines are ready.
@@ -619,7 +617,8 @@ the selected revision.
 
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
         processes and runtime threads.
-        - `enable_fused_mc2: 2` requests the MegaMoE path. It requires a compatible
+        - `enable_fused_mc2: 1` selects the fused `dispatch_ffn_combine` path.
+        `enable_fused_mc2: 2` requests the MegaMoE path instead. It requires a compatible
         `cann_ops_transformer` package and a supported model configuration.
         - `enable_flashcomm1: false` disables FlashComm. The old `enable_dsa_cp`
         option is omitted because this example uses PCP instead of DSA CP.
@@ -1865,3 +1864,64 @@ For common environment, installation, and parameter issues, refer to the
   `FULL_DECODE_ONLY` ACL Graph with DSpark draft graph execution enabled.
 - Production performance qualification and task-level accuracy evaluation are
   not complete.
+
+## 12 SWA Bounded Replay in v0.32.0
+
+SWA bounded replay is supported in v0.32.0 with the matching upstream vLLM
+revision described in Section 1. On Prefill, enable both prefix caching and
+bounded replay:
+
+```shell
+--enable-prefix-caching \
+--swa-bounded-replay
+```
+
+The A3 PD example in Section 5.2 already enables these options with model
+runner V2 and PCP4. Decode keeps prefix caching disabled.
+
+After a prefix-cache hit, bounded replay reuses available global KV cache
+and replays the bounded suffix needed to rebuild the sliding-window state.
+It does not retain the entire sliding-window history. Short prefixes may
+still require full recomputation. Replay execution depends on a usable
+prefix-cache hit, so successful service startup alone does not prove that
+the replay path was exercised.
+
+Scheduler modes with a pinned scheduler implementation, including
+`recompute_scheduler_enable`, dynamic load balancing, profiling chunks, and
+balance scheduling, disable SWA bounded replay with a warning. In Section
+5.2, the recomputation scheduler is enabled only on Decode, where prefix
+caching is disabled.
+
+### 12.1 Validate Replay Correctness
+
+Use the [bounded-replay probe](https://github.com/vllm-project/vllm-ascend/blob/releases/v0.32.0rc/tests/e2e/models/swa_bounded_replay_probe.py)
+to compare responses with replay disabled and enabled. Keep the checkpoint,
+parallel layout, sampling parameters, and all other serving options the same.
+The probe fixes the seed, uses deterministic sampling, and repeats requests
+with a shared prefix longer than the sliding window.
+
+First, start the service with `--enable-prefix-caching` and
+`--no-swa-bounded-replay`, then save the baseline:
+
+```shell
+export BASE_URL="http://<PROXY_IP>:<PROXY_PORT>"
+python tests/e2e/models/swa_bounded_replay_probe.py \
+    --base-url "$BASE_URL" --model dsv41 \
+    --output /tmp/replay-disabled.json
+```
+
+Restart with `--swa-bounded-replay`, keeping the other settings unchanged,
+and compare against the saved baseline:
+
+```shell
+python tests/e2e/models/swa_bounded_replay_probe.py \
+    --base-url "$BASE_URL" --model dsv41 \
+    --baseline /tmp/replay-disabled.json \
+    --output /tmp/replay-enabled.json
+```
+
+Check Prefill cache-hit metrics and replay execution evidence in service
+logs or traces as well as the probe output. In a PD deployment, route repeated
+prefixes to the same Prefill engine so they can reuse its cache. For additional
+cross-chunk coverage, use a prefill chunk size smaller than the sliding window.
+This probe checks replay correctness; use Section 8 for performance evaluation.
