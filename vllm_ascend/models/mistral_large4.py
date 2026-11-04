@@ -56,13 +56,17 @@ from vllm.models.mistral.mistral_large4.amd.model import (
     MistralLarge4ForCausalLM,
 )
 
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+
 logger = init_logger(__name__)
 
 __all__ = [
+    "AscendMistralIndexerBackend",
     "AscendMistralLarge4ForCausalLM",
     "AscendMistralMLAAttention",
     "AscendSharedKVSlotMappingMixin",
     "adopt_ascend_modules",
+    "prepare_indexer_for_ascend",
     "validate_moe_parallelism",
 ]
 
@@ -128,13 +132,20 @@ def adopt_shared_kv_skip(attn: nn.Module) -> None:
 
 
 class AscendMistralMLAAttention(MistralMLAAttention):
-    """Upstream attention with the CUDA stream overlap removed.
+    """Upstream attention with the CUDA stream overlap and indexer call removed.
+
+    Two changes, and the second is a correctness one.
 
     Upstream runs the indexer on an aux stream so it overlaps the Q/KV
     projections, joining on two ``torch.cuda.Event``s. vLLM-Ascend uses
     ``torch.npu.Event`` and ``npu_stream_switch``; upstream's helper
     (``vllm.utils.multi_stream_utils.execute_in_parallel``) has no Ascend
-    counterpart. Running the two serially keeps the same math.
+    counterpart.
+
+    More importantly, **the model must not call the indexer at all here.** On
+    CUDA, ``MLAAttention`` does not run it, so upstream's attention module
+    does. ``AscendSFAImpl`` does run it, from inside ``self.attn``. Calling it
+    in both places would run the k path and the cache write twice per step.
     """
 
     def forward(
@@ -145,14 +156,12 @@ class AscendMistralMLAAttention(MistralMLAAttention):
         rotary_emb: Any,
     ) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
-        indexer = self.indexer
-        if indexer is not None:
-            indexer(
-                hidden_states,
-                positions,
-                log_positions,
-                rotary_emb if self.spec.indexer_use_rope else None,
-            )
+        # The Ascend SFA impl runs the indexer itself, from inside self.attn,
+        # and its signature carries no log positions. This is the last place
+        # that holds them, so hand them to the backend here.
+        backend = getattr(getattr(self.attn.impl, "indexer", None), "impl", None)
+        if isinstance(backend, AscendMistralIndexerBackend):
+            backend.log_positions = log_positions
         q, kv_c_normed, k_pe = self._project_qkv(positions, hidden_states, log_positions, rotary_emb)
         if self.spec.use_sparse:
             # Upstream's MLA impls use this to order the top-k read against the
@@ -169,6 +178,80 @@ class AscendMistralMLAAttention(MistralMLAAttention):
             output_shape=(num_tokens, self.num_local_heads * self.v_head_dim),
         )
         return self.o_proj(attn_out)[0]
+
+
+class AscendMistralIndexerBackend(AscendSFAIndexerBackend):
+    """The Ascend DSA indexer, driven from Mistral's indexer module.
+
+    ``AscendSFAIndexerBackend`` is not a reimplementation of the indexer: it
+    borrows the upstream module's weights by attribute name and calls them.
+    ``MistralIndexer`` already carries ``n_head``, ``head_dim``, ``wq_b``,
+    ``wk_weights_proj`` and ``k_norm`` under exactly those names, because both
+    designs descend from DeepSeek-V3.2's DSA. So the k path needs nothing: the
+    base class calls ``wk_weights_proj`` and splits at ``head_dim``, which is
+    Mistral's layout, and it calls ``k_norm`` as a module, so Mistral's
+    ``LayerNorm`` with a bias costs nothing.
+
+    Two things differ, and this subclass covers both.
+
+    **The query.** DeepSeek's indexer shares the MLA's ``q_c`` — the output of
+    ``q_a_layernorm`` over a q-LoRA projection. Mistral has no q-LoRA, so the
+    fused prolog yields no ``q_c``; its indexer instead owns a ``q_input_norm``
+    over the hidden states. The two are therefore decoupled, which is simpler:
+    this backend computes ``q_input_norm(hidden_states)`` and ignores whatever
+    ``q_c`` it is handed.
+
+    **Scalable softmax.** Upstream scales the indexer query by
+    ``s * log(pos + 1) + b`` after ``wq_b``. The Ascend ``forward`` has no
+    ``log_positions`` parameter, so there is no hook; the scale is applied
+    here, in the same place and the same order as upstream.
+    """
+
+    def __init__(self, vllm_indexer: nn.Module, qk_rope_head_dim: int) -> None:
+        super().__init__(vllm_indexer, qk_rope_head_dim)
+        # Kept so the q path and SSMax can run from the upstream module.
+        self.q_input_norm = vllm_indexer.q_input_norm
+        self.ssmax = vllm_indexer.ssmax
+        # Set once per step by the attention module, which is the last place
+        # that holds the step's log positions before the Ascend impl takes
+        # over. The Ascend indexer signature has nowhere to carry them.
+        self.log_positions: torch.Tensor | None = None
+
+    def mistral_q(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """``q_input_norm``, then ``wq_b``, then SSMax — upstream's order."""
+        q = self.wq_b(self.q_input_norm(hidden_states))[0]
+        q = q.view(-1, self.n_head, self.head_dim)
+        if self.ssmax is None:
+            return q
+        if self.log_positions is None:
+            raise RuntimeError(
+                "Mistral Large 4 on Ascend: scalable softmax needs the step's "
+                "log(positions + 1), which the attention module sets before "
+                "the indexer runs. It was not set, so the query would go "
+                "unscaled and long-context attention would flatten."
+            )
+        return self.ssmax(q, self.log_positions)
+
+
+def prepare_indexer_for_ascend(indexer: nn.Module, config: Any) -> nn.Module:
+    """Give ``MistralIndexer`` the three scalars the Ascend backend reads.
+
+    ``AscendSFAIndexerBackend.__init__`` reads ``topk_tokens``,
+    ``softmax_scale`` and ``q_lora_rank`` off the module it wraps. Mistral's
+    indexer defines none of them:
+
+    * ``topk_tokens`` is genuinely used (it sizes the top-k output and clamps
+      the per-token lengths), and is ``config.index_topk``.
+    * ``softmax_scale`` and ``q_lora_rank`` are assigned in the backend's
+      constructor and never read anywhere in the file. They are set here so
+      construction succeeds, with values that stay correct if that changes:
+      the usual DSA scale, and ``None`` for a model with no q-LoRA — which is
+      the value ``AscendSFAImpl`` already branches on.
+    """
+    indexer.topk_tokens = config.index_topk
+    indexer.q_lora_rank = None
+    indexer.softmax_scale = indexer.head_dim**-0.5
+    return indexer
 
 
 def adopt_ascend_modules(model: nn.Module) -> int:

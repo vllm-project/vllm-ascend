@@ -287,6 +287,98 @@ def test_a_dense_config_is_left_alone(monkeypatch):
     ml4.validate_moe_parallelism(_moe_config(enable_ep=True, n_routed_experts=0))
 
 
+# ---------------------------------------------------------------- indexer
+
+
+def test_prepare_supplies_the_three_scalars_the_backend_reads():
+    """MistralIndexer defines none of them; the Ascend backend reads all three."""
+    indexer = SimpleNamespace(head_dim=128)
+
+    ml4.prepare_indexer_for_ascend(indexer, SimpleNamespace(index_topk=2048))
+
+    assert indexer.topk_tokens == 2048
+    # No q-LoRA: the value AscendSFAImpl already branches on.
+    assert indexer.q_lora_rank is None
+    assert indexer.softmax_scale == pytest.approx(128**-0.5)
+
+
+def test_prepare_leaves_the_shared_module_names_alone():
+    """The backend borrows these by name; the shim must not rebind them."""
+    wq_b, wk, k_norm = object(), object(), object()
+    indexer = SimpleNamespace(head_dim=128, n_head=32, wq_b=wq_b, wk_weights_proj=wk, k_norm=k_norm)
+
+    ml4.prepare_indexer_for_ascend(indexer, SimpleNamespace(index_topk=2048))
+
+    assert indexer.wq_b is wq_b
+    assert indexer.wk_weights_proj is wk
+    assert indexer.k_norm is k_norm
+    assert indexer.n_head == 32
+
+
+def test_ssmax_refuses_to_run_unscaled():
+    """Without log positions the query would go unscaled, which is silent."""
+    backend = ml4.AscendMistralIndexerBackend.__new__(ml4.AscendMistralIndexerBackend)
+    backend.n_head, backend.head_dim = 2, 4
+    backend.q_input_norm = lambda x: x
+    backend.wq_b = lambda x: (torch.zeros(x.shape[0], 8),)
+    backend.ssmax = lambda q, log_pos: q
+    backend.log_positions = None
+
+    with pytest.raises(RuntimeError, match="log"):
+        backend.mistral_q(torch.zeros(3, 16))
+
+
+def test_ssmax_is_applied_after_wq_b_with_the_step_log_positions():
+    seen = {}
+
+    def _ssmax(q, log_positions):
+        seen["log_positions"] = log_positions
+        return q * 2
+
+    backend = ml4.AscendMistralIndexerBackend.__new__(ml4.AscendMistralIndexerBackend)
+    backend.n_head, backend.head_dim = 2, 4
+    backend.q_input_norm = lambda x: x + 1
+    backend.wq_b = lambda x: (torch.ones(x.shape[0], 8),)
+    backend.ssmax = _ssmax
+    log_positions = torch.tensor([0.0, 0.7, 1.1])
+    backend.log_positions = log_positions
+
+    q = backend.mistral_q(torch.zeros(3, 16))
+
+    assert q.shape == (3, 2, 4)
+    assert torch.equal(q, torch.full((3, 2, 4), 2.0))
+    assert seen["log_positions"] is log_positions
+
+
+def test_a_model_without_ssmax_needs_no_log_positions():
+    backend = ml4.AscendMistralIndexerBackend.__new__(ml4.AscendMistralIndexerBackend)
+    backend.n_head, backend.head_dim = 2, 4
+    backend.q_input_norm = lambda x: x
+    backend.wq_b = lambda x: (torch.ones(x.shape[0], 8),)
+    backend.ssmax = None
+    backend.log_positions = None
+
+    assert backend.mistral_q(torch.zeros(3, 16)).shape == (3, 2, 4)
+
+
+def test_the_model_does_not_call_the_indexer_itself():
+    """AscendSFAImpl runs it; calling it here too would write the cache twice."""
+    attn = _attn(_spec(0, 0))
+    attn.__class__ = ml4.AscendMistralMLAAttention
+    attn.num_local_heads, attn.v_head_dim = 2, 4
+    attn.indexer = lambda *a, **k: pytest.fail("the model must not run the indexer")
+    attn._project_qkv = lambda *_a: (
+        torch.zeros(3, 2, 8),
+        torch.zeros(3, 16),
+        torch.zeros(3, 1, 4),
+    )
+    attn.attn = lambda *a, **k: torch.zeros(3, 8)
+    attn.attn.impl = _Impl()
+    attn.o_proj = lambda x: (x,)
+
+    attn.forward(torch.zeros(3), torch.zeros(3, 16), torch.zeros(3), None)
+
+
 # ------------------------------------------------------------ registration
 
 
