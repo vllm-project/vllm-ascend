@@ -27,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.mamba_utils import get_mamba_groups
 
 from vllm_ascend.ascend_config import KVPPConfig
+from vllm_ascend.core.kv_cache_interface import MambaStateSharding
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
@@ -92,6 +93,7 @@ class KVPoolWorker:
         self.use_recoverssm = getattr(vllm_config.cache_config, "use_kda_recoverssm", False) is True
         self.use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
         self.kv_cache_config = kv_cache_config
+        self.mamba_state_sharding: dict[int, MambaStateSharding] = {}
         hf_text_config = getattr(model_config, "hf_text_config", None)
         hf_config = getattr(model_config, "hf_config", hf_text_config)
         self.hf_config = hf_text_config or hf_config
@@ -105,6 +107,7 @@ class KVPoolWorker:
         self._init_parallelism_info(model_config, parallel_config)
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self._init_key_head_config(model_config, parallel_config)
+        self._init_mamba_state_sharding()
         self._init_metadata(model_config, vllm_config, extra_config)
         self._init_backend(parallel_config, extra_config)
         self._init_kv_events(vllm_config)
@@ -286,6 +289,20 @@ class KVPoolWorker:
             self.effective_heads_per_rank = tp_mismatch_info.effective_heads_per_rank
             self.num_sub_keys = tp_mismatch_info.num_sub_keys
 
+    def _init_mamba_state_sharding(self) -> None:
+        """Resolve optional model declarations before building state cache keys."""
+        if self.use_layerwise or self.use_kvpp or not self.use_mamba:
+            return
+        model_cls = get_model_cls(self.vllm_config.model_config)
+        get_sharding = getattr(model_cls, "get_mamba_state_sharding", None)
+        if not callable(get_sharding):
+            return
+        declarations = get_sharding(self.vllm_config.parallel_config, self.tp_rank, self.pcp_rank)
+        for spec, group_ids in get_mamba_groups(self.kv_cache_config).items():
+            if spec.mamba_type in declarations:
+                for group_id in group_ids:
+                    self.mamba_state_sharding[group_id] = declarations[spec.mamba_type]
+
     def _init_metadata(self, model_config, vllm_config, extra_config) -> None:
         partitions = None
         if self.kv_role == "kv_consumer" and self.can_put:
@@ -314,6 +331,9 @@ class KVPoolWorker:
         for group_id in range(self.num_kv_cache_groups):
             # the mamba kv_heads is not same with the full attention, can't share the cache data
             group_tp_rank = self.tp_rank if self.group_uses_align_state[group_id] else self.head_or_tp_rank
+            sharding = self.mamba_state_sharding.get(group_id)
+            if sharding is not None:
+                group_tp_rank = sharding.shard_rank
             self.metadata.append(
                 KeyMetadata(
                     model_config.model.rstrip("/").split("/")[-1],
@@ -439,6 +459,7 @@ class KVPoolWorker:
                 self.group_uses_align_state,
                 self.enable_kv_events,
                 worker=self if self.tp_mismatch else None,
+                group_state_sharding=self.mamba_state_sharding,
             )
             self.kv_send_thread.start()
             ready_event_sending.wait()
@@ -1548,6 +1569,9 @@ class KVPoolWorker:
             return self.tp_size * self.pcp_size
         if self.tp_mismatch:
             return self.effective_tp_size
+        sharding = self.mamba_state_sharding.get(kv_cache_group_id)
+        if sharding is not None:
+            return sharding.shard_count
         if self.group_uses_align_state[kv_cache_group_id]:
             return self.tp_size
         return min(self.tp_size, self._get_group_num_kv_heads(kv_cache_group_id))
@@ -1565,7 +1589,7 @@ class KVPoolWorker:
         return f"{key[:value_start]}{value}{key[value_end:]}"
 
     def _expand_lookup_keys_by_rank(self, keys: list[str], group_id: int) -> list[str]:
-        # PCP replicas share keys; expand only the physical KV partitions.
+        # Expand head partitions; replicas of the same partition share a key.
         expanded: list[str] = []
         num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match

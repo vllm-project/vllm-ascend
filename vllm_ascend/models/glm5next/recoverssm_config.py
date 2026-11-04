@@ -41,8 +41,8 @@ def validate_glm_recoverssm(vllm_config: VllmConfig) -> None:
     if parallel.prefill_context_parallel_size > 1:
         if parallel.tensor_parallel_size != 1:
             raise ValueError("GLM RecoverSSM PCP requires TP=1")
-        if transfer is None or transfer.kv_connector not in mooncake_connectors or transfer.kv_role != "kv_producer":
-            raise ValueError("GLM RecoverSSM PCP requires a Mooncake KV producer")
+        if transfer is None or transfer.kv_role != "kv_producer":
+            raise ValueError("GLM RecoverSSM PCP requires a KV producer")
     if transfer is not None and transfer.kv_connector not in (*mooncake_connectors, "AscendStoreConnector"):
         raise ValueError(
             "GLM RecoverSSM KV transfer requires MooncakeConnectorV2, MooncakePullConnector or AscendStoreConnector"
