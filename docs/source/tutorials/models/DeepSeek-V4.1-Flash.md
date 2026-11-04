@@ -609,14 +609,12 @@ the selected revision.
 
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
         processes and runtime threads.
-        - `enable_fused_mc2: 1` selects the fused `dispatch_ffn_combine` path.
-        `enable_fused_mc2: 2` requests the MegaMoE path instead. It requires a compatible
-        `cann_ops_transformer` package and a supported model configuration.
-        - `enable_flashcomm1: false` disables FlashComm. The old `enable_dsa_cp`
-        option is omitted because this example uses PCP instead of DSA CP.
+        - `enable_fused_mc2: 2` selects the MegaMoE path on Prefill. It requires a
+        compatible `cann_ops_transformer` package and a supported model configuration.
+        - `enable_flashcomm1: false` disables FlashComm.
         - `enable_shared_expert_dp: true` uses data parallelism for shared experts.
-        - `multistream_overlap_shared_expert: false` explicitly disables shared-
-        expert multistream overlap on Prefill for this MegaMoE configuration.
+        - `multistream_overlap_shared_expert: false` disables shared-expert
+        multistream overlap on Prefill, where MegaMoE is enabled.
 
     - Decode uses the following `--additional-config` options:
 
@@ -626,9 +624,9 @@ the selected revision.
         kernel generation while retaining the enhanced ACL Graph path.
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
         processes and runtime threads.
-        - `multistream_overlap_shared_expert: true` overlaps shared-expert execution
-        with routed-expert computation on separate streams to improve Decode MoE
-        throughput.
+        - `multistream_overlap_shared_expert: true` enables shared-expert multistream
+        overlap on Decode, where MegaMoE is not enabled. Shared-expert execution
+        overlaps routed-expert computation on separate streams.
         - `recompute_scheduler_enable: true` enables the PD Decode recomputation
         scheduler. When the Decode-side KV cache is unavailable, the request can be
         sent back to Prefill to recompute it. Enable this option only on Decode.
