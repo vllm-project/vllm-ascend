@@ -312,9 +312,9 @@ def test_unsharded_only_model_with_dcp_topology(worker):
 def test_scheduler_prompt_truncation_uses_each_groups_dcp_size(dcp_size):
     tree = ast.parse(SOURCE.read_text())
     info = next(n for n in tree.body if getattr(n, "name", None) == "GroupTransferInfo")
-    cls = next(n for n in tree.body if getattr(n, "name", None) == "MooncakeConnectorScheduler")
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "MooncakeConnectorScheduler")
     cls.body = [n for n in cls.body if getattr(n, "name", None) == "_get_transfer_block_ids"]
-    scope = {"dataclass": dataclass, "cdiv": lambda a, b: (a + b - 1) // b}
+    scope: dict[str, Any] = {"dataclass": dataclass, "cdiv": lambda a, b: (a + b - 1) // b}
     exec(
         compile(
             "from __future__ import annotations\n" + ast.unparse(ast.Module(body=[info, cls], type_ignores=[])),
