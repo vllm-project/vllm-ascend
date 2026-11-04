@@ -2726,30 +2726,28 @@ For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool gui
 
 ### 5.6 Service Verification
 
-Select the service endpoint for the deployment:
+Use the host and port for your deployment to set `SERVICE_URL` in the HTTP example below.
 
-| Deployment | `SERVICE_URL` | `HEALTH_PATH` |
+| Deployment | Host and port | `HEALTH_PATH` |
 | ---------- | ------------- | ------------- |
-| 950DT products single-node colocated | `http://<SERVICE_IP>:8000` | `health` |
-| A3 single-node colocated | `http://<A3_IP>:8900` | `health` |
-| 950DT products PD proxy | `http://<PROXY_IP>:1999` | `healthcheck` |
-| A3 PD proxy | `http://<PROXY_IP>:<PROXY_PORT>` | `healthcheck` |
-| A2 PD proxy | `http://<PROXY_IP>:2999` | `healthcheck` |
-| A2 multi-node colocated | `http://<A2_NODE0_IP>:8000` | `health` |
+| 950DT products single-node colocated | `<SERVICE_IP>:8000` | `health` |
+| A3 single-node colocated | `<A3_IP>:8900` | `health` |
+| 950DT products PD proxy | `<PROXY_IP>:1999` | `healthcheck` |
+| A3 PD proxy | `<PROXY_IP>:<PROXY_PORT>` | `healthcheck` |
+| A2 PD proxy | `<PROXY_IP>:2999` | `healthcheck` |
+| A2 multi-node colocated | `<A2_NODE0_IP>:8000` | `health` |
 
 The 950DT products proxy example uses port `1999`, and the A2 proxy example
 uses `2999`. For A3, set `PROXY_PORT` to the port chosen when starting its
 proxy. Use the configured proxy port in `SERVICE_URL`.
 
 The proxy's `/healthcheck` reports the configured Prefill and Decode instance
-counts; it does not verify whether those instances are ready. To check an
-individual instance, send `GET /health` to its IP address and API port, for
-example `http://<PREFILL_NODE_IP>:7100/health` or
-`http://<DECODE_NODE_IP>:7100/health`. The backend API ports start at `7100` on
-A2, A3, and 950DT products.
+counts. To check whether a backend is ready, send `GET /health` to its host
+and API port, for example `<PREFILL_NODE_IP>:7100` or `<DECODE_NODE_IP>:7100`.
+The backend API ports start at `7100` on A2, A3, and 950DT products.
 
-The following example checks a colocated service. For PD, use the proxy URL
-and `healthcheck` from the table instead. Reuse `SERVICE_URL` for the requests
+The following example checks a colocated service. For PD, use the proxy host and port
+with `healthcheck` from the table. Reuse `SERVICE_URL` for the requests
 in [Section 6](#6-functional-verification).
 
 ```shell
