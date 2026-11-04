@@ -249,7 +249,6 @@ the selected revision.
             },
             "enable_cpu_binding":true,
             "enable_fused_mc2":1,
-            "enable_dsa_cp":true,
             "enable_flashcomm1":false,
             "enable_shared_expert_dp":true
         }'
@@ -277,8 +276,8 @@ the selected revision.
     - `--safetensors-load-strategy lazy` avoids eagerly materializing the whole
         checkpoint during loading.
     - `--swa-bounded-replay` enables SWA bounded replay.
-    - `enable_fused_mc2`, `enable_dsa_cp`, and
-        `enable_shared_expert_dp` enable the A3 MoE and communication optimizations
+    - `enable_fused_mc2` and `enable_shared_expert_dp` enable the A3 MoE and
+        communication optimizations
         used by this configuration. `enable_cpu_binding` pins worker processes to
         CPUs, while `enable_npugraph_ex` enables the enhanced ACL Graph path.
 
@@ -820,7 +819,6 @@ the selected revision.
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
             "enable_cpu_binding":true,
-            "enable_dsa_cp":true,
             "enable_flashcomm1":true,
             "enable_shared_expert_dp":true
         }' \
@@ -1216,7 +1214,6 @@ vllm serve "$MODEL_PATH" \
     --additional-config '{
         "enable_cpu_binding":true,
         "enable_fused_mc2":1,
-        "enable_dsa_cp":true,
         "enable_flashcomm1":true,
         "enable_shared_expert_dp":true
     }' \
@@ -1495,7 +1492,6 @@ vllm serve "$MODEL_PATH" \
     --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
     --additional-config '{
         "enable_cpu_binding":true,
-        "enable_dsa_cp":true,
         "enable_flashcomm1":true,
         "enable_shared_expert_dp":true
     }' \
@@ -1722,7 +1718,6 @@ For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool gui
               "enable_static_kernel":false
           },
           "enable_cpu_binding":true,
-          "enable_dsa_cp":true,
           "enable_flashcomm1":true,
           "enable_shared_expert_dp":true
       }'
