@@ -2,12 +2,14 @@
 """Qwen4Exp QSA has one fused Ascend execution path."""
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
 
 from vllm_ascend.models.qwen4_exp import lightning_indexer
 from vllm_ascend.models.qwen4_exp import qsa as ascend_qsa
+from vllm_ascend.utils import vllm_version_is
 
 
 def _make_indexer() -> ascend_qsa.AscendQSAIndexer:
@@ -66,35 +68,52 @@ def _make_impl() -> ascend_qsa.AscendQSAImpl:
     return impl
 
 
-def test_forward_qsa_always_uses_cann_gbsa(monkeypatch) -> None:
+def test_impl_always_uses_cann_gbsa(monkeypatch) -> None:
     sentinel = torch.zeros(1, 2, 2)
     calls: list[tuple] = []
     logical_positions = torch.zeros(1, dtype=torch.int64)
     seq_lens = torch.ones(1, dtype=torch.int32)
+    layer = SimpleNamespace(
+        topk_indices_buffer=torch.zeros(1, 515, dtype=torch.int32),
+        indexer=SimpleNamespace(token_topk=2048, compress_ratio=4),
+    )
+    kv_cache = (torch.zeros(1, 1, 1, 2), torch.zeros(1, 1, 1, 2))
+    attn_metadata = SimpleNamespace(
+        num_actual_tokens=1,
+        block_table=torch.zeros(1, 1, dtype=torch.int32),
+    )
+    output = torch.zeros(1, 2, 2)
 
     def gbsa(*args, **kwargs):
         calls.append(args)
         return sentinel
 
     monkeypatch.setattr(ascend_qsa, "qsa_gbsa_attention", gbsa)
-    result = _make_impl().forward_qsa(
-        layer=SimpleNamespace(
-            topk_indices_buffer=torch.zeros(1, 515, dtype=torch.int32),
-            indexer=SimpleNamespace(token_topk=2048, compress_ratio=4),
-        ),
-        query=torch.zeros(1, 2, 2),
-        key=torch.zeros(0),
-        value=torch.zeros(0),
-        kv_cache=(torch.zeros(1, 1, 1, 2), torch.zeros(1, 1, 1, 2)),
-        attn_metadata=SimpleNamespace(
-            num_actual_tokens=1,
-            block_table=torch.zeros(1, 1, dtype=torch.int32),
-        ),
-        output=torch.zeros(1, 2, 2),
-        token_to_req=torch.zeros(1, dtype=torch.int64),
-        logical_positions=logical_positions,
-        seq_lens=seq_lens,
-    )
+    impl: Any = _make_impl()
+    if vllm_version_is("0.32.0"):
+        result = impl.forward_qsa(
+            layer=layer,
+            query=torch.zeros(1, 2, 2),
+            key=torch.zeros(0),
+            value=torch.zeros(0),
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            output=output,
+            token_to_req=torch.zeros(1, dtype=torch.int64),
+            logical_positions=logical_positions,
+            seq_lens=seq_lens,
+        )
+    else:
+        result = impl.forward(
+            layer=layer,
+            query=torch.zeros(1, 2, 2),
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            output=output,
+            token_to_req=torch.zeros(1, dtype=torch.int64),
+            logical_positions=logical_positions,
+            seq_lens=seq_lens,
+        )
 
     assert result is sentinel
     assert len(calls) == 1

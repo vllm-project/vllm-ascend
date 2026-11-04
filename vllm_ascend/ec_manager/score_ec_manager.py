@@ -6,6 +6,8 @@ from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.request import Request
 
+from vllm_ascend.utils import vllm_version_is
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
@@ -108,6 +110,10 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
     def __init__(self, cache_size: int, vllm_config: "VllmConfig"):
         super().__init__(cache_size)
+        if not vllm_version_is("0.32.0"):
+            # vLLM main keeps per-mm_hash refcounts for a request's cached
+            # inputs; the pinned release tree tracks only the input ids.
+            self.request_hash_refs: dict[str, dict[str, int]] = {}
 
         config = ScoreEncoderCacheConfig.from_dict(vllm_config.ec_manager_config.manager_config)
         # ---------------- NPU cache ----------------
@@ -300,7 +306,14 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
             if mm_hash in self.npu_cache:
                 ent.clock = self.max_clock
 
-        self.request_cached_ids.setdefault(request.request_id, set()).add(input_id)
+        if vllm_version_is("0.32.0"):
+            self.request_cached_ids.setdefault(request.request_id, set()).add(input_id)
+        else:
+            cached_ids = self.request_cached_ids.setdefault(request.request_id, set())
+            if input_id not in cached_ids:
+                cached_ids.add(input_id)
+                hash_refs = self.request_hash_refs.setdefault(request.request_id, {})
+                hash_refs[mm_hash] = hash_refs.get(mm_hash, 0) + 1
         return True
 
     def on_request(self):
@@ -408,19 +421,46 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         self.cpu_cache[mm_hash] = cache_entry
 
         self.cached[mm_hash].add(request_id)
-        self.request_cached_ids.setdefault(request_id, set()).add(input_id)
+        if vllm_version_is("0.32.0"):
+            self.request_cached_ids.setdefault(request_id, set()).add(input_id)
+        else:
+            cached_ids = self.request_cached_ids.setdefault(request_id, set())
+            if input_id not in cached_ids:
+                cached_ids.add(input_id)
+                hash_refs = self.request_hash_refs.setdefault(request_id, {})
+                hash_refs[mm_hash] = hash_refs.get(mm_hash, 0) + 1
 
     def free_encoder_input(self, request: Request, input_id: int) -> None:
         req_id = request.request_id
         mm_hash = request.mm_features[input_id].identifier
-        if req_id in self.request_cached_ids:
-            self.request_cached_ids[req_id].discard(input_id)
-            if not self.request_cached_ids[req_id]:
-                del self.request_cached_ids[req_id]
+        if vllm_version_is("0.32.0"):
+            if req_id in self.request_cached_ids:
+                self.request_cached_ids[req_id].discard(input_id)
+                if not self.request_cached_ids[req_id]:
+                    del self.request_cached_ids[req_id]
+        else:
+            cached_ids = self.request_cached_ids.get(req_id)
+            if cached_ids is not None and input_id in cached_ids:
+                cached_ids.remove(input_id)
+                hash_refs = self.request_hash_refs.setdefault(req_id, {})
+                refs = hash_refs.get(mm_hash, 0)
+                if refs <= 1:
+                    hash_refs.pop(mm_hash, None)
+                else:
+                    hash_refs[mm_hash] = refs - 1
+                if not cached_ids:
+                    del self.request_cached_ids[req_id]
+                if not hash_refs:
+                    self.request_hash_refs.pop(req_id, None)
 
         # The mm_hash not in cache or the req_id set is empty
         if not self.cached.get(mm_hash, None):
             return
+        if not vllm_version_is("0.32.0"):
+            # A request that still holds another input with the same mm_hash
+            # keeps the entry alive (vLLM main's refcounted release fix).
+            if mm_hash in self.request_hash_refs.get(req_id, ()):
+                return
         self.cached[mm_hash].discard(req_id)
         if self.cached[mm_hash]:
             return
@@ -514,6 +554,8 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         """
         self.cached.clear()
         self.request_cached_ids.clear()
+        if not vllm_version_is("0.32.0"):
+            self.request_hash_refs.clear()
         self.freeable.clear()
         self.promoting.clear()
         self.cpu_get_encoder_mm_hashes.clear()

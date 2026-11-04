@@ -815,7 +815,7 @@
 #       Ascend uses the NPU v2 runner by default. Features that are not
 #       V2-ready (draft_window_size, suffix
 #       speculative decoding, ngram speculative decoding, draft_model
-#       speculative decoding, dflash2 graph, and p-eagle)
+#       speculative decoding, and p-eagle)
 #       default to v1.
 #       Upstream GPU-specific architecture, feature, and Triton gates must not
 #       silently switch an
@@ -887,9 +887,9 @@
 #       At worker patch time, if ``register_kv_cache_dtype`` cannot be
 #       imported from ``vllm.config.cache``, mutate
 #       ``vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"]`` to
-#       ``torch.float8_e4m3fn`` in place. No-op on vLLM builds that already
-#       provide the pluggable mechanism (kvquant_27 / future main), where the
-#       eager handler import already flipped the dtype.
+#       ``torch.float8_e4m3fn`` in place. When the API exists, also replace
+#       the upstream ``torch.uint8`` default if no handler updated it yet.
+#       Preserve any other dtype supplied by a registered handler.
 #    Related PR (if no, explain why):
 #       vLLM commit ``dd7e350c9 pluggable kv quant dtype`` (on kvquant_27).
 #    Future Plan:
