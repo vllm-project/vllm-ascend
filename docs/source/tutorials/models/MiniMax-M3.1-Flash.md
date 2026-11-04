@@ -1329,6 +1329,17 @@ Adjust both values to the workload and usable SSD space, allowing for all worker
 
 #### 5.4.3 Prefill / Decode Scripts
 
+**Key parameters**
+
+`MultiConnector` creates a separate `KVTransferConfig` for each entry in `connectors`; child connectors do not inherit the outer `kv_role`. Both child connectors must specify `kv_connector` and `kv_role`. The scripts below set `KV_ROLE=kv_producer` on Prefill and `KV_ROLE=kv_consumer` on Decode, and explicitly pass that role to both children.
+
+| Child connector | Port configuration in this example |
+| --- | --- |
+| `MooncakeConnectorV1` | Set `kv_port` explicitly for the P→D connection, using the role-specific `KV_PORT` from Section 5.3. |
+| `AscendStoreConnector` | No explicit `kv_port` is needed: this connector does not use it. Set `kv_connector_extra_config.lookup_rpc_port` for its lookup IPC endpoint and `backend` to `mooncake`; configure the Mooncake Master address separately in `mooncake.json`. |
+
+The shared `KVTransferConfig` schema provides a default `kv_port`, so omitting it is not equivalent to omitting `kv_role`. In particular, `AscendStoreConnector` still requires its own `kv_role`; do not remove that field from either child.
+
 Reuse the Section 5.3 role scripts and launch commands. Replace each role script with the pooled version below. Keep the Section 5.3 `vllm serve` flag style; only `--kv-transfer-config` switches to `MultiConnector`. Derive the Decode `lookup_rpc_port` from `DP_RANK` so each rank uses a distinct IPC endpoint; Prefill has one DP rank and uses `37000`.
 
 Prefill-Decode disaggregation with KV Cache Pool on 3 Atlas 800I A3 (64GB × 16) for `MiniMax-M3.1-Flash-W8A8` with DSpark speculative decoding.
