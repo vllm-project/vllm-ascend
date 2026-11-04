@@ -113,3 +113,15 @@ reporting, persistent buffer policy, Mooncake registration, selective restoratio
 and SleepWakeupManager ordering. Level 2 now also retains private draft buffers
 and the inherited parameter retention rules; a KV-only wake does not consume
 saved weights. Runtime CaMem/HCCL qualification remains a merge requirement.
+
+## Execution migration (phase 4)
+
+`execute_model` resolves to GPUWorker, including its inference-mode/sync-check
+wrappers, previous-send waits, receive, runner invocation, pooling and send.
+Ascend owns only the before-iteration, PP-group, profiler and post-send hooks.
+V2 SP selects no all-gather group; V1 connector output is passed back without
+mutating the shared empty result. V2 never accesses V1 connector fields.
+
+The NPU sample_tokens override is retained for profiling-chunk execution-time
+statistics. execute_dummy_batch is retained for idle runtime-guard wave sync,
+current-config scope and GDN-state suppression. Neither is claimed as migrated.

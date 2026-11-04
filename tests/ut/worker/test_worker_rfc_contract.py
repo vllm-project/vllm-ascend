@@ -9,9 +9,9 @@ import ast
 import copy
 import importlib.util
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from types import NoneType, SimpleNamespace
+from types import MethodType, NoneType, SimpleNamespace
 from unittest.mock import MagicMock
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -139,8 +139,7 @@ class WorkerAlignmentContract(unittest.TestCase):
                                 parallel_config=SimpleNamespace(distributed_executor_backend="mp")
                             ),
                         )
-                        execute = worker_method(
-                            "execute_model",
+                        bindings = dict(
                             get_pp_group=lambda pp=pp: pp,
                             get_tp_group=lambda tp=tp: tp,
                             get_ascend_config=lambda: SimpleNamespace(msmonitor_use_daemon=False),
@@ -150,7 +149,16 @@ class WorkerAlignmentContract(unittest.TestCase):
                             ModelRunnerOutput=Output,
                             AsyncModelRunnerOutput=Output,
                             NoneType=NoneType,
+                            nullcontext=nullcontext,
                         )
+                        for hook in (
+                            "_before_execute_model",
+                            "annotate_profile",
+                            "_get_pp_all_gather_group",
+                            "_after_pp_send",
+                        ):
+                            setattr(worker, hook, MethodType(worker_method(hook, **bindings), worker))
+                        execute = worker_method("execute_model", **bindings)
                         execute(worker, SimpleNamespace(total_num_scheduled_tokens=int(forward)))
                         previous.wait.assert_called_once_with()
                         self.assertEqual(worker._pp_send_work, [device])
@@ -409,12 +417,84 @@ class WorkerAlignmentContract(unittest.TestCase):
             backend.resume(None)
         self.assertEqual(backend._state, "SUSPENDED")
 
+    def test_v1_connector_output_and_v2_boundary(self):
+        empty = SimpleNamespace(kv_connector_output=None)
+        handle = worker_method("_after_pp_send", EMPTY_MODEL_RUNNER_OUTPUT=empty, copy=copy)
+        worker = SimpleNamespace(use_v2_model_runner=False)
+        self.assertIsNone(handle(worker, SimpleNamespace(kv_connector_output=None)))
+        pending = SimpleNamespace(finished_sending=False, finished_recving=False)
+        self.assertIs(handle(worker, SimpleNamespace(kv_connector_output=pending)), empty)
+        for sending, receiving in ((True, False), (False, True), (True, True)):
+            connector = SimpleNamespace(finished_sending=sending, finished_recving=receiving)
+            result = handle(worker, SimpleNamespace(kv_connector_output=connector))
+            self.assertIsNot(result, empty)
+            self.assertIs(result.kv_connector_output, connector)
+            self.assertIsNone(empty.kv_connector_output)
+        worker.use_v2_model_runner = True
+        self.assertIsNone(handle(worker, SimpleNamespace()))
+
+    def test_monitor_and_profiler_steps_on_empty_batch(self):
+        worker = SimpleNamespace(log_memory_stats=MagicMock(), profiler=MagicMock())
+        monitor = MagicMock()
+        before = worker_method(
+            "_before_execute_model", get_ascend_config=lambda: SimpleNamespace(msmonitor_use_daemon=True), dp=monitor
+        )
+        before(worker, SimpleNamespace(total_num_scheduled_tokens=0))
+        worker.log_memory_stats.assert_called_once_with()
+        monitor.step.assert_called_once_with()
+        annotate = worker_method("annotate_profile", nullcontext=nullcontext)
+        with annotate(worker, object()):
+            worker.profiler.step.assert_called_once_with()
+
+    def test_inherited_pooling_and_non_pp_outputs(self):
+        class Output:
+            pass
+
+        runner = MagicMock()
+        pooled = Output()
+        runner.execute_model.return_value = None
+        runner.pool.return_value = pooled
+        runner.is_pooling_model = True
+        pp = SimpleNamespace(is_first_rank=True)
+        worker = SimpleNamespace(
+            _pp_send_work=[],
+            _before_execute_model=MagicMock(),
+            annotate_profile=lambda _: nullcontext(),
+            model_runner=runner,
+            use_v2_model_runner=True,
+        )
+        execute = worker_method(
+            "execute_model",
+            get_pp_group=lambda: pp,
+            ModelRunnerOutput=Output,
+            AsyncModelRunnerOutput=Output,
+            NoneType=NoneType,
+        )
+        self.assertIs(execute(worker, SimpleNamespace(total_num_scheduled_tokens=0)), pooled)
+        runner.pool.assert_called_once_with()
+        runner.reset_mock()
+        runner.execute_model.return_value = pooled
+        worker.use_v2_model_runner = False
+        self.assertIs(execute(worker, SimpleNamespace(total_num_scheduled_tokens=1)), pooled)
+        runner.pool.assert_not_called()
+
     def test_execution_decorators(self):
         cls = next(
             n for n in ast.parse(WORKER.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "NPUWorker"
         )
         for name in ("execute_model", "sample_tokens"):
-            node = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name)
+            node = next((n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name), None)
+            if node is None:
+                source = ROOT.parent / "worker-upstream/vllm/v1/worker/gpu_worker.py"
+                if not source.exists():
+                    spec = importlib.util.find_spec("vllm")
+                    source = Path(next(iter(spec.submodule_search_locations))) / "v1/worker/gpu_worker.py"
+                parent = next(
+                    n
+                    for n in ast.parse(source.read_text(encoding="utf-8")).body
+                    if isinstance(n, ast.ClassDef) and n.name == "Worker"
+                )
+                node = next(n for n in parent.body if isinstance(n, ast.FunctionDef) and n.name == name)
             self.assertEqual(
                 [ast.unparse(d) for d in node.decorator_list], ["torch.inference_mode()", "with_gpu_sync_check"]
             )

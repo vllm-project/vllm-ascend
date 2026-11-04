@@ -21,7 +21,6 @@ import copy
 import gc
 import logging
 from contextlib import AbstractContextManager, nullcontext
-from types import NoneType
 from typing import Any
 from unittest.mock import patch
 
@@ -64,7 +63,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
-from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -889,80 +887,31 @@ class NPUWorker(GPUWorker):
             self.torch_allocated / GiB_bytes,
         )
 
-    @torch.inference_mode()
-    @with_gpu_sync_check
-    def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+    def _before_execute_model(self, scheduler_output: "SchedulerOutput") -> None:
         self.log_memory_stats()
-        # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()
 
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
-
-        intermediate_tensors = None
-        forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        if forward_pass and not get_pp_group().is_first_rank:
-            if self.use_v2_model_runner and enable_sp(self.vllm_config):
-                all_gather_group = None
-            else:
-                all_gather_group = get_tp_group()
-            tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
-                all_gather_group=all_gather_group
-            )
-            assert tensor_dict is not None
-            intermediate_tensors = AsyncIntermediateTensors(
-                tensor_dict,
-                comm_handles=comm_handles,
-                comm_postprocess=comm_postprocess,
-            )
-
+    def annotate_profile(self, scheduler_output):
+        # Preserve NPU profiler stepping without CUDA-specific annotations.
         if self.profiler is not None:
             self.profiler.step()
+        return nullcontext()
 
-        output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
-        if self.use_v2_model_runner and self.model_runner.is_pooling_model and output is None:
-            output = self.model_runner.pool()  # type: ignore
-        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
-            return output
+    def _get_pp_all_gather_group(self):
+        return None if self.use_v2_model_runner and enable_sp(self.vllm_config) else get_tp_group()
 
-        assert isinstance(output, IntermediateTensors)
-        parallel_config = self.vllm_config.parallel_config
-        assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        if self.use_v2_model_runner and enable_sp(self.vllm_config):
-            all_gather_group = None
-        else:
-            all_gather_group = get_tp_group()
-        handles = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=all_gather_group,
-        )
-
-        # Metadata work is owned by GroupCoordinator; retain only device work.
-        self._pp_send_work = handles[1:]
-
-        # Align with upstream GPUWorker: Model Runner V2 has no
-        # kv_connector_output to propagate from non-last PP ranks. Model Runner
-        # V1 must continue below to handle the PP + KV connector path.
+    def _after_pp_send(self, output: IntermediateTensors):
         if self.use_v2_model_runner:
             return None
-
-        kv_connector_output = output.kv_connector_output
-        if not kv_connector_output:
+        connector_output = output.kv_connector_output
+        if not connector_output:
             return None
-
-        # In case of PP with kv transfer, we need to pass through the
-        # kv_connector_output
-        if not kv_connector_output.finished_sending and not kv_connector_output.finished_recving:
+        if not connector_output.finished_sending and not connector_output.finished_recving:
             return EMPTY_MODEL_RUNNER_OUTPUT
-        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.kv_connector_output = kv_connector_output
-        return output
+        result = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        result.kv_connector_output = connector_output
+        return result
 
     @torch.inference_mode()
     @with_gpu_sync_check
