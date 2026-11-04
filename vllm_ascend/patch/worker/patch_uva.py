@@ -536,7 +536,7 @@ class UvaBufferWrapper:
         ``__setitem__``, so mark the written rows explicitly.
         """
         np.concatenate(chunks, out=self._np[:n], casting="unsafe")
-        self._mark_prefix_modified(n)
+        self._dirty.mark(slice(0, n))
         return self.uva(n)
 
 

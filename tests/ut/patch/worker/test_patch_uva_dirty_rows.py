@@ -747,6 +747,21 @@ def test_uint64_scattered_write_reaches_the_device_shadow():
     assert buf._uva[6].item() == 2**63 + 1
 
 
+def test_copy_chunks_to_uva_publishes_the_concatenated_rows():
+    # vLLM main stages values by reference and copies them with
+    # ``np.concatenate(out=...)``, which bypasses the NumPy proxy's
+    # ``__setitem__``. The explicit mark has to publish the rows anyway.
+    buf = _make_uva_buffer(8)
+    first = np.array([[1, 2], [3, 4]], dtype=np.int32)
+    second = np.array([[5, 6], [7, 8]], dtype=np.int32)
+
+    output = buf.copy_chunks_to_uva([first, second], 4)
+
+    assert output.tolist() == [[1, 2], [3, 4], [5, 6], [7, 8]]
+    assert buf._uva[:4].tolist() == [[1, 2], [3, 4], [5, 6], [7, 8]]
+    assert buf._uva[4:].eq(0).all()
+
+
 def test_empty_index_write_is_a_noop(monkeypatch):
     # ``arr[[]] = v`` is a valid no-op write in NumPy; ``np.asarray([])`` is
     # float64, so the tracker must not try to use it as an index.
