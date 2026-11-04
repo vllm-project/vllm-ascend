@@ -45,7 +45,7 @@ def _itemize_m1_row(
     dtype: str,
     has_bias: bool,
 ) -> int:
-    """Per-iteration liveness peak of the BLOCK_M==1 dataflow (≡ odd-tail body)."""
+    """Estimated single-row working set, also used for the odd-tail body."""
     w = DTYPE_WIDTH[dtype]
     fp = FP32_BYTES
     half = rope_dim // 2
@@ -117,7 +117,7 @@ def _itemize_pair_tile(
     items.append(_align32(6 * block_m * half * w))
     items.append(_align32(block_m * half * fp))
     items.append(_align32(block_m * half * fp))
-    # Q/Gate tile body (charged at PEAK for one BHQ tile, incl. boundary block).
+    # Q/Gate working-set estimate for one complete BHQ tile.
     items.append(_align32(block_m * bhq * slot * w))  # tile_landing
     items.append(_align32(nq * slot * fp))  # tile_fp32_view
     items.append(_align32(nq * half * fp))  # cos_q
@@ -151,9 +151,9 @@ def estimate_demand(
     has_bias: bool,
     has_pair_work: bool,
 ) -> int:
-    """Estimate the peak, not the sum of the disjoint pair/odd-row loops.
+    """Screen the maximum estimated working set of the disjoint pair/odd-row loops.
 
-    Without pairs, only the single-row peak is screened before G3 selects
+    Without pairs, only the single-row estimate is screened before the workload gate selects
     M1. This does not introduce a separate M2 tail-only kernel instance.
     The model assumes reuse of Q/K chain buffers; mask/arange overhead is
     absorbed in ALPHA. The estimate-vs-capacity gap is not free UB headroom.

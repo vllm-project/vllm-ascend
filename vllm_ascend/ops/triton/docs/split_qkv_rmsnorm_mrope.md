@@ -10,6 +10,14 @@
   3. Both M1 and M2 compute the two RoPE halves directly as `x_1 * cos - x_2 * sin` and `x_2 * cos + x_1 * sin`, removing the concatenated rotation tensor and full-width cos/sin broadcast temporaries used by the main-branch baseline. A selected pair-capable M2 instance handles two token rows per loop iteration. It bounds the Q head tile to `min(num_q_heads, 12)` and processes full head tiles separately. An odd token uses the single-row tail path. The M1 path processes one complete row per iteration. Both paths preserve the same Q/K normalization, MRoPE, V, and gate semantics.
 - **Supported modes**: This is a vLLM-Ascend Triton NPU op called from the Qwen3-VL and Qwen3.5 multimodal paths with optional gate, optional paired Q/K biases, partial RoPE, and interleaved or contiguous MRoPE sections. The adaptive M2 screening domain is bf16/fp16. Bounded single-operator numerical and performance evidence in this PR comes from one Ascend910B3/P40 (Atlas A2) environment; Atlas A3/950, other dtypes, and model/graph execution are not qualified by those measurements. Dispatch does not use a SoC-name or CANN-version allowlist.
 
+Host selection now uses one `_select_tiling` entry returning `(block_m, head_grouped)`, with strict scalar and
+layout checks in `ac_input_validation.py`; the former `ShapeKey` / `DispatchDecision` object chain is removed.
+Checks may run before output allocation, so the first error for invalid dimensions, allocation/OOM failures,
+or multiple simultaneous errors is not guaranteed to match the former ordering. Device and performance records
+below remain attributed to their recorded frozen sources, including operator SHA-256
+`ccacdcb6f7e428d89cc2b37be8175b623813ed5650f9cd4489e213af582b2c24`; they are not device revalidation
+or evidence of host speedup for this helper refactor.
+
 ## Parameters
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |

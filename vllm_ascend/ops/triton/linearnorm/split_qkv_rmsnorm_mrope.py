@@ -23,7 +23,12 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend import envs
 from vllm_ascend.ops.triton.triton_utils import extract_slice, get_ub_size_bytes, get_vectorcore_num, insert_slice
 
-from .ac_dispatch_policy import ShapeKey, layout_valid, select_dispatch
+from .ac_input_validation import layout_valid, validate_scalars
+from .ac_ub_demand import estimate_demand, pair_boundary_screen_supported
+
+_MIN_PAIR_ITERATIONS = 12  # B3-derived workload threshold, not a universal optimum.
+_UB_BYTES_MIN = 64 * 1024
+_UB_BYTES_MAX = 1024 * 1024
 
 
 @triton.jit(
@@ -860,6 +865,119 @@ def _t1_grouped_eligible(
     )
 
 
+def _select_tiling(
+    qkv,
+    q_weight,
+    k_weight,
+    cos_sin,
+    num_q_heads,
+    num_kv_heads,
+    head_size,
+    eps,
+    mrope_section,
+    is_interleaved,
+    rope_dim,
+    q_bias,
+    k_bias,
+    has_gate,
+    core_num,
+    requested_m,
+) -> tuple[int, bool]:
+    """Choose among the three existing tilings, reading UB at most once.
+
+    Grouped M1 has a narrow structural domain and a capacity observability
+    gate, not a general byte-demand model. M2 retains the historical resource,
+    complete-head-tile and workload screens; this is not a maximum-UB solver.
+    """
+    if requested_m == 1:
+        return 1, False
+
+    num_tokens = qkv.shape[0]
+    capacity_checked = False
+    capacity = None
+    if num_tokens == 1 and _t1_grouped_eligible(
+        qkv,
+        q_weight,
+        k_weight,
+        cos_sin,
+        num_q_heads,
+        num_kv_heads,
+        head_size,
+        eps,
+        mrope_section,
+        is_interleaved,
+        rope_dim,
+        q_bias,
+        k_bias,
+        has_gate,
+        core_num,
+    ):
+        capacity = _get_ub_capacity()
+        capacity_checked = True
+        if type(capacity) is int and _UB_BYTES_MIN <= capacity <= _UB_BYTES_MAX:
+            return 1, True
+
+    dtype_tag = str(qkv.dtype).replace("torch.", "")
+    if dtype_tag not in ("bfloat16", "float16"):
+        return 1, False
+    has_bias = q_bias is not None
+    validate_scalars(
+        num_q_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        has_gate=has_gate,
+        rope_dim=rope_dim,
+        has_bias=has_bias,
+        is_interleaved=is_interleaved,
+        mrope_section=(mrope_section[0], mrope_section[1], mrope_section[2]),
+        eps=eps,
+        dtype=dtype_tag,
+    )
+    q_size = num_q_heads * head_size
+    current_layout_valid = layout_valid(
+        qkv,
+        q_weight,
+        k_weight,
+        cos_sin,
+        q_bias,
+        k_bias,
+        num_tokens,
+        q_size,
+        q_size if has_gate else 0,
+        num_kv_heads * head_size,
+        head_size,
+        rope_dim,
+    )
+    if not capacity_checked:
+        capacity = _get_ub_capacity()
+    if current_layout_valid is not True or num_tokens == 0:
+        return 1, False
+    if type(capacity) is not int or not _UB_BYTES_MIN <= capacity <= _UB_BYTES_MAX:
+        return 1, False
+
+    max_rows = (num_tokens + core_num - 1) // core_num
+    min_rows = max(1, num_tokens // core_num)
+    has_pair_work = max_rows >= 2
+    demand_bytes = estimate_demand(
+        num_q_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        has_gate=has_gate,
+        rope_dim=rope_dim,
+        dtype=dtype_tag,
+        has_bias=has_bias,
+        has_pair_work=has_pair_work,
+    )
+    # The archived boundary-head overflow still excludes incomplete Q tiles.
+    if has_pair_work and not pair_boundary_screen_supported(num_q_heads):
+        return 1, False
+    if demand_bytes >= capacity:  # Exact fit is also rejected.
+        return 1, False
+    if min_rows // 2 < _MIN_PAIR_ITERATIONS:
+        return 1, False
+    return 2, False
+
+
 def triton_split_qkv_rmsnorm_mrope(
     qkv: torch.Tensor,
     q_weight: torch.Tensor,
@@ -888,36 +1006,25 @@ def triton_split_qkv_rmsnorm_mrope(
         rope_dim = head_size
     IS_PARTIAL_ROPE = rope_dim != head_size
 
-    # Read the public request once. Explicit M1 never queries UB for WP3.
-    block_m = envs.VLLM_ASCEND_SPLIT_QKV_RMSNORM_MROPE_BLOCK_M
-    head_grouped = False
-    capacity_checked = False
-    capacity = None
-    if (
-        block_m == 2
-        and num_tokens == 1
-        and _t1_grouped_eligible(
-            qkv,
-            q_weight,
-            k_weight,
-            cos_sin,
-            num_q_heads,
-            num_kv_heads,
-            head_size,
-            eps,
-            mrope_section,
-            is_interleaved,
-            rope_dim,
-            q_bias,
-            k_bias,
-            has_gate,
-            core_num,
-        )
-    ):
-        capacity = _get_ub_capacity()
-        capacity_checked = True
-        # Observability only: the whole-head M2 demand is not a grouped budget.
-        head_grouped = type(capacity) is int and 64 * 1024 <= capacity <= 1024 * 1024
+    requested_m = envs.VLLM_ASCEND_SPLIT_QKV_RMSNORM_MROPE_BLOCK_M
+    block_m, head_grouped = _select_tiling(
+        qkv,
+        q_weight,
+        k_weight,
+        cos_sin,
+        num_q_heads,
+        num_kv_heads,
+        head_size,
+        eps,
+        mrope_section,
+        is_interleaved,
+        rope_dim,
+        q_bias,
+        k_bias,
+        has_gate,
+        core_num,
+        requested_m,
+    )
 
     num_tasks = num_tokens * max(num_q_heads, num_kv_heads) if head_grouped else num_tokens
     front_core_num = core_num
@@ -943,50 +1050,6 @@ def triton_split_qkv_rmsnorm_mrope(
         block_dim = total_core
 
     has_bias = q_bias is not None
-
-    # Reuse the launch partition instead of constructing it again in the
-    # selector. There is only one M2 instance; short/no-pair work uses M1.
-    if block_m == 2 and not head_grouped:
-        dtype_tag = str(qkv.dtype).replace("torch.", "")
-        if dtype_tag not in ("bfloat16", "float16"):
-            block_m = 1
-        else:
-            shape = ShapeKey(
-                num_q_heads=num_q_heads,
-                num_kv_heads=num_kv_heads,
-                head_size=head_size,
-                has_gate=has_gate,
-                rope_dim=rope_dim,
-                has_bias=has_bias,
-                is_interleaved=is_interleaved,
-                mrope_section=(mrope_section[0], mrope_section[1], mrope_section[2]),
-                eps=eps,
-                dtype=dtype_tag,
-            )
-            decision = select_dispatch(
-                shape=shape,
-                min_active_tokens=num_tokens_each_tail_core if tail_core_num else num_tokens_each_front_core,
-                max_active_tokens=num_tokens_each_front_core,
-                current_layout_valid=layout_valid(
-                    qkv,
-                    q_weight,
-                    k_weight,
-                    cos_sin,
-                    q_bias,
-                    k_bias,
-                    num_tokens,
-                    q_size,
-                    gate_size,
-                    kv_size,
-                    head_size,
-                    rope_dim,
-                ),
-                capacity_bytes=capacity if capacity_checked else _get_ub_capacity(),
-            )
-            block_m = decision.block_m
-
-    if head_grouped:
-        block_m = 1
 
     launch_kernel = _M2_KERNEL if block_m == 2 else split_qkv_rmsnorm_mrope_kernel
     launch_kernel[(block_dim,)](
