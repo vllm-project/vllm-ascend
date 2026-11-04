@@ -129,7 +129,7 @@ an attention score. IDs and counts remain int32.
 Both the CANN producer and A5 Triton fallback enable ordered output. Only matching
 GBSA consumers skip normalization; direct callers and prefill retain their
 correctness fallback. The A5-specific contract is documented in
-[decode index ordering](minimax_m3_decode_index_sort.md).
+[decode index ordering](msa_m3_index_topk.md).
 
 ## Performance and compilation validation
 
