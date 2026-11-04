@@ -1,0 +1,4 @@
+pr: 20906
+entries:
+  - category: feature
+    text: Added opt-in Mooncake layerwise KV buffer reuse on prefill producers, including GLM main-pack placement and private chunk snapshots. P-side speculative decoding is not supported with this option.
