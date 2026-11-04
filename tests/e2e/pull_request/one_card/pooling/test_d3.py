@@ -8,6 +8,7 @@ import pytest
 import requests
 import torch
 from transformers import AutoModel
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner, cleanup_dist_env_and_memory
 
@@ -82,8 +83,19 @@ def test_d3_systemone_endpoint():
         "state": STATE,
         "questions": QUESTIONS,
     }
-    server_args = ["--max-model-len", "4096", "--limit-mm-per-prompt", json.dumps(NO_MEDIA)]
-    with RemoteOpenAIServer(MODEL, server_args) as server:
+    host = "127.0.0.1"
+    port = get_open_port()
+    server_args = [
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--max-model-len",
+        "4096",
+        "--limit-mm-per-prompt",
+        json.dumps(NO_MEDIA),
+    ]
+    with RemoteOpenAIServer(MODEL, server_args, server_host=host, server_port=port, auto_port=False) as server:
         response = requests.post(
             server.url_for("v1", "systemone"),
             json=request,
