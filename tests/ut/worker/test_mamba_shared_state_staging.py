@@ -163,7 +163,7 @@ def test_publication_and_acceptance_require_completed_layer_capture(make_state):
 
 
 def test_external_reload_and_request_reuse_invalidate_only_their_slot(make_state):
-    state, _, _, _, _ = make_state()
+    state, names, original, _, _ = make_state()
     prepare_batch(state)
     state._mamba_valid.fill_(True)
     state._mamba_checkpoint_tokens.fill_(8)
@@ -174,6 +174,12 @@ def test_external_reload_and_request_reuse_invalidate_only_their_slot(make_state
         ]
     )
     assert state._mamba_valid.tolist() == [False, True, True]
+    for staged, cache in zip(state._mamba_staging[names[0]], original[names[0]]):
+        staged.fill_(17)
+        cache.fill_(9)
+    state._copy_layer_candidates(names[0], restore=True)
+    assert torch.all(original[names[0]][0][4] == 17)
+    assert torch.all(original[names[0]][0][7] == 9)  # External reload must not restore stale staged state.
     state.add_request(2, None)
     assert state._mamba_valid.tolist() == [False, True, False]
     assert state._mamba_checkpoint_tokens.tolist() == [0, 8, 0]
