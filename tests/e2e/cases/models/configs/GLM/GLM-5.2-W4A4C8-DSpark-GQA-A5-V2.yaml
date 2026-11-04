@@ -1,6 +1,6 @@
 test_cases:
   - name: "GLM-5.2-W4A4C8-DSpark-GQA-A5-V2"
-    model: "Eco-Tech/GLM-5.2-DSpark-NPU-0805"
+    model: "Eco-Tech/GLM-5.2-w4a4c8-mxfp4"
     envs:
       ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
       ASCEND_GLOBAL_LOG_LEVEL: "3"
@@ -54,7 +54,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
-      - '{"num_speculative_tokens":5,"method":"dspark","model":"Eco-Tech/GLM-5.2-w4a4c8-mxfp4","enforce_eager":true,"kv_cache_dtype":"auto"}'
+      - '{"num_speculative_tokens":5,"method":"dspark","model":"Eco-Tech/GLM-5.2-DSpark-NPU-0805","enforce_eager":true,"kv_cache_dtype":"auto"}'
       - "--kv-cache-dtype"
       - "fp8"
       - "--attention-config"
