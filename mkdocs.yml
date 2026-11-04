@@ -325,6 +325,7 @@ nav:
         - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/batch_job_aware_scheduler.md
         - user_guide/feature_guide/rl.md
+        - user_guide/feature_guide/weight_checker.md
     - user_guide/release_notes.md
   - Developer Guide:
     - developer_guide/index.md
