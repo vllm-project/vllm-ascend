@@ -889,6 +889,7 @@ def test_scheduler_shutdown_stops_threads_and_clears_request_state() -> None:
     scheduler._reqs_recv_info["recv"] = ("10.0.0.1", 6000, "remote")
     connector = MooncakePullConnector.__new__(MooncakePullConnector)
     connector.connector_scheduler = scheduler
+    connector.connector_worker = None
 
     connector.shutdown()
 
