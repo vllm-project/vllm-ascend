@@ -15,12 +15,17 @@
 
 ```bash
 PYTHON=/usr/local/python3.12.16/bin/python3
+export HCCL_NPU_SOCKET_PORT_RANGE="61000-61050"
 
 "$PYTHON" -m torch.distributed.run --standalone --nproc-per-node 2 \
     benchmarks/benchmark_native_mxfp8_all_reduce.py \
     --tokens 128 --hidden-sizes 5120 \
     --check-only --output native_mxfp8_tp2_check.json
 ```
+
+该测试会同时创建普通 HCCL 域和专用量化 HCCL 域。在当前 A5 容器中必须在
+启动 `torchrun` 前配置 `HCCL_NPU_SOCKET_PORT_RANGE`；所有 rank 使用相同配置，
+并确保所选端口没有被其他任务占用。脚本会把实际环境变量值写入 JSON 元数据。
 
 先后检查全零、不同 rank 常数、正负抵消和手工编码的不同 rank/token/block 尺度。
 手工编码用例绕开动态量化算子，避免用同一算子互相验证。
@@ -57,6 +62,25 @@ tokens hidden BF16_MiB BF16_ms MXFP8_full_ms speedup gain_pct MXFP8_rel_L2 BF16_
 JSON 还包含原生 BF16/FP32 通信的误差、量化本身的误差、最大绝对误差、p95、
 各轮中位数、原始样本以及包含恢复输入的批量 wall time。
 原生通信 `pass=true` 代表结果满足诊断容差，量化误差默认报告，需结合模型判断是否可接受。
+
+## 已验证结果
+
+2026-11-04 在 TP=2、`Ascend950DT_9582`、torch `2.10.0+cpu`、torch_npu
+`2.10.0.post7`、CANN 路径 `9.2.1` 的 0.32 镜像中，`[128,5120]` 精度测试通过：
+
+- `zeros`、`rank_constant`、`cancellation`、`rank_token_block_scales` 全部 PASS。
+- 同一量化 payload 的原生 BF16、FP32 输出及完整 BF16 写回路径相对独立反量化求和
+  均为 `max_abs=0`。
+- 完整 MXFP8 路径相对原始输入 FP32 SUM 的 relative L2 为 `0.02927385`，量化本身为
+  `0.02927171`；普通 BF16 AllReduce 为 `0.00180175`。这表明该用例的主要误差来自
+  MXFP8 量化，没有观察到额外的通信结果误差。
+- 最大绝对误差为 `0.5078125`。该数值仅代表这组固定随机输入，不是模型精度结论。
+
+首次运行时 `cann_ops_transformer` 即时编译并加载 `npu_quant_all_reduce.so`，属于官方
+Python facade 的正常初始化过程，不进入性能计时。日志中的 watchdog 300 秒小于 HCCL
+执行超时 1836 秒告警表示故障时 plog 可能无法完整记录；本次运行正常完成，不影响上述
+正确性结果。需要排查长时间挂起时，可显式提高 `--timeout-seconds` 到大于当前
+`HCCL_EXEC_TIMEOUT` 的值。
 
 ## 扫描 prefill 通信量与 TP
 
@@ -122,3 +146,4 @@ CPU 仿真不证明原生算子、HCCL 或 NPU Event 已通过；A5 结果需由
 
 参数依据 [官方 Python 封装](https://gitcode.com/cann/ops-transformer/blob/master/mc2/quant_all_reduce/torch_extension/quant_all_reduce.py)
 及 [C++ 绑定](https://gitcode.com/cann/ops-transformer/blob/master/mc2/quant_all_reduce/torch_extension/csrc/quant_all_reduce.cpp)。
+端口范围含义与约束见 [HCCL_NPU_SOCKET_PORT_RANGE 官方文档](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/commlib/hcclug/docs/en/user_guide/hccl_env/HCCL_NPU_SOCKET_PORT_RANGE.md)。

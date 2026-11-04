@@ -386,6 +386,7 @@ def main() -> None:
             "device": torch.npu.get_device_name(),
             "hostname_rank0": socket.gethostname(),
             "world_size": world_size,
+            "hccl_npu_socket_port_range": os.environ.get("HCCL_NPU_SOCKET_PORT_RANGE"),
             "ops_package": ops.__file__,
             "operator_module": all_reduce_op.__module__,
             "mode": "correctness_only" if args.check_only else "benchmark",
