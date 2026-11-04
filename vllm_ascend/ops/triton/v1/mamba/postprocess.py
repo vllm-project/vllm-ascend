@@ -78,8 +78,7 @@ def postprocess_mamba_fused_kernel(
     # Output: num_accepted_tokens update (for src==dst case)
     num_accepted_tokens_out_ptr,
     # Optional: batch_idx -> req_idx mapping (V2 model runner / PP). The
-    # per-request decision arrays are in req-state-slot order; the block table
-    # is in batch order, so HAS_IDX_MAPPING splits the two indexings.
+    # decision arrays and persistent block tables are in request-slot order.
     idx_mapping_ptr,
     # Runtime parameter (varies per batch - NOT constexpr to avoid recompilation)
     num_reqs,
@@ -174,8 +173,7 @@ def postprocess_mamba_fused_kernel(
     group_base_addr = tl.load(block_table_ptrs_ptr + group_idx)
     block_table_typed = group_base_addr.to(tl.pointer_type(tl.int32))
 
-    bt_row_idx = batch_idx if HAS_IDX_MAPPING else req_idx
-    block_table_base = block_table_typed + bt_row_idx * block_table_stride_req
+    block_table_base = block_table_typed + req_idx * block_table_stride_req
 
     # Widen block ids to int64 before they reach `block_id * state_block_stride`
     # below: state_block_stride can exceed 2**31 bytes for large mamba caches,
