@@ -479,3 +479,54 @@ isolated gain; those results are retained as investigation evidence, not a win.
 The private runtime also retained an earlier CPU page-preparation experiment;
 that unproven experiment is not added by this commit. The recorded private
 runtime result does not replace a final clean-build qualification of the PR head.
+
+## Current merged-main cleanup and same-node qualification
+
+Core `d3fb7166e0ac9db82158129face12ae28209757a` contains the merged backend, prefetch and profiling-binding
+lifecycle changes. The Ascend adapter now delegates the common resolver control
+flow, grouped prefetch, mirror completion and invalidation ownership to Core,
+removing the copied implementations. Device cache layout, packed prefill address
+mapping, pinned private Host allocation and DMA completion/registration owners
+remain Ascend-owned. No upstream vLLM source or native Attention arithmetic is
+changed by this cleanup.
+
+Current-main API alignment also keeps the platform selector a classmethod,
+accepts the no-argument MLA post-load callback, binds both draft graph managers
+to the device-selected factory, and accepts Core #65100's masked-vocabulary
+resampling hint. The existing NPU categorical resampling calculations remain
+unchanged for either hint value; no CUDA Gumbel optimization is copied into them.
+
+The tested production-code commit is `e5bfa8d7af6d0a46deccab71b473c45ec24893e5`. Full GLM-5.2
+W4A8C8 MXFP, TP8/DP1, MTP3 and V2 ran on one A5 node, C4,
+32768 input/8192 actual output tokens/request, temperature0/seed42, prefix off,
+EvalScope1.13.0, one unscored C1/16K/8K primer and N2/arm. ON used a private
+64GiB Host pool/rank; an earlier 128GiB/rank pinned allocation failed before
+serving. HBM utilization, model and scored workloads were unchanged. This is a
+separate configuration from the earlier private-runtime result.
+
+| Round | OFF TPOT ms | ON TPOT ms | Increase |
+| --- | ---: | ---: | ---: |
+| 1 | 12.100378 | 12.739063 | 5.278% |
+| 2 | 12.109802 | 12.425313 | 2.605% |
+
+Mean TPOT is 12.105090 -> 12.582188ms,
+**+3.941303%; the <=3% goal is not met**. Pooled steady
+decode throughput is 355.070 -> 351.561 tokens/s
+(-0.988%), measured only at running4/waiting0 with a flat prompt counter.
+All 16 scored requests succeeded with 8192 actual IDs each. Input/output hashes,
+draft/accepted counts and per-position MTP counts matched exactly across arms;
+acceptance was 59.893611%. ON settled reported miss/H2D deltas and eight-rank
+idle tails were zero, which does not establish physical DMA bytes.
+
+Both arms passed three bounded natural controls, actual eight-rank source/native
+identity checks and Ascend graph ownership checks. ON also passed actual 79-layer
+Tensor-ABI/capture checks; observation hooks were removed before timing. Separate
+CPU/NPU captures are investigating the larger TTFT and mixed-prefill/decode cost.
+They are unscored and do not replace or discard either formal round.
+
+The earlier 73 cleanup CPU cases and 32 sampler-ABI host-dispatch cases passed in
+separate runs; these are CPU scope only. Focused Ruff/format and diff checks passed.
+Full format.sh CI remains unqualified after the recorded actionlint installation
+stall. Retained native libraries match their frozen source/package hashes, but
+an independent full native rebuild, A3, final P/D and dataset accuracy still
+require separate qualification. N2 is not statistical significance.
