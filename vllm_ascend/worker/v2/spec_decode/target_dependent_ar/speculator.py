@@ -275,7 +275,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # shape. Negotiate its DP agreement instead of reusing the target's.
         sync_state = None if self.pcp_manager is not None else dp_sync_state
         if self.pcp_manager is not None:
-            attn_metadata = self._get_pcp_draft_prefill_metadata(attn_metadata)
+            attn_metadata = self._get_draft_prefill_metadata(attn_metadata)
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with (
@@ -303,10 +303,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             )
 
     @staticmethod
-    def _get_pcp_draft_prefill_metadata(attn_metadata: dict[str, Any]) -> dict[str, Any]:
+    def _get_draft_prefill_metadata(attn_metadata: dict[str, Any]) -> dict[str, Any]:
         """Keep eager draft MLA queries within the target's real decode rows.
 
-        FULL target graphs include query offsets for padded PCP requests. The
+        FULL target graphs include query offsets for padded requests. The
         draft prefill runs outside FULL graphs and MLA slices its query to
         num_decode_tokens, so padding requests must have zero query length.
         Copy only the changed metadata: target graph updates still need the
@@ -502,6 +502,12 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             attn_metadata = {
                 name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
             }
+
+        # #63406 can introduce request-padded target graphs even without PCP.
+        # Eager/PW MLA slices queries to real decode rows; its cumulative query
+        # lengths must exclude target padding too. Keep FULL graph metadata.
+        if not vllm_version_is("0.33.0") and attn_metadata is not None and cudagraph_runtime_mode != CUDAGraphMode.FULL:
+            attn_metadata = self._get_draft_prefill_metadata(attn_metadata)
 
         # vLLM main forwards `skip_sample` so the drafter KV stays in sync
         # without sampling when num_speculative_tokens == 0.
