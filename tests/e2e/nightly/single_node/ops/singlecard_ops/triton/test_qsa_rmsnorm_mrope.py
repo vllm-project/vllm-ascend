@@ -9,8 +9,8 @@ from vllm_ascend.ops.triton.linearnorm.qsa_rmsnorm_mrope import (
 
 pytestmark = [
     pytest.mark.skipif(
-        get_ascend_device_type() != AscendDeviceType.A3,
-        reason="Requires Ascend A3",
+        get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
+        reason="Requires Ascend A3/A5",
     ),
 ]
 
