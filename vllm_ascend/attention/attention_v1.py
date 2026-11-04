@@ -23,7 +23,9 @@ import torch
 import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (  # type: ignore
@@ -48,6 +50,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.suffix_bsh_attention import capture_bsh, eligible as suffix_bsh_eligible
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
@@ -59,6 +62,7 @@ from vllm_ascend.attention.utils import (
     using_paged_attention,
 )
 from vllm_ascend.compilation.updatable_graph import (
+    _ACTIVE_GRAPH,
     get_capture_resource,
     register_task,
 )
@@ -683,6 +687,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         layer=None,
     ) -> torch.Tensor:
+        if (
+            _EXTRA_CTX.capturing
+            and not _EXTRA_CTX.is_draft_model
+            and _ACTIVE_GRAPH.get() is not None
+            and get_forward_context().cudagraph_runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL)
+            and suffix_bsh_eligible(self, query, attn_metadata)
+            and output.shape == query.shape
+            and output.dtype == query.dtype
+            and output.device == query.device
+        ):
+            return capture_bsh(
+                self, query, key, value, attn_metadata, output,
+                layer_name=self._graph_metadata_layer_name(layer),
+            )
+
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
