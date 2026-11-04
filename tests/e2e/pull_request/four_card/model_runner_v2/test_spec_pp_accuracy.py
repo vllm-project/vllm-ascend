@@ -150,7 +150,7 @@ def test_deepseek_v4_dspark_pp_accuracy() -> None:
             pipeline_parallel_size=2,
             enable_expert_parallel=True,
             distributed_executor_backend="mp",
-            gpu_memory_utilization=0.8,
+            gpu_memory_utilization=0.9,  # was 0.8; 16K prompt needs 4.35GiB KV
             quantization="ascend",
             tokenizer_mode="deepseek_v4",
             block_size=128,
