@@ -100,6 +100,37 @@ def test_init_speculator_ngram_requires_request_state():
         init_speculator(_make_config("ngram_gpu"), torch.device("cpu"))
 
 
+@pytest.mark.parametrize("enforce_eager", [False, True])
+def test_init_speculator_suffix_uses_current_request_state(monkeypatch, enforce_eager):
+    from vllm_ascend.worker.v2.spec_decode import suffix
+
+    config = _make_config("suffix")
+    config.speculative_config.enforce_eager = enforce_eager
+    config.compilation_config = SimpleNamespace(mode=CompilationMode.VLLM_COMPILE)
+    device = torch.device("cpu")
+    req_states = object()
+    validate = MagicMock()
+    monkeypatch.setattr(suffix, "validate_suffix_runtime", validate)
+    speculator_cls = _mock_speculator_module(
+        monkeypatch,
+        "vllm_ascend.worker.v2.spec_decode.suffix.speculator",
+        "AscendSuffixSpeculator",
+    )
+    result = init_speculator(config, device, req_states)
+    assert result is speculator_cls.return_value
+    validate.assert_called_once_with(config.speculative_config)
+    draft_config, draft_device, draft_states = speculator_cls.call_args.args
+    assert draft_device == device
+    assert draft_states is req_states
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert draft_config.compilation_config.mode == (CompilationMode.NONE if enforce_eager else CompilationMode.VLLM_COMPILE)
+
+
+def test_init_speculator_suffix_requires_request_state():
+    with pytest.raises(ValueError, match="requires request states"):
+        init_speculator(_make_config("suffix"), torch.device("cpu"))
+
+
 def test_init_speculator_extract_hidden_states(monkeypatch):
     """Test dispatching extract_hidden_states to the upstream speculator."""
     config = _make_config("extract_hidden_states")
