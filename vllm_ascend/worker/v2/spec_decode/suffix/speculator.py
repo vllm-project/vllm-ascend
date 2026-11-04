@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -42,8 +42,6 @@ if TYPE_CHECKING:
     from vllm.config.compilation import CUDAGraphMode
     from vllm.v1.worker.gpu.dp_utils import DPSyncState
     from vllm.v1.worker.gpu.states import RequestState
-
-logger = init_logger(__name__)
 
 # Odd 64-bit multiplier (golden ratio), as a signed int64.
 _HASH_MUL = 0x9E3779B97F4A7C15 - (1 << 64)
@@ -152,9 +150,7 @@ def _corpus_draft(
     k_iota = tl.arange(0, K_PO2).to(tl.int64)
 
     tail_pos = seq_len - 1 - d_iota
-    tail = tl.load(
-        row + tl.maximum(tail_pos, 0), mask=(d_iota < MAX_DEPTH) & (tail_pos >= 0), other=-2
-    )
+    tail = tl.load(row + tl.maximum(tail_pos, 0), mask=(d_iota < MAX_DEPTH) & (tail_pos >= 0), other=-2)
     # Hash the trailing tokens newest-first, as ingestion does.
     hv = tl.zeros((), tl.int64)
     for d in tl.static_range(4):
@@ -165,9 +161,7 @@ def _corpus_draft(
     bucket4 = _bucket(hv, NUM_BUCKETS)
     is4 = c_iota < SLOTS
     key_len = tl.where(is4, 4, 2)
-    slot = tl.where(
-        is4, bucket4 * SLOTS + c_iota, (NUM_BUCKETS + bucket2) * SLOTS + c_iota - SLOTS
-    )
+    slot = tl.where(is4, bucket4 * SLOTS + c_iota, (NUM_BUCKETS + bucket2) * SLOTS + c_iota - SLOTS)
     vals = tl.load(table_ptr + slot)
     cpos = vals & 0xFFFFFFFF
 
@@ -182,11 +176,7 @@ def _corpus_draft(
     nxt = tl.load(corpus_ptr + tl.minimum(cpos, corpus_len - 1), mask=(vals >= 0) & (cpos < corpus_len), other=-1)
     ok = (vals >= 0) & (nxt >= 0) & (c_len >= key_len) & (seq_len >= key_len)
     # Both buckets often hold the same position; count it once.
-    dup = (
-        (cpos[:, None] == cpos[None, :])
-        & ok[:, None]
-        & (c_iota[:, None] < c_iota[None, :])
-    )
+    dup = (cpos[:, None] == cpos[None, :]) & ok[:, None] & (c_iota[:, None] < c_iota[None, :])
     ok = ok & (tl.max(dup.to(tl.int32), axis=0) == 0)
 
     # Continuations, cut at the first document separator.
@@ -200,11 +190,7 @@ def _corpus_draft(
 
     # Candidates sharing a match length draft identical chains; score each
     # distinct length once.
-    same_len = (
-        (c_len[:, None] == c_len[None, :])
-        & ok[:, None]
-        & (c_iota[:, None] < c_iota[None, :])
-    )
+    same_len = (c_len[:, None] == c_len[None, :]) & ok[:, None] & (c_iota[:, None] < c_iota[None, :])
     first = ok & (tl.max(same_len.to(tl.int32), axis=0) == 0)
 
     # A token's probability is its vote count over the candidates still
@@ -229,9 +215,7 @@ def _corpus_draft(
             for d in tl.static_range(K):
                 col = tl.sum(tl.where(k_iota[None, :] == d, cont, 0), axis=1)
                 has = alive & (col >= 0)
-                cnt = tl.sum(
-                    ((col[:, None] == col[None, :]) & has[None, :]).to(tl.int32), axis=1
-                )
+                cnt = tl.sum(((col[:, None] == col[None, :]) & has[None, :]).to(tl.int32), axis=1)
                 cnt = tl.where(has, cnt, 0)
                 cmax = tl.max(cnt, axis=0)
                 # Most frequent next token; ties go to the newest candidate.
@@ -350,9 +334,7 @@ def _suffix_finalize_kernel(
         observed = tl.load(stat + 1, mask=k_mask, other=0).to(tl.float32)
         conf = tl.where(draft_ok, (accepted + 1.0) / (observed + 2.0), 0.0)
         tl.store(conf_ptr + b * K + k_iota, conf, mask=k_mask)
-        tl.store(
-            last_bucket_ptr + req, tl.where(num_valid > 0, bucket, -1).to(tl.int32)
-        )
+        tl.store(last_bucket_ptr + req, tl.where(num_valid > 0, bucket, -1).to(tl.int32))
         tl.store(last_valid_ptr + req, num_valid)
 
 
@@ -395,9 +377,7 @@ def _suffix_observe_kernel(
         & (k[None, :] < valid[:, None])
     )
     num_observed = tl.sum(observed.to(tl.int32), axis=0).to(tl.int64)
-    num_accepted = tl.sum(
-        (observed & (k[None, :] < accepted[:, None])).to(tl.int32), axis=0
-    ).to(tl.int64)
+    num_accepted = tl.sum((observed & (k[None, :] < accepted[:, None])).to(tl.int32), axis=0).to(tl.int64)
     stat = stats_ptr + (bucket * K + k) * 2
     old_accepted = tl.load(stat, mask=k < K, other=0)
     old_observed = tl.load(stat + 1, mask=k < K, other=0)
@@ -452,9 +432,7 @@ def _suffix_ingest_kernel(
     for i in range(f):
         req_i = tl.load(docs_ptr + 2 * i).to(tl.int64)
         end_i = tl.load(total_len_ptr + req_i).to(tl.int64)
-        start_i = tl.maximum(
-            tl.load(docs_ptr + 2 * i + 1).to(tl.int64), end_i - (cap - 1)
-        )
+        start_i = tl.maximum(tl.load(docs_ptr + 2 * i + 1).to(tl.int64), end_i - (cap - 1))
         n_i = tl.maximum(end_i - start_i, 0)
         head = tl.where(head + n_i + 1 > cap, 0, head) + n_i + 1
     head = tl.where(head + n + 1 > cap, 0, head)
@@ -470,9 +448,7 @@ def _suffix_ingest_kernel(
     for g in range(f + 1, num_docs):
         req_g = tl.load(docs_ptr + 2 * g).to(tl.int64)
         end_g = tl.load(total_len_ptr + req_g).to(tl.int64)
-        start_g = tl.maximum(
-            tl.load(docs_ptr + 2 * g + 1).to(tl.int64), end_g - (cap - 1)
-        )
+        start_g = tl.maximum(tl.load(docs_ptr + 2 * g + 1).to(tl.int64), end_g - (cap - 1))
         n_g = tl.maximum(end_g - start_g, 0)
         later = tl.where(later + n_g + 1 > cap, 0, later)
         # Document g and its separator occupy [later, later + n_g].
@@ -544,17 +520,13 @@ class AscendSuffixSpeculator(BaseSpeculator):
         else:
             self.block_l = max(16, triton.next_power_of_2(max(L, 1)))
         self.n_blocks = triton.cdiv(L, self.block_l)
-        self.scratch = torch.zeros(
-            (self.max_num_reqs, self.n_blocks), dtype=torch.int64, device=device
-        )
+        self.scratch = torch.zeros((self.max_num_reqs, self.n_blocks), dtype=torch.int64, device=device)
 
         # Corpus of finished responses separated by -1, plus two hash tables
         # keyed on the last 4 and last 2 tokens before each position. A
         # capacity of 0 disables it.
         self.corpus_len: int = (
-            spec.suffix_decoding_corpus_tokens
-            if spec.suffix_decoding_max_cached_requests != 0
-            else 0
+            spec.suffix_decoding_corpus_tokens if spec.suffix_decoding_max_cached_requests != 0 else 0
         )
         if self.corpus_len > 0 and self.max_depth < 2:
             # Corpus matches need the 2-token hash key.
@@ -567,9 +539,7 @@ class AscendSuffixSpeculator(BaseSpeculator):
             self.corpus_len = 0
         self.has_corpus = self.corpus_len > 0
         self.num_buckets = triton.next_power_of_2(max(16, self.corpus_len // 4))
-        self.corpus = torch.full(
-            (max(self.corpus_len, 1),), -1, dtype=torch.int32, device=device
-        )
+        self.corpus = torch.full((max(self.corpus_len, 1),), -1, dtype=torch.int32, device=device)
         self.table = torch.full(
             (2, self.num_buckets if self.has_corpus else 1, _BUCKET_SLOTS),
             -1,
@@ -590,9 +560,7 @@ class AscendSuffixSpeculator(BaseSpeculator):
             device=device,
         )
         # Number of real (non-filler) draft tokens per batch row.
-        self.num_valid = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
-        )
+        self.num_valid = torch.zeros(self.max_num_reqs, dtype=torch.int32, device=device)
 
         # Adaptive verification (optional): per-slot confidences from
         # acceptance statistics learned online.
@@ -607,12 +575,8 @@ class AscendSuffixSpeculator(BaseSpeculator):
             dtype=torch.int64,
             device=device,
         )
-        self.last_bucket = torch.full(
-            (self.max_num_reqs,), -1, dtype=torch.int32, device=device
-        )
-        self.last_valid = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
-        )
+        self.last_bucket = torch.full((self.max_num_reqs,), -1, dtype=torch.int32, device=device)
+        self.last_valid = torch.zeros(self.max_num_reqs, dtype=torch.int32, device=device)
         self.num_steps = 0
         # Slots reassigned since the last propose; their stats bookkeeping
         # still belongs to the previous request.
@@ -672,9 +636,7 @@ class AscendSuffixSpeculator(BaseSpeculator):
         self.num_docs += num_docs
         docs_gpu = async_tensor_h2d(docs, self.device, torch.int32)
         token_ids = self.req_states.all_token_ids.gpu
-        _suffix_ingest_kernel[
-            (num_docs, triton.cdiv(self.max_model_len, _INGEST_BLOCK))
-        ](
+        _suffix_ingest_kernel[(num_docs, triton.cdiv(self.max_model_len, _INGEST_BLOCK))](
             token_ids,
             token_ids.stride(0),
             docs_gpu,
@@ -794,4 +756,3 @@ class AscendSuffixSpeculator(BaseSpeculator):
             num_warps=4,
         )
         return self.drafts[:num_reqs]
-

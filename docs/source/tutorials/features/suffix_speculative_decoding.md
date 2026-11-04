@@ -15,12 +15,15 @@ suffix configuration and the `BaseSpeculator` request lifecycle hooks. The
 repository's older verified pin does not contain these interfaces. This change
 does not update that pin or backport the upstream runner protocol.
 
-The default runner selection continues to fall back to V1 for suffix decoding
-pending NPU generation, async scheduling, TP consistency and throughput
-qualification. On a compatible upstream version, explicitly opt into V2:
+Suffix decoding uses V2 by default unless another unsupported configuration
+requires V1. Set `VLLM_USE_V2_MODEL_RUNNER=0` to explicitly use the legacy V1
+implementation. A V2 configuration with an older upstream version raises an
+actionable dependency error instead of silently falling back to V1.
+NPU generation, async scheduling, TP consistency and throughput qualification
+are still pending. On a compatible upstream version:
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=1 vllm serve /data/Qwen3-8B \
+vllm serve /data/Qwen3-8B \
   --async-scheduling \
   --speculative-config '{"method":"suffix","num_speculative_tokens":8,"suffix_decoding_corpus_tokens":1048576}'
 ```
@@ -151,6 +154,8 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export TASK_QUEUE_ENABLE=1
 # Enable the AIVector core to directly schedule ROCE communication.
 export HCCL_OP_EXPANSION_MODE="AIV"
+# This section documents the legacy CPU suffix implementation.
+export VLLM_USE_V2_MODEL_RUNNER=0
 vllm serve /data/Qwen3-32B \
   --served-model-name qwen3 \
   --trust-remote-code \

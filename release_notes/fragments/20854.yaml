@@ -4,5 +4,5 @@ entries:
     text: >-
       Added an experimental NPU suffix drafter for Model Runner V2 with
       request-history matching, a shared completed-response corpus and optional
-      adaptive verification. Requires upstream vLLM #60339 and explicit V2
-      opt-in; default suffix runner selection remains on V1 pending qualification.
+      adaptive verification. Suffix now uses V2 by default and requires upstream
+      vLLM #60339; explicitly select V1 to use the legacy implementation.
