@@ -47,9 +47,7 @@ def segment_local_scan(
     heads = tl.where(valid, (keys != previous_keys).to(tl.int32), 0)
     permutation = tl.load(permutation_ptr + safe_offsets, mask=valid, other=0)
     values = tl.load(original_values_ptr + permutation, mask=valid, other=-1)
-    prefixes, _ = tl.associative_scan(
-        (values, heads), axis=0, combine_fn=_segmented_max_combine
-    )
+    prefixes, _ = tl.associative_scan((values, heads), axis=0, combine_fn=_segmented_max_combine)
     tl.store(prefixes_ptr + safe_offsets, prefixes, mask=valid)
 
     last_offset = tl.minimum((tile + 1) * BLOCK, n) - 1
@@ -77,9 +75,7 @@ def segment_scan_carries(
     # through tile t-1. This handles segments spanning ANY number of tiles.
     values = tl.load(summary_values_ptr + previous, mask=has_previous, other=-1)
     heads = tl.load(summary_heads_ptr + previous, mask=has_previous, other=0)
-    carries, _ = tl.associative_scan(
-        (values, heads), axis=0, combine_fn=_segmented_max_combine
-    )
+    carries, _ = tl.associative_scan((values, heads), axis=0, combine_fn=_segmented_max_combine)
     safe_indices = tl.minimum(indices, NUM_TILES - 1)
     tl.store(exclusive_carries_ptr + safe_indices, carries, mask=valid)
 
@@ -166,9 +162,7 @@ def _suffix_ingest_emit_kernel(
     for i in range(f):
         req_i = tl.load(docs_ptr + 2 * i).to(tl.int64)
         end_i = tl.load(total_len_ptr + req_i).to(tl.int64)
-        start_i = tl.maximum(
-            tl.load(docs_ptr + 2 * i + 1).to(tl.int64), end_i - (cap - 1)
-        )
+        start_i = tl.maximum(tl.load(docs_ptr + 2 * i + 1).to(tl.int64), end_i - (cap - 1))
         n_i = tl.maximum(end_i - start_i, 0)
         head = tl.where(head + n_i + 1 > cap, 0, head) + n_i + 1
     head = tl.where(head + n + 1 > cap, 0, head)
@@ -184,9 +178,7 @@ def _suffix_ingest_emit_kernel(
     for g in range(f + 1, num_docs):
         req_g = tl.load(docs_ptr + 2 * g).to(tl.int64)
         end_g = tl.load(total_len_ptr + req_g).to(tl.int64)
-        start_g = tl.maximum(
-            tl.load(docs_ptr + 2 * g + 1).to(tl.int64), end_g - (cap - 1)
-        )
+        start_g = tl.maximum(tl.load(docs_ptr + 2 * g + 1).to(tl.int64), end_g - (cap - 1))
         n_g = tl.maximum(end_g - start_g, 0)
         later = tl.where(later + n_g + 1 > cap, 0, later)
         wrapped = tl.where(later == 0, 1, wrapped)
@@ -204,8 +196,13 @@ def _suffix_ingest_emit_kernel(
     # r4(f, j) = f * P + j                  (4-token family)
     # r2(f, j) = num_docs * P + f * P + j   (2-token family; second plane
     #                                    starts at this batch's F, not max F)
-    row = token_ids_ptr + req * token_ids_stride + start
-    tl.store(corpus_ptr + pos, tl.load(row + j, mask=m), mask=keep)
+    # Masks do not short-circuit address formation on Ascend. Keep the row
+    # base in its allocation even for empty documents and inactive tail tiles.
+    row = token_ids_ptr + req * token_ids_stride
+    token_offset = tl.minimum(tl.maximum(start + j, 0), token_ids_stride - 1)
+    corpus_offset = tl.minimum(tl.maximum(pos, 0), cap - 1)
+    tokens = tl.load(row + token_offset, mask=m, other=0)
+    tl.store(corpus_ptr + corpus_offset, tokens, mask=keep)
     slot = doc_seq % SLOTS
     val = (doc_seq << 32) | pos
     r4 = f * P + j
@@ -216,9 +213,11 @@ def _suffix_ingest_emit_kernel(
     pad_v = tl.full([BLOCK], -1, tl.int64)
     hv = tl.zeros([BLOCK], tl.int64)
     for d in tl.static_range(4):
-        # [NPU] clamp the potentially-negative address before loading.
-        _hp = tl.where(j - 1 - d < 0, 0, j - 1 - d)
-        t = tl.load(row + _hp, mask=m & (j - 1 - d >= 0), other=0)
+        # Preserve the raw document-relative mask, but clamp both ends of
+        # the address before forming a pointer into the request-state row.
+        _hp = j - 1 - d
+        history_offset = tl.minimum(tl.maximum(start + _hp, 0), token_ids_stride - 1)
+        t = tl.load(row + history_offset, mask=m & (_hp >= 0), other=0)
         hv = (hv ^ t.to(tl.int64)) * HASH_MUL
         if d == 1:
             # Emit the 2-token family record: hv holds tokens [j-2, j).

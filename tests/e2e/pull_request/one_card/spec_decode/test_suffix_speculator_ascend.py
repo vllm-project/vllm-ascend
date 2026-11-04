@@ -10,6 +10,7 @@ import torch
 
 try:
     import torch_npu  # noqa: F401
+
     _IS_NPU = True
 except ImportError:
     _IS_NPU = False
@@ -70,9 +71,7 @@ def _make(k, depth, max_reqs, max_len, corpus_tokens, adaptive=False):
     )
 
     def buf(*shape):
-        return SimpleNamespace(
-            gpu=torch.zeros(*shape, dtype=torch.int32, device=DEVICE)
-        )
+        return SimpleNamespace(gpu=torch.zeros(*shape, dtype=torch.int32, device=DEVICE))
 
     req_states = SimpleNamespace(
         all_token_ids=buf(max_reqs, max_len),
@@ -127,7 +126,6 @@ def _propose(spec, req_states, slots, num_sampled=None, num_rejected=None):
     return drafts.cpu().numpy(), spec.num_valid[:n].cpu().numpy()
 
 
-
 _OBSERVE_MLIR_DIAG = "ConvertLinalgRToBinary"
 
 
@@ -140,6 +138,7 @@ def _propose_or_xfail(spec, rs, slots, **kw):
         if _OBSERVE_MLIR_DIAG in str(e):
             pytest.xfail(f"observe kernel MLIR compile failure: {type(e).__name__}")
         raise
+
 
 @pytest.mark.parametrize("vocab", [4, 16, 1000])
 def test_local_matches_reference(vocab):
@@ -468,6 +467,64 @@ def test_ingestion_matches_reference(corpus_tokens):
         assert int(spec.corpus_head) == ref["head"]
         assert int(spec.doc_seq) == ref["doc_seq"]
     assert np.array_equal(spec.table.cpu().numpy(), ref["table"])
+
+
+def test_ingestion_last_request_partial_tile_matches_reference():
+    """Exercise the last valid lane, a high row offset, and then no valid lanes."""
+    max_len, corpus_tokens = 1025, 2048
+    spec, rs = _make(4, 8, 2, max_len, corpus_tokens=corpus_tokens)
+    last_slot = 1
+    _set(rs, 0, [], [900] * max_len)
+    ref = dict(
+        corpus=np.full(corpus_tokens, -1, dtype=np.int64),
+        table=np.full(tuple(spec.table.shape), -1, dtype=np.int64),
+        head=0,
+        doc_seq=0,
+    )
+    full_document = [(17 * index + 3) % 257 for index in range(max_len)]
+    scenarios = [
+        # The second 1024-lane tile has exactly one live token.
+        ("one-live-tail-lane", [], full_document),
+        # The retained prompt tail starts near the end of the final request
+        # row: even low inactive lanes would address past its allocation.
+        ("short-document-at-row-end", full_document[:-5], [11, 12, 13, 14, 15]),
+        ("empty-document", [], []),
+    ]
+    for name, prompt, output in scenarios:
+        _set(rs, last_slot, prompt, output)
+        source_before = rs.all_token_ids.gpu.cpu()
+        doc = (prompt + output)[max(len(prompt) - 3, 0) :]
+        _ref_ingest(ref, [doc], corpus_tokens, spec.num_buckets)
+        _finish(spec, rs, {name: last_slot})
+        torch.npu.synchronize()
+
+        assert spec.corpus.tolist() == ref["corpus"].tolist(), name
+        assert spec.table.tolist() == ref["table"].tolist(), name
+        assert int(spec.corpus_head) == ref["head"], name
+        assert int(spec.doc_seq) == ref["doc_seq"], name
+        torch.testing.assert_close(rs.all_token_ids.gpu.cpu(), source_before, rtol=0, atol=0)
+
+
+def test_ingestion_single_cell_corpus_has_only_separators():
+    """Capacity one retains zero payload tokens, including from a full final row."""
+    max_len = 1025
+    spec, rs = _make(4, 8, 2, max_len, corpus_tokens=1)
+    expected_corpus = [-1]
+    expected_table = np.full(tuple(spec.table.shape), -1, dtype=np.int64)
+    # Both documents have n=0 after the capacity limit. The nonempty case has
+    # start == max_model_len, so even its row base must not be formed past end.
+    documents = [[index % 31 for index in range(max_len)], []]
+    for sequence, document in enumerate(documents, start=1):
+        _set(rs, 1, [], document)
+        _finish(spec, rs, {f"one-cell-{sequence}": 1})
+        torch.npu.synchronize()
+
+        # Independent one-cell ring reference: each finished document writes
+        # its separator at zero, advances head to one, and emits no hash entry.
+        assert spec.corpus.tolist() == expected_corpus
+        assert spec.table.tolist() == expected_table.tolist()
+        assert int(spec.corpus_head) == 1
+        assert int(spec.doc_seq) == sequence
 
 
 def test_reset_state_forgets_the_corpus():
