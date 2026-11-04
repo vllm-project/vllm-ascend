@@ -326,7 +326,11 @@ def rejection_sample(
     fly_window_size: int = 0,
     fly_entropy_threshold: float = 0.3,
     fly_entropy_top_k: int = 3,
+    skip_masked_vocab_blocks: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    # Core's flag only skips zero-mass CUDA Gumbel blocks. The NPU categorical
+    # resampler already computes their exact zero mass without per-token draws;
+    # retain that path for either hint value, including partially masked blocks.
     if use_fp64:
         raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")
     if fly_window_size > 0:

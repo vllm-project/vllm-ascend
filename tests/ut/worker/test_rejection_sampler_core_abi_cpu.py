@@ -13,7 +13,10 @@ import torch
 @pytest.mark.parametrize("current_core", [False, True])
 @pytest.mark.parametrize("draft_kind", ["none", "tensor", "replicated_cache", "mapped_cache"])
 @pytest.mark.parametrize("block_verification", [False, True])
-def test_sampler_dispatch_preserves_row_mapping_and_stats_extent(current_core, draft_kind, block_verification):
+@pytest.mark.parametrize("skip_masked_vocab_blocks", [False, True])
+def test_sampler_dispatch_preserves_row_mapping_and_stats_extent(
+    current_core, draft_kind, block_verification, skip_masked_vocab_blocks
+):
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/spec_decode/rejection_sampler_utils.py"
     function = next(
         n for n in ast.parse(source.read_text()).body if isinstance(n, ast.FunctionDef) and n.name == "rejection_sample"
@@ -70,10 +73,16 @@ def test_sampler_dispatch_preserves_row_mapping_and_stats_extent(current_core, d
     )
     if not current_core and mapping is not None:
         with pytest.raises(ValueError, match="do not support mapped draft-cache rows"):
-            namespace[function.name](*args, use_block_verification=block_verification)
+            namespace[function.name](
+                *args,
+                use_block_verification=block_verification,
+                skip_masked_vocab_blocks=skip_masked_vocab_blocks,
+            )
         assert not launches
         return
-    namespace[function.name](*args, use_block_verification=block_verification)
+    namespace[function.name](
+        *args, use_block_verification=block_verification, skip_masked_vocab_blocks=skip_masked_vocab_blocks
+    )
     stats, _ = launches["_compute_block_stats_kernel"]
     assert len(stats) == (21 if current_core else 20)
     if current_core:
