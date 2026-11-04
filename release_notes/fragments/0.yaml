@@ -1,0 +1,5 @@
+# Local PR draft: replace 0 and this filename with the assigned PR number before publication.
+pr: 0
+entries:
+  - category: feature
+    text: Added opt-in query-row parallelism for the ordinary SFA prefill indexer with enable_indexer_query_parallel, including PCP deployments with full-world replicated-indexer DCP. Native PCP segments preserve their causal boundaries and exchange indices within TP. Eligible batches exchange final Top-K indices while retaining the full visible key history for each query.

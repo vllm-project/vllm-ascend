@@ -90,6 +90,78 @@ The following table lists additional configuration options available in vLLM Asc
 
 The details of each configuration option are as follows:
 
+### SFA indexer query parallelism
+
+`enable_indexer_query_parallel` (boolean, default `false`) distributes the
+ordinary SFA indexer's prefill query rows across tensor-parallel ranks. Every
+row still scores its full visible key history. The ranks exchange the final
+Top-K indices through a padded HCCL all-gather; cache writes and query
+projections retain their existing behavior.
+
+Enable it with `--additional-config '{"enable_indexer_query_parallel": true}'`.
+The minimum **PCP-local scheduled query rows**, before splitting across TP, uses
+vLLM's `--attention-config '{"indexer_tp_shard_min_rows": 65536}'` setting.
+The default is 65,536. This is a batch/chunk size threshold, not the accumulated
+context length: a 1M context with an 8,192-token chunk budget does not meet the
+default threshold. A lower threshold can be tested explicitly, for example
+8,192 with a 16,384-token chunk at TP16; every rank must still receive at least
+128 rows.
+
+This path requires TP > 1, either ordinary TP (PCP = DCP = 1) or
+replicated-indexer SFA DCP = TP × PCP,
+an unpadded pure-prefill batch, and
+the ordinary `AscendSFAIndexerBackend` with BF16 or C8 indexer storage. It
+preserves the existing path for smaller batches, mixed/decode batches, draft
+steps, FULL graph mode, graph capture, batch-invariant mode, sparse KV offload,
+C4 storage and custom indexer selectors. `FULL_DECODE_ONLY` deployments may
+use it for ordinary prefill. Missing host length estimates also retain the
+existing path; execution never reads device lengths back to the CPU.
+
+Standalone SFA DCP retains a complete indexer K/scale cache on every TP rank,
+even though its main attention KV cache is sharded. Query-row parallelism
+can therefore reuse DCP's existing replicated indexer addresses and exchange
+the selected indices within TP. It does not change main-KV sharding, DCP
+attention merging, cache writes or decode execution, and adds no ranks.
+Benchmark this combination with matched on/off settings for the deployment's
+model, cache dtype and chunk size; pure-TP results alone do not establish its
+DCP speedup.
+For PCP with DCP = TP × PCP, query-row parallelism distributes each PCP
+rank's work within its TP group. The native PCP metadata represents the two
+DualChunkSwap segments as separate virtual requests. Each segment retains
+its own absolute causal key bound and request-local FP8 tile alignment; the
+TP all-gather restores the PCP-local row order. PCP's existing K/scale gather
+and DCP's main-KV sharding are unchanged. Legacy PCP metadata and PCP layouts
+without full-world replicated-indexer DCP retain the existing path.
+
+For example, PCP4/TP4/DCP16 with a 16,384-token global chunk has about 4,096
+query rows per PCP rank. An explicitly configured
+`--attention-config '{"indexer_tp_shard_min_rows": 4096}'` permits those chunks
+to be considered. The context length alone does not make the optimization
+activate. Measure the new TP Top-K exchange cost together with the saved
+indexer work using the same PCP deployment with the option off and on.
+
+Requesting this option does not guarantee that it activates. The metadata
+builder logs a warning if the configuration is unsupported or, for a supported
+configuration, if its approximate per-PCP query budget is below the effective
+row threshold. Short replicated requests can change the actual local row
+count; the per-batch check remains authoritative. A 16,384-token global chunk
+remains below the default 65,536-row threshold even without PCP.
+Smaller individual batches can fall back even when startup checks pass.
+
+The scope includes ordinary SFA model paths such as DeepSeek-V3.2 and
+`glm_moe_dsa` GLM variants. GLM-5.3-Flash's KPool indexer, DeepSeek-V4/V4.1's
+compressed indexers, and MiniMax-M3's indexer have separate implementations
+and are not enabled by this option. Check the backend used by the checkpoint.
+
+The planner balances visible-key work across contiguous row ranges. To bound
+padded communication and workspace size, highly skewed partitions fall back
+to equal row counts. Startup profiling reserves the exchange's temporary
+storage, which may reduce available KV capacity when the option is enabled.
+The compute/communication tradeoff depends on context length, TP topology,
+chunk size and quantization; measure matched on/off workloads before adopting
+a lower threshold. No universal speedup or bitwise output equivalence is
+implied by the mathematically unchanged row scoring.
+
 <span id="runtime_guard"></span>**runtime_guard**
 
 Runtime Guard provides online anomaly detection, structured incident reports, and optional native KV cache dump. See the [Runtime Guard feature guide](../feature_guide/runtime_guard.md) for usage and the [runtime_config reference](./runtime_config.md) for JSON fields.

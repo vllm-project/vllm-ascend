@@ -582,6 +582,7 @@ class AscendConfig:
     kv_pool_range_debug: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     sfa_dcp_force_tmajor_restore: bool = False
+    enable_indexer_query_parallel: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True

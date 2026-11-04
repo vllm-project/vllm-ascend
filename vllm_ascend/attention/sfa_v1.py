@@ -28,6 +28,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -1833,6 +1834,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.turboquant._initialize(hidden_states.device)
         if attn_metadata is None:
             # Profiling run.
+            indexer_impl = getattr(getattr(self, "indexer", None), "impl", None)
+            if type(indexer_impl) is AscendSFAIndexerBackend:
+                indexer_impl.reserve_query_parallel_workspace(hidden_states.device)
             return output.fill_(0)
 
         if self.qk_rope_head_dim == 0:
