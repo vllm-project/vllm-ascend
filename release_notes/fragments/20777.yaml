@@ -1,6 +1,4 @@
 pr: 20777
 entries:
-  - category: feature
-    text: Added full ACL graph support for DFlash2 drafting on Model Runner V2.
   - category: bugfix
     text: Fixed standalone compiled modules, including DFlash2 candidate scoring, failing when called without a forward context.
