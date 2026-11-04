@@ -163,7 +163,7 @@ class NPUWorker310(NPUWorker):
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot(device=device)
-        self.requested_memory = self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
+        self.requested_memory = self.init_snapshot.total_memory * self._get_gpu_memory_utilization()
         if is_rc_device():
             self.init_snapshot.free_memory = psutil.virtual_memory().available
             logger.info_once("Root Complex (RC) mode: host and device memory are shared.")
@@ -174,7 +174,7 @@ class NPUWorker310(NPUWorker):
                 f"({GiB(self.init_snapshot.free_memory)}/"
                 f"{GiB(self.init_snapshot.total_memory)} GiB) on startup "
                 f"is less than desired GPU memory utilization "
-                f"({self.cache_config.gpu_memory_utilization}, "
+                f"({self._get_gpu_memory_utilization()}, "
                 f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
                 f"utilization or reduce GPU memory used by other processes."
             )

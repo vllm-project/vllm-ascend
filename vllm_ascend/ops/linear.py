@@ -238,6 +238,8 @@ class AscendQKVParallelLinear(QKVParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
+        # vLLM #63752: custom allocation bypasses the stacked initializer.
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
 
     def forward(
         self,
@@ -278,6 +280,7 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after
         # linear of vllm supports custom comm group
         self.output_sizes = output_sizes
+        self.shard_ids = tuple(range(len(output_sizes)))
         assert all(output_size % self.tp_size == 0 for output_size in output_sizes)
         AscendColumnParallelLinear.__init__(
             self,
@@ -292,6 +295,8 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
+        # vLLM #63752: custom allocation bypasses the stacked initializer.
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
 
     def forward(
         self,

@@ -913,6 +913,20 @@ class TestNPUWorker(TestBase):
         self.assertIs(worker.model_runner, mm_encoder_runner.return_value)
         report_usage_stats.assert_not_called()
 
+    def test_memory_utilization_resolves_default_and_preserves_explicit_budget(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.cache_config = CacheConfig(gpu_memory_utilization=0.5)
+        self.assertEqual(worker._get_gpu_memory_utilization(), 0.5)
+        worker.cache_config = CacheConfig()
+        expected = worker.cache_config.gpu_memory_utilization
+        if expected is None:
+            worker.cache_config.enable_extensible_kv_cache = False
+            expected = worker.cache_config.DEFAULT_GPU_MEMORY_UTILIZATION
+        self.assertEqual(worker._get_gpu_memory_utilization(), expected)
+        self.assertEqual(2000 * worker._get_gpu_memory_utilization(), 2000 * expected)
+
     def test_profile_start_stop(self):
         """Test profile method start and stop"""
         from vllm_ascend.worker.worker import NPUWorker
