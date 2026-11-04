@@ -180,7 +180,13 @@ def test_scheduler_to_ready_to_get_finished(worker, producer, monkeypatch, reque
     assert ready["completion_address"] == worker._recving_thread.address
     assert connector.get_finished(set()) == (set(), set())
     assert done(worker, ready)["kind"] == "done_ack"
-    assert connector.get_finished(set()) == (set(), {"rt"})
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        finished = connector.get_finished(set())
+        if finished[1]:
+            break
+        time.sleep(0.01)
+    assert finished == (set(), {"rt"})
     done(worker, ready)
     connector.start_load_kv(None)
     assert connector.get_finished(set()) == (set(), set())
@@ -321,3 +327,80 @@ def test_ready_requests_reuse_context_and_close_sockets(worker, producer, monkey
     assert all(sock.closed for sock in sockets)
     assert context.closed
     assert worker._sending_thread.zmq_context is None
+
+
+@pytest.mark.parametrize("ack_failed", [False, True])
+def test_done_before_ready_ack_waits_for_sender_outcome(worker, producer, monkeypatch, ack_failed):
+    address, _ = producer
+    monkeypatch.setattr(worker._sending_thread, "_get_remote_worker_addresses", lambda *args: {(0, 0, 0): address})
+    ready_messages = queue.Queue()
+    release = threading.Event()
+    calls = []
+
+    def send_ready(address, message):
+        calls.append(message["transfer_id"])
+        ready_messages.put(message)
+        assert release.wait(3)
+        if ack_failed:
+            raise TimeoutError("Lost Ready ACK after P completed all WRITEs")
+
+    monkeypatch.setattr(worker._sending_thread, "_send_ready", send_ready)
+    worker.start_load_kv(metadata())
+    try:
+        ready = ready_messages.get(timeout=3)
+        done(worker, ready)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            assert not worker.get_transfer_results().finished_recving
+            if worker._reqs_recv_state["t"].finished_ranks:
+                break
+            time.sleep(0.01)
+        assert worker._reqs_recv_state["t"].finished_ranks == {(0, 0, 0)}
+    finally:
+        release.set()
+    result = finish(worker)
+    assert result.finished_recving == {"rt"}
+    assert result.failed_recving == ({"rt"} if ack_failed else set())
+    assert calls == ["t"]  # no request-level resend after an ACK failure
+
+
+def test_done_ack_send_error_reports_request_failure(worker, producer, monkeypatch):
+    address, messages = producer
+    monkeypatch.setattr(worker._sending_thread, "_get_remote_worker_addresses", lambda *args: {(0, 0, 0): address})
+    worker.start_load_kv(metadata())
+    ready = messages.get(timeout=3)
+
+    def fail_send(frames):
+        raise zmq.Again()
+
+    # The source has certified drained WRITEs, but returning its ACK fails.
+    message = {**ready, "kind": "done", "status": "ok", "writes_drained": True}
+    worker._recving_thread._handle_frames(
+        SimpleNamespace(send_multipart=fail_send), [b"producer", b"", msgspec.msgpack.encode(message)]
+    )
+    result = finish(worker)
+    assert result.finished_recving == result.failed_recving == {"rt"}
+
+
+def test_partial_ready_failure_stops_the_request_without_releasing_blocks(worker, producer, monkeypatch):
+    address, _ = producer
+    monkeypatch.setattr(
+        worker._sending_thread,
+        "_get_remote_worker_addresses",
+        lambda *args: {(0, 0, rank): address for rank in range(3)},
+    )
+    sent_ranks = []
+
+    def send_ready(address, message):
+        sent_ranks.append(message["producer_rank"])
+        if message["producer_rank"] == [0, 0, 1]:
+            raise TimeoutError("Second source ACK failed")
+
+    monkeypatch.setattr(worker._sending_thread, "_send_ready", send_ready)
+    worker.start_load_kv(metadata())
+    with pytest.raises(RuntimeError, match="outstanding WRITEs"):
+        finish(worker)
+    assert sent_ranks == [[0, 0, 0], [0, 0, 1]]
+    assert worker._reqs_recv_state["t"].failed
+    assert "t" not in worker._finished_transfers
+    assert worker._stop_event.is_set()
