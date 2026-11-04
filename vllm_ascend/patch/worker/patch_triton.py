@@ -128,10 +128,12 @@ from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (  # noqa:
 
 # triton ops that need to be filed in ops/triton
 penalties.apply_penalties = apply_penalties
-# because sampler.py and speculator.py are imported before this patch, they must be overridden
-prompt_logprob.compute_topk_logprobs = compute_topk_logprobs
-sampler.compute_topk_logprobs = compute_topk_logprobs
-rejection_sampler.compute_topk_logprobs = compute_topk_logprobs
+# These modules import compute_topk_scores before this patch runs.
+# Replace their local references as well as the defining module.
+logprob.compute_topk_scores = compute_topk_logprobs
+prompt_logprob.compute_topk_scores = compute_topk_logprobs
+sampler.compute_topk_scores = compute_topk_logprobs
+rejection_sampler.compute_topk_scores = compute_topk_logprobs
 states.apply_min_p = apply_min_p
 penalties.bincount = bincount
 bad_words.apply_bad_words = apply_bad_words
