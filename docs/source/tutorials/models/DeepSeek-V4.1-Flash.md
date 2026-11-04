@@ -15,6 +15,12 @@ parameters and a context length of up to one million tokens. It uses a
 layers and 20 decoder layers, activating 8B parameters per token during
 Prefill and 16B during Decode.
 
+For 950DT products (A5), this guide covers single-node deployment, ordinary
+1P1D with SWA bounded replay on Prefill, and 1P1D with a Memcache DRAM pool.
+Section 5.2 also covers experimental PCP8 Prefill and multi-node EP16 Decode.
+For 950DT, use the image built from `releases/v0.32.0rc` in the
+[950DT installation tab](#41-docker-image-installation).
+
 The model introduces Compressed Sparse Attention 2 (CSA2), FP4 main KV cache,
 SWA Bounded Replay, Single-Pass mHC, Engram conditional memory, and DSpark
 speculative decoding. These designs reduce the global KV cache footprint to
@@ -28,10 +34,6 @@ configuration and a two-node A3 Prefill-Decode (PD) disaggregated
 configuration. It also supports a two-node hybrid A2 configuration and a
 four-node A2 PD disaggregated configuration.
 
-For 950DT products (A5), this guide covers single-node deployment, ordinary
-1P1D with SWA bounded replay on Prefill, and 1P1D with a Memcache DRAM pool.
-Section 5.2 also covers experimental PCP8 Prefill and multi-node EP16 Decode.
-
 This guide uses **vLLM Ascend v0.32.0** and recommends W4A8 for performance.
 
 Use the matching upstream vLLM revision for the selected vLLM Ascend version.
@@ -39,6 +41,10 @@ For source builds, use the upstream vLLM tag recorded in
 `.github/vllm-release-tag.commit` at the vLLM Ascend **v0.32.0rc** tag.
 
 ## 2 Supported Features
+
+For 950DT products, the examples use model runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`)
+and the original MXFP checkpoint. Single-node deployment and both roles in
+ordinary 1P1D use DP8/TP1/EP8.
 
 Refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md)
 for the complete support matrix and the
@@ -50,10 +56,6 @@ and model runner V2. The single-node colocated configuration uses DP4/TP4.
 The PD configuration uses DP4/PCP4/TP1 on the Prefill node, DP16/TP1 on the
 Decode node, SWA bounded replay and MegaMoE on Prefill, DSpark speculative
 decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode.
-
-For 950DT products, the examples use model runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`)
-and the original MXFP checkpoint. Single-node deployment and both roles in
-ordinary 1P1D use DP8/TP1/EP8.
 
 ## 3 Prerequisites
 
@@ -102,6 +104,11 @@ Use one of the following hardware configurations:
   memory per NPU and exposes 8 devices to the container.
 - **A2 1P1D**: four Atlas 800I A2 servers with the same device configuration.
 
+For 950DT products, use the original DeepSeek-V4.1-Flash MXFP checkpoint
+with `--quantization deepseek_v4_fp8`, including its DSpark parameters and
+Engram tables. Use its actual local directory as `<YOUR_MODEL_PATH>`; the
+ModelSlim checkpoints are for the A2/A3 examples.
+
 Store the checkpoint in a shared directory or copy it to the same absolute
 path on every server.
 
@@ -118,70 +125,6 @@ interfaces, and the service ports must not be blocked.
 
 Select the tab for the target hardware. A2 products and A3 products use
 separate images from the v0.32.0 release branch.
-
-=== "950DT products"
-
-    From the root of your vLLM Ascend checkout, build the A5 image with the
-    upstream vLLM revision selected by this branch:
-
-    ```bash
-    export IMAGE="vllm-ascend-a5:$(git rev-parse --short HEAD)"
-    docker build -f Dockerfile.a5 \
-      --build-arg VLLM_TAG="$(cat .github/vllm-release-tag.commit)" \
-      -t "$IMAGE" .
-    ```
-
-    On each participating server, set `IMAGE` to the tag of the image you
-    built or the reference or digest of a matching prebuilt image. Set
-    `MODEL_ROOT` to the parent directory of the checkpoint on each host.
-    Prepare the host driver for the selected image and verify it with
-    `npu-smi info`; see the [installation guide](../../getting_started/installation.md).
-    The complete driver mount includes the A5 topology files. The PD scripts
-    use `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` for automatic UB resource
-    generation; see the [PD communication guide](../features/pd_disaggregation_mooncake_multi_node.md#atlas-850850e950-superpod-communication-configuration).
-
-    ```bash
-    export MODEL_ROOT="/data/weights"
-    export NPU_SMI="$(command -v npu-smi)"
-
-    docker run --rm -it \
-      --name deepseek-v41-950dt \
-      --net=host \
-      --ulimit nofile=65536:524288 \
-      --shm-size=512g \
-      --privileged=true \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci_manager \
-      --device /dev/hisi_hdc \
-      --device /dev/ummu \
-      --device /dev/uburma \
-      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-      -v /usr/local/dcmi:/usr/local/dcmi \
-      -v "$NPU_SMI:/usr/local/bin/npu-smi:ro" \
-      -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-      -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
-      -v "$MODEL_ROOT:$MODEL_ROOT" \
-      "$IMAGE" bash
-    ```
-
-    Inside the container, run `npu-smi info` and confirm that all eight NPUs
-    are visible. Run `vllm --version` to check the installed vLLM version.
-
-    Reserve enough host memory and shared memory for Engram CPU offload and
-    local DP sharing. Use the same image and absolute checkpoint path on
-    every participating node. For [Memcache pooling](#535-950dt-products-with-memcache-kv-cache-pool),
-    prepare the host files described in the [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
-    Add both options before `"$IMAGE"` in the `docker run` command on each node:
-
-    - `-v /lib/route.conf:/lib/route.conf:ro`
-    - `-v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro`
 
 === "A3 series"
 
@@ -266,12 +209,79 @@ separate images from the v0.32.0 release branch.
       "$IMAGE" bash
     ```
 
+=== "950DT products"
+
+    From the root of your vLLM Ascend checkout, build the A5 image with the
+    upstream vLLM revision selected by this branch:
+
+    ```bash
+    export IMAGE="vllm-ascend-a5:$(git rev-parse --short HEAD)"
+    docker build -f Dockerfile.a5 \
+      --build-arg VLLM_TAG="$(cat .github/vllm-release-tag.commit)" \
+      -t "$IMAGE" .
+    ```
+
+    On each participating server, set `IMAGE` to the tag of the image you
+    built or the reference or digest of a matching prebuilt image. Set
+    `MODEL_ROOT` to the parent directory of the checkpoint on each host.
+    Prepare the host driver for the selected image and verify it with
+    `npu-smi info`; see the [installation guide](../../getting_started/installation.md).
+    The complete driver mount includes the A5 topology files. The PD scripts
+    use `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` for automatic UB resource
+    generation; see the [PD communication guide](../features/pd_disaggregation_mooncake_multi_node.md#atlas-850850e950-superpod-communication-configuration).
+
+    ```bash
+    export MODEL_ROOT="/data/weights"
+    export NPU_SMI="$(command -v npu-smi)"
+
+    docker run --rm -it \
+      --name deepseek-v41-950dt \
+      --net=host \
+      --ulimit nofile=65536:524288 \
+      --shm-size=512g \
+      --privileged=true \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci_manager \
+      --device /dev/hisi_hdc \
+      --device /dev/ummu \
+      --device /dev/uburma \
+      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v "$NPU_SMI:/usr/local/bin/npu-smi:ro" \
+      -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
+      -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
+      -v "$MODEL_ROOT:$MODEL_ROOT" \
+      "$IMAGE" bash
+    ```
+
+    Inside the container, run `npu-smi info` and confirm that all eight NPUs
+    are visible. Run `vllm --version` to check the installed vLLM version.
+
+    Reserve enough host memory and shared memory for Engram CPU offload and
+    local DP sharing. Use the same image and absolute checkpoint path on
+    every participating node. For [Memcache pooling](#535-950dt-products-with-memcache-kv-cache-pool),
+    prepare the host files described in the [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+    Add both options before `"$IMAGE"` in the `docker run` command on each node:
+
+    - `-v /lib/route.conf:/lib/route.conf:ro`
+    - `-v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro`
+
 Change `MODEL_ROOT` if the checkpoint is stored elsewhere. Keep the same
 absolute path inside and outside every container.
 
 ### 4.2 Source Code Installation
 
-For A2/A3 source builds, follow the
+For 950DT products, use the Dockerfile and vLLM revision from the
+[950DT installation tab](#41-docker-image-installation).
+
+To build from source, follow the
 [software environment installation guide](../../getting_started/installation.md#installation-software-environment)
 and check out the **v0.32.0rc** tag of vLLM Ascend. Use the matching upstream
 vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
@@ -805,7 +815,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
       `scheduler_config.recompute_scheduler_enable` to `true`. The recompute
       scheduler cannot perform bounded replay, so use `--no-swa-bounded-replay`.
     - Set `--max-num-batched-tokens` to `5120` on Prefill and `1024` on Decode.
-      See [Section 9.1](#91-recommended-configurations) for the sequence limits,
+      See [950DT recommended configurations](#950dt-recommended-configurations) for the sequence limits,
       memory utilization, and execution mode for each role.
     - Each launcher child starts one local DP engine. The templates therefore
       pass `--data-parallel-size-local 1`, while the launcher starts eight
@@ -2897,7 +2907,7 @@ and SWA bounded replay on Prefill. The [Memcache example](#535-950dt-products-wi
 uses `4096` batch tokens on Prefill with local prefix caching disabled to
 measure external hits. Decode uses `1024` in both examples.
 
-### 9.2 Workload-Specific Tuning
+#### Workload-Specific Tuning
 
 When the workload changes, evaluate configurations with the tools in
 [Section 8](#8-performance-evaluation). Keep input and output lengths,
