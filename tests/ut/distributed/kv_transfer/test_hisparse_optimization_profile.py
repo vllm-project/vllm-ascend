@@ -52,6 +52,45 @@ def test_source_pairing_accepts_windows_checkout_line_endings(tmp_path, monkeypa
     assert MODULE.select_profile("a5_c8_main", tmp_path) == "a5_c8_main"
 
 
+def test_same_runtime_contract_accepts_documentation_and_formatting_edits(tmp_path, monkeypatch):
+    original = (
+        b'"""Old module docs."""\n\ndef hook(value: int) -> int:\n    """Old method docs."""\n    return value + 1\n'
+    )
+    edited = (
+        b'# release comment\n"""New docs."""\ndef hook(value:int)->int:\n'
+        b'    """New method docs."""\n    return (value+1)  # unchanged behavior\n'
+    )
+    relative = "v1/hisparse/runtime.py"
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(edited)
+    monkeypatch.setattr(MODULE, "CORE_SOURCES", {relative: "historical-file-identifier"})
+    monkeypatch.setattr(MODULE, "MAIN_CORE_SOURCES", {relative: hashlib.sha256(original).hexdigest()})
+    monkeypatch.setattr(MODULE, "MAIN_CORE_AST_DIGESTS", {relative: MODULE.source_contract_digest(original)})
+    assert MODULE.select_profile("a5_c8_main", tmp_path) == "a5_c8_main"
+    MODULE.verify_core_source(target, "historical-file-identifier")
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        b"def hook(value):\n    return value + 2\n",
+        b"def hook(value, new_argument):\n    return value + 1\n",
+        b"def hook(value):\n    wait_for_transfer()\n    return value + 1\n",
+        b"def hook(value):\n    return value + 1\n\nimport another_backend\n",
+        b"def hook(:\n",
+    ],
+)
+def test_source_flexibility_does_not_accept_changed_behavior_or_interfaces(tmp_path, monkeypatch, changed):
+    original = b"def hook(value):\n    return value + 1\n"
+    relative = "runtime.py"
+    (tmp_path / relative).write_bytes(changed)
+    monkeypatch.setattr(MODULE, "MAIN_CORE_SOURCES", {relative: hashlib.sha256(original).hexdigest()})
+    monkeypatch.setattr(MODULE, "MAIN_CORE_AST_DIGESTS", {relative: MODULE.source_contract_digest(original)})
+    with pytest.raises(RuntimeError, match="Re-review"):
+        MODULE.select_profile("a5_c8_main", tmp_path)
+
+
 @pytest.mark.parametrize("changed", [None, "runtime", "worker", "missing"])
 def test_main_pairing_rejects_partial_or_different_source_sets(tmp_path, monkeypatch, changed):
     legacy = {}

@@ -122,8 +122,12 @@ def _verify_contract(runtime_module: Any, worker_module: Any) -> None:
         raise RuntimeError("Qualify lazy MTP mirror independently of the group-prefetch candidate.")
 
 
-def _validate_consumer(config: Any) -> None:
-    """Limit this candidate to the current PD consumer, before any capture."""
+def _validate_consumer(config: Any) -> bool:
+    """Validate transport safety and select the optional MTP specialization.
+
+    Other MTP/graph layouts retain Core's mirror preparation rather than
+    failing model startup. Producer/export safety is a separate requirement.
+    """
     transfer = config.kv_transfer_config
     extra = getattr(transfer, "kv_connector_extra_config", None)
     connectors = extra.get("connectors") if isinstance(extra, dict) else None
@@ -151,22 +155,22 @@ def _validate_consumer(config: Any) -> None:
         ):
             raise RuntimeError("Lazy MTP mirror has no producer/outbound-export tail flush qualification.")
     spec = config.speculative_config
-    if (
-        spec is None
-        or spec.method != "mtp"
-        or spec.num_speculative_tokens != 3
-        or getattr(spec, "enable_adaptive_verification", False)
-        or getattr(spec, "parallel_drafting", False)
-        or config.model_config.enforce_eager
-        or getattr(config.compilation_config.cudagraph_mode, "name", None) != "FULL_DECODE_ONLY"
-        or config.attention_config.hisparse_config.eager_host_mirror is not False
-    ):
-        raise RuntimeError("Lazy MTP mirror candidate requires fixed MTP3/FULL and explicit eager_host_mirror=False.")
+    return (
+        spec is not None
+        and spec.method == "mtp"
+        and spec.num_speculative_tokens == 3
+        and not getattr(spec, "enable_adaptive_verification", False)
+        and not getattr(spec, "parallel_drafting", False)
+        and not config.model_config.enforce_eager
+        and getattr(config.compilation_config.cudagraph_mode, "name", None) == "FULL_DECODE_ONLY"
+        and config.attention_config.hisparse_config.eager_host_mirror is False
+    )
 
 
 def install(config: Any) -> None:
     """Install before capture only in an explicitly selected D-only candidate."""
-    _validate_consumer(config)
+    if not _validate_consumer(config):
+        return
     metadata_module = import_module("vllm_ascend.attention.sfa_hisparse_optimized")
     source = getattr(metadata_module, "__file__", None)
     certificate = getattr(metadata_module, "_hisparse_uniform_mtp_group_size", None)

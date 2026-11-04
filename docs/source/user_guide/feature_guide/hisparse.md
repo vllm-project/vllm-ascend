@@ -86,15 +86,25 @@ The KV preprocessing tests include a fixed BF16 activation row that exposes a ro
 The platform interface is provided by merged vLLM PR [#62592](https://github.com/vllm-project/vllm/pull/62592).
 The reviewed main revision also includes [#63801](https://github.com/vllm-project/vllm/pull/63801)
 group prefetch and [#64989](https://github.com/vllm-project/vllm/pull/64989) profiling-binding cleanup.
-The builder adapter accepts
-the original `head_size` and merged `row_width` keyword. Resolver workspace is
+The optimized builder uses merged Core's `row_width` interface. Resolver workspace is
 owned by the group's leader cache operations, without requiring a Core
 `backend_state` field. These interface fixes alone do not qualify a different
 Core revision for serving; pin and validate the complete paired revisions.
 
-The `a5_c8_main` profile requires the exact reviewed Core source hashes.
-Its name does not imply support for an arbitrary latest main. The former
+The `a5_c8_main` profile requires the reviewed Core executable syntax and interfaces.
+Comments, docstrings, formatting and line-ending changes are accepted without
+weakening checks on executable statements. Its name does not imply support for
+an arbitrary latest main. The former
 `a5_c8_62592` pre-merge profile is rejected. Do not bypass the source guards.
+
+Lengths, concurrency and layer/group counts are obtained from configuration;
+the documented benchmark shapes are not input limits. Fixed MTP3/grouped-row
+branches are optional optimizations: other draft counts or graph layouts retain
+Core's ordinary preparation. Packed C8 eager execution retains the normal NPU
+resolver rather than the BF16-only shortcut. These fallbacks have CPU contract
+coverage; full-model qualification is still scoped to the recorded configurations.
+Payload, hardware, native scratch, export durability and buffer ownership bounds
+remain enforced.
 
 A proposed Core `allocate_host_backing` hook lets the optimized backend supply
 PTA-pinned storage before Core aligns and registers it. When that hook is

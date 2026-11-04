@@ -219,16 +219,14 @@ class AscendHiSparseImpl(AscendSFAImpl):
             if self.topk_indices_buffer is None:
                 raise ValueError("Ascend HiSparse requires a model sparse-index group")
             builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
-        from vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile import current_main_profile_enabled
         from vllm_ascend.patch.worker.patch_hisparse_streams import install
 
         install()
-        row_keyword = "row_width" if current_main_profile_enabled() else "head_size"
         self.index_group, self.index_group_index = builder.register_layer(
             self.has_indexer and not self.skip_topk,
             self.vllm_config,
             kv_cache_dtype=self.vllm_config.cache_config.cache_dtype,
-            **{row_keyword: 656 if self.enable_sparse_sfa_c8 else self.kv_lora_rank + self.qk_rope_head_dim},
+            row_width=656 if self.enable_sparse_sfa_c8 else self.kv_lora_rank + self.qk_rope_head_dim,
         )
         if not isinstance(self.index_group, HiSparseMLAIndexGroup):
             raise RuntimeError("Ascend HiSparse was initialized without a HiSparse index group")
@@ -241,7 +239,9 @@ class AscendHiSparseImpl(AscendSFAImpl):
             self.vllm_config.compilation_config.max_cudagraph_capture_size or 0,
         )
         self._kv_staging_capacity = (max_rows + 127) // 128 * 128
-        self._resident_hisparse_enabled = resident_eager_transport_allowed(
+        # The older eager shortcut decodes BF16 payload geometry. Packed C8
+        # keeps the normal NPU resolver even when enforce_eager is requested.
+        self._resident_hisparse_enabled = not self.enable_sparse_sfa_c8 and resident_eager_transport_allowed(
             self.vllm_config.model_config.enforce_eager,
             get_ascend_device_type() == AscendDeviceType.A5,
             self.vllm_config.kv_transfer_config,
@@ -581,7 +581,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
         packed_cache,
         physical_topk,
         *,
-        use_eager_compaction=False,
         _c8_prepared=False,
         _c8_physical_rows=False,
         _mapping_scope=None,
@@ -768,7 +767,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
                     q_pe[:num_decode] if q_pe is not None else None,
                     self.index_group.physical_kv_cache(self.index_group_index),
                     physical,
-                    use_eager_compaction=metadata.num_prefills == 0,
                     _mapping_scope=mapping_scope,
                 )
             )

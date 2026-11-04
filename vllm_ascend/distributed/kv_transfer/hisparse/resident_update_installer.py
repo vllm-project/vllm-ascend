@@ -15,7 +15,7 @@ def install():
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import worker
     from vllm.v1.hisparse import runtime
 
-    from .optimization_profile import current_main_profile_enabled, verify_core_source
+    from .optimization_profile import verify_core_source
 
     original = worker.update_hisparse_residency
     if getattr(original, "_ascend_direct_Resident_update", False):
@@ -25,14 +25,11 @@ def install():
     for obj, digest in ((worker.HiSparseConnectorWorker.start_step, WORKER_SHA), (original, RUNTIME_SHA)):
         path = Path(inspect.getsourcefile(inspect.unwrap(obj)))
         verify_core_source(path, digest)
-    group_first = current_main_profile_enabled()
 
     @wraps(original)
     def update(residency, updates, request_ids, request_state_indices):
         if residency.device.type != "npu":
             return original(residency, updates, request_ids, request_state_indices)
-        if not group_first:
-            return resident_updates.candidate_update(residency, updates, request_ids, request_state_indices, original)
         # Current Core owns [group,state,page]; the existing stride-aware kernel
         # consumes [state,group,page]. A view preserves its allocation and values.
         state_first = residency.permute(1, 0, 2)

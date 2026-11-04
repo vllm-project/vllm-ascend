@@ -9,9 +9,11 @@ the experimental directory over an installation.
 `VLLM_ASCEND_HISPARSE_PROFILE` is a non-sensitive, startup-only setting:
 
 - `baseline` (default): the existing platform backend, including current-Core ABI support.
-- `a5_c8_main`: the merged-main A5 optimization implementation. Exact normalized Core
-  source hashes are checked before adapters are installed. Unknown versions fail
-  explicitly. Restart workers after changing the profile or source.
+- `a5_c8_main`: the merged-main A5 optimization implementation. Reviewed Core
+  contracts are checked before private adapters are installed. Identical syntax
+  with different comments, docstrings, formatting or line endings is accepted;
+  changed executable syntax or interfaces require review. Restart workers after
+  changing the profile or source.
 
 The former `a5_c8_62592` pre-merge profile is rejected. Its historical results
 remain recorded; new reproduction uses merged main only.
@@ -30,6 +32,38 @@ Its final integration/accuracy/performance qualification remains pending. Lazy
 Host mirrors are restricted to the recorded consumer policy; producers require
 eager mirrors. CP/PP, multi-DP, A3 and other payload formats are not qualified by
 the historical A5 result.
+
+### Configuration bounds and fallbacks
+
+Request count, sequence lengths, TopK, workspace capacity and layer/group counts
+come from the current configuration and runtime. The measured C4/C8 and 32K/8K
+workloads are qualification points, not accepted-input limits. Resident mapping,
+descriptors and per-round lengths are refreshed from current state.
+
+The lazy-MTP optimization is specialized for fixed MTP3 with
+`FULL_DECODE_ONLY`. Other draft counts, adaptive/parallel drafting, other graph
+modes and eager execution retain Core's original mirror preparation instead of
+failing startup because the specialization is unavailable. The 16/32/64-row
+grouped-sort branch likewise has an ordinary resolver fallback. These fallbacks
+do not constitute full-model qualification of every configuration.
+
+Packed C8 eager execution uses the NPU resolver; it must not enter the older
+BF16-only Resident shortcut. The reviewed builder uses merged Core's `row_width`
+interface and current `[group, state, page]` residency layout. Retired pre-merge
+branches are removed rather than maintained as unused compatibility code.
+
+Hardware capability, packed dtype/row geometry, int16 LRU capacity, native
+scratch/UB limits, producer/export durability and graph/buffer ownership checks
+remain necessary. The P/D staging protocol still requires its reviewed 16MiB
+buffer; changing that bound requires a matching chunking and ownership review.
+Removing one assertion cannot establish a valid new format or lifetime contract.
+
+The configuration/source audit passed 51 CPU cases; one adjacent-Core adapter
+test module was skipped because that test's paired checkout was unavailable.
+The actual frozen Core also passed cold contract checks on Python 3.12:
+unchanged syntax was accepted, changed private behavior was rejected, and MTP2
+fallback imported neither Torch nor worker modules. These checks do not establish
+NPU/full-model correctness or performance for the new fallback configurations.
 
 ## Check out merged Core and build
 
@@ -584,3 +618,31 @@ Focused Ruff/format and CPU checks passed. Full CI was attempted again and
 stalled installing actionlint; the exact local invocation was interrupted.
 Miss workloads, final P/D, dataset accuracy, A3 and a clean native rebuild are
 still separate qualifications. AVSG remains excluded.
+
+## Same-source C8 miss workload
+
+The same production-code commit `6bbf813f3aa19eeda57baa3adc7496d3cd9ccb91`
+and merged Core were also compared on one A5 node at C8, 32768 input/8192
+output tokens, two rounds per arm, with the same original four fixed bodies
+cycled in the same order. Formal timing had no profiler or observation hooks.
+
+| Round | OFF TPOT ms | ON TPOT ms | OFF MTP acceptance | ON MTP acceptance |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 15.036327 | 17.597151 | 63.4407% | 61.0463% |
+| 2 | 14.874893 | 16.115381 | 64.4599% | 64.3463% |
+
+Observed mean TPOT is **14.955610 -> 16.856266 ms, +12.708646%**;
+pooled sampled steady-decode throughput is 622.798 -> 586.367 tokens/s.
+All 32 requests succeeded, returning 131072 output IDs per arm. Inputs matched
+exactly. Outputs and MTP counts differed across arms and between OFF rounds,
+so this is not an isolated measurement of HiSparse overhead.
+
+ON reported miss increments were 24587112 and 15136424. Host H2D estimates
+were 56988068736 and 34701513088 bytes; these are not physical DMA measurements.
+Raw device/pending counter tails were nonzero and are retained. This is a miss
+workload, not another zero-miss result. OFF retained preceding C4 N2 history;
+the fresh ON instance ran bounded controls and the C1 primer. A zero-miss-only
+harness assertion stopped after the successful ON first round; that round was
+preserved and only the unsent second round was resumed on the same service.
+N2 does not establish significance or dataset accuracy. Matching C8 profiling
+and further miss optimization remain pending.
