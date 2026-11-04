@@ -558,6 +558,7 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     hybrid_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
     if any(group.role == KVCacheGroupRole.HISPARSE_SOURCE for group in kv_cache_config.kv_cache_groups):
         # Core owns HiSparse admission, HMA roles, eviction and prefix state.
+        # Remove this bypass when the Ascend coordinator factory patch retires.
         return _orig_get_kv_cache_coordinator(
             **{name: value for name, value in hybrid_kwargs.items() if name != "eagle_attn_layer_names"}
         )

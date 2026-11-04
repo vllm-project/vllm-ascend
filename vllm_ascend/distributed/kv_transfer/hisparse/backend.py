@@ -16,15 +16,14 @@ if TYPE_CHECKING:
 
 
 class AscendHiSparseBackend(HiSparseBackend):
-    # NPU event IPC is not implemented here. Keep private pools per TP rank;
-    # the common connector still owns transfer completion and TP coordination.
-    supports_shared_host_pool = False
+    # Inherit Core's private Host-pool policy; NPU event IPC is not implemented.
     stats_dtype = torch.int64
 
     def check_available(self) -> None:
-        from vllm_ascend.ops.hisparse import HiSparseNPUOps
         from vllm_ascend.utils import bootstrap_custom_op_env
 
+        # Import the device kernels before the connector allocates Host storage.
+        importlib.import_module("vllm_ascend.ops.hisparse")
         if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
             # A5 disables the global custom-op selection policy. HiSparse still
             # needs its explicit DMA dependency; load the extension lazily here
@@ -36,8 +35,6 @@ class AscendHiSparseBackend(HiSparseBackend):
                 raise RuntimeError("Ascend HiSparse requires the compiled Ascend DMA extension.") from error
             if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
                 raise RuntimeError("Ascend HiSparse requires the Ascend swap_blocks_batch operator.")
-        if not callable(HiSparseNPUOps):
-            raise RuntimeError("Ascend HiSparse device kernels are unavailable.")
 
     def pin_tensor(self, tensor: torch.Tensor) -> None:
         from vllm_ascend.ops.hisparse import MappedHostTensor
