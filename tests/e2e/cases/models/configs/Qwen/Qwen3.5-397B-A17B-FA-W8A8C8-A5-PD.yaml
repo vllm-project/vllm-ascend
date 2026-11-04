@@ -46,7 +46,6 @@ env_common: &env_common
   VLLM_USE_V2_MODEL_RUNNER: "0"
   VLLM_USE_FASTOKENS: "1"
   VLLM_SERVER_DEV_MODE: "1"
-  VLLM_TORCH_PROFILER_DIR: "/mnt/share/l00951447/profiling/qwen35_decoder_W8A8C8_fused_mc2_2_sp_share_expert_dp_GDN_b091"
   VLLM_TORCH_PROFILER_WITH_STACK: "0"
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake"
   SERVER_PORT: "${PORT}"
@@ -116,8 +115,6 @@ templates:
       - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
       - --additional-config
       - '{"enable_flashcomm1":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false},"weight_nz_mode":1,"mega_moe_max_tokens":65535,"enable_cpu_binding":true,"enable_fused_mc2":2,"enable_prefill_mc2":false,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":false,"scheduler_config":{"recompute_scheduler_enable":false}}'
-      - --profiler-config
-      - '{"profiler":"torch","torch_profiler_dir":"/mnt/share/l00951447/profiling/qwen35_decoder_W8A8C8_fused_mc2_2_sp_share_expert_dp_GDN_b091","torch_profiler_with_stack":false}'
       - --kv-transfer-config
       - '{"kv_connector":"MooncakeConnectorV2","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"55220","engine_id":"0","kv_connector_extra_config":{"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":1,"tp_size":8},"decode":{"dp_size":2,"tp_size":4}}}'
 
