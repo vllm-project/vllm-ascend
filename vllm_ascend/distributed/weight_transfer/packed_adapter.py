@@ -17,7 +17,6 @@ import torch
 from vllm.distributed.weight_transfer import packed_tensor as upstream
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import _drain_packed_streams
-from vllm_ascend.patch.torch_streams import patch_cuda_streams
 
 # Per-context state prevents callbacks in other threads from sharing a transfer.
 # vLLM caches streams per device; a per-device lock prevents simultaneous use.
@@ -32,7 +31,10 @@ def _device_lock(device: int) -> Any:
 
 def _install() -> None:
     with _INSTALL_LOCK:
-        patch_cuda_streams()
+        # Standalone trainers need not initialize platform patches.
+        torch.cuda.Stream = torch.npu.Stream
+        torch.cuda.stream = torch.npu.stream
+        torch.cuda.current_stream = torch.npu.current_stream
         if getattr(upstream._get_streams, "_ascend_packed_hook", False):
             return
         get_streams = upstream._get_streams

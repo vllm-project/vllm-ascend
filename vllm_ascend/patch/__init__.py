@@ -2,11 +2,11 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 # Packed HCCL adaptation (installed lazily for standalone trainers too):
-# Target: torch.cuda.Stream/stream/current_stream (patch/torch_streams.py),
+# Target: torch.cuda.Stream/stream/current_stream,
 # vllm.distributed.weight_transfer.packed_tensor._get_streams,
 # unpack_tensor. Implementation: distributed/weight_transfer/packed_adapter.py.
 # Why: CUDA stream contexts and views do not satisfy native HCCL/NPU ownership.
-# How: shared NPU-only stream aliases and boundary hooks, preserving vLLM loops.
+# How: NPU-only stream aliases and boundary hooks, preserving vLLM loops.
 # Related upstream PR: no hook PR yet; this branch evaluates the extension seam.
 # Removal: use device-neutral APIs and owning-unpack/callback-completion hooks
 # once supported vLLM pairings expose them. Generic torch.Event stays unchanged.
@@ -786,8 +786,8 @@
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
 #      `torch.accelerator.reset_peak_memory_stats`, `torch.accelerator.get_memory_info`,
 #      `torch.accelerator.empty_cache`
-#   2. Shared `torch.cuda.Stream/stream/current_stream` NPU aliases, defined in
-#      `patch/torch_streams.py` and also used by standalone trainers.
+#   2. `torch.cuda.Stream/stream/current_stream` NPU aliases, also installed
+#      at the packed adapter entry for standalone trainers.
 #    Why:
 #       Upstream vLLM (commit 747b068) replaced `current_platform.memory_stats()`
 #       with `torch.accelerator.memory_stats()`, but `torch.accelerator` does not

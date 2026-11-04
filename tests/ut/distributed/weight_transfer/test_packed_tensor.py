@@ -1471,3 +1471,34 @@ def test_packed_reuse_orders_callback_completion_and_tracks_owning_clones(num_bu
     assert len({id(event) for event in adapter_events}) == num_buffers
     assert len({tensor.data_ptr() for tensor in retained}) == chunks
     assert packed_adapter._ACTIVE.get() is None
+
+
+def test_packed_stream_aliases_are_minimal_and_reapplicable(monkeypatch):
+    from vllm_ascend.distributed.weight_transfer import packed_adapter
+
+    names = ("Stream", "stream", "current_stream")
+    for name in names:
+        monkeypatch.setattr(torch.cuda, name, object())
+    before = dict(vars(torch.cuda))
+    event = torch.Event
+    accelerator = torch.accelerator.current_stream
+    npu = types.SimpleNamespace(**{name: object() for name in names})
+    monkeypatch.setattr(torch, "npu", npu, raising=False)
+
+    packed_adapter._install()
+    changed = {name for name, value in vars(torch.cuda).items() if before.get(name) is not value}
+    assert changed == set(names)
+    for name in names:
+        assert getattr(torch.cuda, name) is getattr(npu, name)
+    assert torch.Event is event
+    assert torch.accelerator.current_stream is accelerator
+
+    packed_adapter._install()
+    for name in names:
+        assert getattr(torch.cuda, name) is getattr(npu, name)
+
+    # A later NPU entry point must refresh aliases after another wrapper has
+    # changed them, rather than treating import-time installation as sufficient.
+    npu.stream = object()
+    packed_adapter._install()
+    assert torch.cuda.stream is npu.stream

@@ -1,8 +1,9 @@
 import torch
 
-from vllm_ascend.patch.torch_streams import patch_cuda_streams
-
-patch_cuda_streams()
+# NPU-only aliases for vLLM packed stream creation and contexts.
+torch.cuda.Stream = torch.npu.Stream
+torch.cuda.stream = torch.npu.stream
+torch.cuda.current_stream = torch.npu.current_stream
 
 
 def patch_empty_cache() -> None:
