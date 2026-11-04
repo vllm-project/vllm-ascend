@@ -31,8 +31,8 @@ The official release of MiniMax-M3.1-Flash is available on [Hugging Face](https:
 
 | Weight Version | Deployment | Model Path |
 | --- | --- | --- |
-| MiniMax-M3.1-Flash-W8A8 | Atlas 800I A2, two-node PD colocation <br> Atlas 800I A3, single-node or three-node PD disaggregation (1P2D) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8) |
-| MiniMax-M3.1-Flash-MXFP8 | 950DT products, three-node PD disaggregation (1P2D) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8-mxfp8) |
+| MiniMax-M3.1-Flash-W8A8 | Atlas 800I A2, two-node PD colocation <br> Atlas 800I A3, single-node deployment or three-host PD disaggregation (1P1D, Decode spans two hosts) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8) |
+| MiniMax-M3.1-Flash-MXFP8 | 950DT products, three-host PD disaggregation (1P1D, Decode spans two hosts) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8-mxfp8) |
 
 Download the weight variant used by the serving commands to the same model directory on all participating nodes. It is recommended to place the model weight in a shared cache directory.
 
@@ -291,8 +291,6 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
       --safetensors-load-strategy prefetch
     ```
 
-    The verified deployment used `--limit-mm-per-prompt '{"image":10,"video":0}'` for MMMU-Pro requests, which carry up to ten images. Set the value to the maximum number of images per request.
-
     Wait for the following startup messages, then check the health endpoint from another terminal in the container:
 
     ```text
@@ -490,9 +488,9 @@ Monitor node log while weights load and graph capture completes. Startup duratio
 
     Expected output: `200`. Send requests to port `11223` on node 0 with model name `minimax-m3.1-flash`.
 
-### 5.3 PD Disaggregation (1P2D)
+### 5.3 PD Disaggregation (1P1D)
 
-Both platforms use one Prefill node and two Decode nodes (1P2D), with Prefill and Decode on separate hosts. Prefill processes the prompt, Decode generates tokens, and a proxy forwards requests between them while Mooncake transfers the KV cache. For the general workflow, refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md). Both platforms use DSpark speculative decoding with seven draft tokens. Configure the host-specific values at the beginning of each Prefill and Decode script before starting the service.
+Both platforms use a 1P1D topology: one Prefill service on one host and one distributed Decode service spanning two hosts. The two Decode hosts share one global data-parallel group; D1 and D2 identify physical hosts within that service. Multiple Decode API endpoints represent ranks or local rank groups within the same distributed service. Prefill processes the prompt, Decode generates tokens, and a proxy forwards requests between them while Mooncake transfers the KV cache. For the general workflow, refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md). Both platforms use DSpark speculative decoding with seven draft tokens. Configure the host-specific values at the beginning of each Prefill and Decode script before starting the service.
 
 Start Prefill, D1, and D2 within a few seconds of each other, and start the proxy only after every engine prints `Application startup complete`. Do not wait for one role to become ready before starting the next: a role that is still missing blocks the distributed rendezvous, and the roles started earlier fail when `VLLM_ENGINE_READY_TIMEOUT_S` expires before the group is complete.
 
@@ -500,7 +498,7 @@ Monitor the role logs while weights load and graph capture completes. Startup du
 
 === "A3 series (W8A8)"
 
-    Use one Prefill node and two Decode nodes, each with all 16 NPUs and the W8A8 weights. Prefill uses DP1 × TP4 × PP4. Decode uses DP8 × TP4 × PP1 across the two nodes: D1 runs global DP ranks 0–3 and D2 runs ranks 4–7, and each rank starts one TP4 service on four local NPUs. Every Decode rank exposes its own HTTP API, and the proxy registers all eight Decode endpoints. Use the same image and weights on all three nodes.
+    Use one Prefill host and two hosts for the distributed Decode service (1P1D), each with all 16 NPUs and the W8A8 weights. Prefill uses DP1 × TP4 × PP4. Decode uses one global DP8 × TP4 × PP1 group across the two hosts: D1 runs global DP ranks 0–3 and D2 runs ranks 4–7, and each rank starts one TP4 replica on four local NPUs. Every Decode rank exposes its own HTTP API, and the proxy registers all eight Decode endpoints. Use the same image and weights on all three hosts.
 
     The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles.
 
@@ -830,7 +828,7 @@ Monitor the role logs while weights load and graph capture completes. Startup du
 
 === "950DT products"
 
-    Use one Prefill node and two Decode nodes (1P2D), each with all eight NPUs and the W8A8-MXFP8 weights. Prefill uses DP1 × TP4 × PP2. The two Decode nodes form one distributed DP4 × TP4 × PP1 / EP16 group with two local DP ranks per node: D1 runs ranks 0–1 and D2 runs ranks 2–3. Both Decode nodes serve the HTTP API and are registered separately as proxy endpoints, so do not add `--headless` to the D2 script. D1 is the Data Parallel master and the two Decode scripts must use the same `DECODE_HEAD_IP`, DP RPC port, and KV port.
+    Use one Prefill host and two hosts for the distributed Decode service (1P1D), each with all eight NPUs and the W8A8-MXFP8 weights. Prefill uses DP1 × TP4 × PP2. The two Decode hosts form one global DP4 × TP4 × PP1 / EP16 group with two local DP ranks per host: D1 runs ranks 0–1 and D2 runs ranks 2–3. Both Decode hosts serve the HTTP API and are registered separately as proxy endpoints, so do not add `--headless` to the D2 script. D1 is the Data Parallel master and the two Decode scripts must use the same `DECODE_HEAD_IP`, DP RPC port, and KV port.
 
     The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles. They use 128K input and 1K output; see the configuration table after the role summary for the 16K input variant.
 
@@ -1205,7 +1203,7 @@ Monitor the role logs while weights load and graph capture completes. Startup du
 
 ### 5.4 Prefill-Decode Disaggregation with KV Cache Pool
 
-This section builds on [Section 5.3](#53-pd-disaggregation-1p2d). The A3 example uses the same three-node 1P2D topology, role scripts, proxy mapping, and MiniMax-M3.1-Flash `vllm serve` settings as Section 5.3 (one P plus two D nodes). Prefill and Decode switch to `MultiConnector` so live P→D KV transfer and Mooncake KV Cache Pool work together:
+This section builds on [Section 5.3](#53-pd-disaggregation-1p1d). The A3 example uses the same three-host 1P1D topology, role scripts, proxy mapping, and MiniMax-M3.1-Flash `vllm serve` settings as Section 5.3: one Prefill service on one host and one distributed Decode service spanning two hosts. Prefill and Decode switch to `MultiConnector` so live P→D KV transfer and Mooncake KV Cache Pool work together:
 
 - `MooncakeConnectorV1` transfers KV from Prefill to Decode in real time (same role as Section 5.3).
 - `AscendStoreConnector` stores KV in the Mooncake KV Cache Pool so later Prefills with the same prefix can hit the pool instead of recomputing.
@@ -1331,7 +1329,7 @@ Reuse the Section 5.3 role scripts and launch commands. Replace each role script
 
     Prefill-Decode disaggregation with KV Cache Pool on 3 Atlas 800I A3 (64GB × 16) for `MiniMax-M3.1-Flash-W8A8` with DSpark speculative decoding.
 
-    One Prefill node uses `DP1 × TP4 × PP4`; two Decode nodes form a global `DP8 × TP4 × PP1` group, with four local ranks per node. Service settings match Section 5.3; `MultiConnector` adds the KV pool.
+    The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP4` on one host and one distributed Decode service with a global `DP8 × TP4 × PP1` group spanning two hosts, with four local ranks per Decode host. Service settings match Section 5.3; `MultiConnector` adds the KV pool.
 
     **1. Prefill node**
 
