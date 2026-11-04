@@ -86,7 +86,8 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
-          fetch-depth: 1
+          # Gitleaks needs the base branch ref and history to scan the PR commits.
+          fetch-depth: 0
 
       - name: Prepare CI metadata
         id: vllm
