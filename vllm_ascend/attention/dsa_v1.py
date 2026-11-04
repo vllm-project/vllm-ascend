@@ -28,6 +28,10 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     is_a5_bf16_kv_enabled,
     write_dsa_cache,
 )
+from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
+    mixed_quant_sparse_flash_mla_metadata_fp8,
+    mixed_quant_sparse_flash_mla_metadata_turboquant,
+)
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -91,8 +95,10 @@ else:
     dspark_swa_indices_supported = None  # type: ignore
 
 
-# The SAS and QLI metadata operators use a fixed 1024-element int32 layout.
-DSA_METADATA_BUFFER_SIZE = 1024
+# SparseFlashMla and QLI metadata use 1024 int32 elements; MixedQuant SAS uses 2048.
+SAS_METADATA_BUFFER_SIZE = 1024
+MIXED_QUANT_SAS_METADATA_BUFFER_SIZE = 2048
+QLI_METADATA_BUFFER_SIZE = 1024
 
 
 class OProjBufferPool:
@@ -801,6 +807,22 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.spec_slot_mapping = None
         self.dspark_swa_indices_buffer: torch.Tensor | None = None
         kv_plan = get_dsa_attn_kv_plan(vllm_config)
+        # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
+        self.compressor_ratio = getattr(
+            kv_cache_spec,
+            "compress_ratio",
+            getattr(kv_cache_spec, "tokens_per_state", 0),
+        )
+        sas_plan = get_dsa_attn_kv_plan(vllm_config, self.compressor_ratio)
+        self.sas_metadata_buffer_size = (
+            MIXED_QUANT_SAS_METADATA_BUFFER_SIZE
+            if sas_plan.sparse_attn_metadata_op
+            in (
+                mixed_quant_sparse_flash_mla_metadata_fp8,
+                mixed_quant_sparse_flash_mla_metadata_turboquant,
+            )
+            else SAS_METADATA_BUFFER_SIZE
+        )
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.slot_mapping_shape = (
             (max_num_batched_tokens, 2) if kv_plan.requires_block_offset_slots else (max_num_batched_tokens,)
@@ -814,7 +836,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ]
             self.spec_sas_metadata = [
                 torch.zeros(
-                    DSA_METADATA_BUFFER_SIZE,
+                    self.sas_metadata_buffer_size,
                     dtype=torch.int32,
                     device=self.device,
                 )
@@ -856,12 +878,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.seq_lens: torch.Tensor = None
         self.tq_group_block_sizes: torch.Tensor | None = None
 
-        # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
-        self.compressor_ratio = getattr(
-            kv_cache_spec,
-            "compress_ratio",
-            getattr(kv_cache_spec, "tokens_per_state", 0),
-        )
         if not layer_names:
             raise ValueError("DSV4 compressor metadata builder requires at least one layer name")
         self.layer_names = list(layer_names)
@@ -872,10 +888,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_num_reqs = scheduler_config.max_num_seqs * self._request_capacity_factor
         self.start_pos_prefill: torch.Tensor = torch.zeros(max_num_reqs, dtype=torch.int32, device=self.device)
         self.sas_metadata_buffer: torch.Tensor = torch.zeros(
-            DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
+            self.sas_metadata_buffer_size, dtype=torch.int32, device=self.device
         )
         self.qli_metadata_buffer: torch.Tensor = torch.zeros(
-            DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
+            QLI_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
         )
         # QLI v2 PA_BBND reads the compressed K length plus the residual from
         # the original length. Persistent buffers keep their addresses stable
@@ -1691,8 +1707,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 )
             if not has_prefill:
                 assert self.spec_sas_metadata is not None
-                self.spec_sas_metadata[draft_index - 1][:DSA_METADATA_BUFFER_SIZE].copy_(
-                    result[:DSA_METADATA_BUFFER_SIZE]
+                self.spec_sas_metadata[draft_index - 1][: self.sas_metadata_buffer_size].copy_(
+                    result[: self.sas_metadata_buffer_size]
                 )
                 return self.spec_sas_metadata[draft_index - 1]
             return result
@@ -1862,7 +1878,7 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
             if key not in self._sas_variant_buffers:
                 self._sas_variant_buffers[key] = torch.empty_like(output)
             output = self._sas_variant_buffers[key]
-        output[:DSA_METADATA_BUFFER_SIZE] = sas_metadata
+        output[: self.sas_metadata_buffer_size] = sas_metadata
         if use_specialized_metadata:
             metadata_cache[output_key] = output
         return output
@@ -2049,7 +2065,7 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
                     ori_topk_length=dspark_swa_topk_lengths,
                     ori_topk=dspark_swa_indices.shape[-1],
                 )
-                self.sas_metadata_buffer[:DSA_METADATA_BUFFER_SIZE].copy_(result[:DSA_METADATA_BUFFER_SIZE])
+                self.sas_metadata_buffer[: self.sas_metadata_buffer_size].copy_(result[: self.sas_metadata_buffer_size])
                 return self.sas_metadata_buffer
             return self._build_sas_metadata(
                 metadata_cache=metadata_cache,
@@ -2207,7 +2223,7 @@ class AscendDSAIndexerMetadataBuilder(AscendDSAAttentionMetadataBuilder):
             )
             metadata_cache["qli"] = qli_metadata
 
-        self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
+        self.qli_metadata_buffer.copy_(qli_metadata)
         if use_specialized_metadata:
             metadata_cache["qli_output"] = (self.qli_metadata_buffer, qli_seqused_k, qli_cmp_residual_k)
         return self.qli_metadata_buffer
