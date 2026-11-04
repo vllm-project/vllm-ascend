@@ -69,7 +69,7 @@ Model acceptance uses M3/M3.1's `sparse_topk_blocks=16` with their runtime shape
 Other TopK helper fixtures are supplementary and are not a model-support claim.
 
 ```bash
-python -m pytest -q tests/e2e/pull_request/one_card/test_minimax_m3_decode_index_sort.py
+python -m pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_minimax_m3_decode_index_sort.py
 ```
 
 Tests cover heads 1/4; Q=1/4/8; TopK=1/3/16/31/32/64; block/context
