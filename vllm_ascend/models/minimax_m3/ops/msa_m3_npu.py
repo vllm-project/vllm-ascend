@@ -32,7 +32,7 @@ _MSA_SCORE_BLOCK_ALIGNMENT = 16
 _FP8_E4M3_MAX = 448.0
 
 if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
-    from vllm_ascend.ops.triton.msa.msa_m3_triton_a5 import (
+    from vllm_ascend.ops.triton.msa.msa_m3_index_topk import (
         minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
     )
 elif get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):

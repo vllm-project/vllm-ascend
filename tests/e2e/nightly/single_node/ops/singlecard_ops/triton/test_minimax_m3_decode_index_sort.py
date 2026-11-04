@@ -10,7 +10,7 @@ from vllm.triton_utils import triton
 # service does. Importing the model first can create a DeviceOperator cycle.
 import vllm_ascend.ops  # noqa: F401
 from vllm_ascend.device.device_config import check_ascend_device_type, is_950
-from vllm_ascend.ops.triton.msa.msa_m3_triton_a5 import (
+from vllm_ascend.ops.triton.msa.msa_m3_index_topk import (
     _decode_index_postprocess_sorted,
 )
 

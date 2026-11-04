@@ -47,7 +47,6 @@ curated_tests:
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
     - tests/e2e/pull_request/one_card/test_flash_attn_precision.py
-    - tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_minimax_m3_decode_index_sort.py
 
 # === Skipped Tests ===
 # Removed from any selection after directory scanning, so they are never
@@ -121,10 +120,6 @@ runner_mapping:
     default: a5-4
   tests/e2e/pull_request/one_card/test_swiglu_mx_quant\.py$:
     default: a5-4
-  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_minimax_m3_decode_index_sort\.py$:
-    default: a5-4
-  tests/e2e/nightly/single_node/ops/singlecard_ops/test_minimax_m3_sparse_attn\.py$:
-    default: a3-2
   tests/e2e/pull_request/one_card:
     default: a2-1
     310p: 310p-1
