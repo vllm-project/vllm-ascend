@@ -22,7 +22,7 @@ _MLP_TP: GroupCoordinator | None = None
 _OTP: GroupCoordinator | None = None
 _LMTP: GroupCoordinator | None = None
 _EMBED_TP: GroupCoordinator | None = None
-_LINEAR_ATTN_INPUT_PROJ_TP: GroupCoordinator | None = None
+_QKV_IPROJ_TP: GroupCoordinator | None = None
 
 _P_TP: GroupCoordinator | None = None
 
@@ -204,8 +204,8 @@ def init_ascend_model_parallel(
     # 2. O Proj: attention output projection (`oproj_tensor_parallel_size`)
     # 3. Embedding: The token embedding table at the input of the model (`embedding_tensor_parallel_size`)
     # 4. MLP: feed-forward network in transformer blocks (`mlp_tensor_parallel_size`)
-    # 5. Linear attention input projections: request-local recurrent state
-    #    (`linear_attn_input_proj_tensor_parallel_size`)
+    # 5. QKV input projections: request-local recurrent state
+    #    (`qkv_iproj_tensor_parallel_size`)
     _group_cache = {}
 
     def _create_or_get_group(group_size: int, group_name: str) -> GroupCoordinator:
@@ -230,11 +230,9 @@ def init_ascend_model_parallel(
     lmhead_tp_size = get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size
     embedding_tp_size = get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size
     mlp_tp_size = get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size
-    linear_attn_input_proj_tp_size = (
-        get_ascend_config().finegrained_tp_config.linear_attn_input_proj_tensor_parallel_size
-    )
+    qkv_iproj_tp_size = get_ascend_config().finegrained_tp_config.qkv_iproj_tensor_parallel_size
 
-    global _OTP, _LMTP, _EMBED_TP, _MLP_TP, _LINEAR_ATTN_INPUT_PROJ_TP
+    global _OTP, _LMTP, _EMBED_TP, _MLP_TP, _QKV_IPROJ_TP
 
     if otp_size > 1:
         _OTP = _create_or_get_group(otp_size, "otp")
@@ -244,8 +242,8 @@ def init_ascend_model_parallel(
         _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
     if mlp_tp_size > 1:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
-    if linear_attn_input_proj_tp_size > 1:
-        _LINEAR_ATTN_INPUT_PROJ_TP = _create_or_get_group(linear_attn_input_proj_tp_size, "linear_attn_input_proj_tp")
+    if qkv_iproj_tp_size > 1:
+        _QKV_IPROJ_TP = _create_or_get_group(qkv_iproj_tp_size, "qkv_iproj_tp")
 
 
 def model_parallel_initialized():
@@ -277,11 +275,9 @@ def get_embed_tp_group() -> GroupCoordinator:
     return _EMBED_TP
 
 
-def get_linear_attn_input_proj_tp_group() -> GroupCoordinator:
-    assert _LINEAR_ATTN_INPUT_PROJ_TP is not None, (
-        "linear attention input projection tensor parallel group is not initialized"
-    )
-    return _LINEAR_ATTN_INPUT_PROJ_TP
+def get_qkv_iproj_tp_group() -> GroupCoordinator:
+    assert _QKV_IPROJ_TP is not None, "QKV input projection tensor parallel group is not initialized"
+    return _QKV_IPROJ_TP
 
 
 def get_replicated_group() -> ReplicatedGroup:
@@ -304,10 +300,10 @@ def get_kvpp_group() -> GroupCoordinator:
 
 
 def destroy_ascend_model_parallel():
-    global _LINEAR_ATTN_INPUT_PROJ_TP
-    if _LINEAR_ATTN_INPUT_PROJ_TP:
-        _LINEAR_ATTN_INPUT_PROJ_TP.destroy()
-    _LINEAR_ATTN_INPUT_PROJ_TP = None
+    global _QKV_IPROJ_TP
+    if _QKV_IPROJ_TP:
+        _QKV_IPROJ_TP.destroy()
+    _QKV_IPROJ_TP = None
 
     global _KVPP
     if _KVPP:

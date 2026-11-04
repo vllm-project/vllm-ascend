@@ -933,7 +933,7 @@ def test_finegrained_tp_enable_requires_weight_sharding(knob, enable_fn, size, e
 
 @pytest.mark.parametrize("input_proj_tp_size", [1, 2, 4])
 @pytest.mark.parametrize("is_draft", [False, True])
-def test_linear_attn_input_proj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_draft):
+def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_draft):
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=128),
@@ -942,7 +942,7 @@ def test_linear_attn_input_proj_tp_keeps_dp_coordination(monkeypatch, input_proj
     ascend = SimpleNamespace(
         get_mc2_comm_alg=lambda: "fullmesh",
         scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
-        finegrained_tp_config=SimpleNamespace(linear_attn_input_proj_tensor_parallel_size=input_proj_tp_size),
+        finegrained_tp_config=SimpleNamespace(qkv_iproj_tensor_parallel_size=input_proj_tp_size),
     )
     monkeypatch.setattr(utils, "get_ascend_config", lambda: ascend)
     monkeypatch.setattr(utils, "is_mega_moe_supported", lambda: False)

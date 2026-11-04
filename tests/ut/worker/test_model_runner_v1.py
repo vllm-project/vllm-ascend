@@ -343,10 +343,8 @@ class TestDPPaddingPolicy(unittest.TestCase):
                                 )
                                 self.assertEqual(maximum, 31)
                                 self.assertEqual(mode, CUDAGraphMode.NONE)
-                                # Linear attention input projection pads inside its custom-op boundary.
-                                needs_uniform_input = (
-                                    size > 1 and field.name != "linear_attn_input_proj_tensor_parallel_size"
-                                )
+                                # QKV input projection pads inside its custom-op boundary.
+                                needs_uniform_input = size > 1 and field.name != "qkv_iproj_tensor_parallel_size"
                                 self.assertEqual(across_dp.tolist(), [31, 31] if needs_uniform_input else list(tokens))
 
     def test_routing_capture_keeps_uniform_eager_inputs(self):

@@ -19,7 +19,7 @@ def parallel_groups(monkeypatch):
     monkeypatch.setattr(
         model_kda,
         "get_ascend_config",
-        lambda: SimpleNamespace(finegrained_tp_config=SimpleNamespace(linear_attn_input_proj_tensor_parallel_size=1)),
+        lambda: SimpleNamespace(finegrained_tp_config=SimpleNamespace(qkv_iproj_tensor_parallel_size=1)),
     )
     # Exercise inherited vLLM loaders without Ascend's OOT class replacement.
     for name in ("ColumnParallelLinear", "RowParallelLinear"):
@@ -140,12 +140,12 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
     parallel_groups.world_size = pcp_size
     parallel_groups.rank_in_group = pcp_size - 1
     input_proj_tp_group = SimpleNamespace(world_size=input_proj_tp_size, rank_in_group=input_proj_tp_size - 1)
-    monkeypatch.setattr(model_kda, "get_linear_attn_input_proj_tp_group", lambda: input_proj_tp_group)
+    monkeypatch.setattr(model_kda, "get_qkv_iproj_tp_group", lambda: input_proj_tp_group)
     monkeypatch.setattr(
         model_kda,
         "get_ascend_config",
         lambda: SimpleNamespace(
-            finegrained_tp_config=SimpleNamespace(linear_attn_input_proj_tensor_parallel_size=input_proj_tp_size)
+            finegrained_tp_config=SimpleNamespace(qkv_iproj_tensor_parallel_size=input_proj_tp_size)
         ),
     )
     config = SimpleNamespace(

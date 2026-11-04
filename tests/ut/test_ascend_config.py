@@ -1322,7 +1322,7 @@ class TestSubconfigPydanticTypeValidation(TestBase):
                 config.lmhead_tensor_parallel_size,
                 config.embedding_tensor_parallel_size,
                 config.mlp_tensor_parallel_size,
-                config.linear_attn_input_proj_tensor_parallel_size,
+                config.qkv_iproj_tensor_parallel_size,
             ),
             (1, 1, 1, 1, 1),
         )
@@ -1364,7 +1364,7 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaisesRegex(AssertionError, "only supported in graph mode"):
             config._validate_preconditions(self._oproj_tp_vllm_config(cudagraph_mode=CUDAGraphMode.NONE))
 
-    def test_linear_attn_input_proj_tp_preconditions(self):
+    def test_qkv_iproj_tp_preconditions(self):
         def deployment():
             vc = self._oproj_tp_vllm_config()
             vc.parallel_config.pipeline_parallel_size = 1
@@ -1372,30 +1372,30 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             return vc
 
         for size in (2, 4, 8):
-            config = FinegrainedTPConfig(linear_attn_input_proj_tensor_parallel_size=size)
+            config = FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=size)
             config._validate_preconditions(deployment())
-            self.assertEqual(config.linear_attn_input_proj_tensor_parallel_size, size)
+            self.assertEqual(config.qkv_iproj_tensor_parallel_size, size)
         for field in ("tensor_parallel_size", "prefill_context_parallel_size", "pipeline_parallel_size"):
             vc = deployment()
             setattr(vc.parallel_config, field, 2)
             with self.assertRaisesRegex(ValueError, "TP=1, PCP=1 and PP=1"):
-                FinegrainedTPConfig(linear_attn_input_proj_tensor_parallel_size=2)._validate_preconditions(vc)
+                FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
         vc = deployment()
         vc.kv_transfer_config.is_kv_consumer = False
         with self.assertRaisesRegex(ValueError, "PD decode node"):
-            FinegrainedTPConfig(linear_attn_input_proj_tensor_parallel_size=2)._validate_preconditions(vc)
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
         vc = deployment()
         vc.model_config.hf_text_config.model_type = "other"
         with self.assertRaisesRegex(ValueError, "GLM-5.3-Flash only"):
-            FinegrainedTPConfig(linear_attn_input_proj_tensor_parallel_size=2)._validate_preconditions(vc)
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
         with self.assertRaisesRegex(ValueError, "divide the KDA head count"):
-            FinegrainedTPConfig(linear_attn_input_proj_tensor_parallel_size=3)._validate_preconditions(deployment())
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=3)._validate_preconditions(deployment())
         vc = deployment()
         vc.parallel_config.data_parallel_size = 6
         with self.assertRaisesRegex(AssertionError, "divide by data_parallel_size"):
-            FinegrainedTPConfig(linear_attn_input_proj_tensor_parallel_size=4)._validate_preconditions(vc)
-        with self.assertRaisesRegex(ValueError, "linear_attn_input_proj_tensor_parallel_size must be non-negative"):
-            FinegrainedTPConfig(linear_attn_input_proj_tensor_parallel_size=-1)
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=4)._validate_preconditions(vc)
+        with self.assertRaisesRegex(ValueError, "qkv_iproj_tensor_parallel_size must be non-negative"):
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=-1)
 
     def test_oproj_tp_rejects_pcp(self):
         config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
