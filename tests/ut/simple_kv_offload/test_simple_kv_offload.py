@@ -71,11 +71,11 @@ def test_connector_only_replaces_enabled_worker(
     def fake_upstream_init(self, vllm_config, connector_role, kv_cache_config):
         self.worker_handler = upstream_worker
 
-    created: list[tuple[object, object, int]] = []
+    created: list[tuple[object, object, int, int | None]] = []
     npu_worker = object()
 
-    def fake_npu_worker(vllm_config, kv_cache_config, cpu_capacity):
-        created.append((vllm_config, kv_cache_config, cpu_capacity))
+    def fake_npu_worker(vllm_config, kv_cache_config, cpu_capacity, num_cpu_blocks=None):
+        created.append((vllm_config, kv_cache_config, cpu_capacity, num_cpu_blocks))
         return npu_worker
 
     monkeypatch.setattr(SimpleCPUOffloadConnector, "__init__", fake_upstream_init)
@@ -91,7 +91,7 @@ def test_connector_only_replaces_enabled_worker(
 
     if expect_npu_worker:
         assert connector.worker_handler is npu_worker
-        assert created == [(config, kv_cache_config, 512)]
+        assert created == [(config, kv_cache_config, 512, None)]
     else:
         assert connector.worker_handler is upstream_worker
         assert not created
@@ -161,6 +161,9 @@ def test_register_kv_caches_keeps_separate_kv_and_initializes_backend(
     worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
     worker.kv_cache_config = SimpleNamespace(num_blocks=4)
     worker.cpu_capacity_bytes = 96
+    # This fixture bypasses __init__; supply its explicit capacity so upstream
+    # sizing does not invoke a distributed collective in this layout-only test.
+    worker._num_cpu_blocks_override = 8
     worker._backend = FakeBackend()
 
     key_cache = torch.empty(4, 6, dtype=torch.uint8)
