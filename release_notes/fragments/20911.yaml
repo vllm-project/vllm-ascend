@@ -1,0 +1,4 @@
+pr: 20911
+entries:
+  - category: bugfix
+    text: Prevented DeepSeek V4.1 decoder replay setup from failing when the model has no KV source layer and kept compressed KV-source layers on the safe full-batch path.
