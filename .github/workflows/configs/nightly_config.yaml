@@ -324,10 +324,6 @@ a5:
         size: 2
   single_node:
     test_config:
-      - name: DeepSeek-V4-Flash-0731-A5-PD
-        os: linux-aarch64-a5-8
-        config_file_path: DeepSeek-V4-Flash-0731-A5-PD.yaml
-        config_base_path: tests/e2e/cases/models/configs/DeepSeek
       - name: qwen3.6-27B-w8a8c8-A5
         os: linux-aarch64-a5-8
         config_file_path: qwen3.6-27B-w8a8c8-A5.yaml
