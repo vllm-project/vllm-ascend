@@ -302,8 +302,12 @@ class MonitoredTorchTensor:
 
     ``.numpy()`` and ``__array__`` hand out a read-only array when the result
     shares the mirror (but still mark the buffer sticky, since
-    ``torch.from_numpy`` can rewrap it as writable); a copy, such as
-    ``np.array(buf.cpu)``, is writable and does not. ``.data`` is refused.
+    ``torch.from_numpy`` can rewrap it as writable). A dtype conversion
+    (``np.asarray(buf.cpu, dtype=...)``) is an explicit copy and does not. A
+    caller-side copy such as ``np.array(buf.cpu)`` may still mark the buffer
+    sticky: whether NumPy passes ``copy=True`` to ``__array__`` depends on the
+    NumPy version, and the shared array is handed out before the copy in older
+    ones. ``.data`` is refused.
     In-place methods return this proxy rather than the raw tensor, so a retained
     result keeps going through the tracker. One write still stays outside the
     tracker: a view returned by ``__getitem__`` (``t.cpu[0:2].fill_(9)``),

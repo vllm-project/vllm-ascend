@@ -553,10 +553,13 @@ def test_call_returning_a_copy_does_not_make_the_buffer_sticky(read, monkeypatch
     assert not buf._dirty._aliased
 
 
-def test_numpy_copy_does_not_make_the_buffer_sticky(monkeypatch):
+def test_numpy_dtype_conversion_does_not_make_the_buffer_sticky(monkeypatch):
+    # An explicit dtype conversion is a detached copy, so it must not invalidate
+    # the per-row accounting. ``np.array(buf.cpu)`` is left out: whether NumPy
+    # asks ``__array__`` for a copy depends on the NumPy version, so it may
+    # legitimately mark the buffer sticky.
     buf = _make_uva_buffer(8)
     assert np.asarray(buf.cpu, dtype=np.float64).dtype == np.float64
-    assert np.array(buf.cpu).flags.writeable is True
     buf.uva(8)
 
     copied = _count_copied_rows(monkeypatch)
