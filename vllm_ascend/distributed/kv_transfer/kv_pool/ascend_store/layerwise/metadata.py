@@ -160,6 +160,9 @@ class LayerTransferTask:
     shared_block_data: SharedBlockData | None = None
     group_id: int = 0
     layer_idx_in_group: int = 0
+    # Select owner segments within the layer while retaining remote offsets.
+    # None transfers all entries; Qwen running loads select only reused main.
+    cache_entry_indices: tuple[int, ...] | None = None
     # Publish newly allocated GVA keys after this task completes the final
     # actual layer copy for the batch.
     write_finish_keys: list[str] = field(default_factory=list)

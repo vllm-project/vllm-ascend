@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 import regex as re
@@ -174,6 +174,8 @@ def _real_page_size_bytes(spec: KVCacheSpec) -> int:
 def build_qwen4_kv_cache_layout(
     kv_cache_groups: list[KVCacheGroupSpec],
     num_blocks: int,
+    *,
+    cache_slot_map: dict[str, int] | None = None,
 ) -> Qwen4KVCacheLayout | None:
     """Build shared QSA/GDN slots; PLE and hidden states have private storage."""
 
@@ -338,7 +340,109 @@ def build_qwen4_kv_cache_layout(
     for _, spec in role_members[QSA_MAIN]:
         assert isinstance(spec, FullAttentionSpec)
         assert sum(_qsa_main_page_bytes(spec)) <= layout.region("r0").page_size_bytes
+    if cache_slot_map:
+        owner_names = {owner.layer_name for owner in owners}
+        if not cache_slot_map.keys() <= owner_names:
+            raise ValueError("Qwen reuse plan contains unknown cache owners")
+        for owner in owners:
+            slot = cache_slot_map.get(owner.layer_name, owner.slot)
+            if slot < 0 or slot >= slot_count:
+                raise ValueError(f"Qwen reuse slot {slot} exceeds the packed backing")
+            if owner.role not in (QSA_MAIN, GDN) and slot != owner.slot:
+                raise ValueError("Qwen auxiliary caches must retain their original slots")
+        layout = replace(
+            layout,
+            owners=tuple(replace(owner, slot=cache_slot_map.get(owner.layer_name, owner.slot)) for owner in owners),
+        )
     return layout
+
+
+def allocate_qwen4_cache(
+    layout: Qwen4KVCacheLayout, allocate: Callable[[int], torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    """Allocate the original packed backing, including every resident indexer."""
+    backing = allocate(layout.slot_count * layout.slot_backing_size)
+    caches = {}
+    for owner in layout.owners:
+        if owner.role in (PLE, HIDDEN):
+            size = (
+                owner.spec.state_content_size_bytes if isinstance(owner.spec, MambaSpec) else owner.spec.page_size_bytes
+            )
+            caches[owner.layer_name] = allocate(layout.num_blocks * size)
+        else:
+            caches[owner.layer_name] = backing
+    return caches
+
+
+def view_qwen4_cache(
+    layout: Qwen4KVCacheLayout,
+    layer_name: str,
+    raw: torch.Tensor,
+    kernel_block_size: int,
+) -> torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor] | None:
+    """Bind role-specific views without changing packed page geometry."""
+    owner = layout.owner(layer_name)
+    spec = owner.spec
+    slot_offset = owner.slot * layout.slot_backing_size
+    if owner.role == QSA_MAIN:
+        assert isinstance(spec, FullAttentionSpec)
+        region = layout.region("r0")
+        return make_qsa_kernel_page_cache(
+            raw,
+            dtype=spec.dtype,
+            num_blocks=layout.num_blocks,
+            manager_block_size=spec.block_size,
+            kernel_block_size=kernel_block_size,
+            num_kv_heads=spec.num_kv_heads,
+            head_size=spec.head_size,
+            head_size_v=spec.head_size_v,
+            storage_offset=slot_offset + region.offset,
+            block_stride=region.block_stride,
+        )
+    if owner.role in (QSA_RAW, QSA_COMPRESSED):
+        assert isinstance(spec, (CircularBufferSpec, MLAAttentionSpec))
+        region = layout.region("r4" if owner.role == QSA_RAW else "r5")
+        block_size = spec.block_size if owner.role == QSA_RAW else spec.num_states
+        if block_size * spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype) != region.page_size_bytes:
+            raise ValueError(f"{layer_name} Qwen indexer page does not match its packed region")
+        num_blocks = layout.num_blocks
+        if owner.role == QSA_COMPRESSED:
+            num_blocks *= spec.block_size // kernel_block_size
+            block_size = spec.get_num_kernel_states(kernel_block_size)
+        return make_slab_view(
+            raw,
+            dtype=spec.dtype,
+            num_blocks=num_blocks,
+            item_shape=(spec.num_kv_heads, block_size, spec.head_size),
+            storage_offset=slot_offset + region.offset,
+        ).transpose(1, 2)
+    if owner.role == PLE:
+        assert isinstance(spec, MambaSpec)
+        return [
+            make_slab_view(
+                raw,
+                dtype=spec.dtypes[0],
+                num_blocks=layout.num_blocks,
+                item_shape=tuple(spec.shapes[0]),
+                storage_offset=0,
+            )
+        ]
+    if owner.role == GDN:
+        assert isinstance(spec, MambaSpec)
+        return [
+            make_slab_view(
+                raw,
+                dtype=dtype,
+                num_blocks=layout.num_blocks,
+                item_shape=tuple(shape),
+                storage_offset=slot_offset + layout.region(region).offset,
+                block_stride=layout.region(region).block_stride,
+            )
+            for shape, dtype, region in zip(spec.shapes, spec.dtypes, ("r1", "r2"), strict=True)
+        ]
+    if owner.role != HIDDEN:
+        raise ValueError(f"Unsupported Qwen cache owner {owner}")
+    return None
 
 
 def make_slab_view(

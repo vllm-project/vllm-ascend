@@ -120,6 +120,54 @@ The following log confirms that buffer reuse is enabled:
 Layerwise KV cache reuse merged ... descriptors into ... descriptors using ... buffer assignments.
 ```
 
+### Qwen4Exp packed-cache reuse
+
+Qwen4Exp on Model Runner V2 can use the GVA layerwise path with the existing
+`memcache` backend configuration. Set the connector's extra configuration to
+`"layerwise_num_shared_buffers": 2` and
+`"layerwise_independent_layers": [0]` to keep layer 0 independent and alternate
+the remaining main/state owners between two shared buffers.
+
+For the 48-layer Qwen4Exp configuration:
+
+| Cache owner | Device placement | Transfer policy |
+| --- | --- | --- |
+| QSA main KV | Shared `r0` region | Save before reuse; restore before computation |
+| GDN conv and SSM | Two views of the same shared `r0` page | Restore and save both state components |
+| Compressed indexer | Original per-layer `r5` region | Retain in HBM; pool normally and restore missing external prefixes |
+| Raw indexer | Original per-layer `r4` region | Retain in HBM; preserve its non-prefix-cacheable lifetime |
+| PLE | Original private allocation | Retain in HBM and preserve existing state pooling |
+
+The main/state assignments are `(0,)`, `(1, 3, ..., 47)`, and
+`(2, 4, ..., 46)`. Layer `i >= 3` waits for layer `i - 2` to finish saving
+before its shared buffer is overwritten. A QSA main owner and its indexers
+can use different slab ordinals without changing their page formats.
+
+This mode preserves the original packed allocation, descriptor sizes, block
+strides, and all resident indexers. It does **not** reduce allocated HBM or
+increase `num_blocks`. The shared buffers plus independent layers must fit in
+the existing slab count (12 for this configuration). Omitting the shared-buffer
+count or setting independent layers to `"all"` disables reuse. Excluded
+persistent draft owners are not supported by this packed reuse path.
+
+Compressed indexers remain part of the pooled QSA group. Running-step restores
+select only reused main entries, retaining each entry's original DRAM offset;
+external prefix restores can also load missing indexer entries. The raw
+indexer's `prefix_cacheable=False` flag is unchanged: this mode does not turn
+raw ring contents into reusable prefix blocks or add a raw-state snapshot
+protocol.
+
+The Qwen-specific startup message is:
+
+```text
+Qwen layerwise KV cache reuse binds ... layers to ... main/state slots; indexers and packed backing geometry remain resident.
+```
+
+Before deploying this configuration, validate multi-step decode, chunked
+prefill, prefix hits, request preemption, and graph execution on the target NPU
+with the matching vLLM main2main version. CPU storage tests cannot establish
+device transfer ordering or inference correctness.
+
 ## 3. Sparse KV Cache Offload on Decode
 
 Requirements and limitations:

@@ -161,6 +161,7 @@ class LayerBatchBuilder:
         block_ids_arr: np.ndarray,
         base_gvas_arr: np.ndarray,
         layer_id: int,
+        cache_entry_indices: tuple[int, ...] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         base_offset = int(self._layer_cache_entry_offsets_np[layer_id])
         end_offset = int(self._layer_cache_entry_offsets_np[layer_id + 1])
@@ -172,6 +173,16 @@ class LayerBatchBuilder:
             (np.zeros(1, dtype=np.int64), np.cumsum(layer_block_len[:-1], dtype=np.int64))
         )
         rank_layer_offset = self.layer_byte_offset + int(self._block_len_np[:base_offset].sum())
+        if cache_entry_indices is not None:
+            indices = np.asarray(cache_entry_indices, dtype=np.int64)
+            if np.any(indices < 0) or np.any(indices >= end_offset - base_offset):
+                raise ValueError("Layer transfer cache entry is out of range")
+            layer_base_addrs = layer_base_addrs[indices]
+            layer_block_len = layer_block_len[indices]
+            layer_block_stride = layer_block_stride[indices]
+            # Compute offsets before filtering: the DRAM object still holds
+            # the complete layer, including its resident indexer.
+            layer_inner_offsets = layer_inner_offsets[indices]
         if base_gvas_arr.size > 0 and np.any(base_gvas_arr <= 0):
             # Zero GVAs here are expected: blocks already committed in the
             # pool or excluded by masks are intentionally not allocated.
@@ -448,9 +459,12 @@ class LayerBatchBuilder:
         self,
         shared: SharedBlockData,
         layer_id: int,
+        cache_entry_indices: tuple[int, ...] | None = None,
     ) -> LayerBatchReqMeta | LayerRangeReqMeta:
         """Compute per-layer addresses from pre-computed shared block data."""
         if shared.block_keys is not None:
+            if cache_entry_indices is not None:
+                raise ValueError("Selective layerwise cache transfers require the GVA backend")
             base_offset = int(self._layer_cache_entry_offsets_np[layer_id])
             end_offset = int(self._layer_cache_entry_offsets_np[layer_id + 1])
             layer_base_addrs = self._kv_caches_base_addr_np[base_offset:end_offset]
@@ -478,7 +492,7 @@ class LayerBatchBuilder:
 
         assert shared.block_gvas_arr is not None
         addr_array, size_array, gvas_array = self._build_transfer_arrays(
-            shared.block_ids_arr, shared.block_gvas_arr, layer_id
+            shared.block_ids_arr, shared.block_gvas_arr, layer_id, cache_entry_indices
         )
 
         return LayerBatchReqMeta(
@@ -500,7 +514,7 @@ class LayerBatchBuilder:
         shared = self.build_shared(task, is_save)
         if shared is None:
             return None
-        return self.build_addrs(shared, task.layer_idx_in_group)
+        return self.build_addrs(shared, task.layer_idx_in_group, task.cache_entry_indices)
 
 
 class KVCacheStoreLayerSendingThreadBase(KVTransferThread):
@@ -958,7 +972,7 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                 if shared is None:
                     raise RuntimeError("Layerwise range save requires shared block metadata")
                 builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-                req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+                req_meta = builder.build_addrs(shared, task.layer_idx_in_group, task.cache_entry_indices)
                 if not isinstance(req_meta, LayerRangeReqMeta):
                     raise TypeError(f"Expected layerwise range metadata, got {type(req_meta).__name__}")
                 req_meta.layer_id = layer_id
@@ -1044,7 +1058,7 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                 continue
             has_any_save = True
             builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-            req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+            req_meta = builder.build_addrs(shared, task.layer_idx_in_group, task.cache_entry_indices)
             if not isinstance(req_meta, LayerBatchReqMeta):
                 raise TypeError(f"Expected GVA layer metadata, got {type(req_meta).__name__}")
             all_save_keys.extend(shared.save_keys)
@@ -1254,7 +1268,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 if shared is None:
                     raise RuntimeError("Layerwise range load requires shared block metadata")
                 builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-                req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+                req_meta = builder.build_addrs(shared, task.layer_idx_in_group, task.cache_entry_indices)
                 if not isinstance(req_meta, LayerRangeReqMeta):
                     raise TypeError(f"Expected layerwise range metadata, got {type(req_meta).__name__}")
                 req_meta.layer_id = layer_id
@@ -1344,7 +1358,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             shared = task.shared_block_data
             builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
             if shared is not None:
-                built_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+                built_meta = builder.build_addrs(shared, task.layer_idx_in_group, task.cache_entry_indices)
                 if not isinstance(built_meta, LayerBatchReqMeta):
                     raise TypeError(f"Expected GVA layer metadata, got {type(built_meta).__name__}")
                 req_meta: LayerBatchReqMeta | None = built_meta

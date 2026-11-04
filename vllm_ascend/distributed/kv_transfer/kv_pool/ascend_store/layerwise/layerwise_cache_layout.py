@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import regex as re
@@ -11,9 +11,13 @@ from vllm.logger import logger
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    CircularBufferSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -21,6 +25,7 @@ from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
+from vllm_ascend.models.qwen4_exp.cache_config import build_qwen4_kv_cache_layout
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 _NUM_SHARED_BUFFERS = "layerwise_num_shared_buffers"
@@ -110,6 +115,16 @@ class LayerwiseReuseLayout:
     independent_layers: list[int]
     num_prefetch_layers: int
     has_layer_reuse: bool
+    # Qwen keeps the original packed backing. Only owner bindings change.
+    cache_slot_map: dict[str, int] = field(default_factory=dict)
+
+    def reused_cache_names(self) -> set[str]:
+        """Main owners restored every step; Qwen indexers/extras stay resident."""
+        return {
+            specs.main.layer_name
+            for layer, specs in self.layer_cache_specs.items()
+            if layer not in self.independent_layers
+        }
 
 
 def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None:
@@ -248,6 +263,8 @@ def build_layerwise_reuse_layout(
     extra_config: dict[str, Any],
 ) -> LayerwiseReuseLayout:
     """Build reusable physical-layer slots by grouping layers on their main cache spec."""
+    if any(name.endswith(".indexer.raw_key_cache") for name in layer_specs):
+        return _build_qwen4_reuse_layout(layer_specs, base_layers, extra_config)
     named_specs_by_layer: dict[int, list[NamedKVCacheSpec]] = {}
     for layer_name, layer_spec in layer_specs.items():
         physical_layer = get_physical_layer_index(layer_name, base_layers)
@@ -329,13 +346,96 @@ def build_layerwise_reuse_layout(
     )
 
 
+def _build_qwen4_reuse_layout(
+    layer_specs: dict[str, KVCacheSpec], base_layers: int, extra_config: dict[str, Any]
+) -> LayerwiseReuseLayout:
+    """Rotate only main/state owners; indexer and extra specs remain resident.
+
+    QSA and GDN interpret the same packed r0 bytes using different views, so
+    semantic spec equality is not the compatibility criterion for these slots.
+    The model-owned layout validates page sizes/alignment before allocation.
+    """
+    by_layer: dict[int, list[NamedKVCacheSpec]] = {}
+    for name, spec in layer_specs.items():
+        by_layer.setdefault(get_physical_layer_index(name, base_layers), []).append(NamedKVCacheSpec(name, spec))
+    physical_layers = sorted(by_layer)
+    base = build_layerwise_cache_layout(len(physical_layers), extra_config)
+    specs_by_layer: dict[int, LayerwiseLayerCacheSpecs] = {}
+    qsa_layers: list[int] = []
+    for layer, specs in by_layer.items():
+        mains = [
+            item
+            for item in specs
+            if (item.layer_name.endswith(".attn") and isinstance(item.spec, FullAttentionSpec))
+            or (
+                item.layer_name.endswith(".linear_attn")
+                and isinstance(item.spec, MambaSpec)
+                and len(item.spec.shapes) == 2
+            )
+        ]
+        compressed = [item for item in specs if item.layer_name.endswith(".indexer.compressed_key_cache")]
+        raw = [item for item in specs if item.layer_name.endswith(".indexer.raw_key_cache")]
+        if len(mains) != 1:
+            raise ValueError(f"Qwen layer {layer} requires exactly one QSA or GDN main cache")
+        if isinstance(mains[0].spec, FullAttentionSpec):
+            if (
+                len(raw) != 1
+                or len(compressed) != 1
+                or not isinstance(raw[0].spec, CircularBufferSpec)
+                or not isinstance(compressed[0].spec, MLAAttentionSpec)
+            ):
+                raise ValueError(f"Qwen layer {layer} requires raw and compressed indexer caches")
+            qsa_layers.append(layer)
+        elif raw or compressed:
+            raise ValueError(f"GDN layer {layer} cannot own a QSA indexer")
+        indexer = compressed[0] if compressed else None
+        extras = tuple(item for item in specs if item is not mains[0] and item is not indexer)
+        if any(
+            not (item in raw or (isinstance(item.spec, MambaSpec) and len(item.spec.shapes) == 1)) for item in extras
+        ):
+            raise ValueError(f"Unsupported Qwen auxiliary cache in layer {layer}")
+        specs_by_layer[layer] = LayerwiseLayerCacheSpecs(mains[0], indexer, extras)
+    slots = tuple(tuple(physical_layers[i] for i in members) for members in base.storage_indices)
+    slot_map: dict[str, int] = {}
+    if base.has_layer_reuse:
+        if len(slots) > len(qsa_layers):
+            raise ValueError("Qwen reuse buffers plus independent layers exceed the existing packed slab count")
+        for slot, members in enumerate(slots):
+            for layer in members:
+                slot_map[specs_by_layer[layer].main.layer_name] = slot
+        for slot, layer in enumerate(sorted(qsa_layers)):
+            for item in by_layer[layer]:
+                if item.layer_name.endswith((".indexer.raw_key_cache", ".indexer.compressed_key_cache")):
+                    slot_map[item.layer_name] = slot
+    return LayerwiseReuseLayout(
+        layer_cache_specs=specs_by_layer,
+        buffer_slots=slots,
+        prefetch_layer_map={physical_layers[i]: physical_layers[j] for i, j in base.prefetch_layer_map.items()},
+        independent_layers=[physical_layers[i] for i in base.independent_layers],
+        num_prefetch_layers=base.num_prefetch_layers,
+        has_layer_reuse=base.has_layer_reuse,
+        cache_slot_map=slot_map,
+    )
+
+
+def get_qwen4_layerwise_slot_map(kv_cache_config: KVCacheConfig, vllm_config: VllmConfig) -> dict[str, int]:
+    extra = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
+    if extra is None:
+        return {}
+    specs = get_layerwise_kv_cache_specs(kv_cache_config)
+    if not any(name.endswith(".indexer.raw_key_cache") for name in specs):
+        return {}
+    base_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+    return build_layerwise_reuse_layout(specs, base_layers, extra).cache_slot_map
+
+
 def apply_layerwise_kv_cache_plan(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
     *,
     excluded_layer_names: set[str] | None = None,
-) -> None:
-    """Rewrite logical layer tensors to use shared physical KV buffers."""
+) -> LayerwiseReuseLayout | None:
+    """Plan shared KV buffers; Qwen returns bindings over unchanged descriptors."""
     extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
     if extra_config is None:
         return
@@ -355,6 +455,23 @@ def apply_layerwise_kv_cache_plan(
     actual_layers = len(reuse_layout.layer_cache_specs)
     if not reuse_layout.has_layer_reuse:
         return
+    if reuse_layout.cache_slot_map:
+        if excluded_layer_names:
+            raise ValueError("Qwen packed layerwise reuse does not support excluded draft cache owners")
+        # Validate the real page geometry, retaining all seven descriptors and
+        # their backing sizes. Allocation/reshape consume the same owner map.
+        build_qwen4_kv_cache_layout(
+            kv_cache_config.kv_cache_groups,
+            kv_cache_config.num_blocks,
+            cache_slot_map=reuse_layout.cache_slot_map,
+        )
+        logger.info(
+            "Qwen layerwise KV cache reuse binds %d layers to %d main/state slots; "
+            "indexers and packed backing geometry remain resident.",
+            actual_layers,
+            len(reuse_layout.buffer_slots),
+        )
+        return reuse_layout
     if actual_layers < base_layers:
         logger.warning(
             "Layer reuse expected at least %d layers, got %d; skip tensor merge.",

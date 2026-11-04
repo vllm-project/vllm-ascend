@@ -1235,6 +1235,10 @@ class NPUWorker(WorkerBase):
         )
         if not reuse_layout.has_layer_reuse:
             return num_layers, num_layers, 1.0
+        if reuse_layout.cache_slot_map:
+            # Qwen retains its packed allocation and all resident indexers.
+            # Aliasing r0 views does not reduce the physical backing budget.
+            return num_layers, len(reuse_layout.buffer_slots), 1.0
         num_buffer_assignments = len(reuse_layout.buffer_slots)
 
         logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
