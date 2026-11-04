@@ -1,0 +1,4 @@
+pr: 20942
+entries:
+  - category: bugfix
+    text: Fixed unnecessary serialization of requests sharing a cached Mamba prefix when running with vLLM 0.32.0, matching the upstream unchanged-tail guard.
