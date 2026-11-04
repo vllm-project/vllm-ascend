@@ -24,8 +24,9 @@ a continuously adjustable reasoning effort from 1 to 100.
 
 DeepSeek-V4.1-Flash deployment on Ascend includes A2 products, A3 products,
 and 950DT products.
-This guide describes W4A8 deployment with **vLLM Ascend v0.32.0**. The
-examples below cover Atlas 800 A3 and A2 servers; use the corresponding
+This guide recommends W4A8 deployment with **vLLM Ascend v0.32.0** for
+performance. W8A8 checkpoints remain supported. The examples below cover
+Atlas 800 A3 and A2 servers; use the corresponding
 hardware-specific image and configuration for 950DT products. They include a
 single-node colocated A3 configuration,
 a two-node A3 Prefill-Decode (PD) disaggregated configuration, a two-node
@@ -56,18 +57,29 @@ The official DeepSeek-V4.1-Flash checkpoint is available from
 [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) and
 [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4.1-Flash).
 
-The Ascend W4A8 checkpoint used by this guide is available as
+The recommended Ascend W4A8 checkpoint used by this guide is available as
 [Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8)
 on ModelScope. It includes the DSpark draft parameters and INT8 Engram tables.
-Download it to the same absolute path on every server and replace the
-checkpoint-path placeholder in each serving command.
+
+The Ascend W8A8 checkpoint remains available as
+[Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8)
+on ModelScope and can also be used for deployment.
+
+Alternatively, use [ModelSlim](https://github.com/Ascend/msmodelslim) to
+prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
+
+Download the selected checkpoint to the same absolute path on every server,
+for example `/data/weights/DeepSeek-V4.1-Flash-1017-w4a8` or
+`/data/weights/DeepSeek-V4.1-Flash-1017-w8a8`. Set `MODEL_PATH` in each serving
+command to that checkpoint directory. The examples below use W4A8; to use
+W8A8, set `MODEL_PATH` to the W8A8 directory instead.
 
 Use one of the following hardware configurations:
 
 - **A3 single-node colocated**: one Atlas 800I A3 server with 8 NPUs and 128GB
   memory per NPU. The server exposes 16 logical devices to the container.
 - **A3 1P1D**: two Atlas 800I A3 servers with the same device configuration.
-- **A2 products**: two Atlas 800I A2 servers. Each server has 8 NPUs with 64GB
+- **A2 series**: two Atlas 800I A2 servers. Each server has 8 NPUs with 64GB
   memory per NPU and exposes 8 devices to the container.
 - **A2 1P1D**: four Atlas 800I A2 servers with the same device configuration.
 
@@ -91,7 +103,7 @@ separate images from the v0.32.0 release branch.
 These nightly images are temporary images for v0.32.0rc. Official release
 image addresses will be published when the release is available.
 
-=== "A3 products"
+=== "A3 series"
 
     An A3 server exposes 16 logical devices. Run this command on every A3
     server.
@@ -138,7 +150,7 @@ image addresses will be published when the release is available.
       "$IMAGE" bash
     ```
 
-=== "A2 products"
+=== "A2 series"
 
     An A2 server exposes 8 devices. Run this command on all four A2 servers.
 
@@ -191,7 +203,7 @@ the selected revision.
 
 ### 5.1 Single-Node Colocated Deployment
 
-=== "A3 products"
+=== "A3 series"
 
     This configuration runs Prefill and Decode on one Atlas 800 A3 server. It
     uses DP4/TP4 across all 16 logical devices, expert parallelism, Engram host
@@ -276,7 +288,7 @@ the selected revision.
 
 ### 5.2 1P1D PD Disaggregated Deployment
 
-=== "A3 products"
+=== "A3 series"
 
     This example uses W4A8 weights and model runner V2 on two Atlas 800 A3
     servers. The Prefill node runs DP4/PCP4/TP1, and the Decode node runs
@@ -612,9 +624,7 @@ the selected revision.
 
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
         processes and runtime threads.
-        - `enable_fused_mc2: 2` selects the MegaMoE path on Prefill. It requires a
-        compatible `cann_ops_transformer` package and a supported model configuration.
-        - `enable_flashcomm1: false` disables FlashComm.
+        - `enable_fused_mc2: 2` selects the MegaMoE path on Prefill.
         - `enable_shared_expert_dp: true` uses data parallelism for shared experts.
         - `multistream_overlap_shared_expert: false` disables shared-expert
         multistream overlap on Prefill, where MegaMoE is enabled.
@@ -653,7 +663,7 @@ the selected revision.
       INFO:     Application startup complete.
       ```
 
-=== "A2 products"
+=== "A2 series"
 
     This example uses four Atlas 800 A2 servers. The Prefill role runs four DP
     ranks with TP4 (DP4/TP4) across two servers: the first Prefill server hosts
@@ -1643,7 +1653,7 @@ For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool gui
 
 ### 5.5 Multi-Node Colocated Deployment
 
-=== "A2 products"
+=== "A2 series"
 
     This two-node colocated configuration uses two Atlas 800 A2 servers with one
     local DP rank per server and a global DP2/TP8/EP topology.
