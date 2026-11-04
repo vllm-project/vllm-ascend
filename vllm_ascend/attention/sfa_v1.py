@@ -19,7 +19,6 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -251,7 +250,7 @@ class SparseMLAMetadataState:
     Pool construction and scoring remain outside operator dispatch.
     """
 
-    def __init__(self, kv_cache_spec, vllm_config, device, kernel_block_size=128, num_heads=None):
+    def __init__(self, kv_cache_spec, vllm_config, device, kernel_block_size: int, num_heads=None):
         block_size = kv_cache_spec.block_size
         if block_size <= 0 or block_size % kernel_block_size:
             raise ValueError("Sparse MLA block size must be a positive multiple of the SFA kernel block size.")
@@ -528,8 +527,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             supports_dcp_with_varlen,
         )
 
-        # Match the logical block size selected for BlockTable.
-        self.kernel_block_size = select_common_block_size(kv_cache_spec.block_size, [AscendSFABackend])
+        # AttentionGroup.create_metadata_builders() passes a copied spec whose
+        # block_size is the final per-group kernel block size.
+        self.kernel_block_size = kv_cache_spec.block_size
 
         layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
         self.nope = layer.qk_rope_head_dim == 0

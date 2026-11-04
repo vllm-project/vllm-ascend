@@ -19,7 +19,6 @@ def _compute_slot_mappings_kernel(
     block_table_ptrs,
     block_table_strides,
     block_sizes,
-    kernel_block_sizes,
     slot_mappings_ptr,
     slot_mappings_stride,
     cp_rank,
@@ -56,7 +55,6 @@ def _compute_slot_mappings_kernel(
     block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
     block_table_stride = tl.load(block_table_strides + group_id)
     kv_block_size = tl.load(block_sizes + group_id)
-    kernel_block_size = tl.load(kernel_block_sizes + group_id)
     req_state_idx = tl.load(idx_mapping + batch_idx)
     # vLLM #56734: idx_mapping == -1 marks a dummy (or CUDA-graph padding)
     # request that owns no blocks: never read its block-table row and emit
@@ -84,11 +82,11 @@ def _compute_slot_mappings_kernel(
             remainder = virtual_block_offsets % CP_INTERLEAVE
             local_offsets = rounds * CP_INTERLEAVE + remainder
             local_positions = virtual_block_indices * kv_block_size + local_offsets
-
-        block_indices = local_positions // kernel_block_size
+        # Public block tables and flat slots use manager-block units.
+        block_indices = local_positions // kv_block_size
         # Replace the remainder with multiply/subtract to avoid scalar fallback
         # on Ascend.
-        block_offsets = local_positions - kernel_block_size * block_indices
+        block_offsets = local_positions - kv_block_size * block_indices
 
         # Stage only the contiguous portion of this request row used by the
         # current token tile. The window bound is selected at launch from the
@@ -105,7 +103,7 @@ def _compute_slot_mappings_kernel(
         relative_block_indices = tl.where(valid & is_local, block_indices - block_idx_base, 0)
         block_numbers = tl.gather(block_table_window, relative_block_indices, 0).to(tl.int32)
 
-        slot_ids = block_numbers * kernel_block_size + block_offsets
+        slot_ids = block_numbers * kv_block_size + block_offsets
         if CP_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
         slot_ids = tl.where(is_real_req, slot_ids, PAD_ID)
