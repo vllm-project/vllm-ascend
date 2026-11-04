@@ -13,11 +13,12 @@ import torch
 def prepare(monkeypatch):
     # No kernel emulation: these tests exercise only allocation and ABI checks.
     triton_utils = types.ModuleType("vllm.triton_utils")
-    triton_utils.tl = types.SimpleNamespace(constexpr=object)
-    triton_utils.triton = types.SimpleNamespace(jit=lambda fn: fn)
+    triton_utils.__dict__["tl"] = types.SimpleNamespace(constexpr=object)
+    triton_utils.__dict__["triton"] = types.SimpleNamespace(jit=lambda fn: fn)
     monkeypatch.setitem(sys.modules, "vllm.triton_utils", triton_utils)
     path = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/triton/qwen4_exp/lightning_prepare.py"
     spec = importlib.util.spec_from_file_location("lightning_prepare", path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.prepare_qsa_lightning_inputs
