@@ -225,12 +225,12 @@ class NPUModelRunner(GPUModelRunner):
             vocab_size=self.vocab_size,
             device=self.device,
             use_dense_all_token_ids=(
-                self.speculative_config is not None and self.speculative_config.method in ("ngram", "ngram_gpu")
+                self.speculative_config is not None and self.speculative_config.method in ("ngram", "ngram_gpu", "suffix")
             ),
         )
         # The upstream speculator was constructed with the discarded upstream
         # request state. This construction does not use that speculator: it
-        # binds n-gram to the new state and selects Ascend implementations for
+        # binds n-gram/suffix to the new state and selects Ascend implementations for
         # model-based methods through the Ascend factory.
         self.speculator: Any = None
         if self.speculative_config is not None and self.is_last_pp_rank:

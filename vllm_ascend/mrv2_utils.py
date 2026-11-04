@@ -56,6 +56,8 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
     if _is_configured(spec_config):
         method = getattr(spec_config, "method", None)
         if method == "suffix":
+            # Explicit V2 opt-in is available. Keep the default fallback until
+            # current-pin NPU E2E / TP / throughput qualification (RFC #20832).
             reasons.append("suffix speculative decoding")
         if method in _NGRAM_SPEC_METHODS:
             reasons.append("ngram speculative decoding")
@@ -109,6 +111,11 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
 
 def _validate_v2_model_runner(vllm_config: VllmConfig) -> None:
     """Skip upstream GPU/Triton V2 checks; Ascend uses :func:`use_v2_model_runner`."""
+    spec_config = getattr(vllm_config, "speculative_config", None)
+    if getattr(spec_config, "method", None) == "suffix" and use_v2_model_runner(vllm_config):
+        from vllm_ascend.worker.v2.spec_decode.suffix import validate_suffix_runtime
+
+        validate_suffix_runtime(spec_config)
 
 
 def apply_v2_model_runner_config_patch() -> None:
