@@ -279,8 +279,7 @@ for training-side usage.
 `--return-sampling-mask` enables the feature and is disabled by default.
 Model runner V2 and `--logprobs-mode processed_logprobs` are required.
 The following example also uses `--tokens-only` to expose the token-in/token-out
-API and skip tokenizer initialization; this is an API serving option, not a
-sampling-mask feature switch. Use `--enable-scale-out` instead to expose the
+API and skip tokenizer initialization. Use `--enable-scale-out` instead to expose the
 same endpoint while retaining the normal serving setup and tokenizer.
 
 ```bash
