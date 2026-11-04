@@ -43,6 +43,65 @@ def load_definitions(path, class_name=None, names=None):
     return namespace
 
 
+def lazy_contract(monkeypatch):
+    """Use the real paired Core methods and real source-hash validation."""
+    profile_name = "vllm_ascend.distributed.kv_transfer.hisparse.optimization_profile"
+    profile_path = ROOT / "vllm_ascend/distributed/kv_transfer/hisparse/optimization_profile.py"
+    spec = importlib.util.spec_from_file_location(profile_name, profile_path)
+    profile = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(profile)
+    monkeypatch.setitem(sys.modules, profile_name, profile)
+    path = ROOT / "vllm_ascend/patch/worker/patch_hisparse_lazy_mtp_mirror.py"
+    tree = ast.parse(path.read_bytes())
+    function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_verify_contract")
+    namespace = {"Any": object, "Path": Path, "inspect": inspect, "signature": inspect.signature}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+            if node.targets[0].id.startswith("_EXPECTED_"):
+                namespace[node.targets[0].id] = ast.literal_eval(node.value)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), str(path), "exec"), namespace)
+    common = load_definitions(COMMON, "HiSparseCacheHandle", {"_prepare_for_batch"})
+    runtime = load_definitions(COMMON, "HiSparseRuntime", {"_resolve_and_stage_group"})
+    worker = load_definitions(WORKER, "HiSparseConnectorWorker", {"_enqueue_host_mirror"})
+    return (
+        namespace["_verify_contract"],
+        types.SimpleNamespace(
+            __file__=str(COMMON),
+            HiSparseCacheHandle=types.SimpleNamespace(**common),
+            HiSparseRuntime=types.SimpleNamespace(**runtime),
+        ),
+        types.SimpleNamespace(__file__=str(WORKER), HiSparseConnectorWorker=types.SimpleNamespace(**worker)),
+    )
+
+
+def test_lazy_mirror_accepts_reviewed_core_without_deleted_adapter_marker(monkeypatch):
+    verify, common, worker = lazy_contract(monkeypatch)
+    method = worker.HiSparseConnectorWorker._enqueue_host_mirror
+    assert not getattr(method, "_ascend_backend_adapter", False)
+    verify(common, worker)
+
+
+def test_lazy_mirror_rejects_foreign_method_even_with_old_marker(monkeypatch):
+    verify, common, worker = lazy_contract(monkeypatch)
+
+    def foreign(self, ready_event=None):
+        pass
+
+    foreign._ascend_backend_adapter = True
+    worker.HiSparseConnectorWorker._enqueue_host_mirror = foreign
+    with pytest.raises(RuntimeError, match="reviewed Core Host-mirror method"):
+        verify(common, worker)
+
+
+def test_lazy_mirror_rejects_changed_core_method_signature(monkeypatch):
+    verify, common, worker = lazy_contract(monkeypatch)
+    worker.HiSparseConnectorWorker._enqueue_host_mirror.__signature__ = inspect.Signature(
+        [inspect.Parameter("self", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+    )
+    with pytest.raises(RuntimeError, match="Host-mirror signature"):
+        verify(common, worker)
+
+
 @pytest.mark.parametrize("resident_block", [1, 2, 4])
 @pytest.mark.parametrize("state_order", [[0, 1], [1, 0]])
 def test_prefill_resident_mapping_matches_common(resident_block, state_order):

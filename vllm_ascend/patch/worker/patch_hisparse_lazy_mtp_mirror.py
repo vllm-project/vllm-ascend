@@ -114,8 +114,8 @@ def _verify_contract(runtime_module: Any, worker_module: Any) -> None:
     enqueue = worker_module.HiSparseConnectorWorker._enqueue_host_mirror
     if tuple(signature(prepare).parameters) != ("self", "attn_metadata"):
         raise RuntimeError("Unsupported HiSparse batch-preparation signature.")
-    if not getattr(enqueue, "_ascend_backend_adapter", False):
-        raise RuntimeError("Install the reviewed Ascend runtime backend before lazy mirror.")
+    if Path(inspect.getsourcefile(enqueue)).resolve() != Path(worker_module.__file__).resolve():
+        raise RuntimeError("Lazy MTP mirror requires the reviewed Core Host-mirror method.")
     if tuple(signature(enqueue).parameters) != ("self", "ready_event"):
         raise RuntimeError("Unsupported HiSparse Host-mirror signature.")
     if getattr(runtime_module.HiSparseRuntime._resolve_and_stage_group, "_ascend_certified_mtp_prefetch_patch", False):
