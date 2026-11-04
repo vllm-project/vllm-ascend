@@ -9,7 +9,8 @@ Triton sparse-attention reference.
 Default sparse-attention backend selection runs both Triton and torch_npu.
 Select one backend with::
 
-    pytest tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py --msa-m3-sparse-backend=torch_npu
+    pytest tests/e2e/nightly/single_node/ops/singlecard_ops/test_minimax_m3_sparse_attn.py \
+        --msa-m3-sparse-backend=torch_npu
 
 Test cases are adapted from
 ``reference/vllm_cp/tests/kernels/attention/test_minimax_m3.py`` and
@@ -33,16 +34,16 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
 )
-from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
+from vllm_ascend.ops.triton.msa.msa_m3_triton import (
     SPARSE_BLOCK_SIZE,
     minimax_m3_index_decode,
     minimax_m3_index_score,
     minimax_m3_index_topk,
 )
-from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
+from vllm_ascend.ops.triton.msa.msa_m3_triton import (
     minimax_m3_sparse_attn as minimax_m3_sparse_attn_triton,
 )
-from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
+from vllm_ascend.ops.triton.msa.msa_m3_triton import (
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_triton,
 )
 

@@ -58,7 +58,7 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
 )
-from vllm_ascend.ops.triton.msa import msa_m3_index_postprocess
+from vllm_ascend.ops.triton.msa import msa_m3_index_postprocess, msa_m3_triton_a5
 from vllm_ascend.utils import AscendDeviceType
 
 
@@ -284,7 +284,7 @@ def test_m3_indexer_cache_spec_follows_resolved_fp8_dtype(mock_get_vllm_config: 
 
 
 def test_a5_decode_topk_keeps_fused_postprocess_fast_path() -> None:
-    source_path = Path(msa_m3_module.__file__).with_name("ops") / "msa_m3_triton_a5.py"
+    source_path = Path(msa_m3_triton_a5.__file__)
     source = source_path.read_text(encoding="utf-8")
     decode_source = source[source.index("def minimax_m3_index_decode(") :]
 
@@ -601,7 +601,7 @@ def test_index_score_uses_ascendc_prefill_and_decode_on_all_devices() -> None:
     assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL is can_use_cann_index_score
     assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE is can_use_cann_index_score
     assert "msa_m3_triton_a5" in import_branches
-    assert "from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import" in import_branches
+    assert "from vllm_ascend.ops.triton.msa.msa_m3_triton import" in import_branches
     assert "_CANN_INDEX_SCORE_AVAILABLE" in module_source
 
 

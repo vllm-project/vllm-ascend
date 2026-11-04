@@ -6,7 +6,7 @@ Operators shared by both runners, model-layer kernels, and general utilities
 keep their functional directories. A model supported by V2 alone does not make
 all of its mathematical kernels V2 runner operators.
 
-This inventory covers all 107 non-`__init__.py` Python modules under this package.
+This inventory covers all 109 non-`__init__.py` Python modules under this package.
 It includes launch wrappers and utilities as well as JIT definitions. Operators
 defined under `worker/v2/`, `models/`, or other packages are outside this layout
 change.
@@ -146,6 +146,8 @@ configuration rather than the V1/V2 runner input or sampling interface.
 | [mamba/state_ops.py](mamba/state_ops.py) | Model state/attention |
 | [msa/minimax_qknorm_rope_cache.py](msa/minimax_qknorm_rope_cache.py) | Model sparse attention |
 | [msa/msa_m3_index_postprocess.py](msa/msa_m3_index_postprocess.py) | Model sparse attention |
+| [msa/msa_m3_triton.py](msa/msa_m3_triton.py) | MiniMax-M3 A2/A3 indexer and sparse attention; [operator doc](docs/msa_m3_triton.md) |
+| [msa/msa_m3_triton_a5.py](msa/msa_m3_triton_a5.py) | MiniMax-M3 A5 indexer and sparse attention; [operator doc](docs/msa_m3_triton_a5.md) |
 | [mul_add.py](mul_add.py) | Model/attention primitive or shared utility |
 | [muls_add.py](muls_add.py) | Model/attention primitive or shared utility |
 | [mxfp_k_scale.py](mxfp_k_scale.py) | Model/attention primitive or shared utility |
