@@ -1449,7 +1449,11 @@ def _setup_compile_backend(
         and not vllm_config.model_config.enforce_eager
         and requires_tp_aligned_capture_sizes
     ):
-        original_sizes = compilation_config.cudagraph_capture_sizes
+        # Main V2 resolves prefill tokens and decode requests separately.
+        # The TP token-layout restriction applies to the prefill grid; keep
+        # the resolved decode request grid used by the graph managers intact.
+        prefill_sizes = getattr(compilation_config, "prefill_cudagraph_capture_token_sizes", None)
+        original_sizes = prefill_sizes if prefill_sizes is not None else compilation_config.cudagraph_capture_sizes
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         sp_aclgraph_sizes = [size for size in original_sizes if size % tp_size == 0]
         if not sp_aclgraph_sizes:
@@ -1459,7 +1463,17 @@ def _setup_compile_backend(
                 f"{vllm_config.parallel_config.tensor_parallel_size}"
             )
 
-        if len(sp_aclgraph_sizes) != len(original_sizes):
+        if prefill_sizes is not None:
+            compilation_config.prefill_cudagraph_capture_token_sizes = sp_aclgraph_sizes
+            compilation_config.max_prefill_cudagraph_capture_tokens = sp_aclgraph_sizes[-1]
+            # Re-record the token union from the resolved split grids. Keeping
+            # a legacy-only list (e.g. [4] with one decode request) makes the
+            # engine handshake's config re-entry reject the derived sizes.
+            vllm_config._split_cudagraph_capture_sizes(
+                False, vllm_config.get_decode_cudagraph_query_lens(vllm_config.uniform_decode_query_len)
+            )
+            compilation_config.post_init_cudagraph_sizes()
+        elif len(sp_aclgraph_sizes) != len(original_sizes):
             # Match max_cudagraph_capture_size with the valid max size to avoid
             # initialization error of vllm server.
             compilation_config.max_cudagraph_capture_size = sp_aclgraph_sizes[-1]

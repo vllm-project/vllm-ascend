@@ -936,6 +936,63 @@ class TestNPUPlatform(TestBase):
                     config._set_cudagraph_sizes()
                     self.assertIn(max_num_seqs, config.compilation_config.cudagraph_capture_sizes)
 
+    def test_setup_compile_backend_keeps_split_decode_grid_after_tp_alignment(self):
+        cases = ((1, 1, [4]), (4, 2, [16, 32]), (4, 1, [1, 2, 4, 8]))
+        for max_num_seqs, query_len, sizes in cases:
+            for mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_DECODE_ONLY):
+                for sequence_parallel in (False, True):
+                    with self.subTest(seqs=max_num_seqs, query=query_len, mode=mode, sp=sequence_parallel):
+                        config = TestNPUPlatform.mock_vllm_config()
+                        config.compilation_config = CompilationConfig(
+                            mode=CompilationMode.VLLM_COMPILE,
+                            cudagraph_mode=mode,
+                            cudagraph_capture_sizes=list(sizes),
+                        )
+                        config.scheduler_config.max_num_seqs = max_num_seqs
+                        config.scheduler_config.max_num_batched_tokens = 1024
+                        config.parallel_config.tensor_parallel_size = 4
+                        config.uniform_decode_query_len = query_len
+                        config.use_v2_model_runner = True
+                        config.performance_mode = "balanced"
+                        config.speculative_config = None
+                        config.model_config.enforce_eager = False
+                        config.additional_config = {"ascend_compilation_config": {}}
+                        config.get_decode_cudagraph_query_lens = lambda q, count=max_num_seqs: {q: count}
+                        config.get_draft_decode_cudagraph_request_sizes = lambda: []
+                        split_sizes = getattr(VllmConfig, "_split_cudagraph_capture_sizes", None)
+                        if split_sizes is not None:
+                            config._split_cudagraph_capture_sizes = partial(split_sizes, config)
+                        config._set_cudagraph_sizes = partial(VllmConfig._set_cudagraph_sizes, config)
+                        config._set_cudagraph_sizes()
+                        decode_sizes = getattr(
+                            config.compilation_config, "decode_cudagraph_capture_request_sizes", None
+                        )
+                        if decode_sizes is not None:
+                            decode_sizes = list(decode_sizes)
+                        with patch("vllm_ascend.platform.enable_sp", return_value=sequence_parallel):
+                            _setup_compile_backend(
+                                config, compile_backend="test_backend", enable_shared_expert_dp=not sequence_parallel
+                            )
+                        # Engine handshakes re-enter the native config resolver.
+                        config._set_cudagraph_sizes()
+                        config._set_cudagraph_sizes()
+                        if split_sizes is not None:
+                            self.assertEqual(
+                                config.compilation_config.decode_cudagraph_capture_request_sizes, decode_sizes
+                            )
+                            prefill_sizes = config.compilation_config.prefill_cudagraph_capture_token_sizes
+                            self.assertTrue(all(size % 4 == 0 for size in prefill_sizes))
+                            if max_num_seqs == 1:
+                                self.assertEqual(prefill_sizes, [4])
+                                self.assertEqual(decode_sizes, [1])
+                                if mode == CUDAGraphMode.FULL_DECODE_ONLY:
+                                    self.assertEqual(config.compilation_config.cudagraph_capture_sizes, [1])
+                        else:
+                            self.assertTrue(
+                                all(size % 4 == 0 for size in config.compilation_config.cudagraph_capture_sizes)
+                            )
+                        self.assertEqual(config.compilation_config.cudagraph_mode, mode)
+
     def test_apply_config_platform_defaults_sets_sp_threshold(self):
         for enabled_option in ("enable_sp", "fuse_gemm_comms"):
             with self.subTest(enabled_option=enabled_option):
