@@ -1439,11 +1439,19 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ConsumeCandScoreToken(
     // （tmpBuf_.Get<T>()[idx]）：对切片张量做 ReinterpretCast 不保留基址偏移，
     // 会把掩码/kscale/索引写到错误位置（本轮实测）。
     LocalTensor<float> posPatternF = tmpBuf_.Get<float>()[4096]; // [512] 块内偏移 0..7 重复
+    LocalTensor<float> oneF = tmpBuf_.Get<float>()[14848];       // [512] 全 1.0（Select 常量）
+    LocalTensor<float> zeroF = tmpBuf_.Get<float>()[15360];      // [512] 全 0.0
+    // v12: 硬件比较 mask 缓冲（uint8 ×512 ×2 = 512B ×2）
+    LocalTensor<uint8_t> maskA = tmpBuf_.Get<uint8_t>()[45312U];
+    LocalTensor<uint8_t> maskB = tmpBuf_.Get<uint8_t>()[45824U];
     if (!candMaskConstReady_) {
         for (uint32_t p = 0U; p < CAND_TILE_TOKENS; p++) {
             posPatternF.SetValue(p, static_cast<float>(static_cast<int32_t>(p % 8U)));
         }
         SetWaitFlag<HardEvent::S_V>(HardEvent::S_V);
+        Duplicate(oneF, 1.0f, CAND_TILE_TOKENS);
+        Duplicate(zeroF, 0.0f, CAND_TILE_TOKENS);
+        PipeBarrier<PIPE_V>();
         candMaskConstReady_ = true;
     }
     // 每 tile 的向量暂存（逻辑 token 号 → 掩码 / 排序索引）。UB 分区（float 偏移）：
@@ -1525,24 +1533,14 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ConsumeCandScoreToken(
                           static_cast<uint8_t>(1), QLIV2ServiceVec::B32RepeatParams());
         }
         PipeBarrier<PIPE_V>();
-        // valid = (tok >= 0) && (tok < V)：两段 clamp 相乘
-        Adds(validF, idxTokF, 1.0f, CAND_TILE_TOKENS);
+        // v12: valid = (tok >= 0) && (tok <= V-1)：两次硬件标量比较 + 两次 Select（0/1 浮点）
+        AscendC::Compares(maskA, idxTokF, 0.0f, CMPMODE::GE, CAND_TILE_TOKENS);
         PipeBarrier<PIPE_V>();
-        Maxs(validF, validF, 0.0f, CAND_TILE_TOKENS);
+        AscendC::Compares(maskB, idxTokF, static_cast<float>(V), CMPMODE::LT, CAND_TILE_TOKENS); // LT(V) 等价 LE(V-1)（V 是整数）
         PipeBarrier<PIPE_V>();
-        Mins(validF, validF, 1.0f, CAND_TILE_TOKENS);
+        AscendC::Select(validF, maskA, oneF, zeroF, SELMODE::VSEL_TENSOR_TENSOR_MODE, CAND_TILE_TOKENS);
         PipeBarrier<PIPE_V>();
-        Adds(penF, idxTokF, static_cast<float>(1 - V), CAND_TILE_TOKENS);
-        PipeBarrier<PIPE_V>();
-        Maxs(penF, penF, 0.0f, CAND_TILE_TOKENS);
-        PipeBarrier<PIPE_V>();
-        Mins(penF, penF, 1.0f, CAND_TILE_TOKENS);
-        PipeBarrier<PIPE_V>();
-        Muls(penF, penF, -1.0f, CAND_TILE_TOKENS);
-        PipeBarrier<PIPE_V>();
-        Adds(penF, penF, 1.0f, CAND_TILE_TOKENS); // penF = 1 - clamp(tok - (V-1))
-        PipeBarrier<PIPE_V>();
-        Mul(validF, validF, penF, CAND_TILE_TOKENS); // 位置有效 0/1
+        AscendC::Select(validF, maskB, validF, zeroF, SELMODE::VSEL_TENSOR_TENSOR_MODE, CAND_TILE_TOKENS);
         PipeBarrier<PIPE_V>();
         Muls(penF, validF, -1.0f, CAND_TILE_TOKENS);
         PipeBarrier<PIPE_V>();
