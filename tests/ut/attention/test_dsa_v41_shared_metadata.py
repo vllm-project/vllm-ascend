@@ -158,9 +158,11 @@ class TestSharedPCPMetadata:
             metadata.append(
                 owner.build(
                     0,
-                    batch.local.replace(replay_start=replay_start),
-                    pcp_context=batch.context,
-                    pcp_cache_group_idx=group,
+                    batch.local.replace(
+                        replay_start=replay_start,
+                        pcp_context=batch.context,
+                        pcp_cache_group_idx=group,
+                    ),
                     common_v41_metadata={},
                     common_v41_batch_metadata=batch_cache,
                 )
@@ -168,6 +170,11 @@ class TestSharedPCPMetadata:
         assert prepare.call_count == 1
         assert gather.call_count == 4
         assert smla.call_count == 2
+        for group, result in enumerate(metadata):
+            global_metadata = result.global_metadata
+            assert global_metadata is not None
+            torch.testing.assert_close(global_metadata.block_table, batch.context.global_block_tables[group])
+            torch.testing.assert_close(global_metadata.flat_slot_mapping, batch.context.global_slot_mappings[group])
         assert metadata[0].seq_lens.data_ptr() == metadata[1].seq_lens.data_ptr()
         assert metadata[0].cos[LAYER].data_ptr() == metadata[1].cos[LAYER].data_ptr()
         assert metadata[0].smla_metadata.data_ptr() != metadata[1].smla_metadata.data_ptr()
