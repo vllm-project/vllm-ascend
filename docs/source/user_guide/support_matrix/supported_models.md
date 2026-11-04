@@ -148,6 +148,7 @@
     | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) | ✅ | A2/A3 | 🟡 | ✅ | 🟡 | 🟡 | ✅ | 🟡 | ❌ | ❌ | ❌ | ❌ | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | 🟡 | 🟡 | 🟡 | 3 | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
     | [Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md) | 🔴 | A2/A3 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
     | [PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md) | 🔴 | A2/A3 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
+| [LocateAnything-3B](../../tutorials/models/LocateAnything-3B.md) | 🔵 | A2/A3 | ✅ | ✅ |  |  |  |  |  |  |  |  | 🟡 |  |  |  |  |  |  |  | ❌ |  |  |  |  |  |  |  |  |  |  |  | ✅ |  | ✅ |  |  |  |  |  |  |
 
 === "Atlas 300I DUO"
 
