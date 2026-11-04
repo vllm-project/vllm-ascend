@@ -64,6 +64,10 @@ class HardwareCapability(Enum):
     SCATTER_ND_STRIDED_CACHE_STORE = auto()
     # Extend SK cache writes to FP8 E4M3FN/E5M2 (A5 ABI).
     SCATTER_ND_FP8_CACHE_STORE = auto()
+    # Qualified fixed-K4 BF16 Qwen3 suffix FIA with split K/V and NHD/HND
+    # views. Other devices remain on existing paths until qualified; this is
+    # not a claim that their hardware cannot support the configuration.
+    SUFFIX_FIA_CACHE = auto()
     # Allow the CANN MegaMoe fused-MC2 path when its model, EP, and config checks pass.
     CANN_MEGAMOE = auto()
     # Allow A5 MegaMoe's MXFP-only path and its A5-specific calling conventions.
@@ -288,6 +292,7 @@ _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
+    HardwareCapability.SUFFIX_FIA_CACHE,
 }
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
 _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyType(
