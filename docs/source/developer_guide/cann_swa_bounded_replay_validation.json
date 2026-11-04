@@ -257,6 +257,23 @@
     "cpu_log": "/tmp/cann-swa-aux-regressions.log",
     "junit": "/tmp/cann-swa-aux-regressions.xml",
     "a3_runtime": "not executed",
-    "config_workaround": "VLLM_USE_V2_MODEL_RUNNER=1 avoids this V1 method; complete A3 startup remains unvalidated"
+    "config_workaround": "Retracted for the reported DP4/TP4 + legacy DSA-CP configuration: MRV2 + enable_dsa_cp=true is rejected during VllmConfig validation. Keep MRV1 and apply a52a257e27ae9670c043ed91c0161e9a1d426391."
+  },
+  "configuration_followup": {
+    "date": "2026-11-04",
+    "reported_error": "DSA-CP is not supported by Model Runner V2",
+    "phase": "VllmConfig construction before model loading or request processing",
+    "cause": "The prior configuration-only workaround failed to account for AscendConfig.derive_and_validate rejecting MRV2 with legacy DSA-CP",
+    "recommended_configuration": "VLLM_USE_V2_MODEL_RUNNER=0, keep DP4/TP4 and enable_dsa_cp=true, apply a52a257e27ae9670c043ed91c0161e9a1d426391",
+    "removing_dsa_cp_only": "With SP still enabled, make_decoder_replay disables decoder trimming; startup alone would not validate the intended optimization",
+    "runtime_code_changed": false,
+    "a3_startup_after_fix": "not verified locally",
+    "validation": {
+      "actual_mrv2_dsa_cp_guard": "Confirmed derive_and_validate raises the reported ValueError before later validation or initialization",
+      "existing_config_tests": "4 passed, 135 deselected with current_platform.device_type scoped to cpu",
+      "initial_config_test_attempt": "4 failures because the CPU-only empty vLLM installation could not infer a device; no product source changes were made to work around the test environment",
+      "cpu_test_log": "/tmp/cann-swa-dsa-cp-guards-cpu.log",
+      "runtime_code_changes_in_followup": false
+    }
   }
 }

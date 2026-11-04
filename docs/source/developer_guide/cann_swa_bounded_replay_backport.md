@@ -157,15 +157,33 @@ AscendC/Triton 算子，也没有验证 NPU 集合通信或建立性能收益结
 放在 `model_config`，较新接口才使用 `aux_output_config`。本分支已优先读取新接口、
 在其不存在或为 `None` 时回退到旧接口；不向 vLLM 注入一个虚构的新配置对象。
 
-该异常不表示 SWA replay 必须使用 MRV2。可以更新修复后继续使用
-`VLLM_USE_V2_MODEL_RUNNER=0`；若先尝试配置绕行，也可以只将这个值改为 `1`
-并保持其余参数不变，避开这处 MRV1 调用，但仍需验证完整 A3 启动和推理。
+该异常不表示 SWA replay 必须使用 MRV2。对于下述 DP4/TP4＋旧 DSA-CP 配置，
+应应用修复 `a52a257e27ae9670c043ed91c0161e9a1d426391`，并继续使用
+`VLLM_USE_V2_MODEL_RUNNER=0`。
+
+此前“只把 runner 改为 V2、其余参数不变”的绕行说明有误，现已撤回。CANN 分支的
+`AscendConfig.derive_and_validate()` 明确拒绝 MRV2＋`enable_dsa_cp=true`，会在
+创建 `VllmConfig` 时退出，尚未处理请求。仅删除旧 DSA-CP 也不能证明 decoder replay
+生效：继续启用 FlashComm/SP 时，`make_decoder_replay()` 会因 SP 缺少旧 DSA-CP
+而关闭裁剪。要保留当前性能对照基线，应走修复后的 MRV1 路径。
 
 对于现有 DP4/TP4、`FULL_DECODE_ONLY`、`enable_dsa_cp=true`、FlashComm 开启且没有
 KV connector 的配置，继续沿用 CANN 分支的旧 DSA-CP 参数。不要套用 0.32 CI 的
 “删除 enable_dsa_cp、切到 PCP4”步骤：那是另一套版本和拓扑的迁移。
 本分支的 decoder replay 允许配合旧 DSA-CP 的 SP 路径，但实际生效仍须检查
 `SWA decoder bounded replay active (MRV1/MRV2)` 日志。
+
+在现有源码目录应用修复（如果尚未包含该提交）：
+
+```bash
+cd /vllm-workspace/vllm-ascend
+git fetch https://github.com/gg820827047/vllm-ascend.git backport/cann-swa-bounded-replay
+git cherry-pick a52a257e27ae9670c043ed91c0161e9a1d426391
+```
+
+然后将启动脚本中的 runner 值恢复为 `0`，保留 `enable_dsa_cp=true` 和其余原参数，
+重启服务及全部 worker。该修复只改 Python；可编辑安装更新源码后即可加载新逻辑，
+wheel 安装则需更新对应的包，不需要仅为这处修改重新编译自定义算子。
 
 首轮建议在同一个 runner 上分别跑 replay OFF/ON。切换到 MRV2 后，原 MRV1/OFF
 的性能不能直接当作 MRV2/ON 的 replay 对照基线。
