@@ -111,7 +111,10 @@ def _suffix_local_scan_kernel(
     pos = blk * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
     active = (pos >= 1) & (pos < seq_len) & (num_sampled > 0)
     match_len = tl.zeros([BLOCK], dtype=tl.int64)
-    for t in range(MAX_DEPTH):
+    # Failed candidates never reactivate: once none remain, no later
+    # iteration can change the match lengths or the rightmost tie-break.
+    t = 0
+    while (t < MAX_DEPTH) & (tl.sum(active.to(tl.int32), axis=0) > 0):
         # Request token t back from its end (newest first).
         tail_pos = seq_len - 1 - t
         # [NPU] masked load does not short-circuit address computation:
@@ -126,6 +129,7 @@ def _suffix_local_scan_kernel(
         tok = tl.load(row + _sp, mask=ok, other=-1)
         active = ok & (tok == tail_tok)
         match_len += active.to(tl.int64)
+        t += 1
 
     score = tl.where(match_len > 0, match_len * Lp1 + pos, 0)
     tl.store(scratch_ptr + scratch_off, tl.max(score, axis=0))

@@ -26,6 +26,7 @@ from vllm_ascend.ops.triton.spec_decode.suffix import (  # noqa: E402
 )
 from vllm_ascend.worker.v2.spec_decode.suffix.speculator import (  # noqa: E402
     SuffixSpeculator,
+    _suffix_local_scan_kernel,
 )
 
 DEVICE = torch.device("npu")
@@ -656,3 +657,55 @@ def test_ingestion_dense_collisions_keep_int64_document_order():
     assert spec.corpus.tolist() == ref["corpus"].tolist()
     assert int(spec.doc_seq) == ref["doc_seq"]
     assert int(spec.corpus_head) == ref["head"]
+
+
+@pytest.mark.parametrize("depth", [1, 8, 64])
+@pytest.mark.parametrize("num_sampled", [0, 1])
+@pytest.mark.parametrize(
+    "history",
+    [
+        [],
+        [7],
+        list(range(257)),
+        [7] * 257,
+        [1, 2, 3, 4] * 65 + [1, 2, 3],
+        list(range(1000)) + [21, 22, 23, 24],
+    ],
+    ids=["empty", "single", "no-match", "depth-bound", "block-ties", "sparse-match"],
+)
+def test_local_scan_early_exit_preserves_every_block_score(history, depth, num_sampled):
+    spec, rs = _make(4, depth, 2, 1100, corpus_tokens=0)
+    _set(rs, 0, [], [99] * 100)
+    _set(rs, 1, [], history)
+    spec.scratch.fill_(-1)
+    idx_mapping = torch.tensor([1], dtype=torch.int32, device=DEVICE)
+    sampled = torch.tensor([num_sampled], dtype=torch.int32, device=DEVICE)
+    token_ids = rs.all_token_ids.gpu
+    radix = spec.max_model_len + 1
+    _suffix_local_scan_kernel[(1, spec.n_blocks)](
+        token_ids,
+        token_ids.stride(0),
+        idx_mapping,
+        rs.total_len.gpu,
+        sampled,
+        spec.scratch,
+        spec.scratch.stride(0),
+        radix,
+        MAX_DEPTH=depth,
+        BLOCK=spec.block_l,
+        num_warps=4,
+    )
+    expected = [0] * spec.n_blocks
+    if num_sampled:
+        for pos in range(1, len(history)):
+            match = 0
+            while match < depth and pos - 1 - match >= 0:
+                if history[pos - 1 - match] != history[-1 - match]:
+                    break
+                match += 1
+            if match:
+                block = pos // spec.block_l
+                expected[block] = max(expected[block], match * radix + pos)
+    # Includes untouched-by-work padding blocks, initially poisoned above.
+    assert spec.scratch[0].tolist() == expected
+    assert (spec.scratch[1] == -1).all()

@@ -4,6 +4,7 @@
 
 Ported from vLLM PR #60339 (SuffixDecodingSpeculator for MRV2) with
 Ascend-specific hardening:
+  - bounded local suffix scans stop once no candidate remains active
   - masked-load address clamping for stale corpus index entries
   - non-atomic corpus ingestion: exact float32 address sorting followed by
     three int64 segmented-max kernels on the current stream
