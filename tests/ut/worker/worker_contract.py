@@ -305,8 +305,8 @@ NPU_WORKER_INTERFACES: tuple[WorkerInterface, ...] = (
         "profile",
         Disposition.ASCEND_SPECIFIC,
         "0.5c",
-        "NPU profiler wrapper (TorchNPUProfilerWrapper). Widen the signature with "
-        "delay_iterations/max_iterations in 0.5c so it stays assignable to the parent.",
+        "NPU profiler wrapper (TorchNPUProfilerWrapper); the signature already accepts upstream "
+        "delay_iterations/max_iterations and profiler_kwargs after the main-branch alignment.",
     ),
     _i(
         "add_lora",
@@ -468,7 +468,7 @@ XLITE_WORKER_INTERFACES: tuple[WorkerInterface, ...] = (
 
 #: Overrides whose local signature does not yet accept every call the parent
 #: accepts. Phase 0.5c removes them one by one.
-KNOWN_SIGNATURE_GAPS = frozenset({"load_model", "profile"})
+KNOWN_SIGNATURE_GAPS = frozenset({"load_model"})
 
 #: Overrides that lost (or never adopted) a parent decorator. Phase 0.5a fixes
 #: them. ``sample_tokens`` is added at test time only where
