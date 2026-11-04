@@ -4,7 +4,12 @@ import copy
 import unittest
 from types import SimpleNamespace
 
-from vllm_ascend.distributed.fasteep.policy import replica_donors, validate_config, validate_target
+from vllm_ascend.distributed.fasteep.policy import (
+    communication_method,
+    replica_donors,
+    validate_config,
+    validate_target,
+)
 
 
 class TestPlacement(unittest.TestCase):
@@ -78,10 +83,24 @@ class TestConfig(unittest.TestCase):
     def test_valid(self):
         validate_config(self.config())
 
+    def test_multi_node_and_v2_config(self):
+        config = self.config()
+        config.parallel_config.data_parallel_size_local = 2
+        config.use_v2_model_runner = True
+        validate_config(config)
+
+    def test_communication_selection(self):
+        config = self.config()
+        self.assertEqual(communication_method(config), "allgather")
+        config.additional_config = {"fasteep": {"communication": "alltoall"}}
+        self.assertEqual(communication_method(config), "alltoall")
+        config.additional_config["fasteep"]["communication"] = "unknown"
+        with self.assertRaisesRegex(ValueError, "communication"):
+            validate_config(config)
+
     def test_incompatible_configurations(self):
         for field, value in (
             ("tensor_parallel_size", 2),
-            ("data_parallel_size_local", 2),
             ("enable_elastic_ep", True),
             ("enable_eplb", True),
             ("enable_expert_parallel", False),

@@ -7,6 +7,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
+import pytest
+import regex as re
 import requests
 
 from tests.e2e.conftest import RemoteOpenAIServer
@@ -14,9 +16,32 @@ from tests.e2e.conftest import RemoteOpenAIServer
 MODEL = "Qwen/Qwen3-30B-A3B-Base"
 
 
-def test_fasteep_serving(tmp_path):
+@pytest.mark.parametrize("graphs", [False, True])
+def test_fasteep_alltoall_serving(tmp_path, graphs):
+    observations = _run_serving(tmp_path, "1", "alltoall", graphs)
+    assert all(outputs == observations[0] for outputs in observations[1:])
+
+
+def test_fasteep_allgather_graph_parity(tmp_path):
+    # BF16 reduction grouping changes with EP topology. Compare graph replay
+    # with eager execution at each identical placement, including restored ranks.
+    eager = _run_serving(tmp_path / "eager", "0", "allgather", False)
+    graphs = _run_serving(tmp_path / "graphs", "0", "allgather", True)
+    assert graphs == eager
+
+
+def _run_serving(tmp_path, runner, communication, graphs):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     placement = tmp_path / "placement.json"
-    devices = [{"device_expert": list(range((rank % 2) * 64, (rank % 2 + 1) * 64))} for rank in range(4)]
+    devices = [
+        {"device_expert": experts}
+        for experts in [
+            list(range(64)),
+            list(range(32, 96)),
+            list(range(64, 128)),
+            list(range(32)) + list(range(96, 128)),
+        ]
+    ]
     placement.write_text(json.dumps({"moe_layer_count": 48, "layer_list": [{"device_list": devices}] * 48}))
     args = [
         "--data-parallel-size",
@@ -48,15 +73,27 @@ def test_fasteep_serving(tmp_path):
             {
                 "eplb_config": {"dynamic_eplb": False, "num_redundant_experts": 128, "expert_map_path": str(placement)},
                 "enable_cpu_binding": False,
+                "fasteep": {"communication": communication, "verify_migration": True},
             }
         ),
     ]
+    if graphs:
+        config_index = args.index("--additional-config") + 1
+        additional = json.loads(args[config_index])
+        additional["ascend_compilation_config"] = {"fuse_norm_quant": False}
+        args[config_index] = json.dumps(additional)
+        args.remove("--enforce-eager")
+        args += [
+            "--compilation-config",
+            json.dumps({"mode": 3, "cudagraph_mode": "PIECEWISE", "cudagraph_capture_sizes": [1, 2, 4, 8]}),
+        ]
     env = {
-        "VLLM_USE_V2_MODEL_RUNNER": "0",
+        "VLLM_USE_V2_MODEL_RUNNER": runner,
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:False",
         "HCCL_CONNECT_TIMEOUT": "120",
         "HCCL_EXEC_TIMEOUT": "120",
         "HCCL_BUFFSIZE": "64",
+        "HCCL_DETERMINISTIC": "true",
         "OMP_NUM_THREADS": "4",
     }
     with RemoteOpenAIServer(MODEL, args, env_dict=env, max_wait_seconds=900) as server:
@@ -64,6 +101,7 @@ def test_fasteep_serving(tmp_path):
         def complete(prompt):
             response = requests.post(
                 server.url_for("v1", "completions"),
+                headers={"X-data-parallel-rank": "0"},
                 json={"model": MODEL, "prompt": prompt, "temperature": 0, "seed": 0, "max_tokens": 32, "logprobs": 1},
                 timeout=240,
             )
@@ -92,10 +130,14 @@ def test_fasteep_serving(tmp_path):
             return started, time.monotonic()
 
         with ThreadPoolExecutor(max_workers=4) as pool:
-            baseline = list(pool.map(complete, prompts))
-            for target in (2, 4, 2, 4):
+            baseline = [complete(prompt) for prompt in prompts]
+            assert [complete(prompt) for prompt in prompts] == baseline
+            patterns = [r"(?i)\bparis\b", r"(?i)\b(two|2)\b", r"(?i)\b(eleven|11)\b", r"(?i)\b(zero|0|32)\b"]
+            assert all(re.search(pattern, "".join(output[0])[:64]) for pattern, output in zip(patterns, baseline))
+            observations = [baseline]
+            for target in (3, 2, 4, 2, 4):
                 resize(target)
-                assert list(pool.map(complete, prompts)) == baseline
+                observations.append([complete(prompt) for prompt in prompts])
 
             started = Event()
 
@@ -143,6 +185,7 @@ def test_fasteep_serving(tmp_path):
             # Allow a small margin for HTTP response delivery to the clients.
             assert resize_started <= stream_finished <= resize_finished + 0.1
             assert arrival_finished >= resize_finished - 0.1
-            assert arrival_output == baseline[0]
+            assert arrival_output == observations[2][0]
             resize(4)
-            assert complete(prompts[0]) == baseline[0]
+            assert complete(prompts[0]) == observations[-1][0]
+            return observations

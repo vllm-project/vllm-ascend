@@ -3,6 +3,7 @@
 """HCCL children with explicit ownership and no process-group reinitialization."""
 
 import ctypes
+import math
 import socket
 from importlib import import_module
 
@@ -23,6 +24,8 @@ from vllm_ascend.utils import current_stream
 class RetainedGroup:
     """Minimal eager DP/EP group; the parent's device group is never borrowed."""
 
+    fasteep = True
+
     def __init__(self, owner, comm, cpu_group, size):
         self.owner = owner
         self.comm = comm
@@ -36,9 +39,10 @@ class RetainedGroup:
         self.device_communicator = self
 
     def all_reduce(self, tensor):
-        if tensor.device.type == "cpu":
-            dist.all_reduce(tensor, group=self.cpu_group)
+        if self.world_size == 1:
             return tensor
+        if tensor.device.type == "cpu":
+            return self.cpu_all_reduce_(tensor)
         output = torch.empty_like(tensor)
         self.owner.library.hcclAllReduce(
             buffer_type(tensor.data_ptr()),
@@ -51,7 +55,19 @@ class RetainedGroup:
         )
         return output
 
+    def cpu_all_reduce_(self, tensor):
+        """Synchronize V2 scheduling metadata over the active CPU group."""
+        if tensor.device.type != "cpu":
+            raise ValueError("CPU all-reduce requires a CPU tensor.")
+        if self.world_size > 1:
+            options = dist.AllreduceOptions()
+            options.reduceOp = dist.ReduceOp.SUM
+            self.cpu_group.allreduce([tensor], options).wait()
+        return tensor
+
     def all_gather(self, tensor, dim=-1):
+        if self.world_size == 1:
+            return tensor
         dim %= tensor.ndim
         source = tensor.movedim(dim, 0).contiguous()
         output = torch.empty(
@@ -61,6 +77,8 @@ class RetainedGroup:
         return output.movedim(0, dim).contiguous()
 
     def reduce_scatter(self, tensor, dim=-1):
+        if self.world_size == 1:
+            return tensor
         dim %= tensor.ndim
         source = tensor.movedim(dim, 0).contiguous()
         if source.shape[0] % self.world_size:
@@ -71,6 +89,67 @@ class RetainedGroup:
         self.owner.collective("HcclReduceScatter", source, output, output.numel(), self.comm)
         return output.movedim(0, dim).contiguous()
 
+    def all_to_all(self, output, source, output_splits, input_splits):
+        if output.dtype != source.dtype or not source.is_contiguous() or not output.is_contiguous():
+            raise ValueError("All-to-all requires contiguous tensors with matching dtypes.")
+        if self.world_size == 1:
+            output.copy_(source)
+            return
+        width = math.prod(source.shape[1:])
+        if input_splits is None:
+            if source.shape[0] % self.world_size:
+                raise ValueError("All-to-all input must divide evenly across ranks.")
+            input_splits = [source.shape[0] // self.world_size] * self.world_size
+        if output_splits is None:
+            output_splits = [output.shape[0] // self.world_size] * self.world_size
+        if len(input_splits) != self.world_size or len(output_splits) != self.world_size:
+            raise ValueError("All-to-all split counts must match the active group.")
+        if any(n < 0 for n in input_splits) or any(n < 0 for n in output_splits):
+            raise ValueError("All-to-all split counts must be nonnegative.")
+        if sum(input_splits) != source.shape[0] or sum(output_splits) != output.shape[0]:
+            raise ValueError("All-to-all split counts must cover the tensors.")
+        counts_type = ctypes.c_uint64 * self.world_size
+        send_counts = counts_type(*(int(n) * width for n in input_splits))
+        recv_counts = counts_type(*(int(n) * width for n in output_splits))
+        send_offsets = counts_type(*(sum(send_counts[:i]) for i in range(self.world_size)))
+        recv_offsets = counts_type(*(sum(recv_counts[:i]) for i in range(self.world_size)))
+        function = self.owner.library.lib.HcclAlltoAllV
+        pointer = ctypes.POINTER(ctypes.c_uint64)
+        function.argtypes = [
+            buffer_type,
+            pointer,
+            pointer,
+            ctypes.c_int,
+            buffer_type,
+            pointer,
+            pointer,
+            ctypes.c_int,
+            hcclComm_t,
+            aclrtStream_t,
+        ]
+        function.restype = ctypes.c_int
+        dtype = hcclDataTypeEnum.from_torch(source.dtype)
+        # HCCL still requires valid buffer pointers when every split is zero.
+        send_buffer = source if source.numel() else source.new_empty(1)
+        receive_buffer = output if output.numel() else output.new_empty(1)
+        self.owner.library.HCCL_CHECK(
+            function(
+                buffer_type(send_buffer.data_ptr()),
+                send_counts,
+                send_offsets,
+                dtype,
+                buffer_type(receive_buffer.data_ptr()),
+                recv_counts,
+                recv_offsets,
+                dtype,
+                self.comm,
+                aclrtStream_t(current_stream().npu_stream),
+            )
+        )
+        # The dispatcher consumes this result immediately. Synchronizing also
+        # retains all input and host count buffers until HCCL has consumed them.
+        current_stream().synchronize()
+
 
 class RetainedCommunicators:
     def __init__(self, parent):
@@ -78,7 +157,7 @@ class RetainedCommunicators:
         self.rank = parent.rank_in_group
         self.device = torch.device("npu", torch.npu.current_device())
         self.control = getattr(parent, "tcp_store_group", None)
-        self.root = PyHcclCommunicator(self.control or parent.cpu_group, self.device)
+        self.root: PyHcclCommunicator | None = PyHcclCommunicator(self.control or parent.cpu_group, self.device)
         if not self.root.available:
             raise RuntimeError("A live HCCL parent is required for FastEEP.")
         self.library = self.root.hccl
@@ -131,6 +210,8 @@ class RetainedCommunicators:
         self.library.HCCL_CHECK(self.functions[name](*args))
 
     def transfer(self, pointer, size, peer, send):
+        if self.root is None:
+            raise RuntimeError("FastEEP migration communicator is inactive.")
         self.library.HCCL_CHECK(
             self.functions["HcclSend" if send else "HcclRecv"](
                 buffer_type(pointer),
@@ -145,6 +226,8 @@ class RetainedCommunicators:
     def child(self, size):
         if size in self.children:
             return self.children[size]
+        if self.root is None:
+            raise RuntimeError("FastEEP parent communicator is inactive.")
         # Lazy import keeps normal serving usable with prebuilt older extensions.
         python_hccl_subcomm = import_module("vllm_ascend.vllm_ascend_C").python_hccl_subcomm
 
@@ -198,4 +281,5 @@ class RetainedCommunicators:
                 self.library.hcclCommDestroy(group.comm)
                 stateless_destroy_torch_distributed_process_group(group.cpu_group)
         self.children.clear()
-        self.root.close()
+        if self.root is not None:
+            self.root.close()

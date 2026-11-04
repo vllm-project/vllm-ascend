@@ -55,16 +55,20 @@ def validate_config(config) -> None:
         raise ValueError("FastEEP currently requires TP=PP=PCP=DCP=1.")
     if not parallel.enable_expert_parallel or parallel.data_parallel_size < 2:
         raise ValueError("FastEEP requires DP >= 2 and expert parallelism.")
-    if parallel.data_parallel_size_local != parallel.data_parallel_size:
-        raise ValueError("FastEEP currently requires all ranks on one node.")
     if getattr(parallel, "data_parallel_external_lb", False) or getattr(parallel, "data_parallel_hybrid_lb", False):
         raise ValueError("FastEEP requires internal data-parallel request routing.")
     if parallel.enable_elastic_ep:
         raise ValueError("Use retained FastEEP or native Elastic EP in one instance, not both.")
-    if parallel.enable_eplb or config.use_v2_model_runner:
-        raise ValueError("FastEEP currently requires Model Runner V1 and static expert placement.")
-    if not config.model_config.enforce_eager or not config.model_config.enable_sleep_mode:
-        raise ValueError("FastEEP requires eager execution and sleep mode.")
+    if parallel.enable_eplb:
+        raise ValueError("Pause continuous EPLB when using FastEEP-controlled expert migration.")
+    if not config.model_config.enable_sleep_mode:
+        raise ValueError("FastEEP requires sleep mode.")
+    if not config.model_config.enforce_eager:
+        from vllm.config.compilation import CUDAGraphMode
+
+        if config.compilation_config.cudagraph_mode != CUDAGraphMode.PIECEWISE:
+            raise ValueError("FastEEP communicator reclamation requires PIECEWISE graphs or eager execution.")
+    communication_method(config)
     if str(config.model_config.dtype) != "torch.bfloat16" or config.quant_config is not None:
         raise ValueError("FastEEP currently supports unquantized BF16 weights.")
     if config.cache_config.enable_prefix_caching:
@@ -78,7 +82,7 @@ def validate_config(config) -> None:
 
 def is_fasteep(config) -> bool:
     return (
-        getattr(config.parallel_config, "worker_extension_cls", None)
+        getattr(getattr(config, "parallel_config", None), "worker_extension_cls", None)
         == "vllm_ascend.distributed.fasteep.runtime.FastEEPWorkerExtension"
     )
 
@@ -87,3 +91,10 @@ def local_physical_mask(topk_ids, rank: int, local_experts: int):
     """Each physical expert ID contributes on exactly one active rank."""
     first = rank * local_experts
     return (topk_ids >= first) & (topk_ids < first + local_experts)
+
+
+def communication_method(config) -> str:
+    method = (getattr(config, "additional_config", None) or {}).get("fasteep", {}).get("communication", "allgather")
+    if method not in ("allgather", "alltoall"):
+        raise ValueError("FastEEP communication must be allgather or alltoall.")
+    return method

@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
@@ -63,7 +64,8 @@ def test_factory_adapts_only_the_returned_router():
     assert getattr(untouched_router._apply_eplb_mapping, "__func__", None) is _Router._apply_eplb_mapping
 
 
-def test_factory_keeps_v1_eplb_on_the_legacy_routing_path():
+@pytest.mark.parametrize("fasteep_v2", [False, True])
+def test_factory_keeps_static_placement_on_the_ascend_routing_path(fasteep_v2):
     router = _Router()
     runner = SimpleNamespace(router=router)
     original_factory = MagicMock(return_value=runner)
@@ -83,7 +85,14 @@ def test_factory_keeps_v1_eplb_on_the_legacy_routing_path():
         patch.object(
             patch_fused_moe,
             "get_current_vllm_config",
-            return_value=SimpleNamespace(use_v2_model_runner=False),
+            return_value=SimpleNamespace(
+                use_v2_model_runner=fasteep_v2,
+                parallel_config=SimpleNamespace(
+                    worker_extension_cls=(
+                        "vllm_ascend.distributed.fasteep.runtime.FastEEPWorkerExtension" if fasteep_v2 else None
+                    )
+                ),
+            ),
         ),
     ):
         result = patch_fused_moe._ascend_FusedMoE(

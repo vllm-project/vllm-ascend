@@ -72,6 +72,17 @@ def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event
             device=torch.npu.current_device(),
         )
 
+    if getattr(group, "fasteep", False):
+        if event is not None:
+            event.wait()
+        group.all_to_all(a2a_out, input_.contiguous(), output_split_sizes, input_split_sizes)
+
+        class CompletedWork:
+            def wait(self):
+                return True
+
+        return input_, a2a_out, CompletedWork()
+
     if event:
         # multi stream wait event
         global COMM_STREAM
@@ -112,6 +123,10 @@ def _gather_along_first_dim(input_, group, output_split_sizes=None):
     Returns:
         torch.Tensor: Gathered tensor.
     """
+    if getattr(group, "fasteep", False):
+        if output_split_sizes is not None:
+            raise ValueError("FastEEP expert-count gathering requires equal-sized rank inputs.")
+        return group.all_gather(input_, dim=0)
     world_size = torch.distributed.get_world_size(group)
     # Bypass the function if we are using only 1 GPU.
     if world_size == 1:

@@ -41,6 +41,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMo
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
+from vllm_ascend.distributed.fasteep.policy import is_fasteep
 from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
 from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
 
@@ -147,7 +148,11 @@ def _ascend_FusedMoE(
             )
         enable_eplb = True
         num_redundant_experts = configured_redundancy or upstream_redundancy
-    enable_router_eplb = enable_eplb and get_current_vllm_config().use_v2_model_runner
+    # FastEEP owns placement and replica selection.
+    enable_router_eplb = False
+    if enable_eplb:
+        config = get_current_vllm_config()
+        enable_router_eplb = config.use_v2_model_runner and not is_fasteep(config)
     if router is None:
         router = create_ascend_fused_moe_router(
             top_k=top_k,

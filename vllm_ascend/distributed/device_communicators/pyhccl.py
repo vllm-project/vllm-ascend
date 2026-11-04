@@ -40,6 +40,8 @@ class PyHcclCommunicator:
         group: ProcessGroup | StatelessProcessGroup,
         device: int | str | torch.device,
         library_path: str | None = None,
+        *,
+        group_local: bool = False,
     ):
         """
         Args:
@@ -53,7 +55,12 @@ class PyHcclCommunicator:
         is bind to a unique device.
         """
 
-        if not isinstance(group, StatelessProcessGroup):
+        if group_local:
+            # Stateless Gloo groups are not in torch.distributed's world map.
+            group._get_backend(torch.device("cpu"))
+            self.rank = group.rank()
+            self.world_size = group.size()
+        elif not isinstance(group, StatelessProcessGroup):
             assert dist.is_initialized()
             assert dist.get_backend(group) != dist.Backend.HCCL, (
                 "PyHcclCommunicator should be attached to a non-HCCL group."
@@ -105,9 +112,14 @@ class PyHcclCommunicator:
 
         if not isinstance(group, StatelessProcessGroup):
             tensor = torch.ByteTensor(list(self.unique_id.internal))
-            ranks = dist.get_process_group_ranks(group)
-            # arg `src` in `broadcast` is the global rank
-            dist.broadcast(tensor, src=ranks[0], group=group)
+            if group_local:
+                options = dist.BroadcastOptions()
+                options.rootRank = 0
+                options.rootTensor = 0
+                group.broadcast([tensor], options).wait()
+            else:
+                ranks = dist.get_process_group_ranks(group)
+                dist.broadcast(tensor, src=ranks[0], group=group)
             byte_list = tensor.tolist()
             for i, byte in enumerate(byte_list):
                 self.unique_id.internal[i] = byte

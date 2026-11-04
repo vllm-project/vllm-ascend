@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Discard idle weights/KV and refill identical shards through retained HCCL."""
+"""Discard idle weight/KV pools while preserving graphs and rank-local state."""
 
 import gc
 from typing import Any
@@ -17,6 +17,7 @@ class PeerMemory:
         self.allocator = CaMemAllocator.get_instance()
         self.saved = []
         self.sleeping = False
+        self.graph_offloaded_bytes = 0
         self.addresses = [(name, param.data_ptr()) for name, param in model.named_parameters()]
 
     def storages(self):
@@ -81,6 +82,7 @@ class PeerMemory:
             except (ReferenceError, TypeError):
                 continue
         self.saved = saved
+        self.graph_offloaded_bytes = self.allocator.offload("graphs")
         self.allocator.discard(("weights", "kv_cache"))
         self.sleeping = True
 
@@ -93,6 +95,7 @@ class PeerMemory:
         for tensor, backup in self.saved:
             tensor.copy_(backup)
         torch.npu.synchronize()
+        self.allocator.wake_up(tags=["graphs"])
         self.saved.clear()
         self.sleeping = False
         if self.addresses != [(name, param.data_ptr()) for name, param in self.model.named_parameters()]:
