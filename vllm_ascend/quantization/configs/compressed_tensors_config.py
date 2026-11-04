@@ -321,6 +321,8 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                 f"quant_type={quant_type}, layer_type={layer_type}."
             )
 
+        if quant_type == "W4A16":
+            return scheme_cls(group_size=weight_quant.group_size)
         return scheme_cls()
 
     def _detect_quant_type(
