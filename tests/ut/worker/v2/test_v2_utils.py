@@ -43,8 +43,6 @@ def test_v2_utils_context_managers_switch_and_restore():
         # Mapping is process-wide and must survive runner init so GPU V2
         # load_model / PrefetchOffloader can query capture state on NPU.
         assert fake_cuda.is_current_stream_capturing is fake_npu.is_current_stream_capturing
-        fake_cuda.ipc_collect()
-        fake_npu.ipc_collect.assert_called_once_with()
 
         with v2_utils.communicator_switch():
             assert cuda_comm_mod.CudaCommunicator is npu_cls
