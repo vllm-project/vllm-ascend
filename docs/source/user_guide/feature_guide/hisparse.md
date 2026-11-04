@@ -4,8 +4,9 @@
 
 This is the foundational split of [#19109](https://github.com/vllm-project/vllm-ascend/pull/19109).
 It supplies an Ascend backend for the merged vLLM HiSparse API and the minimal
-SFA data path. It is a contribution starting point, with new-head NPU and full-model
-qualification pending. Historical optimized C8 performance does not qualify this split.
+SFA data path. It is a contribution starting point with NPU component checks
+and a complete A5 model smoke test. Dataset accuracy and performance qualification
+remain pending. Historical optimized C8 performance does not qualify this split.
 
 Core owns HMA allocation, Coordinator admission/eviction, prefix-cache state,
 request lifetimes, prefetch control flow, mirror completion and release/rollback.
@@ -25,8 +26,7 @@ The data path covers unquantized KV and the native Ascend 950 C8 format with
 the RoPE SFA layout and Model Runner V2. Model-weight quantization is independent. Private
 Host pools are used per rank because NPU IPC events are not implemented.
 The mapped-Host capability is checked at registration; hardware evidence for
-the original primitives is from Ascend 950. A3 and the new source pair still
-need their own qualification.
+the current primitives is from Ascend 950. A3 still needs its own qualification.
 
 The SFA kernel requires TopK divisible by 128. The resolver's int16 LRU format
 limits aligned Hot capacity to 32768 rows, and Hot must cover the complete
@@ -119,10 +119,15 @@ implementation owns query preparation, current length tensors and the call to
 the existing native SFA operation. The Triton and native Attention kernels are
 unchanged by this organization.
 
-Core's generic `torch.Stream`, `torch.Event` and current-stream interfaces are
-used directly. The Ascend backend preserves Core's event placement and does not
-replace its Torch bindings. This PR tests its own NPU operations and changing
-graph replays rather than duplicating generic Torch stream tests.
+Core's generic `torch.Stream`, `torch.Event` and current-stream interfaces retain
+their event placement and stream identities. On the supported PTA stack, generic
+waits do not drain Host submission queues to propagate a graph-capture fork before
+CANN allocates workspace. The backend wraps only the bound runtime copy stream:
+after a wait during capture, obtaining the native handle drains that Host queue.
+It adds no device synchronization or replay-time Python work and replaces no
+global Torch binding. A regression covers production-size sort workspace across
+multiple graph owners and changing replays. Remove this adapter when PTA's generic
+binding propagates the captured dependency itself.
 
 The model-owned index-group builder is carried in Core's existing
 `MLAModules.index_group_builder` field, preserving the common MLA wrapper ABI.
@@ -195,10 +200,11 @@ pytest --confcutdir=tests/e2e/pull_request/one_card \
 ```
 
 On Ascend 950 with Torch 2.10.0, torch-npu 2.10.0.post7 and CANN 9.2.1,
-the standard CPU module passed all 20 cases. Running the four complete NPU
-modules passed all 42 cases, including BF16/C8 Attention and changing graph
-replays. The run reused the compiled Ascend extension and vendor package;
-it was not an independent native rebuild.
+25 foundation CPU cases, the existing MLA-wrapper case and 32 Indexer-spec cases
+passed: 58 in total. Running the four complete NPU modules passed all 44 cases,
+including BF16/C8 Attention, pinned Host writeback, production-size cross-stream
+sort workspace and changing graph replays. The run reused the compiled Ascend
+extension and vendor package; it was not an independent native rebuild.
 
 The original `test_resident_prefill_plan_shared_layers[2-128]` failure was
 traced to NPU advanced column indexing in Core's `ensure_gpu_sources` for a
@@ -215,10 +221,9 @@ model graph: this stack's Core `scatter_reduce` path cannot be captured. The
 existing eager/changing-graph payload and Attention cases continue to pass;
 the tests do not claim graph capture of the complete Prefill planner.
 
-Fresh full-model correctness, dataset accuracy, eager/Graph lifecycle and
-same-workload performance remain prerequisites for marking the foundation
-ready. Existing C8 benchmark results are intentionally not presented as this
-implementation's performance.
+Dataset accuracy, additional lifecycle coverage and same-workload performance
+remain prerequisites for production qualification. Existing C8 benchmark results
+are intentionally not presented as this implementation's performance.
 
 Full-model integration additionally preserves the Core Indexer cache role and
 merge semantics, and retains each Indexer cache's backend choice after the model
@@ -232,5 +237,16 @@ PTA-pinned destinations passed, while a pageable allocation registered only for
 mapping failed both batch and single-copy APIs on this stack. The private-pool
 adapter reuses PR #19109's pinned-allocation approach before Core creates any
 cache views. Core still owns completion, cache views and release. Other backends
-keep their original allocator. The added writeback regression and a new full-model
-run remain pending hardware validation for this allocation change.
+keep their original allocator. The writeback regression passed on the NPU with
+changing payloads, completion fences and untouched-neighbor checks.
+
+The next full-model attempt exposed invalid CANN sort workspace during captured
+cross-stream execution. A production-size reproducer retained generic streams,
+events and the sort operation: the original path failed, while capture-propagated
+forks passed. With the narrow backend adapter, the complete GLM-5.2 W4A8C8 model
+loaded with TP8, MTP3, V2 and native C8 KV; all eight ranks captured. Three natural
+controls returned the expected answers. Two concurrent requests each consumed
+exactly 16,384 input tokens and returned sensible summaries (24 and 23 output
+tokens); all five responses were successful with actual token IDs. Host mirroring
+remained enabled. The model exited cleanly, its workers were reaped and the lease
+was released. This smoke test is not a dataset accuracy, P/D or performance result.
