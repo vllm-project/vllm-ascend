@@ -1,0 +1,6 @@
+pr: 20980
+entries:
+  - category: bugfix
+    text: >-
+      Fixed class calls to the Ascend compute-unit query so they accept keyword arguments and
+      query the requested device.
