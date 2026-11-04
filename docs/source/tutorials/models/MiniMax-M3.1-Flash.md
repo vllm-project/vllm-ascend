@@ -31,7 +31,7 @@ The official release of MiniMax-M3.1-Flash is available on [Hugging Face](https:
 
 | Weight Version | Deployment | Model Path |
 | --- | --- | --- |
-| MiniMax-M3.1-Flash-W8A8 | Atlas 800I A2, tow-node PD colocation <br> Atlas 800I A3, three-node PD disaggregation (1P2D) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8) |
+| MiniMax-M3.1-Flash-W8A8 | Atlas 800I A2, two-node PD colocation <br> Atlas 800I A3, three-node PD disaggregation (1P2D) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8) |
 | MiniMax-M3.1-Flash-MXFP8 | 950DT products, three-node PD disaggregation (1P2D) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8-mxfp8) |
 
 Download the weight variant used by the serving commands to the same model directory on all participating nodes. It is recommended to place the model weight in a shared cache directory.
@@ -549,7 +549,6 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
     export VLLM_USE_FASTOKENS=1
-    export VLLM_SERVER_DEV_MODE=1
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -638,7 +637,6 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
-    export VLLM_SERVER_DEV_MODE=1
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -733,7 +731,6 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
-    export VLLM_SERVER_DEV_MODE=1
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -881,7 +878,6 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     GPU_MEMORY_UTILIZATION=0.85
 
     # Fixed runtime configuration.
-    export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_FASTOKENS=1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ENGINE_READY_TIMEOUT_S=1800
@@ -984,7 +980,6 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     GPU_MEMORY_UTILIZATION=0.92
 
     # Fixed runtime configuration.
-    export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ENGINE_READY_TIMEOUT_S=1800
     export HCCL_BUFFSIZE=1024
@@ -1089,7 +1084,6 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     GPU_MEMORY_UTILIZATION=0.92
 
     # Fixed runtime configuration.
-    export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ENGINE_READY_TIMEOUT_S=1800
     export HCCL_BUFFSIZE=1024
@@ -1419,8 +1413,7 @@ For common environment, installation, and general parameter issues, refer to the
     "method": "dspark",
     "num_speculative_tokens": 7,
     "enforce_eager": true,
-    "kv_cache_dtype": "bfloat16",
-    "draft_sample_method": "probabilistic"
+    "kv_cache_dtype": "bfloat16"
 }
 ```
 
