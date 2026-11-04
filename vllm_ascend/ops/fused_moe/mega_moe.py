@@ -16,33 +16,49 @@
 #
 from __future__ import annotations
 
-from dataclasses import dataclass
-from inspect import signature
+from inspect import Parameter, signature
 from typing import Any
 
 import torch
-from vllm.config import get_current_vllm_config
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.ascend_forward_context import get_a5_mega_moe_buffer_tokens_per_rank
-from vllm_ascend.distributed.parallel_state import get_mega_moe_group
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput
 from vllm_ascend.quantization.quant_type import QuantType
 
-_MEGA_MOE_SUPPORTED_QUANTS = {
-    QuantType.W4A8MXFP,
-}
-_MEGA_MOE_SUPPORTED_SHARED_QUANTS = {
-    QuantType.W4A8MXFP,
-    QuantType.W8A8MXFP,
-}
+_MEGA_MOE_SUPPORTED_SHARED_QUANTS = frozenset({QuantType.W4A8MXFP, QuantType.W8A8MXFP})
 _FP4_PACK_FACTOR = 2
 _MXFP_SCALE_BLOCK_SIZE = 64
 _MXFP_SCALE_MULTIPLIER = 2
-# ops-transformer's weight type schema uses the PyTorch ScalarType enum.
 _FLOAT8_E4M3FN_WEIGHT_TYPE = 24
 _TORCH_FLOAT8_E8M0FNU_DTYPE = getattr(torch, "float8_e8m0fnu", None)
+
+
+def supports_mega_moe_shared_experts(mega_moe_op: Any) -> bool:
+    """Require explicit shared-weight arguments from the installed CANN ABI."""
+    required_parameters = {
+        "shared_l1_weights",
+        "shared_l2_weights",
+        "shared_l1_weights_sf",
+        "shared_l2_weights_sf",
+        "shared_weight1_type",
+        "shared_weight2_type",
+    }
+    try:
+        parameters = signature(mega_moe_op).parameters
+        keyword_parameters = {
+            name
+            for name, parameter in parameters.items()
+            if parameter.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+        }
+        supported = required_parameters <= keyword_parameters
+    except (TypeError, ValueError):
+        supported = False
+    if not supported:
+        logger.warning_once(
+            "Installed MegaMoE operator does not expose shared weights and independent "
+            "shared weight types; falling back to the standalone shared MLP."
+        )
+    return supported
 
 
 def _as_tensor_list(tensor_or_list: torch.Tensor | list[torch.Tensor] | None, name: str) -> list[torch.Tensor]:
@@ -73,381 +89,96 @@ def _view_mxfp_scales_as_e8m0(scales: list[torch.Tensor], name: str) -> list[tor
     return normalized_scales
 
 
-def _get_mega_moe_ops():
-    try:
-        from cann_ops_transformer.ops import get_symm_buffer_for_mega_moe, mega_moe
-    except ImportError as exc:
-        raise RuntimeError(
-            "A5 MegaMoE requires cann_ops_transformer.ops. Install a package "
-            "that provides mega_moe and get_symm_buffer_for_mega_moe."
-        ) from exc
-    return get_symm_buffer_for_mega_moe, mega_moe
+def _validate_shared_mxfp_layout(
+    fused_experts_input: MoEFusedExpertsInput,
+    w1: list[torch.Tensor],
+    w2: list[torch.Tensor],
+    w1_scale: list[torch.Tensor],
+    w2_scale: list[torch.Tensor],
+    intermediate_hidden: int,
+    quant_type: QuantType,
+    routed_weight_type: int | None,
+) -> Any:
+    tensors = {
+        "shared_w1": w1,
+        "shared_w2": w2,
+        "shared_w1_scale": w1_scale,
+        "shared_w2_scale": w2_scale,
+    }
+    for name, values in tensors.items():
+        if len(values) != 1:
+            raise ValueError(f"A5 MegaMoE requires {name} to contain one per-expert tensor.")
+        if not values[0].is_contiguous():
+            raise ValueError(f"A5 MegaMoE requires contiguous {name}, got stride={values[0].stride()}.")
 
+    if quant_type not in _MEGA_MOE_SUPPORTED_SHARED_QUANTS:
+        raise ValueError(f"A5 MegaMoE does not support shared quantization type {quant_type}.")
 
-@dataclass(frozen=True, slots=True)
-class _MegaMoEBufferKey:
-    num_experts: int
-    buffer_tokens_per_rank: int
-    top_k: int
-    hidden_size: int
-    intermediate_hidden: int
-    dispatch_quant_mode: int
-    dispatch_quant_out_dtype: torch.dtype
-
-
-@dataclass(frozen=True, slots=True)
-class _MegaMoESymmetricBufferState:
-    key: _MegaMoEBufferKey
-    buffer: Any
-
-
-_MEGA_MOE_BUFFER_STATE_ATTR = "_mega_moe_symmetric_buffer_state"
-
-
-class MegaMoEBackend:
-    """A5 MegaMoE wrapper for the logical FUSED_MC2 MoE path."""
-
-    def __init__(self, moe_config: FusedMoEConfig):
-        self.moe_config = moe_config
-        self._supports_shared_experts: bool | None = None
-
-    def supports_shared_experts(self) -> bool:
-        if self._supports_shared_experts is None:
-            _, mega_moe = _get_mega_moe_ops()
-            try:
-                parameters = signature(mega_moe).parameters
-                required_parameters = {
-                    "shared_l1_weights",
-                    "shared_l2_weights",
-                    "shared_l1_weights_sf",
-                    "shared_l2_weights_sf",
-                    "shared_weight1_type",
-                    "shared_weight2_type",
-                }
-                self._supports_shared_experts = required_parameters <= parameters.keys()
-            except (TypeError, ValueError):
-                self._supports_shared_experts = False
-            if not self._supports_shared_experts:
-                logger.warning_once(
-                    "[MegaMoE/shared] installed MegaMoE operator does not expose shared-expert weights "
-                    "and independent shared weight type arguments; "
-                    "falling back to the standalone shared MLP."
-                )
-        return self._supports_shared_experts
-
-    @staticmethod
-    def _validate_stacked_mxfp_layout(
-        fused_experts_input: MoEFusedExpertsInput,
-        w1: list[torch.Tensor],
-        w2: list[torch.Tensor],
-        w1_scale: list[torch.Tensor],
-        w2_scale: list[torch.Tensor],
-    ) -> int:
-        tensors = {
-            "w1": w1,
-            "w2": w2,
-            "w1_scale": w1_scale,
-            "w2_scale": w2_scale,
-        }
-        for name, values in tensors.items():
-            if len(values) != 1:
-                raise ValueError(
-                    f"A5 MegaMoE requires {name} to contain one stacked tensor, got {len(values)} tensors."
-                )
-            if not values[0].is_contiguous():
-                raise ValueError(
-                    f"A5 MegaMoE requires contiguous {name}, got shape={tuple(values[0].shape)} "
-                    f"and stride={values[0].stride()}."
-                )
-
-        weight1 = w1[0]
-        weight2 = w2[0]
-        scale1 = w1_scale[0]
-        scale2 = w2_scale[0]
-        if weight1.ndim != 3 or weight2.ndim != 3:
-            raise ValueError(
-                "A5 MegaMoE expects stacked 3D expert weights, "
-                f"got w1={tuple(weight1.shape)} and w2={tuple(weight2.shape)}."
-            )
-        if scale1.ndim != 4 or scale2.ndim != 4:
-            raise ValueError(
-                "A5 MegaMoE expects stacked 4D MXFP scales, "
-                f"got w1_scale={tuple(scale1.shape)} and w2_scale={tuple(scale2.shape)}."
-            )
-
-        hidden_size = int(fused_experts_input.hidden_states.shape[-1])
-        pack_factor = _FP4_PACK_FACTOR
-        projected_hidden = int(weight1.shape[1])
-        if projected_hidden % 2 != 0:
-            raise ValueError(f"A5 MegaMoE expects w1.shape[1] to be even, got {projected_hidden}.")
-        intermediate_hidden = projected_hidden // 2
-        if hidden_size % pack_factor != 0 or intermediate_hidden % pack_factor != 0:
-            raise ValueError(
-                "A5 MegaMoE FP4 dimensions must be divisible by the packing factor: "
-                f"hidden_size={hidden_size}, intermediate_hidden={intermediate_hidden}, "
-                f"pack_factor={pack_factor}."
-            )
-
-        expected_shapes = {
-            "w1": (weight1.shape[0], projected_hidden, hidden_size // pack_factor),
-            "w2": (weight1.shape[0], hidden_size, intermediate_hidden // pack_factor),
-            "w1_scale": (
-                weight1.shape[0],
-                projected_hidden,
-                (hidden_size + _MXFP_SCALE_BLOCK_SIZE - 1) // _MXFP_SCALE_BLOCK_SIZE,
-                _MXFP_SCALE_MULTIPLIER,
-            ),
-            "w2_scale": (
-                weight1.shape[0],
-                hidden_size,
-                (intermediate_hidden + _MXFP_SCALE_BLOCK_SIZE - 1) // _MXFP_SCALE_BLOCK_SIZE,
-                _MXFP_SCALE_MULTIPLIER,
-            ),
-        }
-        actual_shapes = {
-            "w1": tuple(weight1.shape),
-            "w2": tuple(weight2.shape),
-            "w1_scale": tuple(scale1.shape),
-            "w2_scale": tuple(scale2.shape),
-        }
-        if actual_shapes != expected_shapes:
-            raise ValueError(
-                "A5 MegaMoE received an incompatible stacked MXFP layout: "
-                f"actual={actual_shapes}, expected={expected_shapes}."
-            )
-        return intermediate_hidden
-
-    @staticmethod
-    def _validate_shared_mxfp_layout(
-        fused_experts_input: MoEFusedExpertsInput,
-        w1: list[torch.Tensor],
-        w2: list[torch.Tensor],
-        w1_scale: list[torch.Tensor],
-        w2_scale: list[torch.Tensor],
-        intermediate_hidden: int,
-        quant_type: QuantType,
-    ) -> Any:
-        tensors = {
-            "shared_w1": w1,
-            "shared_w2": w2,
-            "shared_w1_scale": w1_scale,
-            "shared_w2_scale": w2_scale,
-        }
-        for name, values in tensors.items():
-            if len(values) != 1:
-                raise ValueError(f"A5 MegaMoE requires {name} to contain one stacked tensor.")
-            if not values[0].is_contiguous():
-                raise ValueError(f"A5 MegaMoE requires contiguous {name}, got stride={values[0].stride()}.")
-
-        if quant_type not in _MEGA_MOE_SUPPORTED_SHARED_QUANTS:
-            raise ValueError(f"A5 MegaMoE does not support shared quantization type {quant_type}.")
-
-        hidden_size = int(fused_experts_input.hidden_states.shape[-1])
-        weight_pack_factor = _FP4_PACK_FACTOR if quant_type == QuantType.W4A8MXFP else 1
-        expected_shapes = {
-            "shared_w1": (1, 2 * intermediate_hidden, hidden_size // weight_pack_factor),
-            "shared_w2": (1, hidden_size, intermediate_hidden // weight_pack_factor),
-            "shared_w1_scale": (
-                1,
-                2 * intermediate_hidden,
-                (hidden_size + _MXFP_SCALE_BLOCK_SIZE - 1) // _MXFP_SCALE_BLOCK_SIZE,
-                _MXFP_SCALE_MULTIPLIER,
-            ),
-            "shared_w2_scale": (
-                1,
-                hidden_size,
-                (intermediate_hidden + _MXFP_SCALE_BLOCK_SIZE - 1) // _MXFP_SCALE_BLOCK_SIZE,
-                _MXFP_SCALE_MULTIPLIER,
-            ),
-        }
-        actual_shapes = {
-            "shared_w1": tuple(w1[0].shape),
-            "shared_w2": tuple(w2[0].shape),
-            "shared_w1_scale": tuple(w1_scale[0].shape),
-            "shared_w2_scale": tuple(w2_scale[0].shape),
-        }
-        if actual_shapes != expected_shapes:
-            raise ValueError(
-                "A5 MegaMoE received an incompatible shared-expert MXFP layout: "
-                f"actual={actual_shapes}, expected={expected_shapes}."
-            )
-        if quant_type == QuantType.W8A8MXFP:
-            return _FLOAT8_E4M3FN_WEIGHT_TYPE
-        mxfp = fused_experts_input.quant.mxfp
-        if mxfp is None or mxfp.weight_quant_type is None:
-            raise ValueError("A5 MegaMoE requires the routed FP4 weight type for FP4 shared experts.")
-        return mxfp.weight_quant_type
-
-    def _make_buffer_key(
-        self,
-        fused_experts_input: MoEFusedExpertsInput,
-        intermediate_hidden: int,
-        *,
-        buffer_tokens_per_rank: int,
-    ) -> _MegaMoEBufferKey:
-        if fused_experts_input.hidden_states.shape[0] > buffer_tokens_per_rank:
-            raise ValueError(
-                "A5 MegaMoE input exceeds the symmetric buffer token capacity: "
-                f"num_tokens={fused_experts_input.hidden_states.shape[0]}, "
-                f"mega_moe_buffer_tokens_per_rank={buffer_tokens_per_rank}."
-            )
-        act_dtype = torch.float8_e4m3fn
-        if fused_experts_input.quant.mxfp is not None and fused_experts_input.quant.mxfp.act_quant_type is not None:
-            act_dtype = fused_experts_input.quant.mxfp.act_quant_type
-        return _MegaMoEBufferKey(
-            num_experts=self.moe_config.num_experts,
-            buffer_tokens_per_rank=buffer_tokens_per_rank,
-            top_k=self.moe_config.experts_per_token,
-            hidden_size=int(fused_experts_input.hidden_states.shape[-1]),
-            intermediate_hidden=intermediate_hidden,
-            dispatch_quant_mode=4,
-            dispatch_quant_out_dtype=act_dtype,
-        )
-
-    def _get_sym_buffer(self, fused_experts_input: MoEFusedExpertsInput, intermediate_hidden: int):
-        vllm_config = get_current_vllm_config()
-        if vllm_config is None:
-            raise RuntimeError("A5 MegaMoE requires a current vLLM configuration.")
-        buffer_tokens_per_rank = get_a5_mega_moe_buffer_tokens_per_rank(vllm_config)
-        key = self._make_buffer_key(
-            fused_experts_input,
-            intermediate_hidden,
-            buffer_tokens_per_rank=buffer_tokens_per_rank,
-        )
-        mega_moe_group = get_mega_moe_group()
-        state: _MegaMoESymmetricBufferState | None = getattr(
-            mega_moe_group,
-            _MEGA_MOE_BUFFER_STATE_ATTR,
-            None,
-        )
-        if state is not None:
-            if state.key != key:
-                raise RuntimeError(
-                    "A5 MegaMoE symmetric buffer is process-wide and cannot be replaced during inference: "
-                    f"initialized={state.key}, requested={key}."
-                )
-            return state.buffer
-
-        get_symm_buffer_for_mega_moe, _ = _get_mega_moe_ops()
-        buffer = get_symm_buffer_for_mega_moe(
-            mega_moe_group.device_group,
-            num_experts=key.num_experts,
-            num_max_tokens_per_rank=key.buffer_tokens_per_rank,
-            num_topk=key.top_k,
-            hidden=key.hidden_size,
-            intermediate_hidden=key.intermediate_hidden,
-            dispatch_quant_mode=key.dispatch_quant_mode,
-            dispatch_quant_out_dtype=key.dispatch_quant_out_dtype,
-        )
-        setattr(
-            mega_moe_group,
-            _MEGA_MOE_BUFFER_STATE_ATTR,
-            _MegaMoESymmetricBufferState(key=key, buffer=buffer),
-        )
-        return buffer
-
-    @staticmethod
-    def _normalize_activation(activation: Any) -> str:
-        activation_name = activation if isinstance(activation, str) else getattr(activation, "name", str(activation))
-        activation_lower = activation_name.lower().removeprefix("moeactivation.")
-        if activation_lower in ("silu", "swiglu"):
-            return "swiglu"
+    hidden_size = int(fused_experts_input.hidden_states.shape[-1])
+    weight_pack_factor = _FP4_PACK_FACTOR if quant_type == QuantType.W4A8MXFP else 1
+    expected_shapes = {
+        "shared_w1": (2 * intermediate_hidden, hidden_size // weight_pack_factor),
+        "shared_w2": (hidden_size, intermediate_hidden // weight_pack_factor),
+        "shared_w1_scale": (
+            2 * intermediate_hidden,
+            (hidden_size + _MXFP_SCALE_BLOCK_SIZE - 1) // _MXFP_SCALE_BLOCK_SIZE,
+            _MXFP_SCALE_MULTIPLIER,
+        ),
+        "shared_w2_scale": (
+            hidden_size,
+            (intermediate_hidden + _MXFP_SCALE_BLOCK_SIZE - 1) // _MXFP_SCALE_BLOCK_SIZE,
+            _MXFP_SCALE_MULTIPLIER,
+        ),
+    }
+    actual_shapes = {
+        "shared_w1": tuple(w1[0].shape),
+        "shared_w2": tuple(w2[0].shape),
+        "shared_w1_scale": tuple(w1_scale[0].shape),
+        "shared_w2_scale": tuple(w2_scale[0].shape),
+    }
+    if actual_shapes != expected_shapes:
         raise ValueError(
-            f"A5 MegaMoE does not support activation={activation!r} without changing its semantics. "
-            "Only SILU/SwiGLU is currently supported."
+            "A5 MegaMoE received an incompatible shared-expert MXFP layout: "
+            f"actual={actual_shapes}, expected={expected_shapes}."
         )
-
-    def fused_experts(
-        self, fused_experts_input: MoEFusedExpertsInput
-    ) -> tuple[torch.Tensor, torch.Tensor | None, bool]:
-        if fused_experts_input.quant.quant_type not in _MEGA_MOE_SUPPORTED_QUANTS:
-            raise RuntimeError(
-                f"A5 MegaMoE only supports MXFP MoE quantization, got {fused_experts_input.quant.quant_type}."
-            )
-        if not fused_experts_input.quant.is_mxfp:
-            raise RuntimeError("A5 MegaMoE requires MXFP quant parameters.")
-        if fused_experts_input.dynamic_eplb:
-            raise RuntimeError("A5 MegaMoE does not support dynamic EPLB expert weight lists.")
-        if fused_experts_input.routing.global_redundant_expert_num:
-            raise RuntimeError("A5 MegaMoE does not support redundant physical experts.")
-
-        w1 = _as_tensor_list(fused_experts_input.weights.w1, "w1")
-        w2 = _as_tensor_list(fused_experts_input.weights.w2, "w2")
-        w1_scale = _view_mxfp_scales_as_e8m0(
-            _as_tensor_list(fused_experts_input.weights.w1_scale, "w1_scale"),
-            "w1_scale",
-        )
-        w2_scale = _view_mxfp_scales_as_e8m0(
-            _as_tensor_list(fused_experts_input.weights.w2_scale, "w2_scale"),
-            "w2_scale",
-        )
-        intermediate_hidden = self._validate_stacked_mxfp_layout(
-            fused_experts_input,
-            w1,
-            w2,
-            w1_scale,
-            w2_scale,
-        )
-        activation = self._normalize_activation(fused_experts_input.activation)
-        swiglu_limit = self.moe_config.swiglu_limit
-        activation_clamp = None if swiglu_limit is None or swiglu_limit <= 0 else float(swiglu_limit)
-        mxfp = fused_experts_input.quant.mxfp
-        weight_type = None if mxfp is None else mxfp.weight_quant_type
-
-        shared_weights = fused_experts_input.shared_weights
-        shared_moe_kwargs = {}
-        if shared_weights is not None:
-            if not self.supports_shared_experts():
-                raise RuntimeError("The installed MegaMoE operator does not support shared-expert inputs.")
-            shared_w1 = _as_tensor_list(shared_weights.w1, "shared_w1")
-            shared_w2 = _as_tensor_list(shared_weights.w2, "shared_w2")
-            shared_w1_scale = _view_mxfp_scales_as_e8m0(
-                _as_tensor_list(shared_weights.w1_scale, "shared_w1_scale"),
-                "shared_w1_scale",
-            )
-            shared_w2_scale = _view_mxfp_scales_as_e8m0(
-                _as_tensor_list(shared_weights.w2_scale, "shared_w2_scale"),
-                "shared_w2_scale",
-            )
-            shared_quant_type = shared_weights.quant_type or fused_experts_input.quant.quant_type
-            shared_weight_type = self._validate_shared_mxfp_layout(
-                fused_experts_input,
-                shared_w1,
-                shared_w2,
-                shared_w1_scale,
-                shared_w2_scale,
-                intermediate_hidden,
-                shared_quant_type,
-            )
-            shared_moe_kwargs = {
-                "shared_l1_weights": shared_w1,
-                "shared_l2_weights": shared_w2,
-                "shared_l1_weights_sf": shared_w1_scale,
-                "shared_l2_weights_sf": shared_w2_scale,
-                "shared_weight1_type": shared_weight_type,
-                "shared_weight2_type": shared_weight_type,
-            }
-
-        _, mega_moe = _get_mega_moe_ops()
-        mega_moe_kwargs = {
-            "x": fused_experts_input.hidden_states,
-            "topk_ids": fused_experts_input.topk_ids.to(torch.int32),
-            "topk_weights": fused_experts_input.topk_weights,
-            "l1_weights": w1,
-            "l1_weights_sf": w1_scale,
-            "l2_weights": w2,
-            "l2_weights_sf": w2_scale,
-            "sym_buffer": self._get_sym_buffer(fused_experts_input, intermediate_hidden),
-            "activation": activation,
-            "activation_clamp": activation_clamp,
-        }
-        if weight_type is not None:
-            mega_moe_kwargs["weight1_type"] = weight_type
-            mega_moe_kwargs["weight2_type"] = weight_type
-        mega_moe_kwargs.update(shared_moe_kwargs)
-
-        output, expert_tokens = mega_moe(**mega_moe_kwargs)
-        return output, expert_tokens, shared_weights is not None
+    if quant_type == QuantType.W8A8MXFP:
+        return _FLOAT8_E4M3FN_WEIGHT_TYPE
+    if routed_weight_type is None:
+        raise ValueError("A5 MegaMoE requires the routed FP4 weight type for FP4 shared experts.")
+    return routed_weight_type
 
 
-__all__ = ["MegaMoEBackend"]
+def build_mega_moe_shared_kwargs(
+    fused_experts_input: MoEFusedExpertsInput,
+    intermediate_hidden: int,
+    routed_weight_type: int | None,
+) -> dict[str, Any]:
+    """Validate shared MXFP weights before passing them to the fused operator."""
+    shared_weights = fused_experts_input.shared_weights
+    if shared_weights is None:
+        return {}
+    if fused_experts_input.quant.quant_type != QuantType.W4A8MXFP:
+        raise ValueError("Shared MegaMoE fusion currently requires W4A8MXFP routed experts.")
+    w1 = _as_tensor_list(shared_weights.w1, "shared_w1")
+    w2 = _as_tensor_list(shared_weights.w2, "shared_w2")
+    w1_scale = _view_mxfp_scales_as_e8m0(_as_tensor_list(shared_weights.w1_scale, "shared_w1_scale"), "shared_w1_scale")
+    w2_scale = _view_mxfp_scales_as_e8m0(_as_tensor_list(shared_weights.w2_scale, "shared_w2_scale"), "shared_w2_scale")
+    shared_quant_type = shared_weights.quant_type or fused_experts_input.quant.quant_type
+    weight_type = _validate_shared_mxfp_layout(
+        fused_experts_input,
+        w1,
+        w2,
+        w1_scale,
+        w2_scale,
+        intermediate_hidden,
+        shared_quant_type,
+        routed_weight_type,
+    )
+    return {
+        "shared_l1_weights": w1,
+        "shared_l2_weights": w2,
+        "shared_l1_weights_sf": w1_scale,
+        "shared_l2_weights_sf": w2_scale,
+        "shared_weight1_type": weight_type,
+        "shared_weight2_type": weight_type,
+    }

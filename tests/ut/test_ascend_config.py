@@ -1319,6 +1319,49 @@ class TestUpstreamConfigCompatibility(TestBase):
         "vllm_ascend.ascend_config.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A5),
     )
+    def test_a5_megamoe_accepts_4608_projection_and_preserves_guards(self, _mock_profile):
+        text_config = SimpleNamespace(
+            model_type="deepseek_v41_text", hidden_size=5120, moe_intermediate_size=2304, num_experts_per_tok=8
+        )
+        model_config = SimpleNamespace(
+            hf_text_config=text_config,
+            get_num_experts=lambda: 256,
+        )
+        parallel_config = SimpleNamespace(world_size_across_dp=8, pipeline_parallel_size=1)
+        vc = SimpleNamespace(model_config=model_config, parallel_config=parallel_config)
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+
+        for hf_config in (
+            SimpleNamespace(model_type="deepseek_v41", text_config=text_config),
+            text_config,
+            {"text_config": {"model_type": "deepseek_v41_text"}},
+        ):
+            with self.subTest(hf_config=hf_config):
+                model_config.hf_config = hf_config
+                self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+        del model_config.hf_config
+
+        for model_type in ("deepseek_v4", "kimi_k3", "minimax_m3", "qwen3_moe"):
+            with self.subTest(model_type=model_type), patch.object(text_config, "model_type", model_type):
+                self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+                with patch.object(text_config, "moe_intermediate_size", 2048):
+                    self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+
+        for field, value in (
+            ("hidden_size", 896),
+            ("moe_intermediate_size", 2560),
+            ("num_experts_per_tok", 33),
+        ):
+            with self.subTest(field=field), patch.object(text_config, field, value):
+                self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        for world_size in (1, 3):
+            with self.subTest(world_size=world_size), patch.object(parallel_config, "world_size_across_dp", world_size):
+                self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
     def test_a5_megamoe_minimax_config_and_existing_guards(self, _mock_profile):
         text_config = SimpleNamespace(hidden_size=6144, intermediate_size=3072, num_experts_per_tok=4)
         model_config = SimpleNamespace(
@@ -1428,6 +1471,47 @@ class TestUpstreamConfigCompatibility(TestBase):
                 ):
                     with self.subTest(field=field), patch.object(text_config, field, value):
                         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+
+    @patch("vllm_ascend.ascend_config.get_current_hardware_profile")
+    def test_a3_megamoe_v41_intermediate_size_exception(self, mock_profile):
+        text = SimpleNamespace(model_type="deepseek_v41_text", hidden_size=5120, moe_intermediate_size=2304)
+        vc = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=text))
+        mock_profile.return_value = get_hardware_profile(AscendDeviceType.A3)
+        configs = (
+            SimpleNamespace(model_type="deepseek_v41", text_config=text),
+            text,
+            {"text_config": {"model_type": "deepseek_v41_text"}},
+        )
+        for hf_config in configs:
+            with self.subTest(hf_config=hf_config):
+                vc.model_config.hf_config = hf_config
+                self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+        del vc.model_config.hf_config
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+
+        for model_type in ("deepseek_v4", "kimi_k3", "qwen3_moe"):
+            with self.subTest(model_type=model_type):
+                text.model_type = model_type
+                self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        text.model_type = "deepseek_v41_text"
+        mock_profile.return_value = get_hardware_profile(AscendDeviceType.A2)
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+
+        mock_profile.return_value = get_hardware_profile(AscendDeviceType.A3)
+        for size in (1024, 1536, 2048, 2560, 3072):
+            text.moe_intermediate_size = size
+            self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+        for size in (512, 1280, 1792, 2816, 3328):
+            text.moe_intermediate_size = size
+            self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        text.moe_intermediate_size = 2304
+        text.hidden_size = 896
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        text.hidden_size = 5120
+        text.moe_quantize = "mxfp4"
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        text.moe_quantize = "w8a8_dynamic"
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
 
     def test_megamoe_model_config_constraints(self):
         supported = SimpleNamespace(

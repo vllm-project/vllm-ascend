@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -30,8 +29,8 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
-from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
@@ -41,6 +40,7 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertParallelMode,
     SubmittedSharedExpertGateUp,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 def _ascend_moe_forward_shared_sp_fake(
@@ -491,6 +491,54 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         )
         return router_logits, shared_input_ready, router_output_ready, submitted_gate_up
 
+    def _forward_with_fused_shared_experts(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        shared_hidden_states: torch.Tensor,
+        input_ids: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if self.routed_experts.quant_type != QuantType.W4A8MXFP:
+            return None
+        if self.routed_experts.dynamic_eplb or self.routed_experts.mix_placement:
+            return None
+        if self.routed_experts.global_redundant_expert_num:
+            return None
+        if self.ascend_shared_experts is None:
+            return None
+        if shared_hidden_states is not hidden_states:
+            return None
+        if _EXTRA_CTX.moe_comm_type != MoECommType.FUSED_MC2:
+            return None
+        moe_comm_method = _EXTRA_CTX.moe_comm_method
+        supports_fused_shared = getattr(moe_comm_method, "supports_fused_shared_experts", None)
+        if supports_fused_shared is None or not supports_fused_shared():
+            return None
+        shared_weights = self.ascend_shared_experts.get_mega_moe_weights()
+        if shared_weights is None:
+            return None
+
+        if self.is_internal_router:
+            router_logits = self._compute_router_logits(hidden_states, router_logits)
+
+        # __init__ enables return_with_event whenever shared experts exist;
+        # retain the milestone so we can verify that fusion actually occurred.
+        combined_out, fused_moe_events = self.routed_experts.forward_impl(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            input_ids=input_ids,
+            shared_experts=shared_weights,
+            shared_experts_input=shared_hidden_states,
+        )
+        if not fused_moe_events.shared_experts_fused:
+            raise RuntimeError("MegaMoE returned without fusing the provided shared expert weights.")
+        # vLLM selects the two-Tensor moe_forward_shared schema whenever this
+        # runner owns shared experts. MegaMoE has already summed the routed and
+        # shared contributions, so expose that sum in the shared slot and a
+        # shape-compatible zero in the routed slot. This also prevents vLLM
+        # from applying routed-only scaling or transforms to the combined sum.
+        return combined_out, torch.zeros_like(combined_out)
+
     def _forward_impl(
         self,
         hidden_states: torch.Tensor,
@@ -508,6 +556,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     router_logits=router_logits,
                     input_ids=input_ids,
                 )
+            fused_shared_out = self._forward_with_fused_shared_experts(
+                hidden_states, router_logits, shared_hidden_states, input_ids
+            )
+            if fused_shared_out is not None:
+                return fused_shared_out
             shared_input_is_gathered = self._can_overlap_sp_shared_with(self.routed_input_transform)
             defer_shared_output_wait = self._can_overlap_sp_shared_with(self.routed_output_transform)
             prepared_shared_input = (

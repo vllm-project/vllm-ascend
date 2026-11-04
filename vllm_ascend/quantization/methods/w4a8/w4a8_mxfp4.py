@@ -171,7 +171,9 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.convert_weight_to_list
+        self.dynamic_eplb = (
+            False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.convert_weight_to_list
+        )
 
     def _resolve_gmm_weights(self, layer, packed_attr: str, list_attr: str) -> list[torch.Tensor]:
         """Return per-expert transposed weights for EPLB or the packed tensor."""
@@ -232,6 +234,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 layer=layer,
+                shared_weights=shared_experts,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=layer.ascend_expert_map,
@@ -531,6 +534,21 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
     model_dtype = None
     quant_type: QuantType = QuantType.W4A8MXFP
 
+    def _resolve_gmm_weights(self, layer, packed_attr: str, list_attr: str) -> list[torch.Tensor]:
+        # A5 can select ordinary MoE for a batch exceeding MegaMoE capacity.
+        # The packed parameters were released at load time; reuse the same
+        # independent NZ expert tensors in the ordinary GMM's (K, N) layout.
+        weights = getattr(layer, f"cann_mega_moe_{packed_attr}_list", None)
+        if weights is not None:
+            return [weight.transpose(0, 1) for weight in weights]
+        return super()._resolve_gmm_weights(layer, packed_attr, list_attr)
+
+    def _resolve_gmm_scales(self, layer, packed_attr: str, list_attr: str) -> list[torch.Tensor]:
+        scales = getattr(layer, f"cann_mega_moe_{packed_attr}_list", None)
+        if scales is not None:
+            return [scale.view(torch.uint8).transpose(-3, -2) for scale in scales]
+        return super()._resolve_gmm_scales(layer, packed_attr, list_attr)
+
     def get_dynamic_quant_param(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
     ) -> dict[str, Any]:
@@ -582,6 +600,21 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
         del layer.w13_weight, layer.w2_weight, layer.w13_weight_scale, layer.w2_weight_scale
 
     def process_weights_after_loading(self, layer):
+        if getattr(layer, "_mxfp4_transformed", False):
+            return
+        if use_cann_megamoe(get_current_vllm_config()):
+            if self.dynamic_eplb:
+                raise ValueError("DeepSeek MegaMoE weight preparation does not support dynamic EPLB.")
+            # DeepSeek checkpoints store E8M0 scales with their semantic dtype.
+            # The parent prepares independent NZ weights and E8M0 scale lists
+            # from the original, non-transposed byte containers.
+            tensor_names = ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
+            layer._ds_mega_moe_original_dtypes = {name: getattr(layer, name).dtype for name in tensor_names}
+            for name in tensor_names:
+                tensor = getattr(layer, name)
+                tensor.data = tensor.data.view(torch.uint8)
+            super().process_weights_after_loading(layer)
+            return
         if self.dynamic_eplb:
             self._build_expert_lists(layer)
             return
@@ -607,3 +640,22 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
         layer.w2_weight_scale.data = (
             layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).view(torch.uint8).transpose(-3, -2)
         )
+
+    def restore_weights_for_rl_loading(self, layer):
+        original_dtypes = getattr(layer, "_ds_mega_moe_original_dtypes", None)
+        if original_dtypes is None:
+            return super().restore_weights_for_rl_loading(layer)
+        # The parent releases the packed parameters after preparing MegaMoE
+        # lists, so rebuild ND checkpoint tensors instead of transposing the
+        # empty parameters. Scale restoration must preserve every E8M0 bit.
+        original_shapes = layer._mxfp4_original_shapes
+        for name, dtype in original_dtypes.items():
+            experts = getattr(layer, f"cann_mega_moe_{name}_list")
+            if name in ("w13_weight", "w2_weight"):
+                tensors = [torch_npu.npu_format_cast(weight, 2).view(torch.uint8) for weight in experts]
+            else:
+                tensors = [scale.view(torch.uint8) for scale in experts]
+            getattr(layer, name).data = torch.stack(tensors).reshape(original_shapes[name]).view(dtype)
+            delattr(layer, f"cann_mega_moe_{name}_list")
+        del layer._ds_mega_moe_original_dtypes
+        layer._mxfp4_transformed = False

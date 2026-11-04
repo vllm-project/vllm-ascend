@@ -18,7 +18,6 @@ from collections.abc import Callable
 
 import torch
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.logger import logger
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -28,99 +27,6 @@ from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTo
 
 DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID = 129257
 DEEPSEEK_V4_IMAGE_SENTINEL_COUNT = 5
-_VISION_GATING_OP_NAME = "npu_moe_gating_top_k"
-_VISION_GATING_REQUIRED_ARGUMENTS = frozenset(("additional_bias", "additional_token_mask"))
-
-
-def _npu_moe_gating_vision_op() -> Callable | None:
-    """Return the optional fused op only when its schema supports vision routing."""
-    try:
-        import custom_ops  # noqa: F401  # Registers torch.ops.custom.* from the wheel.
-    except ImportError:
-        logger.warning_once(
-            "[MoE/router] DeepSeek V4 vision fused routing is unavailable: "
-            "custom_ops is not installed; using the Python vision routing fallback."
-        )
-        return None
-
-    op = getattr(torch.ops.custom, _VISION_GATING_OP_NAME, None)
-    if op is None:
-        logger.warning_once(
-            "[MoE/router] DeepSeek V4 vision fused routing is unavailable: "
-            "%s is not registered; using the Python vision routing fallback.",
-            _VISION_GATING_OP_NAME,
-        )
-        return None
-
-    schemas_by_overload = getattr(op, "_schemas", None) or {}
-    schemas = list(schemas_by_overload.values())
-    schema = getattr(op, "_schema", None)
-    if schema is not None:
-        schemas.append(schema)
-    default_overload = getattr(op, "default", None)
-    default_schema = getattr(default_overload, "_schema", None)
-    if default_schema is not None:
-        schemas.append(default_schema)
-
-    available_arguments: set[str] = set()
-    for candidate in schemas:
-        argument_names = {argument.name for argument in candidate.arguments}
-        available_arguments.update(argument_names)
-        if argument_names >= _VISION_GATING_REQUIRED_ARGUMENTS:
-            return op
-    logger.warning_once(
-        "[MoE/router] DeepSeek V4 vision fused routing is unavailable: %s schema is missing %s; "
-        "available_arguments=%s. Using the Python vision routing fallback.",
-        _VISION_GATING_OP_NAME,
-        sorted(_VISION_GATING_REQUIRED_ARGUMENTS - available_arguments),
-        sorted(available_arguments),
-    )
-    return None
-
-
-def select_deepseek_v4_vision_experts_with_fusion_op(
-    vision_gating_op: Callable,
-    router_logits: torch.Tensor,
-    input_ids: torch.Tensor,
-    bias_vl: torch.Tensor,
-    text_bias: torch.Tensor | None,
-    top_k: int,
-    renormalize: bool,
-    k_group: int,
-    group_count: int,
-    routed_scaling_factor: float = 1.0,
-    eps: float = 1e-20,
-    image_sentinel_lo: int = DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Select DeepSeek V4 vision experts with the optional fused operator."""
-    router_logits = router_logits.float()
-    bias_vl = bias_vl.to(router_logits.dtype)
-    if text_bias is not None:
-        text_bias = text_bias.to(router_logits.dtype)
-    image_hi = image_sentinel_lo + DEEPSEEK_V4_IMAGE_SENTINEL_COUNT
-    image_token_mask = (input_ids >= image_sentinel_lo) & (input_ids < image_hi)
-    topk_weights, topk_ids, _ = vision_gating_op(
-        router_logits,
-        k=top_k,
-        bias=text_bias,
-        additional_bias=bias_vl,
-        additional_token_mask=image_token_mask.view(-1),
-        k_group=k_group,
-        group_count=group_count,
-        routed_scaling_factor=1.0,
-        eps=eps,
-        group_select_mode=1,
-        renorm=0,
-        norm_type=2,
-        out_flag=False,
-    )
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(
-            torch.finfo(topk_weights.dtype).tiny
-        )
-    if routed_scaling_factor != 1.0:
-        topk_weights = topk_weights * routed_scaling_factor
-    return topk_weights, topk_ids
 
 
 def select_deepseek_v4_vision_experts(
@@ -212,7 +118,6 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         self.tid2eid = tid2eid
         self.bias_vl = bias_vl
         self.image_sentinel_lo = image_sentinel_lo
-        self.vision_gating_op = _npu_moe_gating_vision_op() if bias_vl is not None else None
 
     def is_fused_supported(
         self,
@@ -255,7 +160,6 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             if self.tid2eid is not None or self.bias_vl is not None:
                 if input_ids is None:
                     raise ValueError("DeepSeek V4 vision/hash MoE routing requires input_ids.")
-                input_ids = input_ids.to(torch.int64)
                 tid2eid_ones = self.tid2eid.to(torch.int32) if self.tid2eid is not None else None
                 if _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
                     prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
@@ -269,10 +173,6 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                     # has not already aligned ids with local router rows.
                     input_ids = sequence_parallel_chunk(input_ids.reshape(-1, 1)).reshape(-1)
                 if tid2eid_ones is not None:
-                    # Hash routing uses input_ids as table indices and requires
-                    # int64, non-negative values. Non-hash vision routing only
-                    # compares sentinel IDs, so keep its original dtype and
-                    # leave padding at -1 to avoid four device-side ops.
                     input_ids = input_ids.to(torch.int64)
                     input_ids = torch.where(input_ids == -1, 0, input_ids)
             else:

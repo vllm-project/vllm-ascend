@@ -1,6 +1,7 @@
 import math
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import copy
 from enum import Enum
 from typing import Any
 
@@ -11,7 +12,11 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.ascend_config import (
+    compute_mega_moe_buffer_tokens_per_rank,
+    get_ascend_config,
+    is_mega_moe_supported,
+)
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     MoECommPolicy,
@@ -84,10 +89,61 @@ def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
 
 
+def make_draft_moe_vllm_config(vllm_config: VllmConfig) -> VllmConfig:
+    """Record draft MoE topology without changing the target metadata.
+
+    MRv2 DSpark retains the target model config for target-layer metadata.
+    Copy the two config containers so loaders and graph managers can compare
+    expert layouts without relying on the deprecated forward-context flag.
+    """
+    draft_config = copy(vllm_config)
+    draft_config.model_config = copy(vllm_config.model_config)
+    draft_model_config = vllm_config.speculative_config.draft_model_config
+    draft_hf_config = getattr(draft_model_config, "hf_text_config", None)
+    draft_config.model_config._ascend_draft_moe_topology = (
+        getattr(draft_hf_config, "n_routed_experts", getattr(draft_hf_config, "num_experts", None)),
+        getattr(draft_hf_config, "num_experts_per_tok", getattr(draft_hf_config, "top_k_experts", None)),
+    )
+    return draft_config
+
+
+def has_different_draft_moe_topology(vllm_config: VllmConfig, is_draft_model: bool = False) -> bool:
+    """Keep drafts with different expert counts or Top-K out of MegaMoE.
+
+    MRv2 DSpark records its expert topology on a private target-derived config.
+    Legacy proposers use the draft runner type or explicit forward argument.
+    Weight preparation and execution must make the same decision.
+    """
+    recorded_topology = getattr(vllm_config.model_config, "_ascend_draft_moe_topology", None)
+    if (
+        not isinstance(recorded_topology, tuple)
+        and not is_draft_model
+        and getattr(vllm_config.model_config, "runner_type", None) != "draft"
+    ):
+        return False
+    draft_config = getattr(getattr(vllm_config, "speculative_config", None), "draft_model_config", None)
+    draft_hf_config = getattr(draft_config, "hf_text_config", None)
+    target_hf_config = vllm_config.model_config.hf_text_config
+    if draft_hf_config is None and not isinstance(recorded_topology, tuple):
+        return False
+
+    def topology(config):
+        return (
+            getattr(config, "n_routed_experts", getattr(config, "num_experts", None)),
+            getattr(config, "num_experts_per_tok", getattr(config, "top_k_experts", None)),
+        )
+
+    target_topology = topology(target_hf_config)
+    draft_topology = recorded_topology if isinstance(recorded_topology, tuple) else topology(draft_hf_config)
+    # Preserve the existing policy when either config lacks MoE topology.
+    return None not in target_topology and None not in draft_topology and target_topology != draft_topology
+
+
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
-        is_mega_moe_supported()
+        not has_different_draft_moe_topology(vllm_config)
+        and is_mega_moe_supported()
         and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE)
         and get_ascend_config().enable_fused_mc2 == 1
         and is_moe_model(vllm_config)
@@ -165,7 +221,9 @@ def set_ascend_forward_context(
             model_comm_methods[moe_comm_type] if model_comm_methods is not None else get_moe_comm_method(moe_comm_type)
         )
         forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
-        forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
+        forward_context.use_mega_moe = not has_different_draft_moe_topology(
+            vllm_config, is_draft_model
+        ) and use_cann_megamoe(vllm_config)
         forward_context.draft_moe_quant_type = draft_moe_quant_type
 
         tp_world_size = get_tensor_model_parallel_world_size()
@@ -246,7 +304,11 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
         return
 
     ascend_config = get_ascend_config()
-    use_mega_moe = use_cann_megamoe(vllm_config)
+    # A5 MegaMoE has its own symmetric-buffer capacity. Keep the shared MC2
+    # capacity on the ordinary dispatch budget, as in the release backend.
+    use_mega_moe = use_cann_megamoe(vllm_config) and not get_current_hardware_profile().supports(
+        HardwareCapability.CANN_MEGAMOE_MXFP
+    )
 
     # Cap for fused MC2 / MegaMoe: regular MC2 (gated by enable_prefill_mc2) uses
     # HCCL comm buffer (HCCL_BUFFSIZE); MegaMoe (use_mega_moe, non-decode-only)
@@ -367,15 +429,19 @@ def _select_capacity_and_world_size_moe_comm_method(
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
-    if get_ascend_config().enable_fused_mc2 == 1:
+    kv_role = getattr(getattr(vllm_config, "kv_transfer_config", None), "kv_role", None)
+    # Match the release policy: PD consumers retain ordinary MoE communication.
+    if get_ascend_config().enable_fused_mc2 == 1 and kv_role != "kv_consumer":
         if is_mega_moe_supported():
-            if is_draft_model and draft_moe_quant_type not in A5_SUPPORT_MEGA_MOE_QUANT_TYPES:
-                # The A5 mega moe (FUSED_MC2) operator only supports a subset of
-                # quantized weight layouts. An unquantized (or unsupported-quantized)
-                # MTP draft MoE layer must skip FUSED_MC2 and fall through to the
-                # original MoE path (MC2/ALLGATHER/ALLTOALL) below.
+            if has_different_draft_moe_topology(vllm_config, is_draft_model):
+                # A different expert layout must not recreate the target's
+                # MegaMoE communication resource under the same context tag.
                 pass
-            else:
+            elif is_draft_model and draft_moe_quant_type not in A5_SUPPORT_MEGA_MOE_QUANT_TYPES:
+                pass
+            elif num_tokens is not None and num_tokens <= get_a5_mega_moe_buffer_tokens_per_rank(
+                vllm_config, mc2_tokens_capacity
+            ):
                 return MoECommType.FUSED_MC2
     num_experts_per_tok = getattr(
         vllm_config.model_config.hf_text_config,
@@ -383,29 +449,6 @@ def _select_capacity_and_world_size_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
-    ascend_config = get_ascend_config()
-    eplb_config = ascend_config.eplb_config
-    kv_role = getattr(getattr(vllm_config, "kv_transfer_config", None), "kv_role", None)
-    buffer_tokens_per_rank = (
-        get_a5_mega_moe_buffer_tokens_per_rank(vllm_config, mc2_tokens_capacity)
-        if ascend_config.enable_fused_mc2 == 1
-        else 0
-    )
-    normalized_activation = None if activation is None else activation.lower().removeprefix("moeactivation.")
-    use_mega_moe = (
-        ascend_config.enable_fused_mc2 == 1
-        and world_size > 1
-        and num_tokens <= buffer_tokens_per_rank
-        and quant_type in _A5_MEGA_MOE_QUANT_TYPES
-        and normalized_activation in (None, "silu", "swiglu")
-        and group_size in (None, _A5_MEGA_MOE_GROUP_SIZE)
-        and not eplb_config.dynamic_eplb
-        and eplb_config.num_redundant_experts == 0
-        and not ascend_config.mix_placement
-        and kv_role != "kv_consumer"
-    )
-    if use_mega_moe:
-        return MoECommType.FUSED_MC2
     if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
         return MoECommType.MC2
     if world_size <= num_experts_per_tok:
@@ -462,13 +505,23 @@ def select_moe_comm_method(
             is_draft_model,
             draft_moe_quant_type,
         )
+    mega_moe_capacity = None
+    kv_role = getattr(getattr(vllm_config, "kv_transfer_config", None), "kv_role", None)
+    if (
+        moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE
+        and get_ascend_config().enable_fused_mc2 == 1
+        and is_mega_moe_supported()
+        and kv_role != "kv_consumer"
+    ):
+        mega_moe_capacity = get_a5_mega_moe_buffer_tokens_per_rank(vllm_config, mc2_tokens_capacity)
     logger.debug(
         "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s, "
-        "is_draft_model=%s, draft_moe_quant_type=%r",
+        "mega_moe_capacity=%s, is_draft_model=%s, draft_moe_quant_type=%r",
         moe_comm_policy,
         moe_comm_type,
         num_tokens,
         mc2_tokens_capacity,
+        mega_moe_capacity,
         is_draft_model,
         draft_moe_quant_type,
     )
