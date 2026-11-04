@@ -166,9 +166,7 @@ def test_fused_moe_method_normalizes_the_rows_gmm2_returns():
     norm = _post_expert_norm(hidden_size)
     method.post_expert_norm_fn = norm.forward
 
-    with patch.object(
-        muse_spark, "tensor_model_parallel_all_reduce", side_effect=AssertionError("all-reduce")
-    ):
+    with patch.object(muse_spark, "tensor_model_parallel_all_reduce", side_effect=AssertionError("all-reduce")):
         # Complete rows, as on one card or under expert parallelism.
         output = method.apply_gmm2(None, None, None)
 
