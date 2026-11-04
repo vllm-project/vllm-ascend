@@ -44,7 +44,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     ensure_zmq_recv,
     ensure_zmq_send,
-    group_concurrent_contiguous,
     zmq_ctx,
 )
 
@@ -1114,9 +1113,29 @@ class MooncakePullRecvingThread(threading.Thread):
                             length_list.append(transfer_len)
 
     @staticmethod
+    def _group_concurrent_contiguous_blocks(local_ids: list[int], remote_ids: list[int]) -> list[tuple[int, int, int]]:
+        """Return (local start, remote start, count), preserving paired ID order."""
+        if len(local_ids) != len(remote_ids):
+            raise ValueError("Local and remote block ID counts differ")
+        if not local_ids:
+            return []
+
+        runs: list[tuple[int, int, int]] = []
+        local_start, remote_start = local_ids[0], remote_ids[0]
+        count = 0
+        for local_id, remote_id in zip(local_ids, remote_ids):
+            if local_id != local_start + count or remote_id != remote_start + count:
+                runs.append((local_start, remote_start, count))
+                local_start, remote_start, count = local_id, remote_id, 0
+            count += 1
+        runs.append((local_start, remote_start, count))
+        return runs
+
+    @staticmethod
     def _append_block_transfer_addresses(
-        local_block_groups: list[list[int]],
-        remote_block_groups: list[list[int]],
+        local_block_ids: list[int],
+        remote_block_ids: list[int],
+        runs: list[tuple[int, int, int]] | None,
         local_base_addr: int,
         remote_base_addr: int,
         local_block_stride: int,
@@ -1128,13 +1147,26 @@ class MooncakePullRecvingThread(threading.Thread):
         local_inner_offset: int = 0,
         remote_inner_offset: int = 0,
     ) -> None:
-        """Append addresses from block groups prepared for one request."""
+        """Append exact byte ranges; callers supply runs only for contiguous bytes.
+
+        ``None`` selects single-block transfers without allocating singleton lists.
+        Source/destination naming follows the Mooncake READ API: local addresses
+        are passed in src_list and remote addresses in dst_list.
+        """
         if transfer_len <= 0:
             return
-        for local_block_group, remote_block_group in zip(local_block_groups, remote_block_groups):
-            src_list.append(local_base_addr + local_block_group[0] * local_block_stride + local_inner_offset)
-            dst_list.append(remote_base_addr + remote_block_group[0] * remote_block_stride + remote_inner_offset)
-            length_list.append(transfer_len * len(local_block_group))
+        local_base_addr += local_inner_offset
+        remote_base_addr += remote_inner_offset
+        if runs is None:
+            for local_id, remote_id in zip(local_block_ids, remote_block_ids):
+                src_list.append(local_base_addr + local_id * local_block_stride)
+                dst_list.append(remote_base_addr + remote_id * remote_block_stride)
+                length_list.append(transfer_len)
+        else:
+            for local_start, remote_start, count in runs:
+                src_list.append(local_base_addr + local_start * local_block_stride)
+                dst_list.append(remote_base_addr + remote_start * remote_block_stride)
+                length_list.append(transfer_len * count)
 
     def _append_spec_transfer_addresses(
         self,
@@ -1183,17 +1215,17 @@ class MooncakePullRecvingThread(threading.Thread):
         if not any(local_block_ids for local_block_ids, _ in block_ids_by_request.values()):
             return
 
-        single_block_ids_by_request = {
-            request_id: (
-                [[block_id] for block_id in local_block_ids],
-                [[block_id] for block_id in remote_block_ids],
-            )
-            for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
-        }
-        contiguous_block_ids_by_request = {
-            request_id: group_concurrent_contiguous(local_block_ids, remote_block_ids)
-            for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
-        }
+        # Materialize compact runs only for requests with a byte-contiguous
+        # transfer. Strided and partial-head transfers use the original IDs.
+        runs_by_request: dict[str, list[tuple[int, int, int]]] = {}
+
+        def get_runs(request_id: str) -> list[tuple[int, int, int]]:
+            if request_id not in runs_by_request:
+                runs_by_request[request_id] = self._group_concurrent_contiguous_blocks(
+                    *block_ids_by_request[request_id]
+                )
+            return runs_by_request[request_id]
+
         remote_tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
         transfer_whole_block = is_circular_kv_cache_spec(spec) or isinstance(
             spec,
@@ -1230,16 +1262,13 @@ class MooncakePullRecvingThread(threading.Thread):
                             f"{self.layer_names[local_layer_index]!r}, cache {cache_index}: "
                             f"local={local_block_len}, remote={remote_block_len}"
                         )
-                    block_ids_to_transfer = (
-                        contiguous_block_ids_by_request
-                        if local_block_stride == remote_block_stride == local_block_len
-                        else single_block_ids_by_request
-                    )
+                    can_coalesce = local_block_stride == remote_block_stride == local_block_len
                     for request_id, _, _ in transfer_entries:
-                        local_block_groups, remote_block_groups = block_ids_to_transfer[request_id]
+                        local_block_ids, remote_block_ids = block_ids_by_request[request_id]
                         self._append_block_transfer_addresses(
-                            local_block_groups=local_block_groups,
-                            remote_block_groups=remote_block_groups,
+                            local_block_ids=local_block_ids,
+                            remote_block_ids=remote_block_ids,
+                            runs=get_runs(request_id) if can_coalesce else None,
                             local_base_addr=local_base_addr,
                             remote_base_addr=remote_base_addr,
                             local_block_stride=local_block_stride,
@@ -1354,17 +1383,16 @@ class MooncakePullRecvingThread(threading.Thread):
                 transfer_len = num_transfer_heads * local_head_len
                 local_inner_offset = local_head_offset * local_head_len
                 remote_inner_offset = remote_head_offset * remote_head_len
-                block_ids_to_transfer = (
-                    contiguous_block_ids_by_request
-                    if local_block_stride == local_block_len == transfer_len
+                can_coalesce = (
+                    local_block_stride == local_block_len == transfer_len
                     and remote_block_stride == remote_block_len == transfer_len
-                    else single_block_ids_by_request
                 )
                 for request_id, _, _ in transfer_entries:
-                    local_block_groups, remote_block_groups = block_ids_to_transfer[request_id]
+                    local_block_ids, remote_block_ids = block_ids_by_request[request_id]
                     self._append_block_transfer_addresses(
-                        local_block_groups=local_block_groups,
-                        remote_block_groups=remote_block_groups,
+                        local_block_ids=local_block_ids,
+                        remote_block_ids=remote_block_ids,
+                        runs=get_runs(request_id) if can_coalesce else None,
                         local_base_addr=local_base_addr,
                         remote_base_addr=remote_base_addr,
                         local_block_stride=local_block_stride,

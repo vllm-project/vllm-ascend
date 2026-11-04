@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import queue
+import random
 import threading
 from concurrent.futures import Future
 from dataclasses import replace
@@ -24,10 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import (
     MooncakePullConnectorWorker,
     MooncakePullRecvingThread,
 )
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
-    SizedDict,
-    group_concurrent_contiguous,
-)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import SizedDict
 
 from .helpers import (
     make_circular_spec,
@@ -1449,9 +1447,9 @@ def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers
     lengths: list[int] = []
 
     with patch.object(
-        pull_worker,
-        "group_concurrent_contiguous",
-        wraps=group_concurrent_contiguous,
+        MooncakePullRecvingThread,
+        "_group_concurrent_contiguous_blocks",
+        wraps=MooncakePullRecvingThread._group_concurrent_contiguous_blocks,
     ) as mock_group:
         thread._append_spec_transfer_addresses(
             0,
@@ -2107,3 +2105,117 @@ def test_replicated_short_conv_copies_complete_state_between_different_ranks(
         assert src == [1128]
         assert dst == [5320]
         assert lengths == [96]
+
+
+@pytest.mark.parametrize("strides", [[[256], [256]], [[256], [128]]])
+def test_whole_block_runs_are_lazy_for_strided_and_mixed_layers(strides):
+    spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
+    thread = make_thread(
+        layer_names=["layer.0", "layer.1"],
+        kv_cache_specs=[spec],
+        kv_caches_base_addr=[[1000], [2000]],
+        block_strides=strides,
+        block_lens=[[128], [128]],
+    )
+    remote = make_pp_metadata(
+        layer_names=["layer.0", "layer.1"],
+        block_strides=strides,
+        block_lens=[[128], [128]],
+        tp_base_addrs={0: [[5000], [6000]]},
+    )
+    entries = [("request", [1, 2], [3, 4])]
+    src, dst, lengths = [], [], []
+    with patch.object(
+        MooncakePullRecvingThread,
+        "_group_concurrent_contiguous_blocks",
+        wraps=MooncakePullRecvingThread._group_concurrent_contiguous_blocks,
+    ) as grouped:
+        thread._append_spec_transfer_addresses(
+            0,
+            0,
+            0,
+            1,
+            1,
+            1,
+            {(0, 0): entries, (1, 1): entries},
+            remote,
+            src,
+            dst,
+            lengths,
+        )
+    if strides[1][0] == 256:
+        grouped.assert_not_called()
+        assert src == [1256, 1512, 2256, 2512]
+        assert dst == [5768, 6024, 6768, 7024]
+        assert lengths == [128, 128, 128, 128]
+    else:
+        grouped.assert_called_once_with([1, 2], [3, 4])
+        assert src == [1256, 1512, 2128]
+        assert dst == [5768, 6024, 6384]
+        assert lengths == [128, 128, 256]
+
+
+@pytest.mark.parametrize(
+    "local,remote,expected",
+    [
+        ([], [], []),
+        ([7], [9], [(7, 9, 1)]),
+        ([1, 2, 3], [7, 8, 9], [(1, 7, 3)]),
+        ([1, 2, 3], [7, 9, 10], [(1, 7, 1), (2, 9, 2)]),
+        ([1, 3, 4], [7, 8, 9], [(1, 7, 1), (3, 8, 2)]),
+        ([4, 4, 3], [9, 9, 8], [(4, 9, 1), (4, 9, 1), (3, 8, 1)]),
+    ],
+)
+def test_paired_runs_preserve_order(local, remote, expected):
+    assert MooncakePullRecvingThread._group_concurrent_contiguous_blocks(local, remote) == expected
+
+
+def test_mismatched_ids_rejected():
+    with pytest.raises(ValueError, match="counts differ"):
+        MooncakePullRecvingThread._group_concurrent_contiguous_blocks([1], [])
+
+
+@pytest.mark.parametrize("coalesce", [False, True])
+def test_address_ranges_preserve_each_requested_byte(coalesce):
+    rng = random.Random(20261104)
+    for _ in range(100):
+        local = []
+        remote = []
+        for _ in range(rng.randrange(25)):
+            local.append((local[-1] if local else 0) + rng.choice([1, 1, 3]))
+            remote.append((remote[-1] if remote else 0) + rng.choice([1, 1, 5]))
+        length = rng.randrange(1, 17)
+        local_stride = length if coalesce else length * 3
+        remote_stride = length if coalesce else length * 5
+        src, dst, lengths = [], [], []
+        MooncakePullRecvingThread._append_block_transfer_addresses(
+            local,
+            remote,
+            MooncakePullRecvingThread._group_concurrent_contiguous_blocks(local, remote) if coalesce else None,
+            1000,
+            9000,
+            local_stride,
+            remote_stride,
+            length,
+            src,
+            dst,
+            lengths,
+            local_inner_offset=7,
+            remote_inner_offset=11,
+        )
+        actual = [(s + offset, d + offset) for s, d, size in zip(src, dst, lengths) for offset in range(size)]
+        expected = [
+            (1007 + local_id * local_stride + offset, 9011 + remote_id * remote_stride + offset)
+            for local_id, remote_id in zip(local, remote)
+            for offset in range(length)
+        ]
+        assert actual == expected
+
+
+def test_nonpositive_length_does_not_append():
+    for length in [0, -1]:
+        src, dst, lengths = [], [], []
+        MooncakePullRecvingThread._append_block_transfer_addresses(
+            [1], [2], None, 0, 0, 8, 8, length, src, dst, lengths
+        )
+        assert (src, dst, lengths) == ([], [], [])
