@@ -384,6 +384,17 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 continue
             decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
             decode_metadata.actual_seq_lengths_q = query_lens_list
+            if self.attn_architecture == "GQA" and getattr(metadata, "seq_lens_list", None) is not None:
+                # The generic builder can append a synthetic request for the
+                # target's padded token extent. Draft FULL graphs already have
+                # uniform padded request slots: keep Q, KV and block-table
+                # rows at the same captured extent when updating FIA tasks.
+                if len(metadata.seq_lens_list) > num_reqs_padded:
+                    metadata.seq_lens_list = metadata.seq_lens_list[:num_reqs_padded]
+                    for name in ("seq_lens", "seq_lens_cpu", "seq_lens_gpu", "block_tables"):
+                        value = getattr(metadata, name, None)
+                        if value is not None:
+                            setattr(metadata, name, value[:num_reqs_padded])
         return attn_metadata
 
     @torch.inference_mode()
