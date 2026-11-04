@@ -94,10 +94,7 @@ def _normalize_legacy_qwen3_dspark_config(
             hf_config, transformers_mtp_overrides
         )
     # #63205 renames this legacy architecture before returning to our hook.
-    legacy_qwen3_dspark = (
-        hf_config.model_type == "qwen3"
-        and "DSparkDraftModel" in (hf_config.architectures or ())
-    )
+    legacy_qwen3_dspark = hf_config.model_type == "qwen3" and "DSparkDraftModel" in (hf_config.architectures or ())
     hf_config = _orig_hf_config_override(hf_config)
     _normalize_kimi_dflash_rope(hf_config)
     if legacy_qwen3_dspark:
