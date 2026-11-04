@@ -69,6 +69,36 @@ def test_main_qkv_projection_falls_back_when_fused_abi_is_ineligible(
     fallback.assert_called_once_with(qkv, positions)
 
 
+def test_main_qkv_projection_falls_back_when_fused_abi_is_ineligible(
+    monkeypatch,
+) -> None:
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.layer_name = "model.layers.0.self_attn.attn"
+    monkeypatch.setattr(
+        layer,
+        "_main_fused_norm_rope_eligible",
+        Mock(return_value=False),
+    )
+    expected = (
+        torch.empty(1),
+        torch.empty(1),
+        torch.empty(1),
+        torch.empty(1),
+    )
+    fallback = Mock(return_value=expected)
+    monkeypatch.setattr(
+        qsa.upstream_qsa.Qwen4ExpQSAAttention,
+        "_project_qkv_gate",
+        fallback,
+    )
+    qkv = torch.empty((2, 8))
+    positions = torch.arange(2)
+
+    assert layer._project_qkv_gate(qkv, positions) is expected
+    fallback.assert_called_once_with(qkv, positions)
+
+
 def test_main_falls_back_when_fused_projection_abi_is_not_satisfied(monkeypatch) -> None:
     upstream_projection = Mock(return_value=("q", "k", "v", "gate"))
     monkeypatch.setattr(
