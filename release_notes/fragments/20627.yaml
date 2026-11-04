@@ -1,4 +1,4 @@
 pr: 20627
 entries:
   - category: dependency
-    text: Updated vLLM release compatibility and Dockerfile defaults to v0.33.0 while retaining support for the verified vLLM main baseline.
+    text: Updated vLLM release compatibility and Dockerfile defaults to v0.33.0 and advanced the verified vLLM main baseline with matching graph, speculative decoding, weight-loading, and KV offload compatibility.
