@@ -313,6 +313,40 @@ class BaseDeviceAdaptor:
         )
 
     @staticmethod
+    def npu_all_gather_base_mm(
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        hcom: str,
+        world_size: int,
+        *,
+        bias: torch.Tensor | None = None,
+        x1_scale: torch.Tensor | None = None,
+        x2_scale: torch.Tensor | None = None,
+        gather_index: int = 0,
+        gather_output: bool = False,
+        comm_turn: int = 0,
+        output_dtype: torch.dtype | None = None,
+        comm_mode: str = "aiv",
+    ):
+        # The operator also returns the gathered x1 when gather_output=True;
+        # no current caller needs it, so only the matmul result is returned.
+        output, _ = torch_npu.npu_all_gather_base_mm(
+            x1,
+            x2,
+            hcom,
+            world_size,
+            bias=bias,
+            x1_scale=x1_scale,
+            x2_scale=x2_scale,
+            gather_index=gather_index,
+            gather_output=gather_output,
+            comm_turn=comm_turn,
+            output_dtype=output_dtype,
+            comm_mode=comm_mode,
+        )
+        return output
+
+    @staticmethod
     def npu_dynamic_quant(
         hidden_states: torch.Tensor,
         dynamic_scale: torch.Tensor | None = None,
@@ -1271,6 +1305,44 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             output_dtype=output_dtype,
             comm_mode=comm_mode,
         )
+
+    @staticmethod
+    def npu_all_gather_base_mm(
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        hcom: str,
+        world_size: int,
+        *,
+        bias: torch.Tensor | None = None,
+        x1_scale: torch.Tensor | None = None,
+        x2_scale: torch.Tensor | None = None,
+        gather_index: int = 0,
+        gather_output: bool = False,
+        comm_turn: int = 0,
+        output_dtype: torch.dtype | None = None,
+        comm_mode: str = "ai_cpu",
+    ):
+        expansion_mode = os.environ.get("HCCL_OP_EXPANSION_MODE")
+        if expansion_mode == "CCU_SCHED":
+            comm_mode = "ccu"
+
+        # The operator also returns the gathered x1 when gather_output=True;
+        # no current caller needs it, so only the matmul result is returned.
+        output, _ = torch_npu.npu_all_gather_base_mm(
+            x1,
+            x2,
+            hcom,
+            world_size,
+            bias=bias,
+            x1_scale=x1_scale,
+            x2_scale=x2_scale,
+            gather_index=gather_index,
+            gather_output=gather_output,
+            comm_turn=comm_turn,
+            output_dtype=output_dtype,
+            comm_mode=comm_mode,
+        )
+        return output
 
     @staticmethod
     def npu_dynamic_quant(

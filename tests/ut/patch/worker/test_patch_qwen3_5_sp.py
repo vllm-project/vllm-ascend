@@ -6,7 +6,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
+from vllm_ascend.ops import linear_op
 from vllm_ascend.patch.worker import patch_qwen3_5
 from vllm_ascend.utils import enable_dense_sp, enable_sp
 
@@ -98,8 +100,18 @@ def _make_layer(layer_type: str = "full_attention", mlp=None, upstream_sp: bool 
     if layer_type == "linear_attention":
         layer.linear_attn = SimpleNamespace(out_proj=SimpleNamespace(reduce_results=True))
     else:
-        layer.self_attn = SimpleNamespace(o_proj=SimpleNamespace(reduce_results=True))
-    layer.mlp = mlp if mlp is not None else SimpleNamespace(down_proj=SimpleNamespace(reduce_results=True))
+        layer.self_attn = SimpleNamespace(
+            qkv_proj=SimpleNamespace(),
+            o_proj=SimpleNamespace(reduce_results=True),
+        )
+    layer.mlp = (
+        mlp
+        if mlp is not None
+        else SimpleNamespace(
+            gate_up_proj=SimpleNamespace(),
+            down_proj=SimpleNamespace(reduce_results=True),
+        )
+    )
     return layer
 
 
@@ -368,3 +380,433 @@ class TestPatchInstallation:
             patch_qwen3_5.Qwen3_5DecoderLayer.__init__(layer, config, "full_attention", prefix="model.layers.0")
 
         assert calls == [(config, "full_attention", "model.layers.0")]
+
+
+class _FakeDeviceOperator:
+    """Single-process stand-in for the fused matmul-collective kernels.
+
+    The fakes delegate to the module-level ``sp_all_gather`` /
+    ``sp_reduce_scatter`` that each test patches, so the fused path and the
+    fallback path compute from the same staged collectives and stay directly
+    comparable.
+    """
+
+    calls: list = []
+
+    @staticmethod
+    def npu_all_gather_base_mm(x1, x2, hcom, world_size, *, bias=None, **kwargs):
+        _FakeDeviceOperator.calls.append(("all_gather_mm", x1, x2, world_size, bias))
+        output = patch_qwen3_5.sp_all_gather(x1) @ x2
+        return output if bias is None else output + bias
+
+    @staticmethod
+    def npu_mm_reduce_scatter_base(x1, x2, hcom, world_size, *, reduce_op="sum", **kwargs):
+        _FakeDeviceOperator.calls.append(("mm_reduce_scatter", x1, x2, world_size))
+        return patch_qwen3_5.sp_reduce_scatter(x1 @ x2)
+
+
+class _FakeQuantMethod:
+    """Plain GEMM stand-in for ``quant_method.apply``."""
+
+    def __init__(self, weight: torch.Tensor):
+        self.weight = weight
+
+    def apply(self, layer, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        output = x @ self.weight.t()
+        return output if bias is None else output + bias
+
+
+def _make_fake_tp_group(world_size: int = 2) -> MagicMock:
+    group = MagicMock()
+    group.world_size = world_size
+    group.rank_in_group = 0
+    group.device_group._get_backend.return_value.get_hccl_comm_name.return_value = "hcom-0"
+    return group
+
+
+def _make_column_proj(weight: torch.Tensor, *, bias: torch.Tensor | None = None, quant_method=None) -> SimpleNamespace:
+    return SimpleNamespace(
+        prefix="model.layers.0.self_attn.qkv_proj",
+        bias=bias,
+        skip_bias_add=False,
+        return_bias=True,
+        quant_method=quant_method if quant_method is not None else _FakeQuantMethod(weight),
+        weight=weight,
+        gather_output=False,
+        custom_op=None,
+    )
+
+
+def _make_row_proj(weight: torch.Tensor, *, bias: torch.Tensor | None = None, quant_method=None) -> SimpleNamespace:
+    return SimpleNamespace(
+        prefix="model.layers.0.self_attn.o_proj",
+        bias=bias,
+        skip_bias_add=False,
+        return_bias=True,
+        quant_method=quant_method if quant_method is not None else _FakeQuantMethod(weight),
+        weight=weight,
+        input_is_parallel=True,
+        reduce_results=False,
+        input_size_per_partition=weight.shape[1],
+        custom_op=None,
+    )
+
+
+class TestDenseSpFusedColumnOp:
+    @pytest.fixture(autouse=True)
+    def _fused_env(self, monkeypatch: pytest.MonkeyPatch):
+        _FakeDeviceOperator.calls = []
+        monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: _make_fake_tp_group(2))
+        monkeypatch.setattr(patch_qwen3_5, "DeviceOperator", _FakeDeviceOperator)
+        monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_DTYPES", (torch.float64,))
+        monkeypatch.setattr(patch_qwen3_5, "is_forward_context_available", lambda: True)
+        monkeypatch.setattr(
+            patch_qwen3_5,
+            "get_forward_context",
+            lambda: SimpleNamespace(attn_metadata=SimpleNamespace(num_prefills=1, num_decodes=0)),
+        )
+
+    def test_pure_prefill_fuses_all_gather_into_gemm(self, monkeypatch):
+        gen = torch.Generator().manual_seed(0)
+        weight = torch.randn(5, 4, generator=gen, dtype=torch.float64)
+        gathered = torch.randn(6, 4, generator=gen, dtype=torch.float64)
+        shard = torch.randn(3, 4, generator=gen, dtype=torch.float64)
+        monkeypatch.setattr(patch_qwen3_5, "sp_all_gather", lambda x: gathered)
+
+        op = patch_qwen3_5.DenseSpAllGatherMmOp(_make_column_proj(weight))
+        output, output_bias = op.apply(shard)
+
+        assert [call[0] for call in _FakeDeviceOperator.calls] == ["all_gather_mm"]
+        _, x1, x2, world_size, bias = _FakeDeviceOperator.calls[0]
+        assert x1 is shard
+        assert torch.equal(x2, weight.t())
+        assert world_size == 2
+        assert bias is None
+        # The fused op returns the padded full-token rows; the caller trims.
+        assert output.shape[0] == gathered.shape[0]
+        torch.testing.assert_close(output, gathered @ weight.t())
+        assert output_bias is None
+
+    def test_bias_is_passed_into_the_fused_gemm(self, monkeypatch):
+        gen = torch.Generator().manual_seed(1)
+        weight = torch.randn(5, 4, generator=gen, dtype=torch.float64)
+        bias = torch.randn(5, generator=gen, dtype=torch.float64)
+        gathered = torch.randn(6, 4, generator=gen, dtype=torch.float64)
+        monkeypatch.setattr(patch_qwen3_5, "sp_all_gather", lambda x: gathered)
+
+        op = patch_qwen3_5.DenseSpAllGatherMmOp(_make_column_proj(weight, bias=bias))
+        output, output_bias = op.apply(torch.randn(3, 4, generator=gen, dtype=torch.float64))
+
+        torch.testing.assert_close(output, gathered @ weight.t() + bias)
+        assert output_bias is None
+
+    def test_non_prefill_falls_back_to_gather_plus_gemm(self, monkeypatch):
+        gen = torch.Generator().manual_seed(2)
+        weight = torch.randn(5, 4, generator=gen, dtype=torch.float64)
+        gathered = torch.randn(6, 4, generator=gen, dtype=torch.float64)
+        monkeypatch.setattr(patch_qwen3_5, "sp_all_gather", lambda x: gathered)
+        monkeypatch.setattr(patch_qwen3_5, "is_forward_context_available", lambda: False)
+
+        op = patch_qwen3_5.DenseSpAllGatherMmOp(_make_column_proj(weight))
+        output, _ = op.apply(torch.randn(3, 4, generator=gen, dtype=torch.float64))
+
+        assert _FakeDeviceOperator.calls == []
+        torch.testing.assert_close(output, gathered @ weight.t())
+
+
+class TestDenseSpFusedRowOp:
+    @pytest.fixture(autouse=True)
+    def _fused_env(self, monkeypatch: pytest.MonkeyPatch):
+        _FakeDeviceOperator.calls = []
+        fake_group = _make_fake_tp_group(2)
+        monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: fake_group)
+        # CustomLinearOp.tp_rank resolves the group from linear_op's module.
+        monkeypatch.setattr(linear_op, "get_tp_group", lambda: fake_group)
+        monkeypatch.setattr(patch_qwen3_5, "DeviceOperator", _FakeDeviceOperator)
+        monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_DTYPES", (torch.float64,))
+        monkeypatch.setattr(patch_qwen3_5, "is_forward_context_available", lambda: True)
+        monkeypatch.setattr(
+            patch_qwen3_5,
+            "get_forward_context",
+            lambda: SimpleNamespace(attn_metadata=SimpleNamespace(num_prefills=1, num_decodes=0)),
+        )
+        monkeypatch.setattr(patch_qwen3_5, "sp_reduce_scatter", lambda x: x[: x.shape[0] // 2])
+
+    def test_pure_prefill_zero_pads_then_fuses(self, monkeypatch):
+        gen = torch.Generator().manual_seed(3)
+        weight = torch.randn(4, 6, generator=gen, dtype=torch.float64)
+        partial_input = torch.randn(5, 6, generator=gen, dtype=torch.float64)  # 5 % tp(2) != 0
+
+        op = patch_qwen3_5.DenseSpMmReduceScatterOp(_make_row_proj(weight))
+        output, output_bias = op.apply(partial_input)
+
+        assert [call[0] for call in _FakeDeviceOperator.calls] == ["mm_reduce_scatter"]
+        _, x1, x2, world_size = _FakeDeviceOperator.calls[0]
+        assert x1.shape[0] == 6  # zero-padded to the TP multiple
+        assert torch.equal(x1[5:], torch.zeros(1, 6, dtype=torch.float64))
+        assert torch.equal(x2, weight.t())
+        assert world_size == 2
+        assert output.shape[0] == 3
+        # The zero-padded row contributes nothing: rows 0..2 of the padded
+        # GEMM equal rows 0..2 of the unpadded one.
+        torch.testing.assert_close(output, (partial_input @ weight.t())[:3])
+        assert output_bias is None
+
+    def test_aligned_input_fused_matches_fallback(self, monkeypatch):
+        gen = torch.Generator().manual_seed(4)
+        weight = torch.randn(4, 6, generator=gen, dtype=torch.float64)
+        x = torch.randn(6, 6, generator=gen, dtype=torch.float64)
+
+        fused_op = patch_qwen3_5.DenseSpMmReduceScatterOp(_make_row_proj(weight))
+        fused, _ = fused_op.apply(x)
+
+        monkeypatch.setattr(patch_qwen3_5, "is_forward_context_available", lambda: False)
+        fallback, _ = fused_op.apply(x)
+
+        torch.testing.assert_close(fused, fallback)
+        # Fused once, fallback once.
+        assert [call[0] for call in _FakeDeviceOperator.calls] == ["mm_reduce_scatter"]
+
+    def test_bias_lands_once_on_the_local_shard(self, monkeypatch):
+        gen = torch.Generator().manual_seed(5)
+        weight = torch.randn(4, 6, generator=gen, dtype=torch.float64)
+        bias = torch.randn(4, generator=gen, dtype=torch.float64)
+        x = torch.randn(6, 6, generator=gen, dtype=torch.float64)
+
+        op = patch_qwen3_5.DenseSpMmReduceScatterOp(_make_row_proj(weight, bias=bias))
+        output, output_bias = op.apply(x)
+
+        torch.testing.assert_close(output, (x @ weight.t())[:3] + bias)
+        assert output_bias is None
+
+    def test_non_prefill_falls_back_to_partial_gemm_plus_scatter(self, monkeypatch):
+        gen = torch.Generator().manual_seed(6)
+        weight = torch.randn(4, 6, generator=gen, dtype=torch.float64)
+        x = torch.randn(6, 6, generator=gen, dtype=torch.float64)
+        monkeypatch.setattr(patch_qwen3_5, "is_forward_context_available", lambda: False)
+
+        op = patch_qwen3_5.DenseSpMmReduceScatterOp(_make_row_proj(weight))
+        output, _ = op.apply(x)
+
+        assert _FakeDeviceOperator.calls == []
+        torch.testing.assert_close(output, (x @ weight.t())[:3])
+
+
+class TestInstallDenseSpFusedOps:
+    @pytest.fixture(autouse=True)
+    def _install_env(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: _make_fake_tp_group(2))
+        monkeypatch.setattr(patch_qwen3_5.torch_npu, "npu_all_gather_base_mm", lambda *a, **k: None, raising=False)
+        monkeypatch.setattr(patch_qwen3_5.torch_npu, "npu_mm_reduce_scatter_base", lambda *a, **k: None, raising=False)
+
+    def _eligible_proj(self, **overrides):
+        weight = torch.randn(4, 6, dtype=torch.bfloat16)
+        kwargs = {"quant_method": UnquantizedLinearMethod()}
+        kwargs.update(overrides)
+        return _make_row_proj(weight, **kwargs)
+
+    def test_installs_fused_row_op_on_eligible_projection(self):
+        proj = self._eligible_proj()
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, patch_qwen3_5.DenseSpMmReduceScatterOp) is True
+        assert isinstance(proj.custom_op, patch_qwen3_5.DenseSpMmReduceScatterOp)
+
+    def test_skips_for_unsupported_tp_size(self, monkeypatch):
+        monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: _make_fake_tp_group(16))
+        proj = self._eligible_proj()
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, patch_qwen3_5.DenseSpMmReduceScatterOp) is False
+        assert proj.custom_op is None
+
+    def test_skips_for_quantized_projection(self):
+        proj = self._eligible_proj(quant_method=_FakeQuantMethod(torch.randn(4, 6, dtype=torch.bfloat16)))
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, patch_qwen3_5.DenseSpMmReduceScatterOp) is False
+        assert proj.custom_op is None
+
+    def test_skips_when_a_custom_op_is_already_installed(self):
+        proj = self._eligible_proj()
+        proj.custom_op = object()
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, patch_qwen3_5.DenseSpMmReduceScatterOp) is False
+
+    def test_skips_column_projection_with_gather_output(self):
+        weight = torch.randn(4, 6, dtype=torch.bfloat16)
+        proj = _make_column_proj(weight, quant_method=UnquantizedLinearMethod())
+        proj.gather_output = True
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, patch_qwen3_5.DenseSpAllGatherMmOp) is False
+
+    def test_skips_when_the_fused_kernel_is_unavailable(self, monkeypatch):
+        monkeypatch.delattr(patch_qwen3_5.torch_npu, "npu_mm_reduce_scatter_base", raising=False)
+        proj = self._eligible_proj()
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, patch_qwen3_5.DenseSpMmReduceScatterOp) is False
+
+
+class TestDenseSpLayerInitFusedOps:
+    @pytest.fixture(autouse=True)
+    def _init_env(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: _make_fake_tp_group(2))
+        monkeypatch.setattr(patch_qwen3_5, "enable_dense_sp", return_value=True)
+        monkeypatch.setattr(patch_qwen3_5.torch_npu, "npu_all_gather_base_mm", lambda *a, **k: None, raising=False)
+        monkeypatch.setattr(patch_qwen3_5.torch_npu, "npu_mm_reduce_scatter_base", lambda *a, **k: None, raising=False)
+
+    def _make_layer_with_fusable_projections(self, layer_type: str):
+        layer = _make_layer(layer_type)
+        quant_method = UnquantizedLinearMethod()
+        if layer_type == "linear_attention":
+            layer.linear_attn.out_proj.weight = torch.randn(4, 6, dtype=torch.bfloat16)
+            layer.linear_attn.out_proj.quant_method = quant_method
+        else:
+            layer.self_attn.qkv_proj.weight = torch.randn(6, 4, dtype=torch.bfloat16)
+            layer.self_attn.qkv_proj.quant_method = quant_method
+            layer.self_attn.o_proj.weight = torch.randn(4, 6, dtype=torch.bfloat16)
+            layer.self_attn.o_proj.quant_method = quant_method
+        layer.mlp.gate_up_proj.weight = torch.randn(6, 4, dtype=torch.bfloat16)
+        layer.mlp.gate_up_proj.quant_method = quant_method
+        layer.mlp.down_proj.weight = torch.randn(4, 6, dtype=torch.bfloat16)
+        layer.mlp.down_proj.quant_method = quant_method
+        return layer
+
+    def test_full_attention_installs_all_four_fused_ops(self):
+        layer = self._make_layer_with_fusable_projections("full_attention")
+        _run_layer_init(layer, _make_vllm_config(), "full_attention", dense_sp=True)
+
+        assert isinstance(layer.self_attn.qkv_proj.custom_op, patch_qwen3_5.DenseSpAllGatherMmOp)
+        assert isinstance(layer.self_attn.o_proj.custom_op, patch_qwen3_5.DenseSpMmReduceScatterOp)
+        assert isinstance(layer.mlp.gate_up_proj.custom_op, patch_qwen3_5.DenseSpAllGatherMmOp)
+        assert isinstance(layer.mlp.down_proj.custom_op, patch_qwen3_5.DenseSpMmReduceScatterOp)
+
+    def test_gdn_installs_only_the_output_projection(self):
+        layer = self._make_layer_with_fusable_projections("linear_attention")
+        _run_layer_init(layer, _make_vllm_config(), "linear_attention", dense_sp=True)
+
+        assert isinstance(layer.linear_attn.out_proj.custom_op, patch_qwen3_5.DenseSpMmReduceScatterOp)
+        # The GDN in-projections keep the decoder-level gather.
+        assert not hasattr(layer.linear_attn, "in_proj_qkvz")
+
+    def test_no_fused_ops_without_dense_sp(self):
+        layer = self._make_layer_with_fusable_projections("full_attention")
+        _run_layer_init(layer, _make_vllm_config(), "full_attention", dense_sp=False)
+
+        assert layer.self_attn.qkv_proj.custom_op is None
+        assert layer.self_attn.o_proj.custom_op is None
+        assert layer.mlp.gate_up_proj.custom_op is None
+        assert layer.mlp.down_proj.custom_op is None
+
+    def test_half_installed_mlp_pair_is_unwound(self):
+        layer = self._make_layer_with_fusable_projections("full_attention")
+        # Make down_proj ineligible (an already-installed custom op) while
+        # gate_up_proj stays eligible.
+        sentinel = object()
+        layer.mlp.down_proj.custom_op = sentinel
+        _run_layer_init(layer, _make_vllm_config(), "full_attention", dense_sp=True)
+
+        assert layer.mlp.gate_up_proj.custom_op is None
+        assert layer.mlp.down_proj.custom_op is sentinel
+
+
+class TestFusedDecoderFlow:
+    """With fused boundary projections the decoder-level collectives vanish."""
+
+    @pytest.fixture(autouse=True)
+    def _fused_env(self, monkeypatch: pytest.MonkeyPatch):
+        _FakeDeviceOperator.calls = []
+        fake_group = _make_fake_tp_group(2)
+        monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: fake_group)
+        monkeypatch.setattr(linear_op, "get_tp_group", lambda: fake_group)
+        monkeypatch.setattr(patch_qwen3_5, "DeviceOperator", _FakeDeviceOperator)
+        monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_DTYPES", (torch.float64,))
+        monkeypatch.setattr(patch_qwen3_5, "is_forward_context_available", lambda: True)
+        monkeypatch.setattr(
+            patch_qwen3_5,
+            "get_forward_context",
+            lambda: SimpleNamespace(attn_metadata=SimpleNamespace(num_prefills=1, num_decodes=0)),
+        )
+
+    def _fused_column(self, out_features: int, in_features: int) -> SimpleNamespace:
+        proj = _make_column_proj(torch.randn(out_features, in_features, dtype=torch.float64))
+        proj.custom_op = patch_qwen3_5.DenseSpAllGatherMmOp(proj)
+        return proj
+
+    def _fused_row(self, out_features: int, in_features: int) -> SimpleNamespace:
+        proj = _make_row_proj(torch.randn(out_features, in_features, dtype=torch.float64))
+        proj.custom_op = patch_qwen3_5.DenseSpMmReduceScatterOp(proj)
+        return proj
+
+    def test_all_fused_layer_skips_decoder_collectives(self):
+        gather_rows = []
+        scatter_rows = []
+
+        layer = _make_forward_layer("full_attention", use_sp=True)
+        # self_attn is a MagicMock, so the decoder only inspects its qkv_proj
+        # / o_proj custom ops; the MLP projections run for real below. The
+        # float64 return keeps the fused dtype guard satisfied.
+        layer.self_attn = MagicMock(return_value=torch.zeros(4, 2, dtype=torch.float64))
+        layer.self_attn.qkv_proj = self._fused_column(6, 4)
+        layer.self_attn.o_proj = self._fused_row(2, 6)
+        layer.mlp.gate_up_proj = self._fused_column(6, 2)
+        layer.mlp.down_proj = self._fused_row(2, 6)
+
+        def _gather(x):
+            gather_rows.append(x.shape[0])
+            return x.repeat(2, 1)
+
+        def _scatter(x):
+            scatter_rows.append(x.shape[0])
+            return x[: x.shape[0] // 2]
+
+        with (
+            patch.object(patch_qwen3_5, "sp_all_gather", _gather),
+            patch.object(patch_qwen3_5, "sp_reduce_scatter", _scatter),
+        ):
+            output, residual = layer.forward(
+                hidden_states=torch.zeros(4, 2, dtype=torch.float64),
+                residual=torch.zeros(4, 2, dtype=torch.float64),
+                positions=torch.zeros(4, dtype=torch.long),
+            )
+
+        # The unfused layout would run one decoder-level gather plus one
+        # MLP-helper gather (and the same for the scatters); with the fused
+        # ops owning the boundary collectives only the kernels' staged
+        # collectives run: the MLP's gather over the 4-row shard and its
+        # scatter over the 8 padded rows.
+        assert gather_rows == [4]
+        assert scatter_rows == [8]
+        assert [call[0] for call in _FakeDeviceOperator.calls] == ["all_gather_mm", "mm_reduce_scatter"]
+        assert output.shape == (4, 2)
+        assert residual.shape == (4, 2)
+
+    def test_attention_trims_padded_rows_behind_fused_qkv(self):
+        class _Rotary:
+            def __call__(self, positions, q, k):
+                return q, k
+
+        attention = SimpleNamespace(
+            qkv_proj=self._fused_column(8, 8),
+            config=SimpleNamespace(model_type="qwen3_5_text", rms_norm_eps=1e-6),
+            attn_output_gate=False,
+            q_size=4,
+            kv_size=2,
+            num_heads=2,
+            num_kv_heads=1,
+            head_dim=2,
+            q_norm=MagicMock(side_effect=lambda x: x),
+            k_norm=MagicMock(side_effect=lambda x: x),
+            rotary_emb=_Rotary(),
+            attn=MagicMock(return_value=torch.zeros(5, 4, dtype=torch.float64)),
+            o_proj=MagicMock(return_value=(torch.zeros(5, 4, dtype=torch.float64), None)),
+        )
+
+        # 5 real tokens, TP=2: the fused gather produces 6 padded rows and
+        # the patched attention must trim back to 5 before RoPE.
+        with (
+            patch.object(patch_qwen3_5, "sp_all_gather", lambda x: x.repeat(2, 1)),
+            patch.object(patch_qwen3_5, "sp_reduce_scatter", lambda x: x[: x.shape[0] // 2]),
+        ):
+            out = patch_qwen3_5.AscendQwen3NextAttention.forward(
+                attention,
+                positions=torch.zeros(5, dtype=torch.long),
+                hidden_states=torch.randn(3, 8, dtype=torch.float64),
+            )
+
+        q, k, v = attention.attn.call_args.args
+        assert q.shape[0] == 5
+        assert k.shape[0] == 5
+        assert v.shape[0] == 5
+        assert out.shape[0] == 5
