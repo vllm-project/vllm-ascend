@@ -72,6 +72,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Route PrefillNoCache attention through the A2/A3 QFA INT8-GQA operator
+    # (cann_ops_transformer quant_flash_attn, quant_mode=12). Prefill steps
+    # with chunked/prefix-hit histories and all decode steps keep the stock
+    # FIA path. Valid values: "0" (default, disabled) or "1" (enabled).
+    "VLLM_ASCEND_QFA_A3_PREFILL": lambda: bool(int(os.getenv("VLLM_ASCEND_QFA_A3_PREFILL", "0"))),
 }
 
 # end-env-vars-definition
