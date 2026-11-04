@@ -1665,12 +1665,10 @@ def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp):
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
     )
     config.cache_config.kv_cache_layout = "LBHNC"
-    bytes_per_block = (
-        kv_cache_utils_patch._ascend_pool_bytes_per_block(groups)
-        if vllm_version_is("0.31.0")
-        else kv_cache_utils_patch._ascend_pool_bytes_per_block(config, groups)
-    )
+    bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(config, groups)
     assert bytes_per_block == target.page_size_bytes + draft.page_size_bytes
+    assert kv_cache_utils_patch._has_ascend_multi_allocation_kv_cache_layout(groups)
+    assert kv_cache_utils_patch._ascend_builder_pool_bytes_per_block(object(), config, groups) == bytes_per_block
     planned = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(config, groups, 11 * bytes_per_block)
     assert planned.num_blocks == 11
     assert planned.kv_cache_groups is groups
