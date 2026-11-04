@@ -72,7 +72,8 @@ Download the selected checkpoint to the same absolute path on every server,
 for example `/data/weights/DeepSeek-V4.1-Flash-1017-w4a8` or
 `/data/weights/DeepSeek-V4.1-Flash-1017-w8a8`. Set `MODEL_PATH` in each serving
 command to that checkpoint directory. The examples below use W4A8; to use
-W8A8, set `MODEL_PATH` to the W8A8 directory instead.
+W8A8, set `MODEL_PATH` to the W8A8 directory instead. For A3 PD deployment,
+also use the W8A8 topology described in Section 5.2.
 
 Use one of the following hardware configurations:
 
@@ -100,17 +101,13 @@ interfaces, and the service ports must not be blocked.
 Select the tab for the target hardware. A2 products and A3 products use
 separate images from the v0.32.0 release branch.
 
-These nightly images are temporary images for v0.32.0rc. Official release
-image addresses will be published when the release is available.
-
 === "A3 series"
 
     An A3 server exposes 16 logical devices. Run this command on every A3
     server.
 
     ```shell
-    # Temporary image for v0.32.0rc; official release image addresses will follow.
-    export IMAGE=quay.io/ascend/vllm-ascend:nightly-releases-v0.32.0rc-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export MODEL_ROOT="/data/weights"
 
     docker pull "$IMAGE"
@@ -155,7 +152,6 @@ image addresses will be published when the release is available.
     An A2 server exposes 8 devices. Run this command on all four A2 servers.
 
     ```shell
-    # Temporary image for v0.32.0rc; official release image addresses will follow.
     export IMAGE=quay.io/ascend/vllm-ascend:nightly-releases-v0.32.0rc
     export MODEL_ROOT="/data/weights"
 
@@ -246,6 +242,7 @@ the selected revision.
         --block-size 128 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --async-scheduling \
+        --swa-bounded-replay \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
             "ascend_compilation_config":{
@@ -255,7 +252,7 @@ the selected revision.
             "enable_cpu_binding":true,
             "enable_fused_mc2":1,
             "enable_dsa_cp":true,
-            "enable_flashcomm1":true,
+            "enable_flashcomm1":false,
             "enable_shared_expert_dp":true
         }'
     ```
@@ -281,7 +278,8 @@ the selected revision.
         Decode path while Prefill remains outside the captured graph.
     - `--safetensors-load-strategy lazy` avoids eagerly materializing the whole
         checkpoint during loading.
-    - `enable_fused_mc2`, `enable_dsa_cp`, `enable_flashcomm1`, and
+    - `--swa-bounded-replay` enables SWA bounded replay.
+    - `enable_fused_mc2`, `enable_dsa_cp`, and
         `enable_shared_expert_dp` enable the A3 MoE and communication optimizations
         used by this configuration. `enable_cpu_binding` pins worker processes to
         CPUs, while `enable_npugraph_ex` enables the enhanced ACL Graph path.
@@ -295,6 +293,9 @@ the selected revision.
     DP16/TP1. Both layouts consume all 16 logical devices on their respective
     servers. Mooncake transfers KV cache from the Prefill engines to the Decode
     engines.
+
+    For W8A8 weights, use Prefill DP4/TP4 and Decode DP8/TP2. Adjust the
+    launcher, connector layouts, and proxy endpoints to match that topology.
 
     #### 5.2.1.1 Prepare the DP Launcher
 
@@ -1839,6 +1840,15 @@ optimal settings. Tune `--max-num-seqs`, `--max-num-batched-tokens`, and
 output length, and concurrency. Keep DP4/TP4 for A3 single-node deployment,
 or Prefill DP4/PCP4/TP1 and Decode DP16/TP1 for A3 PD deployment, until an
 alternative configuration has been validated.
+
+### 9.1 Tool-Assisted Tuning with msmodeling
+
+The msmodeling tool (MindStudio-Modeling) optimizes serving and benchmark
+parameters together, combining measured results with knowledge-base experience
+to determine a better parameter set in one run and push performance toward the
+hardware limit.
+For the complete, step-by-step usage guide please refer to
+**[Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md)**.
 
 ## 10 FAQ
 
