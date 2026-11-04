@@ -1,0 +1,7 @@
+pr: 20910
+entries:
+  - category: bugfix
+    text: >-
+      MLA chunked prefill now packs cached contexts into bounded workspace chunks
+      using upstream vLLM planning and sizing, removing the requirement for
+      workspace to grow with the maximum request count times the KV block size.
