@@ -137,7 +137,7 @@ class MooncakePullRecvingThread(threading.Thread):
         # engine_id -> remote_pp_rank
         # -> [(local_layer_index, remote_layer_index), ...]
         self.remote_layer_index_pairs: SizedDict[str, dict[int, list[tuple[int, int]]]] = SizedDict()
-        self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]]] = queue.Queue()
+        self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]] | None] = queue.Queue()
         self.finished_requests: queue.SimpleQueue[tuple[str, bool]] = queue.SimpleQueue()
         self.invalid_block_ids: set[int] = set()
         self.invalid_block_ids_lock = threading.Lock()
@@ -171,12 +171,23 @@ class MooncakePullRecvingThread(threading.Thread):
             self.invalid_block_ids = set()
         return invalid_block_ids
 
+    def shutdown(self) -> None:
+        """Drain queued receives before releasing the transfer executor."""
+        if self.is_alive():
+            self.request_queue.put(None)
+            self.join()
+        self.executor.shutdown(wait=True)
+
     def run(self) -> None:
         """Consume queued requests and invoke the transfer implementation."""
         torch.npu.set_device(self.device)
         self.ready_event.set()
         while True:
-            remote_engine_id, requests = self.request_queue.get()
+            work = self.request_queue.get()
+            if work is None:
+                self.request_queue.task_done()
+                return
+            remote_engine_id, requests = work
             failed_request_ids: set[str] = set()
             request_endpoints = {(request.remote_host, request.remote_port) for request in requests.values()}
             try:
@@ -1599,6 +1610,11 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
                 raise RuntimeError("Timed out starting Mooncake pull receiving thread")
             if not self._recving_thread.is_alive():
                 raise RuntimeError("Mooncake pull receiving thread failed to start")
+
+    def shutdown(self) -> None:
+        if self._recving_thread is not None:
+            self._recving_thread.shutdown()
+            self._recving_thread = None
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         """Start the pull operations described by scheduler metadata."""
