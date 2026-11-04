@@ -23,7 +23,10 @@ import torch
 import vllm
 from torch.distributed import Backend
 from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
-from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
+from vllm.distributed.utils import (
+    get_cpu_distributed_timeout_or_none,
+    get_distributed_timeout_or_none,
+)
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry, make_hccl_pg_key
@@ -157,6 +160,29 @@ class GroupCoordinatorPatch(GroupCoordinator):
             except Exception:
                 logger.exception("Failed to clean up partially initialized GroupCoordinatorPatch")
             raise
+
+    def make_sibling_device_group(self, group_desc: str | None = None) -> torch.distributed.ProcessGroup:
+        """Create an independent group with the coordinator's HCCL buffer policy."""
+        if self.backend != "hccl":
+            return super().make_sibling_device_group(group_desc)
+
+        device_timeout = get_distributed_timeout_or_none()
+        sibling = None
+        # Every world rank must create all groups in the same order.
+        for ranks in self.group_ranks:
+            # Do not use the reuse registry: a sibling must remain independent
+            # of the PP P2P group even when ranks and options match.
+            pg = torch.distributed.new_group(
+                ranks,
+                backend=self.torch_distributed_backend,
+                pg_options=create_hccl_pg_options(self.group_name),
+                group_desc=group_desc,
+                timeout=device_timeout,
+            )
+            if self.rank in ranks:
+                sibling = pg
+        assert sibling is not None
+        return sibling
 
     def _init_device_groups(self, create_cpu_group: bool) -> None:
         reuse_domain = _resolve_reuse_domain(self.group_name)

@@ -761,6 +761,8 @@ def test_load_model_joins_warmups_when_weight_loading_fails():
 
 @pytest.mark.parametrize("with_draft", [False, True])
 def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with_draft):
+    # This CPU fixture also runs on NPU hosts, where the real cast rejects CPU tensors.
+    monkeypatch.setattr("vllm_ascend.attention.mla_v1.torch_npu.npu_format_cast", lambda weight, _format: weight)
     runner = _make_runner(need_timing=False)
     runner.device = torch.device("cpu")
     runner.load_config = SimpleNamespace(load_format="auto")
@@ -2229,3 +2231,100 @@ def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected,
     runner.num_computed_tokens_event.record.assert_not_called()
     runner.num_computed_tokens_event.synchronize.assert_not_called()
     assert runner.num_computed_tokens_cpu.tolist() == [-99] * 4
+
+
+@pytest.mark.parametrize("is_last_rank", [False, True])
+@pytest.mark.parametrize("sample_len", [1, 8])
+def test_profile_run_warms_pp_group_before_parent_without_changing_handler(is_last_rank, sample_len):
+    runner = _make_runner()
+    runner.use_pp = True
+    runner.is_last_pp_rank = is_last_rank
+    runner.device = torch.device("cpu")
+    runner.max_num_reqs = 4
+    runner.max_num_tokens = 16
+    stream = Mock()
+    handler = SimpleNamespace(
+        broadcast_stream=stream,
+        broadcast_group=object(),
+        last_rank=7,
+        max_sample_len=sample_len,
+        queue=[None, None],
+        req_idx_gen_np=np.zeros(4, dtype=np.int32),
+        sampled_tokens_broadcast=False,
+        broadcast=Mock(),
+        receive=Mock(),
+    )
+    runner.pp_handler = handler
+    queue = list(handler.queue)
+    generations = handler.req_idx_gen_np.copy()
+    events = []
+    active_stream = False
+
+    @contextmanager
+    def stream_context(selected):
+        nonlocal active_stream
+        assert selected is stream
+        active_stream = True
+        try:
+            yield
+        finally:
+            active_stream = False
+
+    def broadcast(tensor, *, src, group):
+        assert active_stream
+        assert src == 7  # Global rank, not a rank relative to the PP group.
+        assert group is handler.broadcast_group
+        events.append((tuple(tensor.shape), tensor.dtype))
+
+    def synchronized():
+        events.append("synchronized")
+
+    def parent_profile(**kwargs):
+        assert not active_stream
+        assert events == [((4, sample_len), torch.int64), ((2, 4), torch.int32), "synchronized"]
+        assert kwargs == {"randomize_inputs": True}
+        assert handler.queue == queue
+        np.testing.assert_array_equal(handler.req_idx_gen_np, generations)
+        assert handler.sampled_tokens_broadcast is False
+
+    stream.synchronize.side_effect = synchronized
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.torch.npu.stream", side_effect=stream_context),
+        patch("vllm_ascend.worker.v2.model_runner.torch.distributed.broadcast", side_effect=broadcast),
+        patch("vllm_ascend.worker.v2.model_runner.get_mc2_tokens_capacity", return_value=None),
+        patch("vllm_ascend.worker.v2.model_runner.override_mrv2_in_profile_run", return_value=nullcontext()),
+        patch.object(GPUModelRunner, "profile_run", side_effect=parent_profile) as parent,
+    ):
+        runner.profile_run(randomize_inputs=True)
+
+    parent.assert_called_once_with(randomize_inputs=True)
+    stream.synchronize.assert_called_once_with()
+    handler.broadcast.assert_not_called()
+    handler.receive.assert_not_called()
+
+
+def test_profile_run_does_not_continue_after_pp_warmup_failure():
+    runner = _make_runner()
+    runner.use_pp = True
+    runner.device = torch.device("cpu")
+    runner.max_num_reqs = 4
+    runner.max_num_tokens = 16
+    runner.pp_handler = SimpleNamespace(
+        broadcast_stream=Mock(),
+        broadcast_group=object(),
+        last_rank=3,
+        max_sample_len=1,
+    )
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.torch.npu.stream", return_value=nullcontext()),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.torch.distributed.broadcast",
+            side_effect=RuntimeError("HCCL warmup failed"),
+        ),
+        patch("vllm_ascend.worker.v2.model_runner.get_mc2_tokens_capacity", return_value=None),
+        patch("vllm_ascend.worker.v2.model_runner.override_mrv2_in_profile_run", return_value=nullcontext()),
+        patch.object(GPUModelRunner, "profile_run") as parent,
+        pytest.raises(RuntimeError, match="HCCL warmup failed"),
+    ):
+        runner.profile_run()
+    parent.assert_not_called()
