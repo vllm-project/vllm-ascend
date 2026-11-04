@@ -28,7 +28,7 @@ from vllm.models.qwen4_exp.common.ops.ple import ple_conv as upstream_ple_conv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.attention.utils import wait_for_kv_layer_from_connector
-from vllm_ascend.ops.triton_ple import ple_conv_decode, ple_conv_prefill
+from vllm_ascend.ops.triton_ple import ple_conv_decode, ple_conv_prefill, ple_conv_spec
 
 
 def _ple_conv_ascend(*args: Any, mode: Literal["decode", "spec", "prefill"], **kwargs: Any) -> None:
@@ -36,6 +36,8 @@ def _ple_conv_ascend(*args: Any, mode: Literal["decode", "spec", "prefill"], **k
         ple_conv_prefill(*args, **kwargs)
     elif mode == "decode":
         ple_conv_decode(*args, **kwargs)
+    elif mode == "spec":
+        ple_conv_spec(*args, **kwargs)
     else:
         upstream_ple_conv(*args, mode=mode, **kwargs)
 

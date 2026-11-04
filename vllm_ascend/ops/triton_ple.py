@@ -4,10 +4,12 @@
 """Ascend-friendly Qwen PLE short convolution."""
 
 import torch
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 PLE_BLOCK_C = 512
+PLE_SPEC_BLOCK_C = 512
 PLE_NUM_WARPS = 8
 
 
@@ -226,6 +228,134 @@ def _ple_conv_decode_kernel(
         )
 
 
+@triton.jit(do_not_specialize=["has_token_map"])
+def _ple_conv_spec_kernel(
+    x_ptr,
+    state_ptr,
+    w_ptr,
+    residual_ptr,
+    outer_residual_ptr,
+    state_idx_ptr,
+    qsl_ptr,
+    num_acc_ptr,
+    token_idx_ptr,
+    has_token_map,
+    state_idx_stride,
+    state_bs,
+    state_ws,
+    state_cs,
+    C: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+    STATE_LEN: tl.constexpr,
+    STATE_WIDTH: tl.constexpr,
+    DILATION: tl.constexpr,
+    KERNEL_SIZE: tl.constexpr,
+    SPEC_QUERY_LEN: tl.constexpr,
+    NULL_STATE_ID: tl.constexpr,
+    FUSE_RESIDUAL: tl.constexpr,
+    launch_pdl: tl.constexpr,
+):
+    """Compute and commit one speculative request per program."""
+    request_idx = tl.program_id(0)
+    channel_offsets = tl.program_id(1) * BLOCK_C + tl.arange(0, BLOCK_C)
+    channel_mask = channel_offsets < C
+
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+
+    query_start = tl.load(qsl_ptr + request_idx)
+    query_end = tl.load(qsl_ptr + request_idx + 1)
+    query_len = (query_end - query_start).to(tl.int32)
+    state_idx = tl.load(state_idx_ptr + request_idx * state_idx_stride).to(tl.int64)
+    state_ok = state_idx != NULL_STATE_ID
+    safe_state_idx = tl.where(state_ok, state_idx, 0)
+    state_base = state_ptr + safe_state_idx * state_bs
+    num_accepted = tl.load(num_acc_ptr + request_idx)
+    state_offset = tl.minimum(tl.maximum(num_accepted - 1, 0), SPEC_QUERY_LEN - 1).to(tl.int32)
+
+    for token_offset in tl.static_range(0, SPEC_QUERY_LEN):
+        token_ok = token_offset < query_len
+        logical_token = query_start + token_offset
+        output_token = tl.load(
+            token_idx_ptr + logical_token,
+            mask=has_token_map & token_ok,
+            other=logical_token,
+        ).to(tl.int64)
+        acc = tl.zeros([BLOCK_C], tl.float32)
+        for tap_idx in tl.static_range(0, KERNEL_SIZE):
+            history_offset = token_offset + DILATION * tap_idx
+            from_state = history_offset <= STATE_LEN - 1
+            if from_state:
+                tap = tl.load(
+                    state_base + (history_offset + state_offset) * state_ws + channel_offsets * state_cs,
+                    mask=channel_mask & state_ok & token_ok,
+                    other=0.0,
+                ).to(tl.float32)
+            else:
+                input_token = query_start + history_offset - STATE_LEN
+                input_token = tl.load(
+                    token_idx_ptr + input_token,
+                    mask=has_token_map & token_ok,
+                    other=input_token,
+                ).to(tl.int64)
+                tap = tl.load(
+                    x_ptr + input_token * C + channel_offsets,
+                    mask=channel_mask & token_ok,
+                    other=0.0,
+                ).to(tl.float32)
+            weight = tl.load(
+                w_ptr + tap_idx * C + channel_offsets,
+                mask=channel_mask,
+                other=0.0,
+            ).to(tl.float32)
+            acc += weight * tap
+
+        _store_ple_conv_output(
+            acc,
+            residual_ptr,
+            outer_residual_ptr,
+            output_token,
+            channel_offsets,
+            channel_mask,
+            token_ok,
+            C,
+            FUSE_RESIDUAL,
+        )
+
+    # All verification rows consumed the old state. Commit the rollback window
+    # once per request and preserve graph-padded state rows.
+    for state_write_idx in tl.static_range(0, STATE_WIDTH):
+        source_offset = 1 + state_write_idx
+        from_state = source_offset <= STATE_LEN - 1
+        do_write = state_write_idx < STATE_LEN + query_len - 1
+        if from_state:
+            value = tl.load(
+                state_base + (state_offset + source_offset) * state_ws + channel_offsets * state_cs,
+                mask=channel_mask & state_ok & do_write,
+                other=0.0,
+            )
+        else:
+            input_token = query_start + source_offset - STATE_LEN
+            input_token = tl.load(
+                token_idx_ptr + input_token,
+                mask=has_token_map & state_ok & do_write,
+                other=input_token,
+            ).to(tl.int64)
+            value = tl.load(
+                x_ptr + input_token * C + channel_offsets,
+                mask=channel_mask & state_ok & do_write,
+                other=0.0,
+            )
+        tl.store(
+            state_base + state_write_idx * state_ws + channel_offsets * state_cs,
+            value,
+            mask=channel_mask & state_ok & do_write,
+        )
+
+    if launch_pdl:
+        tl.extra.cuda.gdc_launch_dependents()
+
+
 # Write back separately so every token reads the old state.
 @triton.jit(do_not_specialize=["has_token_map"])
 def _ple_conv_writeback_kernel(
@@ -426,5 +556,68 @@ def ple_conv_decode(
         HAS_INIT=has_initial_states is not None,
         NULL_STATE_ID=NULL_BLOCK_ID,
         FUSE_RESIDUAL=outer_residual is not None,
+        num_warps=PLE_NUM_WARPS,
+    )
+
+
+def ple_conv_spec(
+    inputs: torch.Tensor,
+    residual: torch.Tensor,
+    conv_state: torch.Tensor,
+    conv_weights: torch.Tensor,
+    state_indices: torch.Tensor,
+    outer_residual: torch.Tensor | None,
+    *,
+    dilation: int,
+    query_start_loc: torch.Tensor | None = None,
+    num_accepted_tokens: torch.Tensor | None = None,
+    spec_query_len: int = 1,
+    token_indices: torch.Tensor | None = None,
+    **_: object,
+) -> None:
+    """Run speculative PLE convolution grouped by request."""
+    if query_start_loc is None or num_accepted_tokens is None:
+        raise ValueError("query_start_loc and num_accepted_tokens are required for spec decode")
+    if spec_query_len < 1:
+        raise ValueError("spec_query_len must be positive")
+
+    _, channels = inputs.shape
+    kernel_size = conv_weights.shape[1]
+    state_len = (kernel_size - 1) * dilation
+    state_width = state_len + spec_query_len - 1
+    if conv_state.shape[1] != channels or conv_state.shape[2] < state_width:
+        raise ValueError(
+            "conv_state must have shape [slots, channels, window], with "
+            f"channels={channels} and window >= {state_width}"
+        )
+
+    num_reqs = state_indices.numel()
+    state_bs, state_cs, state_ws = conv_state.stride()
+    weights_by_tap = conv_weights.transpose(0, 1).contiguous()
+    _ple_conv_spec_kernel[(num_reqs, triton.cdiv(channels, PLE_SPEC_BLOCK_C))](
+        inputs,
+        conv_state,
+        weights_by_tap,
+        residual,
+        outer_residual,
+        state_indices,
+        query_start_loc,
+        num_accepted_tokens,
+        token_indices if token_indices is not None else state_indices,
+        token_indices is not None,
+        state_indices.stride(0),
+        state_bs,
+        state_ws,
+        state_cs,
+        C=channels,
+        BLOCK_C=PLE_SPEC_BLOCK_C,
+        STATE_LEN=state_len,
+        STATE_WIDTH=state_width,
+        DILATION=dilation,
+        KERNEL_SIZE=kernel_size,
+        SPEC_QUERY_LEN=spec_query_len,
+        NULL_STATE_ID=NULL_BLOCK_ID,
+        FUSE_RESIDUAL=outer_residual is not None,
+        launch_pdl=current_platform.is_arch_support_pdl(),
         num_warps=PLE_NUM_WARPS,
     )
