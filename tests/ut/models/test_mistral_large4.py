@@ -222,6 +222,71 @@ def test_a_supported_deployment_is_accepted():
     ml4._reject_unsupported(_vllm_config())
 
 
+def test_fused_mc2_is_not_rejected():
+    """Unlike Muse Spark: no per-route norm needs an apply_gmm2 boundary."""
+    ml4._reject_unsupported(_vllm_config())
+
+
+# ------------------------------------------------------------- MoE layout
+
+
+def _moe_config(enable_ep=False, n_routed_experts=128, moe_intermediate_size=6144):
+    parallel = SimpleNamespace(enable_expert_parallel=enable_ep)
+    hf = SimpleNamespace(
+        n_routed_experts=n_routed_experts,
+        moe_intermediate_size=moe_intermediate_size,
+    )
+    return SimpleNamespace(
+        parallel_config=parallel,
+        model_config=SimpleNamespace(hf_config=hf),
+    )
+
+
+def test_experts_must_divide_across_the_expert_parallel_group(monkeypatch):
+    monkeypatch.setattr(ml4, "get_ep_group", lambda: SimpleNamespace(world_size=5))
+
+    with pytest.raises(ValueError, match="divide evenly"):
+        ml4.validate_moe_parallelism(_moe_config(enable_ep=True))
+
+
+@pytest.mark.parametrize("ep_size", [1, 2, 4, 8, 16])
+def test_a_divisible_expert_parallel_group_is_accepted(monkeypatch, ep_size):
+    monkeypatch.setattr(ml4, "get_ep_group", lambda: SimpleNamespace(world_size=ep_size))
+
+    ml4.validate_moe_parallelism(_moe_config(enable_ep=True))
+
+
+def test_the_expert_group_is_not_consulted_when_expert_parallel_is_off(monkeypatch):
+    """vLLM builds the EP group either way; only the flag shards the experts."""
+
+    def _boom():
+        raise AssertionError("EP group must not be consulted with EP disabled")
+
+    monkeypatch.setattr(ml4, "get_ep_group", _boom)
+
+    ml4.validate_moe_parallelism(_moe_config(enable_ep=False, n_routed_experts=127))
+
+
+def test_the_megamoe_fallback_is_reported_once(caplog):
+    with caplog.at_level("INFO"):
+        ml4.validate_moe_parallelism(_moe_config(moe_intermediate_size=6144))
+
+    assert "grouped-matmul" in caplog.text
+
+
+def test_an_expert_width_inside_the_window_reports_nothing(caplog):
+    with caplog.at_level("INFO"):
+        ml4.validate_moe_parallelism(_moe_config(moe_intermediate_size=2048))
+
+    assert "grouped-matmul" not in caplog.text
+
+
+def test_a_dense_config_is_left_alone(monkeypatch):
+    monkeypatch.setattr(ml4, "get_ep_group", lambda: SimpleNamespace(world_size=7))
+
+    ml4.validate_moe_parallelism(_moe_config(enable_ep=True, n_routed_experts=0))
+
+
 # ------------------------------------------------------------ registration
 
 

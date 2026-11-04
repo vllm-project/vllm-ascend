@@ -49,16 +49,21 @@ from typing import Any
 import torch
 from torch import nn
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_ep_group
+from vllm.logger import init_logger
 from vllm.models.mistral.amd.attention import MistralMLAAttention
 from vllm.models.mistral.mistral_large4.amd.model import (
     MistralLarge4ForCausalLM,
 )
+
+logger = init_logger(__name__)
 
 __all__ = [
     "AscendMistralLarge4ForCausalLM",
     "AscendMistralMLAAttention",
     "AscendSharedKVSlotMappingMixin",
     "adopt_ascend_modules",
+    "validate_moe_parallelism",
 ]
 
 
@@ -217,6 +222,51 @@ def _reject_unsupported(vllm_config: VllmConfig) -> None:
         raise NotImplementedError("Sequence-parallel MoE is not supported for Mistral Large 4 on Ascend.")
 
 
+def validate_moe_parallelism(vllm_config: VllmConfig) -> None:
+    """Check the MoE block against the layout it will actually run under.
+
+    The MoE itself needs no rewiring: vLLM-Ascend overrides ``MoERunner`` and
+    ``RoutedExperts`` in the out-of-tree custom-op registry, so upstream's
+    ``FusedMoEFactory`` already builds the Ascend experts, router and
+    dispatch/combine. Unlike Muse Spark there is no per-route norm to thread
+    through the MLP stage, so ``enable_fused_mc2`` is left alone here: nothing
+    needs an ``apply_gmm2`` boundary to survive.
+
+    What is worth checking up front is the expert count against the
+    expert-parallel group, because the failure otherwise surfaces inside the
+    dispatch as a shape error.
+    """
+    parallel_config = vllm_config.parallel_config
+    hf_config = vllm_config.model_config.hf_config
+    num_experts = getattr(hf_config, "n_routed_experts", None)
+    if not num_experts:
+        return
+
+    # vLLM builds the EP group over every MoE model's ranks either way; only
+    # enable_expert_parallel actually shards the experts across it.
+    if parallel_config.enable_expert_parallel:
+        ep_size = get_ep_group().world_size
+        if num_experts % ep_size:
+            raise ValueError(
+                f"Mistral Large 4 on Ascend needs its {num_experts} experts to "
+                f"divide evenly across the {ep_size}-rank expert-parallel "
+                f"group."
+            )
+
+    # Expert width 6144 is outside the MegaMoe window ([256, 4096] aligned to
+    # 128), so the fused MoE declines and the generic grouped-matmul path runs.
+    # That is correct, only slower, and the warning MegaMoe logs on its own
+    # says nothing about why this model in particular misses it.
+    moe_width = getattr(hf_config, "moe_intermediate_size", None)
+    if moe_width is not None and not (256 <= int(moe_width) <= 4096):
+        logger.info(
+            "Mistral Large 4: expert width %s is outside the MegaMoe window "
+            "[256, 4096], so the routed experts run on the generic "
+            "grouped-matmul path rather than the fused one.",
+            moe_width,
+        )
+
+
 class AscendMistralLarge4ForCausalLM(MistralLarge4ForCausalLM):
     """Mistral Large 4 with the Ascend paths adopted after construction.
 
@@ -226,6 +276,7 @@ class AscendMistralLarge4ForCausalLM(MistralLarge4ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         _reject_unsupported(vllm_config)
+        validate_moe_parallelism(vllm_config)
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         # Upstream fails fast when an unsupported deployment asks for the
         # specialized decode; on Ascend it is never built, since its runtime is
