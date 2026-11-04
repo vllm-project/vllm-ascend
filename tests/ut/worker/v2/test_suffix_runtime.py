@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
+
+from types import SimpleNamespace
+
+import pytest
+from vllm.v1.worker.gpu.spec_decode import speculator as upstream
+
+from vllm_ascend import mrv2_utils
+from vllm_ascend.worker.v2.spec_decode.suffix import validate_suffix_runtime
+
+
+def _with_hooks():
+    return SimpleNamespace(
+        add_request=lambda *args: None,
+        on_requests_finished=lambda *args: None,
+        reset_state=lambda *args: None,
+    )
+
+
+@pytest.mark.parametrize("missing", ["add_request", "on_requests_finished", "reset_state", "config"])
+def test_incomplete_upstream_protocol_is_rejected(monkeypatch, missing):
+    base = _with_hooks()
+    config = SimpleNamespace(suffix_decoding_corpus_tokens=0)
+    if missing == "config":
+        del config.suffix_decoding_corpus_tokens
+    else:
+        delattr(base, missing)
+    monkeypatch.setattr(upstream, "BaseSpeculator", base)
+    with pytest.raises(ValueError, match="requires vLLM #60339"):
+        validate_suffix_runtime(config)
+
+
+def test_complete_upstream_protocol_is_accepted(monkeypatch):
+    monkeypatch.setattr(upstream, "BaseSpeculator", _with_hooks())
+    validate_suffix_runtime(SimpleNamespace(suffix_decoding_corpus_tokens=0))
+
+
+def test_forced_v2_fails_before_runner_construction_on_old_upstream(monkeypatch):
+    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
+    monkeypatch.setattr(upstream, "BaseSpeculator", SimpleNamespace())
+    config = SimpleNamespace(speculative_config=SimpleNamespace(method="suffix"))
+    with pytest.raises(ValueError, match="requires vLLM #60339"):
+        mrv2_utils._validate_v2_model_runner(config)
+
+
+def test_v1_fallback_does_not_require_the_new_protocol(monkeypatch):
+    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(upstream, "BaseSpeculator", SimpleNamespace())
+    config = SimpleNamespace(speculative_config=SimpleNamespace(method="suffix"))
+    mrv2_utils._validate_v2_model_runner(config)
+    assert not mrv2_utils.use_v2_model_runner(config)
