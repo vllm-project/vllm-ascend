@@ -47,6 +47,10 @@ class TestV2MooncakeAllocatorRouting(TestCase):
             k_tensor = attn_utils._allocate_dsa_pd_mooncake_kv_tensor(48, 4096)
             v_tensor = attn_utils._allocate_dsa_pd_mooncake_kv_tensor(32, 4096)
 
+        for raw in self.fake_tensors:
+            self.assertEqual(
+                dsa_pd_mooncake.get_dsa_pd_mooncake_kv_register_location(raw.data_ptr(), raw.nbytes), "cpu"
+            )
         self.assertEqual(k_tensor.data_ptr() % 4096, 0)
         self.assertEqual(v_tensor.data_ptr() % 4096, 0)
         self.assertEqual(k_tensor.numel(), 48)
@@ -99,7 +103,7 @@ class TestV2MooncakeAllocatorRouting(TestCase):
         vllm_config = SimpleNamespace(
             kv_transfer_config=SimpleNamespace(
                 is_kv_consumer=True,
-                kv_connector="MooncakeLayerwiseConnector",
+                kv_connector="MooncakeConnectorV2",
             )
         )
         ascend_config = SimpleNamespace(
@@ -118,7 +122,7 @@ class TestV2MooncakeAllocatorRouting(TestCase):
         ):
             ok = attn_utils._use_dsa_pd_mooncake_cpu_kv(vllm_config, is_sparse_kv_cache=True)
         self.assertTrue(pred.called)
-        self.assertIsInstance(ok, bool)
+        self.assertTrue(ok)
 
 
 class TestV2RegistryResetHook(TestCase):

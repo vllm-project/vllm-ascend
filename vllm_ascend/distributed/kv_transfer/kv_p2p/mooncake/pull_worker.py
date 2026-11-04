@@ -42,11 +42,14 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
+    as_kv_cache_tensors,
     ensure_zmq_recv,
     ensure_zmq_send,
     group_concurrent_contiguous,
     zmq_ctx,
 )
+from vllm_ascend.kv_offload.dsa_pd_mooncake import is_dsa_pd_mooncake_offloaded_kv_buffer
+from vllm_ascend.kv_offload.dsa_pd_mooncake_staging import DSAPDMooncakeStagingReader
 
 
 class MooncakePullRecvingThread(threading.Thread):
@@ -78,9 +81,11 @@ class MooncakePullRecvingThread(threading.Thread):
         dcp_size: int,
         device: Any,
         ready_event: threading.Event,
+        staging_reader: DSAPDMooncakeStagingReader | None = None,
     ) -> None:
         super().__init__(daemon=True, name="MooncakePullRecvingThread")
         self.engine = engine
+        self.staging_reader = staging_reader
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.kv_cache_config = kv_cache_config
@@ -1427,7 +1432,14 @@ class MooncakePullRecvingThread(threading.Thread):
             }
         )
         transfer_start_time = time.perf_counter()
-        ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
+        if self.staging_reader is None:
+            ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
+        else:
+            # Success includes landing and event drain, before completion can
+            # release the producer's blocks or make Host KV visible to decode.
+            ret = self.staging_reader.batch_transfer_sync_read(
+                session_id, src_list, dst_list, length_list, ",".join(request_ids)
+            )
         if ret < 0:
             raise RuntimeError(
                 "Mooncake KV transfer failed for remote "
@@ -1572,6 +1584,15 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
         if self.kv_transfer_config.is_kv_consumer:
             if not isinstance(self.xfer_handshake_metadata, MooncakeTransferMetadata):
                 raise RuntimeError("Mooncake KV caches were registered without transfer metadata")
+            staging_reader = None
+            if any(
+                is_dsa_pd_mooncake_offloaded_kv_buffer(int(cache.data_ptr()), int(cache.nbytes))
+                for cache_or_caches in kv_caches.values()
+                for cache in as_kv_cache_tensors(cache_or_caches)
+            ):
+                staging_reader = DSAPDMooncakeStagingReader(
+                    self.engine, kv_caches, self.xfer_handshake_metadata.block_lens
+                )
             ready_event = threading.Event()
             self._recving_thread = MooncakePullRecvingThread(
                 engine=self.engine,
@@ -1593,6 +1614,7 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
                 dcp_size=self.dcp_size,
                 device=torch.npu.current_device(),
                 ready_event=ready_event,
+                staging_reader=staging_reader,
             )
             self._recving_thread.start()
             if not ready_event.wait(timeout=10):

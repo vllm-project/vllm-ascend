@@ -94,6 +94,36 @@ for staging.
 For startup scripts and a proxy example, see
 [D2RH deployment on Atlas 850E](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#d2rh-deployment-on-atlas-850e-uboe).
 
+#### DSA Host KV offload with MooncakeConnectorV2
+
+With vLLM 0.32.0, enable ModelRunner V2 with
+`VLLM_USE_V2_MODEL_RUNNER=1` and select `MooncakeConnectorV2` on both nodes:
+
+```json
+{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer"}
+```
+
+Set `kv_role` to `kv_producer` on P. On D, keep the DSA
+`dsa_sparse_attention_config` settings `mode: fused_overlap` and
+`enable_cpu_kv_store: true` in `additional_config`, together with the model's
+sparse-attention settings. This path uses the DSA swapped Host KV allocator.
+
+P's source KV and D's HBM destinations are registered with Mooncake. D's Host
+KV addresses remain in the transfer metadata but are excluded from HBM
+registration. Host-bound READs first enter a pre-registered HBM staging
+window, then land through the DSA tensor views. HBM-bound READs remain direct.
+The existing V2 layer, block, TP and PCP mapping is preserved; completion is
+reported only after all landing copies finish. Concurrent peer buckets share
+one staging lock through READ and landing.
+
+`VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW` keeps its total slot count
+(default 16), with each slot rounded to at least 2 MiB. Source page offsets
+are preserved. `VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE=1` enables the existing
+landing streams and per-slot events, and
+`VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS` sets their bank count (default 4).
+Disabling the pipeline retains the synchronous landing path. These controls
+are independent of the `MooncakeConnectorV2` and ModelRunner V2 names.
+
 #### SFA decode offload with Mooncake pull
 
 `SfaRemoteD2HConnector` also accepts `"transfer_backend": "mooncake"` in

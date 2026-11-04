@@ -44,6 +44,7 @@ from .helpers import (
 
 def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
+    thread.staging_reader = None
     thread.tp_rank = 0
     thread.tp_size = 1
     thread.pcp_rank = 0
@@ -2050,3 +2051,19 @@ def test_replicated_short_conv_copies_complete_state_between_different_ranks(
         assert src == [1128]
         assert dst == [5320]
         assert lengths == [96]
+
+
+@pytest.mark.parametrize("result", [0, -1])
+def test_execute_bucket_waits_for_staged_landing_and_propagates_failure(result):
+    reader = MagicMock()
+    reader.batch_transfer_sync_read.return_value = result
+    thread = make_thread(engine=MagicMock(), staging_reader=reader)
+    remote = make_pp_metadata()
+    entries = {0: {(0, 0): [("request", [1], [2])]}}
+    if result < 0:
+        with pytest.raises(RuntimeError, match="transfer failed"):
+            thread._execute_tp_transfer_bucket(0, 0, 0, 1, 1, 1, remote, entries)
+    else:
+        thread._execute_tp_transfer_bucket(0, 0, 0, 1, 1, 1, remote, entries)
+    reader.batch_transfer_sync_read.assert_called_once_with("10.0.0.1:9000", [1128], [5256], [128], "request")
+    thread.engine.batch_transfer_sync_read.assert_not_called()

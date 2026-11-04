@@ -57,6 +57,10 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+from vllm_ascend.kv_offload.dsa_pd_mooncake import (
+    get_dsa_pd_mooncake_kv_register_location,
+    is_dsa_pd_mooncake_offloaded_kv_buffer,
+)
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 if TYPE_CHECKING:
@@ -394,7 +398,16 @@ class MooncakeBaseConnectorWorker:
 
         register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
         validate_register_region_count(register_regions)
-        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        # Swapped Host KV has NPU tensor semantics, but is not an HBM READ
+        # destination. Keep its addresses in the metadata; only register HBM.
+        device_regions = [
+            (ptr, length)
+            for ptr, length in zip(register_regions.ptrs, register_regions.lengths)
+            if get_dsa_pd_mooncake_kv_register_location(ptr, length) != "cpu"
+            and not is_dsa_pd_mooncake_offloaded_kv_buffer(ptr, length)
+        ]
+        if device_regions:
+            global_te.register_buffer([ptr for ptr, _ in device_regions], [length for _, length in device_regions])
 
         transfer_metadata = MooncakeTransferMetadata(
             engine_id=self.engine_id,
@@ -421,8 +434,8 @@ class MooncakeBaseConnectorWorker:
             self.engine_id,
             len(layer_names),
             self.num_blocks,
-            len(register_regions.ptrs),
-            sum(register_regions.lengths),
+            len(device_regions),
+            sum(length for _, length in device_regions),
         )
 
         logger.debug(

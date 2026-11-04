@@ -98,6 +98,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.kv_offload.dsa_pd_mooncake import (
     empty_mooncake_cpu_kv_memory,
+    register_dsa_pd_mooncake_cpu_kv_buffer,
     register_dsa_pd_mooncake_offloaded_kv_tensor,
     reset_dsa_pd_mooncake_kv_registries,
     should_use_dsa_pd_mooncake_cpu_kv,
@@ -969,6 +970,9 @@ def _allocate_dsa_pd_mooncake_kv_tensor(tensor_size: int, alignment: int) -> tor
         (tensor_size + alignment,),
         dtype=torch.int8,
     )
+    # Registration is collected by backing storage, including alignment
+    # padding. Mark the whole Host allocation before binding its final views.
+    register_dsa_pd_mooncake_cpu_kv_buffer(int(tensor.data_ptr()), int(tensor.numel()))
     tensor = _align_memory(tensor, alignment)[:tensor_size]
     if tensor.data_ptr() % alignment != 0:
         raise RuntimeError(
