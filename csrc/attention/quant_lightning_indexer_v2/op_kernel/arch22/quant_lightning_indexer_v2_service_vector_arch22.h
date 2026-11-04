@@ -1502,6 +1502,11 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ConsumeCandScoreToken(
         AscendC::Cast(curPadF, curPad, RoundMode::CAST_NONE,
                       QLIV2Common::CAND_AUX_SCALE_HALVES_PER_TILE);
         PipeBarrier<PIPE_V>();
+        // v10: 无效候选槽位的 staging 是陈旧数据，原始分可能是 NaN 位型；NaN×scale 仍传播 NaN
+        // （排序网络比较恒 false 会沉底，但 ReduceMax 会中毒）。先上界 clamp（minNum 语义
+        // 下 NaN → 1e30，有限值不变；无效分随后被 1e30 罚到 0 以下）。
+        Mins(curScore, curScore, 1.0e30f, CAND_TILE_TOKENS);
+        PipeBarrier<PIPE_V>();
         // 每 tile 32 个候选块：块内 8 个位置 = 32B，天然满足向量操作的对齐要求。
         // 同一次循环里做两件事（都不用 Brcb / Gather）：
         //   1) 逻辑 token 号 = 8×块号 + j（无效块得 -8+j < 0）；
@@ -1558,7 +1563,7 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ConsumeCandScoreToken(
         // 分数 = 原始分数 × kscale - 1e30 × (1 - valid)
         Mul(curScore, curScore, scaleF, CAND_TILE_TOKENS);
         PipeBarrier<PIPE_V>();
-        Muls(penF, penF, 1.0e30f, CAND_TILE_TOKENS);
+        Muls(penF, penF, 1.0e31f, CAND_TILE_TOKENS); // ≥ clamp 上界 × kscale 上界，保证无效分 < 0
         PipeBarrier<PIPE_V>();
         Sub(curScore, curScore, penF, CAND_TILE_TOKENS);
         PipeBarrier<PIPE_V>();
@@ -1572,11 +1577,22 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ConsumeCandScoreToken(
             AscendC::DataCopyPad(nextScore, candScoreGm_[nextBase], copyParams, padParams);
             AscendC::DataCopyPad(nextPad, candAuxScaleGm_[2ULL * nextBase], sParams, sPad);
         }
-        QLIV2ServiceVec::SortAll(curScore, sortTmp, CAND_TILE_TOKENS);
+        // v10: 阈值剪枝 —— tile 最大分低于当前 topk 第 topkWidth_ 名时，本 tile 不可能
+        // 改变 top-512（严格小于才跳过，相等仍归并，保证同分选择与不剪枝逐位一致）。
+        LocalTensor<float> maxSlot = tmpBuf_.Get<float>()[11264];  // ReduceMax 输出 + 临时
+        AscendC::ReduceMax(maxSlot, curScore, maxSlot[32], static_cast<int32_t>(CAND_TILE_TOKENS), false);
         PipeBarrier<PIPE_V>();
-        QLIV2ServiceVec::MergeSort(globalTopkUb_[inner * topkPairWidth_], topkWidth_, curScore,
-                                   CAND_TILE_TOKENS, sortTmp);
-        PipeBarrier<PIPE_V>();
+        SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
+        const float tileMax = maxSlot.GetValue(0);
+        const float curTail = globalTopkUb_.GetValue(inner * topkPairWidth_ + 2 * (topkWidth_ - 1));
+        SetWaitFlag<HardEvent::S_V>(HardEvent::S_V);
+        if (!(tileMax < curTail)) { // NaN 安全：tileMax/curTail 任一为 NaN 都归并（不剪）
+            QLIV2ServiceVec::SortAll(curScore, sortTmp, CAND_TILE_TOKENS);
+            PipeBarrier<PIPE_V>();
+            QLIV2ServiceVec::MergeSort(globalTopkUb_[inner * topkPairWidth_], topkWidth_, curScore,
+                                       CAND_TILE_TOKENS, sortTmp);
+            PipeBarrier<PIPE_V>();
+        }
     }
     LocalTensor<uint32_t> idxULocal = outQueue_.AllocTensor<uint32_t>();
     QLIV2ServiceVec::ExtractIndex(idxULocal,
