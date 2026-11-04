@@ -34,6 +34,7 @@ variants:
     hardware_overrides:
       ascend_910c:
         docker_image: "quay.io/ascend/vllm-ascend:nightly-main-a3"
+        docker_serve_command: "vllm serve"
         install:
           pip: false
         extra_args:
