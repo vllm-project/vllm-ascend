@@ -49,9 +49,11 @@ def _qsa_rmsnorm_mrope_kernel(
             h_mask = (rotary_offsets % 3 == 1) & (rotary_offsets < mrope_section_h * 3)
             w_mask = (rotary_offsets % 3 == 2) & (rotary_offsets < mrope_section_w * 3)
             axis = tl.where(h_mask, 1, tl.where(w_mask, 2, 0))
+            position = tl.load(positions_ptr + axis * position_stride_axis + token_id * position_stride_token)
         else:
-            axis = tl.full((half_rope_dim,), 0, tl.int32)
-        position = tl.load(positions_ptr + axis * position_stride_axis + token_id * position_stride_token)
+            # Keep the shared position scalar: an all-zero axis vector creates
+            # a repeated-address gather unsupported by Triton Ascend lowering.
+            position = tl.load(positions_ptr + token_id * position_stride_token)
         position = tl.minimum(tl.maximum(position, 0), cache_rows - 1)
         cache_row = cos_sin_ptr + position.to(tl.int64) * cos_sin_stride_token
         cos = tl.load(cache_row + rotary_offsets).to(tl.float32)
