@@ -820,6 +820,21 @@ class KVCacheStoreSendingThread(KVTransferThread):
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
         for group_id in req_meta.kv_cache_group_ids or [0]:
+            local_group_layers = self.token_database.group_num_layers.get("kv", {}).get(
+                group_id, 0
+            )
+            if local_group_layers <= 0:
+                pp_rank = (
+                    self.token_database.metadata[group_id].pp_rank
+                    if group_id < len(self.token_database.metadata)
+                    else "unknown"
+                )
+                logger.debug(
+                    "Skipping KV pool put for cache group without local descriptors: "
+                    "request=%s group=%d pp_rank=%s local_layers=%d",
+                    req_id, group_id, pp_rank, local_group_layers,
+                )
+                continue
             group_block_size = self._get_block_size(group_id)
 
             group_store_mask = (
@@ -920,6 +935,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 len(keys),
                 keys[:3],
             )
+            prepared_keys: list[str] = []
+            prepared_addrs: list[list[int]] = []
+            prepared_sizes: list[list[int]] = []
             for index, start in enumerate(starts):
                 addr, size, _ = self._prepare_value(
                     start,
@@ -928,8 +946,21 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     kv_cache_group_id=group_id,
                     block_id=key_block_ids[index],
                 )
-                addrs.append(addr)
-                sizes.append(size)
+                if not addr or not size:
+                    pp_rank = (
+                        self.token_database.metadata[group_id].pp_rank
+                        if group_id < len(self.token_database.metadata)
+                        else "unknown"
+                    )
+                    logger.warning(
+                        "Skipping KV pool key without local descriptors: "
+                        "request=%s group=%d pp_rank=%s key=%s local_layers=%d",
+                        req_id, group_id, pp_rank, keys[index], local_group_layers,
+                    )
+                    continue
+                prepared_keys.append(keys[index])
+                prepared_addrs.append(addr)
+                prepared_sizes.append(size)
                 if self.enable_kv_event:
                     token_ids = self.get_event_token_ids(req_meta, start, ends[index])
                     block_size = (
@@ -954,6 +985,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         )
                         stored_events.append(stored_event)
                         logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
+
+            keys = prepared_keys
+            addrs = prepared_addrs
+            sizes = prepared_sizes
+            if not keys:
+                continue
 
             logical_key_count = len(keys)
             if self.kv_role == "kv_consumer":

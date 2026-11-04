@@ -573,6 +573,63 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         )
         return t, store
 
+
+    def test_pp_hybrid_producer_skips_groups_without_local_descriptors(self):
+        layouts = (
+            (0, {0: [1000, 2000], 1: []}, {0: [16, 16], 1: []}, {0: 2, 1: 0}, 0),
+            (1, {0: [], 1: [3000]}, {0: [], 1: [16]}, {0: 0, 1: 1}, 1),
+        )
+        for pp_rank, addrs, sizes, layer_counts, expected_group in layouts:
+            with self.subTest(pp_rank=pp_rank):
+                store = FakeStore([0, 0])
+                database = ChunkedTokenDatabase(
+                    [
+                        KeyMetadata("m", 0, 0, pp_rank, 0),
+                        KeyMetadata("m", 0, 0, pp_rank, 1),
+                    ],
+                    [16, 16],
+                    None,
+                )
+                database.set_group_buffers(
+                    addrs,
+                    sizes,
+                    {
+                        group_id: [16] * len(group_addrs)
+                        for group_id, group_addrs in addrs.items()
+                    },
+                    group_num_layers=layer_counts,
+                )
+                thread = KVCacheStoreSendingThread(
+                    m_store=store,
+                    token_database=database,
+                    block_size=[16, 16],
+                    tp_rank=0,
+                    dcp_size=1,
+                    put_step=1,
+                    kv_role="kv_producer",
+                    ready_event=threading.Event(),
+                    group_uses_align_state=[False, False],
+                )
+                request = ReqMeta(
+                    req_id=f"pp{pp_rank}",
+                    token_len_chunk=16,
+                    block_ids_by_group=[[1], [1]],
+                    block_hashes=["h0"],
+                    kv_cache_group_ids=[0, 1],
+                )
+                thread.add_stored_request(request)
+                thread.request_queue.put(request)
+
+                thread._handle_request(request)
+
+                self.assertEqual(len(store.put_calls), 1)
+                keys, stored_addrs, stored_sizes = store.put_calls[0]
+                self.assertTrue(
+                    all(f"@group:{expected_group}@" in key for key in keys)
+                )
+                self.assertTrue(all(stored_addrs))
+                self.assertTrue(all(stored_sizes))
+                self.assertEqual(thread.get_saved_offset(request.req_id), 16)
     def test_save_keeps_checks_for_align_state_slots(self):
         thread, store = self._make_thread()
         thread.group_uses_align_state = [True]

@@ -480,6 +480,26 @@ class MemcacheBackend(Backend):
         addr: list[list[int]],
         size: list[list[int]],
     ) -> list[bool] | bool:
+        if not (len(key) == len(addr) == len(size)):
+            logger.error(
+                "Refusing unaligned memcache put batch: keys=%d addrs=%d sizes=%d",
+                len(key), len(addr), len(size),
+            )
+            return [False] * len(key)
+        invalid_rows = [
+            index
+            for index, (row_addr, row_size) in enumerate(zip(addr, size, strict=True))
+            if not row_addr or not row_size or len(row_addr) != len(row_size)
+        ]
+        if invalid_rows:
+            logger.error(
+                "Refusing memcache put rows without valid local descriptors: "
+                "rows=%s keys=%s local_layer_counts=%s",
+                invalid_rows,
+                [key[index] for index in invalid_rows],
+                [len(addr[index]) for index in invalid_rows],
+            )
+            return [False] * len(key)
         self.ensure_initialized()
         assert self.store is not None
         try:
