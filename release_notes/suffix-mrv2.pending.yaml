@@ -1,0 +1,10 @@
+# Assign the actual PR number and move to fragments/<PR number>.yaml when
+# opening a PR. No PR is created by this local implementation task.
+pr: null
+entries:
+  - category: feature
+    text: >-
+      Added an experimental NPU suffix drafter for Model Runner V2 with
+      request-history matching, a shared completed-response corpus and optional
+      adaptive verification. Requires upstream vLLM #60339 and explicit V2
+      opt-in; default suffix runner selection remains on V1 pending qualification.
