@@ -590,7 +590,7 @@ jobs:
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
             --curated pr-single-node-ops \
-            --runner-label-override linux-aarch64-a3-800i-8
+            --runner-label-override linux-aarch64-a3-800i-2
 
       - name: Set no-tests output for A3-sn when source paths unchanged
         id: noop-a3-sn
@@ -619,7 +619,7 @@ jobs:
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
             --curated pr-single-node-ops \
-            --runner-label-override linux-aarch64-a5-4
+            --runner-label-override linux-aarch64-a5-1
 
       - name: Set no-tests output for A5-sn when source paths unchanged
         id: noop-a5-sn
