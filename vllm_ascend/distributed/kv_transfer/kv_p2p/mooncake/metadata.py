@@ -139,11 +139,26 @@ class ReqMeta:
     local_full_block_ids: BlockIds
 
 
+@dataclass(frozen=True)
+class PushReqMeta:
+    """D allocation snapshot; shared by the main and Ready-sender threads."""
+
+    transfer_id: str
+    remote_engine_id: str
+    remote_bootstrap_addr: str
+    local_block_ids: tuple[tuple[int, ...], ...]
+    num_computed_tokens: int
+    num_external_tokens: int
+    scheduler_host: str
+    scheduler_port: int
+
+
 class MooncakeConnectorMetadata(KVConnectorMetadata):
     """Scheduler-to-worker metadata for Mooncake KV transfers."""
 
     def __init__(self) -> None:
         self.requests: dict[str, ReqMeta] = {}
+        self.push_requests: dict[str, PushReqMeta] = {}
         self.requests_to_send: dict[str, float] = {}
         self.reqs_in_batch: set[str] = set()
 
@@ -170,6 +185,31 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             local_full_block_ids=local_full_block_ids or tuple(),
         )
 
+    def add_new_push_req(
+        self,
+        request_id: str,
+        local_block_ids: BlockIds,
+        num_external_tokens: int,
+        kv_transfer_params: dict[str, Any],
+        *,
+        scheduler_host: str,
+        scheduler_port: int,
+    ) -> None:
+        """Register a D receive with an immutable allocation snapshot."""
+        for field in ("transfer_id", "remote_engine_id", "remote_bootstrap_addr"):
+            if not kv_transfer_params.get(field):
+                raise ValueError(f"Missing Push transfer parameter: {field}")
+        self.push_requests[request_id] = PushReqMeta(
+            transfer_id=kv_transfer_params["transfer_id"],
+            remote_engine_id=kv_transfer_params["remote_engine_id"],
+            remote_bootstrap_addr=kv_transfer_params["remote_bootstrap_addr"],
+            local_block_ids=tuple(tuple(group) for group in local_block_ids),
+            num_computed_tokens=kv_transfer_params["num_computed_tokens"],
+            num_external_tokens=num_external_tokens,
+            scheduler_host=scheduler_host,
+            scheduler_port=scheduler_port,
+        )
+
 
 __all__ = [
     "MooncakeConnectorMetadata",
@@ -178,5 +218,6 @@ __all__ = [
     "MooncakeTPTransferMetadata",
     "MooncakeTransferMetadata",
     "MooncakeTransferMetadataGroups",
+    "PushReqMeta",
     "ReqMeta",
 ]

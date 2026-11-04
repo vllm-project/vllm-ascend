@@ -60,6 +60,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self.bootstrap_server: AscendMooncakeBootstrapServer | None = None
         self._metadata_thread: MooncakePushMetadataThread | None = None
+        self._reqs_pending_recv: dict[str, tuple[Request, BlockIds, int]] = {}
         self.start_bootstrap_server()
 
     def _should_launch_bootstrap_server(self) -> bool:
@@ -96,27 +97,53 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
             self.bootstrap_server = None
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int) -> None:
-        """Process allocated blocks for Push requests; implementation is deferred."""
-        raise NotImplementedError
+        """Queue D allocations for the next connector metadata batch."""
+        if self.kv_transfer_config.is_kv_producer:
+            pass
+        else:
+            params = request.kv_transfer_params
+            if not params or not params.get("do_remote_prefill"):
+                return
+            if num_external_tokens > 0:
+                if self._metadata_thread is None:
+                    raise RuntimeError("D scheduler metadata service is not ready")
+                self._reqs_pending_recv[request.request_id] = (
+                    request,
+                    tuple(list(group) for group in blocks.get_block_ids()),
+                    num_external_tokens,
+                )
+            params["do_remote_prefill"] = False
 
     def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> MooncakeConnectorMetadata:
-        """Build scheduler-to-worker metadata; Push request population is deferred."""
-        raise NotImplementedError
+        metadata = MooncakeConnectorMetadata()
+        if self.kv_transfer_config.is_kv_producer:
+            pass
+        else:
+            for req_id, (req, block_ids, num_external_tokens) in self._reqs_pending_recv.items():
+                assert req.kv_transfer_params is not None
+                metadata.add_new_push_req(
+                    request_id=req_id,
+                    local_block_ids=block_ids,
+                    num_external_tokens=num_external_tokens,
+                    kv_transfer_params=req.kv_transfer_params,
+                    scheduler_host=self.side_channel_host,
+                    scheduler_port=self.side_channel_port,
+                )
+            self._reqs_pending_recv.clear()
+        return metadata
 
     def request_finished(self, request: "Request", block_ids: BlockIds) -> tuple[bool, dict[str, Any] | None]:
-        """Publish final P blocks and retain them until worker transfers settle.
-
-        Return delayed-free ownership and proxy-compatible transfer params;
-        cancellation must not release allocations used by in-flight WRITEs.
-        """
-        raise NotImplementedError
+        # vLLM keeps cancelled WAITING_FOR_REMOTE_KVS requests pinned until
+        # finished_recving. Keep queued transfers so they can still settle.
+        if self.kv_transfer_config.is_kv_producer:
+            pass
+        return False, None
 
     def update_connector_output(self, connector_output: "KVConnectorOutput") -> None:
-        """Consume aggregated worker outcomes for receive and delayed-free state.
-
-        Preserve failure information so D cannot run with incomplete KV.
-        """
-        raise NotImplementedError
+        # Core scheduler consumes aggregated finished_recving/failed_recving.
+        # D never sends a scheduler-to-scheduler completion ACK in Push mode.
+        if self.kv_transfer_config.is_kv_producer:
+            pass
 
     def set_xfer_handshake_metadata_from_workers(
         self, metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata]

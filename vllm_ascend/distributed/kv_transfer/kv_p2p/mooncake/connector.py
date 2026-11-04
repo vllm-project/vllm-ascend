@@ -275,6 +275,11 @@ class MooncakePushConnector(MooncakeBaseConnector):
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
 
+    def shutdown(self) -> None:
+        if self.connector_worker is not None:
+            self.connector_worker.shutdown()
+        super().shutdown()
+
 
 # Backward compatibility: MooncakeConnector is the pull-based connector.
 MooncakeConnector = MooncakePullConnector

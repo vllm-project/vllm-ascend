@@ -18,12 +18,14 @@ class AscendRegisterWorkerPayload(RegisterWorkerPayload):
     pp_rank: int = Field(ge=0)
     addr: str = Field(min_length=1)
     pcp_rank: int = Field(default=0, ge=0)
+    tp_size: int = Field(default=1, ge=1)
+    pp_size: int = Field(default=1, ge=1)
     pcp_size: int = Field(default=1, ge=1)
     dcp_size: int = Field(default=1, ge=1)
 
     @model_validator(mode="after")
     def validate_context_ranks(self) -> "AscendRegisterWorkerPayload":
-        if self.pcp_rank >= self.pcp_size:
+        if self.pcp_rank >= self.pcp_size or self.tp_rank >= self.tp_size or self.pp_rank >= self.pp_size:
             raise ValueError("Context-parallel rank must be smaller than its group size")
         return self
 
@@ -36,6 +38,8 @@ class AscendEngineEntry:
     # PCP rank -> TP rank -> PP rank -> address. In the paired vLLM layout,
     # dcp_rank = (tp_rank * pcp_size + pcp_rank) % dcp_size.
     worker_addr: dict[int, dict[int, dict[int, str]]]
+    tp_size: int = 1
+    pp_size: int = 1
 
 
 class AscendMooncakeBootstrapServer(MooncakeBootstrapServer):
@@ -60,10 +64,17 @@ class AscendMooncakeBootstrapServer(MooncakeBootstrapServer):
         if entry is not None:
             if entry.engine_id != payload.engine_id:
                 raise HTTPException(status_code=400, detail=f"Engine ID mismatch for dp_rank={payload.dp_rank}")
-            if (entry.pcp_size, entry.dcp_size) != (payload.pcp_size, payload.dcp_size):
+            if (entry.pcp_size, entry.dcp_size, entry.tp_size, entry.pp_size) != (
+                payload.pcp_size,
+                payload.dcp_size,
+                payload.tp_size,
+                payload.pp_size,
+            ):
                 raise HTTPException(status_code=400, detail="Context-parallel topology mismatch")
         else:
-            entry = AscendEngineEntry(payload.engine_id, payload.pcp_size, payload.dcp_size, {})
+            entry = AscendEngineEntry(
+                payload.engine_id, payload.pcp_size, payload.dcp_size, {}, payload.tp_size, payload.pp_size
+            )
             self.workers[payload.dp_rank] = entry
 
         workers = entry.worker_addr.setdefault(payload.pcp_rank, {}).setdefault(payload.tp_rank, {})
