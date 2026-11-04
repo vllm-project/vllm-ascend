@@ -8,7 +8,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec, MLAAttentionSpec, SparseCacheRole
 
 from vllm_ascend.attention.indexer import AscendHiSparseIndexerBackend
 from vllm_ascend.attention.sfa_hisparse import AscendHiSparseMetadataBuilder, finish_hisparse_kv_update
@@ -137,6 +137,14 @@ def indexer_spec():
     return AscendSFAIndexerCacheSpec(
         block_size=4, num_kv_heads=1, head_size=4, dtype=torch.float32, block_stride_alignment=3
     )
+
+
+@pytest.mark.parametrize("role", [SparseCacheRole.SPARSE, SparseCacheRole.INDEXER])
+def test_indexer_spec_merge_retains_core_cache_role(indexer_spec, role):
+    spec = replace(indexer_spec, cache_role=role)
+    merged = AscendSFAIndexerCacheSpec.merge([spec, spec])
+    assert merged.cache_role is role
+    assert merged.block_stride_alignment == spec.block_stride_alignment
 
 
 @pytest.mark.parametrize("blocks,stride", [(1, 1), (3, 2), (5, 3)])

@@ -358,9 +358,6 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         assert all(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in specs), (
             "All attention layers in the same KV cache group must be AscendSFAIndexerCacheSpec."
         )
-        cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
-        dtype_set = set(spec.dtype for spec in specs)
-        max_tp_shards_set = {spec.max_tp_shards for spec in specs}
         scale_dim_set = set(spec.scale_dim for spec in specs)
         scale_dtype_set = set(spec.scale_dtype for spec in specs)
         cache_sparse_li_c8_set = set(spec.cache_sparse_li_c8 for spec in specs)
@@ -368,10 +365,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
         assert len({spec.dcp_sharded for spec in specs}) == 1
         assert (
-            len(cache_dtype_str_set) == 1
-            and len(dtype_set) == 1
-            and len(max_tp_shards_set) == 1
-            and len(scale_dim_set) == 1
+            len(scale_dim_set) == 1
             and len(scale_dtype_set) == 1
             and len(cache_sparse_li_c8_set) == 1
             and len(cache_sparse_li_c4_set) == 1
@@ -381,14 +375,10 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             "the same dtype, scale layout, quantization method, LI quant flags "
             "and DCP replication size."
         )
-        return cls(
-            block_size=specs[0].block_size,
-            dcp_sharded=specs[0].dcp_sharded,
-            num_kv_heads=specs[0].num_kv_heads,
-            head_size=specs[0].head_size,
-            dtype=dtype_set.pop(),
-            max_tp_shards=max_tp_shards_set.pop(),
-            cache_dtype_str=cache_dtype_str_set.pop(),
+        # Preserve Core's role, padding and stride alignment, and reuse its
+        # standard-field validation before restoring the Ascend-only fields.
+        return replace(
+            super().merge(specs),
             scale_dim=scale_dim_set.pop(),
             scale_dtype=scale_dtype_set.pop(),
             cache_sparse_li_c8=cache_sparse_li_c8_set.pop(),

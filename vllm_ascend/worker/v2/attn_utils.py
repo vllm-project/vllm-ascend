@@ -370,6 +370,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 block_size=vllm_config.cache_config.block_size,
                 dcp_sharded=spec.dcp_sharded,
                 num_kv_heads=1,
+                cache_role=spec.cache_role,
                 head_size=head_dim // 2 if cache_sparse_li_c4 else head_dim,
                 dtype=torch.uint8
                 if cache_sparse_li_c4
