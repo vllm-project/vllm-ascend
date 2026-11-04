@@ -7,7 +7,7 @@ and upstream vllm#55420 for the rationale). Patches the V2 sampler's
 ``ThinkingBudgetState`` construction so the masked subclass is used; the
 stock kernelized budget path is left untouched, and the mask itself runs
 as NPU Triton kernels
-(``vllm_ascend/ops/triton/v2/sample/thinking_eos_mask.py``):
+(``vllm_ascend/ops/triton/sample/thinking_eos_mask.py``):
 
 - a marker-cache kernel incrementally tracks the last reasoning-start /
   natural-or-implicit end position in the committed token history,
@@ -32,7 +32,7 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 
 from vllm_ascend import envs
-from vllm_ascend.ops.triton.v2.sample.thinking_eos_mask import (
+from vllm_ascend.ops.triton.sample.thinking_eos_mask import (
     apply_thinking_eos_mask,
 )
 
