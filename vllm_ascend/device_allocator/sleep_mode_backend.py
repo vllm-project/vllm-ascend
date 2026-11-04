@@ -16,9 +16,10 @@ class CaMemSleepBackend(SleepModeBackend):
         if level not in (1, 2):
             raise ValueError("Ascend sleep level must be 1 or 2.")
         allocator = CaMemAllocator.get_instance()
+        # A partial unmap must never leave the backend advertised as running.
+        self._state = "SUSPENDED"
         global_te.unregister_buffer()
         allocator.sleep(offload_tags=("weights",) if level == 1 else ())
-        self._state = "SUSPENDED"
 
     def resume(self, tags: list[str] | None = None) -> None:
         allocator = CaMemAllocator.get_instance()
@@ -31,8 +32,8 @@ class CaMemSleepBackend(SleepModeBackend):
         allocator = CaMemAllocator.get_instance()
         if "kv_cache" in tags:
             global_te.unregister_buffer()
-        allocator.discard(tags)
         self._state = "SUSPENDED"
+        allocator.discard(tags)
 
     @classmethod
     def preserves_communicators(cls) -> bool:
