@@ -499,6 +499,7 @@ def test_request_finished_acks_unallocated_remote_prefill() -> None:
             "remote_port": 6000,
             "remote_request_id": "request-p",
             "remote_block_ids": ([20, 21],),
+            "remote_lease_nonce": "hold-1",
         },
     )
 
@@ -507,7 +508,7 @@ def test_request_finished_acks_unallocated_remote_prefill() -> None:
     assert delay_free is False
     assert params is None
     assert request.kv_transfer_params["do_remote_prefill"] is False
-    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p", "hold-1")
     assert "request-d" not in scheduler._reqs_need_recv
 
 
@@ -927,6 +928,39 @@ def test_expired_lease_is_invalid_before_finished_sending_is_consumed() -> None:
         thread._retrieve_expired_requests_locked()
     assert not thread.finished_requests.empty()
     assert thread._verify_leases((("request", nonce),)) == [False]
+
+
+@pytest.mark.parametrize("nonce_kind", ["current", "stale", "missing"])
+def test_unallocated_cancellation_releases_only_matching_hold(lease_control_server, nonce_kind):
+    producer, port = lease_control_server
+    stale_nonce = producer.add_delayed_request("p", 0.0)
+    assert producer.get_and_clear_finished_requests() == {"p"}
+    nonce = producer.add_delayed_request("p", time.time())
+    params = {
+        "do_remote_prefill": True,
+        "remote_host": "127.0.0.1",
+        "remote_port": port,
+        "remote_request_id": "p",
+    }
+    if nonce_kind != "missing":
+        params["remote_lease_nonce"] = nonce if nonce_kind == "current" else stale_nonce
+    scheduler = make_pull_scheduler()
+    receiver = MooncakeSchedulerRecvingThread(threading.Event())
+    scheduler._recving_thread = receiver
+    request = make_request(request_id="d", status=RequestStatus.FINISHED_ABORTED, kv_transfer_params=params)
+    receiver.start()
+    try:
+        assert scheduler.request_finished(request, ([],)) == (False, None)
+        receiver.request_queue.join()
+        assert producer.get_and_clear_finished_requests() == ({"p"} if nonce_kind == "current" else set())
+        assert producer._verify_leases((("p", nonce),)) == [nonce_kind != "current"]
+        assert request.kv_transfer_params["do_remote_prefill"] is False
+        assert not scheduler._reqs_need_recv
+        assert scheduler.request_finished(request, ([],)) == (False, None)
+        receiver.request_queue.join()
+        assert producer.get_and_clear_finished_requests() == set()
+    finally:
+        receiver.shutdown()
 
 
 def test_stale_done_cannot_release_a_reused_request_id() -> None:

@@ -716,6 +716,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                     params["remote_host"],
                     params["remote_port"],
                     params["remote_request_id"],
+                    params.get("remote_lease_nonce"),
                 )
                 if self._recving_thread is None:
                     raise RuntimeError("Producer Mooncake scheduler cannot acknowledge a receive request")
