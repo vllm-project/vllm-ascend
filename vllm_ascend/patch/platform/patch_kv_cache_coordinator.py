@@ -29,6 +29,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -555,6 +556,11 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     )
     # vLLM main (#54736) added allow_partial_hash_hits.
     hybrid_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
+    if any(group.role == KVCacheGroupRole.HISPARSE_SOURCE for group in kv_cache_config.kv_cache_groups):
+        # Core owns HiSparse admission, HMA roles, eviction and prefix state.
+        return _orig_get_kv_cache_coordinator(
+            **{name: value for name, value in hybrid_kwargs.items() if name != "eagle_attn_layer_names"}
+        )
     # Private state blocks are excluded by the block-size resolver. Keep
     # their independent manager geometry when prefix caching is disabled too.
     num_cacheable_groups = sum(is_prefix_cacheable(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)

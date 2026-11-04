@@ -370,6 +370,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
+        if get_current_vllm_config().attention_config.hisparse_config is not None:
+            from vllm_ascend.attention.sfa_hisparse import AscendHiSparseMetadataBuilder
+
+            return AscendHiSparseMetadataBuilder
         if get_ascend_config().sparse_kv_offload_config.enabled:
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadMetadataBuilder
 
@@ -390,6 +394,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
+        if get_current_vllm_config().attention_config.hisparse_config is not None:
+            from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
+
+            return AscendHiSparseImpl
         if get_ascend_config().sparse_kv_offload_config.enabled:
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
 

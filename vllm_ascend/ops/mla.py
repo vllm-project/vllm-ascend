@@ -179,6 +179,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         # both layernorms as extra args, so this flag has no effect here and is
         # accepted for signature compatibility only.
         fuse_qkv_rmsnorm: bool = False,
+        index_group_builder=None,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
@@ -225,6 +226,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             dcp_q_replicate=self.dcp_q_replicate_enabled,
             use_sparse=mla_modules.is_sparse,
             indexer=ascend_indexer,
+            index_group_builder=index_group_builder,
             skip_topk=skip_topk,
             topk_indices_buffer=getattr(mla_modules, "topk_indices_buffer", None),
             non_causal_multi_token_decode=non_causal_multi_token_decode,
@@ -249,17 +251,23 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
 
         original_process_weights = self.mla_attn.process_weights_after_loading
 
-        def wrapped_process_weights(act_dtype: torch.dtype):
+        def wrapped_process_weights(act_dtype: torch.dtype | None = None):
             from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 
             if self.dcp_q_replicate_enabled:
-                self.mla_attn.impl.process_weights_after_loading(act_dtype)
+                self.mla_attn.impl.process_weights_after_loading(
+                    self.mla_attn.act_dtype if act_dtype is None else act_dtype
+                )
             elif not isinstance(self.mla_attn.impl, AscendSFAImpl):
-                # Both supported vLLM versions dispatch to the impl here.
-                original_process_weights(act_dtype)
+                if act_dtype is None:
+                    original_process_weights()
+                else:
+                    original_process_weights(act_dtype)
             else:
                 # SFA disposes kv_b_proj, so bypass upstream's dense packing.
-                self.mla_attn.impl.process_weights_after_loading(act_dtype)
+                self.mla_attn.impl.process_weights_after_loading(
+                    self.mla_attn.act_dtype if act_dtype is None else act_dtype
+                )
 
         self.mla_attn.process_weights_after_loading = wrapped_process_weights
 

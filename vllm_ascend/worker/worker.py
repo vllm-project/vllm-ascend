@@ -777,6 +777,9 @@ class NPUWorker(WorkerBase):
         derives a num_blocks (and block pool) small enough for the per-layer
         buffers to fit.
         """
+        if self.vllm_config.attention_config.hisparse_config is not None:
+            # Core budgets the shared Resident/Hot/Indexer slab, not per-layer buffers.
+            return available_memory
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
             return available_memory
