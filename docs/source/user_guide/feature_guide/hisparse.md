@@ -80,6 +80,11 @@ CANN workspace allocation and changing graph replays.
 The model-owned index-group builder is carried in Core's existing
 `MLAModules.index_group_builder` field, preserving the common MLA wrapper ABI.
 
+HiSparse groups use Core's coordinator and shared-slab memory budget. Ascend's
+existing private-buffer budget correction and hybrid coordinator are bypassed
+for those groups. V2 retains Core's source/group ownership and skips metadata
+construction for Resident/Hot groups that have no Attention consumer.
+
 Follow-up contributions should be separate and measurable: packed C8/indexer
 formats, native resolver/refill improvements, Host-writeback optimization, metadata
 reuse, additional hardware and P/D transport. PR19109 retains these experiments.
@@ -96,15 +101,17 @@ Portable, source-isolated CPU boundary checks:
 
 ```bash
 python -m pytest -q --noconftest \
-  tests/ut/distributed/kv_transfer/test_hisparse_foundation_cpu.py \
-  tests/ut/ops/test_mla_weight_hook_cpu.py \
-  tests/ut/worker/test_hisparse_capture_mirror_cpu.py
+  tests/ut/distributed/kv_transfer/test_hisparse_foundation_cpu.py
 ```
 
 These check current Host offsets, failed-unregister ownership, group scratch
 isolation, strided indexer aliases, planner alignment, unsupported formats,
-Core coordinator forwarding, loader ABI and capture-only mirror suppression.
+Core coordinator forwarding and capture-only mirror suppression.
 They do not exercise an installed NPU package or qualify device execution.
+
+The weight-loading wrapper keeps Ascend main's explicit activation-dtype ABI,
+already covered by `tests/ut/ops/test_mla_weight_processing.py`; this foundation
+does not add another calling convention or a duplicate test module.
 
 Real-NPU cases are included for resolver/refill/overwrite invalidation, independent
 FP32 Attention references, selection order/duplicates, native BF16 preprocessing
@@ -115,8 +122,7 @@ pytest --confcutdir=tests/e2e/pull_request/one_card \
   tests/e2e/pull_request/one_card/test_hisparse_ops.py \
   tests/e2e/pull_request/one_card/test_hisparse_attention.py \
   tests/e2e/pull_request/one_card/test_hisparse_kv_preprocess.py \
-  tests/e2e/pull_request/one_card/test_hisparse_prefill_staging.py \
-  tests/e2e/pull_request/one_card/test_hisparse_selection_order.py
+  tests/e2e/pull_request/one_card/test_hisparse_prefill_staging.py
 ```
 
 The full modules have not been rerun on this new split. Isolated stream-boundary

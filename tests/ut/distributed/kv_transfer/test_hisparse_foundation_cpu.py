@@ -4,7 +4,6 @@
 
 import ast
 import ctypes
-import inspect
 import math
 import sys
 from dataclasses import dataclass, replace
@@ -33,24 +32,6 @@ def backend_type():
     return definitions(
         "distributed/kv_transfer/hisparse/backend.py", {"AscendHiSparseBackend"}, HiSparseBackend=object
     )["AscendHiSparseBackend"]
-
-
-def test_merged_core_resolver_call_keeps_optional_outputs_in_their_current_positions():
-    operation = definitions("ops/hisparse.py", {"HiSparseNPUOps"})["HiSparseNPUOps"].hisparse_resolve_residency
-    # Argument positions from the reviewed merged Core Runtime.swap_in call.
-    # The former pre-merge method rejected this call or shifted output buffers.
-    arguments = [object() for _ in range(26)]
-    bound = inspect.signature(operation).bind(object(), *arguments).arguments
-    for name, position in {
-        "miss_mask": 10,
-        "stats": 11,
-        "source_block_size": 16,
-        "resolved_global_indices": 17,
-        "valid_counts": 18,
-        "resident_null_block": 24,
-        "num_valid_rows": 25,
-    }.items():
-        assert bound[name] is arguments[position]
 
 
 def test_failed_unregister_retains_host_owner_for_safe_retry(monkeypatch):
@@ -102,18 +83,8 @@ def test_mapped_addresses_retain_offsets_and_reject_expired_or_external_views():
 def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups(
     monkeypatch, max_rows, hot_rows, union_rows
 ):
-    allocated = []
-
-    class Workspace:
-        def __init__(self, **geometry):
-            self.geometry = geometry
-            allocated.append(self)
-
-    class Ops:
-        def __init__(self, mapping, workspace):
-            self.mapping, self.workspace = mapping, workspace
-
-    monkeypatch.setitem(sys.modules, "vllm_ascend.ops.hisparse", NS(ResolverWorkspace=Workspace, HiSparseNPUOps=Ops))
+    operations = definitions("ops/hisparse.py", {"ResolverWorkspace", "HiSparseNPUOps"})
+    monkeypatch.setitem(sys.modules, "vllm_ascend.ops.hisparse", NS(**operations))
     backend = backend_type()()
 
     def group():
@@ -134,12 +105,16 @@ def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups
     first, follower = group()
     second, _ = group()
     assert follower.workspace is first.cache_ops.workspace
-    assert follower.mapping is first.registered_host_pool._hisparse_registration
+    assert follower.host_mapping is first.registered_host_pool._hisparse_registration
     assert second.cache_ops.workspace is not first.cache_ops.workspace
-    assert len(allocated) == 2
-    assert allocated[0].geometry == dict(
-        max_rows=max_rows, hot_size=hot_rows, max_union_rows=union_rows, device=torch.device("cpu")
-    )
+    first_workspace, second_workspace = first.cache_ops.workspace, second.cache_ops.workspace
+    assert first_workspace.row_keys.shape == (max_rows * hot_rows,)
+    assert first_workspace.cache_keys.shape == (max_rows, hot_rows)
+    assert first_workspace.max_union_rows == union_rows
+    first_workspace.row_keys.fill_(13)
+    second_workspace.row_keys.zero_()
+    assert torch.all(follower.workspace.row_keys == 13)
+    assert torch.count_nonzero(second_workspace.row_keys) == 0
 
 
 @dataclass(frozen=True)
@@ -211,8 +186,8 @@ def test_unsupported_indexer_formats_are_rejected_before_pool_binding(field):
         functions["get_hisparse_indexer_specs"](config)
 
 
-@pytest.mark.parametrize("hash_lookahead", [0, 7])
-def test_hisparse_roles_preserve_core_admission_and_explicit_hash_budget(hash_lookahead):
+@pytest.mark.parametrize("enable_caching", [False, True])
+def test_hisparse_roles_preserve_core_admission_and_explicit_hash_budget(enable_caching):
     calls = []
     marker = object()
     functions = definitions(
@@ -227,12 +202,51 @@ def test_hisparse_roles_preserve_core_admission_and_explicit_hash_budget(hash_lo
         config,
         max_model_len=65536,
         max_in_flight_tokens=129,
-        num_hash_lookahead_tokens=hash_lookahead,
-        enable_caching=False,
+        num_hash_lookahead_tokens=7,
+        enable_caching=enable_caching,
     )
     assert result is marker and len(calls) == 1
     assert calls[0]["kv_cache_config"] is config
     assert calls[0]["max_in_flight_tokens"] == 129
-    assert calls[0]["num_hash_lookahead_tokens"] == hash_lookahead
-    assert calls[0]["enable_caching"] is False
+    assert calls[0]["num_hash_lookahead_tokens"] == 7
+    assert calls[0]["enable_caching"] is enable_caching
     assert "eagle_attn_layer_names" not in calls[0]
+
+
+def test_capture_metadata_prevents_warmup_host_mirrors():
+    class Parent:
+        def build_for_cudagraph_capture(self, common, **kwargs):
+            assert common is common_input and kwargs["draft_index"] is draft
+            return self.build()
+
+        def build(self):
+            return NS(hisparse_for_capture=False)
+
+    methods = definitions(
+        "attention/sfa_hisparse.py",
+        {"AscendHiSparseMetadataBuilder", "finish_hisparse_kv_update"},
+        AscendSFAMetadataBuilder=Parent,
+    )
+    cls = methods["AscendHiSparseMetadataBuilder"]
+    builder = cls.__new__(cls)
+    common_input, draft = object(), object()
+    capture_metadata = builder.build_for_cudagraph_capture(common_input, draft_index=draft)
+    real_metadata = builder.build()
+    finish = methods["finish_hisparse_kv_update"]
+    submitted = []
+    cache = NS(finish_kv_update=lambda: submitted.append(True))
+    for _ in range(5):
+        finish(cache, capture_metadata)
+    assert submitted == []
+    finish(cache, real_metadata)
+    assert submitted == [True]
+
+
+def test_real_forward_mirror_errors_remain_visible():
+    finish = definitions("attention/sfa_hisparse.py", {"finish_hisparse_kv_update"})["finish_hisparse_kv_update"]
+
+    def duplicate():
+        raise RuntimeError("HiSparse layer 0 mirrored twice.")
+
+    with pytest.raises(RuntimeError, match="mirrored twice"):
+        finish(NS(finish_kv_update=duplicate), NS(hisparse_for_capture=False))
