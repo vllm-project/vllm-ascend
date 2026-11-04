@@ -7,7 +7,9 @@ import unittest
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import torch
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -58,6 +60,9 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         thread.request_task_counts = defaultdict(int)
         thread.finished_request_markers = set()
         thread.request_task_counts_lock = threading.Lock()
+        thread.failed_recv_requests = set()
+        thread.invalid_block_ids = set()
+        thread.failed_recv_requests_lock = threading.Lock()
         return thread
 
     def test_group_transfer_and_completion(self):
@@ -80,6 +85,7 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
             "prefill": {31002: [0x4000, 0x5000, 0x6000]},
         }
         thread.remote_te_port = {"prefill": {31002: 7777}}
+        thread.remote_te_host = {"prefill": {31002: "192.0.2.1"}}
         # Two buffers share the first group's blocks; the state group has its own stride.
         thread.addr_group_idx = [[0], [0], [1]]
         thread.block_len_per_addr = [16, 8, 32]
@@ -839,7 +845,6 @@ class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
             kv_cache_tensors=[
                 types.SimpleNamespace(
                     size=backing_size,
-                    layers=[layer_name],
                     layers=[layer_name],
                     layer_stride=backing_size,
                     block_stride=2 * alignment,

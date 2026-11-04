@@ -41,10 +41,15 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, UniformTypeKVCacheSpecs
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec, register_ascend_kv_cache_specs
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import MooncakeConnector
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import (
+    MooncakeConnector as MooncakeHybridConnector,
+)
 from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import (
+    _initialize_replay_window,
     _mark_prefix_replay,
     _patch_scheduler,
     _rewrite_method,
@@ -351,7 +356,7 @@ def test_scheduler_created_before_patch_initializes_replay_on_first_schedule(rep
     # revalidation installed the replay constructor wrapper.
     del scheduler.prefix_replay_tokens
     if connector:
-        with pytest.raises(ValueError, match="local prefix caching only"):
+        with pytest.raises(ValueError, match="get_loaded_kv_cache_group_ids"):
             scheduler.schedule()
         assert not hasattr(scheduler, "prefix_replay_tokens")
     else:
@@ -360,3 +365,163 @@ def test_scheduler_created_before_patch_initializes_replay_on_first_schedule(rep
             assert scheduler.prefix_replay_tokens == WINDOW
         else:
             assert not hasattr(scheduler, "prefix_replay_tokens")
+
+
+@pytest.mark.parametrize("connector_cls", [MooncakeConnector, MooncakeHybridConnector])
+def test_pd_transfer_declares_private_swa_groups(connector_cls):
+    connector = object.__new__(connector_cls)
+    connector.connector_scheduler = SimpleNamespace(
+        kv_cache_config=SimpleNamespace(kv_cache_groups=["global", "swa", "compressor"])
+    )
+    assert connector.get_loaded_kv_cache_group_ids(MagicMock()) == (0, 1, 2)
+
+
+def _attach_pd_connector(scheduler, hit, asynchronous=True, loaded_groups=None):
+    """Use the real Hybrid connector contract; only replace network work."""
+    connector = object.__new__(MooncakeHybridConnector)
+    connector.connector_scheduler = SimpleNamespace(kv_cache_config=scheduler.kv_cache_manager.kv_cache_config)
+    if loaded_groups is not None:
+        connector.get_loaded_kv_cache_group_ids = lambda request: loaded_groups
+    loads = []
+    connector.get_num_new_matched_tokens = lambda request, local: (
+        (max(0, hit - local), asynchronous) if not loads else (0, False)
+    )
+    connector.update_state_after_alloc = lambda request, blocks, external: loads.append(external) if external else None
+    connector.on_new_request = MagicMock()
+    connector.build_connector_meta = MagicMock(return_value=None)
+    connector.has_pending_block_frees = lambda: False
+    connector.has_pending_push_work = lambda: False
+    scheduler.connector = connector
+    _initialize_replay_window(scheduler)
+    return connector, loads
+
+
+def _pd_request(scheduler, length):
+    init_none_hash(sha256)
+    request = Request(
+        "pd",
+        list(range(length)),
+        SamplingParams(max_tokens=4),
+        None,
+        block_hasher=get_request_block_hasher(BLOCK_SIZE, sha256),
+    )
+    scheduler.add_request(request)
+    return request
+
+
+@pytest.mark.parametrize("hit", [16, 32, 95, 96])
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_pd_full_window_is_loaded_without_128_token_replay(replay_scheduler, hit, asynchronous):
+    scheduler = replay_scheduler
+    _, loads = _attach_pd_connector(scheduler, hit, asynchronous)
+    req = _pd_request(scheduler, hit + 1)
+    first = scheduler.schedule()
+    if asynchronous:
+        assert first.total_num_scheduled_tokens == 0
+        assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert req.num_computed_tokens == hit
+    assert loads == [hit]
+    blocks = scheduler.kv_cache_manager.get_blocks(req.request_id).blocks
+    full_blocks = blocks[0][:]
+    # The transferred SWA tail is private but physically allocated.
+    assert any(not block.is_null for block in blocks[1])
+    output = first
+    if asynchronous:
+        scheduler.finished_recving_kv_req_ids.add(req.request_id)
+        output = scheduler.schedule()
+    data = output.scheduled_new_reqs[0]
+    assert data.num_computed_tokens == hit
+    assert data.replay_start == 0
+    assert output.num_scheduled_tokens[req.request_id] == 1
+    assert scheduler.kv_cache_manager.get_blocks(req.request_id).blocks[0][: len(full_blocks)] == full_blocks
+
+
+def test_async_pd_full_prompt_hit_only_recomputes_last_token(replay_scheduler):
+    scheduler = replay_scheduler
+    _attach_pd_connector(scheduler, HIT_TOKENS)
+    req = _pd_request(scheduler, HIT_TOKENS)
+    scheduler.schedule()
+    scheduler.finished_recving_kv_req_ids.add(req.request_id)
+    output = scheduler.schedule()
+    data = output.scheduled_new_reqs[0]
+    assert data.num_computed_tokens == HIT_TOKENS - 1
+    assert data.replay_start == 0
+    assert output.num_scheduled_tokens[req.request_id] == 1
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("hit", [95, 96])
+def test_external_hit_without_window_replays_only_after_load(replay_scheduler, asynchronous, hit):
+    scheduler = replay_scheduler
+    _, loads = _attach_pd_connector(scheduler, hit, asynchronous, loaded_groups=(0,))
+    req = _pd_request(scheduler, hit + 1)
+    output = scheduler.schedule()
+    adopted = hit - hit % BLOCK_SIZE
+    assert loads == [adopted]
+    full_blocks = scheduler.kv_cache_manager.get_blocks(req.request_id).blocks[0][:]
+    if asynchronous:
+        assert output.total_num_scheduled_tokens == 0
+        assert req.replay_start == 0
+        scheduler.finished_recving_kv_req_ids.add(req.request_id)
+        output = scheduler.schedule()
+    data = output.scheduled_new_reqs[0]
+    assert data.num_computed_tokens == adopted - WINDOW
+    assert data.replay_start == adopted - WINDOW
+    assert output.num_scheduled_tokens[req.request_id] == BLOCK_SIZE
+    assert scheduler.kv_cache_manager.get_blocks(req.request_id).blocks[0] == full_blocks
+    # Another replay chunk must not allocate/overwrite the shared global hit.
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[req.request_id] == BLOCK_SIZE
+    assert scheduler.kv_cache_manager.get_blocks(req.request_id).blocks[0] == full_blocks
+    swa_blocks = scheduler.kv_cache_manager.get_blocks(req.request_id).blocks[1]
+    assert not swa_blocks[(adopted - WINDOW) // BLOCK_SIZE].is_null
+
+
+@pytest.mark.parametrize("hit", [15, 16, 32])
+def test_short_external_hit_without_window_recomputes_cold(replay_scheduler, hit):
+    scheduler = replay_scheduler
+    _, loads = _attach_pd_connector(scheduler, hit, loaded_groups=(0,))
+    req = _pd_request(scheduler, hit + 1)
+    output = scheduler.schedule()
+    assert loads == []
+    assert output.scheduled_new_reqs[0].num_computed_tokens == 0
+    assert req.replay_start == 0
+    assert req.status == RequestStatus.RUNNING
+
+
+@pytest.mark.parametrize("valid_tokens", [0, 16, 32, 64])
+def test_failed_async_pd_load_does_not_trust_received_window(replay_scheduler, valid_tokens):
+    scheduler = replay_scheduler
+    _attach_pd_connector(scheduler, HIT_TOKENS)
+    req = _pd_request(scheduler, HIT_TOKENS + 1)
+    scheduler.schedule()
+    # The upstream invalid-block handler has lowered the valid prefix.
+    req.num_computed_tokens = valid_tokens
+    scheduler.failed_recving_kv_req_ids.add(req.request_id)
+    scheduler.finished_recving_kv_req_ids.add(req.request_id)
+    output = scheduler.schedule()
+    data = output.scheduled_new_reqs[0]
+    expected = max(0, valid_tokens - WINDOW)
+    assert data.num_computed_tokens == expected
+    assert data.replay_start == expected
+    assert req.request_id not in scheduler.failed_recving_kv_req_ids
+    assert req.request_id not in scheduler.finished_recving_kv_req_ids
+
+
+def test_pd_preemption_rebuilds_window_from_local_global_hit(replay_scheduler):
+    scheduler = replay_scheduler
+    _attach_pd_connector(scheduler, HIT_TOKENS)
+    req = _pd_request(scheduler, HIT_TOKENS + 1)
+    scheduler.schedule()
+    scheduler.finished_recving_kv_req_ids.add(req.request_id)
+    scheduler.schedule()
+    assert req.replay_start == 0
+    scheduler.running.remove(req)
+    req.num_in_flight_tokens = 0
+    scheduler._preempt_request(req, time.monotonic())
+    output = scheduler.schedule()
+    assert req.replay_start == HIT_TOKENS - WINDOW
+    if scheduler.use_v2_model_runner:
+        assert output.scheduled_new_reqs[0].replay_start == HIT_TOKENS - WINDOW
+    else:
+        assert output.scheduled_cached_reqs.replay_start == {req.request_id: HIT_TOKENS - WINDOW}

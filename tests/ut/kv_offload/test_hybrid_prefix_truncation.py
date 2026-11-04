@@ -18,10 +18,12 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import assert_scheduler_empty, create_model_runner_output, create_vllm_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import apply_legacy_replay_patch
 
 
 @pytest.mark.parametrize("speculative_method", [None, "mtp", "dspark"])
-def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, monkeypatch):
+@pytest.mark.parametrize("replay", [False, True])
+def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, replay, monkeypatch):
     monkeypatch.setattr(KVConnectorFactory, "_registry", KVConnectorFactory._registry.copy())
     if "MooncakeHybridConnector" not in KVConnectorFactory._registry:
         KVConnectorFactory.register_connector(
@@ -37,9 +39,16 @@ def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, mon
     )
     config.model_config.hf_config.compress_ratios = [1, 2]
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    config.cache_config.swa_bounded_replay = replay
+    apply_legacy_replay_patch(config)
     full = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
     swa = AscendSlidingWindowMLASpec(
-        block_size=128, num_kv_heads=1, head_size=8, dtype=torch.bfloat16, sliding_window=128
+        block_size=128,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+        bounded_replay=replay,
     )
     ring = CircularBufferSpec(block_size=32, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32)
     plan = KVCacheConfig(
@@ -94,6 +103,86 @@ def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, mon
 
     run("warm", 641)
     starts = run("hit", 513)
-    assert starts[0] == 384
-    assert run("shorter", 512)[0] == 384
-    assert run("longer", 514)[0] == 512
+    assert starts[0] == (256 if replay else 384)
+    assert run("shorter", 512)[0] == (256 if replay else 384)
+    assert run("longer", 514)[0] == (384 if replay else 512)
+
+
+@pytest.mark.parametrize("length", [129, 640, 641])
+def test_pd_consumer_without_prefix_caching_reuses_received_swa(length, monkeypatch):
+    monkeypatch.setattr(KVConnectorFactory, "_registry", KVConnectorFactory._registry.copy())
+    if "MooncakeHybridConnector" not in KVConnectorFactory._registry:
+        KVConnectorFactory.register_connector(
+            "MooncakeHybridConnector",
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector",
+            "MooncakeConnector",
+        )
+    config = create_vllm_config(
+        max_num_batched_tokens=1024,
+        kv_transfer_config=KVTransferConfig(kv_connector="MooncakeHybridConnector", kv_role="kv_consumer"),
+    )
+    config.model_config.hf_config.compress_ratios = [1, 2]
+    config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    config.cache_config.enable_prefix_caching = False
+    config.cache_config.swa_bounded_replay = True
+    apply_legacy_replay_patch(config)
+    full = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+    swa = AscendSlidingWindowMLASpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+        bounded_replay=True,
+    )
+    plan = KVCacheConfig(
+        num_blocks=128,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["full"], full), KVCacheGroupSpec(["swa"], swa)],
+    )
+    config.cache_config.num_gpu_blocks = plan.num_blocks
+    register_all_kvcache_specs(None)
+    init_none_hash(sha256)
+    block_size, hash_size = resolve_kv_cache_block_sizes(plan, config)
+    scheduler = Scheduler(
+        config, plan, StructuredOutputManager(config), block_size=block_size, hash_block_size=hash_size
+    )
+    request = Request(
+        request_id="pd-decode",
+        prompt_token_ids=list(range(length)),
+        pooling_params=None,
+        sampling_params=SamplingParams(
+            max_tokens=1,
+            extra_args={
+                "kv_transfer_params": {
+                    "do_remote_prefill": True,
+                    "remote_block_ids": (
+                        list(range(1, (length - 2) // 128 + 2)),
+                        [101, 102][-min(2, (length - 2) // 128 + 1) :],
+                    ),
+                    "remote_engine_id": "prefill",
+                    "remote_host": "192.0.2.1",
+                    "remote_port": 30000,
+                    "remote_request_id": "pd-prefill",
+                }
+            },
+        ),
+        block_hasher=get_request_block_hasher(hash_size, sha256),
+    )
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert output.total_num_scheduled_tokens == 0
+    assert request.num_computed_tokens == length - 1
+    assert output.kv_connector_metadata.requests[request.request_id].num_external_tokens == length - 1
+    assert scheduler.connector.get_loaded_kv_cache_group_ids(request) == (0, 1)
+    # Simulate only network completion; allocation, admission and sampling
+    # bookkeeping are the real scheduler and Hybrid connector implementations.
+    scheduler.finished_recving_kv_req_ids.add(request.request_id)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 1
+    assert output.scheduled_new_reqs[0].num_computed_tokens == length - 1
+    assert output.scheduled_new_reqs[0].replay_start == 0
+    result = create_model_runner_output([request])
+    scheduler.update_from_output(output, result)
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)

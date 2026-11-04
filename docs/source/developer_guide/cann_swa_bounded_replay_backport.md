@@ -76,7 +76,8 @@ MRV1 用 `VLLM_USE_V2_MODEL_RUNNER=0`。
 
 - 启动时 `Ascend decoder bounded replay: layers ... keep ... tokens` 表示已接入 decoder 适配器。
 - 实际长 prefill 后 `SWA decoder bounded replay active (MRV1/MRV2): ...` 表示执行了裁剪。
-- 重复前缀请求后 `SWA bounded replay is active: a local prefix hit is rebuilding its window` 表示命中重建路径。
+- 重复前缀请求后 `SWA bounded replay is active: a prefix hit is rebuilding its window` 表示命中重建路径。
+- Mooncake P/D 接收后 `SWA P/D handoff: received SWA window; skipping prefix replay` 表示复用了传入窗口。
 
 `--swa-bounded-replay` 被接受、启动成功或 HTTP 返回成功，均不能单独证明裁剪路径执行。
 短于窗口的请求不一定触发裁剪；开启 prompt logprobs 的请求会保留所需行。
@@ -138,8 +139,11 @@ vllm bench serve --backend vllm --base-url http://127.0.0.1:8000 \
   不提供捕获后的 decoder prefill 图加速。
 - PCP＋DP 的新增路径属于 MRV2。先验证 PCP=1，再使用相同开关测试 MRV2 的 PCP＋DP。
 - PP、DCP、microbatching、LoRA、不兼容的草稿或 replay 边界后的 Engram 会关闭 decoder replay。
-- vLLM 0.30 兼容层目前只允许本地 prefix replay，检测到 KV connector 会明确拒绝该组合。
-  本轮先验证单机 colocated；P/D 和 layerwise transfer 不在本次兼容层验证范围。
+- vLLM 0.30 兼容层接入 Ascend 的 `MooncakeHybridConnector` 和 `MooncakeConnectorV1`
+  请求级 P/D 交接，保留全局 KV、SWA 尾部和必要状态的原有传输路径。
+  未声明 `get_loaded_kv_cache_group_ids` 的 connector 仍明确拒绝；
+  Mooncake Store / AscendStore 的 layerwise offload 不属于此次接入范围。
+  配置和验收步骤见 [P/D replay 指南](cann_swa_pd_replay.md)。
 - 自定义 scheduler 若替换了上游调度循环，会关闭 SWA replay 并给出原因；需检查最终日志。
 - 本分支默认 OFF；不把 CPU 回归通过表述为 A3 功能、精度或性能已经通过。
 

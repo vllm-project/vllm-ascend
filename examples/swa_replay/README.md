@@ -48,7 +48,7 @@ bash examples/swa_replay/run_all.sh
 `usage.prompt_tokens_details.cached_tokens` 判断；未返回 cached_tokens 时显示为空。
 
 ```text
-SWA bounded replay is active: a local prefix hit is rebuilding its window.
+SWA bounded replay is active: a prefix hit is rebuilding its window.
 ```
 
 HTTP 成功只表示请求正常完成，不证明 replay 已执行，也不代表通过准确率验收。

@@ -1,0 +1,125 @@
+{
+  "date": "2026-11-04",
+  "branch": "backport/cann-swa-bounded-replay",
+  "parent_revision": "21b975838d9e05a5585f1ba58e81598aece2eb53",
+  "upstream_vllm_pin": "ced6857afa0ea7b2e3f0846a62e1394e90f15607",
+  "protocol_reference": "https://github.com/vllm-project/vllm/blob/dd4e40142a3280ef404493e5117bde0c60c6e389/vllm/v1/core/sched/scheduler.py#L3523",
+  "scope": {
+    "connectors": [
+      "MooncakeHybridConnector",
+      "MooncakeConnectorV1"
+    ],
+    "handoff": "Transfer request-owned global KV, required SWA tail and existing continuation state; reuse received window on D",
+    "ced": "Existing CANN DeepSeek V4.1 architecture and previous decoder-prefill trimming are retained; no encoder-only P weight placement or layer-20 internal trimming is introduced",
+    "unsupported": "Connectors without the loaded-group protocol, including the current AscendStore/Mooncake Store layerwise path, remain rejected with replay enabled",
+    "a3_baseline": "MRV1; documented P DP4/TP4 with legacy DSA-CP, D DP8/TP2; preserve actual deployment topology"
+  },
+  "cpu_regression": {
+    "files": 31,
+    "passed": 1449,
+    "skipped": 23,
+    "subtests_passed": 513,
+    "seconds": 22.72,
+    "log": "/tmp/cann-swa-pd-regressions.log",
+    "junit": "/tmp/cann-swa-pd-regressions.xml"
+  },
+  "coverage": [
+    "Real vLLM 0.30 scheduler, block allocation and reference ownership",
+    "Real Hybrid producer and consumer constructors and request metadata",
+    "Consumer with prefix caching disabled, H=N-1 and non-block-aligned boundaries",
+    "Complete SWA loads skip replay, including short hits; local hits still rebuild",
+    "Synchronous and asynchronous admission; no forward before async receive completion",
+    "Window-missing protocol paths, short-hit fallback, transfer-failure recovery",
+    "Preemption and readmission payloads for MRV1, MRV2 and async scheduler",
+    "Producer cache hits with MTP/DSpark, grouped transfer and completion bookkeeping"
+  ],
+  "offline_probe": {
+    "script": "tests/e2e/models/swa_bounded_replay_probe.py",
+    "validation": "Local simulated HTTP baseline and ON comparisons, both P/D activation markers, missing-marker failure, unpaired-argument failure passed",
+    "log_source_policy": "Supply fresh service logs; activation markers are process-level evidence, not per-request traces"
+  },
+  "baseline_test_fixture_repairs": [
+    "Remove duplicate layers keyword that prevented collection",
+    "Restore missing torch and patch imports",
+    "Initialize failed-receive bookkeeping and remote transfer host used by current receiver"
+  ],
+  "checks": {
+    "ruff_check": "passed, 7 changed Python files",
+    "ruff_format": "passed, 7 changed Python files",
+    "shellcheck": "passed, warning severity",
+    "bash_syntax": "passed",
+    "markdown_local_links": "passed",
+    "codespell_typos": "passed for new guide",
+    "format_sh_ci": "blocked before hooks by certificate configuration; retry with system CA reaches nodeenv parse error for version 0-alpha",
+    "standalone_markdownlint": "blocked by truncated minipass JSON from npm registry"
+  },
+  "not_validated": [
+    "A3 startup with real weights",
+    "Real Mooncake network and HCCL",
+    "NPU kernel execution and memory safety under load",
+    "Business accuracy and DSpark acceptance",
+    "A3 TTFT, TPOT/ITL and throughput"
+  ],
+  "reproduce_cpu_tests": {
+    "env": {
+      "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+      "VLLM_VERSION": "0.30.0",
+      "VLLM_PLUGINS": "",
+      "OMP_NUM_THREADS": "1"
+    },
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/ut/_310p/test_model_runner_310p.py",
+      "tests/ut/attention/test_decoder_replay_swa_indices.py",
+      "tests/ut/core/test_kv_cache_interface.py",
+      "tests/ut/core/test_swa_replay_downgrade.py",
+      "tests/ut/distributed/kv_transfer/kv_p2p/test_mooncake_connector.py",
+      "tests/ut/kv_offload/test_dspark_resident_kv.py",
+      "tests/ut/models/test_deepseek_v41_cache.py",
+      "tests/ut/models/test_deepseek_v41_decoder_replay.py",
+      "tests/ut/models/test_deepseek_v41_decoder_replay_state.py",
+      "tests/ut/models/test_deepseek_v41_dspark.py",
+      "tests/ut/models/test_deepseek_v41_hyper_connection.py",
+      "tests/ut/models/test_deepseek_v41_replay_distributed.py",
+      "tests/ut/models/test_engram_multistream.py",
+      "tests/ut/models/test_engram_v2_model_state.py",
+      "tests/ut/patch/platform/test_packed_kv_cache_compat.py",
+      "tests/ut/patch/platform/test_patch_swa_bounded_replay.py",
+      "tests/ut/patch/platform/test_patch_swa_bounded_replay_legacy.py",
+      "tests/ut/patch/platform/test_prefix_cache_cp_patches.py",
+      "tests/ut/worker/test_attn_utils_v2.py",
+      "tests/ut/worker/test_disable_compilation.py",
+      "tests/ut/worker/test_idle_dummy_config.py",
+      "tests/ut/worker/test_model_runner_v1.py",
+      "tests/ut/worker/test_model_runner_v2.py",
+      "tests/ut/worker/test_pcp_manager_v2.py",
+      "tests/ut/worker/test_replay_slot_padding.py",
+      "tests/ut/worker/test_v2_dummy_padding.py",
+      "tests/ut/worker/test_worker_v1.py",
+      "tests/ut/worker/v2/test_deepseek_v41_engram_state.py",
+      "tests/ut/attention/test_dsa_v41_cp.py",
+      "--disable-warnings",
+      "tests/ut/kv_offload/test_hybrid_prefix_truncation.py",
+      "tests/ut/kv_offload/test_mooncake_hybrid_connector.py",
+      "--tb=short",
+      "--junitxml=/tmp/cann-swa-pd-regressions.xml"
+    ]
+  },
+  "source_sha256": {
+    "docs/source/developer_guide/cann_swa_bounded_replay_backport.md": "3c6007881062429818c90297f497b923e1cd6c5cc9b04f0cb54e8a418f2e6237",
+    "docs/source/tutorials/models/DeepSeek-V4.1-Flash.md": "0d59a180de1357bee86801a732bc6ab759a6fadb3ddbed5d861091d94f0a0070",
+    "examples/swa_replay/README.md": "06ff603051b0df4163044481593441c0e4658da2f03aa17361d8c1545d7fa379",
+    "examples/swa_replay/common.sh": "fdce2e057dd2fbd4094deac70470ed0ea036b1593c07b078e360ae89f29ffcc1",
+    "tests/e2e/models/swa_bounded_replay_probe.py": "a14909f08ff87fb9d0df4ead730c9768dea3f77819cfd0b4b6b5bf1911bd8cbd",
+    "tests/ut/kv_offload/test_hybrid_prefix_truncation.py": "95a5eb81b1ba1ba79f250a5dfa0416336f3e65f47640aadf8fde006419d92d5c",
+    "tests/ut/kv_offload/test_mooncake_hybrid_connector.py": "7c89d2226a8ad494242350015753c5fded922a41bca2df1422fd40490305a2fd",
+    "tests/ut/patch/platform/test_patch_swa_bounded_replay_legacy.py": "16cef14888c71f9c6c62d3540a2ccb953a29de54560d084f43d04b5a990553c9",
+    "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_connector.py": "d39e6c3a682272a81c1058d70e9e8784ef37b812795dd3aba7ef7f494c639d37",
+    "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_hybrid_connector.py": "2cccc15912fc719acb0850a48aeb5bc39260a57e5f119074c78ff470ff88ba4d",
+    "vllm_ascend/patch/platform/patch_swa_bounded_replay_legacy.py": "9fe448e78726efaee1b66eca223835dec7a43db01d2a4c220f215740b7045092",
+    "docs/source/developer_guide/cann_swa_pd_replay.md": "0547080ee4ee4b4d4572fb07e26eb45b6622cfaf4e8b76e93de1d036e90e7150"
+  }
+}

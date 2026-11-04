@@ -870,12 +870,18 @@ native replay use the upstream implementation. Compatibility is detected from
 the replay interfaces rather than a version string. Configuration and wire
 fields are registered before use; scheduler and cache behavior is patched only
 when replay is enabled. Unsupported scheduler source bodies fail explicitly.
-The backport supports local prefix caching only; enabling replay with a KV
-connector raises an error. Existing replay restrictions still apply to PCP and
-Ascend modes that use independent scheduler copies.
+The backport supports local prefix caching and request-level P/D transfers with
+the Ascend `MooncakeHybridConnector` and `MooncakeConnectorV1` implementations.
+Connectors without the loaded-cache-group protocol are rejected. Mooncake Store
+layerwise offload is outside this integration. Existing replay restrictions
+still apply to Ascend modes that use independent scheduler copies. Follow the
+[CANN P/D replay guide](../../developer_guide/cann_swa_pd_replay.md) for the
+MRV1 A3 configuration and validation limits.
 
 SWA caches do not participate in prefix reuse. After a hit in another cache
 group, the scheduler recomputes the final SWA window of the cached prefix.
+An external P/D load that includes all required SWA groups reuses the received
+window instead. This distinction is also applied after asynchronous load completion.
 The worker masks writes to shared cache groups during replay and clamps the
 visible SWA range. Hits no longer than the window are recomputed in full.
 After preemption, readmission recalculates and forwards the replay boundary.

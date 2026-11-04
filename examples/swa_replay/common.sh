@@ -63,7 +63,7 @@ swa_finish() {
     if [[ -n "${SERVICE_LOG:-}" && -r "$SERVICE_LOG" ]]; then
         printf '\nNew replay messages since this script started (a worker logs activation only once):\n'
         awk -v start="$SWA_LOG_START" \
-            'NR > start && /SWA decoder bounded replay active|SWA bounded replay is active|Decoder bounded replay requires synchronized/ {print NR ":" $0}' \
+            'NR > start && /SWA decoder bounded replay active|SWA bounded replay is active|SWA P\/D handoff|Decoder bounded replay requires synchronized/ {print NR ":" $0}' \
             "$SERVICE_LOG"
     fi
     return "$status"

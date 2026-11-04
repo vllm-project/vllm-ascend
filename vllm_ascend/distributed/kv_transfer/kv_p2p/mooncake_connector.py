@@ -1646,6 +1646,11 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.on_new_request(request)
 
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        """The request-owned P/D transfer includes every group and SWA tail."""
+        assert self.connector_scheduler is not None
+        return tuple(range(len(self.connector_scheduler.kv_cache_config.kv_cache_groups)))
+
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Backport the local SWA replay admission protocol to vLLM 0.30.
+"""Backport the SWA replay admission and Mooncake P/D protocol to vLLM 0.30.
 
 The installed vLLM files and extensions are left intact. This patch supplies
 configuration and scheduling interfaces missing before upstream #56227. The
@@ -88,7 +88,7 @@ def register_legacy_replay_argument(parser) -> None:
             "--swa-bounded-replay",
             action=argparse.BooleanOptionalAction,
             default=False,
-            help="Rebuild the DeepSeek V4.1 SWA window after a local prefix-cache hit.",
+            help="Trim DeepSeek V4.1 prefill and rebuild missing SWA windows after cache hits.",
         )
 
 
@@ -114,14 +114,17 @@ def _rewrite_method(cls, name: str, replacements: tuple[tuple[str, str], ...], *
     return patched
 
 
-def _mark_prefix_replay(self, request, num_hit_tokens: int) -> int:
+def _mark_prefix_replay(self, request, num_hit_tokens: int, window_loaded: bool = False) -> int:
     request.replay_start = 0
     if not self.prefix_replay_tokens:
+        return 0
+    if window_loaded:
+        logger.info_once("SWA P/D handoff: received SWA window; skipping prefix replay.")
         return 0
     num_replay_tokens = min(self.prefix_replay_tokens, num_hit_tokens)
     request.replay_start = num_hit_tokens - num_replay_tokens
     if num_replay_tokens:
-        logger.info_once("SWA bounded replay is active: a local prefix hit is rebuilding its window.")
+        logger.info_once("SWA bounded replay is active: a prefix hit is rebuilding its window.")
         logger.debug(
             "SWA bounded replay: hit=%d start=%d tokens=%d", num_hit_tokens, request.replay_start, num_replay_tokens
         )
@@ -135,6 +138,19 @@ def _replay_window(spec) -> int:
     return getattr(spec, "prefix_replay_tokens", 0)
 
 
+def _load_restores_replay_window(self, request) -> bool:
+    """A request's own P/D blocks include SWA; hash-addressed hits may not.
+
+    Follow the native connector protocol without assuming that a nonzero
+    external token count restores every group. In particular, prefix_cacheable
+    is a persistence policy, not the set of groups a P/D handoff must transfer.
+    """
+    if self.connector is None or not self.prefix_replay_group_ids:
+        return False
+    loaded = self.connector.get_loaded_kv_cache_group_ids(request)
+    return set(self.prefix_replay_group_ids).issubset(loaded)
+
+
 def _initialize_replay_window(self) -> None:
     enabled = getattr(self.cache_config, "swa_bounded_replay", False)
     windows = (
@@ -146,9 +162,21 @@ def _initialize_replay_window(self) -> None:
     if len(windows) > 1:
         raise ValueError("SWA bounded replay requires matching window sizes")
     prefix_replay_tokens = next(iter(windows), 0)
-    if prefix_replay_tokens and self.connector is not None:
-        raise ValueError("The vLLM 0.30 SWA replay backport supports local prefix caching only")
+    if (
+        prefix_replay_tokens
+        and self.connector is not None
+        and not callable(getattr(type(self.connector), "get_loaded_kv_cache_group_ids", None))
+    ):
+        raise ValueError(
+            "SWA replay requires a KV connector implementing get_loaded_kv_cache_group_ids; "
+            "use the Ascend Mooncake P/D connector from this backport"
+        )
     self.prefix_replay_tokens = prefix_replay_tokens
+    self.prefix_replay_group_ids = tuple(
+        i
+        for i, group in enumerate(self.kv_cache_manager.kv_cache_config.kv_cache_groups)
+        if prefix_replay_tokens and _replay_window(group.kv_cache_spec)
+    )
     if prefix_replay_tokens:
         logger.info("SWA bounded replay enabled on vLLM 0.30: window=%d", prefix_replay_tokens)
 
@@ -168,12 +196,22 @@ def _patch_scheduler() -> None:
         "schedule",
         (
             (
+                "if partial_tail and ext_tokens > partial_tail:",
+                "if ext_tokens and not self._load_restores_replay_window(request):\n"
+                "                        ext_tokens -= ext_tokens % self.block_size\n"
+                "                        load_kv_async = load_kv_async and ext_tokens > 0\n"
+                "                    if partial_tail and ext_tokens > partial_tail:",
+            ),
+            (
                 "assert num_computed_tokens <= request.num_tokens",
-                "if 0 < num_computed_tokens <= self.prefix_replay_tokens:\n"
+                "window_loaded = bool(num_external_computed_tokens) and self._load_restores_replay_window(request)\n"
+                "                if not window_loaded and 0 < num_computed_tokens <= self.prefix_replay_tokens:\n"
                 "                    new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks\n"
                 "                    num_new_local_computed_tokens = 0\n"
                 "                    num_external_computed_tokens = 0\n"
+                "                    connector_prefix_cache_hits = 0\n"
                 "                    num_computed_tokens = 0\n"
+                "                    load_kv_async = False\n"
                 "                assert num_computed_tokens <= request.num_tokens",
             ),
             (
@@ -185,7 +223,8 @@ def _patch_scheduler() -> None:
                 "                # Number of tokens",
                 "request_token_budget = min(token_budget, input_budget - draft_slots)\n"
                 "                if did_prefix_cache_lookup:\n"
-                "                    num_replay_tokens = self._mark_prefix_replay(request, num_computed_tokens)\n"
+                "                    num_replay_tokens = self._mark_prefix_replay(\n"
+                "                        request, num_computed_tokens, window_loaded=window_loaded)\n"
                 "                    num_computed_tokens -= num_replay_tokens\n"
                 "                # Number of tokens",
             ),
@@ -194,6 +233,41 @@ def _patch_scheduler() -> None:
                 "                request,\n                num_new_tokens,",
                 "new_blocks = self.kv_cache_manager.allocate_slots(\n"
                 "                request,\n                max(num_new_tokens - num_replay_tokens, 0),",
+            ),
+        ),
+        install=False,
+    )
+    replay_remote_complete = _rewrite_method(
+        Scheduler,
+        "_update_waiting_for_remote_kv",
+        (
+            (
+                "assert self.connector is not None",
+                "assert self.connector is not None\n"
+                "    load_failed = request.request_id in self.failed_recving_kv_req_ids",
+            ),
+            (
+                "        # on a full prompt hit, we need to re-compute the last token\n"
+                "        # in order to be able to sample the next token\n"
+                "        if request.num_computed_tokens == request.num_tokens:\n"
+                "            request.num_computed_tokens = request.num_tokens - 1\n",
+                "",
+            ),
+            (
+                "self.finished_recving_kv_req_ids.remove(request.request_id)",
+                "if load_failed and request.num_computed_tokens <= self.prefix_replay_tokens:\n"
+                "        # A short partial load cannot amortize replay. Retry cold,\n"
+                "        # without writing into an adopted shared prefix.\n"
+                "        self.kv_cache_manager.free(request)\n"
+                "        request.num_computed_tokens = 0\n"
+                "    num_replay_tokens = self._mark_prefix_replay(\n"
+                "        request, request.num_computed_tokens,\n"
+                "        window_loaded=not load_failed and self._load_restores_replay_window(request))\n"
+                "    if num_replay_tokens:\n"
+                "        request.num_computed_tokens -= num_replay_tokens\n"
+                "    elif request.num_computed_tokens == request.num_tokens:\n"
+                "        request.num_computed_tokens = request.num_tokens - 1\n"
+                "    self.finished_recving_kv_req_ids.remove(request.request_id)",
             ),
         ),
         install=False,
@@ -220,10 +294,20 @@ def _patch_scheduler() -> None:
             _initialize_replay_window(self)
         return replay_schedule(self, *args, **kwargs)
 
-    # Validate both source bodies before installing any scheduler behavior.
+    original_remote_complete = Scheduler._update_waiting_for_remote_kv
+
+    @functools.wraps(original_remote_complete)
+    def remote_complete(self, request):
+        if not getattr(self.cache_config, "swa_bounded_replay", False):
+            return original_remote_complete(self, request)
+        return replay_remote_complete(self, request)
+
+    # Validate every source body before installing any scheduler behavior.
     Scheduler.__init__ = init
     Scheduler._mark_prefix_replay = _mark_prefix_replay
+    Scheduler._load_restores_replay_window = _load_restores_replay_window
     Scheduler.schedule = schedule
+    Scheduler._update_waiting_for_remote_kv = remote_complete
     KVCacheManager.allocate_slots = replay_allocate_slots
 
 

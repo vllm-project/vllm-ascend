@@ -70,7 +70,11 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--prefill-log", type=Path, help="Fresh P service log for a replay-ON P/D run.")
+    parser.add_argument("--decode-log", type=Path, help="Fresh D service log for a replay-ON P/D run.")
     args = parser.parse_args()
+    if bool(args.prefill_log) != bool(args.decode_log):
+        parser.error("--prefill-log and --decode-log must be supplied together")
     results = {}
     baseline = json.loads(args.baseline.read_text()) if args.baseline else None
     for name, prompt in CASES.items():
@@ -85,9 +89,22 @@ def main():
         print(name, json.dumps(results[name][0], ensure_ascii=False), flush=True)
         if name.startswith("long"):
             assert results[name][0]["usage"]["prompt_tokens"] > 4096
+    if args.prefill_log:
+        evidence = {}
+        for role, path, marker in (
+            ("prefill", args.prefill_log, "SWA decoder bounded replay active ("),
+            ("decode", args.decode_log, "SWA P/D handoff: received SWA window; skipping prefix replay."),
+        ):
+            lines = [line for line in path.read_text(errors="replace").splitlines() if marker in line]
+            evidence[role] = {"log": str(path), "activation_lines": lines}
+        results["pd_replay_evidence"] = evidence
     args.output.write_text(json.dumps(results, ensure_ascii=False, indent=2))
+    if args.prefill_log:
+        assert all(item["activation_lines"] for item in evidence.values()), evidence
+        print("PASS: P prefill trimming and D window handoff markers found in supplied logs", flush=True)
     if baseline:
-        for name, responses in results.items():
+        for name in CASES:
+            responses = results[name]
             reference = baseline[name][0]
             assert all(r["text"] == reference["text"] for r in responses), name
             assert all(r["finish_reason"] == reference["finish_reason"] for r in responses), name
