@@ -89,8 +89,8 @@ on:
       vllm_ref_for_test:
         required: false
         type: string
-        default: "main"
-        description: "vllm commit/tag for _presmoke_tests"
+        default: ""
+        description: "Optional vllm commit/tag override. Empty resolves .github/vllm-main-verified.commit from vllm_ascend_branch."
       build_from_raw_base:
         type: boolean
         required: false
@@ -144,6 +144,28 @@ jobs:
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
 
+  # ========== 解析已验证的vLLM commit，避免浮动main与vllm-ascend代码不匹配 ==========
+  resolve-vllm-ref:
+    name: Resolve verified vLLM commit
+    if: ${{ inputs.run_presmoke }}
+    runs-on: ubuntu-latest
+    outputs:
+      vllm_ref: ${{ steps.verified.outputs.ref }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.vllm_ascend_branch }}
+      - name: Read verified vLLM commit
+        id: verified
+        run: |
+          vllm_ref="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+          if ! [[ "${vllm_ref}" =~ ^[0-9a-f]{7,40}$ ]]; then
+            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${vllm_ref}"
+            exit 1
+          fi
+          echo "ref=${vllm_ref}" >> "$GITHUB_OUTPUT"
+
   # ========== 生成presmoke分组，调用 _presmoke_tests.yaml 冒烟 ==========
   gen-presmoke-groups:
     name: Generate presmoke test groups for ${{ inputs.target }}
@@ -174,11 +196,14 @@ jobs:
 
   run-presmoke-tests:
     name: Run Presmoke Smoke Tests ${{ inputs.target }}-${{ inputs.os }}
-    needs: gen-presmoke-groups
-    if: ${{ inputs.run_presmoke && needs.gen-presmoke-groups.result == 'success' }}
+    needs: [gen-presmoke-groups, resolve-vllm-ref]
+    if: >-
+      ${{ inputs.run_presmoke &&
+          needs.gen-presmoke-groups.result == 'success' &&
+          needs.resolve-vllm-ref.result == 'success' }}
     uses: ./.github/workflows/presmoke_tests.yaml
     with:
-      vllm: ${{ inputs.vllm_ref_for_test }}
+      vllm: ${{ inputs.vllm_ref_for_test || needs.resolve-vllm-ref.outputs.vllm_ref }}
       test_groups: ${{ needs.gen-presmoke-groups.outputs.presmoke_groups_json }}
       ref: ${{ inputs.vllm_ascend_branch }}
       base_ref: ${{ inputs.base_image_branch || 'main' }}
