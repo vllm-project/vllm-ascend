@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -39,6 +39,22 @@ from vllm_ascend.worker.v2.aclgraph_utils import (
 )
 from vllm_ascend.worker.v2.utils import communicator_switch
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
+
+
+def get_draft_prefill_cudagraph_mode(vllm_config: VllmConfig, cudagraph_mode: CUDAGraphMode) -> CUDAGraphMode:
+    """Keep PCP-sharded draft prefill out of FULL graphs.
+
+    An autoregressive draft keeping the target's PCP size shards its prefill
+    through the upstream PCP hooks. Their rank-local input staging and the
+    all-gather in ``restore_draft_prefill`` run outside the model forward,
+    which a FULL graph would skip on replay.
+    """
+    if vllm_config.parallel_config.prefill_context_parallel_size <= 1:
+        return cudagraph_mode
+    return CUDAGraphMode.PIECEWISE if cudagraph_mode.has_piecewise_cudagraphs() else CUDAGraphMode.NONE
+
 
 class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
     """ACL graph manager for autoregressive speculative decoding."""
@@ -51,6 +67,10 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
     ):
+        # Upstream uses num_speculative_steps + 1 as the draft-prefill query
+        # length and 1 for draft decode.
+        if decode_query_len > 1:
+            cudagraph_mode = get_draft_prefill_cudagraph_mode(vllm_config, cudagraph_mode)
         super().__init__(
             vllm_config,
             device,
@@ -86,21 +106,17 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        pcp_manager: "PCPManager | None" = None,
     ) -> None:
-        """Capture ACL graphs for autoregressive speculative decoding."""
+        """Capture ACL graphs for autoregressive speculative decoding.
+
+        Draft prefill reuses the target's PCP-local metadata at runtime, so
+        its capture stages the dummy through ``pcp_manager`` like the target
+        capture does. TODO: drop once upstream SpeculatorCudaGraphManager
+        forwards ``pcp_manager`` to ``prepare_inputs_to_capture``.
+        """
 
         with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
-            if self.is_draft_model_prefill:
-                super().capture(
-                    forward_fn,
-                    model_state,
-                    input_buffers,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    progress_bar_desc=progress_bar_desc,
-                )
-                return
 
             def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
                 num_tokens = desc.num_tokens
@@ -110,7 +126,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                     if self.dp_size > 1
                     else None
                 )
-                prepare_inputs_to_capture(
+                attn_metadata, slot_mappings = prepare_inputs_to_capture(
                     num_reqs,
                     num_tokens,
                     model_state,
@@ -123,7 +139,12 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                     # by bounding the dummy query length to the capture
                     # descriptor.
                     max_query_len=desc.max_query_len or desc.uniform_token_count,
+                    pcp_manager=pcp_manager,
                 )
+                if self.is_draft_model_prefill:
+                    return lambda cg_mode: forward_fn(
+                        num_reqs, num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cg_mode
+                    )
                 seq_lens_cpu_upper_bound = input_buffers.seq_lens_cpu[:num_reqs]
                 return lambda cg_mode: forward_fn(
                     num_reqs,

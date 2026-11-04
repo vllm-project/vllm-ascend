@@ -31,6 +31,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
     dispose_tensor,
@@ -310,8 +311,10 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             self.process_weights_after_loading_compressed_tensors(layer)
         else:
             self.process_weights_after_loading_modelslim(layer)
-        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        # The W4A8 MoE kernels require NZ, including in batch-invariant mode.
+        # Keep this operator requirement local; other weights retain their policy.
+        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         tensor_names = (
             "w13_weight",
             "w2_weight",
