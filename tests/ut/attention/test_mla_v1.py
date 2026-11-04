@@ -1503,7 +1503,8 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertIsNone(metadata.prefill)
         self.assertEqual(metadata.decode.seq_lens_list, [4, 5, 6])
 
-        # Without DCP, preserve the original classification even on a PD consumer.
+        # Without DCP, short prefills use the decode path for both PCP and
+        # non-PCP MLA. PCP+DCP keeps its separate classification policy.
         self.mock_vllm_config.parallel_config.decode_context_parallel_size = 1
         builder.use_dcp = False
         for pcp_size in (1, 2):
@@ -1522,11 +1523,60 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
                 common_attn_metadata.pcp_context = SimpleNamespace() if pcp_size > 1 else None
                 common_attn_metadata.slot_mapping = torch.arange(3 * pcp_size)
                 metadata = builder.build(0, common_attn_metadata)
-                expected_decodes = 3 if pcp_size == 1 else 0
-                self.assertEqual(metadata.num_decodes, expected_decodes)
-                self.assertEqual(metadata.num_prefills, 3 - expected_decodes)
-                self.assertEqual(metadata.num_decode_tokens, expected_decodes)
-                self.assertEqual(builder.num_prefill_tokens, 3 - expected_decodes)
+                self.assertEqual(metadata.num_decodes, 3)
+                self.assertEqual(metadata.num_prefills, 0)
+                self.assertEqual(metadata.num_decode_tokens, 3)
+                self.assertEqual(builder.num_prefill_tokens, 0)
+                self.assertIsNone(metadata.prefill)
+                self.assertIsNotNone(metadata.decode)
+
+    @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
+    def test_pcp_short_prefill_uses_decode_subbatch(self, mock_get_cos_and_sin_mla):
+        self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 2
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 1, 2, 6]),
+            query_start_loc_cpu=torch.tensor([0, 1, 2, 6]),
+            seq_lens_cpu=torch.tensor([64, 65, 68]),
+            num_reqs=3,
+            num_actual_tokens=6,
+            max_query_len=4,
+            block_table_tensor=torch.zeros((3, 10)),
+            slot_mapping=torch.arange(12),
+            actual_seq_lengths_q=torch.tensor([1, 2, 6]),
+            decode_token_per_req=torch.tensor([1, 1, 4]),
+            positions=torch.arange(6),
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            num_computed_tokens_cpu=None,
+            seq_lens=None,
+            max_seq_len=68,
+            is_prefilling=torch.tensor([False, True, True]),
+            pcp_context=SimpleNamespace(),
+        )
+        builder = AscendMLAMetadataBuilder(
+            kv_cache_spec=self.kv_cache_spec,
+            layer_names=["layer_0", "layer_1"],
+            vllm_config=self.mock_vllm_config,
+            device=self.mock_device,
+        )
+        decode_metadata = MagicMock()
+        prefill_metadata = MagicMock()
+        mock_get_cos_and_sin_mla.return_value = (torch.zeros((6, 32)), torch.zeros((6, 32)))
+
+        with (
+            patch.object(builder, "build_decode_metadata", return_value=decode_metadata) as build_decode,
+            patch.object(builder, "build_prefill_metadata", return_value=prefill_metadata) as build_prefill,
+        ):
+            metadata = builder.build(0, common_attn_metadata)
+
+        self.assertEqual(metadata.num_decodes, 2)
+        self.assertEqual(metadata.num_decode_tokens, 2)
+        self.assertEqual(metadata.num_prefills, 1)
+        self.assertIs(metadata.decode, decode_metadata)
+        self.assertIs(metadata.prefill, prefill_metadata)
+        self.assertEqual(metadata.attn_state, AscendAttentionState.ChunkedPrefill)
+        self.assertEqual(prefill_metadata.pcp_local_num_input_tokens, 6)
+        build_decode.assert_called_once_with(0, common_attn_metadata)
+        build_prefill.assert_called_once_with(0, common_attn_metadata)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     def test_build_decode_metadata_without_disable_padded_drafter_batch(self, mock_get_cos_and_sin_mla):

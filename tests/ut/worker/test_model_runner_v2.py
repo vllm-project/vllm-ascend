@@ -65,6 +65,7 @@ def _make_runner(need_timing: bool = True):
     runner._debugger_started = False
     runner.attn_groups = []
     runner._uses_flashmla = False
+    runner._uses_mla_backend = False
     runner.adaptive_verification = None
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)  # type: ignore[assignment]
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
@@ -225,6 +226,61 @@ def test_gather_batch_preserves_pd_tail_and_flashmla_request_order(uses_flashmla
     np.testing.assert_array_equal(batch_state.is_prefilling_np, [True, False])
     if not uses_flashmla:
         assert gathered is batch_state
+
+
+@pytest.mark.parametrize(
+    "computed_prefill,expected_mask,expected_graph_eligible,expected_dispatch_tokens",
+    [
+        (127, [True, False], True, 1),
+        (0, [False, False], False, 2),
+    ],
+)
+def test_gather_pcp_mla_classifies_only_cached_one_token_prefill_as_decode(
+    computed_prefill,
+    expected_mask,
+    expected_graph_eligible,
+    expected_dispatch_tokens,
+):
+    runner = _make_runner()
+    runner.model_config.use_mla = True
+    runner._uses_mla_backend = True
+    runner.vllm_config = SimpleNamespace(
+        model_config=runner.model_config,
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=1,
+        ),
+    )
+    runner.pcp_manager = AscendPCPManager(
+        2,
+        0,
+        torch.device("cpu"),
+        shard_decode_requests=True,
+    )
+    runner.pcp_manager.bind_config(runner.vllm_config)
+    batch_state = _make_batch_state(
+        [computed_prefill, 128],
+        [1, 1],
+        [128 if computed_prefill else 1, 128],
+    )._replace(
+        prefill_runs_as_decode_np=None,
+        decode_graph_eligible=False,
+    )
+
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)):
+        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
+
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [True, False])
+    np.testing.assert_array_equal(gathered.prefill_runs_as_decode_np, expected_mask)
+    assert gathered.decode_graph_eligible is expected_graph_eligible
+    assert uniform == (1 if expected_graph_eligible else None)
+    assert (
+        runner.pcp_manager.get_num_tokens_for_dispatch(
+            gathered.num_scheduled_tokens,
+            gathered.is_prefilling_np,
+        )
+        == expected_dispatch_tokens
+    )
 
 
 @pytest.mark.parametrize("uses_flashmla", [False, True])

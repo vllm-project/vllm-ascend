@@ -89,6 +89,10 @@ class AscendPCPManager(PCPManager):
     # Draft input buffers and row count overwritten by staged rank-local
     # draft prefill inputs; the rows are stashed in the _draft_*_stash buffers.
     _staged_draft_inputs: tuple[InputBuffers, int] | None = None
+    # Short prefills that MLA dispatches through the decode path. The runner
+    # publishes this before graph dispatch; partition_batch later receives the
+    # same mask on AscendInputBatch and keeps the original request phase intact.
+    _dispatch_prefill_runs_as_decode_np: np.ndarray | None = None
 
     def __init__(
         self,
@@ -175,10 +179,63 @@ class AscendPCPManager(PCPManager):
         """
         self._draft_layer_names = frozenset(speculator.draft_attn_layer_names)
         self._is_draft_prefill_sharded = speculator.vllm_config.parallel_config.prefill_context_parallel_size > 1
+        # Whether the runner already restored the target hidden states to the
+        # global PCP layout for the current sampling step (replicated PCP
+        # draft). A second all-gather in restore_for_sampling would reorder
+        # them, so the sampling path consumes this flag instead of inferring
+        # the layout from the tensor length, which is ambiguous under
+        # piecewise/FULL graphs where each rank pads its local batch to the
+        # same global padded length.
+        self._sampling_hidden_restored = False
+        self._dispatch_prefill_runs_as_decode_np = None
 
     def bind_config(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
         self.shard_decode_requests: bool = self.shard_decode_requests and self.is_decode_sharded
+
+    def prepare_mla_batch_req_state(self, batch_state):
+        """Classify cached one-token prompt tails as PCP decode work.
+
+        Request lifecycle state remains in ``is_prefilling_np``. The separate
+        mask controls graph dispatch and PCP partitioning, matching the
+        non-PCP runner without making a fresh one-token prompt use decode.
+        PCP+DCP keeps its existing replicated-prefill policy.
+        """
+        self._dispatch_prefill_runs_as_decode_np = None
+        if batch_state is None or not self.is_decode_sharded or not batch_state.has_prefill:
+            return batch_state
+
+        num_new_tokens = batch_state.num_scheduled_tokens
+        num_draft_tokens = getattr(batch_state, "num_draft_tokens_np", None)
+        if num_draft_tokens is not None:
+            num_new_tokens = num_new_tokens - num_draft_tokens
+        one_token_ext = (num_new_tokens == 1) & (batch_state.num_computed_prefill_tokens_np > 0)
+        prefill_runs_as_decode = batch_state.is_prefilling_np & one_token_ext
+        self._dispatch_prefill_runs_as_decode_np = prefill_runs_as_decode
+        decode_graph_eligible = bool((prefill_runs_as_decode | ~batch_state.is_prefilling_np).all())
+        return batch_state._replace(
+            prefill_runs_as_decode_np=prefill_runs_as_decode,
+            decode_graph_eligible=decode_graph_eligible,
+        )
+
+    @staticmethod
+    def _effective_is_prefilling(input_batch: InputBatch) -> np.ndarray:
+        """Return the compute-path phase without mutating lifecycle state."""
+        is_prefilling = np.asarray(input_batch.is_prefilling_np, dtype=np.bool_)
+        prefill_runs_as_decode = getattr(input_batch, "prefill_runs_as_decode_np", None)
+        if prefill_runs_as_decode is None:
+            return is_prefilling
+        prefill_runs_as_decode = np.asarray(prefill_runs_as_decode, dtype=np.bool_)
+        if prefill_runs_as_decode.shape != is_prefilling.shape:
+            raise RuntimeError(
+                "PCP prefill-as-decode mask must match the request phase mask: "
+                f"{prefill_runs_as_decode.shape} != {is_prefilling.shape}."
+            )
+        return is_prefilling & ~prefill_runs_as_decode
+
+    @classmethod
+    def _has_compute_prefill(cls, input_batch: InputBatch) -> bool:
+        return bool(cls._effective_is_prefilling(input_batch).any())
 
     @property
     def is_decode_sharded(self) -> bool:
@@ -231,6 +288,44 @@ class AscendPCPManager(PCPManager):
                 chunk_len = min(chunk_size, query_len - chunk_offset)
                 if chunk_len > 0:
                     yield req_idx, chunk_offset, chunk_len
+
+    def get_num_tokens_for_dispatch(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        is_prefilling: np.ndarray,
+    ) -> int:
+        """Size dispatch from the same phase classification as partitioning."""
+        prefill_runs_as_decode = self._dispatch_prefill_runs_as_decode_np
+        if prefill_runs_as_decode is not None:
+            if prefill_runs_as_decode.shape != is_prefilling.shape:
+                raise RuntimeError(
+                    "PCP dispatch prefill-as-decode mask must match the request phase mask: "
+                    f"{prefill_runs_as_decode.shape} != {is_prefilling.shape}."
+                )
+            is_prefilling = np.asarray(is_prefilling, dtype=np.bool_) & ~prefill_runs_as_decode
+        return super().get_num_tokens_for_dispatch(num_scheduled_tokens, is_prefilling)
+
+    @staticmethod
+    def broadcast_replicated_hidden_states(
+        last_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
+        num_tokens: int,
+        replicated_pcp: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Broadcast actual draft hidden states only when target PCP is replicated."""
+        if not replicated_pcp:
+            return last_hidden_states, hidden_states
+
+        # Draft tokens are replicated: broadcast PCP rank 0 directly,
+        # matching target decode's gather-then-select behavior.
+        pcp_group = get_pcp_group()
+        shared_hidden_states = hidden_states is last_hidden_states
+        last_hidden_states = pcp_group.broadcast(last_hidden_states[:num_tokens].contiguous(), src=0)
+        if shared_hidden_states:
+            hidden_states = last_hidden_states
+        else:
+            hidden_states = pcp_group.broadcast(hidden_states[:num_tokens].contiguous(), src=0)
+        return last_hidden_states, hidden_states
 
     @property
     def global_batch(self) -> AscendInputBatch:
@@ -300,7 +395,7 @@ class AscendPCPManager(PCPManager):
         token, so their request metadata is kept at the request extent instead.
         """
         return (
-            not bool(global_batch.is_prefilling_np.any())
+            not self._has_compute_prefill(global_batch)
             and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
             and global_batch.num_draft_tokens == 0
         )
@@ -311,8 +406,42 @@ class AscendPCPManager(PCPManager):
         batch_desc: BatchExecutionDescriptor,
     ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
-        local_batch = super().partition_batch(input_batch, batch_desc)
+        effective_is_prefilling = self._effective_is_prefilling(input_batch)
+        partition_input = input_batch
+        if not np.array_equal(effective_is_prefilling, input_batch.is_prefilling_np):
+            # Upstream PCP accepts only one phase mask. Give it the compute-path
+            # view while retaining the original InputBatch as the global view
+            # used by prompt preparation, sampling, and request lifecycle code.
+            partition_input = replace(
+                input_batch,
+                is_prefilling_np=effective_is_prefilling,
+                has_prefill=bool(effective_is_prefilling.any()),
+            )
+        local_batch = super().partition_batch(partition_input, batch_desc)
         assert isinstance(local_batch, AscendInputBatch)
+        self._global_batch = input_batch
+
+        prefill_runs_as_decode = input_batch.prefill_runs_as_decode_np
+        if prefill_runs_as_decode is not None:
+            global_flags = {
+                int(req_state): bool(flag)
+                for req_state, flag in zip(
+                    input_batch.idx_mapping_np[: input_batch.num_reqs],
+                    prefill_runs_as_decode,
+                )
+            }
+            local_flags = np.zeros(local_batch.num_reqs_after_padding, dtype=np.bool_)
+            local_flags[: local_batch.num_reqs] = np.fromiter(
+                (global_flags[int(req_state)] for req_state in local_batch.idx_mapping_np[: local_batch.num_reqs]),
+                dtype=np.bool_,
+                count=local_batch.num_reqs,
+            )
+            local_batch = replace(
+                local_batch,
+                prefill_runs_as_decode_np=local_flags,
+                decode_graph_eligible=input_batch.decode_graph_eligible,
+            )
+            self._local_batch = local_batch
         # A sharded decode graph is sized per rank, so upstream can pad the
         # local requests. Replicated decode graphs are padded below instead.
         padded_num_reqs = batch_desc.num_reqs if batch_desc.cg_mode == CUDAGraphMode.FULL else None
@@ -355,7 +484,7 @@ class AscendPCPManager(PCPManager):
             local_batch.seq_lens_np = actual_seq_lens_np
         # Preserve the global attention state for decode-only batches, including
         # empty ranks, before upstream clears local draft metadata.
-        if not bool(global_batch.is_prefilling_np.any()):
+        if not self._has_compute_prefill(global_batch):
             return local_batch
 
         local_batch.attn_state = build_attn_state(
@@ -425,7 +554,7 @@ class AscendPCPManager(PCPManager):
     ) -> AscendInputBatch:
         """Pad a replicated decode batch to the fixed FULL-graph layout."""
         graph_num_tokens = global_batch.num_tokens_after_padding
-        is_decode_only = not bool(global_batch.is_prefilling_np.any())
+        is_decode_only = not self._has_compute_prefill(global_batch)
         # FULL_DECODE_ONLY graphs capture one token for every padded request.
         # Other graph modes may pad tokens without padding request metadata.
         is_full_decode_graph = self._full_decode_requests_are_token_sized(global_batch)
@@ -654,7 +783,7 @@ class AscendPCPManager(PCPManager):
         slot_mappings = super().prepare_slot_mappings()
         assert self._global_batch is not None
         graph_num_tokens = self._global_batch.num_tokens_after_padding
-        is_decode_only = not bool(self._global_batch.is_prefilling_np.any())
+        is_decode_only = not self._has_compute_prefill(self._global_batch)
         if self.is_decode_sharded or not is_decode_only or graph_num_tokens <= self._global_batch.num_tokens:
             return slot_mappings
 
@@ -762,7 +891,7 @@ class AscendPCPManager(PCPManager):
         assert hidden_restore_idx is not None
         global_block_table_num_blocks = None
         local_to_global_req_indices = None
-        if self.dcp_world_size > 1 and bool(global_batch.is_prefilling_np.any()):
+        if self.dcp_world_size > 1 and self._has_compute_prefill(global_batch):
             global_block_table_num_blocks = torch.from_numpy(
                 self._block_tables.num_blocks.np[:, global_batch.idx_mapping_np[: global_batch.num_reqs]]
             ).to(device=self.device, non_blocking=True)

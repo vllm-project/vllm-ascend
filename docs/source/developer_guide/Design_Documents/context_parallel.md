@@ -87,7 +87,7 @@ PCP rank 2:         [2]      [5]
 PCP rank 3:            [3][4]
 ```
 
-Each fragment keeps its original positions and computed-prefix length, so tail queries can attend to earlier chunks. Local buffers are padded for collectives. Short requests can leave PCP-only ranks without queries; the PCP+DCP path replicates short prefills when splitting would leave an empty chunk.
+Each fragment keeps its original positions and computed-prefix length, so tail queries can attend to earlier chunks. Local buffers are padded for collectives. For MLA with PCP-only, a cached one-token prompt tail uses decode request ownership instead of prefill splitting; its original prefill lifecycle state is retained. Fresh prompts still use prefill splitting, and PCP+DCP replicates short prefills when splitting would leave an empty chunk.
 
 #### Decode: request ownership and cache shards
 

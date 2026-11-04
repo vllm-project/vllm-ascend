@@ -52,6 +52,7 @@ from vllm.v1.worker.gpu.model_runner import (
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -160,6 +161,7 @@ class NPUModelRunner(GPUModelRunner):
         # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
         self._uses_flashmla = False
+        self._uses_mla_backend = False
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -451,6 +453,9 @@ class NPUModelRunner(GPUModelRunner):
                 getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
                 for groups in self.attn_groups
                 for group in groups
+            )
+            self._uses_mla_backend = any(
+                group.backend is AscendMLABackend for groups in self.attn_groups for group in groups
             )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
@@ -772,6 +777,24 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
+        pcp_manager = getattr(self, "pcp_manager", None)
+        if pcp_manager is not None:
+            if not self._uses_flashmla and self._uses_mla_backend:
+                batch_state = pcp_manager.prepare_mla_batch_req_state(batch_state)
+            else:
+                # Clear the per-step dispatch mask for dummy, non-MLA, and
+                # FlashMLA batches. FlashMLA keeps prompt tails on its FIA
+                # prefill path.
+                pcp_manager.prepare_mla_batch_req_state(None)
+
+            if batch_state is not None and batch_state.prefill_runs_as_decode_np is not None:
+                max_query_len = int(batch_state.num_scheduled_tokens.max())
+                uniform_token_count = get_uniform_decode_token_count(
+                    len(batch_state.req_ids),
+                    batch_state.num_tokens,
+                    max_query_len,
+                    batch_state.decode_graph_eligible,
+                )
         if self._uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
