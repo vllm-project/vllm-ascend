@@ -1,5 +1,7 @@
 import threading
 
+from vllm.logger import logger
+
 # Mooncake transport used for PD KV transfer unless
 # ``kv_connector_extra_config["transfer_protocol"]`` overrides it. ``ascend``
 # installs the Ascend transport, which falls back to ``aclrtMemcpy`` staging
@@ -66,6 +68,16 @@ class GlobalTE:
                     # like a conflict to a lock-free caller.
                     self.transfer_protocol = resolved_protocol
                     self.transfer_engine = engine
+                    if resolved_protocol != DEFAULT_TRANSFER_PROTOCOL:
+                        # The engine is process-wide and the callers that pass
+                        # no protocol reuse it, so a non-default transport is
+                        # not local to the connector that selected it.
+                        logger.info(
+                            "Mooncake transfer engine initialized with non-default protocol %r; "
+                            "in this process the AscendStore Mooncake backend and encoder-cache "
+                            "transfer reuse the same engine and transport.",
+                            resolved_protocol,
+                        )
         # The native engine is process-wide and cannot be re-initialized, so a
         # second caller asking for another transport would otherwise silently
         # run on the first one. This only catches an in-process mismatch;

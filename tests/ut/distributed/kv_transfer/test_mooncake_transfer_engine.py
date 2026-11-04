@@ -112,6 +112,18 @@ class TestGlobalTE(unittest.TestCase):
             self.assertIsNone(global_te.transfer_engine)
             factory.assert_called_once_with()
 
+    def test_non_default_protocol_reports_the_shared_engine(self):
+        global_te = self.global_te_cls()
+        engine = MagicMock()
+        engine.initialize.return_value = 0
+        with (
+            patch("mooncake.engine.TransferEngine", return_value=engine),
+            self.assertLogs("vllm", level="INFO") as logs,
+        ):
+            global_te.get_transfer_engine("localhost", None, protocol="ascend_direct")
+        engine.initialize.assert_called_once_with("localhost", "P2PHANDSHAKE", "ascend_direct", "")
+        self.assertTrue(any("non-default protocol 'ascend_direct'" in line for line in logs.output))
+
     def test_waiting_getter_does_not_retry_failed_initialization(self):
         started, release, waiting = (threading.Event() for _ in range(3))
         engine = MagicMock()
