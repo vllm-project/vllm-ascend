@@ -520,6 +520,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             )
             self.kv_send_thread.start()
             ready_event_sending.wait()
+            self.kv_send_thread.raise_if_failed()
         elif self.can_put:
             ready_event_sending = threading.Event()
             self.kv_send_thread = KVCacheStoreKeyLayerSendingThread(
@@ -538,6 +539,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             )
             self.kv_send_thread.start()
             ready_event_sending.wait()
+            self.kv_send_thread.raise_if_failed()
         ready_event = threading.Event()
         if self.use_block_key_layerwise or self.use_layerwise_transfer:
             self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
@@ -585,6 +587,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             self.kv_send_thread.save_disabled = self._save_disabled
         self.kv_recv_thread.start()
         ready_event.wait()
+        self.kv_recv_thread.raise_if_failed()
         self._transfer_threads_started = True
 
     def _register_dspark_prefix_cache(self, draft_caches: dict[str, torch.Tensor]) -> None:
