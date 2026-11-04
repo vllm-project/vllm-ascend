@@ -801,18 +801,18 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self._step_rope_buffers: dict = {}
         self.logical_block_size = kv_cache_spec.block_size
         self.storage_block_size = get_storage_block_size(kv_cache_spec)
-        scheduler_config = vllm_config.scheduler_config
-        self.speculative_config = vllm_config.speculative_config
-        self.decode_threshold = 1
-        self.spec_slot_mapping = None
-        self.dspark_swa_indices_buffer: torch.Tensor | None = None
-        kv_plan = get_dsa_attn_kv_plan(vllm_config)
         # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
         self.compressor_ratio = getattr(
             kv_cache_spec,
             "compress_ratio",
             getattr(kv_cache_spec, "tokens_per_state", 0),
         )
+        scheduler_config = vllm_config.scheduler_config
+        self.speculative_config = vllm_config.speculative_config
+        self.decode_threshold = 1
+        self.spec_slot_mapping = None
+        self.dspark_swa_indices_buffer: torch.Tensor | None = None
+        kv_plan = get_dsa_attn_kv_plan(vllm_config)
         sas_plan = get_dsa_attn_kv_plan(vllm_config, self.compressor_ratio)
         self.sas_metadata_buffer_size = (
             MIXED_QUANT_SAS_METADATA_BUFFER_SIZE
