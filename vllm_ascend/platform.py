@@ -1885,8 +1885,31 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
         raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors/rfork), or dummy weights.")
 
 
+def _validate_mrv1_pp_spec_async(vllm_config: VllmConfig) -> None:
+    """MRV1 + PP + speculation relies on a serialized EngineCore batch queue.
+
+    Async scheduling bypasses that serialization and silently corrupts the
+    generated tokens, so reject the combination instead of returning wrong
+    output. The async path is being repaired separately in #19309; this guard
+    can be relaxed once that lands.
+    """
+    parallel_config = vllm_config.parallel_config
+    if (
+        not vllm_config.use_v2_model_runner
+        and parallel_config.pipeline_parallel_size > 1
+        and vllm_config.speculative_config is not None
+        and vllm_config.scheduler_config.async_scheduling
+    ):
+        raise ValueError(
+            "Async scheduling is not supported with pipeline parallel (PP>1) and "
+            "speculative decoding on the V1 model runner. Disable async scheduling "
+            "or use the V2 model runner."
+        )
+
+
 def _validate_parallel_config(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config
+    _validate_mrv1_pp_spec_async(vllm_config)
     if not vllm_config.use_v2_model_runner and parallel_config.prefill_context_parallel_size > 1:
         raise ValueError(
             "PCP (Prefill Context Parallelism) is not supported by vLLM Ascend. "

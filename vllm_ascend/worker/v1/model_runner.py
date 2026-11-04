@@ -1033,7 +1033,34 @@ class NPUModelRunner(GPUModelRunner):
                 new_block_ids_to_zero=[],
                 kv_cache_block_copies=[],
             )
+        _pp_prev_ncomp = {}
+        if (
+            self.speculative_config is not None
+            and self.num_spec_tokens > 0
+            and get_pp_group().world_size > 1
+            and not get_pp_group().is_last_rank
+            and not self._is_pd_prefill_worker()
+            and not self.use_async_scheduling
+            and scheduler_output.total_num_scheduled_tokens > 0
+        ):
+            # Non-final PP stages never sample; derive the verified accepted
+            # count for the previous verify step from num_computed_tokens.
+            for _rid in req_data.req_ids:
+                _idx0 = self.input_batch.req_id_to_index.get(_rid)
+                _st = self.requests.get(_rid)
+                if _idx0 is not None and _st is not None:
+                    _pp_prev_ncomp[_rid] = (
+                        int(self.input_batch.num_computed_tokens_cpu[_idx0]),
+                        _st.prev_num_draft_len > 0,
+                    )
         sampling_metadata = super()._update_states(scheduler_output)
+        for _rid, (_prev, _had) in _pp_prev_ncomp.items():
+            _idx3 = self.input_batch.req_id_to_index.get(_rid)
+            if _idx3 is None or not _had:
+                continue
+            _delta = int(self.input_batch.num_computed_tokens_cpu[_idx3]) - _prev
+            if _delta > 0:
+                self.input_batch.num_accepted_tokens_cpu[_idx3] = _delta
         self._track_tmp_encoder_cache_refs(scheduler_output)
         return sampling_metadata
 
@@ -2878,6 +2905,26 @@ class NPUModelRunner(GPUModelRunner):
         self._draft_prob_req_ids = None
         self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
 
+    def _fill_pp_spec_token_ids(self, model_runner_output, req_ids_output_copy) -> None:
+        """Carry the last rank's drafts in the runner output.
+
+        ``EngineCore.post_step`` is skipped by ``patch_pp_mtp`` for PP, so the
+        runner has to hand the draft token ids to the scheduler itself.
+        """
+        if (
+            self.speculative_config is None
+            or get_pp_group().world_size <= 1
+            or self._is_pd_prefill_worker()
+        ):
+            return
+        draft = self.take_draft_token_ids()
+        if draft is None:
+            return
+        draft_by_req = dict(zip(draft.req_ids, draft.draft_token_ids))
+        model_runner_output.spec_token_ids = [
+            draft_by_req.get(req_id, []) for req_id in req_ids_output_copy
+        ]
+
     @torch.inference_mode()
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
@@ -3036,6 +3083,7 @@ class NPUModelRunner(GPUModelRunner):
             num_nans_in_logits=num_nans_in_logits,
             cudagraph_stats=cudagraph_stats,
         )
+        self._fill_pp_spec_token_ids(model_runner_output, req_ids_output_copy)
         if self.dynamic_eplb:
             self.eplb_updator.forward_end(self.eplb_heat_collection_status)
 
