@@ -32,7 +32,7 @@ hybrid A2 configuration, and a four-node A2 PD disaggregated configuration.
 
 Use the matching upstream vLLM revision for the selected vLLM Ascend version.
 For source builds, use the upstream vLLM tag recorded in
-`.github/vllm-release-tag.commit` at the selected vLLM Ascend revision.
+`.github/vllm-release-tag.commit` at the vLLM Ascend **v0.32.0rc** tag.
 
 ## 2 Supported Features
 
