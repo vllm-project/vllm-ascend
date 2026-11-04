@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NPU boundary adapters around the installed vLLM packed loops.
 
-The shared NPU-only CUDA stream patch handles device APIs. The installed vLLM
+Minimal NPU-only CUDA stream aliases handle device APIs. The installed vLLM
 producer/consumer functions and their torch module reference stay unchanged.
 Only stream capture, owning unpack and HCCL/callback boundaries are adapted.
 Remove the helper hooks when vLLM exposes equivalent extension points.

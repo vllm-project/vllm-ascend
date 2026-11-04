@@ -1393,7 +1393,7 @@ def test_packed_roundtrip_odd_bf16_followed_by_unaligned_int64(backend):
     assert _assert_packed_roundtrip(backend, tensors, 32) == 1
 
 
-def test_packed_reuse_keeps_vllm_loops_and_uses_shared_stream_patch():
+def test_packed_reuse_keeps_vllm_loops_and_uses_npu_stream_aliases():
     from vllm.distributed.weight_transfer import packed_tensor as upstream
 
     from vllm_ascend.distributed.weight_transfer import packed_adapter
