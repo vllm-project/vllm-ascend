@@ -341,6 +341,10 @@ a3-560t:
         os: linux-aarch64-a3-800i-4
         config_file_path: Qwen3-32B-W8A8C8-A3.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
+      - name: Qwen3.8-27B-w8a8-PP2-TP2-AIME2025
+        os: linux-aarch64-a3-800i-4
+        config_file_path: Qwen3.8-27B-w8a8-PP2-TP2.yaml
+        config_base_path: tests/e2e/cases/features/pp
 
   a5:
     #   multi_node:
