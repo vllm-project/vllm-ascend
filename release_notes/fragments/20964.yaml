@@ -1,4 +1,0 @@
-pr: 20964
-entries:
-  - category: bugfix
-    text: Fixed DeepSeek V4 MixedQuant sparse attention metadata buffers to retain all entries during FP8 and TurboQuant execution.

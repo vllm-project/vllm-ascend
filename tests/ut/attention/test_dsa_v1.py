@@ -30,7 +30,6 @@ from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAPCPMetadataBuilder,
 )
 from vllm_ascend.attention.dsa_v1 import (
-    MIXED_QUANT_SAS_METADATA_BUFFER_SIZE,
     QLI_METADATA_BUFFER_SIZE,
     SAS_METADATA_BUFFER_SIZE,
     AscendDSABackend,
@@ -209,10 +208,10 @@ def _make_builder(
 @pytest.mark.parametrize(
     ("metadata_op", "expected_sas_size"),
     [
-        (None, SAS_METADATA_BUFFER_SIZE),
-        (sparse_flash_mla_metadata, SAS_METADATA_BUFFER_SIZE),
-        (mixed_quant_sparse_flash_mla_metadata_fp8, MIXED_QUANT_SAS_METADATA_BUFFER_SIZE),
-        (mixed_quant_sparse_flash_mla_metadata_turboquant, MIXED_QUANT_SAS_METADATA_BUFFER_SIZE),
+        (None, 1024),
+        (sparse_flash_mla_metadata, 2048),
+        (mixed_quant_sparse_flash_mla_metadata_fp8, 2048),
+        (mixed_quant_sparse_flash_mla_metadata_turboquant, 2048),
     ],
 )
 @pytest.mark.parametrize("use_tokens_per_state", [False, True])
@@ -3002,7 +3001,8 @@ def test_dspark_compressed_tq_metadata_keeps_full_context(use_tq, ratio, deferre
         query_start_loc_cpu=query_start_loc,
         causal=False,
     )
-    metadata_op = MagicMock(return_value=torch.zeros(SAS_METADATA_BUFFER_SIZE, dtype=torch.int32))
+    generated_metadata = torch.arange(builder.sas_metadata_buffer_size, dtype=torch.int32)
+    metadata_op = MagicMock(return_value=generated_metadata)
     plan = _mock_dsa_kv_plan(
         get_dsa_sparse_attn_metadata_op=metadata_op,
         get_dsa_sparse_attn_metadata_kwargs={},
@@ -3028,6 +3028,7 @@ def test_dspark_compressed_tq_metadata_keeps_full_context(use_tq, ratio, deferre
     assert metadata_op.call_args.kwargs["seqused_kv"].tolist() == [261 if compressed_tq else 133]
     assert (metadata.dspark_swa_indices is None) == compressed_tq
     assert metadata.ori_win_left == (127 if compressed_tq else 132)
+    torch.testing.assert_close(metadata.sas_metadata, generated_metadata)
 
 
 @pytest.mark.parametrize("otp_size", [0, 1])

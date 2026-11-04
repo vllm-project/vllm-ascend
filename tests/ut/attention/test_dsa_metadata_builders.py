@@ -52,7 +52,8 @@ def make_builder(cls, ratio=0):
     builder.start_pos_prefill = torch.full((4,), -1, dtype=torch.int32)
     builder.qli_seqused_k = torch.full((4,), -1, dtype=torch.int32)
     builder.qli_cmp_residual_k = torch.full((4,), -1, dtype=torch.int32)
-    builder.sas_metadata_buffer = torch.zeros(dsa_v1.SAS_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    builder.sas_metadata_buffer_size = dsa_v1.SAS_METADATA_BUFFER_SIZE
+    builder.sas_metadata_buffer = torch.zeros(builder.sas_metadata_buffer_size, dtype=torch.int32)
     builder.qli_metadata_buffer = torch.zeros(dsa_v1.QLI_METADATA_BUFFER_SIZE, dtype=torch.int32)
     builder.seqused_q = torch.zeros(4, dtype=torch.int32)
     builder.cu_seqlens_ori_kv = torch.zeros(4, dtype=torch.int32)

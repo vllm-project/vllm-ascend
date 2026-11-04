@@ -32,7 +32,7 @@ from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
     mixed_quant_sparse_flash_mla_metadata_fp8,
     mixed_quant_sparse_flash_mla_metadata_turboquant,
 )
-from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
+from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_or_register_attention_buffer,
@@ -95,9 +95,10 @@ else:
     dspark_swa_indices_supported = None  # type: ignore
 
 
-# SparseFlashMla and QLI metadata use 1024 int32 elements; MixedQuant SAS uses 2048.
+# The current SparseFlashMla and MixedQuant SAS ops use 2048 int32 elements;
+# QLI and the legacy metadata op use 1024.
 SAS_METADATA_BUFFER_SIZE = 1024
-MIXED_QUANT_SAS_METADATA_BUFFER_SIZE = 2048
+SPARSE_FLASH_MLA_METADATA_BUFFER_SIZE = 2048
 QLI_METADATA_BUFFER_SIZE = 1024
 
 
@@ -808,11 +809,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             getattr(kv_cache_spec, "tokens_per_state", 0),
         )
         sas_plan = get_dsa_attn_kv_plan(vllm_config, self.compressor_ratio)
-        # BF16 SparseFlashMla uses the standard 1024-element metadata layout.
+        # Size the buffer for the metadata operator selected by the cache plan.
         self.sas_metadata_buffer_size = (
-            MIXED_QUANT_SAS_METADATA_BUFFER_SIZE
+            SPARSE_FLASH_MLA_METADATA_BUFFER_SIZE
             if sas_plan.get_dsa_sparse_attn_metadata_op()
             in (
+                sparse_flash_mla_metadata,
                 mixed_quant_sparse_flash_mla_metadata_fp8,
                 mixed_quant_sparse_flash_mla_metadata_turboquant,
             )
