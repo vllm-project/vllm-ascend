@@ -81,18 +81,6 @@ class BaseKVPoolScheduler(ABC):
         )
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.num_speculative_blocks_by_group = self._infer_mamba_groups()
-        self.swa_group_ids = {
-            group_id
-            for group_id, group in enumerate(kv_cache_groups or ())
-            if isinstance(group.kv_cache_spec, (SlidingWindowSpec, RSWASpec))
-            or (
-                isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-                and any(
-                    isinstance(spec, (SlidingWindowSpec, RSWASpec))
-                    for spec in group.kv_cache_spec.kv_cache_specs.values()
-                )
-            )
-        }
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_load", False
@@ -119,6 +107,21 @@ class BaseKVPoolScheduler(ABC):
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
+        self.swa_group_ids = {
+            group_id
+            for group_id in self.cacheable_group_ids
+            if kv_cache_groups is not None
+            and (
+                isinstance(kv_cache_groups[group_id].kv_cache_spec, (SlidingWindowSpec, RSWASpec))
+                or (
+                    isinstance(kv_cache_groups[group_id].kv_cache_spec, UniformTypeKVCacheSpecs)
+                    and any(
+                        isinstance(spec, (SlidingWindowSpec, RSWASpec))
+                        for spec in kv_cache_groups[group_id].kv_cache_spec.kv_cache_specs.values()
+                    )
+                )
+            )
+        }
         cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
