@@ -216,14 +216,6 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         torch.Tensor.pin_memory = lambda x: x  # noqa
         self.builder = AscendAttentionMetadataBuilder(None, None, self.mock_vllm_config, self.mock_device)
 
-    def test_reorder_batch(self):
-        mock_input_batch = MagicMock()
-        mock_scheduler_output = MagicMock()
-
-        result = self.builder.reorder_batch(mock_input_batch, mock_scheduler_output)
-
-        self.assertFalse(result)
-
     def test_pcp_mode_is_initialized_from_config(self):
         self.assertFalse(self.builder.use_pcp)
         self.assertIs(self.builder.metadata_cls, AscendMetadata)

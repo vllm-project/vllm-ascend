@@ -77,7 +77,6 @@ test_cases:
             "enable_shared_expert_dp": true,
             "multistream_overlap_shared_expert":true,
             "rejection_sampler_config": {
-              "enable_block_verify": true,
               "enable_entropy_verify": true,
               "posterior_threshold": 0.95,
               "posterior_alpha": 0.4
@@ -108,7 +107,6 @@ test_cases:
             "enable_shared_expert_dp": true,
             "multistream_overlap_shared_expert":true,
             "rejection_sampler_config": {
-                "enable_block_verify": false,
                 "enable_entropy_verify": false,
                 "posterior_threshold": 0.95,
                 "posterior_alpha": 0.4

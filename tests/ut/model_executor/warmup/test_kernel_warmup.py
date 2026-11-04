@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from tests.ut.model_executor.warmup.helpers import (
-    make_mock_spec_config,
     make_mock_vllm_config,
     make_registry,
 )
@@ -147,31 +146,3 @@ def test_v2_initialize_kv_cache_upstream_holds_registry_window():
     with patch.object(V2BaseRunner, "initialize_kv_cache") as super_init:
         bare._initialize_kv_cache_upstream(MagicMock(), None)
     super_init.assert_called_once()
-
-
-@patch.object(kw, "HAS_TRITON", True)
-def test_register_v1_sampling_warmup_registers_four_kernel_families():
-    from tests.ut.model_executor.warmup.helpers import make_mock_ascend_config
-    from vllm_ascend.ops.triton.v1 import bincount, penalty, reject_sample
-
-    spec = make_mock_spec_config(num_speculative_tokens=3)
-    config = make_mock_vllm_config(speculative_config=spec)
-    registry = make_registry(config)
-
-    with (
-        patch.object(penalty, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(bincount, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(reject_sample, "get_vectorcore_num", return_value=4),
-        patch(
-            "vllm_ascend.ascend_config.get_ascend_config",
-            return_value=make_mock_ascend_config(),
-        ),
-        patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=1),
-    ):
-        kw.register_v1_sampling_warmup(config)
-        assert len(registry) == 0  # outside a window: no-op
-
-        with registry.activate():
-            kw.register_v1_sampling_warmup(config)
-    # penalties + bincount + prepare_inputs + six rejection wrappers.
-    assert len(registry) == 9

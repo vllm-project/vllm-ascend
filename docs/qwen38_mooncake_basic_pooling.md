@@ -8,7 +8,7 @@ PLE and hidden state use private banks. Views may have a physical block stride
 larger than their payload. Transfers must preserve that stride and leave other
 owners, unused blocks and padding unchanged.
 
-Use Model Runner V2 with `AscendStoreConnector`. The adaptation supports bulk
+Use `AscendStoreConnector`. The adaptation supports bulk
 transfers and the existing Mooncake block-key/Memcache GVA layerwise paths.
 Other connectors retain their existing allocation path. Layerwise QSA opens
 its transfer window after both indexer and main-KV updates; PLE waits before
@@ -20,18 +20,14 @@ a restorable common boundary. With transfer granularity 1536, a 9216-token
 prompt queries at 7680, while 9217 can query at 9216. Layouts whose necessary
 state is all externally cacheable retain the existing lookup behavior.
 
-MRV2 with MTP defers save finalization until after draft generation.
+MTP defers save finalization until after draft generation.
 `MambaCopyKVConnector.finalize_step()` forwards to the wrapped connector so
 that deferred saves complete and metadata is cleared.
 
 ## Configuration
 
 Install matching vLLM/vLLM-Ascend builds, native extensions and backend runtime.
-Enable V2 and configure the existing connector:
-
-```bash
-export VLLM_USE_V2_MODEL_RUNNER=1
-```
+Configure the existing connector:
 
 ```json
 {
