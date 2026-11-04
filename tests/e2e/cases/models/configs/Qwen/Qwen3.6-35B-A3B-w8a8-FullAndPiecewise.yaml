@@ -14,7 +14,6 @@
         OMP_NUM_THREADS: "1"
         OPENBLAS_NUM_THREADS: "1"
         TASK_QUEUE_ENABLE: "1"
-        VLLM_USE_FASTOKENS: "1"
         HCCL_BUFFSIZE: "1024"
         SERVER_PORT: "DEFAULT_PORT"
       server_cmd:
