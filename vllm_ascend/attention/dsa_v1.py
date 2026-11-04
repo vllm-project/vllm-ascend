@@ -2224,7 +2224,7 @@ class AscendDSAIndexerMetadataBuilder(AscendDSAAttentionMetadataBuilder):
             )
             metadata_cache["qli"] = qli_metadata
 
-        self.qli_metadata_buffer.copy_(qli_metadata)
+        self.qli_metadata_buffer[:QLI_METADATA_BUFFER_SIZE] = qli_metadata
         if use_specialized_metadata:
             metadata_cache["qli_output"] = (self.qli_metadata_buffer, qli_seqused_k, qli_cmp_residual_k)
         return self.qli_metadata_buffer
