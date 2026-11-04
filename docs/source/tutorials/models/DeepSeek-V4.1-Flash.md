@@ -30,8 +30,7 @@ four-node A2 PD disaggregated configuration.
 
 For 950DT products (A5), this guide covers single-node deployment, ordinary
 1P1D with SWA bounded replay on Prefill, and 1P1D with a Memcache DRAM pool.
-The single-node, pooling, and optional PCP and wide EP examples follow the
-v0.30.0 reference. Use the runtime for the selected branch in Section 4.1.
+Section 5.2 also covers experimental PCP8 Prefill and multi-node EP16 Decode.
 
 This guide uses **vLLM Ascend v0.32.0** and recommends W4A8 for performance.
 
@@ -84,7 +83,7 @@ W8A8, set `MODEL_PATH` to the W8A8 directory instead. For A3 PD deployment
 with W8A8 weights, use Prefill DP4/TP4 and Decode DP8/TP2, as described in
 Section 5.2.
 
-For the A5 reference, use the original DeepSeek-V4.1-Flash MXFP checkpoint
+For 950DT products, use the original DeepSeek-V4.1-Flash MXFP checkpoint
 with `--quantization deepseek_v4_fp8`, including its DSpark parameters and
 Engram tables. Use its actual local directory as `<YOUR_MODEL_PATH>`; the
 ModelSlim W8A8 checkpoint above is for the A2/A3 examples.
@@ -122,15 +121,12 @@ separate images from the v0.32.0 release branch.
 
 === "950DT products"
 
-    Use an A5 runtime built from `Dockerfile.a5` at the selected vLLM Ascend
-    checkout, with the matching upstream vLLM revision. For main development,
-    select `.github/vllm-main-verified.commit`; for the v0.32.0 release line,
-    select the matching vLLM v0.32.0 build. Replace the image placeholder
-    below with that A5 image's reference or digest. The A2/A3 v0.30.0rc2
-    images are a separate validation baseline.
+    Build the A5 runtime with `Dockerfile.a5` from your vLLM Ascend checkout.
+    On `main`, use the upstream vLLM revision in `.github/vllm-main-verified.commit`.
+    On `releases/v0.32.0rc`, use the vLLM tag in `.github/vllm-release-tag.commit`.
 
-    The container command follows the v0.30.0 A5 example. Run it on each
-    participating server and set `MODEL_ROOT` to the parent directory of the checkpoint.
+    On each participating server, set `IMAGE` to the A5 image reference or
+    digest and `MODEL_ROOT` to the parent directory of the checkpoint.
     Prepare the host driver for the selected image and verify it with
     `npu-smi info`; see the [installation guide](../../getting_started/installation.md).
     The complete driver mount includes the A5 topology files. The PD scripts
@@ -266,7 +262,7 @@ absolute path inside and outside every container.
 
 ### 4.2 Source Code Installation
 
-To build from source, follow the
+For A2/A3 source builds, follow the
 [software environment installation guide](../../getting_started/installation.md#installation-software-environment)
 and check out the **v0.32.0rc** tag of vLLM Ascend. Use the matching upstream
 vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
@@ -425,12 +421,8 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     | Prefill | 8 / 1 / 8 | 7100–7107 | 12321 | 26010–26017 |
     | Decode | 8 / 1 / 8 | 7100–7107 | 12321 | 27010–27017 |
 
-    This section follows the DP8/TP1 A5 recipe from v0.30.0, with the
-    Prefill batch token limit kept at `5120` and bounded-replay switches
-    made explicit for vLLM 0.32.0 or a matching
-    native-replay build. Use the vLLM Ascend checkout and upstream revision
-    selected in the A5 installation tab. The A2/A3 v0.30.0rc2 baseline and
-    the local-only replay backport in Section 12 do not apply to this tab.
+    Use the 950DT runtime from [Section 4.1](#41-docker-image-installation)
+    on both nodes. Prefill requires native SWA bounded replay with the PD connector.
 
     Prefill and Decode form separate DP groups on different servers, so both
     can use RPC port `12321`. Within each group, all ranks must use the same
@@ -809,38 +801,26 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
     ##### A5 Replay Configuration Notes
 
-    - Prefill keeps local prefix caching enabled and explicitly enables
-      `--swa-bounded-replay`. Native replay excludes SWA blocks from prefix
-      reuse and rebuilds the trailing SWA window after a prefix hit. In the
-      verified vLLM build this switch defaults to enabled; spelling it out
-      records the intended configuration.
-    - Decode keeps prefix caching enabled, as in the v0.30.0 A5 example,
-      together with `scheduler_config.recompute_scheduler_enable: true`.
-      This Ascend scheduler cannot perform bounded replay, so the backend
-      disables replay automatically. `--no-swa-bounded-replay` makes that
-      choice explicit; disabling replay does not require disabling prefix
-      caching.
-    - Prefill keeps `--max-num-batched-tokens 5120`.
-      DP8/TP1/EP8, the Decode batch limit (`1024`), sequence
-      limits (`16` and `64`), memory utilization (`0.90` and `0.92`), target
-      execution modes, and DSpark draft settings follow the v0.30.0 example.
-      The API ports remain `7100-7107`, with KV base ports `26010` on Prefill
-      and `27010` on Decode.
+    - On Prefill, enable local prefix caching and `--swa-bounded-replay`.
+      After a prefix hit, the engine reuses cached non-SWA blocks and
+      recomputes the trailing SWA window.
+    - On Decode, enable local prefix caching and set
+      `scheduler_config.recompute_scheduler_enable` to `true`. The recompute
+      scheduler cannot perform bounded replay, so use `--no-swa-bounded-replay`.
+    - Set `--max-num-batched-tokens` to `5120` on Prefill and `1024` on Decode.
+      See [Section 9.1](#91-recommended-configurations) for the sequence limits,
+      memory utilization, and execution mode for each role.
     - Each launcher child starts one local DP engine. The templates therefore
       pass `--data-parallel-size-local 1`, while the launcher starts eight
       children with `--dp-size-local 8`.
 
     Verify generation and an actual Prefill prefix-cache hit on the selected
     build. See the [Public FAQs](../../faqs.md) for startup and environment
-    troubleshooting. Accuracy and performance results from v0.30.0 do not
-    establish validation of a newer build.
+    troubleshooting.
 
     ##### A5 Deployment Extensions
 
     ###### A5 PCP Prefill (Experimental)
-
-    The v0.30.0 reference reports basic GPQA and MMMU-Pro checks and a test
-    with Memcache pooling. Verify PCP on the selected build and workload.
 
     For long prompts, PCP can distribute one Prefill request across all eight
     NPUs. Starting from the DP8 Prefill template above, make these changes:
@@ -2044,10 +2024,9 @@ the same as ordinary PD deployment.
 stores reusable prefixes; Decode receives KV from Prefill. DeepSeek-V4.1-Flash
 uses bulk pool access: set `use_layerwise` to `false` on both roles.
 
-The v0.30.0 950DT reference used Memcache as the pool backend. Its Prefill
-template sets `--max-num-batched-tokens 4096` and disables local prefix
-caching so that repeated-prefix requests exercise the external pool. Decode
-keeps its `1024` batch limit and local prefix caching enabled.
+Set `--max-num-batched-tokens` to `4096` on Prefill and disable local prefix
+caching so that repeated-prefix requests exercise the external pool. On
+Decode, use `1024` batch tokens and enable local prefix caching.
 
 ##### 5.3.5.1 Prepare Memcache
 
@@ -2976,6 +2955,6 @@ For common environment, installation, and parameter issues, refer to the
   `FULL_DECODE_ONLY` ACL Graph with DSpark draft graph execution enabled.
 - Production performance qualification and task-level accuracy evaluation are
   not complete.
-- The v0.30.0 950DT reference validated Memcache pooling. It did not cover
-  Mooncake as a pool backend on this hardware. Verify the selected build
-  using the service checks and pool-hit metrics in this guide.
+- The 950DT pooling example uses Memcache for storage and
+  `MooncakeHybridConnector` for P-to-D KV transfer. Verify external pool
+  hits as described in [Section 5.3.5.4](#5354-start-the-proxy-and-verify-pooling).
