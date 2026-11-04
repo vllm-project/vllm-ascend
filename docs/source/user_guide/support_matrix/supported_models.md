@@ -140,6 +140,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | MiniMax-M3.1-Flash | 🔵 | Experimental |  | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | 1M | [MiniMax-M3.1-Flash](../../tutorials/models/MiniMax-M3.1-Flash.md) |
     | Cohere Transcribe                  | 🔵      | 2B Conformer encoder-decoder ASR, 14 languages (03-2026 & arabic-07-2026) | ✅ | A2/A3 | ❌ |  |  | ❌ | ❌ |  | 🟡 |  |  |  | ❌ | 🟡 | 🟡 |  | [Cohere-Transcribe](../../tutorials/models/Cohere-Transcribe.md) |
     | PaddleOCR-VL | 🔴 |  |  | A2/A3 |  |  |  |  |  |  |  |  |  |  |  |  |  |  | [PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md) |
+    | LocateAnything-3B | 🔵 | LM-only via `prompt_embeds`; vision tower runs client-side; no MTP | ✅ | A2/A3 |  | 🟡 | ✅ |  | ❌ |  | 🟡 |  |  |  |  | 🟡 | 🟡 | 8192 | [LocateAnything-3B](../../tutorials/models/LocateAnything-3B.md) |
 
 === "Atlas 300I DUO"
 
