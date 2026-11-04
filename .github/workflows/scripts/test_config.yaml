@@ -114,9 +114,9 @@ accuracy_tests:
 runner_mapping:
   # Nightly single-node ops tests — routed to a placeholder partition.
   # The actual A3/A5 label is forced via --runner-label-override in pr_test.yaml.
-  tests/e2e/pull_request/one_card/test_mla_prolog_head_padding\.py$:
-    default: a3-2
   tests/e2e/nightly/single_node/ops/singlecard_ops:
+    default: a3-2
+  tests/e2e/pull_request/one_card/test_mla_prolog_head_padding\.py$:
     default: a3-2
   # Native padded-head Q_B packing regressed on A3; keep its numerical test there.
   tests/e2e/pull_request/one_card/test_mla_prolog_head_padding\.py$:
