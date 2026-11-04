@@ -76,4 +76,10 @@ test_cases:
         temperature: 0
         baseline: 95
         threshold: 5
-    test_content: []
+    test_content:
+      - spec_decode_acceptance
+    acceptance_rate:
+      # Placeholder only: collect this MTP5 GSM8K run before setting regression baselines.
+      # Zero baselines do not enforce an acceptance-rate regression threshold.
+      baseline: [0.0, 0.0, 0.0, 0.0, 0.0]
+      tolerance: 0.05
