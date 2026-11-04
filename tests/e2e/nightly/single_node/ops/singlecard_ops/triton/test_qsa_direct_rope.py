@@ -28,7 +28,11 @@ def test_direct_rope_matches_gathered_cache(rows: int, axes: int, weight_dtype: 
     gathered = cache[positions.clamp(0, 128)]
     qkv = torch.randn(rows, 6 * 256, dtype=torch.bfloat16, device="npu")
     qw, kw = [torch.randn(256, dtype=weight_dtype, device="npu") for _ in range(2)]
-    kwargs = dict(
+    expected = triton_split_qkv_rmsnorm_mrope(
+        qkv,
+        1 + qw,
+        1 + kw,
+        gathered if axes == 3 else gathered.repeat(3, 1, 1),
         num_q_heads=2,
         num_kv_heads=1,
         head_size=256,
@@ -38,10 +42,21 @@ def test_direct_rope_matches_gathered_cache(rows: int, axes: int, weight_dtype: 
         rope_dim=64,
         has_gate=True,
     )
-    expected = triton_split_qkv_rmsnorm_mrope(
-        qkv, 1 + qw, 1 + kw, gathered if axes == 3 else gathered.repeat(3, 1, 1), **kwargs
+    actual = triton_split_qkv_rmsnorm_mrope(
+        qkv,
+        qw,
+        kw,
+        cache,
+        positions=positions,
+        num_q_heads=2,
+        num_kv_heads=1,
+        head_size=256,
+        eps=1e-6,
+        mrope_section=[11, 11, 10],
+        is_interleaved=True,
+        rope_dim=64,
+        has_gate=True,
     )
-    actual = triton_split_qkv_rmsnorm_mrope(qkv, qw, kw, cache, positions=positions, **kwargs)
     for result, reference in zip(actual, expected):
         torch.testing.assert_close(result, reference, rtol=0, atol=0)
 
