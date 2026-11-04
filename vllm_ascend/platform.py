@@ -732,7 +732,7 @@ class NPUPlatform(Platform):
             mmrs_fusion = False
         padded_length = None
 
-        if num_tokens is None and attn_metadata is not None:
+        if num_tokens is None and attn_metadata:
             num_tokens = list(attn_metadata.values())[0].num_actual_tokens
         pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         max_tokens_across_pcp = num_tokens if pcp_size > 1 else 0
