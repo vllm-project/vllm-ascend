@@ -12,42 +12,14 @@
 
 This document shows the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, Prefill-Decode (PD) disaggregated deployment, multi-node deployment, and accuracy and performance evaluation.
 
-For 950DT products, this document is written based on the vLLM-Ascend
-v0.32.0rc1 release.
-
 ## 2 Supported Features
 
 Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-### 950DT products
-
-GLM-5.3-Flash uses Model Runner V2 on 950DT products. Set
-`VLLM_USE_V2_MODEL_RUNNER=1` in the deployment scripts.
-
-| Feature | Configuration |
-| --- | --- |
-| Quantization | W8A8-MXFP8 weights with `--quantization ascend`; FP8 main KV cache with `--kv-cache-dtype fp8`. |
-| KPool indexer cache | [FP8 indexer cache](#a5-fp8-kpool) in the examples, configured independently of the main KV cache. |
-| MTP and graph mode | `deepseek_mtp` with five speculative tokens. Prefill uses eager mode for the target and MTP draft models; single-node deployment and Decode use `FULL_DECODE_ONLY` for both models. |
-| Prefix caching and chunked prefill | Enabled in the examples; keep the hybrid KV cache manager enabled. |
-| PD disaggregation | `MooncakeConnectorV2` with TP1/PCP8/DP1 Prefill and TP1/PCP1/DP8 Decode. Both roles use EP8. |
-| Context parallelism | Experimental [PCP](../../user_guide/feature_guide/context_parallel.md) uses `--prefill-context-parallel-size`. PD Prefill uses PCP8; single-node deployment and Decode use PCP1. DCP remains 1; the KPool indexer does not support DCP>1. |
-| KV Cache Pool | Refer to [KV Cache Pool Deployment](#glm53-flash-5-4-950dt) for configuration. |
-| RecoverSSM | For experimental KDA RecoverSSM, refer to [Speculative Decoding](../../user_guide/feature_guide/speculative_decoding.md#experimental-glm-kda-recoverssm). |
-
-### FP8 KPool Indexer Cache on A5 {: #a5-fp8-kpool }
-
-Set `--attention-config.indexer_kv_dtype fp8` to use CANN FP8 KPool
-indexing with FP32 per-pool scales. The default `auto` and explicit
-`bf16` retain BF16. This setting is independent of `--kv-cache-dtype`.
-Use a CANN ops-transformer build with FP8 `PoolKeyIndexer` support on
-Ascend 950, and match cache formats between PD roles.
-
-FP8 indexer caches do not support `OffloadingConnector` or
-`PreemptOffloadConnector`. The INT8 indexer option in the next subsection
-is A3-specific.
+The 950DT products examples use Model Runner V2 with
+`VLLM_USE_V2_MODEL_RUNNER=1`. A2/A3 examples use Model Runner V1.
 
 ### INT8 KPool indexer cache on A3
 
@@ -75,11 +47,6 @@ Download the checkpoint from ModelScope for the hardware shown below. A3 and 950
 | `GLM-5.3-Flash-w8a8` | A3 series (64GB × 16) | 1 node for single-node deployment; 2 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) | Supports a W8A8C8 configuration: C8 is dynamic KV-cache quantization. Set `--kv-cache-dtype int8` in the serving command to enable INT8 KV cache; no separate C8 checkpoint is required. |
 | `GLM-5.3-Flash-w8a8` | A2 series (64GB × 8 per node) | 2 nodes for colocated deployment; 4 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) | / |
 
-> **Path description**: Download `GLM-5.3-Flash-w8a8-mxfp8` from the ModelScope
-> link above to a directory of your choice and record it. Replace
-> `<YOUR_MODEL_PATH>` in the A5 deployment commands with this directory.
-> Use the same model weights on all nodes.
-
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
 The checkpoints linked above are already quantized and can be served directly. For self-quantization, follow the installation and command examples in the [msModelSlim quantization guide](https://www.hiascend.com/document/detail/en/mindstudio/2610/TITools/msModelSlim/docs/en/user_guide/feature_guide/quick_quantization_v1/usage.md) and select the configuration for the exact model and target hardware from the [model recipes](https://gitcode.com/Ascend/msmodelslim/tree/master/lab_practice). Do not reuse a different model's YAML file.
@@ -92,16 +59,12 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ## 4 Installation
 
-### 4.1 Docker Image Installation
-
 Select an image for your hardware and start a container on each node.
 Refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image) for details.
 
 === "950DT products"
 
     Start the Docker container on each node.
-    Prepare the platform's `/etc/hccl_rootinfo.json`, `/etc/hixlep/` and
-    `/lib/route.conf` before starting a container on each node.
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
@@ -110,8 +73,7 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
     docker run --rm \
     --name $NAME \
     --net=host \
-    --shm-size=100g \
-    --privileged \
+    --shm-size=1g \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
@@ -136,16 +98,6 @@ Refer to [Using Docker](../../getting_started/installation.md#installation-prebu
     -v /lib/route.conf:/lib/route.conf \
     -itd $IMAGE bash
     ```
-
-    Check the container status and installed package versions:
-
-    ```shell
-    docker ps --filter "name=$NAME"
-    docker exec "$NAME" python3 -m pip show vllm vllm-ascend
-    ```
-
-    The container status should be `Up`, and the package versions should
-    match the selected image.
 
 === "A3 series"
 
@@ -258,7 +210,6 @@ are not interchangeable.
 
 | Parameter | Meaning and constraints |
 | --- | --- |
-| `VLLM_USE_V2_MODEL_RUNNER` | Selects the model runner. The 950DT products examples set it to `1` to use Model Runner V2. |
 | `HCCL_BUFFSIZE` | CANN/HCCL communication buffer size in MB; a positive integer, with a documented default of 200. Larger buffers consume more device memory, multiplied by the number of communication domains. Keep the example's hardware/role-specific value and account for this memory when sizing the KV cache. See the [CANN HCCL reference](https://www.hiascend.com/document/detail/zh/canncommercial/latest/API/hcclug/hcclenvref_07_0005.html) for allocation details and version-specific constraints. |
 | `HCCL_IF_IP` and socket interface variables | Set the current node's communication IP and matching network interface. Peers must be reachable through the selected network. |
 | `--data-parallel-size`, `--tensor-parallel-size`, `--pipeline-parallel-size` | DP is the number of data-parallel ranks; TP and PP partition each model engine across devices and pipeline stages. Follow the topology and placement in the selected tab. |
@@ -282,7 +233,6 @@ are not interchangeable.
     Run the following script to execute online inference.
 
     ```shell
-    # Replace <YOUR_MODEL_PATH> with the directory recorded in Section 3.1.
     MODEL_PATH="<YOUR_MODEL_PATH>"
     export VLLM_USE_V2_MODEL_RUNNER=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -313,17 +263,6 @@ are not interchangeable.
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
     ```
-
-    A successful startup includes output similar to:
-
-    ```text
-    INFO:     Waiting for application startup.
-    INFO:     Application startup complete.
-    ```
-
-    Send an inference request as described in
-    [Section 6](#6-functional-verification). For common startup issues,
-    refer to the [Public FAQs](../../faqs.md).
 
 === "A3 series"
 
@@ -379,6 +318,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
   The complete single-node commands above use `fp8` on 950DT products and `int8` on A3 series.
   KV cache quantization is independent of weight quantization: enabling C8 does not require W8A8 weights or a separate C8 checkpoint.
   The examples use W8A8-MXFP8 weights on 950DT products and W8A8 weights on A3 series, as listed in Section 3.1.
+- `--attention-config.indexer_kv_dtype fp8`: Uses FP8 KPool indexer cache on 950DT products, independently of `--kv-cache-dtype`.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 - `--limit-mm-per-prompt '{"image":1,"video":0}'`: Allows at most one image per prompt and disables video input in all deployment examples.
 - `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use five speculative tokens. GLM-5.3-Flash supports MTP draft graph execution.
@@ -592,7 +532,6 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
     TP1/PCP1/DP8. Both roles use EP8.
     Both nodes use the same GLM-5.3-Flash W8A8-MXFP8 checkpoint and software build.
     Set the local IP, network interface and checkpoint path in each script.
-    Start the proxy after all nine Prefill and Decode API endpoints are healthy.
 
     ##### Prepare the Scripts
 
@@ -608,7 +547,6 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
 
             local_ip="<P0_IP>"
             nic_name="<NETWORK_INTERFACE>"
-            # Replace with the checkpoint directory recorded in Section 3.1.
             MODEL_PATH="<YOUR_MODEL_PATH>"
 
             export VLLM_USE_V2_MODEL_RUNNER=1
@@ -674,7 +612,6 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
 
             local_ip="<D0_IP>"
             nic_name="<NETWORK_INTERFACE>"
-            # Replace with the checkpoint directory recorded in Section 3.1.
             MODEL_PATH="<YOUR_MODEL_PATH>"
 
             export VLLM_USE_V2_MODEL_RUNNER=1
@@ -756,21 +693,6 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
 
     ##### Start the Proxy
 
-    Check the endpoints from the proxy host before registering them:
-
-    ```shell
-    P0_IP="<P0_IP>"
-    D0_IP="<D0_IP>"
-    curl --fail "http://${P0_IP}:8000/health"
-    for port in 8000 8001 8002 8003 8004 8005 8006 8007; do
-        curl --fail "http://${D0_IP}:${port}/health" || exit 1
-    done
-    ```
-
-    Each request should return HTTP 200, and each API process should report
-    `Application startup complete.` For startup issues, refer to the
-    [Public FAQs](../../faqs.md).
-
     Run inside a vLLM-Ascend container on a separate host after the Prefill
     and Decode endpoints are healthy. The official image includes the proxy
     at the absolute path below; for a source installation, replace the
@@ -816,7 +738,6 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
     - Prefill uses PCP8, while Decode keeps the default PCP1. Both roles
       keep the default DCP1. For PCP configuration, refer to
       [Context Parallel](../../user_guide/feature_guide/context_parallel.md).
-      The removed `enable_dsa_cp` additional-config key is not accepted.
     - Both roles enable prefix caching and allow one image per prompt,
       with video input disabled through `--limit-mm-per-prompt`.
     - `MooncakeConnectorV2` uses `kv_producer` on Prefill and `kv_consumer`
@@ -1483,77 +1404,8 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     launcher and proxy from [Section 5.3](#glm53-flash-5-3-950dt).
     Both roles use EP8, FP8 main KV cache and an FP8 indexer.
 
-    ##### Prepare the Memcache Backend
-
     Follow [Scenario 2: Memcache Backend](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend)
-    for prerequisite checks and installation of `memfabric-hybrid` and
-    `memcache-hybrid`. Add the following mount to the Docker command in
-    Section 4 on both nodes:
-
-    ```shell
-    -v /etc/hccn.conf:/etc/hccn.conf:ro \
-    ```
-
-    Locate the installed Memcache package in each container:
-
-    ```shell
-    pip show memcache_hybrid
-    ```
-
-    The `Location` field is `<PYTHON_SITE_PACKAGES>` in the commands below.
-    Replace `<CONFIG_DIRECTORY>` with the absolute directory containing
-    the configuration files on each node.
-
-    On the Prefill node, create `mmc-meta.conf`:
-
-    ```ini
-    ock.mmc.meta_service_url = tcp://<P0_IP>:5000
-    ock.mmc.meta_service.config_store_url = tcp://<P0_IP>:6000
-    ock.mmc.meta_service.metrics_url = http://<P0_IP>:18000
-    ock.mmc.log_level = info
-    ```
-
-    On both nodes, create `mmc-local.conf`:
-
-    ```ini
-    ock.mmc.meta_service_url = tcp://<P0_IP>:5000
-    ock.mmc.local_service.config_store_url = tcp://<P0_IP>:6000
-    ock.mmc.log_level = info
-    ock.mmc.local_service.world_size = 256
-    ock.mmc.local_service.protocol = device_urma
-    ock.mmc.local_service.dram.size = 20GB
-    ock.mmc.local_service.max.dram.size = 1024GB
-    ock.mmc.local_service.storage.enabled = false
-    ```
-
-    Use `device_urma` for UB. For UBOE, replace it with `device_uboe`.
-    Both roles must use the same MetaService and ConfigStore endpoints.
-    This example uses embedded LocalServices, with each worker contributing
-    `20GB` of DDR memory. Eight workers per node contribute `160GB` per
-    node and `320GB` in total. Adjust this capacity to the available DDR
-    memory after reserving memory for the operating system and vLLM.
-    `world_size` is the maximum number of LocalServices supported by the
-    pool; keep it consistent and large enough for the 16 workers.
-
-    ##### Add the Pool Environment Variables
-
-    On both nodes, add the following exports to `run_dp_template.sh`
-    before `vllm serve`:
-
-    ```shell
-    MEMCACHE_PACKAGE_DIR="<PYTHON_SITE_PACKAGES>/memcache_hybrid"
-    PYTHON_LIB_DIR="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
-
-    export PYTHONHASHSEED=0
-    export MMC_LOCAL_CONFIG_PATH="<CONFIG_DIRECTORY>/mmc-local.conf"
-    export LD_LIBRARY_PATH="${MEMCACHE_PACKAGE_DIR}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH:-}"
-    ```
-
-    `PYTHONHASHSEED` keeps Python hash generation consistent across the
-    nodes. `MMC_LOCAL_CONFIG_PATH` selects the LocalService configuration;
-    `LD_LIBRARY_PATH` includes the Memcache and Python shared libraries.
-
-    ##### Update the Prefill and Decode Connectors
+    for the Memcache backend configuration.
 
     Keep prefix caching, chunked prefill and the hybrid KV cache manager
     enabled. With prefix caching enabled, the model configuration selects
@@ -1640,46 +1492,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     identifies the local IPC endpoint between the pooling scheduler and
     worker. Prefill loads and saves pooled prefixes; Decode receives KV
     cache through `MooncakeConnectorV2` and contributes DDR pool memory.
-
-    ##### Start the Services
-
-    1. In a separate terminal in the Prefill container, start MetaService:
-
-        ```shell
-        MEMCACHE_PACKAGE_DIR="<PYTHON_SITE_PACKAGES>/memcache_hybrid"
-        PYTHON_LIB_DIR="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
-        export LD_LIBRARY_PATH="${MEMCACHE_PACKAGE_DIR}/lib:${PYTHON_LIB_DIR}:${LD_LIBRARY_PATH:-}"
-        export MMC_META_CONFIG_PATH="<CONFIG_DIRECTORY>/mmc-meta.conf"
-        python -c "from memcache_hybrid import MetaService; MetaService.main()"
-        ```
-
-        Ensure ports `5000` and `6000` are reachable from both nodes and
-        port `18000` is available for metrics. The vLLM API uses port
-        `8000` on the same host.
-
-    2. Start Prefill and Decode with the launcher commands from
-       [Section 5.3](#glm53-flash-5-3-950dt). Each worker initializes its
-       Memcache LocalService during startup. Wait until the Prefill API
-       on port `8000` and all eight Decode APIs on ports `8000-8007`
-       pass the health checks from that section.
-    3. Start the proxy from Section 5.3. Send requests to the proxy using
-       [Section 6](#6-functional-verification).
-
-    ##### Verify KV Cache Reuse
-
-    Send a request with a prompt longer than one cache block to populate
-    the pool, then repeat requests with the same prefix. Wait for pool
-    saves to complete before repeating the prefix. Check Prefill output
-    for successful pool lookups, saves and loads, and Decode output for
-    successful P-to-D transfers.
-
-    Compare `vllm:ascend_store_load_get_keys_total` at the Prefill API's
-    `/metrics` endpoint before and after a request that loads pooled
-    prefixes. An increase records pool GET keys; a local prefix-cache
-    hit or HTTP 200 alone does not establish pool reuse. Confirm that the
-    pool loads and inference requests complete successfully. If a repeated
-    request hits only the local prefix cache, use a prefix whose local
-    cache blocks have been evicted to check external pool loading.
 
 === "A3 series"
 
@@ -2137,46 +1949,6 @@ The response is a JSON payload containing the model's generated text in a text_c
 }
 ```
 
-### 6.1 Chat Completions on 950DT Products
-
-After the service is started, send the following request to the single-node
-API server or the PD proxy on port `8000`:
-
-```shell
-curl --fail http://<SERVICE_IP>:8000/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "glm",
-        "messages": [{"role": "user", "content": "What is 2 + 2? Reply with the number."}],
-        "reasoning_effort": "low",
-        "chat_template_kwargs": {"clear_thinking": true},
-        "temperature": 0.6,
-        "top_p": 0.95,
-        "seed": 1024,
-        "max_tokens": 8192
-    }'
-```
-
-Expected Result:
-
-The service returns HTTP 200 with a JSON response containing the `choices`
-field. The following is an example response:
-
-```json
-{
-  "id": "chatcmpl-example",
-  "object": "chat.completion",
-  "created": 0,
-  "model": "glm",
-  "choices": [{
-    "index": 0,
-    "message": {"role": "assistant", "content": "4"},
-    "finish_reason": "stop"
-  }],
-  "usage": {"prompt_tokens": 22, "completion_tokens": 32, "total_tokens": 54}
-}
-```
-
 ## 7 Accuracy Evaluation
 
 ### 7.1 Using AISBench
@@ -2210,24 +1982,6 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ### 9.1 Recommended Configurations {: #91-atlas-800i-a3-pd-optimizations }
 
-#### 950DT products {: #glm53-flash-a5-tuning }
-
-The following configurations use W8A8-MXFP8 weights, FP8 main KV cache,
-an FP8 indexer, and DCP1. Set `max-model-len` and `max-num-seqs`
-according to the actual usage scenario.
-
-| Deployment | NPUs | TP | PCP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Tokens | Graph Mode |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Single node | 8 | 8 | 1 | 1 | 32 | 8192 | 133120 | 5 | `FULL_DECODE_ONLY` |
-| PD Prefill | 8 | 1 | 8 | 1 | 256 | 24576 | 133120 | 5 | Eager |
-| PD Decode | 8 | 1 | 1 | 8 | 30 | 120 | 133120 | 5 | `FULL_DECODE_ONLY` |
-
-For complete startup commands and parameter descriptions, refer to
-[Single-Node Deployment](#glm53-flash-5-1-950dt) and
-[PD Disaggregated Deployment](#glm53-flash-5-3-950dt).
-
-#### A3 series
-
 The following optimizations are already enabled in the reference configuration
 in [Section 5.3](#53-1p1d-pd-disaggregated-deployment). Use the same W8A8 weights
 and role-specific settings when reproducing the deployment.
@@ -2243,22 +1997,6 @@ and role-specific settings when reproducing the deployment.
 | KV capacity | Prefill and Decode | `--kv-cache-dtype int8` | Reduces KV cache memory consumption for long contexts. |
 
 ### 9.2 Tuning Guidelines {: #92-workload-specific-settings }
-
-#### 950DT products
-
-- Set `--max-model-len` to the required context length and adjust
-  `--gpu-memory-utilization` to the available NPU memory.
-- Tune `--max-num-seqs` and `--max-num-batched-tokens` independently on each
-  role. Measure time to first token, time per output token, and throughput
-  before changing these limits.
-- For experimental PCP configuration, refer to
-  [Context Parallel](../../user_guide/feature_guide/context_parallel.md).
-
-Refer to the [performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md)
-and [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for
-general tuning methods.
-
-#### A3 series
 
 - Tune `--max-num-seqs` and `--max-num-batched-tokens` independently on each
   role. The reference uses 64 sequences and 4096 batched tokens on Prefill,
