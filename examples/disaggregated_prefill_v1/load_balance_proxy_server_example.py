@@ -116,6 +116,7 @@ import argparse
 import asyncio
 import base64
 import functools
+import hashlib
 import heapq
 import ipaddress
 import json
@@ -225,6 +226,22 @@ def setup_logging(log_level: str) -> None:
         force=True,
     )
     logger.setLevel(getattr(logging, log_level.upper()))
+
+
+def conversation_affinity_key(req_data: dict) -> str | None:
+    """Identify a conversation without hashing its growing message history."""
+    user = req_data.get("user")
+    if isinstance(user, str) and user:
+        identity = [req_data.get("model"), "session", user]
+    else:
+        messages = req_data.get("messages") or []
+        first_user_index = next((i for i, message in enumerate(messages) if message.get("role") == "user"), None)
+        if first_user_index is None:
+            return None
+        instructions = [m for m in messages[:first_user_index] if m.get("role") in ("system", "developer")]
+        identity = [req_data.get("model"), instructions, messages[first_user_index]]
+    encoded = json.dumps(identity, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def next_req_id() -> str:
@@ -385,8 +402,22 @@ class SharedProxyScheduler:
         *,
         active_tokens: bool = False,
         kv_cache: bool = False,
+        affinity_key: str | None = None,
     ) -> dict[str, Any]:
-        key = self._pop_valid(role)
+        if affinity_key and role is ServerRole.PREFILL:
+            pool = self._pool(role)
+            candidates = pool.servers.keys() - pool.tainted
+            if not candidates:
+                raise RuntimeError("No available prefill servers for session affinity")
+            # Rendezvous hashing is stable across workers/restarts and only
+            # remaps conversations whose chosen endpoint is removed.
+            key = max(
+                candidates,
+                key=lambda k: (hashlib.sha256((affinity_key + "\0" + k).encode("utf-8")).digest(), k),
+            )
+            logger.debug("Prefill affinity key=%s backend=%s", affinity_key[:16], key)
+        else:
+            key = self._pop_valid(role)
         entry = self._pool(role).servers[key]
         if active_tokens:
             entry.active_tokens += load
@@ -413,17 +444,17 @@ class SharedProxyScheduler:
             entry.active_kv_cache = max(0.0, entry.active_kv_cache - load)
         self._push_heap(role, key)
 
-    def begin_request(self, load: float) -> dict[str, Any]:
+    def begin_request(self, load: float, affinity_key: str | None = None) -> dict[str, Any]:
         """Pick a prefiller, reserve KV pressure, and count this as an active request."""
         with self._lock:
-            picked = self._pick_server(ServerRole.PREFILL, load, kv_cache=True)
+            picked = self._pick_server(ServerRole.PREFILL, load, kv_cache=True, affinity_key=affinity_key)
             self.request_num += 1
             return picked
 
-    def reserve_prefill_kv(self, load: float) -> dict[str, Any]:
+    def reserve_prefill_kv(self, load: float, affinity_key: str | None = None) -> dict[str, Any]:
         """Pick a prefiller for recompute without bumping the active request count."""
         with self._lock:
-            return self._pick_server(ServerRole.PREFILL, load, kv_cache=True)
+            return self._pick_server(ServerRole.PREFILL, load, kv_cache=True, affinity_key=affinity_key)
 
     def pick_decoder(self, load: float) -> dict[str, Any]:
         with self._lock:
@@ -676,6 +707,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefiller-ports", type=int, nargs="+", default=[8001])
     parser.add_argument("--decoder-hosts", type=str, nargs="+", default=["localhost"])
     parser.add_argument("--decoder-ports", type=int, nargs="+", default=[8002])
+    parser.add_argument(
+        "--enable-prefill-affinity",
+        action="store_true",
+        help="Route conversations to stable prefill endpoints to reuse prefix cache; decode remains load balanced.",
+    )
     parser.add_argument("--max-retries", type=int, default=3, help="Maximum number of retries for HTTP requests")
     parser.add_argument(
         "--retry-delay", type=float, default=0.001, help="Base delay (seconds) for exponential backoff retries"
@@ -956,7 +992,10 @@ async def assign_instances(
     decoder_score = calculate_decode_score(request_length)
     request_id = req_data.get("request_id") or next_req_id()
     pick_prefill = "begin_request" if is_initial_request else "reserve_prefill_kv"
-    prefiller = await runtime.schedule(pick_prefill, prefiller_score)
+    if args.enable_prefill_affinity:
+        prefiller = await runtime.schedule(pick_prefill, prefiller_score, conversation_affinity_key(req_data))
+    else:
+        prefiller = await runtime.schedule(pick_prefill, prefiller_score)
     prefiller_key = prefiller["key"]
 
     try:
@@ -1038,6 +1077,8 @@ async def handle_completions_impl(api: str, request: Request):
     request_released = False
     try:
         req_data = await request.json()
+        if args.enable_prefill_affinity and (session_id := request.headers.get("X-Session-Id")):
+            req_data["user"] = session_id
         if request_id := request.headers.get("X-Request-Id"):
             req_data["request_id"] = request_id
         req_body = await request.body()

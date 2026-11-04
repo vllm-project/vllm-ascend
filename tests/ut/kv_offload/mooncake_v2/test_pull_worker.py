@@ -995,6 +995,63 @@ def test_mamba_equal_tp_address_generation_transfers_each_cache(
     assert lengths == block_lens
 
 
+def test_recoverssm_pcp8_producer_reassembles_all_cache_contents_on_tp1_consumer() -> None:
+    shapes = ((8, 3 * 8 * 2), (8, 2, 2), (8, 6, 2), (8, 6, 4))
+    dtypes = (torch.bfloat16, torch.float32, torch.float32, torch.bfloat16)
+    expected = [
+        torch.arange(torch.empty(shape).numel()).reshape(shape).to(dtype) for shape, dtype in zip(shapes, dtypes)
+    ]
+    local_caches = [torch.full((3, *shape), -1, dtype=dtype) for shape, dtype in zip(shapes, dtypes)]
+    producer_caches = []
+    for rank in range(8):
+        shards = [expected[0].reshape(8, 3, 8, 2)[:, :, rank : rank + 1].reshape(8, 6)]
+        shards.extend(cache[rank : rank + 1] for cache in expected[1:])
+        caches = [torch.full((3, *shard.shape), -5, dtype=shard.dtype) for shard in shards]
+        for cache, shard in zip(caches, shards):
+            cache[2].copy_(shard)
+        producer_caches.append(caches)
+
+    thread = make_thread(
+        kv_caches_base_addr=[[cache.data_ptr() for cache in local_caches]],
+        block_shapes=[[tuple(cache.shape[1:]) for cache in local_caches]],
+        block_strides=[[cache.stride(0) * cache.element_size() for cache in local_caches]],
+        block_lens=[[cache[0].numel() * cache.element_size() for cache in local_caches]],
+    )
+    remote = make_pp_metadata(
+        block_shapes=[[tuple(cache.shape[1:]) for cache in producer_caches[0]]],
+        block_strides=[[cache.stride(0) * cache.element_size() for cache in producer_caches[0]]],
+        block_lens=[[cache[0].numel() * cache.element_size() for cache in producer_caches[0]]],
+        pcp_tp_base_addrs={
+            rank: {0: [[cache.data_ptr() for cache in caches]]} for rank, caches in enumerate(producer_caches)
+        },
+    )
+    spec = replace(make_mamba_spec(), shapes=shapes, dtypes=dtypes, mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
+    groups = thread._get_mamba_remote_tp_rank_groups(8, 1)
+    assert groups == [[rank] for rank in range(8)]
+    local_pages = [cache[1].view(torch.uint8).reshape(-1) for cache in local_caches]
+    for (rank,) in groups:
+        src: list[int] = []
+        dst: list[int] = []
+        lengths: list[int] = []
+        thread._append_mamba_transfer_addresses(
+            spec, rank, 0, 1, {(0, 0): [("request", [1], [2])]}, remote, src, dst, lengths
+        )
+        remote_pages = [cache[2].view(torch.uint8).reshape(-1) for cache in producer_caches[rank]]
+        for local_addr, remote_addr, length in zip(src, dst, lengths):
+            local_page = next(
+                page for page in local_pages if page.data_ptr() <= local_addr < page.data_ptr() + page.numel()
+            )
+            remote_page = next(
+                page for page in remote_pages if page.data_ptr() <= remote_addr < page.data_ptr() + page.numel()
+            )
+            local_offset = local_addr - local_page.data_ptr()
+            remote_offset = remote_addr - remote_page.data_ptr()
+            local_page[local_offset : local_offset + length].copy_(remote_page[remote_offset : remote_offset + length])
+    for cache, full_state in zip(local_caches, expected):
+        torch.testing.assert_close(cache[1], full_state, atol=0, rtol=0)
+        assert torch.all(cache[0] == -1) and torch.all(cache[2] == -1)
+
+
 def test_execute_bucket_calls_mooncake_and_raises_on_negative_return() -> None:
     thread = make_thread(engine=MagicMock())
     thread._append_spec_transfer_addresses = MagicMock(  # type: ignore[method-assign]

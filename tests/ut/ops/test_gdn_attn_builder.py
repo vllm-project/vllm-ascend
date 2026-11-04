@@ -190,6 +190,8 @@ def _make_vllm_config(
         speculative_config = SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
             parallel_drafting=False,
+            use_eagle_block_drop=lambda: False,
+            enable_adaptive_verification=False,
         )
 
     model_config = SimpleNamespace(max_model_len=max_model_len, hf_text_config=SimpleNamespace())
@@ -202,6 +204,7 @@ def _make_vllm_config(
             max_cudagraph_capture_size=None,
         ),
         speculative_config=speculative_config,
+        num_hash_lookahead_tokens=0,
         use_v2_model_runner=False,
         scheduler_config=SimpleNamespace(
             max_num_seqs=max_num_seqs,
@@ -367,9 +370,12 @@ def test_ascend_gdn_attention_uses_ascend_backend():
     from vllm_ascend.models.glm5next.kda import Glm5NextGDNHostMetadataBackend, Glm5NextLinearAttention
     from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
 
-    assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNFusedAttentionBackend
-    assert AscendKimiK3DeltaAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
-    assert Glm5NextLinearAttention.get_attn_backend(object()) is Glm5NextGDNHostMetadataBackend
+    fused_backend = AscendGatedDeltaNetAttention.get_attn_backend(object())  # type: ignore[arg-type]
+    kimi_backend = AscendKimiK3DeltaAttention.get_attn_backend(object())  # type: ignore[arg-type]
+    glm_backend = Glm5NextLinearAttention.get_attn_backend(object())  # type: ignore[arg-type]
+    assert fused_backend is AscendGDNFusedAttentionBackend
+    assert kimi_backend is AscendGDNHostMetadataBackend
+    assert glm_backend is Glm5NextGDNHostMetadataBackend
     assert Glm5NextLinearAttention.use_contiguous_conv_indices
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
 

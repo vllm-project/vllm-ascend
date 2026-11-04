@@ -821,6 +821,42 @@ def test_balance_schedule_waiting_and_running_paths():
     scheduler.schedule(throttle_prefills=True)
 
 
+def test_balance_schedule_records_local_prefix_cache_stats():
+    """A newly admitted request must be reported to the prefix-cache stats.
+
+    Regression guard: this fork of ``schedule()`` used to record only on the
+    mamba + connector fast path, so plain full-attention models (Qwen3,
+    DeepSeek) left ``vllm:prefix_cache_queries_total`` /
+    ``vllm:prefix_cache_hits_total`` at zero even with APC enabled.
+
+    Asserted at the call site rather than on the counters: whether
+    ``record_prefix_cache_stats()`` keeps the values depends on
+    ``CacheConfig.enable_prefix_caching``, which this fixture does not resolve
+    (``VllmConfig.__post_init__`` is mocked). The bug being locked out is the
+    missing call, not the manager's own bookkeeping.
+    """
+    scheduler = _make_balance_scheduler()
+    manager = scheduler.kv_cache_manager
+    recorded = []
+    original = manager.record_prefix_cache_stats
+
+    def _record(request, num_hits):
+        recorded.append((request, num_hits))
+        return original(request, num_hits)
+
+    manager.record_prefix_cache_stats = _record
+
+    request = _create_requests(1, num_tokens=32, max_tokens=8)[0]
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert output.total_num_scheduled_tokens > 0
+    assert request in scheduler.running
+
+    # The lookup ran against an empty cache: every prompt token is a query,
+    # nothing is a hit, and it happens exactly once per admission.
+    assert recorded == [(request, 0)]
+
+
 @pytest.mark.parametrize("holds_kv_blocks", [False, True])
 def test_balance_schedule_drained_waiting_queues(holds_kv_blocks):
     scheduler = _make_balance_scheduler()
