@@ -23,7 +23,7 @@ import torch
 import vllm
 from torch.distributed import Backend
 from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
-from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
+from vllm.distributed.utils import get_cpu_distributed_timeout_or_none, get_distributed_timeout_or_none
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry, make_hccl_pg_key
@@ -185,6 +185,29 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
         if self_device_group is not None:
             self.device_group = self_device_group
+
+    def make_sibling_device_group(self, group_desc: str | None = None) -> torch.distributed.ProcessGroup:
+        if self.backend != "hccl" or group_desc != "pp_broadcast":
+            return super().make_sibling_device_group(group_desc=group_desc)
+
+        # Keep the sampled-token broadcast independent of PP send/recv, but use
+        # the normal group buffer policy instead of the global MC2 buffer size.
+        # Do not use the registry: a sibling must remain a distinct communicator.
+        device_timeout = get_distributed_timeout_or_none()
+        sibling = None
+        for ranks in self.group_ranks:
+            pg = torch.distributed.new_group(
+                ranks,
+                backend=self.torch_distributed_backend,
+                pg_options=create_hccl_pg_options(group_desc),
+                group_desc=group_desc,
+                timeout=device_timeout,
+            )
+            if self.rank in ranks:
+                self._unshared_hccl_groups.append(pg)
+                sibling = pg
+        assert sibling is not None
+        return sibling
 
     def _init_device_communicator(self) -> None:
         self.device = torch.npu.current_device()

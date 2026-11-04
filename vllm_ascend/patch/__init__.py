@@ -944,17 +944,20 @@
 #       Ascend can reuse equivalent HCCL process groups across coordinators
 #       instead of creating a fresh device group for every coordinator, and it
 #       must release those reused groups on teardown.
+#       MRV2's independent PP broadcast group also needs explicit HCCL buffer
+#       options to avoid inheriting a large global MC2 buffer configuration.
 #    How：
 #       Replace `GroupCoordinator` with an Ascend subclass backed by a
 #       process-local `HcclPgRegistry` (see `worker/_hccl_pg_registry.py`) that
 #       deduplicates groups by ranks / backend / pg_options / reuse-domain, and
 #       wrap `destroy_distributed_environment` so the registry is cleared after
-#       teardown.
+#       teardown. Create PP broadcast sibling groups outside the registry with
+#       the existing per-group buffer policy and track them for destruction.
 #    Related PR (if no, explain why):
 #       No, HCCL process-group reuse is Ascend-specific.
 #    Future Plan:
 #       Remove this patch once upstream exposes process-group reuse and teardown
-#       hooks.
+#       hooks, and backend-specific options for sibling device groups.
 #
 # ** 4. File: worker/patch_eagle3_init.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
