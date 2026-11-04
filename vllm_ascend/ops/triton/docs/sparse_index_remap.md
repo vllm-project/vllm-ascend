@@ -2,7 +2,7 @@
 
 ## Description
 
-- **Function**: Remaps DCP sparse-attention top-k indices from the replicated view to DCP-local KV positions, retains entries owned by the current rank, compacts them in top-k order and pads the tail with `-1`. The current power-of-two DCP/interleave route uses two Triton kernels; other configurations use exact INT64 Torch arithmetic and order-preserving compaction.
+- **Function**: Remaps replicated-view sparse-attention indices to DCP-local positions, retaining this rank’s entries in top-k order and padding the tail with `-1`. For power-of-two DCP and interleave, A5 uses a position-sort kernel for INT32 with K<=4096; other inputs use two chunked kernels. Other layouts use exact INT64 Torch arithmetic and order-preserving compaction. Kimi local-output merge incorporates this operation and skips a second remap.
 - **Formula** (per row, all integer arithmetic; `idx >= 0` marks valid lanes):
     - `block_idx = idx // interleave_size`
     - `owner = block_idx % dcp_size`
@@ -13,7 +13,7 @@
 - **Algorithm flow** (processed per row, chunked for parallelism):
   1. Fused kernel, grid `(num_chunks, rows)`: each program loads `BLOCK = min(128, next_power_of_2(topk_count))` indices, uses exact bit shifts/masks for the owner and local index, then serial-compacts valid entries to its `chunk_out` slot with scalar `get_element`, records the count and pre-fills its output region with `-1`. Input integer width is retained.
   2. Gather kernel, grid `(rows,)`: per row, iterates over the chunks and masked-copies `chunk_out[:cnt]` to the row front in chunk order, restoring top-k order across chunks.
-- **Supported modes**: NPU eager execution and ACLGraph capture/replay through a hardware-generation-independent API. The current integer-boundary and graph tests have Atlas A3 execution evidence; no new 950 validation is claimed.
+- **Supported modes**: NPU eager execution and ACLGraph capture/replay. Integer-boundary and graph tests have Atlas A3 execution evidence; the A5 position-sort path requires hardware regression validation for the exact-integer changes.
 
 ## Parameters
 
@@ -28,12 +28,11 @@
 ## Constraints
 
 - `topk_count` must not exceed the configured `index_topk` (checked by the caller).
-- Index values are logical KV positions, not bounded by top-k count. Nonnegative values within the input dtype's range must retain exact integer boundaries, including values above `2**24` and INT64 values above `2**31`. Do not use FP32 division as an oracle or a fallback.
-- For power-of-two DCP and interleave, let `b = log2(interleave_size)` and `r = log2(dcp_size)`: `owner = (idx >> b) & (dcp_size - 1)` and `local = ((idx >> (b + r)) << b) + (idx & (interleave_size - 1))`. Both bit counts are static configuration; the current rank and top-k work count remain runtime parameters.
-- Other layouts use INT64 quotient/remainder and unique order keys for compaction. Integer argsort may use AICPU; this path prioritizes correctness, not a generic-path speedup claim.
-- `BLOCK` is capped at 128 and the compaction is deliberately serial: a `tl.cumsum` prefix-sum compaction produces nondeterministic garbage on A2 and traps the vector core under repeated launches on A3 (triton-ascend 3.2.0 / CANN 9.1, re-verified 2026-08). Re-validate if the compiler is upgraded.
-- Two kernels are required: cross-program ordering (top-k order across chunks) cannot be expressed inside a single kernel without a global barrier, and an atomic-based reservation would make the output order nondeterministic.
-- Inference only (decode path). Both INT32 and INT64 input/output are preserved; the fast path must not narrow INT64 indices.
+- Index values are logical KV positions, not bounded by top-k count. Nonnegative values within the input dtype’s range must retain exact integer boundaries, including above `2**24` and INT64 values above `2**31`. Do not use FP32 division as an oracle or a fallback.
+- For power-of-two DCP and interleave, let `b = log2(interleave_size)` and `r = log2(dcp_size)`: `owner = (idx >> b) & (dcp_size - 1)` and `local = ((idx >> (b + r)) << b) + (idx & (interleave_size - 1))`. Both bit counts are static configuration.
+- Other layouts use INT64 quotient/remainder and unique order keys for compaction; integer argsort may use AICPU.
+- The chunked implementation requires two kernels to preserve cross-chunk order. A5 sorts unique row-position keys and gathers INT32 payload bits; INT64 uses the chunked implementation.
+- Inference only (decode path). Both INT32 and INT64 input/output are preserved.
 
 ## Origin and Differences
 

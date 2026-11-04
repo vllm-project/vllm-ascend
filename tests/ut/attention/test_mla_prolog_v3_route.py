@@ -745,11 +745,12 @@ def test_dcp_post_load_allocates_only_consumed_workspaces(use_dcp, use_pcp, deco
         assert impl._dcp_prefill_current_kv_buffers[2].numel() == 8192
 
 
-def test_dcp_current_kv_buffers_survive_reloads():
+@pytest.mark.parametrize("block_size", [128, 1536])
+def test_dcp_current_kv_buffers_survive_reloads(block_size):
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=256, max_num_seqs=256),
-        cache_config=SimpleNamespace(block_size=128),
+        cache_config=SimpleNamespace(block_size=block_size),
     )
     impl.speculative_config = None
     impl.num_kv_heads = 1
@@ -776,11 +777,12 @@ def test_dcp_current_kv_buffers_survive_reloads():
     )
 
 
-def test_dcp_prolog_buffers_survive_reloads_and_use_disjoint_workspaces():
+@pytest.mark.parametrize("block_size", [128, 1536])
+def test_dcp_prolog_buffers_survive_reloads_and_use_disjoint_workspaces(block_size):
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4096, max_num_seqs=32),
-        cache_config=SimpleNamespace(block_size=128),
+        cache_config=SimpleNamespace(block_size=block_size),
     )
     impl.speculative_config = SimpleNamespace(num_speculative_tokens=3)
     impl.num_kv_heads = 1

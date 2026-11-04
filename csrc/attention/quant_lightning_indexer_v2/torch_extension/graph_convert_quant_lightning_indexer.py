@@ -66,6 +66,7 @@ if _TORCHAIR_AVAILABLE:
         seqused_q: Tensor | None = None,
         seqused_k: Tensor | None = None,
         cmp_residual_k: Tensor | None = None,
+        causal_seqlens_kv_global: Tensor | None = None,
         batch_size: int | None = None,
         max_seqlen_q: int | None = None,
         max_seqlen_k: int | None = None,
@@ -73,6 +74,10 @@ if _TORCHAIR_AVAILABLE:
         layout_k: str | None = None,
         mask_mode: int | None = None,
         cmp_ratio: int | None = None,
+        enable_dcp: bool | None = None,
+        cp_world: int | None = None,
+        cp_rank: int | None = None,
+        cp_kv_cache_interleave_size: int | None = None,
         meta_outputs: TensorSpec = None,
     ):
         raise RuntimeError("GE converter doesn't support op: 'quant_lightning_indexer_metadata'")

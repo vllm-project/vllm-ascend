@@ -507,14 +507,82 @@ aclnnStatus CheckConsistencyQliV2(int64_t batchSize, const aclTensor *cuSeqlensQ
     return ACLNN_SUCCESS;
 }
 
+aclnnStatus CheckDcpQliV2(const aclTensor *causalSeqlensKvGlobalOptional, int64_t enableDcp, int64_t cpWorld,
+                          int64_t cpRank, int64_t cpInterleaveSize, int64_t cmpRatio, int64_t maskMode,
+                          int64_t queryBatchSize, const std::string &socVersion)
+{
+    const bool isA5 = socVersion.find("Ascend950") != std::string::npos;
+    if (enableDcp == 0) {
+        if ((cpWorld != 1) || (cpRank != 0) || (cpInterleaveSize != 1)) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                    "cp_world/cp_rank/cp_kv_cache_interleave_size must be 1/0/1 when enable_dcp=0, but got "
+                    "%lld/%lld/%lld",
+                    cpWorld, cpRank, cpInterleaveSize);
+            return ACLNN_ERR_PARAM_INVALID;
+        }
+        if (IsTensorExistQliV2(causalSeqlensKvGlobalOptional)) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "causal_seqlens_kv_global must be null when enable_dcp=0");
+            return ACLNN_ERR_PARAM_INVALID;
+        }
+        return ACLNN_SUCCESS;
+    }
+
+    if ((cpWorld < 1) || (cpRank < 0) || (cpRank >= cpWorld) || (cpInterleaveSize < 1)) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                "cp_world/cp_rank/cp_kv_cache_interleave_size must satisfy P>=1, 0<=r<P, S>=1, but got %lld/%lld/%lld",
+                cpWorld, cpRank, cpInterleaveSize);
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    if (!isA5) {
+        // A2/A3: enable_dcp 只用于打开 FD/LD, metadata 仍按本地 L 切分, C/P/r/S 不参与计算。
+        return ACLNN_SUCCESS;
+    }
+    if (cmpRatio != 1) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "enable_dcp requires cmp_ratio=1 on A5, but got %lld", cmpRatio);
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    if ((maskMode != QLI_V2_NO_MASK_MODE) && (maskMode != QLI_V2_CAUSAL_MASK_MODE)) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "enable_dcp requires mask_mode=0 or 3, but got %lld", maskMode);
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    if (!IsTensorExistQliV2(causalSeqlensKvGlobalOptional)) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "causal_seqlens_kv_global is required when enable_dcp=1 on A5");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    if (GetDimNumQliV2(causalSeqlensKvGlobalOptional) != 1) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "causal_seqlens_kv_global must be 1-D, but got dim num %lld",
+                GetDimNumQliV2(causalSeqlensKvGlobalOptional));
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    if (GetDataTypeQliV2(causalSeqlensKvGlobalOptional) != aclDataType::ACL_INT32) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "causal_seqlens_kv_global dtype must be int32");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    if (causalSeqlensKvGlobalOptional->GetViewShape().GetDim(0) != queryBatchSize) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                "causal_seqlens_kv_global element num must equal batch size %lld, but got %lld", queryBatchSize,
+                causalSeqlensKvGlobalOptional->GetViewShape().GetDim(0));
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    return ACLNN_SUCCESS;
+}
+
 aclnnStatus ParamsCheckQliV2(const aclTensor *cuSeqlensQOptional, const aclTensor *cuSeqlensKOptional,
                              const aclTensor *sequsedQOptional, const aclTensor *sequsedKOptional,
-                             const aclTensor *cmpResidualKOptional, int64_t numHeadsQ, int64_t numHeadsK,
+                             const aclTensor *cmpResidualKOptional,
+                             const aclTensor *causalSeqlensKvGlobalOptional, int64_t numHeadsQ, int64_t numHeadsK,
                              int64_t headDim, int64_t topk, int64_t quantMode, int64_t batchSize, int64_t maxSeqlenQ,
                              int64_t maxSeqlenK, char *layoutQOptional, char *layoutKOptional, int64_t maskMode,
-                             int64_t cmpRatio, const aclTensor *metadata, uint32_t aicCoreNum, uint32_t aivCoreNum,
-                             const std::string &socVersion)
+                             int64_t cmpRatio, int64_t enableDcp, int64_t cpWorld, int64_t cpRank,
+                             int64_t cpInterleaveSize, const aclTensor *metadata, uint32_t aicCoreNum,
+                             uint32_t aivCoreNum, const std::string &socVersion)
 {
+    // enable_dcp 仅允许 0/1; 该开关只用于 arch22 上打开 FD/LD, 不影响非 DCP 调用。
+    if ((enableDcp != 0) && (enableDcp != 1)) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(QLI_V2_ACLNN_OP_NAME, "enable_dcp", std::to_string(enableDcp),
+                                              "The value of enable_dcp should be 0 or 1");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
     auto ret =
         CheckSingleParamQliV2(numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK,
                               layoutQOptional, layoutKOptional, maskMode, cmpRatio, aicCoreNum, aivCoreNum, socVersion);
@@ -527,6 +595,13 @@ aclnnStatus ParamsCheckQliV2(const aclTensor *cuSeqlensQOptional, const aclTenso
 
     ret = CheckConsistencyQliV2(batchSize, cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional,
                                 cmpResidualKOptional, layoutQOptional, layoutKOptional, metadata);
+    CHECK_RET(ret == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+
+    std::string querySource;
+    int64_t queryBatchSize =
+        GetQueryBatchSizeQliV2(batchSize, cuSeqlensQOptional, sequsedQOptional, layoutQOptional, querySource);
+    ret = CheckDcpQliV2(causalSeqlensKvGlobalOptional, enableDcp, cpWorld, cpRank, cpInterleaveSize, cmpRatio, maskMode,
+                        queryBatchSize, socVersion);
     CHECK_RET(ret == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
 
     return ACLNN_SUCCESS;

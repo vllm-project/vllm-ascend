@@ -59,6 +59,8 @@ class AscendPCPAttentionContext:
     local_to_global_req_indices: tuple[int, ...] | None = None
     # Actual local tokens in the unpartitioned batch, excluding padding.
     local_token_indices: torch.Tensor | None = None
+    # Padded tensor width consumed by each rank's model forward.
+    local_num_tokens: int | None = None
 
 
 class AscendPCPManager(PCPManager):
@@ -528,7 +530,8 @@ class AscendPCPManager(PCPManager):
         if not self.is_last_pp_rank:
             return hidden_states
 
-        restored_hidden_states = super().restore_hidden_states(hidden_states)
+        # PP and draft states can be strided views; HCCL requires dense inputs.
+        restored_hidden_states = super().restore_hidden_states(hidden_states.contiguous())
         if self._global_batch is None:
             return restored_hidden_states
 
@@ -685,6 +688,7 @@ class AscendPCPManager(PCPManager):
         update_cos_sin(input_batch.positions)
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            local_num_tokens=input_batch.num_tokens_after_padding,
             global_block_tables=self._block_tables.get_dummy_block_tables(num_reqs),
             global_slot_mappings=self._global_batch_slot_mappings[:, :num_tokens].fill_(-1),
             hidden_restore_idx=torch.arange(num_tokens, device=self.device),
@@ -709,6 +713,7 @@ class AscendPCPManager(PCPManager):
             restore_start = self.pcp_rank * num_tokens
             return AscendPCPAttentionContext(
                 global_batch=input_batch,
+                local_num_tokens=num_tokens,
                 local_to_global_req_indices=tuple(range(input_batch.num_reqs)),
                 global_block_tables=block_tables,
                 global_slot_mappings=slot_mappings.view(slot_mappings.shape[0], self.pcp_world_size, num_tokens)[
@@ -740,6 +745,7 @@ class AscendPCPManager(PCPManager):
             )
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            local_num_tokens=local_batch.num_tokens_after_padding,
             local_to_global_req_indices=local_to_global_req_indices,
             local_token_indices=self._local_gather_idx[: local_batch.num_tokens],
             global_block_tables=self._block_tables.gather_block_tables(

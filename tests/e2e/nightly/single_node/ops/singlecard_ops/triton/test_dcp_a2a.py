@@ -41,6 +41,7 @@ def _simulate_receive(
 
 _A5_FIXED_CASES = (
     pytest.param(64, 96, 512, 8, 1, 1, True, id="original-shape"),
+    pytest.param(128, 96, 512, 8, 1, 1, True, id="dspark-128-token-local"),
     pytest.param(4, 96, 512, 8, 1, 1, True, id="too-few-pack-rows"),
     pytest.param(7, 96, 512, 8, 1, 1, True, id="small-token-count"),
     pytest.param(64, 8, 512, 8, 1, 1, True, id="few-local-heads"),
@@ -58,6 +59,23 @@ _A5_FIXED_CASES = (
     pytest.param(64, 36, 128, 9, 1, 1, True, id="dcp9-pack-only"),
     pytest.param(64, 64, 128, 16, 1, 1, False, id="dcp16-pack-only"),
 )
+
+
+@pytest.mark.parametrize("tokens", [128, 129])
+@torch.inference_mode()
+def test_decode_combine_without_local(tokens):
+    torch.manual_seed(35)
+    world, heads, dim = 8, 96, 512
+    outputs = torch.randn(world, tokens, heads, dim, device="npu", dtype=torch.bfloat16)
+    lses = torch.randn(world, tokens, heads, 1, device="npu") * 8 + 70_000
+    lses[:, 0, 0] = -torch.inf
+    outputs[:, 0, 0] = torch.nan
+    lses[0, 1, 0] = torch.nan
+    outputs[0, 1, 0] = torch.nan
+    recv = _simulate_receive(outputs, lses, 0, 1)
+    actual = fused_dcp_lse_combine(recv, dim, 1)
+    expected = _reference_merge(outputs[:, :, : heads // world], lses[:, :, : heads // world, 0])
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
 @torch.inference_mode()
@@ -128,7 +146,11 @@ def _check_a5_batching_case(
     decoded_lse = torch.where(exponent_code < 0, -1.0, 1.0) * significand * torch.exp2(exponent_code.abs() - 151)
     expected_lse = lse.reshape(num_tokens, dcp_size, local_heads, 1).permute(1, 2, 0, 3)
     torch.testing.assert_close(decoded_lse, expected_lse, atol=1e-2, rtol=1e-2)
-    expected_pack_batch = output_stride == 1 and head_dim <= 2048 and num_tokens * num_heads >= 8 * vector_cores
+    expected_pack_batch = (
+        head_dim <= 2048
+        and num_tokens * num_heads >= 8 * vector_cores
+        and (output_stride == 1 or (head_dim == 512 and num_tokens >= 128))
+    )
     assert pack_spy.calls == int(expected_pack_batch)
     if run_combine:
         torch.testing.assert_close(batched_combined, scalar_combined, atol=2e-2, rtol=2e-2)
@@ -537,3 +559,56 @@ def test_combine_with_raw_local_fia(scatter_dim, dcp_size, head_dim, local_dtype
     expected_lse = torch.logsumexp(lses.masked_fill(~torch.isfinite(lses), -torch.inf), dim=0)
     torch.testing.assert_close(actual[..., :head_dim], expected, atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(actual[..., head_dim], expected_lse, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize("ranks,heads", [(4, 12), (5, 24), (8, 12), (9, 16)])
+@torch.inference_mode()
+def test_a3_coalesced_lse_loads_and_graph(monkeypatch, ranks, heads):
+    if get_ascend_device_type() != AscendDeviceType.A3:
+        pytest.skip("The coalesced load specialization is qualified on A3")
+    tokens, dim = 64, 512
+    torch.manual_seed(2026 + ranks)
+    history = torch.randn(ranks, tokens, heads, dim, device="npu", dtype=torch.bfloat16)
+    history_lse = torch.randn(ranks, tokens, heads, 1, device="npu", dtype=torch.float32) * 20
+    local = torch.randn(tokens, heads, dim, device="npu", dtype=torch.bfloat16)
+    local_lse = torch.randn(tokens, heads, 1, device="npu", dtype=torch.float32) * 20
+    history[:, 0, 0] = torch.nan
+    history_lse[:, 0, 0] = -torch.inf
+    local[0, 0] = torch.nan
+    local_lse[0, 0] = torch.nan
+    history[0, 1, 1] = torch.nan
+    history_lse[0, 1, 1] = torch.nan
+    recv = pack_dcp_output_lse(
+        history.transpose(0, 1).reshape(tokens, ranks * heads, dim),
+        history_lse.transpose(0, 1).reshape(tokens, ranks * heads, 1),
+        ranks,
+        1,
+    )
+    expected = _reference_merge(
+        torch.cat((history, local.unsqueeze(0))),
+        torch.cat((history_lse[..., 0], local_lse[..., 0].unsqueeze(0))),
+    )
+    launches = []
+    original = dcp_a2a._fused_dcp_lse_combine_batched_kernel
+
+    class LaunchSpy:
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                launches.append(kwargs)
+                return original[grid](*args, **kwargs)
+
+            return launch
+
+    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_batched_kernel", LaunchSpy())
+    actual = fused_dcp_lse_combine(recv, dim, 1, local_output=local, local_lse=local_lse)
+    min_rows = (10 if ranks == 4 else 12) * dcp_a2a.get_vectorcore_num()
+    assert len(launches) == int(tokens * heads >= min_rows)
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+    assert torch.isfinite(actual).all()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        replayed = fused_dcp_lse_combine(recv, dim, 1, local_output=local, local_lse=local_lse)
+    local.mul_(0.5)
+    graph.replay()
+    eager = fused_dcp_lse_combine(recv, dim, 1, local_output=local, local_lse=local_lse)
+    torch.testing.assert_close(replayed, eager, atol=0, rtol=0)

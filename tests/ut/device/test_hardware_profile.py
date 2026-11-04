@@ -60,6 +60,8 @@ _EXPECTED_CAPABILITIES = {
     },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
+        HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
+        HardwareCapability.DEQUANT_SITU_QUANT,
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.RMS_NORM_CAST,
@@ -95,10 +97,12 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.ENGRAM_UNROTATED_GATE,
             HardwareCapability.ENGRAM_MXFP8,
             HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
+            HardwareCapability.SITU_MX_QUANT,
             HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
             HardwareCapability.FLA_GDN_PREFILL,
             HardwareCapability.FP8_ATTENTION,
             HardwareCapability.POOL_KEY_INDEXER_FP8,
+            HardwareCapability.INDEXER_QUANT_CACHE,
             HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
             HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION,
             HardwareCapability.GRAPH_MULS_ADD_FUSION,

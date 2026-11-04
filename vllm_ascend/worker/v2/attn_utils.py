@@ -187,8 +187,12 @@ def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfi
     return replace(kv_cache_config, kv_cache_groups=groups)
 
 
-def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec]) -> None:
+def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec], minimum_page_size: int = 0) -> None:
     """Align dense K/V segments before padding a shared Attention/Mamba pool."""
+    if any(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in kv_cache_specs.values()):
+        # Paired SFA has two physical page classes. Row byte ratios must never
+        # change the logical token ownership or checkpoint granularity.
+        return
     # MLA and compressed-cache subclasses manage their own storage layouts.
     attention_specs = {
         name: spec for name, spec in kv_cache_specs.items() if type(spec) in (FullAttentionSpec, SlidingWindowSpec)
@@ -220,19 +224,26 @@ def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec]) -
             )
 
 
-def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
+def get_kv_cache_spec(
+    vllm_config: VllmConfig,
+    *,
+    dspark_draft_layer_names: set[str] | None = None,
+) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
+    draft_names = dspark_draft_layer_names or set()
     use_turboquant = vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     attention_layer_names: list[str] = []
     mamba_specs: dict[str, MambaSpec] = {}
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
+    from vllm_ascend.utils import enable_sfa_dcp_sharded_indexer
+
     sfa_dcp_replicated_indexer_size = (
         vllm_config.parallel_config.decode_context_parallel_size
-        if enable_sfa_dcp_replicated_indexer(vllm_config)
+        if enable_sfa_dcp_replicated_indexer(vllm_config) and not enable_sfa_dcp_sharded_indexer(vllm_config)
         else 1
     )
     enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"]
@@ -321,11 +332,16 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 dtype=dtype,
                 cache_dtype_str=cache_dtype_str,
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
-                store_on_host=enable_sfa(vllm_config) and get_ascend_config().sparse_kv_offload_config.enabled,
+                store_on_host=(
+                    layer_name not in draft_names
+                    and enable_sfa(vllm_config)
+                    and get_ascend_config().sparse_kv_offload_config.enabled
+                ),
                 cache_sparse_sfa_turboquant=cache_sparse_sfa_turboquant,
                 non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
                 model_version=model_version,
                 indexes_kv_by_block_stride=indexes_kv_by_block_stride,
+                is_dspark_draft=layer_name in draft_names,
                 **ratio_kwargs,
             )
         if isinstance(attn_module, DeepseekV32IndexerCache):
@@ -385,6 +401,16 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             continue
 
     if mamba_specs:
+        if any(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in kv_cache_spec.values()):
+            from vllm_ascend.core.paired_sfa_cache import align_paired_sfa_cache
+
+            kv_cache_spec.update(mamba_specs)
+            target_specs = {
+                name: spec for name, spec in kv_cache_spec.items() if not getattr(spec, "is_dspark_draft", False)
+            }
+            align_paired_sfa_cache(target_specs)
+            kv_cache_spec.update(target_specs)
+            return kv_cache_spec
         # QSA/CSA hybrid models (descriptor-native cache owners) need
         # the descriptor-native cache alignment: every align_kv_cache_with_mamba
         # attention layer (including the QSA main owners) pads its page up
@@ -1297,7 +1323,8 @@ def _allocate_kv_cache(
     # full cache pool and can OOM before the second tensor is initialized.
     hybrid_backing: torch.Tensor | None = None
     step_backing: torch.Tensor | None = None
-    if use_hybrid_layout and not is_dsv4_model:
+    is_paired_sfa = any(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in layer_kv_cache_spec.values())
+    if use_hybrid_layout and not is_dsv4_model and not is_paired_sfa:
         tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
         if len(tensor_sizes) != 1:
             raise ValueError("Hybrid KV cache tensors must share one backing allocation.")
@@ -1908,6 +1935,21 @@ def _reshape_kv_cache_v2(
             if isinstance(group_spec, AscendSFAIndexerCacheSpec):
                 assert kv_cache_config is not None
                 raw_cache = kv_cache_raw_tensors[layer_name]
+                combined_indexer_cache = raw_cache if isinstance(raw_cache, torch.Tensor) else None
+                if isinstance(raw_cache, torch.Tensor):
+                    # Hybrid descriptors expose a layer view of the shared
+                    # backing. Preserve that allocation while exposing the
+                    # same component-major K/scale protocol as standalone SFA.
+                    raw_blocks = raw_cache.numel() // group_spec.page_size_bytes
+                    k_bytes = (
+                        raw_blocks
+                        * group_spec.sfa_dcp_replicated_indexer_size
+                        * group_spec.block_size
+                        * group_spec.num_kv_heads
+                        * group_spec.head_size
+                        * get_dtype_size(group_spec.dtype)
+                    )
+                    raw_cache = (raw_cache[:k_bytes], raw_cache[k_bytes:]) if group_spec.scale_dim else (raw_cache,)
                 assert isinstance(raw_cache, tuple)
 
                 if group_spec.scale_dim:
@@ -1925,6 +1967,7 @@ def _reshape_kv_cache_v2(
                 # kernel pages. Match the kernel block table without copying KV.
                 num_kernel_blocks = num_blocks * group_spec.block_size // kernel_block_size
 
+                assert group_spec.block_size % kernel_block_size == 0
                 kv_cache_shape = group.backend.get_kv_cache_shape(
                     num_kernel_blocks * group_spec.sfa_dcp_replicated_indexer_size,
                     kernel_block_size,
@@ -1932,7 +1975,18 @@ def _reshape_kv_cache_v2(
                     group_spec.head_size,
                 )
 
-                indexer_k_cache = raw_k_tensor.view(group_spec.dtype).view(kv_cache_shape)
+                kernel_page_bytes = group_spec.page_size_bytes // (
+                    group_spec.sfa_dcp_replicated_indexer_size * (group_spec.block_size // kernel_block_size)
+                )
+                if combined_indexer_cache is not None and group_spec.scale_dim:
+                    # Keep each kernel block's K and scales in the same page.
+                    # Global K/scale planes disagree with overlaying attention
+                    # groups about where a scheduler block begins and ends.
+                    indexer_k_cache = make_page_strided_cache_view(
+                        combined_indexer_cache, kv_cache_shape, group_spec.dtype, kernel_page_bytes
+                    )
+                else:
+                    indexer_k_cache = raw_k_tensor.view(group_spec.dtype).view(kv_cache_shape)
                 if raw_scale_tensor is None:
                     kv_caches[layer_name] = (indexer_k_cache,)
                 else:
@@ -1944,7 +1998,24 @@ def _reshape_kv_cache_v2(
                     )
                     if group_spec.cache_sparse_li_c4:
                         indexer_scale_cache_shape = (*indexer_scale_cache_shape[:-1], group_spec.scale_dim // 2, 2)
-                    indexer_scale_cache = raw_scale_tensor.view(group_spec.scale_dtype).view(indexer_scale_cache_shape)
+                    if combined_indexer_cache is not None:
+                        key_bytes = (
+                            kernel_block_size
+                            * group_spec.num_kv_heads
+                            * group_spec.head_size
+                            * get_dtype_size(group_spec.dtype)
+                        )
+                        indexer_scale_cache = make_page_strided_cache_view(
+                            combined_indexer_cache,
+                            indexer_scale_cache_shape,
+                            group_spec.scale_dtype,
+                            kernel_page_bytes,
+                            offset_bytes=key_bytes,
+                        )
+                    else:
+                        indexer_scale_cache = raw_scale_tensor.view(group_spec.scale_dtype).view(
+                            indexer_scale_cache_shape
+                        )
                     kv_caches[layer_name] = (indexer_k_cache, indexer_scale_cache)
 
                 continue
@@ -2112,7 +2183,9 @@ def _reshape_kv_cache_v2(
                 kernel_block_size,
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size,
-                cache_dtype,
+                (kv_cache_spec.cache_dtype_str or "auto")
+                if getattr(kv_cache_spec, "is_dspark_draft", False)
+                else cache_dtype,
             )
             packed_sfa_main_cache = enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec)
             if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)) and (

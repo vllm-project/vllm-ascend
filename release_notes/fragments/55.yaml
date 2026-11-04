@@ -1,0 +1,7 @@
+pr: 55
+entries:
+  - category: performance
+    hardware: [A3]
+    text: >-
+      Accelerated BF16 DCP output merging for qualified D=512 decode workloads
+      by coalescing encoded LSE loads in the existing batched Triton kernel.

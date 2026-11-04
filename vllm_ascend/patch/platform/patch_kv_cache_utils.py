@@ -24,8 +24,13 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
-from vllm_ascend.core.kv_cache_interface import (
-    is_prefix_cacheable,
+from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.core.paired_sfa_cache import (
+    is_paired_sfa_cache,
+    paired_sfa_cache_config,
+    paired_sfa_cache_groups,
+    paired_sfa_max_memory,
+    paired_sfa_pool_bytes,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
@@ -120,6 +125,23 @@ def _ascend_resolve_kv_cache_block_sizes(
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
+    if is_paired_sfa_cache(groups):
+        # DCP scales token-history attention only; recurrent checkpoints keep
+        # the TP-local state for the complete logical sequence.
+        specs = [
+            next(iter(g.kv_cache_spec.kv_cache_specs.values()))
+            if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
+            else g.kv_cache_spec
+            for g in groups
+        ]
+        effective = [s.block_size if isinstance(s, MambaSpec) else s.block_size * dcp for s in specs]
+        scheduler = math.lcm(*effective)
+        if not cache_config.enable_prefix_caching:
+            return scheduler, scheduler
+        unit = getattr(cache_config, "prefix_match_unit", None) or math.gcd(*(s.block_size for s in specs))
+        if any(size % unit for size in effective):
+            raise ValueError("Prefix match unit must divide every effective cache block size.")
+        return scheduler, unit
     cacheable_groups = [group for group in groups if is_prefix_cacheable(group.kv_cache_spec)]
     filtered_private_groups = bool(cacheable_groups) and len(cacheable_groups) != len(groups)
     if filtered_private_groups and not is_deepseek_v41_cache(groups):
@@ -654,6 +676,8 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     layout, so using the upstream value changes ``num_blocks`` during the
     re-plan and leaves ranks inconsistent.
     """
+    if is_paired_sfa_cache(kv_cache_groups):
+        return paired_sfa_pool_bytes(kv_cache_groups)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.pool_bytes_per_block(kv_cache_groups)
     if is_deepseek_v41_cache(kv_cache_groups):
@@ -675,7 +699,8 @@ def _has_ascend_multi_allocation_kv_cache_layout(
 ) -> bool:
     """Whether Ascend materializes these groups as several device allocations."""
     return (
-        tq_cache.uses_turboquant_groups(kv_cache_groups)
+        is_paired_sfa_cache(kv_cache_groups)
+        or tq_cache.uses_turboquant_groups(kv_cache_groups)
         or is_deepseek_v41_cache(kv_cache_groups)
         or _get_glm5_next_cache_layout(kv_cache_groups) is not None
         or _is_deepseek_v4_groups(kv_cache_groups)
@@ -713,6 +738,8 @@ if vllm_version_is("0.32.0"):
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> int:
         """Keep the pre-#51718 DSV4 admission formula for its shared tuples."""
+        if is_paired_sfa_cache(kv_cache_groups):
+            return paired_sfa_max_memory(vllm_config, kv_cache_groups)
         if tq_cache.uses_turboquant_groups(kv_cache_groups):
             return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
@@ -755,6 +782,8 @@ else:
         else:
             builder = None
             vllm_config, kv_cache_groups = args
+        if is_paired_sfa_cache(kv_cache_groups):
+            return paired_sfa_max_memory(vllm_config, kv_cache_groups)
         if tq_cache.uses_turboquant_groups(kv_cache_groups):
             return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
@@ -787,6 +816,8 @@ def _get_ascend_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
+    if is_paired_sfa_cache(kv_cache_spec):
+        return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
     if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
         return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
     groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
@@ -815,7 +846,9 @@ def _ascend_get_kv_cache_config_from_groups(
         if vllm_version_is("0.28.0")
         else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     )
-    if qwen_config is not None:
+    if is_paired_sfa_cache(kv_cache_groups):
+        kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
+    elif qwen_config is not None:
         kv_cache_config = qwen_config
     elif is_deepseek_v41_cache(kv_cache_groups):
         kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
@@ -845,6 +878,15 @@ def _ascend_get_kv_cache_config_from_groups(
         # Preserve the worker-derived ownership through that deepcopy. Remove
         # this bridge once upstream KVCacheConfig carries per-layer ownership.
         kv_cache_config.dspark_context_group_ids = resident_mla_context_group_ids(kv_cache_config.kv_cache_groups)
+        has_explicit_draft_ownership = any(
+            getattr(spec, "is_dspark_draft", False)
+            for group in kv_cache_config.kv_cache_groups
+            for spec in (
+                group.kv_cache_spec.kv_cache_specs.values()
+                if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+                else (group.kv_cache_spec,)
+            )
+        )
         draft_only_group_ids = []
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
             group_spec = group.kv_cache_spec
@@ -855,9 +897,12 @@ def _ascend_get_kv_cache_config_from_groups(
             )
             # Keep mixed target/draft groups in the ordinary target lookup.
             # Empty PP-local layer names still carry the global group spec.
-            if specs and all(
-                isinstance(spec, MLAAttentionSpec) and spec.non_causal_multi_token_decode for spec in specs
-            ):
+            is_draft_group = (
+                all(getattr(spec, "is_dspark_draft", False) for spec in specs)
+                if has_explicit_draft_ownership
+                else all(isinstance(spec, MLAAttentionSpec) and spec.non_causal_multi_token_decode for spec in specs)
+            )
+            if specs and is_draft_group:
                 draft_only_group_ids.append(group_id)
         kv_cache_config.dspark_draft_only_group_ids = tuple(draft_only_group_ids)
     return kv_cache_config

@@ -11,12 +11,16 @@ performed explicitly by the worker after the NPU runtime is ready.
 
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 from vllm_ascend.device.hardware import (
     AscendDeviceType,
     device_type_from_runtime_soc,
     device_type_from_soc_version,
 )
+
+if TYPE_CHECKING:
+    from vllm_ascend.device.hardware_profile import HardwareProfile
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,16 @@ def get_device_config() -> DeviceConfig:
     """Return the immutable hardware configuration for this installation."""
 
     return DeviceConfig(_device_type=_device_type_from_build_info())
+
+
+def supports_kda_int8_quant_overlap() -> bool:
+    """Enable early INT8 KDA input preparation on A3 only."""
+    return get_device_config()._device_type is AscendDeviceType.A3
+
+
+def uses_native_int8_sparse_adaptor(profile: "HardwareProfile") -> bool:
+    """Identify the A3 native INT8 sparse path without changing hardware profiles."""
+    return profile._device_type is AscendDeviceType.A3
 
 
 # Compatibility API. New business code must consume semantic DeviceConfig

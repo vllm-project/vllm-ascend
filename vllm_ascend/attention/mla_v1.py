@@ -74,6 +74,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_rows_by_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -1039,6 +1040,9 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.speculative_config = self.vllm_config.speculative_config
         self.is_draft_model = self.vllm_config.model_config.runner_type == "draft" or backends.model_tag == "eagle_head"
+        # Replicated MLA layers use ordinary, non-interleaved KV.
+        if not self.pcp_enabled and not self.dcp_enabled:
+            self.supports_mtp_with_cp_non_trivial_interleave_size = True
         self.enable_mlapo = not self.is_draft_model and enabling_mlapo(self.vllm_config)
         if self.qkv_a_gate_fused and self.enable_mlapo:
             # MLAPO consumes the fused QKV-A projection as the latent q/kv pair
@@ -3531,7 +3535,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
         if gate is not None:
-            o_proj_input.mul_(torch.sigmoid(gate))
+            flash_attention_gate(o_proj_input, gate)
         # O proj
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 
