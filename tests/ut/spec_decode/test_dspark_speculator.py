@@ -310,13 +310,13 @@ def test_non_dcp_fia_mla_copies_exact_lengths_and_zeros_padding():
 
 
 @pytest.mark.parametrize("use_flashmla", [False, True])
-def test_mla_draft_device_lengths_do_not_bypass_dcp_manager(use_flashmla):
+def test_mla_draft_device_lengths_do_not_bypass_dcp_manager(monkeypatch, use_flashmla):
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.use_dcp = True
     spec.use_flashmla = use_flashmla
     spec.attn_architecture = "MLA"
     spec.target_input_buffers = SimpleNamespace(seq_lens_cpu=object())
-    spec.max_model_len = 1024
+    monkeypatch.setattr(AscendDSparkSpeculator, "max_model_len", 1024, raising=False)
     spec.dcp_manager = MagicMock()
     result = spec._prepare_draft_dcp_metadata_inputs(2, 3, 7)
     assert result is spec.dcp_manager.prepare_draft_dcp_metadata_inputs.return_value
