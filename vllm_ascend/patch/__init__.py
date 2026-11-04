@@ -1861,17 +1861,38 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
-# ** File: platform/patch_preload.py **
+# ** 36. File: platform/patch_preload.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   Target: vllm.model_executor.model_loader.weight_cache and CLI preload
-#   Why: upstream gates IPC on CUDA/ROCm and exports CUDA storage handles.
-#   How: register an inherited loader; adapt the daemon spawn target, platform
-#        gate, tensor entry and shared-storage byte accounting for NPU ND IPC.
-#        Initialize general plugins in the spawned daemon after device patches
-#        so model/loader registries match the engine's plugin initialization.
-#        The upstream cache protocol, lifecycle and service loop are retained.
-#   Related PR: https://github.com/vllm-project/vllm/pull/54921
-#   Future Plan: remove these bindings after upstream exposes device IPC and
-#                preload daemon initialization hooks through Platform.
-#                Drop the worker's copy snapshot correction after upstream
-#                accounts for producer memory released during copy handoff.
+#   1. `vllm.model_executor.model_loader.weight_cache.daemon._run_daemon`
+#      `vllm.model_executor.model_loader.weight_cache.daemon.WeightCacheDaemon`
+#      `vllm.model_executor.model_loader.weight_cache.daemon.TensorEntry`
+#      `vllm.model_executor.model_loader.weight_cache.daemon.exported_weight_bytes`
+#    Why:
+#       Upstream daemon initialization, tensor exports and shared-storage byte
+#       accounting do not cover Ascend NPU IPC.
+#    How:
+#       Replace the spawn target and daemon class with Ascend adapters, use
+#       NPUTensorEntry for ND tensor exports, and include NPU storage bytes in
+#       exported_weight_bytes. Initialize general plugins in the spawned daemon
+#       after device patches so its model/loader registries match the engine's.
+#       Retain the upstream cache protocol, lifecycle and service loop.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54921
+#    Future Plan:
+#       Remove these bindings once upstream exposes device IPC and preload
+#       daemon initialization hooks through Platform.
+#
+#   2. `vllm.model_executor.model_loader.weight_cache.protocol.check_ipc_platform_support`
+#      `vllm.model_executor.model_loader.weight_cache.ipc_loader.check_ipc_platform_support`
+#      `vllm.entrypoints.cli.preload.check_ipc_platform_support`
+#    Why:
+#       Upstream restricts IPC weight caching to CUDA/ROCm, preventing Ascend
+#       from reaching its NPU-specific transport and daemon adapters.
+#    How:
+#       Allow the NPU platform and delegate other platforms to the original
+#       check. Rebind the loader and any already-imported CLI alias as well.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54921
+#    Future Plan:
+#       Remove these overrides once upstream checks device IPC support through
+#       a Platform capability hook.

@@ -9,6 +9,9 @@ def apply_preload_patch() -> None:
     # Lazy imports avoid the loader/platform import cycle during discovery.
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader, protocol
 
+    # exported_weight_bytes and WeightCacheDaemon.release_distributed were
+    # introduced in vllm-project/vllm#54921. Use their presence to detect the
+    # required weight-cache support and skip this patch on older vLLM versions.
     if not hasattr(daemon, "exported_weight_bytes") or not hasattr(daemon.WeightCacheDaemon, "release_distributed"):
         return
 

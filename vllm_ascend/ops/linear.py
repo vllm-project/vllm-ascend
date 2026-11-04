@@ -42,7 +42,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import maybe_trans_nz
+from vllm_ascend.utils import maybe_trans_nz, vllm_version_is
 from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
 
@@ -115,18 +115,10 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
             weight_fp32 = layer.weight.data.to(torch.float32)
             new_fp32 = weight_fp32 if keep_nd_weight or skip_weight_nz_conversion else maybe_trans_nz(weight_fp32)
             # keep the captured graph's weight reference to the updated weight
-            # during RL weight updates. New vLLM always prefers copying and
-            # removed the prefer_copy keyword; also retain that behavior on
-            # versions where copying was opt-in.
-            old_fp32 = getattr(layer, "weight_fp32", None)
-            if (
-                isinstance(old_fp32, nn.Parameter)
-                and old_fp32.shape == new_fp32.shape
-                and old_fp32.stride() == new_fp32.stride()
-                and old_fp32.dtype == new_fp32.dtype
-                and old_fp32.device == new_fp32.device
-            ):
-                old_fp32.data.copy_(new_fp32)
+            # during RL weight updates. vLLM main (#62326) dropped `prefer_copy`
+            # and keeps the parameter object by default.
+            if vllm_version_is("0.32.0"):
+                replace_parameter(layer, "weight_fp32", new_fp32, prefer_copy=True)
             else:
                 replace_parameter(layer, "weight_fp32", new_fp32)
         if "conv1d" not in layer.prefix and not skip_weight_nz_conversion:

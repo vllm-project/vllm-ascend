@@ -72,6 +72,7 @@ class AscendWeightCacheDaemon(upstream.WeightCacheDaemon):
                 handle = getattr(module, "_bytecode_hook_handle", None)
                 if isinstance(handle, RemovableHandle):
                     handle.remove()
+            # Drop the loop's last module reference before collecting model allocations.
             del module
         self.model = None
         self.vllm_config.compilation_config.static_forward_context.clear()
