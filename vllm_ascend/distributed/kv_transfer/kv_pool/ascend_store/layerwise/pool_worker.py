@@ -1260,6 +1260,9 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             all_group_gvas: list[np.ndarray] = []
             all_group_block_ids: list[np.ndarray] = []
             all_group_save_keys: list[str] = []
+            alloc_keys: list[str] = []
+            alloc_sizes: list[int] = []
+            alloc_targets: list[tuple[np.ndarray | list[int], int]] = []
             request.partial_save_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
                 block_ids_by_group = (
@@ -1335,39 +1338,13 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 # returns its current, client-registered GVA. Every write
                 # target is therefore allocated fresh within this step; no
                 # cross-step GVA cache is kept.
-                block_gvas: list[int] = []
+                full_gvas = np.zeros(len(block_ids_by_group), dtype=np.int64)
                 if transfer_blocks:
                     transfer_keys = [key for key in candidate_keys if key in missing_keys]
-                    transfer_gvas = self.m_store.batch_alloc(
-                        transfer_keys, [alloc_size] * len(transfer_keys), LAYERWISE_READ_LEASE_TTL_MS
-                    )
-                    if transfer_gvas is None or len(transfer_gvas) != len(transfer_keys):
-                        return False
-                    if any(gva <= 0 for gva in transfer_gvas):
-                        logger.error(
-                            "alloc_gvas FAIL: req=%s group=%d alloc_size=%d alloc_keys=%d gvas_sample=%s fail_count=%d",
-                            request.req_id,
-                            group_id,
-                            alloc_size,
-                            len(transfer_keys),
-                            transfer_gvas[:5],
-                            sum(1 for g in transfer_gvas if g <= 0),
-                        )
-                    # 0 means allocation failed; UINT64_MAX means a readable
-                    # SSD hit. Filter both before converting GVAs to np.int64.
-                    block_gvas = [gva if 0 < gva < MEMCACHE_SSD_HIT_GVA else 0 for gva in transfer_gvas]
-                    for key, gva in zip(transfer_keys, block_gvas):
-                        if gva > 0:
-                            all_group_save_keys.append(key)
-                    if self.layerwise_offload and any(gva <= 0 for gva in transfer_gvas):
-                        return False
+                    alloc_keys.extend(transfer_keys)
+                    alloc_sizes.extend([alloc_size] * len(transfer_keys))
+                    alloc_targets.extend((full_gvas, block_idx) for block_idx in transfer_blocks)
 
-                partial_block_index = get_partial_block_index(
-                    request.target_token_len,
-                    effective_block_size,
-                    len(group_block_hashes),
-                    self.layerwise_offload,
-                )
                 if partial_block_index is not None and partial_block_index < len(block_ids_by_group):
                     partial_key = self._make_layerwise_partial_key(
                         request,
@@ -1375,30 +1352,11 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                         partial_block_index,
                         request.target_token_len,
                     )
-                    # Partial keys are request-scoped: allocate fresh each step.
-                    allocated = self.m_store.batch_alloc(
-                        [partial_key],
-                        [alloc_size],
-                        LAYERWISE_READ_LEASE_TTL_MS,
-                    )
-                    if not allocated or len(allocated) != 1:
-                        return False
-                    partial_gva = allocated[0]
-                    if 0 < partial_gva < MEMCACHE_SSD_HIT_GVA:
-                        all_group_save_keys.append(partial_key)
-                    elif partial_gva <= 0:
-                        logger.error(
-                            "alloc_gvas: partial allocation failed req=%s group=%d block=%d gva=%d",
-                            request.req_id,
-                            group_id,
-                            partial_block_index,
-                            partial_gva,
-                        )
-                    if self.layerwise_offload and partial_gva <= 0:
-                        return False
-                    request.partial_save_gva_per_group[group_id] = (
-                        partial_gva if 0 < partial_gva < MEMCACHE_SSD_HIT_GVA else 0
-                    )
+                    # Request-scoped partial pages share the allocation batch,
+                    # but keep their own destination and key namespace.
+                    alloc_keys.append(partial_key)
+                    alloc_sizes.append(alloc_size)
+                    alloc_targets.append((request.partial_save_gva_per_group, group_id))
 
                 logger.debug(
                     "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "
@@ -1414,14 +1372,29 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                     alloc_size,
                 )
 
-                # Pad block_gvas to match block_ids length (fill 0 for non-transferred blocks)
-                full_gvas = [0] * len(block_ids_by_group)
-                for blk_idx, gva in zip(transfer_blocks, block_gvas):
-                    if blk_idx < len(full_gvas):
-                        full_gvas[blk_idx] = gva
-
-                all_group_gvas.append(np.asarray(full_gvas, dtype=np.int64))
+                all_group_gvas.append(full_gvas)
                 all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
+
+            if alloc_keys:
+                # The backend accepts per-key sizes, so all groups and full /
+                # partial pages can use one request-local allocation batch.
+                gvas = self.m_store.batch_alloc(alloc_keys, alloc_sizes, LAYERWISE_READ_LEASE_TTL_MS)
+                if gvas is None or len(gvas) != len(alloc_keys):
+                    return False
+                if any(gva <= 0 for gva in gvas):
+                    logger.error(
+                        "alloc_gvas FAIL: req=%s alloc_keys=%d fail_count=%d",
+                        request.req_id,
+                        len(alloc_keys),
+                        sum(gva <= 0 for gva in gvas),
+                    )
+                    if self.layerwise_offload:
+                        return False
+                for key, gva, (target, index) in zip(alloc_keys, gvas, alloc_targets):
+                    # Filter failure / SSD sentinels before writing np.int64.
+                    if 0 < gva < MEMCACHE_SSD_HIT_GVA:
+                        target[index] = gva
+                        all_group_save_keys.append(key)
 
             if all_group_gvas:
                 request.save_keys = all_group_save_keys
