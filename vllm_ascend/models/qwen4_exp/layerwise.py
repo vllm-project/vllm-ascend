@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Qwen4Exp layerwise owner bindings over the original packed allocation."""
+"""Qwen4Exp main/state and compressed-indexer reuse with private raw rings."""
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -49,7 +49,7 @@ class Qwen4LayerwiseReuseLayout(LayerwiseReuseLayout):
 def build_qwen4_reuse_layout(
     layer_specs: dict[str, KVCacheSpec], base_layers: int, extra_config: dict[str, Any]
 ) -> Qwen4LayerwiseReuseLayout:
-    """Rotate main/state owners while retaining auxiliary physical slots.
+    """Rotate main/state and compressed owners; keep raw rings independent.
 
     QSA and GDN interpret the same packed r0 bytes using different views, so
     semantic spec equality is not the compatibility criterion for these slots.
@@ -103,9 +103,12 @@ def build_qwen4_reuse_layout(
         for slot, members in enumerate(slots):
             for layer in members:
                 slot_map[specs_by_layer[layer].main.layer_name] = slot
+                indexer = specs_by_layer[layer].indexer
+                if indexer is not None:
+                    slot_map[indexer.layer_name] = slot
         for slot, layer in enumerate(sorted(qsa_layers)):
             for item in by_layer[layer]:
-                if item.layer_name.endswith((".indexer.raw_key_cache", ".indexer.compressed_key_cache")):
+                if item.layer_name.endswith(".indexer.raw_key_cache"):
                     slot_map[item.layer_name] = slot
     return Qwen4LayerwiseReuseLayout(
         layer_cache_specs=specs_by_layer,
@@ -118,21 +121,12 @@ def build_qwen4_reuse_layout(
     )
 
 
-def get_qwen4_layerwise_slot_map(kv_cache_config: KVCacheConfig, vllm_config: VllmConfig) -> dict[str, int]:
-    extra = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
-    if extra is None:
-        return {}
-    specs = get_layerwise_kv_cache_specs(kv_cache_config)
-    base_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
-    return build_qwen4_reuse_layout(specs, base_layers, extra).cache_slot_map
-
-
 def apply_qwen4_layerwise_kv_cache_plan(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
     excluded_layer_names: set[str] | None = None,
 ) -> Qwen4LayerwiseReuseLayout | None:
-    """Validate packed bindings without rewriting the KVCacheTensor descriptors."""
+    """Validate bindings already used by capacity planning and allocation."""
     extra = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
     if extra is None or not kv_cache_config.kv_cache_tensors:
         return None
@@ -149,7 +143,7 @@ def apply_qwen4_layerwise_kv_cache_plan(
     )
     logger.info(
         "Qwen layerwise KV cache reuse binds %d layers to %d main/state slots; "
-        "packed geometry and normal indexer offload are preserved.",
+        "compressed indexers share those slots and raw rings remain independent.",
         len(layout.layer_cache_specs),
         len(layout.buffer_slots),
     )
@@ -159,29 +153,69 @@ def apply_qwen4_layerwise_kv_cache_plan(
 def bind_qwen4_layerwise_cache_layout(
     layout: Qwen4KVCacheLayout | None, cache_slot_map: dict[str, int]
 ) -> Qwen4KVCacheLayout:
-    """Bind owners to reuse slots without changing the model's slab geometry."""
+    """Resize the common compute-slot bank without changing any page format."""
     if layout is None:
         raise ValueError("Qwen layerwise reuse requires a packed Qwen cache layout")
+    if not cache_slot_map:
+        return layout
     owner_names = {owner.layer_name for owner in layout.owners}
     if not cache_slot_map.keys() <= owner_names:
         raise ValueError("Qwen reuse plan contains unknown cache owners")
     for owner in layout.owners:
         slot = cache_slot_map.get(owner.layer_name, owner.slot)
-        if slot < 0 or slot >= layout.slot_count:
+        if slot < 0 or slot >= layout.raw_slot_count:
             raise ValueError(f"Qwen reuse slot {slot} exceeds the packed backing")
-        if owner.role not in (QSA_MAIN, GDN) and slot != owner.slot:
+        if owner.role not in (QSA_MAIN, GDN, QSA_COMPRESSED) and slot != owner.slot:
             raise ValueError("Qwen auxiliary caches must retain their original slots")
+    main_names = {owner.layer_name for owner in layout.owners if owner.role in (QSA_MAIN, GDN)}
+    if not main_names <= cache_slot_map.keys():
+        raise ValueError("Qwen compact reuse requires bindings for every main/state owner")
+    state_slots = {cache_slot_map[name] for name in main_names}
+    if state_slots != set(range(len(state_slots))):
+        raise ValueError("Qwen compact main/state slots must be contiguous")
+    for owner in layout.owners:
+        if owner.role == QSA_COMPRESSED:
+            main_name = owner.layer_name.removesuffix(".indexer.compressed_key_cache") + ".attn"
+            if cache_slot_map.get(owner.layer_name) != cache_slot_map[main_name]:
+                raise ValueError("Qwen compressed indexer must share its main KV slot")
+    regions = tuple(
+        replace(region, offset=len(state_slots) * layout.slot_backing_size) if region.name == "r4" else region
+        for region in layout.regions
+    )
     return replace(
         layout,
+        regions=regions,
         owners=tuple(replace(owner, slot=cache_slot_map.get(owner.layer_name, owner.slot)) for owner in layout.owners),
+        slot_count=len(state_slots),
     )
+
+
+def configure_qwen4_cache_reuse(layout: Qwen4KVCacheLayout, vllm_config: VllmConfig) -> Qwen4KVCacheLayout:
+    """Use the same opt-in layout for capacity, admission, allocation and views."""
+    extra = get_layerwise_reuse_config(getattr(vllm_config, "kv_transfer_config", None))
+    if extra is None:
+        return layout
+    # Dispatch imports this module to register the model callbacks.
+    from vllm_ascend.models.layerwise import get_model_layerwise_handler
+
+    handler = get_model_layerwise_handler(vllm_config.model_config)
+    if handler is None:
+        return layout
+    specs = {owner.layer_name: owner.spec for owner in layout.owners}
+    base_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+    reuse = build_qwen4_reuse_layout(specs, base_layers, extra)
+    if not reuse.has_layer_reuse:
+        return layout
+    if not getattr(vllm_config, "use_v2_model_runner", True):
+        raise ValueError("Qwen compact layerwise reuse requires Model Runner V2")
+    return bind_qwen4_layerwise_cache_layout(layout, reuse.cache_slot_map)
 
 
 def allocate_qwen4_cache(
     layout: Qwen4KVCacheLayout, allocate: Callable[[int], torch.Tensor]
 ) -> dict[str, torch.Tensor]:
-    """Allocate the original packed backing, including every indexer region."""
-    backing = allocate(layout.slot_count * layout.slot_backing_size)
+    """Allocate the planned backing, including every indexer region."""
+    backing = allocate(layout.backing_size)
     caches = {}
     for owner in layout.owners:
         if owner.role in (PLE, HIDDEN):
@@ -203,7 +237,7 @@ def view_qwen4_cache(
     """Bind role-specific views without changing packed page geometry."""
     owner = layout.owner(layer_name)
     spec = owner.spec
-    slot_offset = owner.slot * layout.slot_backing_size
+    slot_offset = owner.slot * layout.owner_slot_stride(owner)
     if owner.role == QSA_MAIN:
         assert isinstance(spec, FullAttentionSpec)
         region = layout.region("r0")

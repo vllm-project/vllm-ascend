@@ -101,8 +101,6 @@ from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cach
 from vllm_ascend.models.qwen4_exp.cache_config import build_qwen4_kv_cache_layout
 from vllm_ascend.models.qwen4_exp.layerwise import (
     allocate_qwen4_cache,
-    bind_qwen4_layerwise_cache_layout,
-    get_qwen4_layerwise_slot_map,
     view_qwen4_cache,
 )
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
@@ -1221,6 +1219,7 @@ def _allocate_kv_cache(
     qwen4_cache_layout = build_qwen4_kv_cache_layout(
         kv_cache_config.kv_cache_groups,
         kv_cache_config.num_blocks,
+        vllm_config=vllm_config,
     )
     if qwen4_cache_layout is not None:
         return allocate_qwen4_cache(
@@ -1686,12 +1685,8 @@ def _reshape_kv_cache_v2(
     qwen4_cache_layout = build_qwen4_kv_cache_layout(
         kv_cache_config.kv_cache_groups,
         kv_cache_config.num_blocks,
+        vllm_config=vllm_config,
     )
-    if qwen4_cache_layout is not None:
-        qwen4_cache_layout = bind_qwen4_layerwise_cache_layout(
-            qwen4_cache_layout,
-            get_qwen4_layerwise_slot_map(kv_cache_config, vllm_config),
-        )
     layer_tuple_strides: dict[str, int] = {}
     if is_deepseek_v41_cache(layer_kv_cache_spec):
         layer_tuple_strides = {

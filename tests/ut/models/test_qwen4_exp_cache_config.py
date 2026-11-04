@@ -177,7 +177,8 @@ def test_block_packed_states_have_disjoint_components_and_aligned_kv_pages() -> 
     occupied.sort()
     assert all(left[1] <= right[0] for left, right in zip(occupied, occupied[1:]))
     assert layout.region("r4").offset >= occupied[-1][1]
-    assert layout.region("r5").offset >= layout.region("r4").end
+    assert layout.region("r5").offset >= occupied[-1][1]
+    assert layout.region("r4").offset == layout.slot_count * layout.slot_backing_size
     assert layout.slot_backing_size >= layout.region("r5").end
 
     for slot, source in enumerate(
@@ -202,7 +203,7 @@ def test_qwen4_cache_views_are_contiguous_and_advanced_index_is_bounded() -> Non
         num_blocks=num_blocks,
     )
     assert layout is not None
-    backing = torch.zeros(layout.slot_backing_size, dtype=torch.int8)
+    backing = torch.zeros(layout.backing_size, dtype=torch.int8)
 
     def view(region_name: str, shape: tuple[int, ...]) -> torch.Tensor:
         return make_slab_view(
@@ -301,12 +302,17 @@ def test_main_planner_uses_one_shared_backing_geometry() -> None:
     role_tensors = config.kv_cache_tensors[:4]
     ple_tensor = config.kv_cache_tensors[4]
     hidden_tensor = config.kv_cache_tensors[5]
-    expected_backing_size = layout.slot_count * layout.slot_backing_size
+    expected_backing_size = layout.backing_size
     assert all(tensor.size == expected_backing_size for tensor in role_tensors)
     assert [tensor.offset for tensor in role_tensors] == [
         layout.region(name).offset for name in ("r0", "r4", "r5", "r1")
     ]
-    assert all(tensor.layer_stride == layout.slot_backing_size for tensor in role_tensors)
+    assert [tensor.layer_stride for tensor in role_tensors] == [
+        layout.slot_backing_size,
+        layout.raw_slot_stride,
+        layout.slot_backing_size,
+        layout.slot_backing_size,
+    ]
     assert ple_tensor.layers == ["model.ple"]
     assert ple_tensor.size == 3 * 128 * 5 * 2
     assert ple_tensor.block_stride == 128 * 5 * 2
@@ -565,7 +571,7 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
     assert layout is not None
     assert layout.slot_count == 13
     assert (
-        layout.slot_count * layout.slot_backing_size
+        layout.backing_size
         + sum(owner.spec.real_page_size_bytes * required_blocks for owner in layout.owners if owner.role == PLE)
     ) == required_bytes
 
@@ -626,7 +632,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     probe = build_qwen4_kv_cache_layout(merged, num_blocks=1)
     assert probe is not None
     assert probe.slot_count == 13
-    pool_block_bytes = probe.slot_count * probe.slot_backing_size + sum(
+    pool_block_bytes = probe.backing_size + sum(
         owner.spec.real_page_size_bytes for owner in probe.owners if owner.role == PLE
     )
 
@@ -638,7 +644,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     # distinct live IDs. Verify both the alias and the non-overlapping writes.
     layout = build_qwen4_kv_cache_layout(merged, num_blocks=3)
     assert layout is not None
-    backing = torch.zeros(layout.slot_count * layout.slot_backing_size, dtype=torch.int8)
+    backing = torch.zeros(layout.backing_size, dtype=torch.int8)
     views = []
     for group in gdn_merged:
         slots = [layout.owner(name).slot for name in group.layer_names]
@@ -676,7 +682,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     raw, caches, _ = _allocate_mrv2_kv_cache(config, monkeypatch)
     names = [group.layer_names[0] for group in gdn_merged]
     assert all(raw[name] is raw[names[0]] for name in names)
-    assert raw[names[0]].numel() == 13 * layout.slot_backing_size
+    assert raw[names[0]].numel() == layout.backing_size
     states = [caches[name][1] for name in names]
     assert all(state[0].is_contiguous() and not state.is_contiguous() for state in states)
     for block_id, state in enumerate(states):
@@ -798,8 +804,7 @@ def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
     assert layout is not None
     assert layout.slot_count == 13
     assert get_qwen4_exp_pool_bytes_per_block(groups) * 7 == (
-        layout.slot_count * layout.slot_backing_size
-        + 7 * next(owner.spec.real_page_size_bytes for owner in layout.owners if owner.role == PLE)
+        layout.backing_size + 7 * next(owner.spec.real_page_size_bytes for owner in layout.owners if owner.role == PLE)
     )
 
 
@@ -966,7 +971,8 @@ def test_whole_page_sharing_uses_one_tp4_page_for_qsa_or_complete_gdn():
     assert ssm.offset == 30 * 1024
     assert whole.page_size_bytes == whole.block_stride == conv.block_stride == ssm.block_stride == 896 * 1024
     assert ssm.page_size_bytes == 768 * 1024
-    assert layout.region("r4").offset == 3 * whole.block_stride
+    assert layout.region("r5").offset == 3 * whole.block_stride
+    assert layout.region("r4").offset == layout.slot_count * layout.slot_backing_size
     backing = torch.zeros(layout.slot_backing_size, dtype=torch.int8)
     qsa = make_slab_view(
         backing,

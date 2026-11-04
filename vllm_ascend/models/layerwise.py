@@ -28,6 +28,7 @@ class ModelLayerwiseHandler:
 def get_model_layerwise_handler(model_config: ModelConfig) -> ModelLayerwiseHandler | None:
     architecture = getattr(model_config, "architecture", None)
     if architecture in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration"):
-        # Packed backing capacity is unchanged by Qwen's owner remapping.
+        # Qwen's planner directly charges compact physical bytes per block.
+        # Scaling the available budget as well would count the saving twice.
         return ModelLayerwiseHandler(apply_qwen4_layerwise_kv_cache_plan, build_qwen4_reuse_layout, memory_scale=1.0)
     return None

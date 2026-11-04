@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import groupby
 from typing import Final
 
 import regex as re
@@ -41,6 +42,8 @@ QSA_COMPRESSED: Final = "qsa_compressed"
 GDN: Final = "gdn"
 PLE: Final = "ple"
 HIDDEN: Final = "hidden"
+# Match the transfer allocator's extra bytes per aligned backing allocation.
+QWEN4_CACHE_ALIGNMENT: Final = 2 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -77,14 +80,27 @@ class SlabRegion:
 
 @dataclass(frozen=True)
 class Qwen4KVCacheLayout:
-    """Shared layer slots with packed K/V-or-state pages and two indexer slabs."""
+    """Main/state + compressed-indexer slots followed by independent raw rings.
+
+    OFF and ON use the same regions and addressing. Reuse only changes the
+    compute slot count and owner bindings; raw rings never alias other layers.
+    """
 
     regions: tuple[SlabRegion, ...]
     owners: tuple[CacheOwner, ...]
     slot_count: int
     slot_backing_size: int
+    raw_slot_count: int
+    raw_slot_stride: int
     alignment: int
     num_blocks: int
+
+    @property
+    def backing_size(self) -> int:
+        return self.slot_count * self.slot_backing_size + self.raw_slot_count * self.raw_slot_stride
+
+    def owner_slot_stride(self, owner: CacheOwner) -> int:
+        return self.raw_slot_stride if owner.role == QSA_RAW else self.slot_backing_size
 
     def region(self, name: str) -> SlabRegion:
         return next(region for region in self.regions if region.name == name)
@@ -93,7 +109,11 @@ class Qwen4KVCacheLayout:
         return next(owner for owner in self.owners if owner.layer_name == layer_name)
 
     def slot_shared_by(self, slot: int) -> list[str]:
-        return [owner.layer_name for owner in self.owners if owner.role not in (HIDDEN, PLE) and owner.slot == slot]
+        return [
+            owner.layer_name
+            for owner in self.owners
+            if owner.role in (QSA_MAIN, GDN, QSA_COMPRESSED) and owner.slot == slot
+        ]
 
     def region_name_for_owner(self, layer_name: str) -> str:
         return {
@@ -174,6 +194,8 @@ def _real_page_size_bytes(spec: KVCacheSpec) -> int:
 def build_qwen4_kv_cache_layout(
     kv_cache_groups: list[KVCacheGroupSpec],
     num_blocks: int,
+    *,
+    vllm_config: VllmConfig | None = None,
 ) -> Qwen4KVCacheLayout | None:
     """Build shared QSA/GDN slots; PLE and hidden states have private storage."""
 
@@ -286,19 +308,18 @@ def build_qwen4_kv_cache_layout(
         SlabRegion("r1", 0, conv_bytes, num_blocks, state_stride),
         SlabRegion("r2", conv_bytes, max_ssm_bytes, num_blocks, state_stride),
     ]
-    cursor = state_stride * num_blocks
-    for name, page_size in {
-        "r4": max(_real_page_size_bytes(spec) for _, spec in role_members[QSA_RAW]),
-        "r5": max(_real_page_size_bytes(spec) for _, spec in role_members[QSA_COMPRESSED]),
-    }.items():
-        cursor = round_up(cursor, alignment)
-        regions.append(SlabRegion(name, cursor, page_size, num_blocks))
-        cursor += page_size * num_blocks
-    slot_backing_size = round_up(cursor, alignment)
+    compressed_page_size = max(_real_page_size_bytes(spec) for _, spec in role_members[QSA_COMPRESSED])
+    compressed = SlabRegion("r5", round_up(state_stride * num_blocks, alignment), compressed_page_size, num_blocks)
+    regions.append(compressed)
+    slot_backing_size = round_up(compressed.end, alignment)
 
     # Each QSA layer needs one slot. State groups reuse those slots with
     # separate scheduler block tables, so live groups own disjoint block IDs.
     slot_count = len(role_members[QSA_MAIN])
+    raw_slot_count = len(role_members[QSA_RAW])
+    raw_page_size = max(_real_page_size_bytes(spec) for _, spec in role_members[QSA_RAW])
+    raw_slot_stride = round_up(raw_page_size * num_blocks, alignment)
+    regions.append(SlabRegion("r4", slot_count * slot_backing_size, raw_page_size, num_blocks))
     owners: list[CacheOwner] = []
     for role in required:
         group_slots: dict[int, int] = {}
@@ -318,17 +339,19 @@ def build_qwen4_kv_cache_layout(
         owners=tuple(owners),
         slot_count=slot_count,
         slot_backing_size=slot_backing_size,
+        raw_slot_count=raw_slot_count,
+        raw_slot_stride=raw_slot_stride,
         alignment=alignment,
         num_blocks=num_blocks,
     )
 
     assert layout.region("r1").offset + conv_bytes <= layout.region("r2").offset
     assert layout.region("r2").offset + max_ssm_bytes <= state_stride
-    assert layout.region("r4").offset >= state_stride * num_blocks
-    assert layout.region("r5").offset >= layout.region("r4").end
+    assert layout.region("r5").offset >= state_stride * num_blocks
+    assert layout.region("r4").offset == slot_count * slot_backing_size
     for region in layout.regions:
         assert region.offset % alignment == 0
-        assert region.end <= slot_backing_size
+        assert region.end <= (layout.backing_size if region.name == "r4" else slot_backing_size)
     for owner in layout.owners:
         if owner.role in (HIDDEN, PLE):
             continue
@@ -338,6 +361,12 @@ def build_qwen4_kv_cache_layout(
     for _, spec in role_members[QSA_MAIN]:
         assert isinstance(spec, FullAttentionSpec)
         assert sum(_qsa_main_page_bytes(spec)) <= layout.region("r0").page_size_bytes
+    if vllm_config is not None and getattr(vllm_config, "kv_transfer_config", None) is not None:
+        # The layerwise planner uses the base geometry above; defer its import
+        # to avoid a cycle between model geometry and model reuse planning.
+        from vllm_ascend.models.qwen4_exp.layerwise import configure_qwen4_cache_reuse
+
+        return configure_qwen4_cache_reuse(layout, vllm_config)
     return layout
 
 
@@ -595,13 +624,25 @@ def _private_page_bytes(owner: CacheOwner) -> int:
 
 def get_qwen4_exp_pool_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec],
+    vllm_config: VllmConfig | None = None,
 ) -> int | None:
     """Charge shared slots once, plus one private bank per PLE/hidden owner."""
-    layout = build_qwen4_kv_cache_layout(kv_cache_groups, num_blocks=1)
+    layout = build_qwen4_kv_cache_layout(kv_cache_groups, num_blocks=1, vllm_config=vllm_config)
     if layout is None:
         return None
     private_bytes = sum(_private_page_bytes(owner) for owner in layout.owners if owner.role in (HIDDEN, PLE))
-    return layout.slot_count * layout.slot_backing_size + private_bytes
+    return layout.backing_size + private_bytes
+
+
+def get_qwen4_exp_allocation_overhead(kv_cache_groups: list[KVCacheGroupSpec], vllm_config: VllmConfig) -> int:
+    """Reserve allocator alignment once, before engine capacity/replanning."""
+    if getattr(vllm_config, "kv_transfer_config", None) is None:
+        return 0
+    layout = build_qwen4_kv_cache_layout(kv_cache_groups, num_blocks=1)
+    if layout is None:
+        return 0
+    allocations = 1 + sum(owner.role in (HIDDEN, PLE) for owner in layout.owners)
+    return allocations * QWEN4_CACHE_ALIGNMENT
 
 
 def get_qwen4_exp_max_memory_usage(
@@ -609,7 +650,7 @@ def get_qwen4_exp_max_memory_usage(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int | None:
     """Use the allocation divisor for admission across all group lifetimes."""
-    bytes_per_block = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
+    bytes_per_block = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, vllm_config)
     if bytes_per_block is None:
         return None
     required_blocks = sum(
@@ -657,24 +698,23 @@ def get_qwen4_exp_kv_cache_config(
     probe = build_qwen4_kv_cache_layout(
         kv_cache_groups,
         num_blocks=1,
+        vllm_config=vllm_config,
     )
     if probe is None:
         return None
 
     private_owners = [owner for owner in probe.owners if owner.role in (HIDDEN, PLE)]
     private_bytes_per_block = sum(_private_page_bytes(owner) for owner in private_owners)
-    slab_bytes_per_block = probe.slot_backing_size
-    bytes_per_block = probe.slot_count * slab_bytes_per_block + private_bytes_per_block
+    bytes_per_block = probe.backing_size + private_bytes_per_block
     candidate = available_memory // bytes_per_block
     while candidate > 0:
         candidate_layout = build_qwen4_kv_cache_layout(
             kv_cache_groups,
             num_blocks=candidate,
+            vllm_config=vllm_config,
         )
         assert candidate_layout is not None
-        required = (
-            candidate_layout.slot_count * candidate_layout.slot_backing_size + private_bytes_per_block * candidate
-        )
+        required = candidate_layout.backing_size + private_bytes_per_block * candidate
         if required <= available_memory:
             break
         candidate -= 1
@@ -682,9 +722,10 @@ def get_qwen4_exp_kv_cache_config(
     layout = build_qwen4_kv_cache_layout(
         kv_cache_groups,
         num_blocks=num_blocks,
+        vllm_config=vllm_config,
     )
     assert layout is not None
-    backing_size = layout.slot_count * layout.slot_backing_size
+    backing_size = layout.backing_size
     logger.info_once(
         "Qwen4 cache pool: %d blocks, shared page %d bytes, pool block %d bytes, available %d bytes",
         num_blocks,
@@ -708,15 +749,23 @@ def get_qwen4_exp_kv_cache_config(
         region = layout.region(region_name)
         for group_owners in owners_by_group.values():
             owners = sorted(group_owners, key=lambda owner: owner.slot)
-            tensors.append(
-                KVCacheTensor(
-                    size=backing_size,
-                    layers=[owner.layer_name for owner in owners],
-                    layer_stride=layout.slot_backing_size,
-                    block_stride=region.block_stride,
-                    offset=region.offset + owners[0].slot * layout.slot_backing_size,
-                )
+            contiguous = [owner.slot for owner in owners] == list(range(owners[0].slot, owners[0].slot + len(owners)))
+            # Keep consecutive resident owners in one descriptor. Shared or
+            # nonconsecutive owners require one zero-stride descriptor per slot.
+            packs = (
+                [owners] if contiguous else [list(pack) for _, pack in groupby(owners, key=lambda owner: owner.slot)]
             )
+            for pack in packs:
+                stride = layout.owner_slot_stride(pack[0])
+                tensors.append(
+                    KVCacheTensor(
+                        size=backing_size,
+                        layers=[owner.layer_name for owner in pack],
+                        layer_stride=stride if contiguous else 0,
+                        block_stride=region.block_stride,
+                        offset=region.offset + pack[0].slot * stride,
+                    )
+                )
     tensors.extend(
         KVCacheTensor(
             size=_private_page_bytes(owner) * num_blocks,

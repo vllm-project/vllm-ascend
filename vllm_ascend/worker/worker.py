@@ -104,6 +104,10 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.models.layerwise import get_model_layerwise_handler
+from vllm_ascend.models.qwen4_exp.cache_config import (
+    get_qwen4_exp_allocation_overhead,
+    get_qwen4_exp_pool_bytes_per_block,
+)
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -788,6 +792,11 @@ class NPUWorker(WorkerBase):
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         if not kv_cache_groups:
             return available_memory
+        # Qwen's planner charges the actual physical allocation. The
+        # generic per-layer reduction would discard that physical budget.
+        if get_qwen4_exp_pool_bytes_per_block(kv_cache_groups, self.vllm_config) is not None:
+            reserve = get_qwen4_exp_allocation_overhead(kv_cache_groups, self.vllm_config)
+            return max(available_memory - reserve, 0)
         # Ascend's DSV4/V4.1 and GLM-Next planners already account for shared
         # physical storage across all groups. Their budgets must not take the
         # generic per-layer scale, including when the runner uses sparse SFA.
