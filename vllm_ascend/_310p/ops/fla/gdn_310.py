@@ -25,7 +25,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_310
-from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating_pytorch
+from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating
 from vllm_ascend._310p.ops.fla.l2norm import l2norm_310p
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
@@ -316,7 +316,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
         query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
-        g, beta = fused_gdn_gating_pytorch(self.A_log, a, b, self.dt_bias)
+        g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
         if attn_metadata.num_prefills > 0 or spec_sequence_masks is not None:
             if spec_sequence_masks is not None:
                 if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
