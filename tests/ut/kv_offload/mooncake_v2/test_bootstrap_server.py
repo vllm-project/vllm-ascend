@@ -30,7 +30,7 @@ def test_context_parallel_workers_do_not_overwrite_each_other(client):
     for pcp in range(2):
         for tp in range(2):
             for pp in range(2):
-                data = payload(pcp_size=2, dcp_size=4, pcp_rank=pcp)
+                data = payload(pcp_size=2, dcp_size=4, pcp_rank=pcp, tp_size=2, pp_size=2)
                 data.update(tp_rank=tp, pp_rank=pp, addr=f"tcp://p:{1234 + pcp * 4 + tp * 2 + pp}")
                 assert client.post("/register", json=data).status_code == 200
                 assert client.post("/register", json=data).status_code == 200
