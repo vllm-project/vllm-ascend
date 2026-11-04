@@ -21,6 +21,8 @@ from vllm.config import (
     replace,
 )
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu.spec_decode import utils as spec_utils
+from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
 from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetadata
