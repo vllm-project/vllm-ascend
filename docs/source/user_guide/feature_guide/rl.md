@@ -559,7 +559,11 @@ The output tokens will always be `[15, 284, 1026, 374]`. The logprobs reflect th
 | `--weight-transfer-config '{"backend": "hccl"}'` | Cross-NPU weight transfer | Register the Ascend HCCL transfer engine |
 | `--weight-transfer-config '{"backend": "ipc"}'` | Same-NPU weight transfer | Select the Ascend NPU IPC transfer engine |
 | `--enable-return-routed-experts` | MoE router replay | Return encoded expert routing decisions |
-| `VLLM_USE_V2_MODEL_RUNNER=1` | Trace replay | Select the required model runner V2 implementation |
+| `--return-sampling-mask` | Sampling Mask (Distribution Replay) | Return the support set for each generated token; disabled by default |
+| `--logprobs-mode processed_logprobs` | Required for Sampling Mask | Normalize returned logprobs over the processed sampling distribution |
+| Request `temperature > 0` and `top_k > 0` | Required for Sampling Mask | Use random sampling with a bounded top-k support |
+| Speculative config `enable_adaptive_verification=false` | Sampling Mask with speculative decoding | Keep fixed verification boundaries |
+| `VLLM_USE_V2_MODEL_RUNNER=1` | Sampling Mask and trace replay | Select the required model runner V2 implementation |
 | `--enable-scale-out` | Token-in/token-out requests on a normal server | Register `/inference/v1/generate`; `--tokens-only` also registers this endpoint |
 | `--enable-trace-replay` | trace replay | Forces decoding to follow a predetermined token sequence |
 
