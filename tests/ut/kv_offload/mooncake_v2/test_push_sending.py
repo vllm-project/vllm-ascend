@@ -43,7 +43,7 @@ def descriptor():
         te_rpc_port=1,
         block_size=4,
         num_blocks=100,
-        layer_names=["layer"],
+        layer_names=["model.layers.0.attn"],
         layer_block_sizes=[4],
         group_indices=[0],
         kv_caches_base_addr=[[1000]],
@@ -68,7 +68,7 @@ def remote_metadata(pcp_size=1, tp_size=1, heads=2):
             0: MooncakePPTransferMetadata(
                 block_size=4,
                 num_blocks=100,
-                layer_names=["layer"],
+                layer_names=["model.layers.0.attn"],
                 layer_block_sizes=[4],
                 group_indices=[0],
                 block_strides=[[heads * 16]],
@@ -120,11 +120,13 @@ def drive(worker, predicate):
 
 
 @pytest.fixture
-def worker(monkeypatch):
+def worker(monkeypatch, request):
     spec = Mock(spec=push_worker.FullAttentionSpec)
     spec.sliding_window = None
     spec.is_circular = False
-    config = SimpleNamespace(speculative_config=None)
+    config = SimpleNamespace(
+        speculative_config=None, model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="test"))
+    )
 
     def initialize(self, *args):
         self.engine_id = "p"
@@ -138,8 +140,25 @@ def worker(monkeypatch):
         )
         self.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
         self.transfer_metadata = descriptor()
+        layout = getattr(request, "param", None)
+        if layout is not None:
+            names = ["model.layers.0.attn", "model.layers.0.indexer", "model.layers.1.attn"]
+            if layout == "longcat":
+                config.model_config.hf_text_config.model_type = "longcat_flash"
+                names = ["model.layers.0.attn.0", "model.layers.0.attn.0.indexer", "model.layers.0.attn.1"]
+            self.transfer_metadata = replace(
+                self.transfer_metadata,
+                layer_names=names,
+                layer_block_sizes=[4, 4, 4],
+                group_indices=[0, 1, 0],
+                kv_caches_base_addr=[[1000], [2000], [3000]],
+                block_strides=[[32], [32], [32]],
+                block_lens=[[32], [32], [32]],
+                block_shapes=[[(2, 4, 2)]] * 3,
+                block_size_scales=[[1], [1], [1]],
+            )
         self.kv_cache_specs = [spec]
-        self.layer_name_to_spec_index = {"layer": 0}
+        self.layer_name_to_spec_index = {name: 0 for name in self.transfer_metadata.layer_names}
         self.engine = SimpleNamespace(batch_transfer_sync_write=Mock(return_value=0))
 
     monkeypatch.setattr(MooncakeBaseConnectorWorker, "__init__", initialize)
@@ -167,14 +186,14 @@ def test_ready_listener_and_two_chunks(worker):
         sock.send(msgspec.msgpack.encode(ready()))
         assert msgspec.msgpack.decode(sock.recv())["kind"] == "ready_ack"
     worker.start_load_kv(source_meta())
-    worker.save_kv_layer("layer")
+    worker.save_kv_layer("model.layers.0.attn")
     worker.wait_for_save()
     drive(worker, lambda: worker.engine.batch_transfer_sync_write.call_count == 1)
     worker.wait_for_save()
     assert not worker._send_done.called
     assert worker.engine.batch_transfer_sync_write.call_args.args[1:] == ([1032], [10320], [32])
     worker.start_load_kv(source_meta(4, 4))
-    worker.save_kv_layer("layer")
+    worker.save_kv_layer("model.layers.0.attn")
     worker.wait_for_save()
     drive(worker, lambda: worker._send_done.called)
     assert worker.engine.batch_transfer_sync_write.call_count == 2
@@ -214,9 +233,9 @@ def test_swa_is_final_chunk_only_and_pcp_replicated(worker):
     spec.is_circular = False
     worker.kv_cache_specs = [spec]
     worker.pcp_size = 2
-    assert worker._get_transfer_partition("layer", remote_metadata(), (0, 0, 0)) == (0, 0, 2)
+    assert worker._get_transfer_partition("model.layers.0.attn", remote_metadata(), (0, 0, 0)) == (0, 0, 2)
     worker.pcp_rank = 1
-    assert worker._get_transfer_partition("layer", remote_metadata(), (0, 0, 0)) is None
+    assert worker._get_transfer_partition("model.layers.0.attn", remote_metadata(), (0, 0, 0)) is None
     worker.pcp_rank = 0
     worker._ready_queue.put(ready())
     worker.start_load_kv(source_meta())
@@ -230,21 +249,29 @@ def test_swa_is_final_chunk_only_and_pcp_replicated(worker):
 
 
 def test_tp_head_slices_and_replicas(worker):
-    assert worker._get_transfer_partition("layer", remote_metadata(tp_size=2, heads=1), (0, 0, 1)) == (1, 0, 1)
+    assert worker._get_transfer_partition("model.layers.0.attn", remote_metadata(tp_size=2, heads=1), (0, 0, 1)) == (
+        1,
+        0,
+        1,
+    )
     worker.tp_size = 4
     worker.transfer_metadata.block_shapes[0][0] = (1, 4, 2)
     worker.tp_rank = 2
-    assert worker._get_transfer_partition("layer", remote_metadata(tp_size=2, heads=1), (0, 0, 1)) is None
+    assert worker._get_transfer_partition("model.layers.0.attn", remote_metadata(tp_size=2, heads=1), (0, 0, 1)) is None
     worker.tp_rank = 3
-    assert worker._get_transfer_partition("layer", remote_metadata(tp_size=2, heads=1), (0, 0, 1)) == (0, 0, 1)
+    assert worker._get_transfer_partition("model.layers.0.attn", remote_metadata(tp_size=2, heads=1), (0, 0, 1)) == (
+        0,
+        0,
+        1,
+    )
 
 
 def test_mamba_flattens_pcp_tp(worker):
     worker.kv_cache_specs = [Mock(spec=push_worker.MambaSpec, tp_replicated=False)]
     worker.pcp_size = 2
     worker.pcp_rank = 1
-    assert worker._get_transfer_partition("layer", remote_metadata(tp_size=2), (0, 0, 1)) is not None
-    assert worker._get_transfer_partition("layer", remote_metadata(tp_size=2), (0, 0, 0)) is None
+    assert worker._get_transfer_partition("model.layers.0.attn", remote_metadata(tp_size=2), (0, 0, 1)) is not None
+    assert worker._get_transfer_partition("model.layers.0.attn", remote_metadata(tp_size=2), (0, 0, 0)) is None
 
 
 def test_non_owner_sends_done_without_write(worker):
@@ -507,7 +534,7 @@ def test_wait_for_save_drains_write_without_blocking_ready_listener(worker):
     worker.engine.batch_transfer_sync_write.side_effect = blocked_write
     worker._ready_queue.put(ready())
     worker.start_load_kv(source_meta(0, 8))
-    worker.save_kv_layer("layer")
+    worker.save_kv_layer("model.layers.0.attn")
     drive(worker, entered.is_set)
 
     def wait():
@@ -545,7 +572,7 @@ def test_layer_batch_groups_requests_for_one_destination(worker):
             state.destinations[(0, 0, 0)].required_layers is not None for state in worker._reqs_send_state.values()
         ),
     )
-    worker.save_kv_layer("layer")
+    worker.save_kv_layer("model.layers.0.attn")
     worker.wait_for_save()
     drive(worker, lambda: worker._send_done.call_count == 2)
     assert worker.engine.batch_transfer_sync_write.call_count == 1
@@ -564,3 +591,193 @@ def test_cached_destination_prefix_is_not_written(worker):
     worker.wait_for_save()
     drive(worker, lambda: worker._send_done.called)
     assert worker.engine.batch_transfer_sync_write.call_args.args[1:] == ([1064], [10352], [32])
+
+
+def multi_cache_remote(worker):
+    remote = remote_metadata()
+    pp = remote.metadata_by_pp_rank[0]
+    # P/D groups intentionally have different ordering.
+    remote.metadata_by_pp_rank[0] = replace(
+        pp,
+        layer_names=worker.transfer_metadata.layer_names,
+        layer_block_sizes=[4, 4, 4],
+        group_indices=[1, 0, 1],
+        block_strides=[[32], [32], [32]],
+        block_lens=[[32], [32], [32]],
+        block_shapes=[[(2, 4, 2)]] * 3,
+        block_size_scales=[[1], [1], [1]],
+        metadata_by_pcp_rank={
+            0: MooncakePCPTransferMetadata(
+                {0: MooncakeTPTransferMetadata(2, [0, 1, 2], [[10000], [20000], [30000]], "127.0.0.1", 9001)}
+            )
+        },
+    )
+    return remote
+
+
+@pytest.mark.parametrize("worker", ["multi_cache", "longcat"], indirect=True)
+def test_layer_hook_sends_all_caches_across_groups(worker, monkeypatch):
+    monkeypatch.setattr(worker, "_get_remote_metadata", lambda message: multi_cache_remote(worker))
+    message = ready()
+    message["block_ids"] = [[20, 21], [10, 11]]
+    worker._ready_queue.put(message)
+    meta = MooncakeConnectorMetadata()
+    meta.add_new_push_send_req("p-request", ([1, 2], [3, 4]), 8, 0, 8, {"transfer_id": "t"})
+    worker.start_load_kv(meta)
+    state = worker._reqs_send_state["t"]
+    drive(worker, lambda: state.destinations[(0, 0, 0)].required_layers is not None)
+    attention, indexer, next_layer = worker.transfer_metadata.layer_names
+    worker.save_kv_layer(attention)
+    drive(worker, lambda: len(state.destinations[(0, 0, 0)].sent_tokens) == 2)
+    assert set(state.available_layers) == {attention, indexer}
+    assert state.available_layers[attention][1] is state.available_layers[indexer][1]
+    assert not worker._send_done.called
+    transfers = {
+        tuple(call.args[1]): (call.args[2], call.args[3])
+        for call in worker.engine.batch_transfer_sync_write.call_args_list
+    }
+    assert transfers == {
+        (1032, 1064): ([10320, 10352], [32, 32]),
+        (2096, 2128): ([20640, 20672], [32, 32]),
+    }
+    # Another hook for the same physical layer must not send the caches twice.
+    worker.save_kv_layer(indexer)
+    assert worker.engine.batch_transfer_sync_write.call_count == 2
+    worker.save_kv_layer(next_layer)
+    drive(worker, lambda: worker._send_done.called)
+    assert worker.engine.batch_transfer_sync_write.call_count == 3
+
+
+@pytest.mark.parametrize("worker", ["multi_cache"], indirect=True)
+def test_shared_layer_event_preserves_final_chunk_only_state(worker, monkeypatch):
+    monkeypatch.setattr(worker, "_get_remote_metadata", lambda message: multi_cache_remote(worker))
+    attention, circular, _ = worker.transfer_metadata.layer_names
+    worker.kv_cache_specs.append(SimpleNamespace(is_circular=True, sliding_window=None))
+    worker.layer_name_to_spec_index[circular] = 1
+    message = ready()
+    message["block_ids"] = [[20], [10, 11]]
+    worker._ready_queue.put(message)
+    meta = MooncakeConnectorMetadata()
+    meta.add_new_push_send_req("p-request", ([1, 2], [3]), 8, 0, 4, {"transfer_id": "t"})
+    worker.start_load_kv(meta)
+    state = worker._reqs_send_state["t"]
+    drive(worker, lambda: state.destinations[(0, 0, 0)].required_layers is not None)
+    worker.save_kv_layer(attention)
+    drive(worker, lambda: attention in state.destinations[(0, 0, 0)].sent_tokens)
+    assert circular in state.available_layers
+    assert circular not in state.destinations[(0, 0, 0)].sent_tokens
+    assert worker.engine.batch_transfer_sync_write.call_count == 1
+    meta = MooncakeConnectorMetadata()
+    meta.add_new_push_send_req("p-request", ([1, 2], [3]), 8, 4, 4, {"transfer_id": "t"})
+    worker.start_load_kv(meta)
+    worker.save_kv_layer(attention)
+    drive(worker, lambda: state.destinations[(0, 0, 0)].sent_tokens.get(circular) == 8)
+    assert worker.engine.batch_transfer_sync_write.call_count == 3
+    assert any(
+        call.args[1:] == ([2096], [20640], [32]) for call in worker.engine.batch_transfer_sync_write.call_args_list
+    )
+
+
+@pytest.mark.parametrize("worker", ["multi_cache"], indirect=True)
+def test_only_changed_layers_are_planned_and_idle_polls_do_no_work(worker, monkeypatch):
+    monkeypatch.setattr(worker, "_get_remote_metadata", lambda message: multi_cache_remote(worker))
+    partition = Mock(wraps=worker._get_transfer_partition)
+    plan = Mock(wraps=worker._build_layer_transfer_request)
+    monkeypatch.setattr(worker, "_get_transfer_partition", partition)
+    monkeypatch.setattr(worker, "_build_layer_transfer_request", plan)
+    message = ready()
+    message["block_ids"] = [[20, 21], [10, 11]]
+    worker._ready_queue.put(message)
+    meta = MooncakeConnectorMetadata()
+    meta.add_new_push_send_req("p-request", ([1, 2], [3, 4]), 8, 0, 8, {"transfer_id": "t"})
+    worker.start_load_kv(meta)
+    state = worker._reqs_send_state["t"]
+    drive(worker, lambda: state.destinations[(0, 0, 0)].required_layers is not None)
+    assert partition.call_count == 3
+    attention, indexer, next_layer = worker.transfer_metadata.layer_names
+    worker.save_kv_layer(attention)
+    drive(worker, lambda: len(state.destinations[(0, 0, 0)].sent_tokens) == 2)
+    assert plan.call_count == 2
+    for _ in range(20):
+        worker.get_transfer_results()
+    worker.save_kv_layer(indexer)
+    assert plan.call_count == 2
+    assert partition.call_count == 3
+    worker.save_kv_layer(next_layer)
+    drive(worker, lambda: worker._send_done.called)
+    assert plan.call_count == 3
+    assert partition.call_count == 3
+
+
+def test_metadata_layout_is_reused_between_requests(worker, monkeypatch):
+    partition = Mock(wraps=worker._get_transfer_partition)
+    monkeypatch.setattr(worker, "_get_transfer_partition", partition)
+    worker._ready_queue.put(ready())
+    second = ready()
+    second["transfer_id"] = "second"
+    worker._ready_queue.put(second)
+    drive(
+        worker,
+        lambda: (
+            all(state.destinations[(0, 0, 0)].required_layers is not None for state in worker._reqs_send_state.values())
+            and len(worker._reqs_send_state) == 2
+        ),
+    )
+    assert partition.call_count == 1
+    assert worker._reqs_send_state["t"].expected_ranks is worker._reqs_send_state["second"].expected_ranks
+
+
+def test_new_progress_while_write_pending_is_not_lost(worker, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def blocked_write(session, src, dst, lengths):
+        calls.append((src, dst, lengths))
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(3)
+        return 0
+
+    worker.engine.batch_transfer_sync_write.side_effect = blocked_write
+    worker._ready_queue.put(ready())
+    worker.start_load_kv(source_meta())
+    worker.save_kv_layer("model.layers.0.attn")
+    drive(worker, entered.is_set)
+    try:
+        future = next(iter(worker._pending_sends))
+        done = Mock(wraps=future.done)
+        monkeypatch.setattr(future, "done", done)
+        for _ in range(20):
+            worker.get_transfer_results()
+        assert done.call_count == 0
+        # Publish newer availability while the older snapshot is still in use.
+        state = worker._reqs_send_state["t"]
+        state.metadata = source_meta(4, 4).push_send_requests["p-request"]
+        worker.save_kv_layer("model.layers.0.attn")
+        assert len(calls) == 1
+    finally:
+        release.set()
+    drive(worker, lambda: worker._send_done.called)
+    assert calls == [([1032], [10320], [32]), ([1064], [10352], [32])]
+
+
+def test_layers_ready_before_metadata_query_finishes_are_backfilled(worker, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+
+    def delayed_metadata(message):
+        entered.set()
+        assert release.wait(3)
+        return remote_metadata()
+
+    monkeypatch.setattr(worker, "_get_remote_metadata", delayed_metadata)
+    worker._ready_queue.put(ready())
+    worker.start_load_kv(source_meta(0, 8))
+    assert entered.wait(3)
+    try:
+        worker.save_kv_layer("model.layers.0.attn")
+        worker.wait_for_save()
+        assert not worker.engine.batch_transfer_sync_write.called
+    finally:
+        release.set()
+    drive(worker, lambda: worker._send_done.called)
+    assert worker.engine.batch_transfer_sync_write.call_count == 1
