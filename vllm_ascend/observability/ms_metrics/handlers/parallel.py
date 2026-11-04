@@ -12,6 +12,7 @@ per forward context. It selects the MoE communication method, which is where
 ModelRunner V2 exposes the per-step choice.
 """
 
+import logging
 from typing import Any
 
 from vllm_ascend.observability.ms_metrics.handlers.common import (
@@ -19,10 +20,16 @@ from vllm_ascend.observability.ms_metrics.handlers.common import (
     MetricSpec,
     MetricType,
     record_observation,
+    safe_recording,
 )
+
+logger = logging.getLogger(__name__)
 
 _recorders: dict[str, Any] = {}
 _KEY = "parallel"
+# Log-once guard: a missing TP group is a persistent state, so warn once per
+# process instead of on every forward step.
+_tp_size_error_logged = False
 
 _SP_PADDING_SPEC = MetricSpec(
     "parallel:sp_padding_ratio",
@@ -40,32 +47,46 @@ _SPECS = (_SP_PADDING_SPEC, _MOE_COMM_SELECTION_SPEC)
 
 
 def _tp_size() -> int:
-    """Lazy import keeps the metric core importable without torch or vLLM."""
+    """Return the TP world size, or 1 when it is unavailable.
+
+    Failures are expected outside a TP-initialized process (e.g. kernel or
+    precision tests calling ``sp_padding_mask`` directly), so the metric is
+    skipped instead of propagating into the model forward.
+    """
+    global _tp_size_error_logged
     try:
         from vllm.distributed.parallel_state import (
             get_tensor_model_parallel_world_size,
         )
-    except ImportError:
+        return get_tensor_model_parallel_world_size()
+    except Exception:
+        if not _tp_size_error_logged:
+            _tp_size_error_logged = True
+            logger.warning(
+                "parallel metrics: tensor model parallel size unavailable; "
+                "skipping parallel:sp_padding_ratio (warned once per process)",
+                exc_info=True,
+            )
         return 1
-    return get_tensor_model_parallel_world_size()
 
 
 def sp_padding_handler(original_func, is_padding, hidden_states, *args, **kwargs):
     """Record the ratio of rows padded away by sequence-parallel sharding."""
-    num_tokens = hidden_states.shape[0]
     result = original_func(is_padding, hidden_states, *args, **kwargs)
-    tp_size = _tp_size()
-    if tp_size > 1 and num_tokens > 0:
-        sp_pad = (-num_tokens) % tp_size
-        record_observation(
-            _recorders,
-            _KEY,
-            _SPECS,
-            _SP_PADDING_SPEC,
-            float(sp_pad) / float(num_tokens),
-            {},
-            "parallel",
-        )
+    with safe_recording("parallel"):
+        num_tokens = hidden_states.shape[0]
+        tp_size = _tp_size()
+        if tp_size > 1 and num_tokens > 0:
+            sp_pad = (-num_tokens) % tp_size
+            record_observation(
+                _recorders,
+                _KEY,
+                _SPECS,
+                _SP_PADDING_SPEC,
+                float(sp_pad) / float(num_tokens),
+                {},
+                "parallel",
+            )
     return result
 
 
