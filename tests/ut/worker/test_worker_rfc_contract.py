@@ -136,6 +136,33 @@ class WorkerAlignmentContract(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "cache_config"):
                     update(worker, {"cache_config": {}})
 
+    def test_load_dummy_weights_rejected_before_allocation(self):
+        load = worker_method("load_model")
+        with self.assertRaisesRegex(NotImplementedError, "elastic-EP"):
+            load(SimpleNamespace(), load_dummy_weights=True)
+
+    def test_dummy_contract_and_release_compatibility(self):
+        for release in (False, True):
+            for dp_size in (1, 2):
+                runner = SimpleNamespace(uniform_decode_query_len=4, _dummy_run=MagicMock())
+                worker = SimpleNamespace(
+                    log_memory_stats=MagicMock(),
+                    model_runner=runner,
+                    vllm_config=object(),
+                    parallel_config=SimpleNamespace(data_parallel_size=dp_size),
+                )
+                execute = worker_method(
+                    "execute_dummy_batch",
+                    set_current_vllm_config=lambda _: contextmanager(lambda: iter([None]))(),
+                    vllm_version_is=lambda _, release=release: release,
+                    envs=SimpleNamespace(VLLM_RANDOMIZE_DP_DUMMY_INPUTS=True),
+                )
+                execute(worker)
+                expected = {"uniform_decode": True, "skip_gdn_state_update": True}
+                if not release:
+                    expected["randomize_inputs"] = dp_size > 1
+                runner._dummy_run.assert_called_once_with(4, **expected)
+
     def test_execution_decorators(self):
         cls = next(
             n for n in ast.parse(WORKER.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "NPUWorker"

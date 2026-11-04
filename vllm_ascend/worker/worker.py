@@ -958,7 +958,9 @@ class NPUWorker(WorkerBase):
         )
         return output
 
-    def load_model(self) -> None:
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
+        if load_dummy_weights:
+            raise NotImplementedError("Ascend does not support elastic-EP dummy weight loading.")
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
@@ -1447,11 +1449,18 @@ class NPUWorker(WorkerBase):
     # lives in the runtime_guard hook, see runtime_guard_idle_step.
     @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
+        # Ascend retains the idle runtime guard and GDN-state suppression.
+        # Both current runners accept randomize_inputs; release V2 does not.
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         # Idle DP worker RPCs also need the current config for replay metadata.
         with set_current_vllm_config(self.vllm_config):
-            self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)
+            dummy_kwargs = {"uniform_decode": True, "skip_gdn_state_update": True}
+            if not vllm_version_is("0.32.0"):
+                dummy_kwargs["randomize_inputs"] = (
+                    envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and self.parallel_config.data_parallel_size > 1
+                )
+            self.model_runner._dummy_run(num_tokens, **dummy_kwargs)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
