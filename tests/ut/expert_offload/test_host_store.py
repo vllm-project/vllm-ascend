@@ -6,8 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm_ascend.expert_offload.expert_offload_manager import PrefillExpertPool
-from vllm_ascend.expert_offload.host_store import HostExpertStore
+from vllm_ascend.expert_offload.expert_offload_manager import HostExpertStore, PrefillExpertPool
 from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter
 from vllm_ascend.expert_offload.transfer import TorchExpertTransfer
 

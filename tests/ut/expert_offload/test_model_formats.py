@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CPU loading/storage contracts for GLM5Next and Qwen4Exp expert formats.
+"""CPU loading/storage contracts for native MXFP8 experts.
 
 Native post-processing bodies are exercised with CPU layout/quantizer doubles.
 This does not replace checkpoint, NPU GEMM or hybrid-attention acceptance.
@@ -11,59 +11,30 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 import torch
 
 from vllm_ascend.expert_offload.config import ExpertOffloadConfig
-from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager, LayerOffloadBinding
-from vllm_ascend.expert_offload.host_store import HostExpertStore
-from vllm_ascend.expert_offload.quantization import (
-    BlockFP8ExpertAdapter,
-    MXFP8ExpertAdapter,
-    W8A8ExpertAdapter,
-    expert_adapter_type,
-)
+from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager, HostExpertStore, LayerOffloadBinding
+from vllm_ascend.expert_offload.quantization import MXFP8ExpertAdapter, expert_adapter_type
 from vllm_ascend.expert_offload.transfer import TorchExpertTransfer
 from vllm_ascend.quantization.quant_type import QuantType
 
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def cpu_mx_quant(weight, **_kwargs):
-    """A deterministic group quantizer double with expert-dependent scales."""
-    groups = weight.float().unflatten(-1, (-1, 32))
-    exponent = groups.abs().amax(-1).clamp_min(1).log2().ceil()
-    quantized = (groups / exponent.exp2().unsqueeze(-1)).flatten(-2).to(torch.float8_e4m3fn)
-    scale = (exponent + 127).to(torch.uint8).unflatten(-1, (-1, 2))
-    return quantized, scale
-
-
-def native_scheme(kind):
-    """Use actual native post-processing, replacing only NPU layout/quantize ops."""
+def native_scheme():
+    """Use actual native MXFP8 post-processing, replacing only NPU layout ops."""
     directory = ROOT / "vllm_ascend/quantization/methods/w8a8"
-    filename, classname = {
-        "mxfp8": ("w8a8_mxfp8.py", "AscendW8A8MXFP8DynamicFusedMoEMethod"),
-        "int8": ("w8a8_dynamic.py", "AscendW8A8DynamicFusedMoEMethod"),
-        "block_fp8": ("fp8_block.py", "AscendFp8BlockFusedMoEMethod"),
-    }[kind]
+    filename, classname = "w8a8_mxfp8.py", "AscendW8A8MXFP8DynamicFusedMoEMethod"
     tree = ast.parse((directory / filename).read_text())
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == classname)
     cls.bases = [ast.Name(id="object", ctx=ast.Load())]
     cls.decorator_list = []
     cls.body = [
-        node
-        for node in cls.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name in ("process_weights_after_loading", "_requantize_experts_inplace")
-    ]
-    helpers = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name in ("resolve_block_scales", "_mx_quantize", "_supports_mx_regroup")
+        node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "process_weights_after_loading"
     ]
     module = ast.Module(
-        body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *helpers, cls],
+        body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), cls],
         type_ignores=[],
     )
     namespace = {
@@ -71,7 +42,6 @@ def native_scheme(kind):
         "QuantType": QuantType,
         "torch_npu": SimpleNamespace(
             npu_format_cast=lambda weight, *_a, **_k: weight,
-            npu_dynamic_mx_quant=cpu_mx_quant,
         ),
         "get_current_vllm_config": lambda: None,
         "get_ascend_config": lambda: SimpleNamespace(enable_fused_mc2=0),
@@ -81,25 +51,17 @@ def native_scheme(kind):
             scale.transpose(1, 2).contiguous(),
         ),
         "ACL_FORMAT_FRACTAL_NZ": 29,
-        "BLOCK_FP8_WEIGHT_DTYPE": torch.float8_e4m3fn,
-        "_ROWS_PER_DEQUANT_STEP": 1024,
-        "cdiv": lambda n, d: (n + d - 1) // d,
     }
     exec(compile(ast.fix_missing_locations(module), str(directory / filename), "exec"), namespace)
     scheme = namespace[classname]()
     scheme.group_size = 32
-    scheme.quant_type = {"mxfp8": QuantType.W8A8MXFP, "int8": QuantType.W8A8, "block_fp8": QuantType.NONE}[kind]
+    scheme.quant_type = QuantType.W8A8MXFP
     scheme.use_expert_weight_list = False
-    if kind == "block_fp8":
-        scheme.block_n = scheme.block_k = scheme.group_size = 128
-        scheme.model_dtype = torch.bfloat16
-        scheme.mxfp8_method = native_scheme("mxfp8")
-        scheme._mx_scale_alg = 0
     return scheme
 
 
-def expert_layer(kind):
-    scheme = native_scheme(kind)
+def expert_layer():
+    scheme = native_scheme()
     layer = torch.nn.Module()
     layer.layer_name = "model.layers.3.mlp.experts"
     layer.local_num_experts, layer.top_k, layer.activation = 6, 2, "silu"
@@ -109,17 +71,14 @@ def expert_layer(kind):
     shapes = {"w13_weight": (6, 256, 128), "w2_weight": (6, 128, 128)}
     adapter = expert_adapter_type(scheme)
     for name in adapter.tensor_names:
-        weight_name = name.split("_scale")[0].split("_offset")[0]
+        weight_name = name.removesuffix("_scale")
         e, n, k = shapes[weight_name]
         if name.endswith("_weight"):
-            shape, dtype = (e, n, k), torch.int8 if kind == "int8" else torch.float8_e4m3fn
-        elif kind == "block_fp8":
-            shape, dtype = (e, n // scheme.block_n, k // scheme.block_k), torch.float32
-        elif kind == "int8":
-            shape, dtype = (e, n, 1), torch.bfloat16
+            shape, dtype = (e, n, k), torch.float8_e4m3fn
         else:
             shape, dtype = (e, n, k // 32), torch.uint8
         layer.register_parameter(name, torch.nn.Parameter(torch.zeros(shape, dtype=dtype), requires_grad=False))
+        getattr(layer, name).weight_loader = layer.weight_loader
     return layer, scheme
 
 
@@ -142,19 +101,15 @@ def load_experts(layer, names):
                 if name.startswith("w13"):
                     shape[0] //= 2
                 if "scale" in name:
-                    value = 120 + eid if param.dtype == torch.uint8 else (eid + 1) * 0.5
+                    value = 120 + eid
                 else:
-                    value = eid * 0.125 if "offset" in name else eid + 1
+                    value = eid + 1
                 tensor = torch.full(shape, value, dtype=param.dtype)
-                # W8A8 per-channel checkpoints may store scale/offset as vectors.
-                if tensor.shape[-1] == 1:
-                    tensor = tensor.squeeze(-1)
                 param.weight_loader(param, tensor, name, shard, eid)
 
 
-@pytest.mark.parametrize("kind", ["mxfp8", "int8", "block_fp8"])
-def test_native_preparation_prefill_and_eviction_preserve_every_expert_tensor(kind):
-    layer, scheme = expert_layer(kind)
+def test_native_preparation_prefill_and_eviction_preserve_every_expert_tensor():
+    layer, scheme = expert_layer()
     adapter_type = expert_adapter_type(scheme)
     binding = LayerOffloadBinding(layer, scheme, ExpertOffloadConfig(enabled=True, num_device_experts=2))
     load_experts(layer, adapter_type.tensor_names)
@@ -164,7 +119,7 @@ def test_native_preparation_prefill_and_eviction_preserve_every_expert_tensor(ki
             name, torch.nn.Parameter(getattr(layer, name).detach().clone(), requires_grad=False)
         )
     reference.activation = "silu"
-    native_scheme(kind).process_weights_after_loading(reference)
+    native_scheme().process_weights_after_loading(reference)
     binding.process_weights_after_loading(layer)
     layer._expert_offload_binding = binding
     manager = ExpertOffloadManager()
@@ -181,42 +136,19 @@ def test_native_preparation_prefill_and_eviction_preserve_every_expert_tensor(ki
             expected = getattr(reference, name)[ids.long()].float()
             torch.testing.assert_close(actual, expected)
         assert addresses == {name: tensor.data_ptr() for name, tensor in binding.resident.items()}
-    if kind == "block_fp8":
-        assert not hasattr(layer, "w13_weight_scale_inv")
-        assert expert_adapter_type(scheme) is BlockFP8ExpertAdapter
     manager.close()
 
 
-@pytest.mark.parametrize("kind", ["mxfp8", "int8", "block_fp8"])
-def test_new_formats_reject_incomplete_checkpoint_and_invalid_tensor_before_execution(kind):
-    layer, scheme = expert_layer(kind)
-    adapter = expert_adapter_type(scheme)(layer, scheme)
-    adapter.validate_layer(layer)
-    last = adapter.tensor_names[-1]
-    param = getattr(layer, last)
-    setattr(layer, last, torch.nn.Parameter(param[:5], requires_grad=False))
-    with pytest.raises(ValueError, match=last):
-        adapter.validate_layer(layer)
-    layer, scheme = expert_layer(kind)
-    binding = LayerOffloadBinding(layer, scheme, ExpertOffloadConfig(enabled=True, num_device_experts=2))
-    load_experts(layer, adapter.tensor_names[:-1])
-    with pytest.raises(RuntimeError, match="incomplete expert checkpoint"):
-        binding.process_weights_after_loading(layer)
-    assert not binding.resident
-
-
-@pytest.mark.parametrize("kind,adapter", [("mxfp8", MXFP8ExpertAdapter), ("int8", W8A8ExpertAdapter)])
-def test_format_selected_from_quantization_instead_of_model_name(kind, adapter):
-    layer, scheme = expert_layer(kind)
-    for model_type in ("glm5_next_text", "qwen4_exp"):
+def test_format_selected_from_quantization_instead_of_model_name():
+    layer, scheme = expert_layer()
+    for model_type in ("glm5_next_text", "other_moe"):
         layer.model_type = model_type
-        assert expert_adapter_type(scheme) is adapter
-        adapter(layer, scheme).validate_layer(layer)
+        assert expert_adapter_type(scheme) is MXFP8ExpertAdapter
+        MXFP8ExpertAdapter(layer, scheme).validate_layer(layer)
 
 
-@pytest.mark.parametrize("kind", ["mxfp8", "int8", "block_fp8"])
-def test_prepared_native_bytes_include_derived_scales_and_survive_raw_retirement(monkeypatch, kind):
-    layer, scheme = expert_layer(kind)
+def test_prepared_native_bytes_preserve_weights_and_scales_after_raw_retirement(monkeypatch):
+    layer, scheme = expert_layer()
     adapter = expert_adapter_type(scheme)(layer, scheme)
     store = HostExpertStore(layer, adapter.tensor_names)
     load_experts(layer, adapter.tensor_names)

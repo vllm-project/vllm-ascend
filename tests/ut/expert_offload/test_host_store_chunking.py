@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm_ascend.expert_offload.host_store import HostExpertStore
+from vllm_ascend.expert_offload.expert_offload_manager import HostExpertStore
 from vllm_ascend.expert_offload.transfer import TorchExpertTransfer
 from vllm_ascend.expert_offload.utils import PreparedExpertTensor
 

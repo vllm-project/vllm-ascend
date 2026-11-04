@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -578,7 +578,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             method = super()._get_quant_method(prefix, quant_config, moe_config)
         else:
             method = quant_config.get_quant_method(self, prefix, tid2eid=self.tid2eid)
-        return maybe_offload_quant_method(self, method)
+        if get_current_vllm_config_or_none() is not None:
+            config = getattr(get_ascend_config(), "expert_offload_config", None)
+            if config is not None and config.enabled:
+                return maybe_offload_quant_method(self, method, config)
+        return method
 
     def get_eplb_parameter(self, name: str):
         """Return an expert parameter from the refactored weight owner."""

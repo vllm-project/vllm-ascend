@@ -6,8 +6,11 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
-from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
-from vllm_ascend.expert_offload.graph import GraphExpertStaging, supports_descriptor
+from vllm_ascend.expert_offload.expert_offload_manager import (
+    ExpertOffloadManager,
+    GraphExpertStaging,
+    LayerOffloadBinding,
+)
 from vllm_ascend.expert_offload.residency import ExpertResidency
 from vllm_ascend.expert_offload.transfer import TorchExpertTransfer
 from vllm_ascend.expert_offload.utils import ExpertMapBuffer
@@ -18,32 +21,40 @@ from vllm_ascend.expert_offload.utils import ExpertMapBuffer
     [(1, 1, True), (2, 1, True), (2, 2, True), (3, 1, False), (0, 1, False), (1, None, False), (1, 2, False)],
 )
 def test_padded_descriptor_capacity(tokens, uniform, expected):
-    bindings = [SimpleNamespace(top_k=6, num_slots=16), SimpleNamespace(top_k=4, num_slots=8)]
+    manager = ExpertOffloadManager()
+    manager.bindings = {
+        "first": SimpleNamespace(top_k=6, num_slots=16),
+        "second": SimpleNamespace(top_k=4, num_slots=8),
+    }
     desc = SimpleNamespace(num_tokens=tokens, uniform_token_count=uniform)
-    assert supports_descriptor(bindings, desc) is expected
-    assert not supports_descriptor([], desc)
+    assert manager._supports_graph_descriptor(desc) is expected
+    manager.bindings.clear()
+    assert not manager._supports_graph_descriptor(desc)
 
 
 def test_speculative_graph_bounds_include_all_verification_and_padding_rows():
-    bindings = [SimpleNamespace(top_k=6, num_slots=96)]
-    assert supports_descriptor(bindings, SimpleNamespace(num_tokens=6, uniform_token_count=6))
-    assert supports_descriptor(bindings, SimpleNamespace(num_tokens=12, uniform_token_count=6))
-    assert not supports_descriptor(bindings, SimpleNamespace(num_tokens=18, uniform_token_count=6))
-    assert not supports_descriptor(bindings, SimpleNamespace(num_tokens=6, uniform_token_count=None))
+    manager = ExpertOffloadManager()
+    manager.bindings = {"test": SimpleNamespace(top_k=6, num_slots=96)}
+    assert manager._supports_graph_descriptor(SimpleNamespace(num_tokens=6, uniform_token_count=6))
+    assert manager._supports_graph_descriptor(SimpleNamespace(num_tokens=12, uniform_token_count=6))
+    assert not manager._supports_graph_descriptor(SimpleNamespace(num_tokens=18, uniform_token_count=6))
+    assert not manager._supports_graph_descriptor(SimpleNamespace(num_tokens=6, uniform_token_count=None))
 
 
 @pytest.mark.parametrize("requests,expected", [(1, True), (2, True), (4, False)])
 def test_glm_mtp_three_draft_tokens_with_68_resident_experts(requests, expected):
-    bindings = [SimpleNamespace(top_k=8, num_slots=68)]
+    manager = ExpertOffloadManager()
+    manager.bindings = {"test": SimpleNamespace(top_k=8, num_slots=68)}
     # Every request verifies the new target token plus three draft tokens.
     desc = SimpleNamespace(num_tokens=requests * 4, uniform_token_count=4)
-    assert supports_descriptor(bindings, desc) is expected
+    assert manager._supports_graph_descriptor(desc) is expected
 
 
 def staging_double():
     manager = ExpertOffloadManager()
     manager.graph_load_stream = object()
-    binding = SimpleNamespace(
+    binding = object.__new__(LayerOffloadBinding)
+    binding.__dict__.update(
         manager=manager, residency=ExpertResidency(6, 2), device="cpu", adapter=None, host_store=None, resident={}
     )
     staging = object.__new__(GraphExpertStaging)

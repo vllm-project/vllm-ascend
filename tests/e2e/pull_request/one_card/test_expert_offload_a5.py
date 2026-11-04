@@ -15,9 +15,12 @@ from transformers import Qwen3MoeConfig
 from vllm import LLM, SamplingParams
 from vllm.config import VllmConfig, set_current_vllm_config
 
-from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
-from vllm_ascend.expert_offload.graph import GraphExpertStaging
-from vllm_ascend.expert_offload.host_store import HostExpertStore
+from vllm_ascend.expert_offload.expert_offload_manager import (
+    ExpertOffloadManager,
+    GraphExpertStaging,
+    HostExpertStore,
+    LayerOffloadBinding,
+)
 from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter
 from vllm_ascend.expert_offload.residency import ExpertResidency
 from vllm_ascend.expert_offload.transfer import TorchExpertTransfer
@@ -61,9 +64,6 @@ def expert_bundle(monkeypatch):
         **{name: torch.nn.Parameter(tensor, requires_grad=False) for name, tensor in tensors.items()},
     )
     store = HostExpertStore(layer, MXFP4ExpertAdapter.tensor_names)
-    for name in store.names:
-        shards = ("w1", "w3") if name.startswith("w13") else ("w2",)
-        store.loaded[name] = {(eid, shard) for eid in range(NUM_EXPERTS) for shard in shards}
     store.finalize(layer)
     # These standalone grouped GEMMs do not initialize the distributed MegaMoE runtime.
     monkeypatch.setattr("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", lambda _config: False)
@@ -102,7 +102,8 @@ def test_acl_graph_replay_updates_nz_slots_and_rejects_callback_failure(expert_b
     manager = ExpertOffloadManager()
     manager.graph_load_stream = torch.npu.Stream(device=device)
     resident = adapter.materialize(store, [0, 1], device)
-    binding = SimpleNamespace(
+    binding = object.__new__(LayerOffloadBinding)
+    binding.__dict__.update(
         manager=manager,
         adapter=adapter,
         host_store=store,

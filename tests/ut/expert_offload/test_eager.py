@@ -45,6 +45,7 @@ class ExpertLayer(torch.nn.Module):
             self.register_parameter(
                 tensor_name, torch.nn.Parameter(torch.zeros(shape, dtype=torch.uint8), requires_grad=False)
             )
+            getattr(self, tensor_name).weight_loader = self.weight_loader
         self._expert_offload_binding = LayerOffloadBinding(
             self, LayoutScheme(), ExpertOffloadConfig(enabled=True, num_device_experts=2)
         )
@@ -103,19 +104,12 @@ def test_complete_host_bundle_and_owned_lifetime():
     assert set(binding.resident) == set(MXFP4ExpertAdapter.tensor_names)
 
 
-def test_incomplete_loading_is_rejected_before_slot_allocation():
-    layer = ExpertLayer()
-    binding = layer._expert_offload_binding
-    with pytest.raises(RuntimeError, match="incomplete"):
-        binding.process_weights_after_loading(layer)
-    assert not binding.resident
-
-
-def test_rejected_loader_input_does_not_mark_completion():
+def test_host_store_preserves_native_weight_loader():
     layer = ExpertLayer()
     param = layer.w13_weight
+    assert param.weight_loader == layer.weight_loader
     assert param.weight_loader(param, torch.ones(2, 3), "ignored", "w1", 0, return_success=True) is False
-    assert not layer._expert_offload_binding.host_store.loaded["w13_weight"]
+    assert param.weight_loader(param, torch.ones(2, 3), "ignored", "w1", 0) is None
 
 
 def test_decode_eviction_prefill_and_overflow_preserve_parameters():

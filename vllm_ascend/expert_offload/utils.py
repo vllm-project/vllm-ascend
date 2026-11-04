@@ -33,13 +33,6 @@ class ExpertMapBuffer:
 
 
 @dataclass(frozen=True)
-class ExpertTensorSpec:
-    name: str
-    shape: tuple[int, ...]
-    dtype: torch.dtype
-
-
-@dataclass(frozen=True)
 class PreparedExpertTensor:
     """Pinned physical bytes plus the native tensor layout they encode."""
 

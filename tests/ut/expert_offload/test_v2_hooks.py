@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm import config as vllm_config
 
 from vllm_ascend.expert_offload.config import ExpertOffloadConfig
 from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
@@ -434,7 +435,11 @@ def quant_methods(monkeypatch):
         "AscendRoutedExperts",
         {"_get_quant_method"},
         OwnerParent,
-        {"maybe_offload_quant_method": maybe_offload_quant_method},
+        {
+            "maybe_offload_quant_method": maybe_offload_quant_method,
+            "get_current_vllm_config_or_none": lambda: vllm_config.get_current_vllm_config_or_none(),
+            "get_ascend_config": lambda: config_module.get_ascend_config(),
+        },
     )
     layer = owner_cls()
     layer.tid2eid = None
