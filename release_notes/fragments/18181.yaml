@@ -1,0 +1,4 @@
+pr: 18181
+entries:
+  - category: bugfix
+    text: Fixed W8A8 MoE LoRA inference using SwiGLU instead of the configured SiTU activation.
