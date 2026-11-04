@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from tests.ut.base import PytestBase
+from vllm_ascend.distributed.fasteep import communication
 from vllm_ascend.distributed.fasteep.communication import ReclaimableCommunicators
 from vllm_ascend.distributed.fasteep.hccl import RetainedGroup
 
@@ -40,8 +41,8 @@ class TestCommunicationReclamation(PytestBase):
         owner = self.owner()
         migration, serving = owner.root, owner.active_native
         with (
-            patch("torch.npu.synchronize"),
-            patch("torch.npu.mem_get_info", side_effect=[(100, 1000), (400, 1000)]),
+            patch.object(communication.torch.npu, "synchronize"),
+            patch.object(communication.torch.npu, "mem_get_info", side_effect=[(100, 1000), (400, 1000)]),
         ):
             assert owner.activate(2) is None
         migration.close.assert_called_once()
@@ -56,7 +57,7 @@ class TestCommunicationReclamation(PytestBase):
         cpu = MagicMock()
         owner.cpu_groups = {2: None, 4: cpu}
         with (
-            patch("torch.npu.synchronize"),
+            patch.object(communication.torch.npu, "synchronize"),
             patch(
                 "vllm_ascend.distributed.fasteep.communication.stateless_destroy_torch_distributed_process_group"
             ) as destroy,

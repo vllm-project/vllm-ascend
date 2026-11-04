@@ -72,7 +72,7 @@ def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event
             device=torch.npu.current_device(),
         )
 
-    if getattr(group, "fasteep", False):
+    if getattr(group, "fasteep", False) is True:
         if event is not None:
             event.wait()
         group.all_to_all(a2a_out, input_.contiguous(), output_split_sizes, input_split_sizes)
@@ -123,7 +123,7 @@ def _gather_along_first_dim(input_, group, output_split_sizes=None):
     Returns:
         torch.Tensor: Gathered tensor.
     """
-    if getattr(group, "fasteep", False):
+    if getattr(group, "fasteep", False) is True:
         if output_split_sizes is not None:
             raise ValueError("FastEEP expert-count gathering requires equal-sized rank inputs.")
         return group.all_gather(input_, dim=0)
