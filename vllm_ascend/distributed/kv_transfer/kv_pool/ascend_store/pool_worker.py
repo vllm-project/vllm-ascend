@@ -17,12 +17,14 @@ from vllm.distributed import (
 )
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
+from vllm.model_executor.model_loader.utils import get_model_cls
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.mamba_utils import get_mamba_groups
 
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
@@ -722,20 +724,31 @@ class KVPoolWorker:
         """Register draft caches when the layerwise worker enables prefix reuse."""
 
     def _recoverssm_store_caches(self, kv_caches):
-        """Export persistent KDA state while leaving verification records local."""
+        """Export the model's copyable state prefix, leaving verification records local."""
         if self.kv_cache_config is None:
             raise ValueError("RecoverSSM pooling requires KV cache specs")
         result = dict(kv_caches)
+        copy_funcs = None
         for group in self.kv_cache_config.kv_cache_groups:
             specs = group.kv_cache_spec
             for name in group.layer_names:
                 spec = specs.kv_cache_specs[name] if isinstance(specs, UniformTypeKVCacheSpecs) else specs
                 if not isinstance(spec, MambaSpec):
                     continue
+                if spec.num_speculative_blocks != 0:
+                    raise ValueError("RecoverSSM pooling requires zero speculative state blocks")
+                if copy_funcs is None:
+                    mamba_groups = get_mamba_groups(self.kv_cache_config)
+                    model_cls = get_model_cls(self.vllm_config.model_config)
+                    copy_funcs = model_cls.get_mamba_state_copy_funcs({s.mamba_type for s in mamba_groups})
                 caches = self._as_cache_tuple(kv_caches[name])
-                if len(caches) != 4 or spec.num_speculative_blocks != 0:
-                    raise ValueError("RecoverSSM pooling requires one checkpoint and two verification records")
-                result[name] = caches[:2]
+                num_states = len(copy_funcs[spec.mamba_type])
+                if len(caches) < num_states:
+                    raise ValueError(
+                        f"RecoverSSM pooling layer {name!r} requires at least {num_states} persistent state tensors, "
+                        f"got {len(caches)}"
+                    )
+                result[name] = caches[:num_states]
         return result
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
