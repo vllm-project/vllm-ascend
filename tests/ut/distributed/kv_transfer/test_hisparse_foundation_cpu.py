@@ -1,38 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Source-isolated CPU boundary checks; these do not qualify NPU execution."""
+"""CPU boundary checks using the installed Core and Ascend implementations."""
 
-import ast
-import ctypes
-import importlib.util
 import math
-import sys
-from dataclasses import dataclass, replace
-from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace as NS
 
 import pytest
 import torch
+from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec, MLAAttentionSpec
 
-ROOT = Path(__file__).resolve().parents[4]
-
-
-def definitions(relative, names, **bindings):
-    path = ROOT / "vllm_ascend" / relative
-    tree = ast.parse(path.read_bytes())
-    nodes = [n for n in tree.body if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name in names]
-    assert len(nodes) == len(names)
-    future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
-    namespace = {"torch": torch, **bindings}
-    module = ast.fix_missing_locations(ast.Module(body=[future, *nodes], type_ignores=[]))
-    exec(compile(module, str(path), "exec"), namespace)
-    return namespace
-
-
-def backend_type():
-    return definitions(
-        "distributed/kv_transfer/hisparse/backend.py", {"AscendHiSparseBackend"}, HiSparseBackend=object
-    )["AscendHiSparseBackend"]
+from vllm_ascend.attention.sfa_hisparse import AscendHiSparseMetadataBuilder, finish_hisparse_kv_update
+from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.distributed.kv_transfer.hisparse.backend import AscendHiSparseBackend
+from vllm_ascend.distributed.kv_transfer.hisparse.binding import (
+    _bind_indexer_views,
+    align_hisparse_indexer_specs,
+    get_hisparse_indexer_specs,
+    write_hisparse_indexer_c8,
+)
+from vllm_ascend.ops import hisparse as hisparse_ops
+from vllm_ascend.ops.hisparse_c8 import (
+    c8_storage_view,
+    compact_c8_indices,
+    map_c8_physical_indices,
+    pack_c8_components,
+)
 
 
 def test_failed_unregister_retains_host_owner_for_safe_retry(monkeypatch):
@@ -48,8 +42,8 @@ def test_failed_unregister_retains_host_owner_for_safe_retry(monkeypatch):
             if len(events) == 1:
                 raise RuntimeError("driver did not retire registration")
 
-    monkeypatch.setitem(sys.modules, "vllm_ascend.ops.hisparse", NS(MappedHostTensor=Registration))
-    backend = backend_type()()
+    monkeypatch.setattr(hisparse_ops, "MappedHostTensor", Registration)
+    backend = AscendHiSparseBackend()
     backend.pin_tensor(tensor)
     registration = tensor._hisparse_registration
     assert registration.tensor is tensor
@@ -62,9 +56,8 @@ def test_failed_unregister_retains_host_owner_for_safe_retry(monkeypatch):
 
 
 def test_mapped_addresses_retain_offsets_and_reject_expired_or_external_views():
-    cls = definitions("ops/hisparse.py", {"MappedHostTensor"}, ctypes=ctypes)["MappedHostTensor"]
     backing = torch.arange(128, dtype=torch.uint8)
-    mapping = cls.__new__(cls)
+    mapping = hisparse_ops.MappedHostTensor.__new__(hisparse_ops.MappedHostTensor)
     mapping.tensor = backing
     mapping.host_address = backing.data_ptr()
     mapping.nbytes = backing.numel()
@@ -81,12 +74,8 @@ def test_mapped_addresses_retain_offsets_and_reject_expired_or_external_views():
 
 
 @pytest.mark.parametrize("max_rows,hot_rows,union_rows", [(1, 16, 8), (9, 48, 24), (37, 128, 72)])
-def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups(
-    monkeypatch, max_rows, hot_rows, union_rows
-):
-    operations = definitions("ops/hisparse.py", {"ResolverWorkspace", "HiSparseNPUOps"})
-    monkeypatch.setitem(sys.modules, "vllm_ascend.ops.hisparse", NS(**operations))
-    backend = backend_type()()
+def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups(max_rows, hot_rows, union_rows):
+    backend = AscendHiSparseBackend()
 
     def group():
         owner = NS()
@@ -118,61 +107,22 @@ def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups
     assert torch.count_nonzero(second_workspace.row_keys) == 0
 
 
-@dataclass(frozen=True)
-class IndexerSpec:
-    block_size: int = 4
-    num_kv_heads: int = 1
-    head_size: int = 4
-    block_stride_alignment: int = 3
-    scale_dim: int = 0
-    cache_sparse_li_c8: bool = False
-    cache_sparse_li_c4: bool = False
-    dtype: torch.dtype = torch.float32
-    scale_dtype: torch.dtype = torch.float32
-    sfa_dcp_replicated_indexer_size: int = 1
-    page_size_padded: int | None = None
-
-    @property
-    def page_size_bytes(self):
-        return (
-            self.block_size
-            * self.num_kv_heads
-            * (self.head_size * self.dtype.itemsize + self.scale_dim * self.scale_dtype.itemsize)
-        )
-
-    def get_block_stride_alignment(self):
-        return self.block_stride_alignment
-
-
-def binding_functions(**bindings):
-    return definitions(
-        "distributed/kv_transfer/hisparse/binding.py",
-        {
-            "align_hisparse_indexer_specs",
-            "get_hisparse_indexer_specs",
-            "_bind_indexer_views",
-            "_validate_indexer_spec",
-            "_quantized_indexer_views",
-            "write_hisparse_indexer_c8",
-        },
-        AscendSFAIndexerCacheSpec=IndexerSpec,
-        UniformTypeKVCacheSpecs=type("Uniform", (), {}),
-        math=math,
-        replace=replace,
-        **bindings,
+@pytest.fixture
+def indexer_spec():
+    return AscendSFAIndexerCacheSpec(
+        block_size=4, num_kv_heads=1, head_size=4, dtype=torch.float32, block_stride_alignment=3
     )
 
 
 @pytest.mark.parametrize("blocks,stride", [(1, 1), (3, 2), (5, 3)])
-def test_expanded_indexer_alias_preserves_shared_slab_offsets(blocks, stride):
-    functions = binding_functions()
-    spec = IndexerSpec()
+def test_expanded_indexer_alias_preserves_shared_slab_offsets(indexer_spec, blocks, stride):
+    spec = indexer_spec
     page = 16
     backing = torch.arange(blocks * stride * page + page, dtype=torch.float32)
     original = backing.as_strided((blocks, 1, 4, 4), (stride * page, page, 4, 1), storage_offset=page)
     layer = NS()
     caches = {"indexer": original}
-    functions["_bind_indexer_views"](caches, {"indexer": spec}, {"indexer": layer})
+    _bind_indexer_views(caches, {"indexer": spec}, {"indexer": layer})
     view = caches["indexer"][0]
     assert view.data_ptr() == original.data_ptr()
     assert view.storage_offset() == original.storage_offset()
@@ -184,108 +134,83 @@ def test_expanded_indexer_alias_preserves_shared_slab_offsets(blocks, stride):
     assert original[-1, 0, 1, 2] == -73
 
 
-def test_alignment_updates_only_indexer_specs_without_changing_inputs():
-    functions = binding_functions()
-    source, indexer = NS(get_block_stride_alignment=lambda: 1), IndexerSpec()
+def test_alignment_updates_only_indexer_specs_without_changing_inputs(indexer_spec):
+    source = MLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=4, dtype=torch.float32)
+    indexer = indexer_spec
     values = {"source": source, "indexer": indexer}
-    result = functions["align_hisparse_indexer_specs"](values)
+    result = align_hisparse_indexer_specs(values)
     assert result["source"] is source
     assert result["indexer"].get_block_stride_alignment() == math.lcm(3, indexer.page_size_bytes)
     assert values["indexer"] is indexer and indexer.block_stride_alignment == 3
 
 
-def test_c8_page_alignment_reserves_scale_bytes_and_whole_main_rows():
-    @dataclass(frozen=True)
-    class StorageSpec:
-        block_stride_alignment: int = 128
-
-        def get_block_stride_alignment(self):
-            return self.block_stride_alignment
-
-    functions = binding_functions(HiSparseResidentSpec=StorageSpec, HiSparseHotSpec=StorageSpec)
-    storage = StorageSpec()
-    indexer = IndexerSpec(
-        block_size=128, head_size=128, dtype=torch.float8_e4m3fn, scale_dim=1, cache_sparse_li_c8=True
+def test_c8_page_alignment_reserves_scale_bytes_and_whole_main_rows(indexer_spec):
+    resident = HiSparseResidentSpec(block_size=128, page_size=128 * 656, block_stride_alignment=128)
+    hot = HiSparseHotSpec(block_size=128, page_size=128 * 656, blocks_per_request=1, block_stride_alignment=128)
+    indexer = replace(
+        indexer_spec,
+        block_size=128,
+        head_size=128,
+        dtype=torch.float8_e4m3fn,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        cache_sparse_li_c8=True,
     )
-    result = functions["align_hisparse_indexer_specs"](
-        {"resident": storage, "hot": storage, "indexer": indexer}, packed_row_bytes=656
-    )
+    result = align_hisparse_indexer_specs({"resident": resident, "hot": hot, "indexer": indexer}, packed_row_bytes=656)
     stride_alignment = math.lcm(*(spec.get_block_stride_alignment() for spec in result.values()))
     assert stride_alignment % 656 == 0 and stride_alignment % 128 == 0
     assert result["indexer"].page_size_padded == 128 * (128 + 4)
-    assert storage.block_stride_alignment == 128 and indexer.page_size_padded is None
+    assert resident.block_stride_alignment == hot.block_stride_alignment == 128
+    assert indexer.page_size_padded is None
 
 
 @pytest.mark.parametrize("field", ["scale_dim", "cache_sparse_li_c8", "cache_sparse_li_c4"])
-def test_unsupported_indexer_formats_are_rejected_before_pool_binding(field):
-    functions = binding_functions()
-    spec = replace(IndexerSpec(), **{field: 1})
+def test_unsupported_indexer_formats_are_rejected_before_pool_binding(indexer_spec, field):
+    spec = replace(indexer_spec, **{field: 1})
     config = NS(kv_cache_groups=[NS(layer_names=["indexer"], kv_cache_spec=spec)])
     with pytest.raises(ValueError, match="C4|C8|scales"):
-        functions["get_hisparse_indexer_specs"](config)
+        get_hisparse_indexer_specs(config)
 
 
-def test_capture_metadata_prevents_warmup_host_mirrors():
-    class Parent:
-        def build_for_cudagraph_capture(self, common, **kwargs):
-            assert common is common_input and kwargs["draft_index"] is draft
-            return self.build()
-
-        def build(self):
-            return NS(hisparse_for_capture=False)
-
-    methods = definitions(
-        "attention/sfa_hisparse.py",
-        {"AscendHiSparseMetadataBuilder", "finish_hisparse_kv_update"},
-        AscendSFAMetadataBuilder=Parent,
+def test_capture_metadata_prevents_warmup_host_mirrors(monkeypatch):
+    capture_metadata = NS(hisparse_for_capture=False)
+    monkeypatch.setattr(
+        AscendSFAMetadataBuilder, "build_for_cudagraph_capture", lambda *args, **kwargs: capture_metadata
     )
-    cls = methods["AscendHiSparseMetadataBuilder"]
-    builder = cls.__new__(cls)
-    common_input, draft = object(), object()
-    capture_metadata = builder.build_for_cudagraph_capture(common_input, draft_index=draft)
-    real_metadata = builder.build()
-    finish = methods["finish_hisparse_kv_update"]
+    builder = AscendHiSparseMetadataBuilder.__new__(AscendHiSparseMetadataBuilder)
+    builder.build_for_cudagraph_capture(NS())
+    real_metadata = NS(hisparse_for_capture=False)
     submitted = []
     cache = NS(finish_kv_update=lambda: submitted.append(True))
     for _ in range(5):
-        finish(cache, capture_metadata)
+        finish_hisparse_kv_update(cache, capture_metadata)
     assert submitted == []
-    finish(cache, real_metadata)
+    finish_hisparse_kv_update(cache, real_metadata)
     assert submitted == [True]
 
 
-def c8_module():
-    path = ROOT / "vllm_ascend/ops/hisparse_c8.py"
-    spec = importlib.util.spec_from_file_location("hisparse_c8_test_module", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_c8_packing_preserves_opaque_rope_scale_and_nan_payloads():
-    module = c8_module()
     rows = 3
     raw = [torch.arange(rows * width).to(torch.uint8).reshape(rows, width) for width in (512, 128, 16)]
     components = [values.view(torch.float8_e4m3fn) for values in raw]
-    packed = module.pack_c8_components(*components)
+    packed = pack_c8_components(*components)
     assert packed.dtype == torch.uint8 and packed.shape == (rows, 656)
     torch.testing.assert_close(packed, torch.cat(raw, dim=-1), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("stride_rows", [128, 136])
 def test_c8_storage_mapping_preserves_shared_slab_offsets(stride_rows):
-    module = c8_module()
     pages, block, width, offset = 3, 128, 656, 1312
     backing = torch.full((offset + pages * stride_rows * width,), 17, dtype=torch.uint8)
     cache = backing.view(torch.float8_e4m3fn).as_strided(
         (pages, block, width), (stride_rows * width, width, 1), storage_offset=offset
     )
-    view, actual_block, actual_stride, capacity = module.c8_storage_view(cache)
+    view, actual_block, actual_stride, capacity = c8_storage_view(cache)
     assert (actual_block, actual_stride, capacity) == (block, stride_rows, pages * block)
     assert view.data_ptr() == cache.data_ptr()
     assert view.untyped_storage().data_ptr() == backing.data_ptr()
     indices = torch.tensor([[0, 127, 128, 255, 256, 383, -1, 384]], dtype=torch.int32)
-    mapped = module.map_c8_physical_indices(indices, actual_block, actual_stride, capacity)
+    mapped = map_c8_physical_indices(indices, actual_block, actual_stride, capacity)
     expected = torch.tensor(
         [[0, 127, stride_rows, stride_rows + 127, 2 * stride_rows, 2 * stride_rows + 127, -1, -1]],
         dtype=torch.int32,
@@ -296,16 +221,22 @@ def test_c8_storage_mapping_preserves_shared_slab_offsets(stride_rows):
 
 
 def test_c8_compaction_preserves_duplicate_order_and_empty_rows():
-    module = c8_module()
     indices = torch.tensor([[7, -1, 2, 7, -1, 0], [-1, -1, -1, -1, -1, -1]], dtype=torch.int32)
     expected = torch.tensor([[7, 2, 7, 0, -1, -1], [-1, -1, -1, -1, -1, -1]], dtype=torch.int32)
-    torch.testing.assert_close(module.compact_c8_indices(indices), expected, rtol=0, atol=0)
+    torch.testing.assert_close(compact_c8_indices(indices), expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("padding", [0, 256])
-def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(padding):
-    functions = binding_functions()
-    spec = IndexerSpec(block_size=128, head_size=128, dtype=torch.float8_e4m3fn, scale_dim=1, cache_sparse_li_c8=True)
+def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(indexer_spec, padding):
+    spec = replace(
+        indexer_spec,
+        block_size=128,
+        head_size=128,
+        dtype=torch.float8_e4m3fn,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        cache_sparse_li_c8=True,
+    )
     pages, offset = 3, 256
     key_bytes = 128 * 128
     stride = spec.page_size_bytes + padding
@@ -315,7 +246,7 @@ def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(padding):
     )
     layer = NS()
     caches = {"indexer": cache}
-    functions["_bind_indexer_views"](caches, {"indexer": spec}, {"indexer": layer})
+    _bind_indexer_views(caches, {"indexer": spec}, {"indexer": layer})
     key, scale = caches["indexer"]
     assert key.untyped_storage().data_ptr() == scale.untyped_storage().data_ptr() == raw.data_ptr()
     assert layer.hisparse_block_stride == 1
@@ -340,5 +271,5 @@ def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(padding):
         expected[start : start + 128] = values_raw[i]
         start = offset + page * stride + key_bytes + row * 4
         expected[start : start + 4] = scale_bytes[i]
-    functions["write_hisparse_indexer_c8"](key, scale, values, scales, slots, scatter)
+    write_hisparse_indexer_c8(key, scale, values, scales, slots, scatter)
     torch.testing.assert_close(raw, expected, rtol=0, atol=0)
