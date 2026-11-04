@@ -14,6 +14,9 @@ from .quantization import expert_adapter_type
 class ExpertOffloadMoEMethod(AscendFusedMoEMethod):
     """Reuse native weight creation and execution with bounded expert storage."""
 
+    # Prevent the loader from moving the complete CPU layer to the NPU.
+    requires_device_loading: bool = False
+
     def __init__(self, method, moe_config, config: ExpertOffloadConfig) -> None:
         if not isinstance(method, AscendFusedMoEMethod):
             raise ValueError(
@@ -23,8 +26,6 @@ class ExpertOffloadMoEMethod(AscendFusedMoEMethod):
         expert_adapter_type(method.quant_method).validate_scheme(method.quant_method)
         super().__init__(method.quant_method, moe_config, tid2eid=method.tid2eid)
         self.expert_offload_config = config
-        # Prevent the loader from moving the complete CPU layer to the NPU.
-        self.requires_device_loading = False
 
     def create_weights(
         self,

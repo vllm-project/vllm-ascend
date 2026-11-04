@@ -29,9 +29,9 @@ class ExpertOffloadConfig:
         if not self.enabled:
             return
         slots = self.num_device_experts
-        if slots is None or not 1 <= top_k <= slots < num_experts:
+        if slots is None or not top_k <= slots < num_experts:
             raise ValueError(
-                "expert offload requires 1 <= top_k <= num_device_experts < num_experts; "
+                "expert offload requires top_k <= num_device_experts < num_experts; "
                 f"got top_k={top_k}, slots={slots}, experts={num_experts}"
             )
 
