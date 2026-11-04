@@ -79,7 +79,7 @@ test_cases:
     test_content:
       - spec_decode_acceptance
     acceptance_rate:
-      # Placeholder only: collect this MTP5 GSM8K run before setting regression baselines.
-      # Zero baselines do not enforce an acceptance-rate regression threshold.
-      baseline: [0.0, 0.0, 0.0, 0.0, 0.0]
+      # Provisional baselines copied from PR20769's historical DSpark GSM8K run.
+      # These are not measured acceptance rates for this deepseek_mtp configuration.
+      baseline: [0.9400, 0.8775, 0.8226, 0.7730, 0.7296]
       tolerance: 0.05
