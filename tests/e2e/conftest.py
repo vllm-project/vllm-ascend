@@ -400,7 +400,11 @@ class RemoteOpenAIServer:
         start = time.time()
         client = requests
 
-        ready = {node_ip: False for node_ip, _ in targets}
+        # Key by (node_ip, url): several servers may share one IP (e.g. the
+        # single-node PD/EPD modes start multiple engines on 127.0.0.1), so a
+        # plain-IP key would collapse their readiness state together and make
+        # the timeout message report an empty not-ready list.
+        ready = {(node_ip, url): False for node_ip, url in targets}
 
         last_log_time = 0.0
 
@@ -410,13 +414,13 @@ class RemoteOpenAIServer:
             should_log = (now - last_log_time) >= log_interval
 
             for node_ip, url in targets:
-                if ready[node_ip] and not always_check_nodes:
+                if ready[(node_ip, url)] and not always_check_nodes:
                     continue
 
                 try:
                     resp = client.get(url)
                     if resp.status_code == 200:
-                        ready[node_ip] = True
+                        ready[(node_ip, url)] = True
                         logger.info("[READY] Node %s: %s is ready.", node_ip, url)
                 except RequestException:
                     all_ready = False
@@ -436,7 +440,7 @@ class RemoteOpenAIServer:
                 break
 
             if now - start > timeout:
-                not_ready_nodes = [n for n, ok in ready.items() if not ok]
+                not_ready_nodes = [url for (_, url), ok in ready.items() if not ok]
                 self._terminate_server()
                 raise RuntimeError(
                     f"Timeout: these nodes did not become ready: {not_ready_nodes} in time: {timeout}s"
@@ -522,7 +526,7 @@ class RemotePDServer(RemoteOpenAIServer):
         server_host: str = "127.0.0.1",
         env_dict: dict[str, str] | None = None,
         env_dicts: list[dict[str, str]] | None = None,
-        max_wait_seconds: float | None = 600,
+        max_wait_seconds: float | None = 2800,
     ) -> None:
         self._proc_list = []
 
