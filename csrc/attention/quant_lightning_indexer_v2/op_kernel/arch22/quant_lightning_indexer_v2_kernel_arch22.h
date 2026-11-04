@@ -103,8 +103,8 @@ public:
     static constexpr uint32_t GM_ALIGN_BYTES = 512;
     static constexpr uint32_t LI_QUANT_PRELOAD_TASK_CACHE_SIZE = 2;
     // V1 候选驱动：一个候选 tile = 32 个候选块 × 8 token = 256 token（设计 §3.2）
-    static constexpr uint32_t QLIV2_CAND_TILE_BLOCKS = 32;
-    static constexpr uint32_t QLIV2_CAND_TILE_TOKENS = QLIV2_CAND_TILE_BLOCKS * 8;
+    static constexpr uint32_t QLIV2_CAND_TILE_BLOCKS = QLIV2Common::CAND_TILE_BLOCKS;
+    static constexpr uint32_t QLIV2_CAND_TILE_TOKENS = QLIV2Common::CAND_TILE_TOKENS;
 
     // for workspace double
     static constexpr uint32_t WS_DOUBLE = 2;
@@ -136,9 +136,8 @@ protected:
     // mode=1（source）每行有效候选块数（DSL candidate_length 语义：min(ceil(V/8), candidateTopkBlocks)）
     GlobalTensor<int32_t> candidateBlockLengthOutGm;
     GlobalTensor<int32_t> candidateBlockLengthGm; // 每行有效候选块数 (可选输入)
-    // D3a: 候选 K/scale staging（每个 AIC 私有：4 槽 × 256 token × 128B K + 4 槽 × 256 × 2B scale）
+    // D3a: 候选 K staging（每个 AIC 私有：8 槽 × 512 token × 128B；scale 区已删——AIC 不消费 staging scale）
     GlobalTensor<int8_t> candStagingKeyGm;
-    GlobalTensor<half> candStagingScaleGm;
     // D3b: 候选分数区（per token × maxTiles × 256 float；B1+B2 冒烟阶段不参与输出）
     GlobalTensor<float> candScoreGm;
     // v4: 候选 kscale 辅助区（每 tile 1KB 填充布局，任务奇偶双缓冲）
@@ -547,13 +546,9 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Init(
     // D3a: 候选 staging 区（条件申请：仅在传入 candidate_block_length 时占 workspace）
     if (candidateBlockLength != nullptr) {
         constexpr uint64_t CAND_STAGING_KEY_BYTES =
-            QLIV2Common::CAND_RING_SLOTS * 256ULL * HEAD_DIM;     // 8 槽 × 256 token × 128B
-        constexpr uint64_t CAND_STAGING_SCALE_BYTES =
-            QLIV2Common::CAND_RING_SLOTS * 32ULL * 32ULL;         // 8 槽 × 32 块 × 32B(含填充)
+            QLIV2Common::CAND_RING_SLOTS * static_cast<uint64_t>(QLIV2_CAND_TILE_TOKENS) * HEAD_DIM; // 8 槽 × 512 token × 128B
         candStagingKeyGm.SetGlobalBuffer((__gm__ int8_t *)(workspace + offset + aiCoreIdx * CAND_STAGING_KEY_BYTES));
         offset += static_cast<uint64_t>(GetBlockNum()) * CAND_STAGING_KEY_BYTES;
-        candStagingScaleGm.SetGlobalBuffer((__gm__ half *)(workspace + offset + aiCoreIdx * CAND_STAGING_SCALE_BYTES));
-        offset += static_cast<uint64_t>(GetBlockNum()) * CAND_STAGING_SCALE_BYTES;
         // D3b: 候选分数区（每任务 4 行 × 64 tile × 256 float；按任务奇偶双缓冲 = 512KB/核）
         constexpr uint64_t CAND_SCORE_BYTES = 2ULL * QLIV2Common::CAND_SCORE_TILES_PER_TASK *
                                               QLIV2Common::CAND_TILE_TOKENS * sizeof(float);
@@ -593,7 +588,7 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Init(
                                              outputIdxOffsetGm, outputIdxOffsetValid);
         // D3a: 候选 gather 使能 = mode=2 且传入长度张量（V1 探针：cube 暂不消费 staging）
         vectorService.InitVecCandidateGatherTensor(
-            keyGm, candStagingKeyGm, candStagingScaleGm, candidateBlockLengthGm, candScoreGm, candAuxScaleGm,
+            keyGm, candStagingKeyGm, candidateBlockLengthGm, candScoreGm, candAuxScaleGm,
             (constInfo.candidateMode == CANDIDATE_MODE_CONSUMER && hasCandidateBlockLength_));
         vectorService.InitVecWorkspaceTensor(weightWorkspaceGm, mm1ResGm, vec1ResGm, blockVec1ResGm);
     } else {

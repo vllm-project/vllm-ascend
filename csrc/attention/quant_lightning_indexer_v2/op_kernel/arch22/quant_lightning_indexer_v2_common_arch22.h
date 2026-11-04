@@ -49,12 +49,12 @@ inline constexpr uint32_t CAND_SCORE_READY_FLAG = 15;
 // v4: AIC 主循环结束令牌 —— pending 队列（各任务末尾两个 token）在核尾统一排空，
 // 等 AIC 推进/退出后再读，保证 GM 写已落地。
 inline constexpr uint32_t CAND_AIC_DONE_FLAG = 4;
-// 候选分数区每任务的槽位数：s1Base 4 行 × 最大 64 tile = 256 个 256-float 行。
+// 候选分数区每任务的槽位数：s1Base 4 行 × 最大 32 tile(512 token) = 128 个 512-float 行。
 // 按任务序号奇偶双缓冲（跨任务延迟消费时，下一任务不会覆盖尚未消费的分数）。
-inline constexpr uint32_t CAND_SCORE_TILES_PER_TASK = 256;
+inline constexpr uint32_t CAND_SCORE_TILES_PER_TASK = 128;
 // 候选 tile 粒度：32 个候选块 × 8 token = 256 token（DSL 为 64 块×8=512；910B 上按
 // 现有 mm1 骨架与 UB 容量取 256）
-inline constexpr uint32_t CAND_TILE_BLOCKS = 32;
+inline constexpr uint32_t CAND_TILE_BLOCKS = 64;
 inline constexpr uint32_t CAND_TILE_TOKENS = CAND_TILE_BLOCKS * 8;
 // 候选 kscale 辅助区（每 tile 32 块 × 16 half = 512 half = 1KB，块内前 8 half 有效、后 8 填充）：
 // AIV 在 gather 时每 AIV 写本半（256 half = 512B，一次 DMA），消费时按 tile 一次 1KB 读回，

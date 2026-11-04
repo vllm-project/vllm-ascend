@@ -229,7 +229,7 @@ private:
     bool CheckSequsedK(int32_t batchSize) const;
     bool CheckCmpResidualK(int32_t batchSize) const;
     bool CheckCandidateBlockLength();
-    // QSLI 调度：工作量 = max(L)×8 token，候选 tile = 256（与主算子 V1 一致）
+    // QSLI 调度：工作量 = max(L)×8 token，候选 tile = 512（与主算子一致）
     bool HasCandidateLen() const
     {
         return candidateBlockLength_ != nullptr && candidateBlockLength_->GetData() != nullptr;
@@ -239,7 +239,7 @@ private:
     int64_t CandidateTokensForS1G(uint32_t bIdx, uint32_t s1GIdx);
     uint32_t CandidateTileTokens() const
     {
-        return 256U;
+        return 512U;
     }
     int32_t GetQueryBatchSize();
     ValidSocVersion ProcessSocVersion();

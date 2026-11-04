@@ -1802,19 +1802,19 @@ ge::graphStatus QuantLightningIndexerV2Tiling::DoTiling(QLIV2TilingInfo *tilingI
         if (tilingInfo->candidateMode == CANDIDATE_MODE_CONSUMER &&
             tilingInfo->opParamInfo.candidateBlockLength.tensor != nullptr) {
             constexpr uint32_t CAND_STAGING_SLOTS = 8;    // v4 ring 深度（CAND_RING_SLOTS）
-            constexpr uint32_t CAND_STAGING_TOKENS = 256; // V1 tile = 32 块 × 8 token
+            constexpr uint32_t CAND_STAGING_TOKENS = 512; // tile = 64 块 × 8 token
             constexpr uint32_t CAND_HEAD_DIM = 128;
-            constexpr uint32_t CAND_SCALE_SLOT_BYTES = 32 * 32; // 32 块 × 32B(含 16B 填充)
+            // staging scale 区已删（V1 探针残留：AIC 不消费 staging scale，kscale 由 AIV 消费侧乘）
             workspaceSize += static_cast<uint64_t>(aicNum) * CAND_STAGING_SLOTS *
-                             (CAND_STAGING_TOKENS * CAND_HEAD_DIM + CAND_SCALE_SLOT_BYTES);
-            // D3b: 候选分数区（s1Base 行 × 64 tile × 256 float = 256KB/核；v4 按任务奇偶双缓冲 = 512KB/核）
-            constexpr uint32_t CAND_SCORE_TILES_MAX = 64; // ceil(2048 块 × 8 / 256)
+                             (CAND_STAGING_TOKENS * CAND_HEAD_DIM);
+            // D3b: 候选分数区（s1Base 行 × 32 tile × 512 float = 256KB/核；v4 按任务奇偶双缓冲 = 512KB/核）
+            constexpr uint32_t CAND_SCORE_TILES_MAX = 32; // ceil(2048 块 × 8 / 512)
             constexpr uint32_t CAND_SCORE_DOUBLE_BUF = 2; // v4 跨任务延迟消费
             workspaceSize += static_cast<uint64_t>(aicNum) * CAND_SCORE_DOUBLE_BUF * S1_BASE_SIZE *
                              CAND_SCORE_TILES_MAX * 256 * sizeof(float);
-            // v4: 候选 kscale 辅助区（每任务 256 tile × 1KB，奇偶双缓冲 = 512KB/核）
-            constexpr uint32_t CAND_AUX_SCALE_TILES = 256; // 4 行 × 64 tile
-            constexpr uint32_t CAND_AUX_SCALE_BYTES_PER_TILE = 32 * 16 * sizeof(uint16_t); // 1KB
+            // v4: 候选 kscale 辅助区（每任务 128 tile × 2KB，奇偶双缓冲 = 512KB/核）
+            constexpr uint32_t CAND_AUX_SCALE_TILES = 128; // 4 行 × 32 tile
+            constexpr uint32_t CAND_AUX_SCALE_BYTES_PER_TILE = 64 * 16 * sizeof(uint16_t); // 2KB
             workspaceSize += static_cast<uint64_t>(aicNum) * CAND_SCORE_DOUBLE_BUF * CAND_AUX_SCALE_TILES *
                              CAND_AUX_SCALE_BYTES_PER_TILE;
         }
