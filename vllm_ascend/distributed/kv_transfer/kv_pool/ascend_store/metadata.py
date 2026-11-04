@@ -394,7 +394,6 @@ class ChunkedTokenDatabase:
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
         cache_family: str | None = None,
-        layer_id: int | None = None,
     ):
         assert self.metadata is not None
         if cache_family is None:
@@ -542,8 +541,6 @@ class ChunkedTokenDatabase:
         block_hashes: BlockHashList | list[str],
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
-        cache_role: str = "kv",
-        cache_family: str | None = None,
         block_ids: list[int] | None = None,
         skip_null_blocks: bool = False,
         chunk_filter: Callable[[int], bool] | None = None,
@@ -612,8 +609,6 @@ class ChunkedTokenDatabase:
             block_hashes,
             mask_num,
             kv_cache_group_id,
-            cache_role,
-            cache_family,
         ):
             yield (
                 start,
@@ -927,6 +922,7 @@ class RequestTracker:
 class ReqMeta:
     # Request id
     req_id: str
+    token_len_chunk: int
     # End token for full-block KV save.
     save_end_token: int
     # Token length after this scheduled step finishes.
@@ -1066,6 +1062,23 @@ class ReqMeta:
             return []
         return self.token_ids[start - self.save_start_token : end - self.save_start_token]
 
+    def get_block_ids_array(self, group_id: int) -> np.ndarray | None:
+        if self.block_ids_by_group_np is not None and group_id < len(self.block_ids_by_group_np):
+            return self.block_ids_by_group_np[group_id]
+        return self.block_ids_np
+
+    def get_transfer_arrays(self, group_id: int, is_save: bool = True) -> tuple[np.ndarray | None, np.ndarray | None]:
+        grouped_ids = self.block_ids_by_group_np
+        grouped_gvas = self.block_gvas_by_group_np if is_save else self.load_block_gvas_by_group_np
+        if (
+            grouped_ids is not None
+            and grouped_gvas is not None
+            and group_id < len(grouped_ids)
+            and group_id < len(grouped_gvas)
+        ):
+            return grouped_ids[group_id], grouped_gvas[group_id]
+        return self.block_ids_np, self.block_gvas_np if is_save else self.load_block_gvas_np
+
     last_block_gva: int | None = None
     partial_block_index: int | None = None
     save_keys: list[str] | None = None
@@ -1082,7 +1095,9 @@ class ReqMeta:
     block_gvas_np: np.ndarray | None = None
     block_gvas_by_group_np: list[np.ndarray] | None = None
     gva_block_offset: int = 0
+    load_block_gvas_np: np.ndarray | None = None
     load_block_gvas_by_group_np: list[np.ndarray] | None = None
+    load_gva_block_offset: int = 0
     partial_save_gva_per_group: list[int] = field(default_factory=list)
     partial_load_gva_per_group: list[int] = field(default_factory=list)
     # Per-group reachable masks for the layerwise transfer, computed once per
@@ -1101,7 +1116,6 @@ class ReqMeta:
         is_last_chunk: bool | None = None,
         discard_partial_chunks: bool = True,
         original_block_size: list[int] | int | None = None,
-        kv_cache_group_families: list[str] | None = None,
         save_partial_block: bool = False,
         hash_block_size: int | None = None,
     ) -> ReqMeta | None:

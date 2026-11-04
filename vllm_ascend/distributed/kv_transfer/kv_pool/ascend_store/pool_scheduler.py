@@ -426,7 +426,6 @@ class BaseKVPoolScheduler(ABC):
             is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
             discard_partial_chunks=self._discard_partial_chunks,
             original_block_size=self.original_block_size,
-            kv_cache_group_families=self.kv_cache_group_families,
             save_partial_block=self.layerwise_offload,
             hash_block_size=self.hash_block_size,
         )
@@ -602,7 +601,6 @@ class BaseKVPoolScheduler(ABC):
             block_hashes=request.block_hashes,
             discard_partial_chunks=self._discard_partial_chunks,
             original_block_size=self.original_block_size,
-            kv_cache_group_families=self.kv_cache_group_families,
             hash_block_size=self.hash_block_size,
         )
 

@@ -20,6 +20,8 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import numpy as np
+
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerMultiBlockReqMeta,
@@ -546,6 +548,45 @@ class TestRequestTracker(unittest.TestCase):
 
 
 class TestReqMeta(unittest.TestCase):
+    def test_group_arrays_prefer_selected_group(self):
+        meta = ReqMeta(
+            "r1",
+            block_ids_np=np.array([99]),
+            block_ids_by_group_np=[np.array([10]), np.array([20, 21])],
+            block_gvas_np=np.array([999]),
+            block_gvas_by_group_np=[np.array([100]), np.array([200, 210])],
+            load_block_gvas_np=np.array([888]),
+            load_block_gvas_by_group_np=[np.array([300]), np.array([400, 410])],
+        )
+        np.testing.assert_array_equal(meta.get_block_ids_array(1), [20, 21])
+        ids, gvas = meta.get_transfer_arrays(1)
+        np.testing.assert_array_equal(ids, [20, 21])
+        np.testing.assert_array_equal(gvas, [200, 210])
+        ids, gvas = meta.get_transfer_arrays(1, is_save=False)
+        np.testing.assert_array_equal(ids, [20, 21])
+        np.testing.assert_array_equal(gvas, [400, 410])
+
+    def test_transfer_arrays_fall_back_as_a_pair(self):
+        meta = ReqMeta(
+            "r1",
+            block_ids_np=np.array([99]),
+            block_ids_by_group_np=[np.array([10]), np.array([20])],
+            block_gvas_np=np.array([999]),
+            block_gvas_by_group_np=[np.array([100])],
+            load_block_gvas_np=np.array([888]),
+        )
+        for is_save, expected in ((True, [999]), (False, [888])):
+            with self.subTest(is_save=is_save):
+                ids, gvas = meta.get_transfer_arrays(1, is_save=is_save)
+                np.testing.assert_array_equal(ids, [99])
+                np.testing.assert_array_equal(gvas, expected)
+
+    def test_group_arrays_preserve_empty_groups_and_missing_data(self):
+        meta = ReqMeta("r1", block_ids_np=np.array([99]), block_ids_by_group_np=[np.array([], dtype=np.int64)])
+        np.testing.assert_array_equal(meta.get_block_ids_array(0), [])
+        np.testing.assert_array_equal(meta.get_block_ids_array(1), [99])
+        self.assertEqual(ReqMeta("empty").get_transfer_arrays(0), (None, None))
+
     def test_from_request_tracker_basic_save(self):
         tracker = RequestTracker(
             req_id="r1",

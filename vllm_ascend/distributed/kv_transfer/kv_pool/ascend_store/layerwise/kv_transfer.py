@@ -213,37 +213,7 @@ class LayerBatchBuilder:
         is_save: bool = True,
     ) -> tuple[np.ndarray, np.ndarray]:
         request = block_range.request
-        group_id = self.group_id
-        block_ids_np: np.ndarray | None
-        block_gvas_np: np.ndarray | None
-        if is_save:
-            group_block_ids = request.block_ids_by_group_np
-            group_block_gvas = request.block_gvas_by_group_np
-            if (
-                group_block_ids is not None
-                and group_block_gvas is not None
-                and group_id < len(group_block_ids)
-                and group_id < len(group_block_gvas)
-            ):
-                block_ids_np = group_block_ids[group_id]
-                block_gvas_np = group_block_gvas[group_id]
-            else:
-                block_ids_np = request.block_ids_np
-                block_gvas_np = request.block_gvas_np
-        else:
-            group_block_ids = request.block_ids_by_group_np
-            group_block_gvas = request.load_block_gvas_by_group_np
-            if (
-                group_block_ids is not None
-                and group_block_gvas is not None
-                and group_id < len(group_block_ids)
-                and group_id < len(group_block_gvas)
-            ):
-                block_ids_np = group_block_ids[group_id]
-                block_gvas_np = group_block_gvas[group_id]
-            else:
-                block_ids_np = request.block_ids_np
-                block_gvas_np = request.load_block_gvas_np
+        block_ids_np, block_gvas_np = request.get_transfer_arrays(self.group_id, is_save)
         if block_ids_np is None or block_gvas_np is None:
             raise RuntimeError(
                 f"ReqMeta {'save' if is_save else 'load'} block metadata"
@@ -366,10 +336,9 @@ class LayerBatchBuilder:
         )
 
     def _request_block_ids(self, request: ReqMeta) -> list[int]:
-        if request.block_ids_by_group_np is not None and self.group_id < len(request.block_ids_by_group_np):
-            return request.block_ids_by_group_np[self.group_id].tolist()
-        if request.block_ids_np is not None:
-            return request.block_ids_np.tolist()
+        block_ids = request.get_block_ids_array(self.group_id)
+        if block_ids is not None:
+            return block_ids.tolist()
         if self.group_id < len(request.block_ids_by_group):
             return request.block_ids_by_group[self.group_id]
         return request.block_ids

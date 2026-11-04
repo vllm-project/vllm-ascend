@@ -1262,11 +1262,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             all_group_save_keys: list[str] = []
             request.partial_save_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
-                block_ids_by_group = (
-                    request.block_ids_by_group_np[group_id]
-                    if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
-                    else request.block_ids_np
-                )
+                block_ids_by_group = request.get_block_ids_array(group_id)
                 if block_ids_by_group is None:
                     raise RuntimeError(f"Block IDs are not initialized for request {request.req_id}")
                 if group_id not in self.cacheable_group_ids or not self._is_layerwise_save_owner(group_id):
@@ -1807,11 +1803,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                 if snapshot_start is not None:
                     full_blocks = cached_full_blocks
 
-                block_ids_by_group = (
-                    request.block_ids_by_group_np[group_id]
-                    if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
-                    else request.block_ids_np
-                )
+                block_ids_by_group = request.get_block_ids_array(group_id)
                 if block_ids_by_group is None:
                     all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
                     continue
