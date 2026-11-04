@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
@@ -13,7 +14,7 @@ from vllm.v1.request import RequestStatus
 from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, make_dyntra_test_config
 from tests.ut.core.test_score_encoder_cache_scheduler import _request as make_mm_request
 from tests.ut.kv_offload.utils import create_model_runner_output, create_request
-from vllm_ascend.core.dyntra_lb_scheduler import DyntraLBPolicyMixin
+from vllm_ascend.core.dyntra_lb_scheduler import DyntraLBPolicyMixin, DyntraLBScheduler
 from vllm_ascend.core.recompute_scheduler import (
     AsyncDyntraLBRecomputeScheduler,
     AsyncRecomputeScheduler,
@@ -23,7 +24,9 @@ from vllm_ascend.core.recompute_scheduler import (
     RecomputeSchedulerConfig,
     _normalize_encoder_schedule_result,
 )
+from vllm_ascend.core.scheduler_profiling_chunk import ProfilingChunkScheduler
 from vllm_ascend.ec_manager.score_ec_manager import ScoreEncoderCacheManager
+from vllm_ascend.patch.platform import patch_balance_schedule
 
 
 @pytest.fixture(autouse=True)
@@ -394,9 +397,35 @@ def _make_mm_recompute_scheduler():
     return scheduler
 
 
-def test_waiting_encoder_stall_allows_later_request():
-    scheduler = _make_mm_recompute_scheduler()
+@pytest.mark.parametrize(
+    "scheduler_cls",
+    [
+        pytest.param(DyntraLBScheduler, id="dyntra-lb"),
+        pytest.param(ProfilingChunkScheduler, id="profiling-chunk"),
+        pytest.param(RecomputeScheduler, id="recompute"),
+        pytest.param(patch_balance_schedule.BalanceScheduler, id="balance"),
+    ],
+)
+def test_waiting_encoder_stall_allows_later_request(scheduler_cls, monkeypatch):
+    config = make_dyntra_test_config(block_size=16)
+    config.kv_transfer_config = None
+    config.cache_config.enable_prefix_caching = False
+    if scheduler_cls is patch_balance_schedule.BalanceScheduler:
+        monkeypatch.setattr(patch_balance_schedule, "_balance_scheduling_enabled", lambda _: True)
+    scheduler = create_dyntra_lb_scheduler(config, scheduler_cls=scheduler_cls)
+    scheduler.encoder_cache_manager = EncoderCacheManager(256)
     scheduler.max_num_encoder_input_tokens = 0
+
+    if scheduler_cls is not RecomputeScheduler:
+        original = scheduler._try_schedule_encoder_inputs
+
+        def schedule_encoder_inputs(*args, **kwargs):
+            result = original(*args, **kwargs)
+            # Isolate the legacy four-item callers from the upstream API change.
+            assert len(result) == 4 or result[4] == []
+            return result[:4]
+
+        monkeypatch.setattr(scheduler, "_try_schedule_encoder_inputs", schedule_encoder_inputs)
     stalled = make_mm_request("stalled", [("image", [True, True])])
     ready = create_request(request_id="ready")
     scheduler.add_request(stalled)
