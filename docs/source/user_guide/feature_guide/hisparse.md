@@ -206,7 +206,7 @@ singleton-column input. The Ascend plan subclasses Core's plan and runs its
 unchanged source-resolution method inside a local `TorchFunctionMode` that
 uses equivalent `index_select` for NPU column selection. Core still constructs
 the plan and owns representative pages, source-key caching and Resident/Host
-masks. There is no global Torch replacement, copied planner or CPU readback.
+masks. This adapter adds no global Torch replacement, copied planner or CPU readback.
 Remove this adapter when the supported device stack fixes advanced indexing.
 
 The original case remains enabled and passes. A small regression also checks
@@ -219,3 +219,18 @@ Fresh full-model correctness, dataset accuracy, eager/Graph lifecycle and
 same-workload performance remain prerequisites for marking the foundation
 ready. Existing C8 benchmark results are intentionally not presented as this
 implementation's performance.
+
+Full-model integration additionally preserves the Core Indexer cache role and
+merge semantics, and retains each Indexer cache's backend choice after the model
+construction context exits. With these fixes, the complete TP8/MTP3 model loaded,
+initialized its KV caches, captured all eight ranks and reached serving. Its
+first real request exposed a Host writeback failure; serving alone is not a
+functional pass.
+
+The DMA reproduction distinguishes page locking from mapping: pageable and
+PTA-pinned destinations passed, while a pageable allocation registered only for
+mapping failed both batch and single-copy APIs on this stack. The private-pool
+adapter reuses PR #19109's pinned-allocation approach before Core creates any
+cache views. Core still owns completion, cache views and release. Other backends
+keep their original allocator. The added writeback regression and a new full-model
+run remain pending hardware validation for this allocation change.

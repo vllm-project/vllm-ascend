@@ -28,6 +28,14 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * worker/patch_hisparse_host_pool.py:
+#   Target: vllm.v1.hisparse.runtime.allocate_pinned_host_pool.
+#   Why: AIV mapping alone does not enable DMA to pageable Host storage.
+#   How: Installed only by the HiSparse backend; allocate private pinned storage
+#        before Core builds cache views, retaining Core's release lifecycle.
+#   Related PR: No backend Host-allocation hook exists in the supported Core.
+#   Future plan: Replace this adapter with that upstream hook when available.
+# --------------------------------
 # * worker/patch_kda_recoverssm.py:
 #   Target: Kimi KDA's KDARecoverSSMCommitContext module binding.
 #   Why: The upstream metadata builder imports its CUDA context directly.

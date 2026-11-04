@@ -20,8 +20,10 @@ class AscendHiSparseBackend(HiSparseBackend):
     stats_dtype = torch.int64
 
     def check_available(self) -> None:
+        from vllm_ascend.patch.worker.patch_hisparse_host_pool import install
         from vllm_ascend.utils import bootstrap_custom_op_env
 
+        install()
         # Import the device kernels before the connector allocates Host storage.
         importlib.import_module("vllm_ascend.hisparse.cache_ops")
         if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
@@ -35,6 +37,15 @@ class AscendHiSparseBackend(HiSparseBackend):
                 raise RuntimeError("Ascend HiSparse requires the compiled Ascend DMA extension.") from error
             if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
                 raise RuntimeError("Ascend HiSparse requires the Ascend swap_blocks_batch operator.")
+
+    def allocate_private_host_pool(self, size: int) -> tuple[torch.Tensor, torch.Tensor]:
+        from vllm_ascend.hisparse.cache_ops import allocate_mapped_host
+
+        payload = allocate_mapped_host((size,), torch.int8)
+        registration = payload._hisparse_registration
+        registered = registration.tensor.view(torch.int8)
+        registered._hisparse_registration = registration
+        return registered[:size], registered
 
     def pin_tensor(self, tensor: torch.Tensor) -> None:
         from vllm_ascend.hisparse.cache_ops import MappedHostTensor
