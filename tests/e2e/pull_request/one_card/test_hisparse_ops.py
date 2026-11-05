@@ -24,6 +24,9 @@ def _require_mapped_host_device():
     if not torch.npu.is_available() or not torch.npu.get_device_name(0).startswith("Ascend950"):
         pytest.skip("HiSparse mapped-host operators currently target Ascend 950")
     torch.npu.set_device(0)
+    # Focused -k selections must load their native dependency independently;
+    # they cannot rely on the private-Host-pool test running first.
+    AscendHiSparseBackend().check_available()
 
 
 def test_private_host_pool_retains_pinned_storage_for_dma_writeback():
