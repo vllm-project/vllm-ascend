@@ -132,6 +132,29 @@ def test_init_speculator_suffix_requires_request_state():
         init_speculator(_make_config("suffix"), torch.device("cpu"))
 
 
+def test_suffix_runtime_is_checked_before_importing_ascend_class(monkeypatch):
+    import builtins
+
+    from vllm_ascend.worker.v2.spec_decode import suffix
+
+    original_import = builtins.__import__
+    subclass_imports = []
+
+    def track_import(name, *args, **kwargs):
+        if name == "vllm_ascend.worker.v2.spec_decode.suffix.speculator":
+            subclass_imports.append(name)
+        return original_import(name, *args, **kwargs)
+
+    def reject_runtime(config):
+        raise ValueError("requires vLLM #60339")
+
+    monkeypatch.setattr(builtins, "__import__", track_import)
+    monkeypatch.setattr(suffix, "validate_suffix_runtime", reject_runtime)
+    with pytest.raises(ValueError, match="requires vLLM #60339"):
+        init_speculator(_make_config("suffix"), torch.device("cpu"), object())
+    assert subclass_imports == []
+
+
 def test_init_speculator_extract_hidden_states(monkeypatch):
     """Test dispatching extract_hidden_states to the upstream speculator."""
     config = _make_config("extract_hidden_states")

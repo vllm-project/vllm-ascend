@@ -7,6 +7,7 @@ import pytest
 from vllm.v1.worker.gpu.spec_decode import speculator as upstream
 
 from vllm_ascend import mrv2_utils
+from vllm_ascend.worker.v2.spec_decode import suffix
 from vllm_ascend.worker.v2.spec_decode.suffix import validate_suffix_runtime
 
 
@@ -33,7 +34,28 @@ def test_incomplete_upstream_protocol_is_rejected(monkeypatch, missing):
 
 def test_complete_upstream_protocol_is_accepted(monkeypatch):
     monkeypatch.setattr(upstream, "BaseSpeculator", _with_hooks())
+    monkeypatch.setattr(suffix, "import_module", lambda name: SimpleNamespace(SuffixSpeculator=type("Suffix", (), {})))
     validate_suffix_runtime(SimpleNamespace(suffix_decoding_corpus_tokens=0))
+
+
+def test_missing_concrete_upstream_class_is_rejected(monkeypatch):
+    monkeypatch.setattr(upstream, "BaseSpeculator", _with_hooks())
+    monkeypatch.setattr(suffix, "import_module", lambda name: SimpleNamespace())
+    with pytest.raises(ValueError, match="requires vLLM #60339"):
+        validate_suffix_runtime(SimpleNamespace(suffix_decoding_corpus_tokens=0))
+
+
+@pytest.mark.parametrize("missing", ["vllm.v1.worker.gpu.spec_decode.suffix", "unrelated_dependency"])
+def test_missing_upstream_module_does_not_hide_dependency_errors(monkeypatch, missing):
+    monkeypatch.setattr(upstream, "BaseSpeculator", _with_hooks())
+
+    def import_missing(name):
+        raise ModuleNotFoundError(name=missing)
+
+    monkeypatch.setattr(suffix, "import_module", import_missing)
+    expected_error = ValueError if missing.endswith(".suffix") else ModuleNotFoundError
+    with pytest.raises(expected_error):
+        validate_suffix_runtime(SimpleNamespace(suffix_decoding_corpus_tokens=0))
 
 
 @pytest.mark.parametrize("env_value", [None, True])
@@ -63,5 +85,6 @@ def test_suffix_defaults_to_v2_and_honors_explicit_v1(monkeypatch, env_value):
 def test_default_v2_validates_the_complete_protocol(monkeypatch):
     monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
     monkeypatch.setattr(upstream, "BaseSpeculator", _with_hooks())
+    monkeypatch.setattr(suffix, "import_module", lambda name: SimpleNamespace(SuffixSpeculator=type("Suffix", (), {})))
     config = SimpleNamespace(speculative_config=SimpleNamespace(method="suffix", suffix_decoding_corpus_tokens=0))
     mrv2_utils._validate_v2_model_runner(config)
