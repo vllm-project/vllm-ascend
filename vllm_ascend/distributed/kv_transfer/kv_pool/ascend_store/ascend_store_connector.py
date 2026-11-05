@@ -397,8 +397,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
         assert self.connector_worker is not None
         worker = self.connector_worker
-        if layer_name in getattr(worker.kv_cache_config, "layerwise_draft_layer_names", ()):
-            # Persistent draft caches do not advance the target ring cursor.
+        if layer_name in getattr(worker, "_dspark_draft_layer_names", ()):
+            # GVA/companion drafts have a separate transfer lifecycle.
+            # Mooncake native MTP remains part of its block-key object and
+            # must execute its load/save hooks before that object commits.
             return
         # PLE and attention can share one physical layer. Load its groups once,
         # then let each cache owner copy its own recurrent state before use.
@@ -455,6 +457,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             # A load-only consumer does not publish KV.
             return
         assert self.connector_worker is not None
+        if layer_name in getattr(self.connector_worker, "_dspark_draft_layer_names", ()):
+            return
         cast(LayerwiseKVPoolWorker, self.connector_worker).save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):

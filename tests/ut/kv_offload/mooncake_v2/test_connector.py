@@ -95,6 +95,7 @@ def test_pull_connector_selects_implementation_by_role() -> None:
     config = MagicMock()
     config.kv_transfer_config.engine_id = "engine"
     config.kv_transfer_config.kv_role = "kv_producer"
+    config.kv_transfer_config.kv_connector_extra_config = {}
     kv_cache_config = MagicMock()
 
     def initialize_base(self, *_args, **_kwargs) -> None:
@@ -125,3 +126,23 @@ def test_pull_connector_selects_implementation_by_role() -> None:
 def test_push_connector_is_explicitly_unimplemented() -> None:
     with pytest.raises(NotImplementedError, match="not implemented"):
         MooncakePushConnector(MagicMock(), KVConnectorRole.SCHEDULER, MagicMock())
+
+
+@pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
+def test_v2_layerwise_mode_uses_component_transport_and_completion_gates(role):
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"transfer_mode": "layerwise"})
+    )
+    cache = MagicMock()
+    module = "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector"
+    with patch(module + ".MooncakeLayerwiseConnector") as layerwise:
+        result = MooncakeConnector(config, role, cache)
+    assert result is layerwise.return_value
+    layerwise.assert_called_once_with(config, role, cache)
+    assert MooncakeConnector.get_required_kvcache_layout(config) is None
+
+
+def test_v2_rejects_unknown_transport_mode():
+    config = SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"transfer_mode": "typo"}))
+    with pytest.raises(ValueError, match="transfer_mode"):
+        MooncakeConnector(config, KVConnectorRole.WORKER, MagicMock())

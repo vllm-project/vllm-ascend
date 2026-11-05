@@ -8,8 +8,10 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
 
 from vllm_ascend.core.kv_cache_physical_plan import get_physical_kv_cache_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,
     get_layerwise_reuse_layout,
+    get_physical_layer_index,
 )
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
@@ -34,7 +36,18 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         extra = get_layerwise_reuse_config(getattr(vllm_config, "kv_transfer_config", None))
         if extra is not None:
             base_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+            if (
+                str(extra.get("backend", "mooncake")).lower() == "mooncake"
+                and getattr(vllm_config, "speculative_config", None) is not None
+                and vllm_config.parallel_config.pipeline_parallel_size == 1
+            ):
+                plan.layerwise_draft_layer_names = tuple(
+                    name
+                    for name in get_layerwise_kv_cache_specs(plan)
+                    if get_physical_layer_index(name, base_layers) >= base_layers
+                )
             layout = get_layerwise_reuse_layout(plan, base_layers, extra)
+            plan.layerwise_reuse_layout = layout
             # Generic models retain logical capacity accounting: the worker
             # scales the budget and materializes the scratch tensors later.
             # Mark scheduler residency without changing the builder's probe.

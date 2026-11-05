@@ -8,7 +8,9 @@ This reduces the physical KV allocation at the cost of additional Store traffic.
 This implementation targets GLM-5.3-Flash with TP8 and expert parallelism, and
 uses the existing cache-spec interfaces for ordinary attention models. GLM main
 MLA/KDA backing packs are reused together while compressed indexer and tail
-backings remain resident. Scheduler groups and block IDs remain unchanged.
+backings remain resident. With speculative decoding, KDA state and draft cache
+allocations stay resident. P may use independent recurrent groups; component
+transfer maps each peer's own groups rather than requiring equal group numbers.
 
 The implementation has CPU regression coverage. Ascend correctness, graph-mode
 compatibility and end-to-end performance require hardware validation before
@@ -40,15 +42,20 @@ Add the following to the **producer's** `AscendStoreConnector` configuration:
 ```
 
 For `MultiConnector`, place these options in its nested `AscendStoreConnector`.
-Keep the deployment's existing P-to-D transport and matching consumer settings.
+Use a P/D transport with per-layer buffer-release gates, as described below.
 Do not set `layerwise_num_shared_buffers` on the consumer. Omitting this option
 on the producer retains ordinary Mooncake layerwise pooling without buffer reuse.
 
 For the initial GLM-5.3-Flash validation, keep the model's quantization and
 hardware-specific options and use `--tensor-parallel-size 8
 --enable-expert-parallel --enable-chunked-prefill --mamba-cache-mode align
---enforce-eager`. EP uses the TP8 group in this configuration. Disable speculative
-decoding on P; combining it with Mooncake buffer reuse raises at initialization.
+--enforce-eager`. EP uses the TP8 group in this configuration. Native MTP can use
+`--speculative-config '{"method":"deepseek_mtp","num_speculative_tokens":3,"enforce_eager":true}'`.
+KDA state remains resident so speculative acceptance can select its correct
+checkpoint after forward. Native MTP caches also remain resident, participate in
+external prefix loading, and complete their part of the Mooncake block object
+before it becomes readable. Later proposal iterations do not advance the
+completed target/offload hook sequence.
 Start with PP=PCP=DCP=1 and synchronous scheduling. The existing layerwise
 parallelism constraints still apply; other parallel topologies need separate
 hardware validation. Set the load failure policy to `fail` for hybrid models.
@@ -59,13 +66,61 @@ resident allocations, so total HBM use is not simply the number of ring slots
 times one layer's KV. Too few slots can serialize computation and transfers;
 compare 2, 4 and 8 slots with prefetch depths 1 and 2 on the target hardware.
 
+## V2 P/D Layerwise Transport
+
+Keep the connector name `MooncakeConnectorV2` and set
+`"transfer_mode": "layerwise"` in its extra configuration on **both P and D**.
+This mode reuses the component-aware scheduler, sender and completion gates from
+`MooncakeLayerwiseConnector`, including the GLM adaptations from PR #20152.
+The default V2 `pull` mode keeps its bulk-pull protocol. It cannot protect
+scratch buffers that are overwritten during forward.
+
+Layerwise mode uses a **D-first proxy**: D allocates destination blocks and
+passes their metadata to P before P starts forward. Therefore changing only the
+P connector configuration while keeping the bulk-pull proxy is insufficient.
+P waits for both its Store copy and P/D transfer before reusing a buffer. The
+component path transfers main KV, compressed indexer, tail and recurrent state
+independently, supports P TP8 to D TP1, and retains each side's block-group IDs.
+Its current constraints are PP=1, D PCP=1, P DCP=1 or P DCP=PCP, and TP/PCP
+cannot both exceed one for recurrent state. Start validation with PCP=DCP=1.
+
+Example configurations are provided in
+[`prefill_kv_transfer.json`](../../../../examples/disaggregated_prefill_v1/glm53_mooncake_offload/prefill_kv_transfer.json)
+and
+[`decode_kv_transfer.json`](../../../../examples/disaggregated_prefill_v1/glm53_mooncake_offload/decode_kv_transfer.json).
+Keep your existing model, quantization, parsing and device settings; pass the
+corresponding file contents to each server's `--kv-transfer-config`. On P, retain
+TP8/EP8, native `deepseek_mtp`, chunked prefill and aligned Mamba state. D can
+use DP8/TP1 with its own speculative configuration. Independently launched
+D services need distinct handshake port ranges and proxy entries.
+
+Start the layerwise proxy with reachable P/D addresses, for example:
+
+```bash
+python examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py \
+  --host PROXY_IP --port 9000 \
+  --prefiller-hosts P_IP --prefiller-ports 8000 \
+  --decoder-hosts D_IP --decoder-ports 8001
+```
+
+Warmup and profiling use immediate Mamba state copies. They do not register
+live deferred copies with the connector, since dummy forward does not execute
+the corresponding per-layer load hooks. Real requests retain the check that
+every required deferred copy was executed.
+
 ## Snapshot Safety and Cost
 
 Full blocks use the existing layerwise pool keys. Incomplete or not-yet-hashed
 pages use immutable keys containing a request incarnation and chunk endpoint.
 Only that request restores these private snapshots; other requests see committed
-full prefixes. Recurrent state restores an exact aligned checkpoint, while
-resident state stays in place. Private snapshots become evictable Store objects;
+full prefixes. Reused recurrent state restores its exact saved endpoint,
+including an unaligned prompt tail or a subsequent single-token decode step.
+For example, with block size 1152, endpoints 13824, 16395 and 16396 are distinct
+states. The latter two use immutable private snapshots; neither is floored to
+an older checkpoint. Speculative recurrent state stays resident and is selected
+by the model after acceptance. Missing exact snapshots still fail the request;
+recovery never silently skips a shared recurrent restore or rolls it back from
+a later state. Private snapshots become evictable Store objects;
 size the Store for in-flight snapshots as well as shared prefixes. If a required
 snapshot is evicted, the step fails instead of consuming overwritten NPU bytes.
 

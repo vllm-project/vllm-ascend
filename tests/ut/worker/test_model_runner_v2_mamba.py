@@ -265,6 +265,42 @@ def test_layerwise_connector_defers_mamba_pre_copy(mock_has_group, mock_get_grou
     connector.finish_mamba_state_copy.assert_called_once()
 
 
+@pytest.mark.parametrize("bulk_after_load", [False, True])
+def test_dummy_mamba_copy_never_leaves_live_connector_deferral(bulk_after_load):
+    module = "vllm_ascend.worker.v2.model_states.mamba_hybrid"
+    config = _kv_cache_config(_mamba_spec())
+    state = _make_defer_state(config)
+    state.kvpp_is_dummy_run = True
+    state._pending_bulk_copy = None
+    state._layer_state_ranges = {f"model.layers.{i}.linear_attn": (i * 2, i * 2 + 2) for i in range(34)}
+    ctx = MagicMock()
+    state._mamba_ctx = ctx
+    connector = SimpleNamespace(
+        prepare_mamba_state_copy=MagicMock(return_value=True),
+        finish_mamba_state_copy=MagicMock(),
+        requires_mamba_state_copy_after_load=bulk_after_load,
+    )
+    batch = SimpleNamespace(
+        num_reqs=2, idx_mapping=torch.arange(2, dtype=torch.int32), query_start_loc=torch.zeros(3, dtype=torch.int32)
+    )
+    computed = torch.zeros(4, dtype=torch.int32)
+    with (
+        patch(module + ".has_kv_transfer_group", return_value=True),
+        patch(module + ".get_kv_transfer_group", return_value=connector),
+        patch(module + ".preprocess_mamba_align_fused_kernel"),
+    ):
+        state.preprocess_state(batch, (), config, computed)
+        connector.prepare_mamba_state_copy.assert_not_called()
+        ctx.run_fused_precopy.assert_called_once()
+        assert state._layerwise_mamba_copy is None
+        assert state._pending_bulk_copy is None
+        # The first real request must not inherit 34 pending warmup layers.
+        state.kvpp_is_dummy_run = False
+        state.preprocess_state(batch, (), config, computed)
+        connector.prepare_mamba_state_copy.assert_called_once_with(state)
+        assert len(state._layerwise_mamba_copy.pending_layers) == 34
+
+
 def test_ensure_align_ctx_falls_back_to_mamba_ctx():
     # vLLM main removed `MambaHybridModelState._ensure_align_ctx`; the Ascend
     # override must return the context built in initialize_kv_cache instead of

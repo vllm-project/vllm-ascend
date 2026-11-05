@@ -184,6 +184,22 @@ def _parse_int_config(value: Any, name: str) -> int:
         raise TypeError(f"{name} must be an integer, got {value!r}") from err
 
 
+def validate_layerwise_pd_transports(kv_transfer_config: Any) -> None:
+    """Reject V2 bulk pulls that cannot fence shared source-buffer reuse."""
+    if get_layerwise_reuse_config(kv_transfer_config) is None:
+        return
+    if kv_transfer_config.kv_connector != "MultiConnector":
+        return
+    for connector in kv_transfer_config.kv_connector_extra_config.get("connectors", []):
+        if connector.get("kv_connector") in ("MooncakeConnectorV2", "MooncakePullConnector"):
+            extra = connector.get("kv_connector_extra_config") or {}
+            if extra.get("transfer_mode", "pull") != "layerwise":
+                raise ValueError(
+                    "Shared KV buffers require MooncakeConnectorV2 transfer_mode='layerwise' "
+                    "on both P and D, with the D-first layerwise proxy; bulk pull cannot fence buffer reuse"
+                )
+
+
 def build_layerwise_cache_layout(
     num_layers: int,
     extra_config: dict[str, Any] | None = None,
@@ -370,6 +386,7 @@ def build_layerwise_reuse_layout(
             for slot in buffer_slots
             if len(slot) > 1
             for layer in slot
+            if layer not in independent_layer_set
             for named_spec in named_specs_by_layer[layer]
             if not isinstance(named_spec.spec, AttentionSpec)
             and is_prefix_cacheable(named_spec.spec)
@@ -445,7 +462,11 @@ def get_layerwise_reuse_layout(
     if layout is not None:
         return layout
     return build_layerwise_reuse_layout(
-        get_layerwise_kv_cache_specs(kv_cache_config),
+        {
+            name: spec
+            for name, spec in get_layerwise_kv_cache_specs(kv_cache_config).items()
+            if name not in getattr(kv_cache_config, "layerwise_draft_layer_names", ())
+        },
         base_layers,
         extra_config,
         topology=getattr(kv_cache_config, "layerwise_cache_topology", None),
@@ -467,10 +488,6 @@ def apply_layerwise_kv_cache_plan(
     if extra_config is None:
         return
 
-    if str(extra_config.get("backend", "mooncake")).lower() == "mooncake":
-        if getattr(vllm_config, "speculative_config", None) is not None:
-            raise NotImplementedError("Mooncake prefill buffer reuse requires speculative decoding disabled on P")
-
     old_tensors = kv_cache_config.kv_cache_tensors
     if not old_tensors:
         return
@@ -479,6 +496,18 @@ def apply_layerwise_kv_cache_plan(
     layer_specs = get_layerwise_kv_cache_specs(kv_cache_config)
     excluded_layer_names = (excluded_layer_names or set()) & layer_specs.keys()
     topology = getattr(kv_cache_config, "layerwise_cache_topology", None)
+    if (
+        topology is None
+        and str(extra_config.get("backend", "mooncake")).lower() == "mooncake"
+        and getattr(vllm_config, "speculative_config", None) is not None
+        and getattr(vllm_config.parallel_config, "pipeline_parallel_size", 1) == 1
+    ):
+        # Generic native MTP names follow the target layers. Retain their
+        # physical buffers while the block-key transfer still includes them.
+        excluded_layer_names |= {
+            name for name in layer_specs if get_physical_layer_index(name, base_layers) >= base_layers
+        }
+        kv_cache_config.layerwise_draft_layer_names = tuple(sorted(excluded_layer_names))
     if topology is not None:
         actual_groups = {
             name: group_id

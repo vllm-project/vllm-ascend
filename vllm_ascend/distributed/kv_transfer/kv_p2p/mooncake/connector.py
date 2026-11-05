@@ -237,7 +237,38 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
 
 
 class MooncakePullConnector(MooncakeBaseConnector):
-    """Pull-based Mooncake KV transfer connector."""
+    """V2 pull facade, with an explicit layerwise push transport mode.
+
+    Both peers must select ``transfer_mode=layerwise`` and use the D-first
+    layerwise proxy. Reuse the component-aware transport rather than duplicating
+    its state mapping and completion gates in the bulk pull implementation.
+    """
+
+    @staticmethod
+    def _transfer_mode(vllm_config: VllmConfig) -> str:
+        transfer = getattr(vllm_config, "kv_transfer_config", None)
+        extra = getattr(transfer, "kv_connector_extra_config", None) or {}
+        mode = extra.get("transfer_mode", "pull")
+        if mode not in ("pull", "layerwise"):
+            raise ValueError("MooncakeConnectorV2 transfer_mode must be 'pull' or 'layerwise'")
+        return mode
+
+    def __new__(cls, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: "KVCacheConfig"):
+        if cls._transfer_mode(vllm_config) == "layerwise":
+            # Lazy import keeps ordinary pull deployments independent of the
+            # layerwise transport and its optional dependencies.
+            from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (
+                MooncakeLayerwiseConnector,
+            )
+
+            return MooncakeLayerwiseConnector(vllm_config, role, kv_cache_config)
+        return super().__new__(cls)
+
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
+        if cls._transfer_mode(vllm_config) == "layerwise":
+            return None
+        return super().get_required_kvcache_layout(vllm_config)
 
     def __init__(
         self,

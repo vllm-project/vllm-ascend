@@ -26,16 +26,32 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_trans
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     LayerwiseCacheTopology,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata, LoadSpec, ReqMeta
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendConnectorMetadata,
+    LoadSpec,
+    ReqMeta,
+    RequestTracker,
+)
 
 
 class TestMooncakeOffload(unittest.TestCase):
-    def make_ring(self, buffers=1, hybrid=False):
+    def make_ring(self, buffers=1, hybrid=False, block_size=16, num_blocks=9, native_mtp=False):
         names = [f"model.layers.{layer}.kv" for layer in range(4)]
-        spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8")
-        config = SimpleNamespace(num_blocks=9, kv_cache_groups=[KVCacheGroupSpec(names, spec)])
+        spec = FullAttentionSpec(block_size=block_size, num_kv_heads=1, head_size=1, dtype="uint8")
+        if native_mtp:
+            names.append("model.layers.4.kv")
+        config = SimpleNamespace(num_blocks=num_blocks, kv_cache_groups=[KVCacheGroupSpec(names, spec)])
+        if native_mtp:
+            config.layerwise_draft_layer_names = (names[-1],)
+            config.layerwise_cache_topology = LayerwiseCacheTopology(
+                main_packs=tuple((name,) for name in names[:-1]),
+                group_ids=tuple((name, 0) for name in names),
+                draft_layer_names=(names[-1],),
+            )
         if hybrid:
-            recurrent = MambaSpec(block_size=16, shapes=((32,),), dtypes=("uint8",), mamba_cache_mode="align")
+            recurrent = MambaSpec(
+                block_size=block_size, shapes=((block_size * 2,),), dtypes=("uint8",), mamba_cache_mode="align"
+            )
             config.kv_cache_groups = [KVCacheGroupSpec(names[::2], spec), KVCacheGroupSpec(names[1::2], recurrent)]
             config.layerwise_cache_topology = LayerwiseCacheTopology(
                 main_packs=((names[0], names[1]), (names[2], names[3])),
@@ -55,8 +71,12 @@ class TestMooncakeOffload(unittest.TestCase):
                 "layerwise_prefetch_layers": 2,
             },
         )
+        worker.vllm_config.speculative_config = None
         worker.m_store = MemoryRangeStore()
-        arrays = [np.zeros((9, 32), dtype=np.uint8) for _ in range(buffers)]
+        arrays = [np.zeros((num_blocks, block_size * 2), dtype=np.uint8) for _ in range(buffers)]
+        if native_mtp:
+            arrays.append(np.zeros((num_blocks, block_size * 2), dtype=np.uint8))
+            worker.vllm_config.speculative_config = SimpleNamespace(method="deepseek_mtp", num_speculative_tokens=3)
         if hybrid:
             worker.cache_coordinator = object()
             worker.token_database.store_mask = MagicMock(return_value=(None, None))
@@ -65,7 +85,12 @@ class TestMooncakeOffload(unittest.TestCase):
             patch.object(KVTransferThread, "start", lambda lane: lane.ready_event.set()),
             patch.object(worker, "_align_kv_ptrs"),
         ):
-            worker.register_kv_caches({name: (cpu_cache(arrays[layer % buffers]),) for layer, name in enumerate(names)})
+            worker.register_kv_caches(
+                {
+                    name: (cpu_cache(arrays[-1] if native_mtp and layer == 4 else arrays[layer % buffers]),)
+                    for layer, name in enumerate(names)
+                }
+            )
         jobs, errors = [], []
 
         def dispatch(lane, task):
@@ -100,15 +125,15 @@ class TestMooncakeOffload(unittest.TestCase):
         return worker, arrays, errors
 
     @staticmethod
-    def request(end, *, previous=0, snapshot=None, incarnation="incarnation-1", last=False):
+    def request(end, *, previous=0, snapshot=None, incarnation="incarnation-1", last=False, block_size=16, blocks=4):
         request = ReqMeta(
             "request",
-            token_len_chunk=end // 16 * 16,
-            save_start_token=previous // 16 * 16,
-            save_end_token=end // 16 * 16,
+            token_len_chunk=end // block_size * block_size,
+            save_start_token=previous // block_size * block_size,
+            save_end_token=end // block_size * block_size,
             target_token_len=end,
-            block_ids=[1, 2, 3, 4],
-            block_hashes=[f"hash-{index}".encode() for index in range(end // 16)],
+            block_ids=list(range(1, blocks + 1)),
+            block_hashes=[f"hash-{index}".encode() for index in range(end // block_size)],
             can_save=True,
             is_last_chunk=last,
             load_spec=LoadSpec(
@@ -117,7 +142,7 @@ class TestMooncakeOffload(unittest.TestCase):
                 can_load=True,
                 layerwise_previous_step=True,
                 layerwise_snapshot_end_token=snapshot,
-                layerwise_snapshot_start_block=previous // 16 if snapshot else None,
+                layerwise_snapshot_start_block=previous // block_size if snapshot else None,
             )
             if previous
             else None,
@@ -253,3 +278,114 @@ class TestMooncakeOffload(unittest.TestCase):
         worker.prepare_layerwise_step(metadata)
         self.assertFalse(worker.layer_load_tasks[3])
         self.assertTrue(worker.layer_load_tasks[2][0].final_group_layer)
+
+    def test_kda_exact_partial_endpoint_roundtrip_at_reported_token_lengths(self):
+        size = 1152
+        count = 16
+        worker, arrays, errors = self.make_ring(hybrid=True, block_size=size, num_blocks=2 * count + 1)
+        previous = 0
+        # Reproduce the reported aligned hit followed by the unaligned prompt
+        # endpoint, then restore that endpoint before a subsequent step.
+        endpoints = (13824, 16395, *range(16396, 16443), 17280, 17281)
+        for end in endpoints:
+            request = self.request(
+                end,
+                previous=previous,
+                snapshot=previous if previous % size else None,
+                block_size=size,
+                blocks=count,
+                last=end >= 16395,
+            )
+            request.num_prompt_tokens = 16395
+            request.block_ids_by_group = [list(range(1, count + 1)), list(range(count + 1, 2 * count + 1))]
+            request.block_ids_by_group_np = [np.asarray(ids) for ids in request.block_ids_by_group]
+            metadata = AscendConnectorMetadata(set())
+            metadata.add_request(request)
+            worker.prepare_layerwise_step(metadata)
+            for layer in range(4):
+                worker.wait_for_layer_load()
+                group = layer % 2
+                ids = request.block_ids_by_group[group]
+                if previous:
+                    selected = ids[: (previous + size - 1) // size] if group == 0 else [ids[(previous - 1) // size]]
+                    np.testing.assert_array_equal(arrays[0][selected], layer + previous % 100 if group else layer + 11)
+                with attention_transfer_window():
+                    selected = ids[: (end + size - 1) // size] if group == 0 else [ids[(end - 1) // size]]
+                    arrays[0][selected] = layer + end % 100 if group else layer + 11
+                worker.save_kv_layer(metadata)
+            self.assertFalse(worker.m_store.open_reads)
+            previous = end
+        self.assertFalse(errors)
+
+    def test_unaligned_recurrent_restore_never_uses_a_later_speculative_endpoint(self):
+        worker, _, _ = self.make_ring(hybrid=True)
+        request = self.request(32, previous=20, snapshot=24)
+        request.block_ids_by_group = [[1, 2, 3, 4], [5, 6, 7, 8]]
+        with self.assertRaisesRegex(ValueError, "exact saved snapshot endpoint"):
+            _load_entries(worker, request, 1, [b"hash-0"], None)
+
+    def test_native_mtp_prefix_is_transferred_and_committed_after_its_hook(self):
+        worker, arrays, errors = self.make_ring(native_mtp=True)
+        self.assertEqual(worker.num_layers, 5)
+        self.assertIn(4, worker.independent_layers)
+        self.assertFalse(worker._dspark_draft_layer_names)
+        for end, previous, external in ((16, 0, False), (20, 16, True), (32, 20, False)):
+            request = self.request(end, previous=previous, snapshot=20 if previous == 20 else None)
+            if external:
+                request.load_spec.layerwise_previous_step = False
+                request.load_spec.vllm_cached_tokens = 0
+                arrays[-1].fill(0)
+            metadata = AscendConnectorMetadata(set())
+            metadata.add_request(request)
+            worker.prepare_layerwise_step(metadata)
+            if previous and not external:
+                self.assertFalse(worker.layer_load_tasks[4])
+            for layer in range(5):
+                worker.wait_for_layer_load()
+                rows = arrays[-1 if layer == 4 else 0][1:5].reshape(-1)
+                if previous:
+                    np.testing.assert_array_equal(rows[: previous * 2], layer + 11)
+                with attention_transfer_window():
+                    rows[previous * 2 : end * 2] = layer + 11
+                worker.save_kv_layer(metadata)
+                if not previous and layer == 3:
+                    worker.kv_send_thread.request_queue.join()
+                    self.assertFalse(worker.m_store.complete, "A target-only object omitted its native MTP payload")
+            self.assertTrue(worker.m_store.complete)
+        self.assertFalse(errors)
+
+    def test_recurrent_snapshot_identity_survives_later_hash_publication(self):
+        worker, _, _ = self.make_ring(hybrid=True)
+        request = self.request(32, previous=16, snapshot=16)
+        request.block_ids_by_group = [[1, 2, 3, 4], [5, 6, 7, 8]]
+        # The preceding aligned page had no content hash at save time.
+        entries = _load_entries(worker, request, 1, [b"newly-published-hash"], None)
+        self.assertEqual(entries, [(snapshot_key(worker, request, 1, 0, 16), 0)])
+
+    def test_scheduler_retains_exact_snapshot_identity_for_single_token_decode(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import (
+            LayerwiseKVPoolScheduler,
+        )
+
+        tracker = RequestTracker(
+            "request",
+            token_len=16395,
+            num_saved_tokens=13824,
+            allocated_block_ids=list(range(1, 17)),
+            num_prompt_tokens=16395,
+        )
+        tracker.layerwise_request_id = "incarnation"
+        hashes = [f"hash-{i}".encode() for i in range(14)]
+        ReqMeta.from_request_tracker(tracker, 1152, block_hashes=hashes, save_partial_block=True)
+        self.assertEqual(tracker.last_layerwise_snapshot_end_token, 16395)
+        scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+        scheduler.layerwise_offload = True
+        load = scheduler._running_load_spec(tracker, 16395)
+        tracker.token_len = 16396
+        next_step = ReqMeta.from_request_tracker(
+            tracker, 1152, block_hashes=hashes, load_spec=load, save_partial_block=True
+        )
+        self.assertTrue(next_step.load_spec.layerwise_previous_step)
+        self.assertEqual(next_step.load_spec.layerwise_snapshot_end_token, 16395)
+        self.assertEqual(next_step.target_token_len, 16396)
+        self.assertEqual(tracker.last_layerwise_snapshot_end_token, 16396)

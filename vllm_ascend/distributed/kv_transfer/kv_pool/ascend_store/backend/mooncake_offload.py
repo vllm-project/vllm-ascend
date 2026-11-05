@@ -46,15 +46,24 @@ def _load_entries(worker, request, group, hashes, mask):
     ids = request.block_ids_by_group[group]
     if end > len(ids):
         raise ValueError("Mooncake offload restore exceeds the allocated block table")
+    if recurrent and spec.layerwise_previous_step:
+        if tokens <= 0:
+            return []
+        index = end - 1
+        if ids[index] == 0:
+            raise ValueError("Mooncake offload restore selected a null recurrent checkpoint")
+        if spec.layerwise_snapshot_end_token == tokens:
+            return [(snapshot_key(worker, request, group, index, tokens), index)]
+        if tokens % size or index >= len(hashes):
+            # A recurrent state represents one exact endpoint, including the
+            # final, unaligned prompt chunk. It cannot be floored to an older
+            # hash boundary or rolled back from a later speculative state.
+            raise ValueError("Mooncake recurrent restore requires its exact saved snapshot endpoint")
+        return [(worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index])), index)]
     snapshot_start = worker._layerwise_load_snapshot_start(request, group, tokens)
     entries = []
     for index in range(end):
-        if recurrent and spec.layerwise_previous_step:
-            if tokens % size:
-                raise ValueError("Reused recurrent state requires an aligned prefill checkpoint")
-            if index != end - 1:
-                continue
-        elif mask is not None and index < len(mask) and not mask[index]:
+        if mask is not None and index < len(mask) and not mask[index]:
             continue
         if recurrent and ids[index] == 0:
             raise ValueError("Mooncake offload restore selected a null recurrent checkpoint")
@@ -72,7 +81,21 @@ def _load_entries(worker, request, group, hashes, mask):
 def _save_entries(worker, request, view, group, hashes):
     size = worker.grouped_block_size[group]
     recurrent = worker.group_uses_align_state[group]
-    partial = None if recurrent else get_partial_block_index(request.target_token_len, size, len(hashes), True)
+    # Resident recurrent state is selected by the model after speculative
+    # acceptance. Only scratch-backed recurrent state needs a private snapshot
+    # at every chunk endpoint, including an unaligned or not-yet-hashed one.
+    reused_state = recurrent and worker._group_reuses_buffer(group)
+    partial = get_partial_block_index(request.target_token_len, size, len(hashes), not recurrent or reused_state)
+    if reused_state and request.target_token_len > 0:
+        transfer_size = worker.cache_transfer_granularity
+        # Match RequestTracker's snapshot identity in the transfer LCM unit.
+        # A smaller recurrent group can already be aligned/hashed while the
+        # overall chunk still needs an immutable request endpoint snapshot.
+        if request.target_token_len % transfer_size or (
+            request.target_token_len // transfer_size
+            > len(request.block_hashes) * worker.hash_block_size // transfer_size
+        ):
+            partial = (request.target_token_len - 1) // size
     end = worker._layerwise_save_full_end(request, group, size, partial)
     start = min(request.save_start_token // size, end)
     view.save_key_block_offset = start

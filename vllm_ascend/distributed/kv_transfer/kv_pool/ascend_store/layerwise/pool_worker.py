@@ -352,6 +352,13 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
                     self.independent_layers = layout.independent_layers
                 self.layerwise_offload = layout.has_layer_reuse
                 self.num_prefetch_layers = layout.num_prefetch_layers
+                # Mooncake includes native MTP in its full-prefix object, but
+                # those caches are persistent allocations outside the target
+                # ring. Load them on external hits, not on every running step.
+                for name in getattr(self.kv_cache_config, "layerwise_draft_layer_names", ()):
+                    layer = self._global_to_local_layer.get(self._extract_physical_layer_index(name))
+                    if layer is not None and layer not in self.independent_layers:
+                        self.independent_layers = [*self.independent_layers, layer]
         else:
             self.num_prefetch_layers = 2
             if self.use_layerwise:

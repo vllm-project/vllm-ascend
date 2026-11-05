@@ -9,6 +9,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiCo
 from vllm.v1.worker import mamba_utils
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    validate_layerwise_pd_transports,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -20,6 +23,7 @@ if TYPE_CHECKING:
 
 class AscendMultiConnector(MultiConnector, SupportsHMA):
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole, kv_cache_config: "KVCacheConfig"):
+        validate_layerwise_pd_transports(vllm_config.kv_transfer_config)
         super().__init__(
             vllm_config=vllm_config,
             role=role,

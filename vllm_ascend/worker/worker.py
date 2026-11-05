@@ -1235,15 +1235,23 @@ class NPUWorker(WorkerBase):
         # Match the allocation planner: persistent draft pages are not target
         # scratch slots and must be counted once each in the physical budget.
         excluded_layer_names = (excluded_layer_names or set()) & kv_cache_spec.keys()
-        target_specs = {name: spec for name, spec in kv_cache_spec.items() if name not in excluded_layer_names}
         base_layers = self.model_config.get_num_layers(self.parallel_config)
+        config = getattr(self, "vllm_config", None)
+        if (
+            str(extra_config.get("backend", "mooncake")).lower() == "mooncake"
+            and getattr(config, "speculative_config", None) is not None
+            and getattr(self.parallel_config, "pipeline_parallel_size", 1) == 1
+        ):
+            excluded_layer_names |= {
+                name for name in kv_cache_spec if get_physical_layer_index(name, base_layers) >= base_layers
+            }
+        target_specs = {name: spec for name, spec in kv_cache_spec.items() if name not in excluded_layer_names}
         physical_layers = {get_physical_layer_index(layer_name, base_layers) for layer_name in target_specs}
         num_layers = len(physical_layers)
         if num_layers < base_layers:
             return num_layers, num_layers, 1.0
         # Physical builders already account for the final shared backings.
         # Consume that same layout rather than applying a logical multiplier.
-        config = getattr(self, "vllm_config", None)
         plan = get_physical_kv_cache_config_from_specs(config, kv_cache_spec) if config is not None else None
         if plan is not None:
             layout = getattr(plan, "layerwise_reuse_layout", None)
