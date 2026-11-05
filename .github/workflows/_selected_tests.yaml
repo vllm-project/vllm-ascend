@@ -316,6 +316,36 @@ jobs:
           python3 -c "import fla_npu.ops.ascendc"
           rm -f "/tmp/$FLA_WHL"
 
+      - name: Build MemFabric AccOffload for sparse KV lifecycle test
+        if: ${{ matrix.group.npu_type == 'a3' && contains(matrix.group.tests, 'test_sparse_kv_offload_lifecycle.py') }}
+        timeout-minutes: 15
+        env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: '0'
+        run: |
+          set -eo pipefail
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          python3 -m memfabric_hybrid.cli kernel install --soc-version A3
+          python3 - <<'PY'
+          import hashlib
+          import importlib.metadata
+
+          import torch
+          import torch_npu
+          from memfabric_hybrid import offload
+
+          dist = importlib.metadata.distribution('memfabric-hybrid')
+          lib = dist.locate_file('memfabric_hybrid/lib/libmf_hybm_accoffload.so')
+          print('python:', __import__('sys').executable)
+          print('memfabric-hybrid:', dist.version)
+          print('torch:', torch.__version__, 'torch_npu:', torch_npu.__version__)
+          print('library:', lib, 'bytes:', lib.stat().st_size)
+          data = lib.read_bytes()
+          assert data[:4] == b'\x7fELF', f'AccOffload library is not ELF: {lib}'
+          assert callable(getattr(offload, 'initialize', None)), 'MemFabric offload.initialize is unavailable'
+          print('sha256:', hashlib.sha256(data).hexdigest())
+          print('MemFabric offload loader entry point OK; runtime initialization is checked by lifecycle tests')
+          PY
+
       - name: Verify required AscendC custom ops are registered
         if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
