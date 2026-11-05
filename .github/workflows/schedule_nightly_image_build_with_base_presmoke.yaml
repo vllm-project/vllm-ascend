@@ -166,7 +166,7 @@ jobs:
           fi
           echo "ref=${vllm_ref}" >> "$GITHUB_OUTPUT"
 
-  # ========== 生成presmoke分组，调用 _presmoke_tests.yaml 冒烟 ==========
+  # ========== 生成presmoke分组，调用 _selected_tests.yaml 冒烟 ==========
   gen-presmoke-groups:
     name: Generate presmoke test groups for ${{ inputs.target }}
     needs: build-nightly
@@ -201,7 +201,7 @@ jobs:
       ${{ inputs.run_presmoke &&
           needs.gen-presmoke-groups.result == 'success' &&
           needs.resolve-vllm-ref.result == 'success' }}
-    uses: ./.github/workflows/presmoke_tests.yaml
+    uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ inputs.vllm_ref_for_test || needs.resolve-vllm-ref.outputs.vllm_ref }}
       test_groups: ${{ needs.gen-presmoke-groups.outputs.presmoke_groups_json }}
