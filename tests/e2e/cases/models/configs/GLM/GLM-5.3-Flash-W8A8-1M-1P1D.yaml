@@ -57,17 +57,17 @@ templates:
       - --host
       - "0.0.0.0"
       - --port
-      - $SERVER_PORT
+      - "${SERVER_PORT}"
       - --data-parallel-size
-      - ${DP_SIZE}
+      - "${DP_SIZE}"
       - --data-parallel-rank
-      - ${DP_RANK}
+      - "${DP_RANK}"
       - --data-parallel-address
-      - ${DP_ADDRESS}
+      - "${DP_ADDRESS}"
       - --data-parallel-rpc-port
-      - ${DP_RPC_PORT}
+      - "${DP_RPC_PORT}"
       - --tensor-parallel-size
-      - ${TP_SIZE}
+      - "${TP_SIZE}"
       - --enable-expert-parallel
       - --seed
       - "1024"
@@ -110,17 +110,17 @@ templates:
       - --host
       - "0.0.0.0"
       - --port
-      - $SERVER_PORT
+      - "${SERVER_PORT}"
       - --data-parallel-size
-      - ${DP_SIZE}
+      - "${DP_SIZE}"
       - --data-parallel-rank
-      - ${DP_RANK}
+      - "${DP_RANK}"
       - --data-parallel-address
-      - ${DP_ADDRESS}
+      - "${DP_ADDRESS}"
       - --data-parallel-rpc-port
-      - ${DP_RPC_PORT}
+      - "${DP_RPC_PORT}"
       - --tensor-parallel-size
-      - ${TP_SIZE}
+      - "${TP_SIZE}"
       - --enable-expert-parallel
       - --seed
       - "1024"
