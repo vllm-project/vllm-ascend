@@ -40,6 +40,7 @@ enables the development endpoints, and removes `expandable_segments` from
 | Field | When to enable it |
 | --- | --- |
 | `sleep_mode_extra_cleanup` | Release HCCL process groups and ACL graph workspaces during sleep in a same-NPU deployment |
+| `sleep_mode_graph_reuse` | Experimental A5 MRV2 graph restoration with conservative all-rank recapture fallback; requires sleep mode and extra cleanup |
 | `enable_training_consistency` | Select the FA3 attention backend for training-inference consistency |
 | `enable_batch_invariant` | Enable batch-invariant kernels and deterministic communication settings |
 
