@@ -727,6 +727,20 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, blocked_spec)
 
 
+def test_v2_flashmla_draft_cache_uses_selected_reader_with_sparse_target(monkeypatch):
+    layer_name = "draft.model.layers.0.self_attn.attn"
+    target_config = SimpleNamespace(kv_transfer_config=None, sparse=True)
+    layer = MLAAttention.__new__(MLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.impl = SimpleNamespace(use_flashmla=True)
+    spec = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {layer_name: layer})
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda config: config.sparse)
+    assert attn_utils._uses_single_raw_mla_cache(target_config, layer_name, spec)
+    layer.impl.use_flashmla = False
+    assert not attn_utils._uses_single_raw_mla_cache(target_config, layer_name, spec)
+
+
 def test_v2_zeroer_constructs_component_zeroers(monkeypatch):
     class RecordingZeroer:
         calls: list[dict[str, Any]] = []
