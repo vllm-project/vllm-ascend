@@ -92,6 +92,33 @@ kv_transfer_config = KVTransferConfig(
     - `root_dir`: Directory the tier writes block files into.
     - `n_read_threads` / `n_write_threads`: Thread-pool sizes for the tier's I/O. For high-bandwidth backends (e.g. 3FS over RDMA) increasing these helps saturate parallel bandwidth.
 
+### Pinning the shared CPU tier
+
+`TieringOffloadingSpec` registers its shared mmap as pinned host memory by default
+when the Ascend extension supports both `aclrtMemcpyBatchAsync` and
+`aclrtHostRegisterV2(ACL_HOST_REG_PINNED)`. This allows the existing batched DMA
+path to access the shared bytes directly without a separate pinned staging
+buffer.
+
+Set these options in `kv_connector_extra_config`:
+
+- `pin_shared_mmap`: Defaults to `true`. Set it to `false` to use pageable mmap.
+- `pin_worker_slot_only`: Defaults to `true` for non-replicated layouts. Each
+  worker registers only its page-aligned slots in the shared region. Set it to
+  `false` to register the whole region instead. For the replicated MLA layout,
+  every worker reads the entire shared region, so this option is ignored and the
+  whole region is registered. Older vLLM versions without the worker slot range
+  API also register the whole region.
+
+If the extension lacks support or registration fails, the worker rolls back
+completed registrations and uses pageable mmap with a warning. Large regions
+can exceed runtime registration limits; registering many individual slots can
+also increase startup time. The startup log reports the registered bytes and
+range count. Shutdown waits for NPU transfers before unregistering the ranges
+and releasing the mapping.
+
+`CPUOffloadingSpec` continues to use PyTorch's pinned tensor allocator.
+
 ### Tuning the filesystem (SSD / 3FS) secondary tier
 
 The `fs` tier reuses vLLM's batched filesystem implementation. It probes `O_DIRECT` at startup and automatically falls back to buffered I/O when the filesystem rejects direct I/O. To get the best disk/3FS offload throughput:

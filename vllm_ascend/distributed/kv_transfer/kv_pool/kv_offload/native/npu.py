@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from typing_extensions import override
+from vllm.logger import logger
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec as _CPUOffloadingSpec
@@ -45,11 +46,9 @@ class NPUOffloadingSpec(_NPUWorkerMixin, _CPUOffloadingSpec):
         self,
         kv_caches: CanonicalKVCaches,
     ) -> NPUOffloadingWorker:
-        # Keep the single-tier path on PyTorch's pinned allocator. Unlike CUDA,
-        # Ascend has no public cudaHostRegister-equivalent for an arbitrary
-        # mmap buffer, and the pinned tensor path has the best proven H2D/D2H
-        # performance. Consequently replicated_layout remains safely disabled
-        # for this spec by the upstream _uses_shared_region() gate.
+        # Keep the single-tier path on PyTorch's pinned allocator. This spec
+        # does not use a shared mmap, so upstream's _uses_shared_region() gate
+        # keeps replicated_layout disabled.
         return NPUOffloadingWorker(
             kv_caches=kv_caches,
             blocks_per_chunk=self.blocks_per_chunk,
@@ -76,6 +75,25 @@ class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
         # Match the scheduler's rank-based layout, regardless of device selection.
         rank = 0 if self.replicated_layout else self.config.parallel.rank
 
+        pin_shared_mmap = self.extra_config.get("pin_shared_mmap", True)
+        if isinstance(pin_shared_mmap, str):
+            pin_shared_mmap = pin_shared_mmap.lower() not in ("0", "false", "no")
+        else:
+            pin_shared_mmap = bool(pin_shared_mmap)
+
+        pin_worker_slot_only = self.extra_config.get("pin_worker_slot_only")
+        if pin_worker_slot_only is None:
+            pin_worker_slot_only = not self.replicated_layout
+        elif isinstance(pin_worker_slot_only, str):
+            pin_worker_slot_only = pin_worker_slot_only.lower() not in ("0", "false", "no")
+        else:
+            pin_worker_slot_only = bool(pin_worker_slot_only)
+        if self.replicated_layout and pin_worker_slot_only:
+            logger.warning(
+                "pin_worker_slot_only is ignored for the replicated MLA layout; pinning the whole shared region instead"
+            )
+            pin_worker_slot_only = False
+
         region_kwargs = dict(num_chunks=self.num_chunks, kv_bytes_per_chunk=self.kv_bytes_per_chunk)
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
@@ -88,4 +106,6 @@ class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
             blocks_per_chunk=self.blocks_per_chunk,
             num_cpu_blocks=self.num_chunks,
             mmap_region=worker_mmap,
+            pin_shared_mmap=pin_shared_mmap,
+            worker_slot_only=pin_worker_slot_only,
         )
