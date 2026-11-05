@@ -478,11 +478,7 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
     manager.dcp_world_size, manager.dcp_world_rank = 2, rank
     manager.vllm_config = builder.vllm_config
     manager._get_dcp_local_seq_lens = MagicMock(side_effect=AssertionError("builder owns GQA lengths"))
-    with (
-        patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=False),
-        patch.object(DCPManager, "_is_sfa_dcp_metadata_builder", return_value=False),
-        patch.object(torch.Tensor, "pin_memory", lambda tensor: tensor),
-    ):
+    with patch.object(torch.Tensor, "pin_memory", lambda tensor: tensor):
         manager.prepare_spec_decode_drafting_cp_metadata(common, object())
         assert common.context_parallel_metadata is None
         metadata = builder.build(0, common)
