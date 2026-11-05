@@ -21,6 +21,8 @@ from vllm_ascend._310p.ops.gdn_attn_builder_310 import (
     GDNAttentionMetadataBuilder310,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops import gdn as ascend_gdn
 from vllm_ascend.ops import gdn_attn_builder as ascend_gdn_attn_builder
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
@@ -1820,8 +1822,13 @@ def test_host_conv_indices_are_shared_and_refreshed(monkeypatch):
 
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
-@pytest.mark.parametrize("num_speculative_tokens,expected_fused", [(7, False), (8, True)])
-def test_long_fixed_drafts_use_strided_recurrent_route(builder_cls, num_speculative_tokens, expected_fused):
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("num_speculative_tokens", [7, 8, 9])
+def test_long_fixed_drafts_use_strided_recurrent_route(monkeypatch, builder_cls, device_type, num_speculative_tokens):
+    monkeypatch.setattr(
+        ascend_gdn_attn_builder, "get_current_hardware_profile", lambda: get_hardware_profile(device_type)
+    )
+    expected_fused = device_type == AscendDeviceType.A2 and num_speculative_tokens >= 8
     builder = _make_builder(
         device=torch.device("cpu"),
         num_heads=32,
@@ -1842,6 +1849,58 @@ def test_long_fixed_drafts_use_strided_recurrent_route(builder_cls, num_speculat
     assert metadata.spec_decode_metadata.use_upstream_recurrent is expected_fused
     assert not metadata.spec_decode_metadata.use_upstream_conv
     assert (metadata.spec_decode_metadata.actual_seq_lengths is None) is expected_fused
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("query_len", [1, 9])
+def test_adaptive_recurrent_route_is_hardware_independent(monkeypatch, builder_cls, device_type, query_len):
+    monkeypatch.setattr(
+        ascend_gdn_attn_builder, "get_current_hardware_profile", lambda: get_hardware_profile(device_type)
+    )
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=8,
+        enable_adaptive_verification=True,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        builder_cls=builder_cls,
+    )
+    common = create_common_attn_metadata(BatchSpec([64, 64], [query_len, query_len]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(1, 23, dtype=torch.int32).view(2, 11)
+    metadata = builder.build(
+        0,
+        common,
+        torch.tensor([9, 9], dtype=torch.int32),
+        torch.full((2,), query_len - 1, dtype=torch.int32),
+    )
+    spec = metadata.spec_decode_metadata
+    assert spec.use_upstream_recurrent and spec.use_upstream_conv
+    assert spec.actual_seq_lengths is None
+    assert spec.spec_causal_conv1d.num_accepted_tokens.tolist() == [9, 9]
+    torch.testing.assert_close(metadata.spec_state_indices_tensor, common.block_table_tensor[:, :9])
+
+
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_310p_never_selects_common_strided_recurrent_workaround(monkeypatch, adaptive):
+    monkeypatch.setattr(
+        ascend_gdn_attn_builder,
+        "get_current_hardware_profile",
+        Mock(side_effect=AssertionError("310P must not query the common recurrent workaround")),
+    )
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=8,
+        enable_adaptive_verification=adaptive,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        builder_cls=GDNAttentionMetadataBuilder310,
+    )
+    common = create_common_attn_metadata(BatchSpec([64, 64], [9, 9]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(1, 23, dtype=torch.int32).view(2, 11)
+    spec = builder.build_for_cudagraph_capture(common).spec_decode_metadata
+    assert not spec.use_upstream_recurrent
+    assert not spec.use_upstream_conv
 
 
 def test_adaptive_fused_descriptors_keep_prepared_conv_indices():

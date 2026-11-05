@@ -608,8 +608,13 @@ Check output quality and actual admitted draft counts as well as throughput.
 Adaptive GDN uses strided Triton convolution and recurrent updates with device
 query boundaries. This supports FULL-graph padding and a previously accepted
 block followed by a shorter verification query without copying the state cache.
-Fixed verification queries of at least nine tokens also use the strided recurrent
-update, following native recurrent numerical failures observed on A2.
+On A2, fixed verification queries of at least nine tokens also use the strided
+recurrent update as a workaround for native NaNs observed with BF16 and eight
+draft tokens. This threshold records the observed failing configuration, not a
+general hardware limit. A3 and A5 retain their native fixed-verification path;
+adaptive verification uses the strided path independently of this workaround.
+The fixed-path workaround can be removed after the replacement native operator
+stack passes the recurrent numerical and state-update regression tests on A2.
 
 The FIA path copies admitted query boundaries back to the host for partial draft
 budgets. Full and zero budgets already have exact host boundaries and skip that

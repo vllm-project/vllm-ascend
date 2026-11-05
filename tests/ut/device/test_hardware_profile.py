@@ -218,6 +218,20 @@ def test_hardware_profile_capability_matrix(device_type: AscendDeviceType) -> No
         assert profile.supports(capability) is (capability in expected_capabilities)
 
 
+@pytest.mark.parametrize(
+    "device_type,expected_min_query_len",
+    [
+        (AscendDeviceType.A2, 9),
+        (AscendDeviceType.A3, None),
+        (AscendDeviceType.A5, None),
+        (AscendDeviceType._310P, None),
+    ],
+)
+def test_gdn_fixed_spec_recurrent_fallback_policy(device_type, expected_min_query_len):
+    profile = get_hardware_profile(device_type)
+    assert profile.gdn_fixed_spec_recurrent_fallback_min_query_len == expected_min_query_len
+
+
 def test_current_hardware_profile_uses_device_config() -> None:
     expected_profile = get_hardware_profile(get_device_config()._device_type)
 

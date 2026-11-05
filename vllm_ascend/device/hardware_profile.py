@@ -248,6 +248,10 @@ class HardwareProfile:
 
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
     requires_2d_nz_linear_input: bool = False
+    # Fixed GDN verification uses the strided recurrent kernel at/above this
+    # query length to work around native operator numerical failures. None
+    # retains native dispatch; this is a stack workaround, not a silicon limit.
+    gdn_fixed_spec_recurrent_fallback_min_query_len: int | None = None
 
     def supports(self, capability: HardwareCapability) -> bool:
         """Return whether the exact documented ``capability`` contract is available."""
@@ -294,6 +298,11 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
     {
         AscendDeviceType.A2: HardwareProfile(
             _device_type=AscendDeviceType.A2,
+            # A2 BF16 native verification produced NaNs with 8 drafts (9 queries).
+            # Nine is the first observed failing configuration, not a proven
+            # universal kernel bound. Remove after native recurrent parity is
+            # validated on the replacement operator stack.
+            gdn_fixed_spec_recurrent_fallback_min_query_len=9,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.TOPO_AFFINITY,
             default_worker_cls=_DEFAULT_WORKER_CLS,

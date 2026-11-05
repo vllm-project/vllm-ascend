@@ -32,6 +32,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
+from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
@@ -48,9 +49,6 @@ _GDN_CUMSUM_WORKING_SET = 2**18
 # Accepted-token counts are one-based. The zero-length query segment makes
 # graph-padding rows no-ops, while 1 keeps their count valid for GDN kernels.
 _GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT = 1
-# A2 native recurrent updates produced NaNs for 9-token fixed verification.
-# Use the validated strided route for these longer blocks as well.
-_FUSED_SPEC_RECURRENT_MIN_QUERY_LEN = 9
 
 
 def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
@@ -556,14 +554,19 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             actual_seq_lengths_buffer = self.spec_actual_seq_lengths
         spec_num_rows = attn_metadata.spec_query_start_loc.size(0) - 1
 
-        use_upstream_recurrent = bool(
-            self._USE_COMMON_KERNEL_METADATA
-            and self.speculative_config
-            and (
-                getattr(self.speculative_config, "enable_adaptive_verification", False)
-                or self.num_spec + 1 >= _FUSED_SPEC_RECURRENT_MIN_QUERY_LEN
-            )
-        )
+        use_upstream_recurrent = False
+        if self._USE_COMMON_KERNEL_METADATA and self.speculative_config:
+            if getattr(self.speculative_config, "enable_adaptive_verification", False):
+                # Variable query lengths must retain the previous accepted
+                # state offset on every supported adaptive backend.
+                use_upstream_recurrent = True
+            else:
+                # Fixed-length verification only opts into the workaround
+                # on profiles with an observed native numerical failure.
+                fallback_min_query_len = get_current_hardware_profile().gdn_fixed_spec_recurrent_fallback_min_query_len
+                use_upstream_recurrent = (
+                    fallback_min_query_len is not None and self.num_spec + 1 >= fallback_min_query_len
+                )
         attn_metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
             use_upstream_recurrent=use_upstream_recurrent,
             use_upstream_conv=bool(
