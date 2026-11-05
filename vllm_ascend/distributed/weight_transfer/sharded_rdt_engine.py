@@ -8,7 +8,7 @@ an endpoint/address/size descriptor, never a tensor through Ray RDT. Receive
 rings are registered once with HIXL; NPU events guard their scatter lifetime.
 """
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
@@ -30,8 +30,29 @@ from vllm.logger import logger
 
 from vllm_ascend.distributed.weight_transfer.hixl_session import HixlSession
 
+if TYPE_CHECKING:
+    import queue
+    import threading
+
+    from vllm.distributed.weight_transfer.sharded_rdt_engine import _CallPlan
+
 
 class ShardedRDTHixlWeightTransferEngine(ShardedRDTWeightTransferEngine):
+    # Initialized by the upstream constructor. Declare the types here because
+    # CI skips imported implementations and cannot infer their instance state.
+    _cached_plan: "_CallPlan | None"
+    _dest_buffers: list[dict[torch.dtype, torch.Tensor]]
+    _slot_read_done: list[Any]
+    _slot_cv: Any
+    _slot_done: list[int]
+    _slot_queued: list[int]
+    _proc_thread: "threading.Thread | None"
+    _quant_thread: "threading.Thread | None"
+    _proc_queue: "queue.Queue[_ProcItem | None] | None"
+    _quant_queue: "queue.Queue[tuple[list[Any], Any] | None] | None"
+    _proc_stream: Any
+    _quant_stream: Any
+
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Configure the ring, bind the producers, bake the replay plan, and
         pre-register every HIXL buffer -- in that order, because each step depends
@@ -375,6 +396,7 @@ class ShardedRDTHixlWeightTransferEngine(ShardedRDTWeightTransferEngine):
             (self._quant_thread, self._quant_queue),
         ):
             if thread is not None:
+                assert work_queue is not None
                 work_queue.put(None)
                 thread.join(timeout=30)
                 if thread.is_alive():

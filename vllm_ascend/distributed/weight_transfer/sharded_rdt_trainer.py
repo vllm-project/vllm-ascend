@@ -12,7 +12,6 @@ import threading
 import time
 import uuid
 from dataclasses import asdict
-from typing import Self
 
 import ray
 import torch
@@ -20,6 +19,7 @@ from torch.multiprocessing.reductions import (
     StorageWeakRef,
 )
 from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
+from typing_extensions import Self
 from vllm.distributed.weight_transfer.base import (
     VLLMWeightSyncClient,
     WeightSource,
