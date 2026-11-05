@@ -19,7 +19,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
-
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.utils import collect_pp_group_owners
 
 
