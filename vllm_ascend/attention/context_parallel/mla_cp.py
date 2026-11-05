@@ -15,6 +15,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
 # isort: off
 from vllm_ascend.attention.mla_v1 import (
+    MLA_KERNEL_BLOCK_SIZE,
     ChunkedContextMetadata,
     DecodeMLAPreprocessResult,
     AscendMLADecodeMetadata,
@@ -115,20 +116,28 @@ class AscendMlaDCPMetadataBuilder(
     supports_non_causal_multi_token_dcp = True
 
     @staticmethod
+    def determine_chunk_alignment(vllm_config: VllmConfig) -> int:
+        parallel_config = vllm_config.parallel_config
+        dcp_size = parallel_config.decode_context_parallel_size
+        # A global chunk is compressed by DCP before GatherPa reads it. Align
+        # the resulting local offset, not only the global interleave cycle.
+        return lcm(
+            vllm_config.cache_config.block_size,
+            parallel_config.cp_kv_cache_interleave_size * dcp_size,
+            MLA_KERNEL_BLOCK_SIZE * dcp_size,
+        )
+
+    @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
         workspace_size = AscendMLAMetadataBuilder.determine_chunked_prefill_workspace_size(vllm_config)
         parallel_config = vllm_config.parallel_config
-        if parallel_config.prefill_context_parallel_size > 1 and parallel_config.decode_context_parallel_size > 1:
-            chunk_alignment = lcm(
-                vllm_config.cache_config.block_size,
-                parallel_config.cp_kv_cache_interleave_size * parallel_config.decode_context_parallel_size,
-            )
-            # The shared plan reserves two local fragments per global PCP
-            # request. After halving the budget, each request must still fit
-            # one aligned DCP chunk.
-            min_workspace_size = 2 * vllm_config.scheduler_config.max_num_seqs * chunk_alignment
-            workspace_size = max(workspace_size, min_workspace_size)
-        return workspace_size
+        dcp_size = parallel_config.decode_context_parallel_size
+        chunk_alignment = AscendMlaDCPMetadataBuilder.determine_chunk_alignment(vllm_config)
+        # PCP's shared plan halves the default budget for two local fragments
+        # per global request. Pure DCP also needs one aligned chunk per request.
+        fragment_factor = 2 if parallel_config.prefill_context_parallel_size > 1 and dcp_size > 1 else 1
+        min_workspace_size = fragment_factor * vllm_config.scheduler_config.max_num_seqs * chunk_alignment
+        return cdiv(max(workspace_size, min_workspace_size), dcp_size) * dcp_size
 
     def __init__(
         self,
@@ -147,10 +156,6 @@ class AscendMlaDCPMetadataBuilder(
         self.dcp_collective_rank_order = [collective_ranks.index(rank) for rank in dcp_ranks]
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size
-        self.block_size = (self.block_size * self.cp_virtual_block_size) // np.gcd(
-            self.block_size,
-            self.cp_virtual_block_size,
-        )
 
     def _get_pcp_prefill_kv_inputs(
         self,

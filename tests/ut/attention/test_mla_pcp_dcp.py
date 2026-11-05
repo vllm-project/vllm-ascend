@@ -246,6 +246,9 @@ def test_chunked_metadata_preserves_explicit_plan_and_workspace(use_pcp):
         (2, 16, 32, 128, 131072),
         (2, 16, 64, 128, 262144),
         (2, 16, 32, 256, 262144),
+        (1, 16, 64, 1, 131072),
+        (1, 16, 128, 128, 262144),
+        (2, 16, 64, 1, 262144),
     ],
 )
 def test_pcp_dcp_workspace_fits_an_aligned_chunk_per_fragment(pcp_size, dcp_size, max_num_seqs, interleave, expected):
@@ -272,7 +275,8 @@ def test_pcp_dcp_chunk_plan_rejects_insufficient_budget_and_fits_exact_boundary(
     builder.use_pcp = builder.use_dcp = builder.chunked_prefill_enabled = True
     builder.chunked_prefill_workspace_size = workspace_size
     builder.chunked_prefill_workspace = torch.empty(0)
-    builder.block_size = builder.cp_virtual_block_size = 2048
+    builder.block_size = 128
+    builder.chunk_alignment = builder.cp_virtual_block_size = 2048
     builder.cp_local_block_size = 128
     builder.dcp_size = 16
     builder.dcp_collective_rank_order = list(range(16))
@@ -287,7 +291,10 @@ def test_pcp_dcp_chunk_plan_rejects_insufficient_budget_and_fits_exact_boundary(
     if workspace_size == 65536:
         with pytest.raises(
             ValueError,
-            match=r"workspace_size=32768, num_prefills_with_context=32, block_size=2048, minimum_workspace_size=65536",
+            match=(
+                r"workspace_size=32768, num_prefills_with_context=32, "
+                r"chunk_alignment=2048, minimum_workspace_size=65536"
+            ),
         ):
             builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=64))
         return
@@ -309,6 +316,154 @@ def test_pcp_dcp_chunk_plan_rejects_insufficient_budget_and_fits_exact_boundary(
     assert metadata.chunk_seq_lens.shape == (3, 64)
     assert metadata.seq_tot == [4096, 4096, 4096]
     assert metadata.chunk_seq_lens.sum(1).tolist() == [131072, 131072, 768]
+
+
+@pytest.fixture
+def chunk_metadata_on_cpu(monkeypatch):
+    cpu_zeros = torch.zeros
+
+    def zeros_without_pinning(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return cpu_zeros(*args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "pin_memory", lambda tensor: tensor)
+    monkeypatch.setattr(torch.Tensor, "npu", lambda tensor: tensor, raising=False)
+    monkeypatch.setattr(torch, "zeros", zeros_without_pinning)
+
+
+def _chunk_config(*, block_size=128, pcp_size=1, dcp_size=2, interleave=1, max_num_seqs=16):
+    return SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=32768),
+        cache_config=SimpleNamespace(block_size=block_size),
+        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=pcp_size,
+            decode_context_parallel_size=dcp_size,
+            cp_kv_cache_interleave_size=interleave,
+        ),
+    )
+
+
+def _dcp_chunk_builder(config, histories, *, global_histories=None, workspace_size=None):
+    from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
+
+    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
+    builder.pcp_enabled = config.parallel_config.prefill_context_parallel_size > 1
+    builder.dcp_enabled = builder.chunked_prefill_enabled = True
+    builder.block_size = config.cache_config.block_size
+    builder.chunk_alignment = builder.determine_chunk_alignment(config)
+    builder.chunked_prefill_workspace_size = (
+        builder.determine_chunked_prefill_workspace_size(config) if workspace_size is None else workspace_size
+    )
+    builder.chunked_prefill_workspace = torch.empty(0)
+    builder.dcp_size = config.parallel_config.decode_context_parallel_size
+    builder.cp_local_block_size = config.parallel_config.cp_kv_cache_interleave_size
+    builder.cp_virtual_block_size = builder.cp_local_block_size * builder.dcp_size
+    builder.dcp_collective_rank_order = list(range(builder.dcp_size))
+    builder.device = torch.device("cpu")
+    builder.num_decodes = 0
+    builder.num_prefills = len(histories)
+    builder.query_lens = torch.full((len(histories),), 8, dtype=torch.int32)
+    builder.seq_lens = torch.tensor(histories, dtype=torch.int32) + builder.query_lens
+    if global_histories is not None:
+        fragments = len(histories) // len(global_histories)
+        builder._get_pcp_prefill_kv_inputs = Mock(
+            return_value=(
+                torch.tensor(global_histories, dtype=torch.int32),
+                [row for row in range(len(global_histories)) for _ in range(fragments)],
+                None,
+            )
+        )
+    return builder
+
+
+@pytest.mark.parametrize("pcp_size", [1, 2])
+def test_dcp_chunk_offsets_read_the_correct_second_chunk(pcp_size, chunk_metadata_on_cpu):
+    # Previously global C=14464 produced local offset=7232, and GatherPa's
+    # integer page offset silently started at 7168 instead of 7232.
+    config = _chunk_config(pcp_size=pcp_size)
+    global_histories = [20000] * 9
+    histories = global_histories if pcp_size == 1 else [20000, 19000] * 9
+    builder = _dcp_chunk_builder(
+        config,
+        histories,
+        global_histories=global_histories if pcp_size > 1 else None,
+        workspace_size=131072 * pcp_size,
+    )
+    metadata = builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=len(histories)))
+
+    assert builder.max_context_chunk == 14336
+    assert metadata.chunk_size == 7168
+    assert metadata.starts[1].tolist() == [7168] * 9
+    assert metadata.seq_tot == [64512, 25488]
+    assert metadata.chunk_seq_lens.sum(dim=0).tolist() == histories
+    for rank in range(2):
+        offset = int(metadata.starts[1, 0])
+        length = metadata.padded_local_chunk_seq_lens[1][0]
+        # Emulate GatherPa's page-only offset using token-position payloads.
+        native_local_positions = torch.arange(length) + (offset // 128) * 128
+        actual_global_positions = native_local_positions * 2 + rank
+        torch.testing.assert_close(actual_global_positions, torch.arange(14336 + rank, 20000, 2))
+    if pcp_size > 1:
+        assert metadata.pcp_global_req_indices == [row for row in range(9) for _ in range(2)]
+
+
+@pytest.mark.parametrize("block_size", [16, 128, 384])
+@pytest.mark.parametrize("dcp_size,interleave", [(2, 1), (4, 32), (16, 256)])
+def test_dcp_chunk_offsets_align_to_kernel_blocks(block_size, dcp_size, interleave, chunk_metadata_on_cpu):
+    config = _chunk_config(block_size=block_size, dcp_size=dcp_size, interleave=interleave)
+    histories = [0, 200000, 751, 100001]
+    builder = _dcp_chunk_builder(config, histories)
+    metadata = builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=len(histories)))
+
+    assert builder.num_chunks > 1
+    assert torch.all(metadata.starts % 128 == 0)
+    assert builder.max_context_chunk % (dcp_size * interleave) == 0
+    assert metadata.chunk_size * dcp_size == builder.max_context_chunk
+    assert metadata.chunk_seq_lens.sum(dim=0).tolist() == histories
+    assert max(metadata.seq_tot) * dcp_size <= builder.chunked_prefill_workspace_size
+
+
+@pytest.mark.parametrize("pcp_size", [1, 2])
+@pytest.mark.parametrize("workspace_size", [767, 768])
+def test_dcp_explicit_workspace_preserves_exact_alignment_boundary(pcp_size, workspace_size, chunk_metadata_on_cpu):
+    config = _chunk_config(pcp_size=pcp_size)
+    histories = [0, 1000, 257, 513]
+    builder = _dcp_chunk_builder(config, histories, global_histories=histories if pcp_size > 1 else None)
+    if workspace_size == 767:
+        with pytest.raises(ValueError, match=r"chunk_alignment=256, minimum_workspace_size=768"):
+            builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=4), chunk_workspace_size=workspace_size)
+        return
+
+    metadata = builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=4), chunk_workspace_size=workspace_size)
+    assert builder.max_context_chunk == 256
+    assert metadata.chunk_size == 128
+    assert metadata.chunk_seq_lens.sum(dim=0).tolist() == histories
+
+
+def test_plain_mla_chunks_align_to_kernel_block_when_config_is_smaller(chunk_metadata_on_cpu):
+    from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
+
+    config = _chunk_config(block_size=16, dcp_size=1, max_num_seqs=128)
+    config.model_config.max_model_len = 1
+    builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
+    builder.block_size = config.cache_config.block_size
+    builder.chunk_alignment = builder.determine_chunk_alignment(config)
+    builder.chunked_prefill_enabled = True
+    builder.chunked_prefill_workspace_size = builder.determine_chunked_prefill_workspace_size(config)
+    builder.chunked_prefill_workspace = torch.empty(0)
+    builder.device = torch.device("cpu")
+    builder.num_decodes = 0
+    builder.num_prefills = 9
+    builder.query_lens = torch.ones(9, dtype=torch.int32)
+    builder.seq_lens = torch.full((9,), 301, dtype=torch.int32)
+    assert builder.chunked_prefill_workspace_size == 128 * 128
+
+    metadata = builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=9), chunk_workspace_size=9 * 144)
+    assert builder.block_size == 16
+    assert builder.max_context_chunk == 128
+    assert metadata.starts[:, 0].tolist() == [0, 128, 256]
+    assert metadata.chunk_seq_lens[:, 0].tolist() == [128, 128, 44]
 
 
 def test_pcp_global_plan_keeps_local_fragment_mapping():
