@@ -1,0 +1,7 @@
+pr: 21101
+entries:
+  - category: performance
+    text: >-
+      Native multi-tier KV-cache offloading now pins its shared CPU mapping on
+      supported Ascend runtimes for direct batched transfers, with per-worker
+      registration for non-replicated layouts and configurable pageable fallback.
