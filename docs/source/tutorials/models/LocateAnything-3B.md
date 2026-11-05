@@ -323,6 +323,11 @@ at concurrency 1 / 8 / 32, so `FULL_DECODE_ONLY` adds about +110% / +33% / +5% o
 preprocessing change. Do **not** combine `FULL_DECODE_ONLY` with `ngram` speculative decoding:
 the combination regresses to 1.01 / 6.69 / 11.97 img/s.
 
+Stability: 2000+ requests across concurrency 1–64 (including a 1000-request run at concurrency 32)
+and `max-size` 384/448/512/768/1024/native completed with 0 errors; server HBM stayed at
+19.07–19.16 GB over 187 samples (no leak). Accuracy at those sizes was 87.3/94.3/96.3/95.9/95.9/95.5%,
+again confirming that 512 is the sweet spot and 384 is not usable.
+
 ## 9 Performance Tuning
 
 ### 9.1 Recommended Configurations
@@ -330,8 +335,8 @@ the combination regresses to 1.01 / 6.69 / 11.97 img/s.
 | Scenario | NPUs | Key settings | Main consideration |
 | -------- | ---- | ------------ | ------------------ |
 | Low concurrency, lowest latency | 1–2 | `FULL_DECODE_ONLY`, `--max-num-seqs 8`, `max-size 512` | Single-stream about 311 ms with the client fast path; decode is no longer the bottleneck |
-| Online serving, medium concurrency | 1–2 | `FULL_DECODE_ONLY`, `--max-num-seqs 32`, `max-size 512` | 10–13 img/s per client process on a single NPU |
-| Offline high throughput | 5+ | `--max-num-seqs 32`, 4 client processes | Near-linear scaling with client processes |
+| Online serving, medium concurrency | 1–2 | `FULL_DECODE_ONLY`, `--max-num-seqs 32`, `max-size 512` | 10–13 img/s per process; 2 processes on one NPU reach about 16.7 img/s |
+| Offline high throughput | 1–5 | `--max-num-seqs 32–64`, 2–4 client processes | 4 processes on one NPU reach about 25.3 img/s, but need guided decoding or output validation |
 
 ### 9.2 Tuning Guidelines
 
@@ -339,7 +344,7 @@ Tune in this order; each step was measured on the configuration above.
 
 1. **Input resolution (`max-size` in the client).** This is the dominant knob because it changes the number of vision tokens. Going from 768 to 512 gives +9% throughput at concurrency 8 and +38% at concurrency 32, with slightly better IoU. Do not go below 512 on this model: at 384 the IoU collapses to 87.2%.
 2. **Client concurrency.** End-to-end throughput saturates around concurrency 8–32 per client process. Beyond that, queueing grows faster than throughput.
-3. **Number of client processes.** The vision stage is serialized per process, and the image processor holds the GIL. With the default graph a single process caps at about 7–9 img/s; with `FULL_DECODE_ONLY` and preprocessing moved outside the vision lock it reaches about 10–13 img/s. Adding one client process per NPU scales throughput nearly linearly.
+3. **Number of client processes.** The vision stage is serialized per process, and the image processor holds the GIL. With the default graph a single process caps at about 7–9 img/s; with `FULL_DECODE_ONLY` and preprocessing moved outside the vision lock it reaches about 10–13 img/s. Multiple processes can share one NPU: 2 processes reach about 16.7 img/s, 3 about 21.9, 4 about 25.3. However, at 3–4 processes we observed occasional malformed boxes (5/400 at 4 processes), so 2 processes per NPU is the safe default; for 3–4 add guided decoding or output validation/retry (Section 9.3). Multiple NPUs still scale nearly linearly.
 4. **Server knobs.** `--max-num-seqs` beyond 32 does not help (21.06 req/s at 32 vs 22.62 at 64). Keep the default prefix cache: disabling it costs about 10%. `--max-num-batched-tokens` 4096 showed no gain over the default 2048.
 5. **Graph mode.** The default is `PIECEWISE`. Enable `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: it captures the whole decode step, cuts TPOT from about 32 ms to about 10 ms, and lifts single-request throughput from about 1.5 to 3.15 img/s. It is marked experimental upstream, so fall back to `PIECEWISE` if you hit OOM/hangs. Do **not** combine it with `ngram`.
 
@@ -349,6 +354,9 @@ Tune in this order; each step was measured on the configuration above.
 - **Do not batch images through the vision tower on Ascend.** Batching 8 images into one `extract_feature` call is about 5x slower per image than running them one by one (516 ms/img vs 104 ms/img), and processor-level batching with variable shapes returns the wrong number of feature tokens. Feed one image per call.
 - **The image processor has no fast implementation.** `AutoProcessor(..., use_fast=True)` falls back to the slow path, so preprocessing costs about 35 ms per image at concurrency 1 and about 140 ms under GIL contention at concurrency 32. That is the practical ceiling of a single client process. Moving the processor build outside the vision lock (so CPU preprocessing overlaps the serialized NPU encode) raises concurrency-32 throughput by about 11% (11.05 → 12.26 img/s) with no accuracy change.
 - **Pre-compute embeddings when the same image is queried repeatedly** (for example many prompts on one image). The vision stage then disappears from the critical path, and the server-only ceiling of 21–22 req/s applies.
+- **Multiple client processes can share one NPU, but validate output at 3–4.** Two processes reach about 16.7 img/s with stable IoU; three reach about 21.9 and four about 25.3, but at 3–4 processes we saw occasional malformed boxes such as `<ref><436><598><982></box>`. The failure mode is near-tie coordinate tokens flipping under mixed batches, not a crash.
+- **Structured output is a cheap safety net at high concurrency.** Passing `structured_outputs={"regex": "<ref>[^<]*</ref><box><\\d{1,3}><\\d{1,3}><\\d{1,3}><\\d{1,3}></box>"}` gives 0/400 malformed boxes with 4 client processes, with byte-identical outputs at concurrency 1 and about 12–17% extra per-request latency (4-process throughput 25.3 → 19.1 img/s). Enable it when running multiple clients, or when using the `npu_fa` vision path.
+- **Client-side `box_avg` sampling is not beneficial.** Averaging 5 sampled boxes at temperature 0.3–0.7 gave lower mean IoU than plain greedy decoding (94.1–96.1% vs 96.24%) at 5x the decode cost. The native decoder averages coordinate-token candidates inside one forward pass, which is not equivalent to averaging independent samples. Keep greedy decoding.
 
 ## 10 FAQ
 
@@ -362,7 +370,7 @@ In the default `PIECEWISE` graph mode the native MTP decoder is faster (about 53
 
 ### Q3: Throughput saturates around 8–13 img/s no matter how high I set the concurrency. Why?
 
-The limit is the client, not the server. Measure the server alone by sending cached `prompt_embeds`; it reaches 21–22 req/s. To exceed the client ceiling, add client processes (one NPU each). `FULL_DECODE_ONLY` plus moving preprocessing outside the vision lock raises the single-process ceiling to about 10–13 img/s.
+The limit is the client, not the server. Measure the server alone by sending cached `prompt_embeds`; it reaches 21–22 req/s. To exceed the client ceiling, add client processes; they can share one NPU (2 processes are safe, 3–4 need guided decoding or output validation). `FULL_DECODE_ONLY` plus moving preprocessing outside the vision lock raises the single-process ceiling to about 10–13 img/s.
 
 ### Q4: Can I batch several images in one `extract_feature` call?
 
@@ -375,3 +383,7 @@ Greedy decoding is not bit-wise reproducible under batching; near-tie tokens fli
 ### Q6: The server reports OOM during startup. What should I check?
 
 This LM is 3.09B parameters, about **6.2 GB** in BF16 (not 3 GB), so OOM usually comes from `--gpu-memory-utilization` being shared with the client process on the same NPU. For a single-card deployment use `--gpu-memory-utilization 0.30` (about 19 GB for the server plus about 3 GB for the client); otherwise give the vision client and the server separate NPUs.
+
+### Q7: I occasionally see a malformed box such as `<ref><436><598><982></box>`. Why?
+
+Greedy decoding is not bit-wise stable under batching, so near-tie coordinate tokens can flip. It becomes more likely when several client processes share one NPU (we saw 5/400 at 4 processes). Add structured output (`structured_outputs={"regex": ...}`) or validate the response and retry; this eliminates the malformed boxes at the cost of about 12–17% per-request latency.
