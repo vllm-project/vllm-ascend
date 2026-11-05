@@ -119,34 +119,30 @@ def _quantized_indexer_views(cache: torch.Tensor, spec: AscendSFAIndexerCacheSpe
     return key, scale
 
 
-def write_hisparse_indexer_c8(key, scale, values, scales, slots, scatter) -> None:
+def write_hisparse_indexer_c8(key, scale, values, scales, slots) -> None:
     """Write byte-preserving K and FP32 scales using this layer's page stride.
 
     Derive aliases from the current cache tuple, so profiling-cache replacement
     and teardown cannot leave a second set of persistent cache references.
     """
-    pages, block, heads, width = key.shape
-    stride = key.stride(0)
+    from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
+
+    block, width = key.shape[1], key.shape[-1]
     count = slots.numel()
     if values.numel() != count * width or scales.numel() != count:
         raise ValueError("HiSparse FP8 indexer writes require matching token/slot counts.")
     if values.dtype != key.dtype or scales.dtype != torch.float32:
         raise ValueError("HiSparse FP8 indexer writes require E4M3FN data and FP32 scales.")
-    key_rows = ((pages - 1) * stride + block * width) // width
-    scale_rows = (pages - 1) * scale.stride(0) + block
-    raw_key = torch.as_strided(key, (0,), (1,), storage_offset=0).view(torch.int8)
-    key_write = torch.as_strided(raw_key, (key_rows, width), (width, 1), storage_offset=key.storage_offset())
-    scale_write = torch.as_strided(scale, (scale_rows, 1), (1, 1))
-    # Ascend V2 supplies int32 slots. Page-strided scale addresses can exceed
-    # INT32_MAX even when logical slots fit; widen before multiplying strides.
-    logical = slots.reshape(-1).to(torch.int64)
-    page = logical // block
-    row = logical % block
-    # Preserve the native -1 padding sentinel; never turn it into a valid row.
-    key_slots = torch.where(logical >= 0, page * (stride // width) + row, -1)
-    scale_slots = torch.where(logical >= 0, page * scale.stride(0) + row, -1)
-    scatter(key_write, key_slots.view(-1, 1), values.contiguous().view(torch.int8).reshape(-1, width))
-    scatter(scale_write, scale_slots.view(-1, 1), scales.reshape(-1, 1))
+    store_indexer_key_scale(
+        values.contiguous().view(torch.int8).reshape(-1, width),
+        scales.reshape(-1),
+        slots.reshape(-1),
+        key.view(torch.int8),
+        scale,
+        block_size=block,
+        key_block_stride=key.stride(0),
+        scale_block_stride=scale.stride(0),
+    )
 
 
 def _bind_indexer_views(

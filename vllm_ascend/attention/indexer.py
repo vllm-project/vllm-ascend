@@ -546,7 +546,6 @@ class AscendHiSparseIndexerBackend(AscendSFAIndexerBackend):
             k_li,
             k_li_scale,
             slot_mapping.reshape(-1),
-            DeviceOperator.scatter_cache,
         )
 
 

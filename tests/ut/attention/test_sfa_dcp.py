@@ -557,7 +557,12 @@ CASES: list[tuple[str, str, set[str], set[str]]] = [
         },
     ),
     ("dcp/sfa_dcp_query.py", "_unpack_query_fragments", {"NOPE_DIM", "ROPE_DIM"}, {"tokens", "programs", "heads"}),
-    ("sfa_indexer_store.py", "_store_indexer_key_scale", {"KEY_WIDTH"}, {"capacity"}),
+    (
+        "sfa_indexer_store.py",
+        "_store_indexer_key_scale",
+        {"KEY_WIDTH", "BLOCK_SIZE"},
+        {"capacity", "key_block_stride", "scale_block_stride"},
+    ),
 ]
 
 
