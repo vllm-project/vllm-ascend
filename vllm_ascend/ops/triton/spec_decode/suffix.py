@@ -70,15 +70,18 @@ def _suffix_local_scan_kernel(
 
     pos = blk * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
     active = (pos >= 1) & (pos < seq_len) & (num_sampled > 0)
+    # Keep indirect-load masks independent of loop-carried match state so
+    # Triton-Ascend can lower the loop. Matching still stops at the first miss.
+    candidate_mask = active
     match_len = tl.zeros([BLOCK], dtype=tl.int64)
     for t in range(MAX_DEPTH):
         # Request token t back from its end (newest first).
         tail_pos = seq_len - 1 - t
         tail_tok = tl.load(row + tl.maximum(tail_pos, 0), mask=tail_pos >= 0, other=-2)
         src_pos = pos - 1 - t
-        ok = active & (src_pos >= 0) & (tail_pos >= 0)
-        tok = tl.load(row + tl.minimum(tl.maximum(src_pos, 0), token_ids_stride - 1), mask=ok, other=-1)
-        active = ok & (tok == tail_tok)
+        load_mask = candidate_mask & (src_pos >= 0) & (tail_pos >= 0)
+        tok = tl.load(row + tl.minimum(tl.maximum(src_pos, 0), token_ids_stride - 1), mask=load_mask, other=-1)
+        active = active & load_mask & (tok == tail_tok)
         match_len += active.to(tl.int64)
 
     score = tl.where(match_len > 0, match_len * Lp1 + pos, 0)
@@ -295,11 +298,22 @@ def _suffix_finalize_kernel(
         # acceptance rate for drafts like this one (Laplace-smoothed); filler
         # slots get 0 so they are trimmed first.
         bucket = source * _NUM_LEN_BUCKETS + _len_bucket(tl.maximum(match_len, 1))
-        stat = stats_ptr + (bucket * K + k_iota) * 2
-        accepted = tl.load(stat, mask=k_mask, other=0).to(tl.float32)
-        observed = tl.load(stat + 1, mask=k_mask, other=0).to(tl.float32)
-        conf = tl.where(draft_ok, (accepted + 1.0) / (observed + 2.0), 0.0)
-        tl.store(conf_ptr + b * K + k_iota, conf, mask=k_mask)
+        if K != K_PO2:
+            # As in the observer, avoid padded strided statistics accesses
+            # for non-power-of-two draft lengths on the current backend.
+            for d in tl.static_range(K):
+                stat = stats_ptr + (bucket * K + d) * 2
+                accepted = tl.load(stat).to(tl.float32)
+                observed = tl.load(stat + 1).to(tl.float32)
+                is_valid = tl.sum(tl.where(k_iota == d, draft_ok.to(tl.int32), 0), axis=0) > 0
+                conf = tl.where(is_valid, (accepted + 1.0) / (observed + 2.0), 0.0)
+                tl.store(conf_ptr + b * K + d, conf)
+        else:
+            stat = stats_ptr + (bucket * K + k_iota) * 2
+            accepted = tl.load(stat, mask=k_mask, other=0).to(tl.float32)
+            observed = tl.load(stat + 1, mask=k_mask, other=0).to(tl.float32)
+            conf = tl.where(draft_ok, (accepted + 1.0) / (observed + 2.0), 0.0)
+            tl.store(conf_ptr + b * K + k_iota, conf, mask=k_mask)
         tl.store(last_bucket_ptr + req, tl.where(num_valid > 0, bucket, -1).to(tl.int32))
         tl.store(last_valid_ptr + req, num_valid)
 
@@ -332,23 +346,46 @@ def _suffix_observe_kernel(
     rejected = tl.load(num_rejected_ptr + b, mask=b < num_reqs, other=0)
     accepted = sampled - 1
     verified = accepted + rejected
-    k = tl.arange(0, K_PO2)
-    observed = (
-        (b[:, None] < num_reqs)
-        & (previous_bucket[:, None] == bucket)
-        & (sampled[:, None] > 0)
-        & (k[None, :] < K)
-        & (k[None, :] <= accepted[:, None])
-        & (k[None, :] < verified[:, None])
-        & (k[None, :] < valid[:, None])
-    )
-    num_observed = tl.sum(observed.to(tl.int32), axis=0).to(tl.int64)
-    num_accepted = tl.sum((observed & (k[None, :] < accepted[:, None])).to(tl.int32), axis=0).to(tl.int64)
-    stat = stats_ptr + (bucket * K + k) * 2
-    old_accepted = tl.load(stat, mask=k < K, other=0)
-    old_observed = tl.load(stat + 1, mask=k < K, other=0)
-    tl.store(stat, old_accepted + num_accepted, mask=k < K)
-    tl.store(stat + 1, old_observed + num_observed, mask=k < K)
+    if K != K_PO2:
+        # The current backend fails on the padded 2D reduction / strided
+        # int64 update path for K=3. Use scalar updates for unaligned K,
+        # keeping the vectorized path for power-of-two draft lengths.
+        for k in tl.static_range(K):
+            observed = (
+                (b < num_reqs)
+                & (previous_bucket == bucket)
+                & (sampled > 0)
+                & (k <= accepted)
+                & (k < verified)
+                & (k < valid)
+            )
+            num_observed = tl.sum(observed.to(tl.int32), axis=0).to(tl.int64)
+            num_accepted = tl.sum((observed & (k < accepted)).to(tl.int32), axis=0).to(tl.int64)
+            stat = stats_ptr + (bucket * K + k) * 2
+            # Load both fields before either store; interleaving them also
+            # triggers a BiShengHIR pipeline failure on the current backend.
+            old_accepted = tl.load(stat)
+            old_observed = tl.load(stat + 1)
+            tl.store(stat, old_accepted + num_accepted)
+            tl.store(stat + 1, old_observed + num_observed)
+    else:
+        k = tl.arange(0, K_PO2)
+        observed = (
+            (b[:, None] < num_reqs)
+            & (previous_bucket[:, None] == bucket)
+            & (sampled[:, None] > 0)
+            & (k[None, :] < K)
+            & (k[None, :] <= accepted[:, None])
+            & (k[None, :] < verified[:, None])
+            & (k[None, :] < valid[:, None])
+        )
+        num_observed = tl.sum(observed.to(tl.int32), axis=0).to(tl.int64)
+        num_accepted = tl.sum((observed & (k[None, :] < accepted[:, None])).to(tl.int32), axis=0).to(tl.int64)
+        stat = stats_ptr + (bucket * K + k) * 2
+        old_accepted = tl.load(stat, mask=k < K, other=0)
+        old_observed = tl.load(stat + 1, mask=k < K, other=0)
+        tl.store(stat, old_accepted + num_accepted, mask=k < K)
+        tl.store(stat + 1, old_observed + num_observed, mask=k < K)
 
 
 @triton.jit(do_not_specialize=["num_docs"])
@@ -408,8 +445,10 @@ def _suffix_ingest_kernel(
     m = j < n
     pos = head + j
     sep = head + n
-    keep = m
-    keep_sep = sep >= 0
+    # Carry integer overlap counts instead of write masks through the loop:
+    # Triton-Ascend cannot lower loop-carried masks on indirect stores.
+    overwritten = tl.zeros([BLOCK], tl.int32)
+    sep_overwritten = tl.zeros((), tl.int32)
     later = head + n + 1
     for g in range(f + 1, num_docs):
         req_g = tl.load(docs_ptr + 2 * g).to(tl.int64)
@@ -418,9 +457,11 @@ def _suffix_ingest_kernel(
         n_g = tl.maximum(end_g - start_g, 0)
         later = tl.where(later + n_g + 1 > cap, 0, later)
         # Document g and its separator occupy [later, later + n_g].
-        keep = keep & ((pos < later) | (pos > later + n_g))
-        keep_sep = keep_sep & ((sep < later) | (sep > later + n_g))
+        overwritten += ((pos >= later) & (pos <= later + n_g)).to(tl.int32)
+        sep_overwritten += ((sep >= later) & (sep <= later + n_g)).to(tl.int32)
         later += n_g + 1
+    keep = m & (overwritten == 0)
+    keep_sep = sep_overwritten == 0
     if blk == 0:
         tl.store(corpus_ptr + sep, -1, mask=keep_sep)
         if f == num_docs - 1:
