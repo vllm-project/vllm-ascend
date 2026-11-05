@@ -359,11 +359,13 @@ class CaMemAllocator(CuMemAllocator):
                 self.python_malloc_callback, self.python_free_callback, self.python_free_complete_callback
             )
             pool = torch.npu.memory.MemPool(allocator._allocator)
-            self.allocator_and_pools[ACL_GRAPH_TAG] = (pool, allocator)
+            # Match CuMemAllocator's per-tag list inventory, including for
+            # the single persistent pool shared by all graph capture sizes.
+            self.allocator_and_pools[ACL_GRAPH_TAG] = [(pool, allocator)]
         old_tag = self.current_tag
         self.current_tag = ACL_GRAPH_TAG
         try:
-            yield self.allocator_and_pools[ACL_GRAPH_TAG][0].id
+            yield self.allocator_and_pools[ACL_GRAPH_TAG][0][0].id
         finally:
             self.current_tag = old_tag
 
@@ -373,12 +375,15 @@ class CaMemAllocator(CuMemAllocator):
         Other pools (weights/KV) remain intact. The native ownership record
         permits cleanup of a partially restored or entirely asleep pool.
         """
-        entry = self.allocator_and_pools.pop(ACL_GRAPH_TAG, None)
-        if entry is not None:
-            pool, allocator = entry
-            del entry, pool
+        entries = self.allocator_and_pools.pop(ACL_GRAPH_TAG, [])
+        if entries:
+            # Keep allocators alive until their MemPool wrappers are gone.
+            pools = [entry[0] for entry in entries]
+            allocators = [entry[1] for entry in entries]
+            entries.clear()
+            pools.clear()
             gc.collect()
-            del allocator
+            allocators.clear()
         self._check_memory_state()
         if any(data.tag == ACL_GRAPH_TAG for data in self.pointer_to_data.values()) or any(
             data.tag == ACL_GRAPH_TAG for data in self._pending_free.values()

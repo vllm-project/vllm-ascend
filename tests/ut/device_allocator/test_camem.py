@@ -14,6 +14,7 @@
 #
 
 import gc
+import weakref
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -130,6 +131,115 @@ class TestCaMem(PytestBase):
         CaMemAllocator._shutdown_singleton()
 
         allocator.release_pools.assert_called_once_with()
+
+    @pytest.mark.parametrize("graph_first", [False, True], ids=["all-pools", "graph-then-ordinary"])
+    @pytest.mark.parametrize("cyclic_pool", [False, True], ids=["refcount", "cyclic-gc"])
+    def test_mixed_pool_release_preserves_allocator_lifetimes(self, monkeypatch, graph_first, cyclic_pool):
+        allocator = CaMemAllocator.get_instance()
+        events = []
+
+        class Owner:
+            def __init__(self, name):
+                self.name = name
+
+            def __del__(self):
+                events.append((self.name, "allocator"))
+
+        class Pool:
+            def __init__(self, name, owner):
+                self.name = name
+                self.owner = weakref.ref(owner)
+                if cyclic_pool:
+                    self.cycle = self
+
+            def __del__(self):
+                events.append((self.name, "pool", self.owner() is not None))
+
+        def entry(name):
+            owner = Owner(name)
+            return Pool(name, owner), owner
+
+        monkeypatch.setattr(
+            allocator,
+            "allocator_and_pools",
+            {
+                "weights": [entry("w0"), entry("w1")],
+                "kv_cache": [entry("kv")],
+                camem_module.ACL_GRAPH_TAG: [entry("graph")],
+            },
+        )
+        monkeypatch.setattr(allocator, "pointer_to_data", {})
+        monkeypatch.setattr(allocator, "_pending_free", {})
+        monkeypatch.setattr(allocator, "_check_memory_state", lambda: None)
+
+        if graph_first:
+            allocator.release_aclgraph_pool()
+            allocator.release_aclgraph_pool()
+            assert events == [("graph", "pool", True), ("graph", "allocator")]
+            assert len(allocator.allocator_and_pools["weights"]) == 2
+            assert "kv_cache" in allocator.allocator_and_pools
+            events.clear()
+
+        allocator.release_pools()
+        expected = 3 if graph_first else 4
+        assert len(events) == expected * 2
+        assert all(event[1:] == ("pool", True) for event in events[:expected])
+        assert all(event[1] == "allocator" for event in events[expected:])
+        assert not allocator.allocator_and_pools
+        allocator.release_pools()
+        assert len(events) == expected * 2
+
+    @pytest.mark.parametrize("destroy_asleep", [False, True], ids=["awake", "asleep"])
+    def test_mixed_pools_graph_replay_and_release(self, _npu_camem_allocator, destroy_asleep):
+        allocator = _npu_camem_allocator
+        with allocator.use_memory_pool("weights"):
+            x = torch.ones(1 << 20, device="npu")
+        with allocator.use_memory_pool("weights"):
+            other = torch.full_like(x, 7)
+        assert len(allocator.allocator_and_pools["weights"]) == 2
+        pointers = (x.data_ptr(), other.data_ptr())
+        stream = torch.npu.Stream()
+        stream.wait_stream(torch.npu.current_stream())
+        with torch.npu.stream(stream):
+            for _ in range(3):
+                warm = x * 2 + 3
+        torch.npu.current_stream().wait_stream(stream)
+        del warm
+        torch.npu.synchronize()
+
+        graph = torch.npu.NPUGraph()
+        with allocator.aclgraph_pool() as pool_id, torch.npu.graph(graph, pool=pool_id, stream=stream):
+            intermediate = x * 2
+            output = intermediate + 3
+        assert len(allocator.allocator_and_pools[camem_module.ACL_GRAPH_TAG]) == 1
+        graph_pointers = (intermediate.data_ptr(), output.data_ptr())
+        for cycle in range(10):
+            x.fill_(cycle + 1)
+            allocator.sleep(offload_tags=("weights", camem_module.ACL_GRAPH_TAG))
+            assert all(data.is_asleep for data in allocator.pointer_to_data.values())
+            allocator.wake_up()
+            graph.replay()
+            torch.npu.synchronize()
+            assert (x.data_ptr(), other.data_ptr()) == pointers
+            assert (intermediate.data_ptr(), output.data_ptr()) == graph_pointers
+            assert torch.equal(output.cpu(), torch.full_like(output.cpu(), 2 * (cycle + 1) + 3))
+
+        if destroy_asleep:
+            allocator.sleep(offload_tags=("weights", camem_module.ACL_GRAPH_TAG))
+        graph.reset()
+        del graph, output, intermediate
+        gc.collect()
+        allocator.release_aclgraph_pool()
+        allocator.release_aclgraph_pool()
+        assert len(allocator.allocator_and_pools["weights"]) == 2
+        allocator.wake_up(tags=["weights"])
+        assert torch.equal(other.cpu(), torch.full_like(other.cpu(), 7))
+        del x, other
+        gc.collect()
+        allocator.release_pools()
+        torch.npu.synchronize()
+        assert not allocator.pointer_to_data
+        assert not allocator._pending_free
 
     def test_shutdown_unmaps_live_allocations_and_drops_backups(self, monkeypatch):
         allocator = CaMemAllocator.get_instance()
