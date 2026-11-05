@@ -19,7 +19,8 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 The 950DT products examples use Model Runner V2 with
-`VLLM_USE_V2_MODEL_RUNNER=1`. A2/A3 examples use Model Runner V1.
+`VLLM_USE_V2_MODEL_RUNNER=1`. The A3 ordinary PD example also uses V2
+for ReplaySSM; A3 single-node and KV Cache Pool examples and A2 examples use V1.
 
 ### NoPE Prolog V3
 
@@ -776,8 +777,8 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
     #### A3 series {: #glm53-flash-5-3-a3 }
 
     This example uses two A3 series servers. The Prefill node runs two
-    DP ranks with TP8 (DP2/TP8), and the Decode node runs four DP ranks
-    with TP4 (DP4/TP4). Both layouts consume all 16 logical devices on their
+    DP ranks with TP1/PCP8 (DP2/TP1/PCP8), and the Decode node runs eight DP ranks
+    with TP2 (DP8/TP2). Both layouts consume all 16 logical devices on their
     respective servers. `MooncakeConnectorV2` transfers KV cache from the
     Prefill engines to the Decode engines.
 
@@ -788,20 +789,20 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
     communication; the socket interface variables still select the host
     network. Adjust the resource configuration for other network topologies.
 
-    Start Decode first, then Prefill. In another terminal, check `<DECODE_NODE_IP>:9900/health` through port `9903` and `<PREFILL_NODE_IP>:9081/health` through port `9082` with `curl --fail`. Start the proxy only after all six endpoints respond successfully; inspect each launcher terminal if a rank fails to initialize.
+    Start Decode first, then Prefill. In another terminal, check `<DECODE_NODE_IP>:9900/health` through port `9907` and `<PREFILL_NODE_IP>:9081/health` through port `9082` with `curl --fail`. Start the proxy only after all ten endpoints respond successfully; inspect each launcher terminal if a rank fails to initialize.
 
     ##### A3 series Serving Scripts and Startup Commands
 
     ##### Start the Prefill node
 
     On the Prefill node, save the following script as `run_p.sh`. The launcher
-    passes the visible devices, API port, DP configuration, and TP size as
+    passes the visible devices, API port, DP configuration, TP size, and PCP size as
     positional arguments.
 
     ```shell
     #!/usr/bin/env bash
     # Usage: bash run_p.sh <visible_devices> <http_port> <dp_size> \
-    #   <dp_rank> <dp_address> <rpc_port> <tp_size>
+    #   <dp_rank> <dp_address> <rpc_port> <tp_size> <pcp_size>
 
     # This A3 series supernode uses HCCS; its device RoCE ports are down.
     export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
@@ -816,12 +817,12 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
-    export ASCEND_RT_VISIBLE_DEVICES="$1"
 
     exec vllm serve "$MODEL_PATH" \
+      --device-ids "$1" \
       --host 0.0.0.0 \
       --port "$2" \
       --data-parallel-size "$3" \
@@ -829,30 +830,33 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       --data-parallel-address "$5" \
       --data-parallel-rpc-port "$6" \
       --tensor-parallel-size "$7" \
+      --prefill-context-parallel-size "$8" \
       --enable-expert-parallel \
+      --enable-eplb \
+      --eplb-config '{"window_size":3000,"step_interval":3000,"num_redundant_experts":0,"use_async":true,"policy":"stair","communicator":"hixl"}' \
       --seed 1024 \
       --served-model-name glm \
       --safetensors-load-strategy prefetch \
-      --max-num-seqs 64 \
+      --max-num-seqs 32 \
       --max-model-len 1048576 \
-      --max-num-batched-tokens 4096 \
+      --max-num-batched-tokens 16384 \
       --trust-remote-code \
       --quantization ascend \
-      --limit-mm-per-prompt '{"image":1,"video":0}' \
+      --limit-mm-per-prompt '{"image":7,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --tool-call-parser glm47 \
       --reasoning-parser glm47 \
       --enable-auto-tool-choice \
       --kv-cache-dtype int8 \
+      --attention-config.indexer_kv_dtype int8 \
       --prefix-cache-retention-interval None \
-      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+      --enforce-eager \
+      --use-replayssm \
+      --mamba-ssm-cache-dtype bfloat16 \
+      --no-enable-prefix-caching \
+      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}' \
       --additional-config '{
-        "enable_flashcomm1": true,
-        "enable_dsa_cp": true,
-        "enable_prefill_mc2": true,
-        "enable_fused_mc2": 1,
-        "enable_shared_expert_dp": true,
-        "multistream_overlap_shared_expert": false
+        "enable_fused_mc2": 2
       }' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "engine_id": "0", "kv_port": "36680"}'
@@ -860,14 +864,15 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
 
     <a id="glm53-flash-a3-prefill-command"></a>
 
-    Start two DP2/TP8 Prefill engines. `--dp-address` uses the Prefill node IP.
+    Start two TP1/PCP8 Prefill engines (total DP2). `--dp-address` uses the Prefill node IP.
     The launcher assigns API ports `9081-9082`.
 
     ```shell
     python launch_online_dp.py \
       --template ./run_p.sh \
       --dp-size 2 \
-      --tp-size 8 \
+      --tp-size 1 \
+      --pcp-size 8 \
       --dp-address "<PREFILL_NODE_IP>" \
       --vllm-start-port 9081
     ```
@@ -895,12 +900,12 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_USE_V2_MODEL_RUNNER=0
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
-    export ASCEND_RT_VISIBLE_DEVICES="$1"
 
     exec vllm serve "$MODEL_PATH" \
+      --device-ids "$1" \
       --host 0.0.0.0 \
       --port "$2" \
       --data-parallel-size "$3" \
@@ -912,24 +917,29 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       --seed 1024 \
       --served-model-name glm \
       --safetensors-load-strategy prefetch \
-      --max-num-seqs 32 \
+      --max-num-seqs 20 \
       --max-model-len 1048576 \
-      --max-num-batched-tokens 192 \
+      --max-num-batched-tokens 240 \
       --trust-remote-code \
       --quantization ascend \
-      --limit-mm-per-prompt '{"image":1,"video":0}' \
+      --limit-mm-per-prompt '{"image":7,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --tool-call-parser glm47 \
       --reasoning-parser glm47 \
       --enable-auto-tool-choice \
+      --no-enable-prefix-caching \
       --kv-cache-dtype int8 \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+      --attention-config.indexer_kv_dtype int8 \
+      --use-replayssm \
+      --mamba-ssm-cache-dtype bfloat16 \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6,12,24,48,60,72,84,96,108,120]}' \
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}' \
       --additional-config '{
         "multistream_overlap_shared_expert": true,
-        "recompute_scheduler_enable": true,
+        "scheduler_config": {"recompute_scheduler_enable": true},
         "enable_shared_expert_dp": true,
-        "enable_flashcomm1": true
+        "enable_flashcomm1": true,
+        "ascend_compilation_config": {"enable_npugraph_ex": false,"enable_static_kernel": true,"enable_super_kernel": false}
       }' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "engine_id": "1", "kv_port": "36580"}'
@@ -937,14 +947,14 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
 
     <a id="glm53-flash-a3-decode-command"></a>
 
-    Start four TP4 Decode engines(total DP4). `--dp-address` uses the Decode node
-    IP. The launcher assigns API ports `9900-9903`.
+    Start eight TP2 Decode engines (total DP8). `--dp-address` uses the Decode node
+    IP. The launcher assigns API ports `9900-9907`.
 
     ```shell
     python launch_online_dp.py \
       --template ./run_d.sh \
-      --dp-size 4 \
-      --tp-size 4 \
+      --dp-size 8 \
+      --tp-size 2 \
       --dp-address "<DECODE_NODE_IP>" \
       --vllm-start-port 9900
     ```
@@ -958,7 +968,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
     [load-balancing proxy](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
     The proxy listens on port `8081`, distributes requests across Prefill
     endpoints `9081-9082`, and then forwards Decode work to endpoints
-    `9900-9903`.
+    `9900-9907`.
 
     ```shell
     #!/usr/bin/env bash
@@ -967,7 +977,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
     P_N=${P_N:-2}
     P_PORT0=${P_PORT0:-9081}
     D_IP="${D_IP:-<DECODE_NODE_IP>}"
-    D_N=${D_N:-4}
+    D_N=${D_N:-8}
     D_PORT0=${D_PORT0:-9900}
 
     unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
@@ -982,45 +992,38 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
 
     **Key Parameter Descriptions**
 
-    - `--data-parallel-size` and `--tensor-parallel-size` define DP2/TP8 on
-      Prefill and DP4/TP4 on Decode. Both layouts use all 16 logical devices
+    - Prefill uses DP2/TP1/PCP8: each of its two engines receives eight
+      devices from `launch_online_dp.py`. Decode uses DP8/TP2: each of its
+      eight engines receives two devices. Both roles use all 16 logical devices
       on their respective A3 series nodes.
     - `--data-parallel-address` and `--data-parallel-rpc-port` coordinate DP
       ranks within one role. Prefill and Decode use their respective node IPs.
-      The default RPC port `12325` can be reused because the roles run on
-      different hosts.
-    - `--vllm-start-port 9081` assigns API ports `9081-9082` on Prefill, while
-      `--vllm-start-port 9900` assigns `9900-9903` on Decode. All endpoints
-      must be reachable from the proxy.
-    - Both roles use `--max-model-len 1048576`, `--kv-cache-dtype int8`, and
-      MTP speculative decoding with three speculative tokens. The MTP draft
-      model uses `enforce_eager: true` on Prefill and `enforce_eager: false`
-      on Decode.
-    - `VLLM_USE_V2_MODEL_RUNNER=0` explicitly selects model runner V1 on both
-      roles for this configuration.
-    - Prefill uses `--max-num-seqs 64` and
-      `--max-num-batched-tokens 4096`. Decode uses `--max-num-seqs 32` and
-      `--max-num-batched-tokens 192`. Tune these role-specific scheduler limits
-      independently for the target workload.
-    - Prefill sets `--prefix-cache-retention-interval None`. For KV Cache
-      Pool deployment, apply the prefix-caching changes in Section 5.4.
-    - Decode uses `FULL_DECODE_ONLY` graph mode. Both roles explicitly
-      enable FlashComm1.
-    - Prefill sets `enable_dsa_cp: true`, `enable_prefill_mc2: true`,
-      `enable_fused_mc2: 1`, and `enable_shared_expert_dp: true`, with
-      `multistream_overlap_shared_expert: false`. Decode sets
-      `multistream_overlap_shared_expert: true`,
-      `enable_shared_expert_dp: true`, and `recompute_scheduler_enable: true`.
-    - Both Prefill and Decode use `--limit-mm-per-prompt '{"image":1,"video":0}'`, allowing
-      at most one image per prompt and disabling video input.
-    - `MooncakeConnectorV2` transfers KV cache between the two roles.
-      `kv_role` must be `kv_producer` on Prefill and `kv_consumer` on Decode.
-      The role-specific KV ports must be available on their respective hosts.
-    - `ASCEND_GLOBAL_RESOURCE_CONFIG` selects `hccs:device`, and
-      `ASCEND_LOCAL_COMM_RES` sets resource configuration version `1.2` for
-      this HCCS supernode. `HCCL_IF_IP` and all socket interface variables must
-      select the host network used by the configured node IPs. The DP RPC,
-      engine, Mooncake, and proxy ports must be allowed by the host firewall.
+      The default RPC port `12325` can be reused on the separate hosts.
+    - `--device-ids "$1"` binds each engine to the launcher-assigned devices.
+      Do not also restrict `ASCEND_RT_VISIBLE_DEVICES` per rank.
+    - Prefill API ports are `9081-9082`; Decode API ports are `9900-9907`.
+      All ten endpoints must be reachable from the proxy.
+    - Both roles use Model Runner V2, INT8 main and indexer KV caches,
+      `--max-model-len 1048576`, MTP3, `--use-replayssm`, and
+      `--mamba-ssm-cache-dtype bfloat16`. Prefix caching is disabled.
+      Refer to [GLM KDA RecoverSSM](../../user_guide/feature_guide/speculative_decoding.md)
+      for the ReplaySSM switch and its requirements.
+    - Prefill runs the target eagerly and enables draft graph execution.
+      It enables asynchronous EPLB with the `stair` policy and `hixl`
+      communicator. `enable_fused_mc2` is `2`; shared-expert DP is not
+      enabled because Prefill uses TP1.
+    - Prefill uses `--max-num-seqs 32` and
+      `--max-num-batched-tokens 16384`. Decode uses `20` and `240`, respectively.
+    - Decode uses `FULL_DECODE_ONLY`, the explicit capture sizes in the
+      command, static kernels, FlashComm1, shared-expert DP and multistream
+      overlap. Recompute scheduling is enabled through `scheduler_config`.
+    - Both roles allow up to seven images per prompt and disable video input.
+    - `MooncakeConnectorV2` uses `kv_producer` and engine ID `0` on Prefill,
+      and `kv_consumer` and engine ID `1` on Decode. These IDs identify the
+      roles in this deployment. Base KV ports are `36680` and `36580`.
+    - The HCCS resource settings select device communication; `HCCL_IF_IP`
+      and the socket interface variables select the host network. The DP RPC,
+      API, Mooncake and proxy ports must be available on the respective hosts.
 
 === "A2 series"
 
@@ -1369,8 +1372,8 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
     ##### Key parameter differences from the A3 series layout
 
     - A2 series uses global DP2/TP8 Prefill and DP8/TP2 Decode, with each
-      role spread across two nodes with eight devices per node. A3 series uses
-      DP2/TP8 Prefill and DP4/TP4 Decode, each on one node with 16 logical devices.
+      role spread across two nodes with eight devices per node. A3 ordinary PD uses
+      DP2/TP1/PCP8 Prefill and DP8/TP2 Decode, each on one node with 16 logical devices.
     - P0 and P1 use the shared launcher with one local DP rank each. P0
       exposes the Prefill API with `--api-server-count 1`; P1 is headless.
       D0 and D1 each run four API-serving TP2 engines(total DP8) through their
@@ -1384,7 +1387,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       `--max-num-batched-tokens 1024` with `FULL_DECODE_ONLY` graph mode.
       Both roles run with `--async-scheduling`.
     - Both roles rely on model runner V1 via
-      `VLLM_USE_V2_MODEL_RUNNER=0`, as in the A3 series examples.
+      `VLLM_USE_V2_MODEL_RUNNER=0`, as in the A3 series KV Cache Pool example.
       `VLLM_HOST_IP` advertises the IP that peers use to reach each
       engine for KV transfer.
     - MTP speculative decoding uses three speculative tokens on A2 series.
@@ -1521,8 +1524,51 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     #### A3 series {: #glm53-flash-5-4-a3 }
 
-    Reuse the A3 series DP2/TP8 Prefill and DP4/TP4 Decode topology, launcher, and
-    proxy endpoint mapping from [Section 5.3](#glm53-flash-5-3-a3).
+    This KV Cache Pool example retains DP2/TP8 Prefill and DP4/TP4 Decode,
+    using Model Runner V1 and native KDA. Prepare separate `run_p.sh` and
+    `run_d.sh` files for this scenario from the [A3 PD scripts](#glm53-flash-5-3-a3).
+    In both files, set `VLLM_USE_V2_MODEL_RUNNER=0`, restore
+    `export ASCEND_RT_VISIBLE_DEVICES="$1"` and remove `--device-ids "$1"`. Replace
+    `--no-enable-prefix-caching` with `--enable-prefix-caching`, remove
+    `--use-replayssm`, `--mamba-ssm-cache-dtype`, and
+    `--attention-config.indexer_kv_dtype`, and restore
+    `--limit-mm-per-prompt '{"image":1,"video":0}'`.
+
+    In the Prefill script, also remove `--prefill-context-parallel-size`,
+    `--enable-eplb`, `--eplb-config`, and `--enforce-eager`. Replace the
+    corresponding options with the following values, retaining the other
+    network, model and serving settings:
+
+    ```shell
+      --max-num-seqs 64 \
+      --max-num-batched-tokens 4096 \
+      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+      --additional-config '{
+        "enable_flashcomm1": true,
+        "enable_dsa_cp": true,
+        "enable_prefill_mc2": true,
+        "enable_fused_mc2": 1,
+        "enable_shared_expert_dp": true,
+        "multistream_overlap_shared_expert": false
+      }' \
+    ```
+
+    In the Decode script, replace the corresponding options with:
+
+    ```shell
+      --max-num-seqs 32 \
+      --max-num-batched-tokens 192 \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+      --additional-config '{
+        "multistream_overlap_shared_expert": true,
+        "recompute_scheduler_enable": true,
+        "enable_shared_expert_dp": true,
+        "enable_flashcomm1": true
+      }' \
+    ```
+
+    Keep MTP3 with `enforce_eager: false` on Decode. Use the pooling
+    connectors and the scenario-specific launch commands below.
 
     ##### Prepare the Memcache Backend
 
@@ -1613,7 +1659,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     ##### Update the Prefill and Decode Connectors
 
     For A3 series KV Cache Pool deployment, add `--enable-prefix-caching` to both
-    `run_p.sh` and `run_d.sh` in [Section 5.3](#glm53-flash-5-3-a3), and keep
+    `run_p.sh` and `run_d.sh` prepared above, and keep
     chunked prefill enabled (the model default). GLM-5.3-Flash has
     linear-attention state, and `AscendStoreConnector`
     requires `mamba_cache_mode=align`; the model configuration selects this mode
@@ -1622,7 +1668,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     Replace the final `--kv-transfer-config` argument in `run_p.sh` with the
     following fragment. Apart from the prefix-caching change above, keep
-    the remaining A3 series Prefill flags from [Section 5.3](#glm53-flash-5-3-a3), including
+    the remaining A3 series Prefill flags restored above, including
     `--max-num-seqs 64`.
 
     ```shell
@@ -1654,7 +1700,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     Replace the final `--kv-transfer-config` argument in `run_d.sh` with the
     following fragment. Apart from the prefix-caching change above, keep
-    the remaining A3 series Decode flags from [Section 5.3](#glm53-flash-5-3-a3), including
+    the remaining A3 series Decode flags restored above, including
     `FULL_DECODE_ONLY` graph mode and the MTP configuration.
 
     ```shell
@@ -1709,14 +1755,31 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
        python -c "from memcache_hybrid import MetaService; MetaService.main()"
        ```
 
-    2. Start Decode with the [A3 series launcher command in Section 5.3](#glm53-flash-a3-decode-command). Wait until
-       all four Decode engines on ports `9900-9903` are ready and their
-       Memcache LocalServices have reserved the configured DDR pool memory.
-    3. Start Prefill with the [A3 series launcher command in Section 5.3](#glm53-flash-a3-prefill-command). Wait until
-       both Prefill engines on ports `9081-9082` are ready and their Memcache
-       LocalServices have reserved the configured DDR pool memory.
-    4. Start the [A3 series proxy from Section 5.3](#glm53-flash-a3-proxy). Send inference requests to
-       `<PREFILL_NODE_IP>:8081` using the examples in [Section 6](#6-functional-verification).
+    2. Start Decode with DP4/TP4. Wait until all four engines on ports
+       `9900-9903` are ready and their Memcache LocalServices have reserved
+       the configured DDR pool memory.
+
+       ```shell
+       python launch_online_dp.py --template ./run_d.sh \
+         --dp-size 4 --tp-size 4 --dp-address "<DECODE_NODE_IP>" \
+         --vllm-start-port 9900
+       ```
+
+    3. Start Prefill with DP2/TP8. Wait until both engines on ports
+       `9081-9082` are ready and their Memcache LocalServices have reserved
+       the configured DDR pool memory.
+
+       ```shell
+       python launch_online_dp.py --template ./run_p.sh \
+         --dp-size 2 --tp-size 8 --dp-address "<PREFILL_NODE_IP>" \
+         --vllm-start-port 9081
+       ```
+
+    4. In a separate terminal, set `export D_N=4`, then run the
+       [A3 series proxy script](#glm53-flash-a3-proxy). It uses Prefill ports
+       `9081-9082` and Decode ports `9900-9903` for this pooling scenario.
+       Send requests to `<PREFILL_NODE_IP>:8081` using
+       [Section 6](#6-functional-verification).
 
     <a id="glm53-flash-pool-reuse"></a>
 
@@ -2012,12 +2075,12 @@ and role-specific settings when reproducing the deployment.
 
 | Optimization | Role | Configuration | Purpose and constraints |
 | --- | --- | --- | --- |
-| FlashComm1 | Prefill and Decode | `enable_flashcomm1: true` | Optimizes tensor-parallel communication. |
-| DSA context parallelism | Prefill | `enable_dsa_cp: true` | Distributes sparse-attention work for long prompts; use model runner V1. |
-| Prefill MoE communication | Prefill | `enable_prefill_mc2: true`, `enable_fused_mc2: 1`, `enable_shared_expert_dp: true` | Uses fused MoE communication with the reference W8A8 weights and EP16 layout; keep `multistream_overlap_shared_expert: false` on this role. |
+| FlashComm1 | Decode | `enable_flashcomm1: true` | Optimizes tensor-parallel communication. |
+| Prefill context parallelism | Prefill | `--prefill-context-parallel-size 8` | Each TP1 Prefill engine uses eight devices. |
+| Prefill MoE communication | Prefill | `enable_fused_mc2: 2`, `--enable-eplb` | Uses fused MoE communication and asynchronous EPLB with the `stair` policy and `hixl` communicator. |
 | Shared-expert overlap | Decode | `multistream_overlap_shared_expert: true` | Overlaps shared-expert execution with other work; the Decode configuration does not enable fused MC2. |
 | Decode execution | Decode | `FULL_DECODE_ONLY` | Reduces decode launch overhead. |
-| MTP | Prefill and Decode | `num_speculative_tokens: 5` | Keeps the Prefill draft in eager mode and enables draft graph execution on Decode. |
+| MTP | Prefill and Decode | `num_speculative_tokens: 3`, `--use-replayssm` | Uses ReplaySSM with draft graph execution on both roles; the Prefill target is eager. |
 | KV capacity | Prefill and Decode | `--kv-cache-dtype int8` | Reduces KV cache memory consumption for long contexts. |
 
 ### 9.2 Tuning Guidelines {: #92-workload-specific-settings }
@@ -2026,8 +2089,8 @@ The settings below refer to the [A3 series PD example](#glm53-flash-5-3-a3).
 Use the role-specific values in the 950DT products example when deploying on that hardware.
 
 - Tune `--max-num-seqs` and `--max-num-batched-tokens` independently on each
-  role. The reference uses 64 sequences and 4096 batched tokens on Prefill,
-  and 32 sequences and 192 batched tokens on Decode. Measure time to first
+  role. The reference uses 32 sequences and 16384 batched tokens on Prefill,
+  and 20 sequences and 240 batched tokens on Decode. Measure time to first
   token, time per output token, and throughput before changing these limits.
 - Set `--max-model-len` to the required context length and adjust
   `--gpu-memory-utilization` to the available NPU memory. The reference uses
