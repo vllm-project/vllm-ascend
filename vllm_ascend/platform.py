@@ -1763,7 +1763,7 @@ def _validate_minimax_ecosystem_fa3(backend_key, selector) -> bool:
     from vllm.v1.attention.backend import AttentionType
 
     config = get_current_vllm_config_or_none()
-    spec = config.speculative_config
+    spec = config.speculative_config if config is not None else None
     if spec is None or spec.draft_model_config is None:
         return False
     if config is None or config.model_config is None or not _uses_minimax_ecosystem_fa3(config):
@@ -1809,7 +1809,7 @@ def _uses_minimax_ecosystem_fa3(config) -> bool:
         "Qwen3OmniDSparkModel",
     }
     return (
-        getattr(spec, "method", None) in ("dspark")
+        getattr(spec, "method", None) in ("dspark",)
         and bool(draft_architectures.intersection(architectures))
         and bool(_MINIMAX_M3_ARCHITECTURES.intersection(getattr(target_hf, "architectures", None) or ()))
     )
