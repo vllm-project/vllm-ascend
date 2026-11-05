@@ -6,7 +6,8 @@ Functional smoke, not accuracy: no checkpoint or tokenizer is downloaded. The
 reduced config keeps every per-layer pattern the full model has, at small
 widths — NoPE on every fourth layer, a shared-indexer schedule, and a layer
 that reads another layer's latent KV instead of owning one — because those
-three are exactly what the Ascend adapter changes.
+three are exactly what the Ascend adapter changes. One case runs it with the
+decode graphs captured, which is a different code path from the others.
 """
 
 import json
@@ -103,7 +104,7 @@ class MistralLarge4Worker:
     def check_mistral_large4_paths(self) -> bool:
         from vllm_ascend.models.mistral_large4 import (
             AscendMistralMLAAttention,
-            AscendSharedKVSlotMappingMixin,
+            has_shared_kv_skip,
         )
 
         model = self.model_runner.model
@@ -122,7 +123,7 @@ class MistralLarge4Worker:
 
         # The write skip is on the borrowing layers and nowhere else: a missed
         # layer would overwrite the latent cache it reads, silently.
-        shared = [i for i, attn in enumerate(attentions) if isinstance(attn.attn.impl, AscendSharedKVSlotMappingMixin)]
+        shared = [i for i, attn in enumerate(attentions) if has_shared_kv_skip(attn.attn.impl)]
         assert shared == SHARING_LAYERS, f"{shared} != {SHARING_LAYERS}"
 
         # The per-layer patterns survived the reduced config.
@@ -134,6 +135,20 @@ class MistralLarge4Worker:
         for i in SHARING_LAYERS:
             assert not hasattr(attentions[i], "kv_a_proj_with_mqa")
         return True
+
+    def decode_graphs_captured(self) -> tuple[bool, str]:
+        """Whether the decode path really ended up captured, and what it is.
+
+        What the engine settles on is not what was asked: the platform lowers
+        cudagraph_mode for a model it will not capture, so a test that only
+        passed the flag would pass against a run that fell back to eager. The
+        mode is read rather than its name matched, because it can be a pair of
+        values whose string form says neither.
+        """
+        from vllm.config import CUDAGraphMode
+
+        mode = self.model_runner.compilation_config.cudagraph_mode
+        return mode.decode_mode() == CUDAGraphMode.FULL, str(mode)
 
 
 def _write_model(destination, config: dict[str, Any] = CONFIG) -> None:
@@ -185,6 +200,50 @@ def test_mistral_large4_dummy_forward_and_logprob_replay(tmp_path):
         seed=0,
     ) as runner:
         assert runner.model.collective_rpc("check_mistral_large4_paths") == [True]
+        baseline = _generate(runner)
+        replay = _generate(runner)
+    _assert_replay_matches(baseline, replay)
+
+
+@wait_until_npu_memory_free()
+def test_mistral_large4_decode_replays_under_graph_capture(tmp_path):
+    """The same reduced model with the decode graphs captured.
+
+    Capture is the one path nothing else here covers, and this model gives it
+    more to go wrong with than most: the indexer runs serially inside the SFA
+    impl and writes its own cache, nine layers write no latent at all, and the
+    top-k read follows the indexer in the same step rather than on a stream.
+
+    A graph that replays stale buffers returns tokens rather than raising, so
+    the assertion is that a second decode reproduces the first. The resolved
+    mode is checked before generating: the platform lowers cudagraph_mode for
+    a model it will not capture, and without that check this test would pass
+    against a run that fell back to eager and measured nothing.
+    """
+    model = tmp_path / "model"
+    _write_model(model)
+    with VllmRunner(
+        str(model),
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        worker_extension_cls=f"{__name__}.MistralLarge4Worker",
+        dtype="bfloat16",
+        max_model_len=1024,
+        max_num_seqs=2,
+        max_num_batched_tokens=1024,
+        enforce_eager=False,
+        # Only the two batch sizes this test generates with, so capture costs
+        # seconds rather than the default ladder's minutes.
+        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2]},
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.5,
+        seed=0,
+    ) as runner:
+        assert runner.model.collective_rpc("check_mistral_large4_paths") == [True]
+        captured = runner.model.collective_rpc("decode_graphs_captured")
+        assert all(flag for flag, _ in captured), (
+            f"the decode path was not captured ({[mode for _, mode in captured]}), so this ran eager"
+        )
         baseline = _generate(runner)
         replay = _generate(runner)
     _assert_replay_matches(baseline, replay)
