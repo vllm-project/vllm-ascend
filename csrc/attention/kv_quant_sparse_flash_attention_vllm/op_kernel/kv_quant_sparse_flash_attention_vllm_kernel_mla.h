@@ -402,6 +402,10 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<QSFAT>::GetSparseActua
         tempLoopInfo.curActualSeqLen = (constInfo.sparseBlockCount * constInfo.sparseBlockSize > threshold) ?
                                            threshold :
                                            constInfo.sparseBlockCount * constInfo.sparseBlockSize;
+        if constexpr (QSFAT::noRope) {
+            // No-RoPE handles tail truncation in its own path.
+            return;
+        }
         // Only trim one complete query row. Keep the original scheduling for
         // grouped M tiles, block-sparse inputs and S2-split work assignments.
         if (constInfo.sparseBlockSize != 1 || constInfo.kvHeadNum != 1 ||

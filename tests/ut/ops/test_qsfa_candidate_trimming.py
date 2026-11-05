@@ -24,6 +24,7 @@ PREFIX = r"""
 #include <stdexcept>
 #include <vector>
 enum class QSFA_LAYOUT {TND, BSND, BNSD};
+struct QSFAT { static constexpr bool noRope=false; };
 constexpr int V_TEMPLATE=0, TEMPLATE_MODE=0;
 constexpr auto LAYOUT_T=QSFA_LAYOUT::TND;
 struct GM {
@@ -111,6 +112,32 @@ int main() {
 """
 
 
+NO_ROPE_SUFFIX = r"""
+int main() {
+    uint64_t cases=0;
+    // Empty GM arrays make any unnecessary candidate or query-prefix read fail.
+    for(int mode: {0,3}) for(int next: {-2,0,63,4095})
+    for(uint32_t query: {0U,1U,2U}) for(uint64_t history: {0ULL,128ULL,9216ULL}) {
+        constInfo.sparseMode=mode;
+        tempLoopInfo.nextTokensPerBatch=next;
+        tempLoopInfo.curActualSeqLenOri=history;
+        tempLoopInfo.curActualSeqLen=999;
+        tempLoopInfo.emptySparseLength=999;
+        const uint64_t threshold=mode==3?static_cast<int64_t>(next)+query+1:history;
+        const uint64_t expected=next<0 && query<static_cast<uint32_t>(-next)?0:
+            std::min<uint64_t>(2048,threshold);
+        production(1,query,0);
+        if(tempLoopInfo.curActualSeqLen!=expected || tempLoopInfo.emptySparseLength!=0 ||
+           topKGm.reads!=0 || actualSeqLengthsQGm.reads!=0) {
+            std::cerr<<"No-RoPE changed legacy bounds or read sparse indices";return 1;
+        }
+        ++cases;
+    }
+    std::cout<<"{\"cases\":"<<cases<<",\"full_valid_reads\":0}";
+}
+"""
+
+
 def production_body():
     source = HEADER.read_text(encoding="utf-8")
     start = source.index("::GetSparseActualSeqLen(")
@@ -129,10 +156,12 @@ class CandidateTrimmingTest(unittest.TestCase):
             self.skipTest("C++17 host compiler unavailable")
         with tempfile.TemporaryDirectory(prefix="qsfa-candidates-") as directory:
             cpp, executable = Path(directory) / "test.cpp", Path(directory) / "test"
-            for layout in ["TND", "BSND"]:
-                with self.subTest(layout=layout):
+            for layout, no_rope in [("TND", False), ("BSND", False), ("TND", True), ("BSND", True)]:
+                with self.subTest(layout=layout, no_rope=no_rope):
                     prefix = PREFIX.replace("LAYOUT_T=QSFA_LAYOUT::TND", f"LAYOUT_T=QSFA_LAYOUT::{layout}")
-                    cpp.write_text(prefix + production_body() + SUFFIX, encoding="utf-8")
+                    prefix = prefix.replace("noRope=false", f"noRope={str(no_rope).lower()}")
+                    suffix = NO_ROPE_SUFFIX if no_rope else SUFFIX
+                    cpp.write_text(prefix + production_body() + suffix, encoding="utf-8")
                     build = subprocess.run(
                         [compiler, "-std=c++17", "-O2", str(cpp), "-o", str(executable)], capture_output=True, text=True
                     )
@@ -140,7 +169,7 @@ class CandidateTrimmingTest(unittest.TestCase):
                     run = subprocess.run([str(executable)], capture_output=True, text=True)
                     self.assertEqual(run.returncode, 0, run.stderr)
                     result = json.loads(run.stdout)
-                    self.assertGreater(result["cases"], 5000)
+                    self.assertGreater(result["cases"], 50 if no_rope else 5000)
                     self.assertLessEqual(result["full_valid_reads"], 1)
 
 
