@@ -34,6 +34,12 @@ All deployment examples on this page use Model Runner V2 with
 `VLLM_USE_V2_MODEL_RUNNER=1`. Every PD Prefill role uses PCP8 with TP1;
 Decode keeps PCP1.
 
+GLM-5.3-Flash supports Prefill Context Parallelism (PCP), ReplaySSM
+(`--use-replayssm`), and BF16 SSM state (`--mamba-ssm-cache-dtype bfloat16`).
+The [A3 ordinary PD examples](#glm53-flash-5-3-a3) use these features together.
+The [A3 KV Cache Pool example](#glm53-flash-5-4-a3)
+uses native KDA because ReplaySSM does not support `MultiConnector`.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
