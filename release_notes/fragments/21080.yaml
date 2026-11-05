@@ -1,0 +1,6 @@
+pr: 21080
+entries:
+  - category: bugfix
+    text: >-
+      Fixed retained prefill KV blocks when a MooncakeHybridConnector decode
+      request finishes in the scheduler before its KV receive is dispatched.
