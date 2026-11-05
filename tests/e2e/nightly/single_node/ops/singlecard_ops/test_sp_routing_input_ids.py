@@ -19,12 +19,12 @@ def test_sp_routing_ids_graph_refresh(monkeypatch, num_tokens, dtype):
     cpu_ids[0] = -1
     input_ids = cpu_ids.npu()
     for _ in range(3):
-        sp_module.prepare_sp_routing_input_ids(input_ids)
+        sp_module.prepare_sp_routing_input_ids(input_ids, padding_value=0)
     torch.npu.synchronize()
 
     graph = torch_npu.npu.NPUGraph()
     with torch_npu.npu.graph(graph):
-        output = sp_module.prepare_sp_routing_input_ids(input_ids)
+        output = sp_module.prepare_sp_routing_input_ids(input_ids, padding_value=0)
 
     for offset in (0, 100, 200):
         updated = cpu_ids + offset

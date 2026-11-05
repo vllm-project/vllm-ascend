@@ -74,21 +74,21 @@ def test_prepared_routing_ids_match_gathered_sp_shards(set_tp, tp_size, num_toke
     gathered = torch.cat(shards)
     expected = torch.where(gathered == -1, 0, gathered)
 
-    actual = sp_module._prepare_sp_routing_input_ids_impl(input_ids)
+    actual = sp_module._prepare_sp_routing_input_ids_impl(input_ids, padding_value=0)
 
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     torch.testing.assert_close(input_ids, original, rtol=0, atol=0)
     assert actual.dtype == torch.int64
-    assert actual.shape == sp_module._prepare_sp_routing_input_ids_fake(input_ids).shape
+    assert actual.shape == sp_module._prepare_sp_routing_input_ids_fake(input_ids, padding_value=0).shape
     assert actual.data_ptr() != input_ids.data_ptr()
 
 
 def test_prepared_routing_ids_follow_updated_input_buffer(set_tp):
     set_tp(8, 0)
     input_ids = torch.arange(12, dtype=torch.int32)
-    first = sp_module._prepare_sp_routing_input_ids_impl(input_ids)
+    first = sp_module._prepare_sp_routing_input_ids_impl(input_ids, padding_value=0)
     input_ids.add_(100)
-    second = sp_module._prepare_sp_routing_input_ids_impl(input_ids)
+    second = sp_module._prepare_sp_routing_input_ids_impl(input_ids, padding_value=0)
     torch.testing.assert_close(first[:12], torch.arange(12), rtol=0, atol=0)
     torch.testing.assert_close(second[:12], torch.arange(12) + 100, rtol=0, atol=0)
     assert torch.equal(second[12:], torch.zeros(4, dtype=torch.int64))
