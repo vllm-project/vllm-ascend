@@ -136,7 +136,8 @@ class TestCaMem(PytestBase):
     @pytest.mark.parametrize("cyclic_pool", [False, True], ids=["refcount", "cyclic-gc"])
     def test_mixed_pool_release_preserves_allocator_lifetimes(self, monkeypatch, graph_first, cyclic_pool):
         allocator = CaMemAllocator.get_instance()
-        events = []
+        events: list[tuple[str, str] | tuple[str, str, bool]] = []
+        owner_refs: list[weakref.ReferenceType[object]] = []
 
         class Owner:
             def __init__(self, name):
@@ -157,7 +158,11 @@ class TestCaMem(PytestBase):
 
         def entry(name):
             owner = Owner(name)
-            return Pool(name, owner), owner
+            pool = Pool(name, owner)
+            # Keep the weakref itself outside the cyclic pool. GC clears an
+            # unreachable weakref before __del__, even if its owner is live.
+            owner_refs.append(pool.owner)
+            return pool, owner
 
         monkeypatch.setattr(
             allocator,
@@ -188,6 +193,7 @@ class TestCaMem(PytestBase):
         assert not allocator.allocator_and_pools
         allocator.release_pools()
         assert len(events) == expected * 2
+        assert all(ref() is None for ref in owner_refs)
 
     @pytest.mark.parametrize("destroy_asleep", [False, True], ids=["awake", "asleep"])
     def test_mixed_pools_graph_replay_and_release(self, _npu_camem_allocator, destroy_asleep):
