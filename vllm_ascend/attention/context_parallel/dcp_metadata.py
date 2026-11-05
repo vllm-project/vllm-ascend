@@ -96,7 +96,9 @@ def reference_dcp_slot_offsets(
     the design-doc formula and the same arithmetic as
     ``worker/block_table.py::_compute_dcp_slot_mapping`` for the
     ``physical_block_size == block_size`` / ``blocks_per_phys_block == 1``
-    layout. Pure int64 tensor math; no vLLM/torch_npu needed.
+    layout. The layout is only meaningful when
+    ``block_size % cp_kv_cache_interleave_size == 0`` (see the design doc).
+    Pure int64 tensor math; no vLLM/torch_npu needed.
     """
     virtual_block_size = block_size * dcp_size
     virtual_block_index = positions // virtual_block_size

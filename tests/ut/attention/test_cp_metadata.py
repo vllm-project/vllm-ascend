@@ -17,7 +17,12 @@ from vllm_ascend.worker.dcp_utils import DCPManager
 _BLOCK_SIZE = 128
 
 
-def _create_block_table(dcp_world_size: int, dcp_rank: int, cp_kv_cache_interleave_size: int):
+def _create_block_table(
+    dcp_world_size: int,
+    dcp_rank: int,
+    cp_kv_cache_interleave_size: int,
+    max_num_batched_tokens: int = 512,
+):
     """Build a real v1 BlockTable on CPU following tests/ut/worker/test_block_table.py."""
     with patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_get_dcp_group:
         mock_dcp_group = MagicMock(spec=GroupCoordinator)
@@ -31,7 +36,7 @@ def _create_block_table(dcp_world_size: int, dcp_rank: int, cp_kv_cache_interlea
             block_size=_BLOCK_SIZE,
             max_num_reqs=4,
             max_num_blocks_per_req=128,
-            max_num_batched_tokens=512,
+            max_num_batched_tokens=max_num_batched_tokens,
             pin_memory=False,
             device=torch.device("cpu"),
             kernel_sizes=[_BLOCK_SIZE],
@@ -88,7 +93,14 @@ def test_reference_matches_v1_block_table_dcp_slot_mapping(dcp_size, cp_kv_cache
     block_ids_per_req = [list(range(10 * (req + 1), 10 * (req + 1) + 8)) for req in range(num_reqs)]
 
     for dcp_rank in range(dcp_size):
-        block_table = _create_block_table(dcp_size, dcp_rank, cp_kv_cache_interleave_size)
+        block_table = _create_block_table(
+            dcp_size,
+            dcp_rank,
+            cp_kv_cache_interleave_size,
+            max_num_batched_tokens=max(512, num_tokens),
+        )
+        # The v1 slot_mapping buffer is allocated exactly to its token capacity.
+        assert block_table.slot_mapping.np.shape[0] >= num_tokens
         for req, block_ids in enumerate(block_ids_per_req):
             block_table.add_row(block_ids, req)
         block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
@@ -121,8 +133,8 @@ def test_local_seq_lens_counts_only_owned_tokens(dcp_size, cp_kv_cache_interleav
         cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
     )
     assert all_ranks.shape == (seq_lens.shape[0], dcp_size)
-    # Every token is owned by exactly one rank.
-    torch.testing.assert_close(all_ranks.sum(dim=1), seq_lens)
+    # Every token is owned by exactly one rank (the integer sum promotes to int64).
+    torch.testing.assert_close(all_ranks.sum(dim=1), seq_lens.to(torch.int64))
 
     cpu_mirror = seq_lens.clone()
     for dcp_rank in range(dcp_size):
