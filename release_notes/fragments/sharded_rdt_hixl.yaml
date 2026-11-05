@@ -1,0 +1,3 @@
+entries:
+  - category: feature
+    text: Added an initial Ascend HIXL transport for sharded_rdt weight transfer while retaining the existing backend configuration name. NPU and model validation are required before deployment.

@@ -23,6 +23,7 @@ from vllm.distributed.weight_transfer.factory import (
 
 def register_engine():
     """Register Ascend weight transfer engines as vLLM plugins."""
+    _register_sharded_rdt()
     WeightTransferEngineFactory.register_engine(
         "sparse_hccl",
         "vllm_ascend.distributed.weight_transfer.sparse_hccl_engine",
@@ -53,3 +54,32 @@ def register_engine():
         "vllm_ascend.distributed.weight_transfer.hccl_engine",
         "HCCLTrainerWeightTransferEngine",
     )
+
+
+def _register_sharded_rdt():
+    """Keep the public backend key and select the transport at lazy load time.
+
+    The pinned upstream factory has no replace/platform-registration API.
+    Remove this registry adapter once it supports platform-specific loaders.
+    Other platforms retain the original upstream loader.
+    """
+    import importlib
+
+    for factory, module_name, class_name in (
+        (WeightTransferEngineFactory, "sharded_rdt_engine", "ShardedRDTWeightTransferEngine"),
+        (WeightTransferTrainerFactory, "sharded_rdt_trainer", "ShardedRDTTrainerWeightTransferEngine"),
+    ):
+        original = factory._registry.get("sharded_rdt")
+        if original is None or getattr(original, "_ascend_sharded_rdt", False):
+            continue
+
+        def loader(original=original, module_name=module_name, class_name=class_name):
+            from vllm.platforms import current_platform
+
+            if current_platform.device_type != "npu":
+                return original()
+            module = importlib.import_module(f"vllm_ascend.distributed.weight_transfer.{module_name}")
+            return getattr(module, class_name)
+
+        loader._ascend_sharded_rdt = True
+        factory._registry["sharded_rdt"] = loader
