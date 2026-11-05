@@ -17,11 +17,12 @@ class TestVitMropeSetupPatch(unittest.TestCase):
             "vllm.models.minimax_m3.common.vision_tower",
             "vllm_ascend.models._vllm_minimax_m3_common_vision_tower",
         )
-        for n in (1, 16, 17, 32, 33, 65):
+        for n, axis_size in product((1, 8, 9, 16, 17, 32, 33, 65), (21, 32)):
+            block_n, block_d = (16, 64) if axis_size == 21 else (8, 128)
             for states in product(("absent", "loaded", "blocked"), repeat=len(models)):
                 loaded_models = tuple(model for model, state in zip(models, states) if state == "loaded")
                 blocked_models = tuple(model for model, state in zip(models, states) if state == "blocked")
-                with self.subTest(n=n, states=states):
+                with self.subTest(n=n, axis_size=axis_size, states=states):
                     modules = {}
                     names = [target, "vllm.triton_utils", "vllm.utils.torch_utils"]
                     names.extend(loaded_models)
@@ -69,7 +70,7 @@ class TestVitMropeSetupPatch(unittest.TestCase):
                                 exec(f"from {target} import vit_mrope_setup", vars(modules[model]))
                             self.assertIs(modules[model].vit_mrope_setup, module.vit_mrope_setup)
                         inv = MagicMock()
-                        inv.numel.return_value = 21
+                        inv.numel.return_value = axis_size
                         for model in models:
                             if model in blocked_models:
                                 continue
@@ -77,14 +78,14 @@ class TestVitMropeSetupPatch(unittest.TestCase):
                     self.assertEqual(kernel.__getitem__.call_count, len(models) - len(blocked_models))
                     if len(blocked_models) == len(models):
                         continue
-                    kernel.__getitem__.assert_called_with(((n + 15) // 16,))
+                    kernel.__getitem__.assert_called_with(((n + block_n - 1) // block_n,))
                     args, kwargs = kernel.__getitem__.return_value.call_args
                     self.assertEqual(args[7:9], (n, 1))
-                    self.assertEqual(kwargs["BLOCK_N"], 16)
-                    self.assertEqual(kwargs["BLOCK_D"], 64)
+                    self.assertEqual(kwargs["BLOCK_N"], block_n)
+                    self.assertEqual(kwargs["BLOCK_D"], block_d)
                     self.assertEqual(kwargs["num_warps"], 8)
                     self.assertEqual(copy.call_args.args[0], [0, n, 1, 1, n])
-                    self.assertEqual(torch.empty.call_args.args, (3, n, 63))
+                    self.assertEqual(torch.empty.call_args.args, (3, n, axis_size * 3))
 
 
 if __name__ == "__main__":

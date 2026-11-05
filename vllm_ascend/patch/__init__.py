@@ -1915,7 +1915,8 @@
 #       Reduce ViT mRoPE setup UB pressure on Ascend A5.
 #    How:
 #       Copy the upstream vit_mrope_setup wrapper and change BLOCK_N from 32
-#       to 16, using the same value for the launch grid divisor. Keep the
+#       to at most 16 (8 for half_rot=96), keeping the tile at most 1024
+#       elements where possible and matching the launch grid divisor. Keep the
 #       upstream kernel unchanged. Rebind both the standard MiniMax vision tower alias and the
 #       Ascend shadow-module alias if already loaded; subsequent imports
 #       use the patched wrapper.

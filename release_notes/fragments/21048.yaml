@@ -1,6 +1,6 @@
 pr: 21048
 entries:
   - category: bugfix
-    text: Fixed the MiniMax-M3 ViT mRoPE 16-token setup patch being bypassed when the Ascend vision tower was loaded before worker initialization.
+    text: Fixed the MiniMax-M3 ViT mRoPE setup patch being bypassed by preloaded Ascend vision towers, and UB overflow for half rotation dimension 96 by reducing the token tile to 8.
     model: minimax-m3
     hardware: [A5]
