@@ -159,6 +159,13 @@ class TestSituHooks(unittest.TestCase):
         calls.clear()
         method.apply_gmm1_act_quant(inp)
         self.assertEqual(calls, ["fused"])
+        # After MegaMoE loading the dense weights were released. Even without
+        # the custom grouped SiTU op or a shared schedule, use live GMM views.
+        inp.layer.cann_mega_moe_w13_weight_list = []
+        calls.clear()
+        method.apply_gmm1_act_quant(inp)
+        self.assertEqual(calls, ["gmm1", "legacy_situ"])
+        del inp.layer.cann_mega_moe_w13_weight_list
         inp.shared_expert_schedule = NS(after_gmm1=lambda: calls.append("shared_down"))
         calls.clear()
         method.apply_gmm1_act_quant(inp)

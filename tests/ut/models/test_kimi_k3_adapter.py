@@ -203,7 +203,9 @@ def test_kimi_moe_leaves_routed_input_transform_to_runner():
     moe.experts.assert_called_once()
     call_kwargs = moe.experts.call_args.kwargs
     torch.testing.assert_close(call_kwargs["hidden_states"], hidden_states)
-    torch.testing.assert_close(call_kwargs["router_logits"], router_logits)
+    # The runtime MoE operation owns routing; the model passes a placeholder.
+    torch.testing.assert_close(call_kwargs["router_logits"], hidden_states)
+    moe.gate.assert_not_called()
     torch.testing.assert_close(result, output)
 
 

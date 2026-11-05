@@ -389,8 +389,8 @@ class AscendKimiMoE(nn.Module):
                 and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
             ):
                 self.shared_experts.act_fn = AscendSharedSparseSituAndMul(
-                    activation_situ_beta,
-                    activation_situ_linear_beta,
+                    self.shared_experts.act_fn.beta,
+                    self.shared_experts.act_fn.linear_beta,
                 )
         else:
             self.shared_experts = None

@@ -3378,6 +3378,17 @@ class NPUModelRunner(GPUModelRunner):
                     self.input_batch.num_computed_tokens_cpu[:num_reqs]
                     >= self.input_batch.num_prompt_tokens[:num_reqs]
                 )
+                if (
+                    not self.use_dcp
+                    and self.model_config.is_hybrid
+                    and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
+                ):
+                    # Match 0.30's graph eligibility below: the D worker's
+                    # last-prompt-token recomputation is Decode work.
+                    decode_mask |= (
+                        self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                        == self.input_batch.num_prompt_tokens[:num_reqs] - 1
+                    )
                 batch_contains_decode = bool(np.any(decode_mask))
                 if bool(np.any(~decode_mask)):
                     force_eager = True

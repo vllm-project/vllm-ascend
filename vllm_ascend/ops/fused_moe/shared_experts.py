@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import wraps
@@ -503,6 +504,11 @@ class AscendSharedExperts:
         prepared_input = prepare_input(layer, hidden_states)
         return hidden_states if prepared_input is None else prepared_input
 
+    def _compute_stream_context(self):
+        if not self.multistream_overlap:
+            return nullcontext()
+        return npu_stream_switch(shared_experts_calculation_stream(), enabled=True)
+
     def enqueue_gate_up_after_router(
         self,
         prepared_execution: PreparedSharedExpertExecution,
@@ -517,7 +523,7 @@ class AscendSharedExperts:
         """
         path = self._select_mlp_path()
         gate_up_input_scale = None
-        with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
+        with self._compute_stream_context():
             self._wait_for_milestone(router_output_ready, "router_output_ready")
             if path is SharedExpertMLPPath.A8_INT_FUSED:
                 # W8A8/W4A8: INT8 activations with INT8 or INT4 weights.
@@ -766,7 +772,8 @@ class AscendSharedExperts:
         # This join is intentionally stream-based. The shared forward executes
         # inside an opaque custom op for ACL Graph, so a Python-side Event
         # assigned inside that op is not available while its fake path traces.
-        torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
+        if self.multistream_overlap:
+            torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
 
     def forward(
         self,
@@ -777,7 +784,7 @@ class AscendSharedExperts:
     ) -> torch.Tensor:
         mode = self.parallel_mode()
         if submitted_gate_up is None:
-            with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
+            with self._compute_stream_context():
                 hidden_states, local_dp_metadata = self._prepare_execution_input(
                     prepared_input,
                     milestones,
@@ -795,7 +802,7 @@ class AscendSharedExperts:
             )
 
         local_dp_metadata = submitted_gate_up.local_dp_metadata
-        with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
+        with self._compute_stream_context():
             shared_out = self._finish_shared_mlp(submitted_gate_up, milestones)
             if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
                 self._wait_for_milestone(

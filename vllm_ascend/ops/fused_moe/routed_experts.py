@@ -30,7 +30,7 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, register_kimi_moe_quant_type, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -429,6 +429,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.router: FusedMoERouter | None = None
         ascend_config = get_ascend_config()
         vllm_config = get_current_vllm_config()
+        register_kimi_moe_quant_type(vllm_config, self.quant_type)
         self.n_shared_experts = n_shared_experts
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel

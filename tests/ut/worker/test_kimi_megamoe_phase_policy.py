@@ -41,8 +41,22 @@ def load_policy():
         "uses_kimi_prefill_megamoe",
         "select_moe_comm_method",
         "_select_capacity_and_world_size_moe_comm_method",
+        "use_cann_megamoe",
+        "set_mc2_tokens_capacity",
+        "register_kimi_moe_quant_type",
+        "_is_kimi_moe_model",
+        "_kimi_megamoe_weights_supported",
     }
-    nodes += [n for n in context.body if getattr(n, "name", None) in names]
+    nodes += [
+        n
+        for n in context.body
+        if getattr(n, "name", None) in names
+        or isinstance(n, ast.Assign)
+        and any(
+            isinstance(t, ast.Name) and (t.id == "_KIMI_MEGA_MOE_GROUP_SIZE" or t.id.endswith("_TOKENS_PER_RANK_LIMIT"))
+            for t in n.targets
+        )
+    ]
     cls = next(n for n in runner.body if isinstance(n, ast.ClassDef) and n.name == "NPUModelRunner")
     cls.bases = []
     cls.decorator_list = []
@@ -66,7 +80,7 @@ def load_policy():
         MoECommPolicy=Policy,
         logging=logging,
         logger=Mock(),
-        HardwareCapability=NS(CANN_MEGAMOE_MXFP="a5"),
+        HardwareCapability=NS(CANN_MEGAMOE_MXFP="a5", CANN_MEGAMOE="mega"),
         is_mega_moe_supported=lambda: True,
         is_moe_model=lambda c: True,
         get_ep_group=lambda: NS(world_size=32),
@@ -98,9 +112,11 @@ class TestKimiMegaMoEPhase(unittest.TestCase):
         )
         self.config = NS(
             model_config=NS(
-                architectures=["KimiK3ForConditionalGeneration"], hf_text_config=NS(num_experts_per_tok=16)
+                architectures=["KimiK3ForConditionalGeneration"],
+                hf_text_config=NS(num_experts_per_tok=16, hidden_act="situ"),
             ),
             parallel_config=NS(enable_expert_parallel=True, world_size_across_dp=32),
+            quant_config=NS(quant_description={"group_size": 32}),
             lora_config=None,
             kv_transfer_config=None,
             use_v2_model_runner=False,
@@ -110,13 +126,15 @@ class TestKimiMegaMoEPhase(unittest.TestCase):
             supports=lambda cap: True, moe_comm_policy=Policy.CAPACITY_AND_WORLD_SIZE
         )
 
+        self.ns["register_kimi_moe_quant_type"](self.config, self.ns["QuantType"].W4A8MXFP)
+
     def batch(self, phases, tokens, expected, unavailable=()):
         # P=real prefill, D=real decode, M=local mixture, I=idle dummy.
         modes = [
             GraphMode.NONE if p in ("P", "M") or r in unavailable else GraphMode.FULL for r, p in enumerate(phases)
         ]
         packed = torch.tensor(
-            [tokens, modes, [p != "I" for p in phases], [p in ("D", "M", "I") for p in phases]], dtype=torch.int32
+            [tokens, modes, [p != "I" for p in phases], [p in ("D", "M", "I", "R") for p in phases]], dtype=torch.int32
         )
         outputs = []
         for rank, phase in enumerate(phases):
@@ -133,10 +151,10 @@ class TestKimiMegaMoEPhase(unittest.TestCase):
             )
             r.vllm_config.observability_config = NS(cudagraph_metrics=False)
             r.parallel_config = r.vllm_config.parallel_config
-            r.model_config = NS(is_encoder_decoder=False, is_hybrid=False)
+            r.model_config = NS(is_encoder_decoder=False, is_hybrid=phase == "R")
             r.use_dcp = False
             r.uniform_decode_query_len = 1
-            computed = [0, 8] if phase == "M" else [0 if phase == "P" else 8]
+            computed = [0, 8] if phase == "M" else [0 if phase == "P" else (7 if phase == "R" else 8)]
             r.input_batch = NS(
                 num_computed_tokens_cpu=torch.tensor(computed),
                 num_prompt_tokens=torch.tensor([8] * len(computed)),
@@ -192,6 +210,65 @@ class TestKimiMegaMoEPhase(unittest.TestCase):
         self.batch(["M", "I"], [4, 1], "MC2")
         self.batch(["D", "I"], [8, 1], "MC2")
         self.batch(["P", "D"], [128, 8], "ALLTOALL")
+
+    def test_pd_last_prompt_token_recompute_keeps_decode_graph(self):
+        self.config.kv_transfer_config = NS(is_kv_consumer=True)
+        self.ns["is_pd_decode_recompute_scheduler_enabled"] = lambda cfg: True
+        self.batch(["R", "I"], [1, 1], "MC2")
+
+    def test_missing_cann_backend_cannot_select_fused_mc2_for_kimi(self):
+        self.ns["use_cann_megamoe"] = lambda cfg: False
+        self.assertEqual(self.ns["select_moe_comm_method"](8, self.config, batch_contains_decode=False).name, "MC2")
+
+    def test_actual_layout_and_ep_guards_match_weight_loading(self):
+        eligible = self.ns["use_cann_megamoe"]
+        select = self.ns["select_moe_comm_method"]
+        self.assertTrue(eligible(self.config))
+        for quant in (self.ns["QuantType"].NONE, self.ns["QuantType"].W8A8MXFP, self.ns["QuantType"].W4A4MXFP):
+            self.config.model_config._ascend_kimi_moe_quant_types = frozenset((quant,))
+            self.assertFalse(eligible(self.config))
+            self.assertEqual(select(8, self.config, batch_contains_decode=False).name, "MC2")
+        self.config.model_config._ascend_kimi_moe_quant_types = frozenset((self.ns["QuantType"].W4A8MXFP,))
+        self.config.quant_config.quant_description["group_size"] = 64
+        self.assertFalse(eligible(self.config))
+        self.config.quant_config.quant_description["group_size"] = 32
+        self.ns["get_ep_group"] = lambda: NS(world_size=128)
+        self.assertFalse(eligible(self.config))
+        self.assertEqual(select(8, self.config, batch_contains_decode=False).name, "MC2")
+
+    def test_mixed_model_registration_is_scoped_and_conservative(self):
+        other = NS(model_config=NS(architectures=["KimiK3ForConditionalGeneration"]))
+        self.ns["register_kimi_moe_quant_type"](other, self.ns["QuantType"].NONE)
+        self.assertTrue(self.ns["use_cann_megamoe"](self.config))
+        self.ns["register_kimi_moe_quant_type"](self.config, self.ns["QuantType"].NONE)
+        self.assertFalse(self.ns["use_cann_megamoe"](self.config))
+        self.assertEqual(len(self.config.model_config._ascend_kimi_moe_quant_types), 2)
+
+    def test_capacity_reservation_precedes_layout_discovery(self):
+        del self.config.model_config._ascend_kimi_moe_quant_types
+        self.ascend.enable_prefill_mc2 = False
+        self.config.scheduler_config = NS(max_num_batched_tokens=4096)
+        self.config.compilation_config = NS(cudagraph_capture_sizes=[1, 8], max_cudagraph_capture_size=8)
+        self.config.parallel_config.tensor_parallel_size = 1
+        self.ns["_mc2_tokens_capacity"] = None
+        self.ns["_is_decode_only_node"] = lambda cfg: False
+        self.ns["set_mc2_tokens_capacity"](self.config, 8, 1)
+        self.assertEqual(self.ns["_mc2_tokens_capacity"], 4096)
+        # Reserving a large buffer does not make unknown layouts executable.
+        self.assertEqual(self.ns["select_moe_comm_method"](8, self.config, batch_contains_decode=False).name, "MC2")
+        self.ns["register_kimi_moe_quant_type"](self.config, self.ns["QuantType"].W4A8MXFP)
+        self.assertEqual(
+            self.ns["select_moe_comm_method"](8, self.config, batch_contains_decode=False).name, "FUSED_MC2"
+        )
+
+    def test_large_prefill_and_ordinary_fallback_have_distinct_limits(self):
+        self.ns["get_mc2_tokens_capacity"] = lambda: 4096
+        select = self.ns["select_moe_comm_method"]
+        self.assertEqual(select(2048, self.config, batch_contains_decode=False).name, "FUSED_MC2")
+        self.assertEqual(select(8192, self.config, batch_contains_decode=False).name, "ALLTOALL")
+        self.assertEqual(select(2048, self.config, batch_contains_decode=True).name, "ALLTOALL")
+        self.config.model_config._ascend_kimi_moe_quant_types = frozenset((self.ns["QuantType"].NONE,))
+        self.assertEqual(select(2048, self.config, batch_contains_decode=False).name, "ALLTOALL")
 
     def test_capture_v2_and_kv_consumer_reject_megamoe(self):
         select = self.ns["select_moe_comm_method"]

@@ -407,6 +407,9 @@ def test_eplb_expert_remapping_preserves_weight_metadata():
 
 @pytest.mark.parametrize("enable_eplb", [False, True])
 def test_moe_uses_factory_expert_counts(monkeypatch, enable_eplb):
+    monkeypatch.setattr(
+        k3_module, "get_ascend_config", lambda: SimpleNamespace(multistream_overlap_shared_expert=False)
+    )
     config = SimpleNamespace(
         hidden_size=4,
         moe_intermediate_size=8,

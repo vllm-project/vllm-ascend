@@ -37,6 +37,59 @@ _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", defa
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 16384
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
+_KIMI_MEGA_MOE_GROUP_SIZE = 32
+
+
+def _is_kimi_moe_model(vllm_config: VllmConfig) -> bool:
+    architectures = getattr(vllm_config.model_config, "architectures", None) or []
+    return any(
+        name in ("KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
+        for name in architectures
+    )
+
+
+def register_kimi_moe_quant_type(vllm_config: VllmConfig, quant_type: QuantType) -> None:
+    """Record actual routed layouts during loading, scoped to this model config.
+
+    A mixed model must not select one batch-wide backend from its first layer's
+    dtype. The immutable set is complete before profiling/capture and avoids
+    inspecting all model modules on each inference step.
+    """
+    if _is_kimi_moe_model(vllm_config):
+        config = vllm_config.model_config
+        layouts = getattr(config, "_ascend_kimi_moe_quant_types", frozenset())
+        config._ascend_kimi_moe_quant_types = layouts | frozenset((quant_type,))
+
+
+def _kimi_megamoe_weights_supported(vllm_config: VllmConfig, *, allow_unknown: bool = False) -> bool:
+    if not _is_kimi_moe_model(vllm_config) or not get_current_hardware_profile().supports(
+        HardwareCapability.CANN_MEGAMOE_MXFP
+    ):
+        return True
+    # PR20's Kimi path requires both MegaMoE and ordinary Decode weight views.
+    # Unknown, BF16, mixed and other quantizations conservatively use ordinary
+    # MoE; their 0.30 weight loaders must not discard the ordinary storage.
+    layouts = getattr(vllm_config.model_config, "_ascend_kimi_moe_quant_types", None)
+    if layouts is None:
+        # Runner capacity is reserved before constructing any MoE layers.
+        # Preserve the 0.30 reservation then, but never select MegaMoE for
+        # execution until the actual layouts have been registered.
+        return allow_unknown
+    description = getattr(getattr(vllm_config, "quant_config", None), "quant_description", None)
+    group_size = description.get("group_size", _KIMI_MEGA_MOE_GROUP_SIZE) if isinstance(description, dict) else None
+    config = get_ascend_config()
+    eplb = getattr(config, "eplb_config", None)
+    parallel_eplb = getattr(vllm_config.parallel_config, "eplb_config", None)
+    activation = getattr(vllm_config.model_config.hf_text_config, "hidden_act", None)
+    return (
+        layouts == frozenset((QuantType.W4A8MXFP,))
+        and group_size == _KIMI_MEGA_MOE_GROUP_SIZE
+        and activation in ("silu", "situ")
+        and not getattr(config, "mix_placement", False)
+        and not getattr(eplb, "dynamic_eplb", False)
+        and not getattr(eplb, "num_redundant_experts", 0)
+        and not getattr(parallel_eplb, "num_redundant_experts", 0)
+    )
 
 
 def _is_decode_only_node(vllm_config: VllmConfig) -> bool:
@@ -94,6 +147,7 @@ def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
         and vllm_config.parallel_config.enable_expert_parallel
         and 1 < get_ep_group().world_size <= 64
         and getattr(vllm_config, "lora_config", None) is None
+        and _kimi_megamoe_weights_supported(vllm_config, allow_unknown=True)
     )
 
 
@@ -431,6 +485,9 @@ def select_moe_comm_method(
         moe_comm_type = MoECommType.ALLTOALL
     elif uses_kimi_prefill_megamoe(vllm_config) and (
         batch_contains_decode
+        or not use_cann_megamoe(vllm_config)
+        or not _kimi_megamoe_weights_supported(vllm_config)
+        or (num_tokens is not None and num_tokens > mc2_tokens_capacity)
         or aclgraph_runtime_mode != CUDAGraphMode.NONE
         or is_draft_model
         or getattr(vllm_config, "use_v2_model_runner", False)
@@ -441,7 +498,10 @@ def select_moe_comm_method(
         moe_comm_type = _select_capacity_and_world_size_moe_comm_method(
             num_tokens,
             vllm_config,
-            mc2_tokens_capacity,
+            min(
+                mc2_tokens_capacity,
+                _MC2_TOKENS_PER_RANK_LIMIT * getattr(vllm_config.parallel_config, "tensor_parallel_size", 1),
+            ),
             is_draft_model,
             draft_moe_quant_type,
             allow_fused=False,

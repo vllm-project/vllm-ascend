@@ -57,19 +57,34 @@ from vllm_ascend.utils import npu_stream_switch
 
 
 def _ascend_kimi_moe_fake(
-    hidden_states: torch.Tensor, input_ids: torch.Tensor | None, layer_name: _layer_name_type
+    hidden_states: torch.Tensor,
+    input_ids: torch.Tensor | None,
+    layer_name: _layer_name_type,
+    shared_experts_input: torch.Tensor | None = None,
+    router_logits: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    if shared_experts_input is not None:
+        return shared_experts_input.new_empty((*hidden_states.shape[:-1], shared_experts_input.shape[-1]))
     return torch.empty_like(hidden_states)
 
 
 def _ascend_kimi_moe(
-    hidden_states: torch.Tensor, input_ids: torch.Tensor | None, layer_name: _layer_name_type
+    hidden_states: torch.Tensor,
+    input_ids: torch.Tensor | None,
+    layer_name: _layer_name_type,
+    shared_experts_input: torch.Tensor | None = None,
+    router_logits: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # Resolve once, like the upstream MoE op. Keep runtime phase selection and
     # all stream orchestration opaque to Dynamo, but capturable by ACLGraph.
     runner = get_layer_from_name(_resolve_layer_name(layer_name))
     try:
-        return runner._forward_standard(hidden_states, hidden_states, input_ids)
+        return runner._forward_standard(
+            hidden_states,
+            hidden_states if router_logits is None else router_logits,
+            input_ids,
+            shared_experts_input,
+        )
     finally:
         # Do not retain a prefill-sized FP32 router tensor on every layer.
         runner._kimi_router_logits = None
@@ -207,7 +222,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if getattr(self, "_kimi_gate", None) is not None:
-            return torch.ops.vllm.ascend_kimi_moe(hidden_states, input_ids, self._encode_layer_name())
+            return torch.ops.vllm.ascend_kimi_moe(
+                hidden_states,
+                input_ids,
+                self._encode_layer_name(),
+                shared_experts_input,
+                None if router_logits is hidden_states else router_logits,
+            )
         return self._forward_standard(hidden_states, router_logits, input_ids, shared_experts_input)
 
     def _forward_standard(
@@ -231,7 +252,19 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # the original hidden states as ``shared_experts_input``; skip the
         # transform in that case so shared experts still see the original input.
         if shared_experts_input is None:
-            hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
+            if getattr(self, "_kimi_gate", None) is not None and router_logits is not hidden_states:
+                hidden_states, shared_experts_input = self.apply_routed_input_transform(
+                    hidden_states,
+                    router_logits=router_logits,
+                )
+            else:
+                hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
+        elif getattr(self, "_kimi_gate", None) is not None:
+            hidden_states, shared_experts_input = self.apply_routed_input_transform(
+                shared_experts_input,
+                routed_input=hidden_states,
+                router_logits=None if router_logits is hidden_states else router_logits,
+            )
 
         # Record before `_maybe_pad_hidden_states` pads activations to match
         # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
@@ -420,6 +453,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def apply_routed_input_transform(
         self,
         hidden_states: torch.Tensor,
+        *,
+        routed_input: torch.Tensor | None = None,
+        router_logits: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Start the SP shared-input gather before the latent down projection."""
         prepared_input = PreparedSharedExpertInput(hidden_states)
@@ -428,7 +464,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             assert shared_experts is not None
             prepared_input = shared_experts.prepare_input_async(hidden_states)
         kimi_gate = getattr(self, "_kimi_gate", None)
-        if kimi_gate is not None:
+        if kimi_gate is not None and router_logits is not None:
+            self._kimi_decode_active = self._can_run_kimi_decode(hidden_states)
+            self._kimi_router_logits = router_logits
+            self._kimi_router_done = None
+        elif kimi_gate is not None:
             self._kimi_decode_active = self._can_run_kimi_decode(hidden_states)
             stream = getattr(self, "_kimi_router_stream", None)
             ready = torch.npu.current_stream().record_event() if stream is not None else None
@@ -444,12 +484,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 )
                 with scope:
                     self._kimi_router_logits = self._compute_router_logits(hidden_states, hidden_states)
-                self._kimi_router_done = torch.npu.current_stream().record_event()
+                self._kimi_router_done = torch.npu.current_stream().record_event() if stream is not None else None
             # Retain 0.30's Router-before-latent-GEMM order. Shared input
             # AllGather overlaps both; do not launch two full Cube GEMMs
             # concurrently just because routing now has its own stream.
-            torch.npu.current_stream().wait_event(self._kimi_router_done)
-        routed_input, shared_input = super().apply_routed_input_transform(hidden_states)
+            if self._kimi_router_done is not None:
+                torch.npu.current_stream().wait_event(self._kimi_router_done)
+        if routed_input is None:
+            routed_input, shared_input = super().apply_routed_input_transform(hidden_states)
+        else:
+            shared_input = hidden_states
         if prepared_input.ready_event is not None:
             torch.npu.current_stream().wait_event(prepared_input.ready_event)
             shared_input = prepared_input.hidden_states
@@ -620,7 +664,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         kimi_gate = getattr(self, "_kimi_gate", None)
         if kimi_gate is not None:
-            torch.npu.current_stream().wait_event(self._kimi_router_done)
+            if self._kimi_router_done is not None:
+                torch.npu.current_stream().wait_event(self._kimi_router_done)
             router_logits = self._kimi_router_logits
             if getattr(self, "_kimi_router_stream", None) is not None:
                 router_logits.record_stream(torch.npu.current_stream())
@@ -642,7 +687,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 else self.ascend_shared_experts.prepare_input_before_routed(shared_hidden_states)
             )
             if kimi_gate is not None:
-                ready = torch.npu.current_stream().record_event()
+                ready = (
+                    torch.npu.current_stream().record_event()
+                    if self.ascend_shared_experts.multistream_overlap
+                    else None
+                )
                 if self._kimi_decode_active:
                     schedule = KimiDecodeSchedule(self.ascend_shared_experts, prepared_shared_input, ready)
                     routed_out, _ = self.routed_experts.forward_impl(

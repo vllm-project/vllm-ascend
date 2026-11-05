@@ -105,6 +105,7 @@ collectives; they are not hardware or full-package import validation.
 ```bash
 python tests/ut/ops/test_kimi_kda_compile.py -v
 python tests/ut/ops/test_kimi_v30_moe.py -v
+python tests/ut/ops/test_kimi_v30_review.py -v
 python tests/ut/worker/test_kimi_megamoe_phase_policy.py -v
 ```
 
@@ -128,8 +129,44 @@ latency. The local environment has no NPU or complete vLLM runtime, so these
 hardware results must be supplied separately. A first-token match alone does
 not establish multi-token correctness.
 
-Local results: 14 CPU tests passed; changed Python files passed Ruff and AST
+Local results after review: 27 CPU tests passed; changed Python files passed Ruff and AST
 parsing; the migration document passed markdownlint; `git diff --check` passed.
 `bash format.sh ci` was attempted twice outside the sandbox, but actionlint's
 Go environment download failed first with a TLS EOF and then a timeout at
 `go.dev/dl/?mode=json`. The full check did not reach completion.
+
+## Follow-up review corrections
+
+The initial migration missed several contracts that the focused policy tests
+alone did not exercise. The follow-up includes failing-before/passing-after
+regressions for the following fixes:
+
+- MegaMoE's W4A8 MXFP loader releases the dense weights. Ordinary Decode now
+  consumes zero-copy transposed views of the live MegaMoE lists, including
+  the path where grouped SiTU is unavailable. The dense GMSQ branch is not
+  used for released tensors. A CPU test executes the production weight loader,
+  simulates release, then checks Prefill/Decode/Prefill storage ownership.
+- Kimi MegaMoE execution requires registered W4A8 MXFP routed layouts,
+  group size 32, supported activation and the existing EP limit (2–64), with
+  no mixed layouts, dynamic EPLB, redundant experts or mix placement. These
+  constraints also govern weight preparation. Layouts are recorded as an
+  immutable set on the owning model config, without a global registry.
+- Before weights exist, startup still reserves 0.30's configured prefill
+  capacity. Unknown layouts cannot execute MegaMoE. Oversized prefill falls
+  back, and ordinary MC2 fallback uses its own 512-token-per-TP-rank limit,
+  rather than assuming MegaMoE's larger capacity is valid for MC2.
+- PD last-prompt-token recomputation follows 0.30's Decode classification;
+  it must not force NONE merely because computed tokens equal prompt minus one.
+- Serial execution acquires no shared auxiliary stream. Precomputed Router
+  logits and preprojected latent inputs remain explicit opaque-op inputs,
+  with correct fake output width and no repeated projection.
+- Shared sparse SiTU inherits the existing activation's normalized beta,
+  including the default when the raw configuration value is None.
+
+The existing model-adapter test now expects routing inside the runtime MoE
+operation. Full package and NPU execution remain unverified; CPU stream/kernel
+simulations do not prove HCCL stability or real-weight precision.
+
+The follow-up reran the full-format command with a 60-second limit; it again
+stalled installing actionlint and timed out. Targeted Ruff, syntax and Markdown
+checks passed. The existing adapter forward test also passed in isolation.
