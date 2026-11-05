@@ -1183,6 +1183,20 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
 
     packed_modules_mapping = AscendKimiLinearModel.packed_modules_mapping
 
+    def process_weights_after_loading(self) -> None:
+        # vLLM invokes this model hook after every per-module quant finalizer,
+        # before memory profiling. Conv's callback alone is too early: F/OProj
+        # can still be awaiting processing when that callback runs.
+        parent_hook = getattr(super(), "process_weights_after_loading", None)
+        if parent_hook is not None:
+            parent_hook()
+        if not get_ascend_config().enable_mega_kda:
+            return
+        mega_workspaces: dict = {}
+        for module in self.model.modules():
+            if isinstance(module, AscendKimiK3DeltaAttentionBase):
+                module._prepare_mega_weights(mega_workspaces)
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         self.model_config = vllm_config.model_config
@@ -1320,6 +1334,10 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
 
     def get_language_model(self) -> AscendKimiLinearForCausalLM:
         return self.language_model
+
+    def process_weights_after_loading(self) -> None:
+        # The loader invokes only the outer model-level hook for VL models.
+        self.language_model.process_weights_after_loading()
 
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.language_model.set_dspark_aux_capture_materialized(enabled)

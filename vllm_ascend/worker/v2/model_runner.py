@@ -505,6 +505,9 @@ class NPUModelRunner(GPUModelRunner):
             self.vllm_config.compilation_config.static_forward_context,
             self.vllm_config.scheduler_config.max_num_seqs,
         )
+        from vllm_ascend.ops.kimi_mega_kda import initialize_mega_kda_cache
+
+        initialize_mega_kda_cache(self.vllm_config.compilation_config.static_forward_context)
 
         copy_mamba_state = getattr(self.model_state, "copy_state_after_kv_load", None)
         if (
