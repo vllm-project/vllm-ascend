@@ -39,7 +39,6 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
-from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -47,13 +46,21 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.block_selection import (
+    GroupTransferInfo,
+    build_group_transfer_info,
+    group_unique_specs,
+    state_prefill_token_count,
+    swa_transfer_block_ids,
+    transfer_block_ids,
+    truncate_request_for_prefill,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.endpoints import (
     pull_base_port,
     pull_handshake_port,
@@ -148,13 +155,6 @@ class GroupPull:
     num_group_pulls: int
     prefill_pp_rank: int = 0
     is_group_transfer_end: bool = False
-
-
-@dataclass(frozen=True)
-class GroupTransferInfo:
-    tokens_per_block: int
-    blocks_per_window: int
-    is_state_group: bool
 
 
 class KVCacheSendingThread(threading.Thread):
@@ -1691,34 +1691,10 @@ class MooncakeConnectorScheduler:
         return isinstance(compress_ratios, (list, tuple, dict))
 
     def _get_group_transfer_info(self, group: Any) -> GroupTransferInfo:
-        specs = self._get_group_unique_specs(group)
-        first_spec = specs[0] if specs else group.kv_cache_spec
-        block_size = getattr(group.kv_cache_spec, "block_size", getattr(first_spec, "block_size", self.block_size))
-        is_state_group = any(isinstance(spec, MambaSpec) for spec in specs)
-        sliding_window = 0
-        compress_ratio = 1
-        for spec in specs:
-            if isinstance(spec, SlidingWindowSpec):
-                sliding_window = spec.sliding_window
-            elif hasattr(spec, "compress_ratio"):
-                compress_ratio = spec.compress_ratio
-
-        return GroupTransferInfo(
-            tokens_per_block=block_size * max(1, int(compress_ratio)),
-            blocks_per_window=cdiv(sliding_window, block_size) + 1 if sliding_window else 0,
-            is_state_group=is_state_group,
-        )
+        return build_group_transfer_info(group, default_block_size=self.block_size)
 
     def _get_group_unique_specs(self, group: Any) -> list[Any]:
-        if not isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            return [group.kv_cache_spec]
-
-        specs = []
-        for layer_name in group.layer_names:
-            layer_spec = group.kv_cache_spec.kv_cache_specs[layer_name]
-            if layer_spec not in specs:
-                specs.append(layer_spec)
-        return specs
+        return group_unique_specs(group)
 
     def _get_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
         """Return blocks that contain prompt KV, dropping MTP extra blocks.
@@ -1729,59 +1705,22 @@ class MooncakeConnectorScheduler:
         state groups keep their existing behavior. SWA tail clipping is handled
         as a separate step after this.
         """
-        if len(block_ids) == 0:
-            return block_ids
-
-        assert len(block_ids) == len(self.group_transfer_info), "Number of KV cache groups must match"
-
-        transfer_block_ids = []
-        for blocks, group_info in zip(block_ids, self.group_transfer_info):
-            is_aligned_state_group = group_info.is_state_group and (
-                getattr(self.vllm_config.cache_config, "mamba_cache_mode", None) == "align"
-            )
-            if group_info.is_state_group and not is_aligned_state_group:
-                transfer_block_ids.append(blocks)
-            elif is_aligned_state_group:
-                # Mamba state is not DCP-sharded like attention KV. Its aligned
-                # block index is derived from the actual (already truncated)
-                # prompt length, without multiplying by the DCP size.
-                num_prompt_state_blocks = cdiv(prompt_len, group_info.tokens_per_block)
-                if num_prompt_state_blocks <= 0 or num_prompt_state_blocks > len(blocks):
-                    raise RuntimeError(
-                        "Invalid aligned Mamba state block metadata: "
-                        f"prompt_len={prompt_len}, tokens_per_block={group_info.tokens_per_block}, "
-                        f"required_block_count={num_prompt_state_blocks}, available_block_count={len(blocks)}."
-                    )
-                transfer_block_ids.append(blocks[num_prompt_state_blocks - 1 : num_prompt_state_blocks])
-            else:
-                # Each scheduler-visible block id is a DCP-grouped virtual
-                # block shared by all DCP ranks.
-                num_prompt_blocks = cdiv(prompt_len, group_info.tokens_per_block * self.dcp_size)
-                transfer_block_ids.append(blocks[:num_prompt_blocks])
-        return tuple(transfer_block_ids)
+        return transfer_block_ids(
+            block_ids,
+            prompt_len,
+            group_transfer_info=self.group_transfer_info,
+            mamba_cache_mode=getattr(self.vllm_config.cache_config, "mamba_cache_mode", None),
+            dcp_size=self.dcp_size,
+        )
 
     def _get_swa_transfer_block_ids(self, block_ids: BlockIds) -> BlockIds:
         """Clip SWA groups to their window tail and drop placeholder block 0."""
-        if len(block_ids) == 0:
-            return block_ids
-
-        assert len(block_ids) == len(self.group_transfer_info), "Number of KV cache groups must match"
-
-        transfer_block_ids = []
-        for blocks, group_info in zip(block_ids, self.group_transfer_info):
-            if group_info.is_state_group or group_info.blocks_per_window == 0:
-                transfer_block_ids.append(blocks)
-            else:
-                window_blocks = blocks[-group_info.blocks_per_window :]
-                transfer_block_ids.append([block_id for block_id in window_blocks if block_id != 0])
-        return tuple(transfer_block_ids)
+        return swa_transfer_block_ids(block_ids, group_transfer_info=self.group_transfer_info)
 
     def _state_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
         always recomputes the last token and must start from h(N-1)."""
-        if self.need_truncate and num_prompt_tokens > 1:
-            return num_prompt_tokens - 1
-        return num_prompt_tokens
+        return state_prefill_token_count(num_prompt_tokens, need_truncate=self.need_truncate)
 
     def _truncate_request_for_prefill(self, request: "Request") -> None:
         """P-side only: drop the last prompt token so the prefiller computes
@@ -1790,27 +1729,7 @@ class MooncakeConnectorScheduler:
 
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
         request is preempted and rescheduled."""
-        params = request.kv_transfer_params
-        if (
-            params is not None
-            # Guard against repeated truncation after preemption/reschedule.
-            and not params.get("_p_side_truncated")
-            and request.num_prompt_tokens > 1
-        ):
-            if request.prompt_token_ids is not None:
-                request.prompt_token_ids.pop()
-            elif request.prompt_embeds is not None:
-                request.prompt_embeds = request.prompt_embeds[:-1]
-            else:
-                return
-
-            request._all_token_ids.pop()
-            request.num_prompt_tokens -= 1
-            request.max_tokens = 1
-            # Request already hashed the full prompt. Rebuild for the shortened one.
-            request.block_hashes.clear()
-            request.update_block_hashes()
-            params["_p_side_truncated"] = True
+        truncate_request_for_prefill(request)
 
     def on_new_request(self, request: "Request") -> None:
         # Truncate before local prefix-cache lookup so its hit count stays
