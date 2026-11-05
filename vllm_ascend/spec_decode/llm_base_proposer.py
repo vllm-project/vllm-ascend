@@ -237,6 +237,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.tp_group_context = nullcontext()
 
         self.use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
+        # Persistent target_positions buffer for the draft graph (stable addresses).
+        self._draft_target_positions = None
         self._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
 
         # GLM series models: speculative decoding does not yet support running
@@ -1007,6 +1009,41 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
+    def _stage_target_positions(self, target_positions: torch.Tensor) -> torch.Tensor:
+        """Copy target_positions into the persistent buffer and return its slice.
+
+        The draft ACL graph is replayed by ACLGraphWrapper.replay(), which does not
+        run this Python code again, so every captured tensor address must stay
+        stable. target_positions is freshly allocated per step (_get_positions
+        via advanced indexing), so its address drifts and the graph reads stale
+        data.
+        """
+        if target_positions.dim() != 1:
+            return target_positions
+        capacity = getattr(self, "max_num_tokens", None)
+        if capacity is None:
+            return target_positions
+        num_tokens = target_positions.shape[0]
+        buffer = getattr(self, "_draft_target_positions", None)
+        if buffer is None:
+            buffer = torch.zeros(
+                capacity,
+                dtype=target_positions.dtype,
+                device=target_positions.device,
+            )
+            self._draft_target_positions = buffer
+            logger.info(
+                "[draft-graph] persistent draft_target_positions buffer created (%d, %s)",
+                capacity,
+                target_positions.dtype,
+            )
+        if buffer.dtype != target_positions.dtype or buffer.device != target_positions.device:
+            raise RuntimeError("[draft-graph] dtype/device changed; refusing to replace the persistent buffer")
+        if num_tokens > buffer.shape[0]:
+            raise ValueError("[draft-graph] target_positions exceed the persistent buffer capacity")
+        buffer[:num_tokens].copy_(target_positions)
+        return buffer[:num_tokens]
+
     def _propose(
         self,
         num_speculative_tokens: int,
@@ -1065,6 +1102,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             target_hidden_states = cast(_HiddenStateDrafter, model).combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
+        # Address stability: draft-graph replay skips Python, so tensor addresses stay fixed.
+        if self.method == "dspark":
+            target_positions = self._stage_target_positions(target_positions)
         num_tokens, token_indices_to_sample, common_attn_metadata, long_seq_args = self.set_inputs_first_pass(
             target_token_ids=target_token_ids,
             next_token_ids=next_token_ids,
