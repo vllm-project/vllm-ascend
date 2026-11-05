@@ -94,6 +94,28 @@ def test_prepared_routing_ids_follow_updated_input_buffer(set_tp):
     assert torch.equal(second[12:], torch.zeros(4, dtype=torch.int64))
 
 
+@pytest.mark.parametrize("tp_size", [2, 4, 8])
+@pytest.mark.parametrize("num_tokens", [3, 12, 16])
+def test_prepared_routing_ids_preserve_padding_marker(set_tp, tp_size, num_tokens):
+    set_tp(tp_size, 0)
+    input_ids = torch.arange(num_tokens, dtype=torch.int32)
+    input_ids[0] = -1
+    input_ids[1] = 0
+    input_ids[-1] = sp_module.MOE_PADDING_TOKEN_ID
+    original = input_ids.clone()
+
+    actual = sp_module._prepare_sp_routing_input_ids_impl(input_ids, padding_value=sp_module.MOE_PADDING_TOKEN_ID)
+
+    torch.testing.assert_close(actual[:2], torch.zeros(2, dtype=torch.int64), rtol=0, atol=0)
+    torch.testing.assert_close(actual[2:num_tokens], input_ids[2:].to(torch.int64), rtol=0, atol=0)
+    assert torch.all(actual[num_tokens:] == sp_module.MOE_PADDING_TOKEN_ID)
+    assert (
+        actual.shape
+        == sp_module._prepare_sp_routing_input_ids_fake(input_ids, padding_value=sp_module.MOE_PADDING_TOKEN_ID).shape
+    )
+    torch.testing.assert_close(input_ids, original, rtol=0, atol=0)
+
+
 def test_sp_reduce_scatter_appends_zero_rows_with_cat(set_tp, monkeypatch: pytest.MonkeyPatch):
     set_tp(2, 0)
     monkeypatch.setattr(sp_module, "_custom_collective", lambda name, value: value)

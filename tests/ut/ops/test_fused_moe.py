@@ -810,6 +810,90 @@ def test_hash_router_reuses_global_ids_across_layers(monkeypatch):
     assert hash_op.call_count == 40
 
 
+@pytest.mark.parametrize("ep_size,ep_rank", [(size, rank) for size in (2, 4, 8) for rank in range(size)])
+@pytest.mark.parametrize("use_hash", [False, True])
+@pytest.mark.parametrize("num_valid_tokens", [0, 5, 12])
+def test_padding_router_preserves_valid_routes_and_uses_foreign_expert(
+    monkeypatch, ep_size, ep_rank, use_hash, num_valid_tokens
+):
+    num_experts, top_k = 384, 6
+    input_ids = torch.arange(12, dtype=torch.int64)
+    input_ids[num_valid_tokens:] = fused_topk_router_module.MOE_PADDING_TOKEN_ID
+    baseline_ids = input_ids.clamp_min(0)
+    hidden_states = torch.ones(12, 16)
+    logits = torch.arange(12 * num_experts, dtype=torch.float32).reshape(12, num_experts).sin()
+    table = (torch.arange(12).unsqueeze(1) * 37 + torch.arange(top_k)) % num_experts if use_hash else None
+    gather = MagicMock(side_effect=AssertionError("Global routing IDs must not be gathered again"))
+    monkeypatch.setattr(
+        fused_topk_router_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_method=SimpleNamespace(prepare_finalize=SimpleNamespace(all_gather_input_ids=gather))),
+    )
+
+    def hash_reference(*, x, k, input_ids, tid2eid, **kwargs):
+        scores = torch.nn.functional.softplus(x).sqrt()
+        if use_hash:
+            torch.testing.assert_close(input_ids, baseline_ids)
+            ids = tid2eid[input_ids].to(torch.int64)
+        else:
+            assert input_ids is None
+            assert tid2eid is None
+            ids = scores.topk(k, dim=-1).indices
+        return scores.gather(1, ids), ids.to(torch.int32), None
+
+    hash_op = MagicMock(side_effect=hash_reference)
+    monkeypatch.setattr(fused_topk_router_module.torch.ops._C_ascend, "moe_gating_top_k_hash", hash_op, raising=False)
+    router = AscendFusedTopKRouter(
+        top_k=top_k, global_num_experts=num_experts, scoring_func="sqrtsoftplus", tid2eid=table
+    )
+    router.input_ids_are_global = True
+    baseline_weights, baseline_experts = router._compute_routing(
+        hidden_states, logits, torch.int32, input_ids=baseline_ids
+    )
+    local_experts = num_experts // ep_size
+    router.padding_expert_id = local_experts if ep_rank == 0 else 0
+    weights, experts = router._compute_routing(hidden_states, logits, torch.int32, input_ids=input_ids)
+
+    torch.testing.assert_close(weights, baseline_weights, rtol=0, atol=0)
+    torch.testing.assert_close(experts[:num_valid_tokens], baseline_experts[:num_valid_tokens], rtol=0, atol=0)
+    assert torch.all(experts[num_valid_tokens:] == router.padding_expert_id)
+    first_expert = ep_rank * local_experts
+    is_local = (experts >= first_expert) & (experts < first_expert + local_experts)
+    assert not is_local[num_valid_tokens:].any()
+    # The active local expert range must see precisely the valid rows' counts.
+    actual_counts = torch.bincount(experts[is_local].to(torch.int64), minlength=num_experts)
+    valid_experts = baseline_experts[:num_valid_tokens]
+    valid_local = (valid_experts >= first_expert) & (valid_experts < first_expert + local_experts)
+    expected_counts = torch.bincount(valid_experts[valid_local].to(torch.int64), minlength=num_experts)
+    torch.testing.assert_close(actual_counts, expected_counts, rtol=0, atol=0)
+    gather.assert_not_called()
+    assert hash_op.call_count == 2
+
+
+@pytest.mark.parametrize("padding_expert", [0, 2])
+def test_padding_vision_router_preserves_valid_text_and_image_rows(monkeypatch, padding_expert):
+    image_id = 129257
+    input_ids = torch.tensor([0, 7, image_id, -2], dtype=torch.int64)
+    logits = torch.tensor([[0.3, 0.7, 0.5, 0.1]] * 4)
+    bias = torch.tensor([0.0, 0.0, 0.0, 1.0])
+    profile = get_hardware_profile(AscendDeviceType.A5)
+    profile = replace(profile, capabilities=profile.capabilities - {HardwareCapability.MOE_GATING_TOP_K_HASH_VISION})
+    monkeypatch.setattr(fused_topk_router_module, "get_current_hardware_profile", lambda: profile)
+    router = AscendFusedTopKRouter(
+        top_k=2, global_num_experts=4, scoring_func="sqrtsoftplus", bias_vl=bias, image_sentinel_lo=image_id
+    )
+    router.input_ids_are_global = True
+    baseline_weights, baseline_ids = router._compute_routing(
+        torch.ones(4, 4), logits, torch.int64, input_ids=input_ids.clamp_min(0)
+    )
+    router.padding_expert_id = padding_expert
+    weights, ids = router._compute_routing(torch.ones(4, 4), logits, torch.int64, input_ids=input_ids)
+    torch.testing.assert_close(weights[:3], baseline_weights[:3], rtol=0, atol=0)
+    torch.testing.assert_close(ids[:3], baseline_ids[:3], rtol=0, atol=0)
+    assert torch.all(ids[3] == padding_expert)
+    assert not torch.equal(ids[1], ids[2])
+
+
 @pytest.mark.parametrize("image_sentinel_lo", [129257, 129264])
 @pytest.mark.parametrize("renormalize", [True, False])
 def test_vision_router_preserves_reference_routing_without_native_vision(monkeypatch, image_sentinel_lo, renormalize):

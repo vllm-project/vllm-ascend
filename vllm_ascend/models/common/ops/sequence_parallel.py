@@ -13,6 +13,8 @@ from vllm.distributed import (
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
 
+MOE_PADDING_TOKEN_ID = -2
+
 
 def _custom_collective(name: str, x: torch.Tensor) -> torch.Tensor | None:
     device_communicator = get_tp_group().device_communicator
@@ -64,17 +66,17 @@ def sp_shard(x: torch.Tensor) -> torch.Tensor:
     return torch.ops.vllm.ascend_sp_shard_impl(x)
 
 
-def _prepare_sp_routing_input_ids_impl(input_ids: torch.Tensor) -> torch.Tensor:
+def _prepare_sp_routing_input_ids_impl(input_ids: torch.Tensor, padding_value: int = 0) -> torch.Tensor:
     """Keep replicated IDs in the row order of gathered SP router logits."""
     tp_size = get_tensor_model_parallel_world_size()
     sp_pad = (-input_ids.shape[0]) % tp_size
     if sp_pad > 0:
-        input_ids = F.pad(input_ids, (0, sp_pad))
+        input_ids = F.pad(input_ids, (0, sp_pad), value=padding_value)
     input_ids = input_ids.to(torch.int64)
     return torch.where(input_ids == -1, 0, input_ids)
 
 
-def _prepare_sp_routing_input_ids_fake(input_ids: torch.Tensor) -> torch.Tensor:
+def _prepare_sp_routing_input_ids_fake(input_ids: torch.Tensor, padding_value: int = 0) -> torch.Tensor:
     tp_size = get_tensor_model_parallel_world_size()
     return input_ids.new_empty((cdiv(input_ids.shape[0], tp_size) * tp_size,), dtype=torch.int64)
 
@@ -88,10 +90,10 @@ direct_register_custom_op(
 )
 
 
-def prepare_sp_routing_input_ids(input_ids: torch.Tensor) -> torch.Tensor:
+def prepare_sp_routing_input_ids(input_ids: torch.Tensor, padding_value: int = 0) -> torch.Tensor:
     # Like sp_shard, keep token-count padding inside the custom op so
     # compilation does not specialize the modulo on a profiling batch.
-    return torch.ops.vllm.prepare_sp_routing_input_ids(input_ids)
+    return torch.ops.vllm.prepare_sp_routing_input_ids(input_ids, padding_value)
 
 
 def _ascend_sp_reduce_scatter_impl(x: torch.Tensor) -> torch.Tensor:

@@ -23,6 +23,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.models.common.ops.sequence_parallel import MOE_PADDING_TOKEN_ID
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
 
 DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID = 129257
@@ -120,6 +121,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         self.image_sentinel_lo = image_sentinel_lo
         # Fixed-ALLGATHER model-level SP can supply normalized, TP-padded IDs.
         self.input_ids_are_global = False
+        # Configured only by eligible DSV4.1 target models, never the drafter.
+        self.padding_expert_id: int | None = None
 
     def is_fused_supported(
         self,
@@ -159,7 +162,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         num_expert_group = self.num_expert_group if self.num_expert_group is not None else 1
         renorm = int(self.renormalize)
         if self.scoring_func == "sqrtsoftplus":
-            if self.tid2eid is not None or self.bias_vl is not None:
+            needs_input_ids = self.tid2eid is not None or self.bias_vl is not None
+            if needs_input_ids or self.padding_expert_id is not None:
                 if input_ids is None:
                     raise ValueError("DeepSeek V4 vision/hash MoE routing requires input_ids.")
                 tid2eid_ones = self.tid2eid.to(torch.int32) if self.tid2eid is not None else None
@@ -180,6 +184,9 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                         # has not already aligned ids with local router rows.
                         input_ids = sequence_parallel_chunk(input_ids.reshape(-1, 1)).reshape(-1)
                     input_ids = torch.where(input_ids == -1, 0, input_ids)
+                if self.padding_expert_id is not None:
+                    padding_mask = input_ids == MOE_PADDING_TOKEN_ID
+                    input_ids = torch.where(padding_mask, 0, input_ids) if needs_input_ids else None
             else:
                 input_ids = None
                 tid2eid_ones = None
@@ -198,6 +205,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                     routed_scaling_factor=self.routed_scaling_factor,
                     image_sentinel_lo=self.image_sentinel_lo,
                 )
+                if self.padding_expert_id is not None:
+                    topk_ids = topk_ids.masked_fill(padding_mask.unsqueeze(-1), self.padding_expert_id)
                 return topk_weights.to(torch.float32), topk_ids.to(
                     torch.int32 if indices_type is None else indices_type
                 )
@@ -226,6 +235,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 image_sentinel_lo=self.image_sentinel_lo,
                 image_sentinel_count=DEEPSEEK_V4_IMAGE_SENTINEL_COUNT,
             )
+            if self.padding_expert_id is not None:
+                topk_ids = topk_ids.masked_fill(padding_mask.unsqueeze(-1), self.padding_expert_id)
             return topk_weights.to(torch.float32), topk_ids.to(torch.int32 if indices_type is None else indices_type)
         norm_type = 0 if self.scoring_func == "softmax" else 1
         if self.e_score_correction_bias is not None and self.e_score_correction_bias.dtype != router_logits.dtype:

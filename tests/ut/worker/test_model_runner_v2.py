@@ -468,6 +468,36 @@ def test_adaptive_verification_pads_fia_query_boundaries(
     np.testing.assert_array_equal(actual[: len(expected)], expected)
 
 
+def test_prepare_inputs_restores_valid_prefix_after_graph_capture():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner._check_finegrained_tp_graph_step = Mock()
+    runner.pcp_manager = None
+    # The graph capture dummy leaves this persistent input buffer all True.
+    mask = torch.ones(32, dtype=torch.bool)
+    runner.input_buffers = SimpleNamespace(is_padding=mask)
+    address = mask.data_ptr()
+
+    class InputsPrepared(Exception):
+        pass
+
+    # Stop before sequence length bookkeeping: this test exercises the real
+    # preparation entry point and its graph input buffer, without NPU metadata.
+    runner._update_seq_lens_cpu = Mock(side_effect=InputsPrepared)
+    for num_tokens, padded_tokens in [(18, 24), (6, 12), (12, 12)]:
+        previous = mask.clone()
+        with pytest.raises(InputsPrepared):
+            runner._prepare_inputs_impl(
+                SimpleNamespace(),
+                SimpleNamespace(num_tokens=num_tokens, req_ids=["request"]),
+                SimpleNamespace(num_tokens=padded_tokens, num_reqs=1, cg_mode=CUDAGraphMode.FULL),
+            )
+        assert runner.input_buffers.is_padding is mask
+        assert mask.data_ptr() == address
+        assert not mask[:num_tokens].any()
+        assert mask[num_tokens:padded_tokens].all()
+        torch.testing.assert_close(mask[padded_tokens:], previous[padded_tokens:])
+
+
 def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     source_path = Path(__file__).parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"))

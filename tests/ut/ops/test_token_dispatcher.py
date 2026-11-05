@@ -25,6 +25,7 @@ import torch
 from tests.ut.base import TestBase
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.ops.fused_moe import token_dispatcher as token_dispatcher_module
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEAllGatherCombineMetadata,
@@ -580,6 +581,57 @@ class TestTokenDispatcherWithMC2(TestBase):
                 kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, metadata)
                 self.assertEqual(kwargs["comm_quant_mode"], expected)
                 self.assertIs(kwargs["expand_x"], hidden_states)
+
+
+@pytest.mark.parametrize("ep_size,ep_rank", [(size, rank) for size in (2, 4, 8) for rank in range(size)])
+@pytest.mark.parametrize("num_valid_tokens", [0, 5, 12])
+@pytest.mark.parametrize("quant_type", [QuantType.NONE, QuantType.W4A8])
+def test_allgather_dispatch_excludes_foreign_padding_routes(
+    monkeypatch, ep_size, ep_rank, num_valid_tokens, quant_type
+):
+    num_experts, top_k = 384, 6
+    local_experts = num_experts // ep_size
+    first_expert = ep_rank * local_experts
+    expert_map = torch.full((num_experts,), -1, dtype=torch.int32)
+    expert_map[first_expert : first_expert + local_experts] = torch.arange(local_experts, dtype=torch.int32)
+    baseline_ids = ((torch.arange(12).unsqueeze(1) * 37 + torch.arange(top_k)) % num_experts).to(torch.int32)
+    topk_ids = baseline_ids.clone()
+    topk_ids[num_valid_tokens:] = local_experts if ep_rank == 0 else 0
+    token_input = build_token_dispatch_input_fixture(
+        hidden_states=torch.ones(12, 16),
+        topk_weights=torch.ones(12, top_k),
+        topk_ids=topk_ids,
+        expert_map=expert_map,
+        quant_type=quant_type,
+    )
+    monkeypatch.setattr(token_dispatcher_module, "get_ep_group", lambda: SimpleNamespace(rank_in_group=ep_rank))
+
+    def init_routing(hidden_states, expert_ids, *, active_expert_range, **kwargs):
+        assert active_expert_range == [first_expert, first_expert + local_experts]
+        assert kwargs["expert_tokens_num_type"] == 1
+        assert kwargs["quant_mode"] == (1 if quant_type == QuantType.W4A8 else -1)
+        local = (expert_ids >= active_expert_range[0]) & (expert_ids < active_expert_range[1])
+        row_ids = local.nonzero()[:, 0]
+        counts = torch.bincount((expert_ids[local] - first_expert).to(torch.int64), minlength=local_experts)
+        return hidden_states[row_ids], row_ids, counts, None
+
+    route = MagicMock(side_effect=init_routing)
+    monkeypatch.setattr(token_dispatcher_module.DeviceOperator, "npu_moe_init_routing", route)
+    dispatcher = TokenDispatcherWithAllGather(top_k=top_k, num_local_experts=local_experts)
+    output = dispatcher.token_dispatch(token_input)
+
+    valid_ids = baseline_ids[:num_valid_tokens]
+    valid_local_ids = valid_ids[(valid_ids >= first_expert) & (valid_ids < first_expert + local_experts)]
+    expected_counts = torch.bincount((valid_local_ids - first_expert).to(torch.int64), minlength=local_experts)
+    torch.testing.assert_close(output.group_list, expected_counts, rtol=0, atol=0)
+    assert output.hidden_states.shape[0] == valid_local_ids.numel()
+    assert output.group_list_type == 1
+    assert not output.combine_metadata.topk_weights[num_valid_tokens:].any()
+    expected_weights = (expert_map[valid_ids] != -1).to(torch.float32)
+    torch.testing.assert_close(
+        output.combine_metadata.topk_weights[:num_valid_tokens], expected_weights, rtol=0, atol=0
+    )
+    route.assert_called_once()
 
 
 @pytest.mark.parametrize("prequantized", [False, True])

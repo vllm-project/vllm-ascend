@@ -796,6 +796,11 @@ class NPUModelRunner(GPUModelRunner):
             graph_num_reqs = global_graph_num_reqs
             num_tokens_after_padding = global_graph_num_reqs * batch_desc.uniform_token_count
         assert num_tokens > 0
+        # Capture dummies mark all rows as padding. Refresh the same buffer
+        # before replay so routing sees this batch's valid token prefix.
+        is_padding = self.input_buffers.is_padding[:num_tokens_after_padding]
+        is_padding[:num_tokens].fill_(False)
+        is_padding[num_tokens:].fill_(True)
 
         req_ids = batch_req_state.req_ids
 
@@ -1031,7 +1036,7 @@ class NPUModelRunner(GPUModelRunner):
             **pp_kwargs,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
-            is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
+            is_padding=is_padding,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,

@@ -59,6 +59,7 @@ def make_model():
     model = object.__new__(model_mod.DeepseekV41Model)
     torch.nn.Module.__init__(model)
     model.reuse_routing_input_ids = False
+    model.skip_moe_padding = False
     model.decoder_replay_layers = None
     model.has_engram, model.engram_dp_shared_memory = True, False
     model._engram_overlap_enabled = True
