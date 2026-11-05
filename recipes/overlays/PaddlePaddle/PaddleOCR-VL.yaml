@@ -140,6 +140,30 @@ guide_sections:
     a frontend-only SIGTERM retry. Keep those errors in validation reports; this
     environment has not passed an error-free-log acceptance check.
 
+    ### Latest-main functional supplement
+
+    On 2026-11-05, the complete official `nightly-main-310p` image at index
+    `sha256:7192b0a7af1bab805c4800cd1db9bfd1e2758507b374f61c2c025c97f7141d31`
+    passed a separate 32-request graph/eager recognition matrix and the same
+    graph PNG/PDF and eager PNG document checks on 310P3. Its arm64 manifest is
+    `sha256:cf9c51b3a89d71de2ecfdb233fbbb0bdd81ad240129898c2566279464256b1a5`.
+    The image contains Python 3.12.16, vLLM 0.32.0, torch_npu 2.10.0.post7,
+    Transformers 5.19.0 and CANN 9.2.1. Original weights and sample assertions
+    are unchanged. The separate layout client retains PaddleOCR 3.3.2 and its
+    CANN 9.2.0-compiled OM; these are separate processes, not a mixed install.
+
+    No Docker engine was available in the development container. The verified
+    complete image ran its original entrypoint under PRoot 5.5.0 with device and
+    driver bindings. SDK, Python and source paths were mapped to host-visible
+    files under the bound workspace: virtual-only paths failed CANN tensor and
+    model startup, while the explicit path mapping passed those checks. No image
+    package, model code or host driver was changed. This execution method does
+    not validate the printed Docker command or establish comparable performance.
+    Both modes still logged `EngineDeadError` during explicit shutdown after
+    completed requests. The functional result does not satisfy a clean-log
+    acceptance requirement or validate future main images. The pinned RC
+    builder configuration and its original 32-request evidence remain separate.
+
     ### Historical tested source environment
 
     - HiDevLab Ascend 310P3: one of two logical devices selected, about 44 GB usable
