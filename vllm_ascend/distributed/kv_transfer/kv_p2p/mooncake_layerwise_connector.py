@@ -13,7 +13,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-import httpx
 import msgspec
 import numpy as np
 import numpy.typing as npt
@@ -77,6 +76,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport imp
     string_to_int64_hash,  # noqa: F401  (re-exported for existing callers/tests)
     zmq_ctx,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.layerwise.metaserver import MetaserverClient
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -889,20 +889,7 @@ class MooncakeLayerwiseConnectorScheduler:
         self._reqs_need_send_layerwise: dict[str, SendReqInfo] = {}
         self.need_truncate = self._has_attn_mamba_hybrid_cache(kv_cache_config)
         self.executor = ThreadPoolExecutor(32)
-        tls_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("tls_config", {})
-        ssl_keyfile = tls_config.get("ssl_keyfile")
-        ssl_certfile = tls_config.get("ssl_certfile")
-        ssl_ca_certs = tls_config.get("ssl_ca_certs", False)
-        ssl_keyfile_password = tls_config.get("ssl_keyfile_password")
-        self.cert_path = (ssl_certfile, ssl_keyfile, ssl_keyfile_password)
-        self.ssl_enable = tls_config.get("ssl_enable", False)
-        self.ca_path = ssl_ca_certs
-        if self.ssl_enable:
-            self.metaserver_client = httpx.Client(
-                limits=httpx.Limits(max_connections=100000), timeout=None, cert=self.cert_path, verify=self.ca_path
-            )
-        else:
-            self.metaserver_client = httpx.Client(limits=httpx.Limits(max_connections=100000), timeout=None)
+        self.metaserver_client = MetaserverClient(vllm_config)
 
     @staticmethod
     def _iter_kv_cache_specs(kv_cache_config: KVCacheConfig):
@@ -1123,17 +1110,7 @@ class MooncakeLayerwiseConnectorScheduler:
         return meta
 
     def _access_metaserver(self, url, message):
-        success = False
-        retry = 0
-        while retry < 3 and success is False:
-            retry += 1
-            try:
-                self.metaserver_client.post(url, json=message)
-                success = True
-            except Exception as e:
-                logger.error("Failed to connect to metaserver. url=%s, retry=%d. ", url, retry)
-                if retry == 3:
-                    raise e
+        self.metaserver_client.access(url, message)
 
     def request_finished(
         self,
