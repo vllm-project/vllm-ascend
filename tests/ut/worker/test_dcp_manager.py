@@ -10,6 +10,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -18,7 +20,9 @@ import pytest
 import torch
 
 from vllm_ascend.attention.context_parallel import dcp_metadata
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.utils import AscendDCPMetadata
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.worker.dcp_utils import DCPManager
 
 
@@ -420,3 +424,75 @@ def test_dcp_manager_metadata_methods_delegate_to_attention_helpers() -> None:
     assert metadata.dcp_mtp_attn_mask is None
     assert actual_block_table is block_table
     assert manager.long_seq_metadata is metadata
+
+
+def test_unknown_backend_keeps_spec_based_assertions() -> None:
+    manager = object.__new__(DCPManager)
+    mla_spec = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.float16)
+
+    # An unknown builder falls back to the shared spec checks: MLA requires the
+    # backend-specific decode metadata, GQA requires the history/current split.
+    mla_metadata = SimpleNamespace(decode=SimpleNamespace(cp_seq_len=None))
+    with pytest.raises(AssertionError):
+        manager.update_spec_decode_drafting_cp_metadata(
+            attn_metadata=mla_metadata,
+            kv_cache_spec=mla_spec,
+            seq_lens=torch.tensor([3]),
+            draft_index=1,
+            attn_metadata_builder=object(),
+        )
+
+    gqa_metadata = SimpleNamespace(decode=SimpleNamespace(cp_history_seq_len=None))
+    with pytest.raises(AssertionError):
+        manager.update_spec_decode_drafting_cp_metadata(
+            attn_metadata=gqa_metadata,
+            kv_cache_spec=object(),
+            seq_lens=torch.tensor([3]),
+            draft_index=1,
+            attn_metadata_builder=SimpleNamespace(),
+        )
+
+
+def test_sfa_provider_hook_updates_graph_stable_buffer() -> None:
+    manager = object.__new__(DCPManager)
+    manager.dcp_world_size = 2
+    manager.dcp_world_rank = 1
+    manager.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
+    )
+    dcp_seq_lens = torch.zeros(3, dtype=torch.int32)
+    attn_metadata = SimpleNamespace(dcp_context=SimpleNamespace(seq_lens=dcp_seq_lens))
+    builder = AscendSFADCPMetadataBuilder.__new__(AscendSFADCPMetadataBuilder)
+
+    with patch("vllm_ascend.worker.dcp_utils.dcp_metadata.validate_spec_decode_drafting_metadata") as validate:
+        manager.update_spec_decode_drafting_cp_metadata(
+            attn_metadata=attn_metadata,
+            kv_cache_spec=object(),
+            seq_lens=torch.tensor([7, 11], dtype=torch.int32),
+            draft_index=1,
+            attn_metadata_builder=builder,
+        )
+
+    validate.assert_not_called()
+    # Rank-1 interleave-aware lengths for advanced seq_lens [9, 13].
+    assert torch.equal(dcp_seq_lens, torch.tensor([4, 6, 0], dtype=torch.int32))
+
+
+def test_dcp_manager_has_no_backend_module_imports() -> None:
+    module_path = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/dcp_utils.py"
+    tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+
+    imported_modules: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_modules.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported_modules.append(node.module or "")
+
+    forbidden_fragments = ("sfa_cp", "attention_cp", "mla_cp", "_v1")
+    assert not any(fragment in module for module in imported_modules for fragment in forbidden_fragments), (
+        imported_modules
+    )
+    # The backend type checks now live behind the provider hook.
+    assert not hasattr(DCPManager, "_is_mla_kv_cache_spec")
+    assert not hasattr(DCPManager, "_is_sfa_dcp_metadata_builder")

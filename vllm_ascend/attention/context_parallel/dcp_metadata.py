@@ -151,3 +151,21 @@ def build_legacy_gqa_dcp_metadata(
     )
     query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
     return build_dcp_metadata(local_seq_lens, query_lens_cpu, max_query_len, None)
+
+
+def validate_spec_decode_drafting_metadata(attn_metadata, kv_cache_spec) -> None:
+    """Assert the drafting metadata was classified as decode for MLA or GQA DCP."""
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
+    if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+        assert attn_metadata.decode is not None, (
+            "MLA DCP speculative draft metadata must be classified as decode "
+            "before backend-specific metadata is finalized."
+        )
+        assert attn_metadata.decode.cp_seq_len is not None
+    else:
+        assert attn_metadata.decode is not None, (
+            "GQA DCP speculative draft metadata must be classified as decode "
+            "before backend-specific metadata is finalized."
+        )
+        assert attn_metadata.decode.cp_history_seq_len is not None

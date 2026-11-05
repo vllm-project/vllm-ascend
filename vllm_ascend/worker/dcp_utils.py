@@ -23,7 +23,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.v1.utils import CpuGpuBuffer
 
-from vllm_ascend.attention.context_parallel import dcp_metadata
+from vllm_ascend.attention.context_parallel import dcp_metadata, registry
 from vllm_ascend.utils import is_pd_decode_recompute_scheduler_enabled
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.spec_decode_utils import correct_optimistic_seq_lens_cpu
@@ -589,24 +589,6 @@ class DCPManager:
             cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
         )
 
-    @staticmethod
-    def _is_mla_kv_cache_spec(kv_cache_spec: Any) -> bool:
-        from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-
-        return isinstance(kv_cache_spec, AscendMLAAttentionSpec)
-
-    @staticmethod
-    def _is_sfa_dcp_metadata_builder(
-        attn_metadata_builder: Any | None,
-    ) -> bool:
-        if attn_metadata_builder is None:
-            return False
-        from vllm_ascend.attention.context_parallel.sfa_cp import (
-            AscendSFADCPMetadataBuilder,
-        )
-
-        return isinstance(attn_metadata_builder, AscendSFADCPMetadataBuilder)
-
     def prepare_spec_decode_drafting_cp_metadata(
         self,
         common_attn_metadata: Any,
@@ -629,35 +611,18 @@ class DCPManager:
         draft_index: int,
         attn_metadata_builder: Any | None = None,
     ) -> None:
-        is_sfa_dcp = self._is_sfa_dcp_metadata_builder(attn_metadata_builder)
-        if not is_sfa_dcp:
-            if self._is_mla_kv_cache_spec(kv_cache_spec):
-                assert attn_metadata.decode is not None, (
-                    "MLA DCP speculative draft metadata must be classified as decode "
-                    "before backend-specific metadata is finalized."
-                )
-                assert attn_metadata.decode.cp_seq_len is not None
-            else:
-                assert attn_metadata.decode is not None, (
-                    "GQA DCP speculative draft metadata must be classified as decode "
-                    "before backend-specific metadata is finalized."
-                )
-                assert attn_metadata.decode.cp_history_seq_len is not None
-            return
-
-        # SFA updates its graph-stable device buffer without a CPU->NPU copy.
-        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens + draft_index + 1)
-        rank_seq_lens = local_seq_lens[:, self.dcp_world_rank]
-        dcp_context = attn_metadata.dcp_context
-        assert dcp_context is not None
-        target = dcp_context.seq_lens
-        rank_seq_lens = rank_seq_lens.to(
-            device=target.device,
-            dtype=target.dtype,
-            non_blocking=True,
-        )
-        target[: rank_seq_lens.shape[0]].copy_(rank_seq_lens, non_blocking=True)
-        target[rank_seq_lens.shape[0] :].fill_(0)
+        provider = registry.find_cp_backend_for_builder(attn_metadata_builder)
+        if provider is not None and provider.spec_decode_drafting_updater is not None:
+            if provider.spec_decode_drafting_updater(
+                self,
+                attn_metadata_builder,
+                attn_metadata,
+                kv_cache_spec,
+                seq_lens,
+                draft_index,
+            ):
+                return
+        dcp_metadata.validate_spec_decode_drafting_metadata(attn_metadata, kv_cache_spec)
 
     def generate_dcp_metadata(
         self,

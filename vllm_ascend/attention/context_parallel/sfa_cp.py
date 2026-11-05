@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel import dcp_metadata
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
@@ -1470,6 +1471,37 @@ def _resolve_sfa_cp_classes(vllm_config, topology) -> tuple[type, type]:
     return builder_cls, impl_cls
 
 
+def _update_sfa_spec_decode_drafting_metadata(
+    manager,
+    attn_metadata_builder,
+    attn_metadata,
+    kv_cache_spec,
+    seq_lens,
+    draft_index,
+) -> bool:
+    """Refresh SFA's graph-stable device buffer for a speculative drafting step."""
+    if not isinstance(attn_metadata_builder, AscendSFADCPMetadataBuilder):
+        return False
+    # SFA updates its graph-stable device buffer without a CPU->NPU copy.
+    local_seq_lens = dcp_metadata.dcp_local_seq_lens(
+        seq_lens + draft_index + 1,
+        dcp_size=manager.dcp_world_size,
+        cp_kv_cache_interleave_size=manager.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+    )
+    rank_seq_lens = local_seq_lens[:, manager.dcp_world_rank]
+    dcp_context = attn_metadata.dcp_context
+    assert dcp_context is not None
+    target = dcp_context.seq_lens
+    rank_seq_lens = rank_seq_lens.to(
+        device=target.device,
+        dtype=target.dtype,
+        non_blocking=True,
+    )
+    target[: rank_seq_lens.shape[0]].copy_(rank_seq_lens, non_blocking=True)
+    target[rank_seq_lens.shape[0] :].fill_(0)
+    return True
+
+
 SFA_CP_BACKEND = register_cp_backend(
     CPBackendProvider(
         name="sfa",
@@ -1478,5 +1510,6 @@ SFA_CP_BACKEND = register_cp_backend(
         supports_pcp=True,
         supports_dcp=True,
         cp_resolver=_resolve_sfa_cp_classes,
+        spec_decode_drafting_updater=_update_sfa_spec_decode_drafting_metadata,
     )
 )

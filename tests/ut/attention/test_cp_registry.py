@@ -130,7 +130,11 @@ def test_builtin_providers_are_registered() -> None:
         "supports_dcp",
         "validate",
         "cp_resolver",
+        "spec_decode_drafting_updater",
     ]
+    # The optional drafting hook defaults to None; only the SFA provider uses it.
+    assert registry.CPBackendProvider(name="probe").spec_decode_drafting_updater is None
+    assert registry.get_cp_backend("sfa").spec_decode_drafting_updater is not None
 
 
 @pytest.mark.parametrize(
@@ -444,3 +448,28 @@ def test_v1_backends_delegate_to_registry(
         assert expected == expected_pair
         assert backend.get_builder_cls() is expected[0]
         assert backend.get_impl_cls() is expected[1]
+
+
+def test_find_cp_backend_for_builder() -> None:
+    assert registry.find_cp_backend_for_builder(None) is None
+    assert registry.find_cp_backend_for_builder(object()) is None
+
+    gqa_builder = attention_cp.AscendAttentionDCPMetadataBuilder.__new__(attention_cp.AscendAttentionDCPMetadataBuilder)
+    gqa_provider = registry.find_cp_backend_for_builder(gqa_builder)
+    assert gqa_provider is not None
+    assert gqa_provider.name == "gqa"
+
+    sfa_dcp_builder = sfa_cp.AscendSFADCPMetadataBuilder.__new__(sfa_cp.AscendSFADCPMetadataBuilder)
+    sfa_provider = registry.find_cp_backend_for_builder(sfa_dcp_builder)
+    assert sfa_provider is not None
+    assert sfa_provider.name == "sfa"
+
+
+def test_sfa_provider_updater_handles_only_dcp_builder() -> None:
+    sfa_provider = registry.get_cp_backend("sfa")
+    updater = sfa_provider.spec_decode_drafting_updater
+    assert updater is not None
+    base_builder = sfa_cp.AscendSFAMetadataBuilder.__new__(sfa_cp.AscendSFAMetadataBuilder)
+    # Only the SFA-DCP builder is handled by the hook; everything else falls
+    # back to the shared spec checks.
+    assert updater(None, base_builder, None, None, None, 0) is False

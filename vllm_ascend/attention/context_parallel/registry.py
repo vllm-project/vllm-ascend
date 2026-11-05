@@ -55,6 +55,9 @@ class CPBackendProvider:
     validate: Callable[[Any, CPTopology], None] | None = None
     # Multi-layout hook used by backends such as SFA; when None, cp_* is used.
     cp_resolver: Callable[[Any, CPTopology], tuple[type | None, type | None]] | None = None
+    # Optional per-backend hook for spec-decode drafting metadata; returns True
+    # when it handled the update, False to fall back to the shared spec checks.
+    spec_decode_drafting_updater: Callable[..., bool] | None = None
 
     def uses_cp(self, topology: CPTopology) -> bool:
         """Whether a CP specialization should be selected for this topology."""
@@ -127,3 +130,23 @@ def resolve_cp_classes(name: str, vllm_config, topology: CPTopology) -> tuple[ty
     if provider is None:
         raise NotImplementedError(f"Unknown context-parallel attention backend: {name!r}.")
     return provider.resolve_classes(vllm_config, topology)
+
+
+def find_cp_backend_for_builder(attn_metadata_builder: Any | None) -> CPBackendProvider | None:
+    """Find the provider owning a metadata builder class (None when unknown)."""
+    if attn_metadata_builder is None:
+        return None
+    # Ensure the built-in adapters have registered their providers first; the
+    # imports are idempotent and the registry itself stays free of adapters.
+    for module_path in _CP_BACKEND_MODULES.values():
+        importlib.import_module(module_path)
+    for name in sorted(_CP_BACKEND_REGISTRY):
+        provider = _CP_BACKEND_REGISTRY[name]
+        builder_classes = [
+            builder_cls
+            for builder_cls in (provider.base_builder_cls, provider.cp_builder_cls)
+            if builder_cls is not None
+        ]
+        if builder_classes and isinstance(attn_metadata_builder, tuple(builder_classes)):
+            return provider
+    return None
