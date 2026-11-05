@@ -39,7 +39,7 @@ class TorchExpertTransfer:
 
         # CPU contract tests use the exact scheme without NPU native storage.
         for expert_id, slot in loads:
-            bundle = adapter.materialize(host_store, (expert_id,), device)
+            bundle = adapter.load_experts(host_store, (expert_id,), device)
             for name, tensor in bundle.items():
                 destination[name][slot].copy_(tensor[0])
 
@@ -49,16 +49,3 @@ class TorchExpertTransfer:
         size = prepared.expert_bytes
         storage = destination.untyped_storage()
         return storage.data_ptr() + slot * size, source.data_ptr() + row * size, size
-
-    @staticmethod
-    def _physical_copy_parameters(destination, source, slot, torch_npu):
-        """Copy one complete physical expert block without interpreting NZ as ND.
-
-        Both tensors come from the same adapter. Its leading expert dimension is
-        an unpadded batch axis; NZ padding belongs to each expert's trailing matrix.
-        Scales retain their original transposed strides and packed byte layout.
-        """
-        size = int(torch_npu.get_storage_size(source)) * source.element_size()
-        dst_storage = destination.untyped_storage()
-        src_storage = source.untyped_storage()
-        return dst_storage.data_ptr() + slot * size, src_storage.data_ptr(), size

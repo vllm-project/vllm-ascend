@@ -36,7 +36,7 @@ class MXFPExpertAdapter:
         self.scheme = scheme
         self.activation = layer.activation
 
-    def materialize(self, host_store, expert_ids, device) -> dict[str, torch.Tensor]:
+    def load_experts(self, host_store, expert_ids, device) -> dict[str, torch.Tensor]:
         indices = torch.tensor(expert_ids, dtype=torch.long, device="cpu")
         view = torch.nn.Module()
         view.activation = self.activation
@@ -47,10 +47,10 @@ class MXFPExpertAdapter:
         self.scheme.process_weights_after_loading(view)
         return {name: getattr(view, name).detach() for name in self.output_names}
 
-    def allocate_pool(self, host_store, count, device) -> dict[str, torch.Tensor]:
+    def allocate_weights(self, host_store, count, device) -> dict[str, torch.Tensor]:
         """Allocate once through the native scheme using a bounded raw prototype."""
         if not host_store.prepared:
-            return self.materialize(host_store, range(count), device)
+            return self.load_experts(host_store, range(count), device)
         view = torch.nn.Module()
         view.activation = self.activation
         for name in self.tensor_names:
@@ -71,13 +71,13 @@ class HostExpertStore:
         self.prepared: dict[str, PreparedExpertTensor] = {}
         self.prototypes: dict[str, torch.Tensor] = {}
 
-    def finalize(self, layer, *, pin_memory: bool = True) -> None:
+    def copy_from_layer(self, layer, *, pin_memory: bool = True) -> None:
         for name in self.names:
             tensor = getattr(layer, name).detach()
             # Own the CPU bytes independently of the checkpoint mmap.
             self.tensors[name] = tensor.pin_memory() if pin_memory else tensor.clone()
 
-    def prepare_native(self, adapter, destination, device) -> None:
+    def convert_to_native_layout(self, adapter, device) -> None:
         """Convert each expert once, retaining its complete physical storage on CPU.
 
         Only one conversion bundle is live on the NPU. Physical copies bypass
@@ -89,11 +89,12 @@ class HostExpertStore:
 
         prepared = {}
         for expert_id in range(self.num_experts):
-            bundle = adapter.materialize(self, (expert_id,), device)
+            bundle = adapter.load_experts(self, (expert_id,), device)
             # Loading only: complete format conversion before reading its storage.
             torch.npu.current_stream(device).synchronize()
             for name, tensor in bundle.items():
-                _, _, size = TorchExpertTransfer._physical_copy_parameters(destination[name], tensor, 0, torch_npu)
+                # Include native padding in weights and packed scale storage.
+                size = int(torch_npu.get_storage_size(tensor)) * tensor.element_size()
                 if expert_id == 0:
                     # The host allocator rounds large pinned allocations up to a
                     # power of two. Splitting 288 experts into 32-expert chunks
@@ -153,12 +154,12 @@ class LayerOffloadBinding:
         self.mapping: ExpertMapBuffer | None = None
         self.ids_cpu: torch.Tensor
 
-    def process_weights_after_loading(self, layer) -> None:
-        self.host_store.finalize(layer, pin_memory=self.device.type == "npu")
-        self.resident = self.adapter.materialize(self.host_store, range(self.num_slots), self.device)
+    def initialize_storage(self, layer) -> None:
+        self.host_store.copy_from_layer(layer, pin_memory=self.device.type == "npu")
+        self.resident = self.adapter.load_experts(self.host_store, range(self.num_slots), self.device)
         if self.device.type == "npu":
             torch.npu.current_stream(self.device).synchronize()
-            self.host_store.prepare_native(self.adapter, self.resident, self.device)
+            self.host_store.convert_to_native_layout(self.adapter, self.device)
         self.mapping = ExpertMapBuffer(self.num_experts, self.device)
         # Capturable descriptors bound route entries by the resident capacity.
         self.ids_cpu = torch.empty(
@@ -183,7 +184,7 @@ class LayerOffloadBinding:
         selected = set(selected_ids.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist())
         full_pool = manager.has_prefill or len(selected) > self.num_slots
         if full_pool:
-            tensors = manager.prefill_pool.fill(self)
+            tensors = manager.full_pool.load_layer(self)
             physical_ids = selected_ids
             count = self.num_experts
         else:
@@ -230,17 +231,17 @@ class LayerOffloadBinding:
         return cast(ExpertMapBuffer, self.mapping).remap(selected_ids)
 
 
-class PrefillExpertPool:
+class FullExpertPool:
     """One reusable full layer shared by the manager's homogeneous expert layers."""
 
     def __init__(self):
         self.tensors: dict[str, torch.Tensor] = {}
 
-    def initialize(self, binding) -> None:
+    def allocate(self, binding) -> None:
         # Allocate in the scheme's native format, including scale strides.
-        self.tensors = binding.adapter.allocate_pool(binding.host_store, binding.num_experts, binding.device)
+        self.tensors = binding.adapter.allocate_weights(binding.host_store, binding.num_experts, binding.device)
 
-    def fill(self, binding):
+    def load_layer(self, binding):
         TorchExpertTransfer.copy_experts(
             binding.adapter,
             binding.host_store,
@@ -256,7 +257,7 @@ class ExpertOffloadManager:
 
     def __init__(self):
         self.bindings: dict[str, LayerOffloadBinding] = {}
-        self.prefill_pool = PrefillExpertPool()
+        self.full_pool = FullExpertPool()
         self.comm_methods = {}
         self.has_prefill = True
         self.graph_load_stream = None
@@ -306,7 +307,7 @@ class ExpertOffloadManager:
         self.has_prefill = False
         return capture(*args, **kwargs)
 
-    def finalize_loading(self, model) -> None:
+    def initialize(self, model) -> None:
         self.bindings = {
             binding.layer_name: binding
             for layer in model.modules()
@@ -314,7 +315,7 @@ class ExpertOffloadManager:
         }
         for binding in self.bindings.values():
             binding.manager = self
-        self.prefill_pool.initialize(next(iter(self.bindings.values())))
+        self.full_pool.allocate(next(iter(self.bindings.values())))
 
     def get_comm(self, binding, moe_config, count):
         # Lazy import avoids an initialization cycle with quantization and routed experts.

@@ -94,7 +94,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     init_sparse_kv_offload_manager,
 )
 from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
-from vllm_ascend.expert_offload.utils import finalize_expert_offload_loading
+from vllm_ascend.expert_offload.utils import initialize_expert_offload
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -322,7 +322,7 @@ class NPUModelRunner(GPUModelRunner):
             join_nz_warm_thread()
 
         if offload is not None:
-            finalize_expert_offload_loading(self)
+            initialize_expert_offload(self)
 
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts

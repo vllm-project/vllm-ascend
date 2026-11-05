@@ -26,8 +26,8 @@ def test_graph_replay_refreshes_experts_and_reuses_storage(expert_factory, manag
     layer, _ = expert_factory()
     manager = manager_factory(layer)
     binding = layer._expert_offload_binding
-    reference = {name: tensor.clone() for name, tensor in manager.prefill_pool.tensors.items()}
-    binding.host_store.prepare_native(binding.adapter, binding.resident, "cpu")
+    reference = {name: tensor.clone() for name, tensor in manager.full_pool.tensors.items()}
+    binding.host_store.convert_to_native_layout(binding.adapter, "cpu")
     addresses = (binding.ids_cpu.data_ptr(), binding.mapping.host_map.data_ptr(), binding.mapping.device_map.data_ptr())
     desc = SimpleNamespace(num_tokens=1, uniform_token_count=1)
     capture = Mock(side_effect=lambda *a, **k: not manager.has_prefill)

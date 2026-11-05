@@ -62,7 +62,7 @@ def expert_bundle(monkeypatch):
         **{name: torch.nn.Parameter(tensor, requires_grad=False) for name, tensor in tensors.items()},
     )
     store = HostExpertStore(layer, MXFPExpertAdapter.tensor_names)
-    store.finalize(layer)
+    store.copy_from_layer(layer)
     # These standalone grouped GEMMs do not initialize the distributed MegaMoE runtime.
     monkeypatch.setattr("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", lambda _config: False)
     # Exercise the real post-processing without constructing a complete model.
@@ -101,7 +101,7 @@ def test_acl_graph_replay_updates_nz_slots(expert_bundle, monkeypatch):
     manager = ExpertOffloadManager()
     manager.device = device
     manager.graph_load_stream = torch.npu.Stream(device=device)
-    resident = adapter.materialize(store, [0, 1], device)
+    resident = adapter.load_experts(store, [0, 1], device)
     binding = object.__new__(LayerOffloadBinding)
     binding.__dict__.update(
         manager=manager,
@@ -118,8 +118,8 @@ def test_acl_graph_replay_updates_nz_slots(expert_bundle, monkeypatch):
     manager.bindings["test"] = binding
     ids = torch.zeros((1, 1), dtype=torch.int32, device=device)
     x = torch.randn(1, HIDDEN_SIZE, generator=torch.Generator().manual_seed(7)).to(device, dtype=torch.bfloat16)
-    full = adapter.materialize(store, range(NUM_EXPERTS), device)
-    store.prepare_native(adapter, resident, device)
+    full = adapter.load_experts(store, range(NUM_EXPERTS), device)
+    store.convert_to_native_layout(adapter, device)
 
     def forbidden_conversion(*args):
         raise AssertionError("graph replay must not format-cast")

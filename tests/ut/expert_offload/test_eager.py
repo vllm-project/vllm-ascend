@@ -44,17 +44,17 @@ def test_loading_decode_prefill_and_capacity_fallback(expert_factory, manager_fa
     assert map_addresses == (binding.mapping.host_map.data_ptr(), binding.mapping.device_map.data_ptr())
 
 
-def test_prefill_pool_is_shared_between_layers(expert_factory, manager_factory):
+def test_full_pool_is_shared_between_layers(expert_factory, manager_factory):
     first, _ = expert_factory()
     second, _ = expert_factory(layer_name="model.layers.1.mlp.experts")
     for parameter in second.parameters():
         parameter.data.add_(3)
     manager = manager_factory(first, second)
-    addresses = {name: value.data_ptr() for name, value in manager.prefill_pool.tensors.items()}
+    addresses = {name: value.data_ptr() for name, value in manager.full_pool.tensors.items()}
     for layer in (first, second, first):
         binding = layer._expert_offload_binding
         view, physical, _ = binding.prepare(layer, torch.tensor([[1, 4]]))
-        expected = binding.adapter.materialize(binding.host_store, (1, 4), "cpu")
+        expected = binding.adapter.load_experts(binding.host_store, (1, 4), "cpu")
         for name in binding.adapter.output_names:
             torch.testing.assert_close(getattr(view, name)[physical.long()].reshape_as(expected[name]), expected[name])
-        assert addresses == {name: value.data_ptr() for name, value in manager.prefill_pool.tensors.items()}
+        assert addresses == {name: value.data_ptr() for name, value in manager.full_pool.tensors.items()}

@@ -42,7 +42,7 @@ class ExpertOffloadMoEMethod(AscendFusedMoEMethod):
         layer._expert_offload_binding = LayerOffloadBinding(layer, self.quant_method, self.expert_offload_config)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer._expert_offload_binding.process_weights_after_loading(layer)
+        layer._expert_offload_binding.initialize_storage(layer)
 
     def apply(
         self,

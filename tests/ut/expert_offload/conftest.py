@@ -101,9 +101,9 @@ def expert_factory(load_hook_class):
 def manager_factory():
     def make(*layers):
         for layer in layers:
-            layer._expert_offload_binding.process_weights_after_loading(layer)
+            layer._expert_offload_binding.initialize_storage(layer)
         manager = ExpertOffloadManager()
-        manager.finalize_loading(torch.nn.ModuleList(layers))
+        manager.initialize(torch.nn.ModuleList(layers))
         manager.get_comm = Mock(return_value=None)
         return manager
 

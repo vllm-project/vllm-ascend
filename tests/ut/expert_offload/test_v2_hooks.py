@@ -16,7 +16,7 @@ from vllm import config as vllm_config
 
 from vllm_ascend.expert_offload.config import ExpertOffloadConfig
 from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager, expert_offload_quant_method
-from vllm_ascend.expert_offload.utils import finalize_expert_offload_loading
+from vllm_ascend.expert_offload.utils import initialize_expert_offload
 from vllm_ascend.quantization.quant_type import QuantType
 
 
@@ -74,7 +74,7 @@ def make_runner(load_hook_class, *, manager=None, has_prefill=False):
         Parent,
         {
             "torch": torch,
-            "finalize_expert_offload_loading": finalize_expert_offload_loading,
+            "initialize_expert_offload": initialize_expert_offload,
             "logger": Mock(),
             "CUDAGraphMode": SimpleNamespace(NONE=0),
             "C8KVBlockZeroer": type("C8KVBlockZeroer", (), {}),
@@ -114,7 +114,7 @@ def test_load_preserves_parent_contract_and_accounts_pool_memory(load_hook_class
     runner, events = make_runner(load_hook_class, manager=manager)
     runner.load_model(False, "extra", reload=False)
     assert events == [("parent_load", False, ("extra",), {"reload": False})]
-    manager.finalize_loading.assert_called_once_with(runner.model)
+    manager.initialize.assert_called_once_with(runner.model)
     assert runner.model_memory_usage == 1064
     assert runner.pd_dspark_aux_layer_ids == [9]
     manager.unsubscribe_graph_streams.side_effect = lambda: events.append("unsubscribe_reports")
@@ -124,15 +124,15 @@ def test_load_preserves_parent_contract_and_accounts_pool_memory(load_hook_class
 
 
 @pytest.mark.parametrize("load_dummy_weights", [False, True])
-def test_disabled_load_does_not_allocate_or_finalize_offload(load_hook_class, loading_memory, load_dummy_weights):
+def test_disabled_load_does_not_initialize_offload(load_hook_class, loading_memory, load_dummy_weights):
     runner, events = make_runner(load_hook_class)
     del runner.expert_offload_manager
     assert runner.expert_offload_manager is None
-    finalize = Mock()
-    with patch.dict(runner.load_model.__globals__, finalize_expert_offload_loading=finalize):
+    initialize = Mock()
+    with patch.dict(runner.load_model.__globals__, initialize_expert_offload=initialize):
         runner.load_model(load_dummy_weights)
     assert events == [("parent_load", load_dummy_weights, (), {})]
-    finalize.assert_not_called()
+    initialize.assert_not_called()
     assert runner.model_memory_usage == 1000
     loading_memory.assert_not_called()
 
@@ -271,7 +271,7 @@ def test_quant_wrapper_only_offloads_target_and_preserves_native_draft(quant_met
     if offloaded:
         q.binding.assert_called_once_with(layer, q.scheme, config)
         method.process_weights_after_loading(layer)
-        q.binding.return_value.process_weights_after_loading.assert_called_once_with(layer)
+        q.binding.return_value.initialize_storage.assert_called_once_with(layer)
         q.scheme.process_weights_after_loading.assert_not_called()
     else:
         q.binding.assert_not_called()
