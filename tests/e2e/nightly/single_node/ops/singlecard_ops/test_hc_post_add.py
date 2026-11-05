@@ -35,8 +35,8 @@ def _native(shared, routed, residual, post, comb):
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("tokens", [1, 6, 10, 12, 48, 96])
-@pytest.mark.parametrize("dim", [256, 4096, 7168])
+@pytest.mark.parametrize("tokens", [1, 6, 10, 12, 32, 48, 96, 128])
+@pytest.mark.parametrize("dim", [256, 4096, 5120, 7168])
 @pytest.mark.parametrize("strided", [False, True])
 def test_hc_post_add_matches_native_a3(tokens, dim, strided):
     if not get_current_hardware_profile().supports(HardwareCapability.HC_POST_ADD_SEPARATE_ROUNDING):
@@ -71,11 +71,12 @@ def test_hc_post_add_tail_matches_ordered_reference(dim):
 
 
 @torch.inference_mode()
-def test_hc_post_add_graph_replay_observes_new_inputs():
+@pytest.mark.parametrize("dim", [4096, 5120])
+def test_hc_post_add_graph_replay_observes_new_inputs(dim):
     if not get_current_hardware_profile().supports(HardwareCapability.HC_POST_ADD_SEPARATE_ROUNDING):
         pytest.skip("requires A3")
     enable_custom_op()
-    inputs = _inputs(12, 4096, False)
+    inputs = _inputs(12, dim, False)
     for _ in range(3):
         fused_hc_post_add(*inputs)
     torch.npu.synchronize()
