@@ -26,6 +26,8 @@ FROM ${BASE_IMAGE}:nightly-${VLLM_ASCEND_BRANCH}-a3${OS_MARK}${TAG_SUFFIX}
 ARG PIP_EXTRA_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi"
 ARG AIS_BENCH_TAG="v3.1-20261013-master"
 ARG AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
+# In-cluster git-cdn service; override with --build-arg when building outside the cluster.
+ARG GIT_CDN_MIRROR="http://git-cdn-service.git-cdn.svc.cluster.local:8000/"
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
@@ -39,7 +41,7 @@ RUN export PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}" && \
     python3 -m pip cache purge
 
 # Install benchmark tools
-RUN git clone -b ${AIS_BENCH_TAG} --depth 1 "${AIS_BENCH_URL}" /vllm-workspace/vllm-ascend/benchmark && \
+RUN git -c url."${GIT_CDN_MIRROR}".insteadOf="https://github.com/" clone -b ${AIS_BENCH_TAG} --depth 1 "${AIS_BENCH_URL}" /vllm-workspace/vllm-ascend/benchmark && \
     cd /vllm-workspace/vllm-ascend/benchmark && \
     pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt && \
     python3 -m pip cache purge

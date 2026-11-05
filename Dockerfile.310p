@@ -32,12 +32,14 @@ RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_TAG=v0.32.0
 ARG VLLM_COMMIT=""
+# In-cluster git-cdn service; override with --build-arg when building outside the cluster.
+ARG GIT_CDN_MIRROR="http://git-cdn-service.git-cdn.svc.cluster.local:8000/"
 RUN if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
-      git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO "$VLLM_COMMIT" && \
+      git -C /vllm-workspace/vllm -c url."${GIT_CDN_MIRROR}".insteadOf="https://github.com/" fetch --depth 1 $VLLM_REPO "$VLLM_COMMIT" && \
       git -C /vllm-workspace/vllm checkout FETCH_HEAD; \
     else \
-      git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
+      git -c url."${GIT_CDN_MIRROR}".insteadOf="https://github.com/" clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi
 
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
