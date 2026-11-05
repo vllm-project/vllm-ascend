@@ -54,6 +54,7 @@ See ``test_config.yaml`` for details.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import sys
@@ -183,6 +184,43 @@ def _as_posix_path(path: str) -> str:
 def _pytest_node_file_path(path: str) -> str:
     """Return the real file path for a pytest nodeid target."""
     return path.split("::", 1)[0]
+
+
+def _pytest_node_exists(target: str) -> bool:
+    """Return whether a function/class nodeid exists in its Python file.
+
+    Coverage recommendations are shared across release branches, so they can
+    contain nodeids added on ``main`` that do not exist in an older checkout.
+    Validate the static Python definition without importing the test module;
+    importing here would require the target device and its runtime packages.
+
+    A syntax/read error is deliberately left to pytest instead of being hidden
+    by the selector. Parameterized suffixes do not affect definition lookup.
+    """
+    parts = target.split("::")
+    if len(parts) == 1:
+        return True
+
+    try:
+        tree = ast.parse(Path(parts[0]).read_text(encoding="utf-8"), filename=parts[0])
+    except (OSError, SyntaxError, UnicodeError):
+        return True
+
+    body = tree.body
+    for raw_name in parts[1:]:
+        name = raw_name.split("[", 1)[0]
+        match = next(
+            (
+                node
+                for node in body
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+            ),
+            None,
+        )
+        if match is None:
+            return False
+        body = match.body if isinstance(match, ast.ClassDef) else []
+    return True
 
 
 def _load_runners() -> dict[str, RunnerInfo]:
@@ -336,6 +374,14 @@ def _route_explicit_test_target(
             file=sys.stderr,
         )
         return
+
+    if "::" in target and not _pytest_node_exists(target):
+        print(
+            f"Warning: Pytest node does not exist in this checkout: {target}; "
+            f"falling back to file-level target: {file_path}",
+            file=sys.stderr,
+        )
+        target = file_path
 
     if _is_ut_path(file_path):
         # All UTs run on CPU, so UT targets always go to the CPU group.
