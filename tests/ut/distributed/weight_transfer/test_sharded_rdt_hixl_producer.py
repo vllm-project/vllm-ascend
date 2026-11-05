@@ -762,7 +762,7 @@ class TestFakeServerAgreesWithTheRealOne:
 
     @staticmethod
     def _fake():
-        from test_sharded_rdt_hixl_trainer import _FakeProducerServer
+        from tests.ut.distributed.weight_transfer.test_sharded_rdt_hixl_trainer import _FakeProducerServer
 
         return _FakeProducerServer(auto_free=False)
 
