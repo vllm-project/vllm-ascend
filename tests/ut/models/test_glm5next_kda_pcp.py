@@ -168,6 +168,8 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
         layer.mamba_type
     ]
     assert (sharding.shard_rank, sharding.shard_count) == (layer.tp_rank, layer.tp_size)
+    expected_replicas = (pcp_size - 1, pcp_size) if tp_size > 1 else (0, 1)
+    assert (sharding.replica_rank, sharding.replica_count) == expected_replicas
     assert (
         isinstance(layer.in_proj_qkvbfg_a, model_kda.PCPGlm5NextMergedColumnParallelLinear)
         == layer.use_pcp_head_sharding
