@@ -302,13 +302,14 @@ def _suffix_config():
 
 def _mock_suffix_base(monkeypatch):
     module = ModuleType("vllm.v1.worker.gpu.spec_decode.speculator")
-    module.BaseSpeculator = type(
+    base_speculator = type(
         "BaseSpeculator",
         (),
         {name: lambda *args: None for name in ("add_request", "on_requests_finished", "reset_state")},
     )
+    monkeypatch.setattr(module, "BaseSpeculator", base_speculator, raising=False)
     monkeypatch.setitem(sys.modules, module.__name__, module)
-    return module.BaseSpeculator
+    return base_speculator
 
 
 @pytest.mark.parametrize("enforce_eager", [False, True])

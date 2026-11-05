@@ -205,7 +205,7 @@ def test_provider_fresh_snapshots_never_reuse_previous_lengths_or_tables(bsh_mod
             [[61, 62], [71, 72], [81, 82], [91, 92]],
         ),
     ]
-    retained = []
+    retained: list[tuple[list[int], torch.Tensor, list[int], list[list[int]]]] = []
     for metadata, expected_lengths, expected_rows in snapshots:
         result = provider.resolve({layer_name: metadata})
         assert set(result) == {"actual_seq_lengths", "actual_seq_lengths_kv", "block_table"}
