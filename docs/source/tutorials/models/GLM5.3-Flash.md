@@ -307,6 +307,8 @@ are not interchangeable.
       --trust-remote-code \
       --quantization ascend \
       --kv-cache-dtype int8 \
+      --attention-config.indexer_kv_dtype int8 \
+      --mamba-ssm-cache-dtype bfloat16 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": false}' \
@@ -329,7 +331,8 @@ Only the key parameters specific to this model/scenario are described below. `ma
   The complete single-node commands above use `fp8` on 950DT products and `int8` on A3 series.
   KV cache quantization is independent of weight quantization: enabling C8 does not require W8A8 weights or a separate C8 checkpoint.
   The examples use W8A8-MXFP8 weights on 950DT products and W8A8 weights on A3 series, as listed in Section 3.1.
-- `--attention-config.indexer_kv_dtype fp8`: Uses FP8 KPool indexer cache on 950DT products, independently of `--kv-cache-dtype`.
+- `--attention-config.indexer_kv_dtype`: Uses FP8 KPool indexer cache on 950DT products and INT8 on A3 series, independently of `--kv-cache-dtype`.
+- `--mamba-ssm-cache-dtype bfloat16`: Uses BF16 SSM state in the A3 series single-node example.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 - `--limit-mm-per-prompt '{"image":1,"video":0}'`: Allows at most one image per prompt and disables video input in all deployment examples.
 - `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use five speculative tokens. GLM-5.3-Flash supports MTP draft graph execution.
@@ -792,7 +795,6 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
 
     # This A3 series supernode uses HCCS; its device RoCE ports are down.
     export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
-    export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
 
     LOCAL_IP="<PREFILL_NODE_IP>"
     NIC_NAME="<NETWORK_INTERFACE>"
@@ -828,7 +830,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       --max-num-batched-tokens 16384 \
       --trust-remote-code \
       --quantization ascend \
-      --limit-mm-per-prompt '{"image":7,"video":0}' \
+      --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --tool-call-parser glm47 \
       --reasoning-parser glm47 \
@@ -839,7 +841,6 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       --enforce-eager \
       --use-replayssm \
       --mamba-ssm-cache-dtype bfloat16 \
-      --no-enable-prefix-caching \
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}' \
       --additional-config '{
         "enable_fused_mc2": 2
@@ -875,7 +876,6 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
 
     # This A3 series supernode uses HCCS; its device RoCE ports are down.
     export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
-    export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
 
     LOCAL_IP="<DECODE_NODE_IP>"
     NIC_NAME="<NETWORK_INTERFACE>"
@@ -903,22 +903,21 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       --seed 1024 \
       --served-model-name glm \
       --safetensors-load-strategy prefetch \
-      --max-num-seqs 20 \
+      --max-num-seqs 40 \
       --max-model-len 1048576 \
       --max-num-batched-tokens 240 \
       --trust-remote-code \
       --quantization ascend \
-      --limit-mm-per-prompt '{"image":7,"video":0}' \
+      --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --tool-call-parser glm47 \
       --reasoning-parser glm47 \
       --enable-auto-tool-choice \
-      --no-enable-prefix-caching \
       --kv-cache-dtype int8 \
       --attention-config.indexer_kv_dtype int8 \
       --use-replayssm \
       --mamba-ssm-cache-dtype bfloat16 \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [8,12,24,48,60,72,84,96,108,120]}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}' \
       --additional-config '{
         "multistream_overlap_shared_expert": true,
@@ -991,7 +990,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       All ten endpoints must be reachable from the proxy.
     - Both roles use Model Runner V2, INT8 main and indexer KV caches,
       `--max-model-len 1048576`, MTP3, `--use-replayssm`, and
-      `--mamba-ssm-cache-dtype bfloat16`. Prefix caching is disabled.
+      `--mamba-ssm-cache-dtype bfloat16`. Prefix caching uses the model default.
       Refer to [GLM KDA RecoverSSM](../../user_guide/feature_guide/speculative_decoding.md)
       for the ReplaySSM switch and its requirements.
     - Prefill runs the target eagerly and enables draft graph execution.
@@ -999,11 +998,10 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       communicator. `enable_fused_mc2` is `2`; shared-expert DP is not
       enabled because Prefill uses TP1.
     - Prefill uses `--max-num-seqs 32` and
-      `--max-num-batched-tokens 16384`. Decode uses `20` and `240`, respectively.
-    - Decode uses `FULL_DECODE_ONLY`, the explicit capture sizes in the
-      command, static kernels, FlashComm1, shared-expert DP and multistream
+      `--max-num-batched-tokens 16384`. Decode uses `40` and `240`, respectively.
+    - Decode uses `FULL_DECODE_ONLY` with default capture sizes, static kernels, FlashComm1, shared-expert DP and multistream
       overlap. Recompute scheduling is enabled through `scheduler_config`.
-    - Both roles allow up to seven images per prompt and disable video input.
+    - Both roles allow one image per prompt and disable video input.
     - `MooncakeConnectorV2` uses `kv_producer` and engine ID `0` on Prefill,
       and `kv_consumer` and engine ID `1` on Decode. These IDs identify the
       roles in this deployment. Base KV ports are `36680` and `36580`.
@@ -1509,8 +1507,8 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     This KV Cache Pool example uses DP2/TP1/PCP8 Prefill and DP4/TP4 Decode,
     using Model Runner V2 and native KDA. Prepare separate `run_p.sh` and
     `run_d.sh` files for this scenario from the [A3 PD scripts](#glm53-flash-5-3-a3).
-    In both files, keep `VLLM_USE_V2_MODEL_RUNNER=1` and `--device-ids "$1"`. Replace
-    `--no-enable-prefix-caching` with `--enable-prefix-caching`, remove
+    In both files, keep `VLLM_USE_V2_MODEL_RUNNER=1` and `--device-ids "$1"`. Add
+    `--enable-prefix-caching`, remove
     `--use-replayssm`, `--mamba-ssm-cache-dtype`, and
     `--attention-config.indexer_kv_dtype`, and restore
     `--limit-mm-per-prompt '{"image":1,"video":0}'`.
@@ -1631,7 +1629,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     Use the same `PYTHONHASHSEED` and Memcache service endpoints on both nodes.
     Keep the HCCS communication settings from [Section 5.3](#glm53-flash-5-3-a3), including
-    `ASCEND_GLOBAL_RESOURCE_CONFIG` and `ASCEND_LOCAL_COMM_RES`.
+    `ASCEND_GLOBAL_RESOURCE_CONFIG`.
 
     ##### Update the Prefill and Decode Connectors
 
@@ -2292,7 +2290,7 @@ Use the role-specific values in the 950DT products example when deploying on tha
 
 - Tune `--max-num-seqs` and `--max-num-batched-tokens` independently on each
   role. The reference uses 32 sequences and 16384 batched tokens on Prefill,
-  and 20 sequences and 240 batched tokens on Decode. Measure time to first
+  and 40 sequences and 240 batched tokens on Decode. Measure time to first
   token, time per output token, and throughput before changing these limits.
 - Set `--max-model-len` to the required context length and adjust
   `--gpu-memory-utilization` to the available NPU memory. The reference uses
