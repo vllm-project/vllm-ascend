@@ -102,6 +102,7 @@ markdown_extensions:
   - footnotes
   - md_in_html
   - tables
+  - mdx_spanner
   - toc:
       permalink: true
       # Site-wide TOC display depth: affects every model guide.
