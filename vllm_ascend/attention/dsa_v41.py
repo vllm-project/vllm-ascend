@@ -29,7 +29,11 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.dsa_v1 import (
+    _is_lora_wrapped,
+    build_dspark_swa_indices,
+    dsv4_dsa_overlap_stream,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -416,6 +420,22 @@ class AscendDSAV41Impl:
         if self.role.is_kv_source:
             self._compress_and_write_caches(attn, hidden_states, cos, sin, metadata, metadata)
 
+    @staticmethod
+    def _prolog_uses_lora(attn) -> bool:
+        """True when Q/KV projections owe an adapter delta.
+
+        The overlapped path calls ``CVLinearWrapper.matmul`` directly, which
+        reads the base weight and never runs the LoRA wrapper's ``forward``.
+        V4.1 resolves its projections from the live attention module instead of
+        caching them, so the check has to happen per call rather than once at
+        construction time like ``dsa_v1`` does.
+        """
+        return any(_is_lora_wrapped(getattr(attn, name, None)) for name in ("wq_a", "wq_b", "wkv"))
+
+    def _overlap_enabled(self, attn) -> bool:
+        """Multi-stream overlap reads ``weight`` directly, so adapters disable it."""
+        return self.multistream_dsv4_dsa_overlap and not self._prolog_uses_lora(attn)
+
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
         return self._preprocess(attn, hidden_states, metadata, metadata)
 
@@ -431,7 +451,7 @@ class AscendDSAV41Impl:
             if hidden_states.shape[0]
             else (None, None)
         )
-        if hidden_states.shape[0] and self.multistream_dsv4_dsa_overlap:
+        if hidden_states.shape[0] and self._overlap_enabled(attn):
             q, qr = self._multistream_qkv(attn, hidden_states, cos, sin, local_metadata.swa)
         else:
             if hidden_states.shape[0]:
