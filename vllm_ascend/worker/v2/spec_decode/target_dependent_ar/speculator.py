@@ -39,7 +39,7 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import draft_config_context, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
 from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
@@ -148,6 +148,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
         )
 
+    @draft_config_context()
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Build the runtime config the way V1's proposer does: validate the
         target-derived config, then swap in the draft model config without
@@ -188,6 +189,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             # Set this before profiling so compiled inputs stay consistent.
             self.supports_mm_inputs = False
 
+    @draft_config_context()
     def load_draft_model(
         self,
         target_model: torch.nn.Module,

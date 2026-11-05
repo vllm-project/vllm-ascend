@@ -291,12 +291,15 @@ class ExternalDPConfigLoader:
             local_ip=local_ip,
             current_node_index=proxy_node_index,
         )
+        proxy_script = routing.get("proxy_script", PROXY_SCRIPT_BY_ROUTING_TYPE[routing_type])
+        if not isinstance(proxy_script, str) or not proxy_script.strip():
+            raise ValueError("routing.proxy_script must be a non-empty string")
         return RoutingConfig(
             type=routing_type,
             proxy_node_index=proxy_node_index,
             proxy_host=local_ip,
             proxy_port=proxy_port,
-            proxy_script=PROXY_SCRIPT_BY_ROUTING_TYPE[routing_type],
+            proxy_script=proxy_script,
             groups={
                 str(name): [int(index) for index in indices] for name, indices in routing.get("groups", {}).items()
             },

@@ -469,11 +469,20 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
 
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.NONE])
-@pytest.mark.parametrize("num_draft_tokens", [0, 3])
-def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata, graph_mode, num_draft_tokens):
+@pytest.mark.parametrize("num_draft_tokens", [None, 0, 3])
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_prepare_attn_classifies_one_token_prompt_tails(
+    mock_build_attn_metadata, graph_mode, num_draft_tokens, adaptive
+):
     """vLLM #58400 requires prompt-tail drafts to use rollback-capable decode metadata."""
+    drafts_missing = num_draft_tokens is None
+    num_draft_tokens = num_draft_tokens or 0
     state = SimpleNamespace(
-        vllm_config=SimpleNamespace(num_speculative_tokens=3, parallel_config=SimpleNamespace()),
+        vllm_config=SimpleNamespace(
+            num_speculative_tokens=3,
+            speculative_config=SimpleNamespace(enable_adaptive_verification=adaptive),
+            parallel_config=SimpleNamespace(),
+        ),
         num_accepted_tokens_gpu=torch.tensor([1, 2, 3], dtype=torch.int32),
         max_model_len=1024,
         recoverssm=None,
@@ -498,6 +507,13 @@ def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata
         positions=None,
         attn_state=None,
     )
+    if drafts_missing:
+        input_batch.num_draft_tokens_per_req = None
+    if adaptive and num_draft_tokens:
+        input_batch.num_scheduled_tokens = np.array([2, 4, 2])
+        input_batch.query_start_loc_np = np.array([0, 2, 6, 8], dtype=np.int32)
+        input_batch.query_start_loc = torch.tensor([0, 1, 5, 8], dtype=torch.int32)
+        input_batch.num_tokens = input_batch.num_tokens_after_padding = 8
     AscendMambaHybridModelState.prepare_attn(
         state,
         input_batch=input_batch,
@@ -509,7 +525,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata
     )
     metadata = mock_build_attn_metadata.call_args.kwargs["model_specific_attn_metadata"]
     assert metadata.is_prefilling.tolist() == [False, True, False]
-    expected_drafts = num_draft_tokens if num_draft_tokens else -1
+    expected_drafts = num_draft_tokens if adaptive or num_draft_tokens else -1
     assert metadata.num_decode_draft_tokens_cpu.tolist() == [expected_drafts, -1, expected_drafts]
     np.testing.assert_array_equal(input_batch.is_prefilling_np, [True, True, False])
 
@@ -1285,3 +1301,43 @@ def test_init_model_state_uses_override_then_default():
             device,
         )
     assert state is default_cls.return_value
+
+
+@patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
+def test_prepare_attn_uses_promised_varlen_capture_bound(mock_build_attn_metadata):
+    """A 16x1 dummy capture must allow a real 9-token verification query."""
+    state = SimpleNamespace(
+        vllm_config=SimpleNamespace(num_speculative_tokens=8, parallel_config=SimpleNamespace()),
+        max_model_len=32768,
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=16,
+        num_reqs_after_padding=16,
+        num_tokens=16,
+        num_tokens_after_padding=16,
+        is_prefilling_np=np.zeros(16, dtype=bool),
+        prefill_runs_as_decode_np=None,
+        num_scheduled_tokens=np.ones(16, dtype=np.int32),
+        max_query_len=9,
+        query_start_loc=torch.arange(17, dtype=torch.int32),
+        query_start_loc_np=np.arange(17, dtype=np.int32),
+        seq_lens=torch.ones(16, dtype=torch.int32),
+        dcp_local_seq_lens=None,
+        seq_lens_np=np.ones(16, dtype=np.int32),
+        positions=None,
+        attn_state=None,
+    )
+
+    AscendMambaHybridModelState._build_attn_metadata_for_batch(
+        state,
+        input_batch=input_batch,
+        cudagraph_mode=CUDAGraphMode.FULL,
+        block_tables=(),
+        slot_mappings=torch.empty(0, dtype=torch.int64),
+        attn_groups=[],
+        kv_cache_config=MagicMock(),
+        for_capture=True,
+        use_pcp_padding=False,
+    )
+
+    assert mock_build_attn_metadata.call_args.kwargs["max_query_len"] == 9

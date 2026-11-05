@@ -18,6 +18,7 @@
 #
 
 import inspect
+import logging
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
@@ -854,6 +855,7 @@ class NPUModelRunner(GPUModelRunner):
             adaptive_verification_manager is not None and num_draft_tokens_per_req is not None
         )
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
+        admitted_draft_kwargs = {}
         if adaptive_verification_active:
             num_scheduled_tokens_np, cu_num_logits_np = adaptive_verification_manager.compact_batch(
                 num_draft_tokens_per_req, num_scheduled_tokens_np, cu_num_logits_np
@@ -886,19 +888,32 @@ class NPUModelRunner(GPUModelRunner):
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
         if adaptive_verification_active:
-            # vLLM main appends the admitted draft counts (a 4th element) for
-            # batch-sharded sampling; the release tree returns three fields.
-            draft_split = adaptive_verification_manager.reallocate_drafts(req_ids, idx_mapping)
-            if vllm_version_is("0.32.0"):
-                cu_num_logits, query_start_loc, total_num_draft_tokens = draft_split
-            else:
-                cu_num_logits, query_start_loc, total_num_draft_tokens, _ = draft_split
+            num_scheduled_draft_tokens = total_num_draft_tokens
+            self._log_adaptive_verification_costs(adaptive_verification_manager)
+            allocation = adaptive_verification_manager.reallocate_drafts(req_ids, idx_mapping)
+            cu_num_logits, query_start_loc, total_num_draft_tokens = allocation[:3]
+            if len(allocation) == 4:
+                admitted_draft_kwargs["num_admitted_draft_tokens"] = allocation[3]
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
+            logger.debug(
+                "Adaptive verification budget: requests=%d, scheduled_drafts=%d, admitted_drafts=%d, "
+                "padded_tokens=%d, graph_mode=%s",
+                num_reqs,
+                num_scheduled_draft_tokens,
+                total_num_draft_tokens,
+                num_tokens_after_padding,
+                batch_desc.cg_mode,
+            )
 
             # Non-fia backends skip padding query boundary when using adaptive verification
             if self.use_fia:
-                query_start_loc_np[: num_reqs + 1] = query_start_loc[: num_reqs + 1].cpu().numpy()
-                query_start_loc_np[num_reqs + 1 :] = int(query_start_loc_np[num_reqs])
+                self._sync_adaptive_fia_query_start_loc(
+                    query_start_loc_np,
+                    query_start_loc,
+                    num_reqs,
+                    num_scheduled_draft_tokens,
+                    total_num_draft_tokens,
+                )
 
         if self.use_fia and adaptive_verification_manager:
             if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -987,6 +1002,7 @@ class NPUModelRunner(GPUModelRunner):
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
         pp_kwargs = {"max_seq_len_np": batch_req_state.max_seq_len_np}
+        pp_kwargs.update(admitted_draft_kwargs)
         input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1267,7 +1283,13 @@ class NPUModelRunner(GPUModelRunner):
                 "GlmMoeDsaForCausalLM",
             )
             or spec.draft_model_config is None
-            or "Qwen3DSparkModel" not in (spec.draft_model_config.architectures or ())
+            or (
+                "Qwen3DSparkModel" not in (spec.draft_model_config.architectures or ())
+                and (
+                    "Glm5DSparkForCausalLM" not in (spec.draft_model_config.architectures or ())
+                    or not getattr(self.speculator, "use_flashmla", False)
+                )
+            )
         ):
             return False
 
@@ -1278,7 +1300,10 @@ class NPUModelRunner(GPUModelRunner):
         # Keep parallel, transfer, offload and adaptive paths on host counts.
         return (
             bool(draft_backends)
-            and all(backend is AscendFlashAttentionBackend for backend in draft_backends.values())
+            and (
+                all(backend is AscendFlashAttentionBackend for backend in draft_backends.values())
+                or getattr(self.speculator, "use_flashmla", False)
+            )
             and parallel_config.pipeline_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
             and parallel_config.decode_context_parallel_size == 1
@@ -1445,6 +1470,51 @@ class NPUModelRunner(GPUModelRunner):
             self._debugger_started = False
 
         self.debugger.step(**kwargs)
+
+    @staticmethod
+    def _log_adaptive_verification_costs(manager: Any) -> None:
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        scheduled, non_draft, budget = manager._batch_budget
+        req_ids = list(scheduled)
+        slots = [manager.req_states.req_id_to_index[req_id] for req_id in req_ids]
+        confidence = manager._stale_confidences[manager._stale_idx].np[slots].astype(np.float64)
+        capacities = np.array(list(scheduled.values()))
+        valid = np.arange(manager.num_speculative_steps)[None, :] < capacities[:, None]
+        scores = np.sort(np.cumprod(confidence, axis=1)[valid])[::-1]
+        max_budget = min(len(scores), max(0, manager._max_total_logits - len(req_ids) * manager.num_bonus_tokens))
+        accepted = np.concatenate(([0.0], np.cumsum(scores[:max_budget])))
+        base_tokens = sum(non_draft.values())
+        draft_cost, verify_cost = manager.cost_tables
+        confidence_by_step = [
+            float(confidence[valid[:, i], i].mean()) for i in range(confidence.shape[1]) if valid[:, i].any()
+        ]
+        logger.debug(
+            "Adaptive verification costs: budget=%d/%d, base_tokens=%d, draft_ms=%.6f, "
+            "verify_ms(zero/chosen/full)=%s, expected_accepted_drafts(chosen/full)=%s, "
+            "mean_confidence_by_step=%s",
+            budget,
+            max_budget,
+            base_tokens,
+            float(draft_cost[len(req_ids)]),
+            [float(verify_cost[base_tokens + n]) for n in (0, budget, max_budget)],
+            [float(accepted[n]) for n in (budget, max_budget)],
+            confidence_by_step,
+        )
+
+    @staticmethod
+    def _sync_adaptive_fia_query_start_loc(
+        query_start_loc_np: np.ndarray,
+        query_start_loc: torch.Tensor,
+        num_reqs: int,
+        num_scheduled_draft_tokens: int,
+        num_admitted_draft_tokens: int,
+    ) -> None:
+        # compact_batch already gives exact host boundaries for full and zero
+        # budgets. Partial budgets may redistribute them on device.
+        if 0 < num_admitted_draft_tokens < num_scheduled_draft_tokens:
+            query_start_loc_np[: num_reqs + 1] = query_start_loc[: num_reqs + 1].cpu().numpy()
+        query_start_loc_np[num_reqs + 1 :] = int(query_start_loc_np[num_reqs])
 
     def _pad_adaptive_query_start_loc_for_fia(
         self,

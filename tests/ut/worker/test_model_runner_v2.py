@@ -2106,12 +2106,100 @@ def test_m3_dspark_device_length_policy_falls_back(m3_device_length_runner, unsu
     assert runner._can_skip_spec_cpu_length_sync() is False
 
 
+def _glm_mla_device_length_runner():
+    runner, output, batch = _m3_device_length_runner()
+    runner.model_config.architecture = "GlmMoeDsaForCausalLM"
+    runner.speculator.use_flashmla = True
+    runner.speculator.attn_backends = {"draft.0": AscendMLABackend}
+    runner.speculative_config.draft_model_config.architectures = ["Glm5DSparkForCausalLM"]
+    return runner, output, batch
+
+
+@pytest.mark.parametrize(
+    "architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration", "GlmMoeDsaForCausalLM"]
+)
+@pytest.mark.parametrize("eager", [False, True])
+def test_glm_mla_dspark_flashmla_can_skip_cpu_length_sync(architecture, eager):
+    runner, _, _ = _glm_mla_device_length_runner()
+    runner.model_config.architecture = architecture
+    runner.speculative_config.enforce_eager = eager
+    assert runner._can_skip_spec_cpu_length_sync() is True
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        "no_speculator",
+        "method",
+        "target_arch",
+        "draft_arch",
+        "no_draft_config",
+        "no_backends",
+        "draft_fia",
+        "pipeline_parallel_size",
+        "prefill_context_parallel_size",
+        "decode_context_parallel_size",
+        "kv_transfer",
+        "sparse_offload",
+        "adaptive",
+        "pp_exact_counts",
+    ],
+)
+def test_glm_mla_dspark_requires_cpu_length_sync(unsupported):
+    runner, _, _ = _glm_mla_device_length_runner()
+    if unsupported == "no_speculator":
+        runner.speculator = None
+    elif unsupported == "method":
+        runner.speculative_config.method = "eagle3"
+    elif unsupported == "target_arch":
+        runner.model_config.architecture = "KimiK3ForCausalLM"
+    elif unsupported == "draft_arch":
+        runner.speculative_config.draft_model_config.architectures = ["OtherDraftModel"]
+    elif unsupported == "no_draft_config":
+        runner.speculative_config.draft_model_config = None
+    elif unsupported == "no_backends":
+        runner.speculator.attn_backends = {}
+    elif unsupported == "draft_fia":
+        runner.speculator.use_flashmla = False
+    elif unsupported.endswith("parallel_size"):
+        setattr(runner.parallel_config, unsupported, 2)
+    elif unsupported == "kv_transfer":
+        runner.vllm_config.kv_transfer_config = object()
+    elif unsupported == "sparse_offload":
+        runner.ascend_config.sparse_kv_offload_config.enabled = True
+    elif unsupported == "adaptive":
+        runner.speculative_config.enable_adaptive_verification = True
+    elif unsupported == "pp_exact_counts":
+        runner.sync_spec_pp_cpu_counts = True
+    assert runner._can_skip_spec_cpu_length_sync() is False
+
+
+def test_glm_mla_dspark_fallback_copies_and_waits():
+    runner, output, batch = _glm_mla_device_length_runner()
+    runner.speculator.use_flashmla = False
+    runner.req_states.num_computed_tokens.gpu[:] = torch.tensor([98, 195, 0, 0])
+    runner.num_computed_tokens_stream = Mock()
+    with (
+        patch.object(GPUModelRunner, "postprocess_sampled"),
+        patch("torch.cuda.current_stream"),
+        patch("torch.npu.stream", return_value=nullcontext()),
+    ):
+        runner.postprocess_sampled(None, None, 2, 1)
+    runner._update_seq_lens_cpu(output, batch.req_ids)
+    runner.num_computed_tokens_event.record.assert_called_once_with()
+    runner.num_computed_tokens_event.synchronize.assert_called_once_with()
+    assert runner.req_states.num_computed_tokens_cpu[0] == 98
+    assert runner.input_buffers.seq_lens_cpu[0] == 100
+
+
 @pytest.mark.parametrize("rejected", [0, 1, 5])
-@pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark"])
+@pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark"])
 def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected, draft):
     runner, output, _ = _device_length_runner() if draft == "dflash" else _m3_device_length_runner()
     if draft == "glm_dspark":
         runner.model_config.architecture = "GlmMoeDsaForCausalLM"
+    elif draft == "glm_mla_dspark":
+        runner, output, _ = _glm_mla_device_length_runner()
     runner.num_computed_tokens_cpu.fill_(-99)  # An old staging snapshot must never be read.
     runner.input_buffers.seq_lens_cpu.fill_(777)
     runner.req_states.num_computed_tokens_cpu[:] = torch.tensor([100, 200, 0, 0])
@@ -2141,3 +2229,51 @@ def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected,
     runner.num_computed_tokens_event.record.assert_not_called()
     runner.num_computed_tokens_event.synchronize.assert_not_called()
     assert runner.num_computed_tokens_cpu.tolist() == [-99] * 4
+
+
+@pytest.mark.parametrize(
+    "scheduled,admitted,host,device,expected_sync",
+    [
+        (8, 8, [0, 5, 10], [0, 5, 10], False),
+        (8, 0, [0, 1, 2], [0, 1, 2], False),
+        (0, 0, [0, 9, 15], [0, 9, 15], False),
+        (8, 4, [0, 3, 6], [0, 1, 6], True),
+    ],
+)
+def test_adaptive_fia_syncs_only_partial_budget(scheduled, admitted, host, device, expected_sync):
+    num_reqs = len(host) - 1
+    host_queries = np.full(num_reqs + 3, -1, dtype=np.int32)
+    host_queries[: num_reqs + 1] = host
+    device_queries = MagicMock()
+    transfer = device_queries.__getitem__.return_value.cpu
+    transfer.return_value.numpy.return_value = np.array(device, dtype=np.int32)
+
+    NPUModelRunner._sync_adaptive_fia_query_start_loc(host_queries, device_queries, num_reqs, scheduled, admitted)
+
+    np.testing.assert_array_equal(host_queries, [*device, device[-1], device[-1]])
+    if expected_sync:
+        transfer.assert_called_once()
+    else:
+        device_queries.__getitem__.assert_not_called()
+
+
+def test_adaptive_cost_diagnostics_reads_only_cpu_budget_inputs():
+    manager = SimpleNamespace(
+        _batch_budget=({"a": 2, "b": 1}, {"a": 1, "b": 4}, 1),
+        req_states=SimpleNamespace(req_id_to_index={"a": 1, "b": 0}),
+        _stale_confidences=[SimpleNamespace(np=np.array([[0.5, 0.01], [0.9, 0.8]]))],
+        _stale_idx=0,
+        num_speculative_steps=2,
+        _max_total_logits=5,
+        num_bonus_tokens=1,
+        cost_tables=(np.array([0.0, 0.5, 1.0]), np.arange(20, dtype=float) + 1),
+    )
+    with patch("vllm_ascend.worker.v2.model_runner.logger") as log:
+        log.isEnabledFor.return_value = True
+        NPUModelRunner._log_adaptive_verification_costs(manager)
+
+    args = log.debug.call_args.args
+    assert args[1:5] == (1, 3, 5, 1.0)
+    assert args[5] == [6.0, 7.0, 9.0]
+    np.testing.assert_allclose(args[6], [0.9, 2.12])
+    np.testing.assert_allclose(args[7], [0.7, 0.8])
