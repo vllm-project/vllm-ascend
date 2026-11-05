@@ -1502,7 +1502,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     #### A3 series {: #glm53-flash-5-4-a3 }
 
-    This KV Cache Pool example uses DP2/TP1/PCP8 Prefill and DP4/TP4 Decode,
+    This KV Cache Pool example uses DP2/TP1/PCP8 Prefill and DP8/TP2 Decode,
     using Model Runner V2 and native KDA. Prepare separate `run_p.sh` and
     `run_d.sh` files for this scenario from the [A3 PD scripts](#glm53-flash-5-3-a3).
     In both files, keep `VLLM_USE_V2_MODEL_RUNNER=1`. Replace
@@ -1600,7 +1600,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     ```
 
     `dram.size` specifies the DDR capacity allocated per worker. Prefill
-    (DP2/TP1/PCP8) and Decode (DP4/TP4) each start 16 workers. At `20GB` per worker,
+    (DP2/TP1/PCP8) and Decode (DP8/TP2) each start 16 workers. At `20GB` per worker,
     each node contributes `320GB`, for a total DDR pool capacity of `640GB`.
     Reserve sufficient DDR memory for the operating system and vLLM. For
     `device_sdma`, keep each non-zero size aligned to `1GB`.
@@ -1709,7 +1709,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     `$4` is the DP rank passed by `launch_online_dp.py`. Each engine must have a
     unique `lookup_rpc_port`. The Prefill lookup values are `37000-37001`, and the
-    Decode lookup values are `37100-37103`. Keep the role-specific Mooncake KV
+    Decode lookup values are `37100-37107`. Keep the role-specific Mooncake KV
     base ports from [Section 5.3](#glm53-flash-5-3-a3); its workers and schedulers derive their own
     ports from the topology.
 
@@ -1730,13 +1730,13 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
        python -c "from memcache_hybrid import MetaService; MetaService.main()"
        ```
 
-    2. Start Decode with DP4/TP4. Wait until all four engines on ports
-       `9900-9903` are ready and their Memcache LocalServices have reserved
+    2. Start Decode with DP8/TP2. Wait until all eight engines on ports
+       `9900-9907` are ready and their Memcache LocalServices have reserved
        the configured DDR pool memory.
 
        ```shell
        python launch_online_dp.py --template ./run_d.sh \
-         --dp-size 4 --tp-size 4 --dp-address "<DECODE_NODE_IP>" \
+         --dp-size 8 --tp-size 2 --dp-address "<DECODE_NODE_IP>" \
          --vllm-start-port 9900
        ```
 
@@ -1750,9 +1750,9 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
          --vllm-start-port 9081
        ```
 
-    4. In a separate terminal, set `export D_N=4`, then run the
+    4. In a separate terminal, set `export D_N=8`, then run the
        [A3 series proxy script](#glm53-flash-a3-proxy). It uses Prefill ports
-       `9081-9082` and Decode ports `9900-9903` for this pooling scenario.
+       `9081-9082` and Decode ports `9900-9907` for this pooling scenario.
        Send requests to `<PREFILL_NODE_IP>:8081` using
        [Section 6](#6-functional-verification).
 
