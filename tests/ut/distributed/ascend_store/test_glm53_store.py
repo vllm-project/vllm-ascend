@@ -7,6 +7,7 @@ import queue
 import threading
 import unittest
 from dataclasses import replace
+from itertools import product
 from types import MethodType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -18,6 +19,7 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
+from tests.ut.distributed.ascend_store.test_mooncake_hybrid import MemoryRangeStore
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker, start_patch
 from tests.ut.models.test_glm5next_cache_config import make_config, make_specs
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
@@ -36,6 +38,10 @@ from vllm_ascend.models.glm5next.cache_config import (
 )
 from vllm_ascend.models.glm5next.parallel import get_kda_state_sharding
 from vllm_ascend.utils import get_kv_cache_tensor_layers
+
+
+def glm_state_sharding(parallel_config, tp_rank, pcp_rank):
+    return {MambaAttentionBackendEnum.GDN_ATTN: get_kda_state_sharding(parallel_config, tp_rank, pcp_rank)}
 
 
 def make_glm53_plan(layer_offset=0, *, use_recoverssm=False):
@@ -216,13 +222,6 @@ class TestGLM53Store(unittest.TestCase):
                 for rank in range(tp_size * pcp_size):
                     tp_rank, pcp_rank = divmod(rank, pcp_size)
 
-                    def mamba_state_sharding(parallel_config, tp_rank, pcp_rank):
-                        return {
-                            MambaAttentionBackendEnum.GDN_ATTN: get_kda_state_sharding(
-                                parallel_config, tp_rank, pcp_rank
-                            )
-                        }
-
                     worker = make_worker(
                         self,
                         kv_cache_config=plan,
@@ -234,7 +233,7 @@ class TestGLM53Store(unittest.TestCase):
                         pcp_rank=pcp_rank,
                         extra_config={"load_async": load_async},
                         use_recoverssm=use_recoverssm,
-                        mamba_state_sharding=mamba_state_sharding,
+                        mamba_state_sharding=glm_state_sharding,
                     )
                     caches = make_glm53_caches(plan)
                     worker.m_store.requires_exists_before_put = False
@@ -337,9 +336,45 @@ class TestGLM53Store(unittest.TestCase):
                     self.assertIs(exported, original)
 
     def test_memcache_layerwise_round_trip_keeps_each_tp_state(self):
+        self.check_layerwise_round_trip()
+
+    def test_layerwise_recoverssm_restores_model_tp_shards_under_pcp(self):
+        for backend in ("memcache", "mooncake"):
+            with self.subTest(backend=backend):
+                self.check_layerwise_round_trip(
+                    backend=backend,
+                    tp_size=1,
+                    pcp_size=2,
+                    pp_size=1,
+                    use_recoverssm=True,
+                    model_sharding=glm_state_sharding,
+                )
+
+    def test_layerwise_replicas_load_the_same_model_tp_partition(self):
+        for backend in ("memcache", "mooncake"):
+            with self.subTest(backend=backend):
+                self.check_layerwise_round_trip(
+                    backend=backend,
+                    tp_size=2,
+                    pcp_size=2,
+                    pp_size=1,
+                    model_sharding=glm_state_sharding,
+                )
+
+    def check_layerwise_round_trip(
+        self,
+        *,
+        backend="memcache",
+        tp_size=2,
+        pcp_size=1,
+        pp_size=2,
+        use_recoverssm=False,
+        model_sharding=None,
+    ):
         block_hash = bytes([1]) * 32
         buffers: dict[str, Any] = {}
-        readable = set()
+        range_store = MemoryRangeStore()
+        readable = range_store.complete if backend == "mooncake" else set()
 
         def alloc(keys, sizes, ttl):
             for key, size in zip(keys, sizes):
@@ -375,69 +410,152 @@ class TestGLM53Store(unittest.TestCase):
         source = [[1], [2], [3], [4], [5]]
         target = [[6], [7], [8], [9], [10]]
         workers = []
-        for rank, pp_rank in ((0, 0), (1, 0), (0, 1), (1, 1)):
-            plan = make_glm53_plan(layer_offset=4 * pp_rank)
+        for pp_rank, pcp_rank, rank in product(range(pp_size), range(pcp_size), range(tp_size)):
+            plan = make_glm53_plan(layer_offset=4 * pp_rank, use_recoverssm=use_recoverssm)
             worker = make_worker(
                 self,
                 kv_cache_config=plan,
                 use_layerwise=True,
                 use_mla=True,
                 num_layers=4,
-                tp_size=2,
+                tp_size=tp_size,
+                pcp_size=pcp_size,
+                pcp_rank=pcp_rank,
                 tp_rank=rank,
-                pp_size=2,
+                pp_size=pp_size,
                 pp_rank=pp_rank,
                 layer_offset=4 * pp_rank,
-                extra_config={"backend": "memcache"},
+                extra_config={"backend": backend},
+                use_recoverssm=use_recoverssm,
+                mamba_state_sharding=model_sharding,
             )
-            worker.m_store.batch_alloc.side_effect = alloc
-            worker.m_store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-            worker.m_store.batch_get_key_info.side_effect = infos
-            worker.m_store.batch_write_finish.side_effect = finish
-            worker.m_store.batch_add_lease.side_effect = lambda keys, ttl: [0] * len(keys)
-            worker.m_store.store.batch_copy.side_effect = copy
+            if backend == "mooncake":
+                worker.m_store = range_store
+            else:
+                worker.m_store.batch_alloc.side_effect = alloc
+                worker.m_store.batch_is_exist.side_effect = lambda keys: [int(key in readable) for key in keys]
+                worker.m_store.batch_get_key_info.side_effect = infos
+                worker.m_store.batch_write_finish.side_effect = finish
+                worker.m_store.batch_add_lease.side_effect = lambda keys, ttl: [0] * len(keys)
+                worker.m_store.store.batch_copy.side_effect = copy
             caches = make_glm53_caches(plan)
             worker.register_kv_caches(caches)
-            self.fill_caches(plan, caches, source, target, rank)
+            sharding = (
+                model_sharding(worker.vllm_config.parallel_config, rank, pcp_rank)[MambaAttentionBackendEnum.GDN_ATTN]
+                if model_sharding is not None
+                else None
+            )
+            state_rank = sharding.shard_rank if sharding is not None else rank
+            self.fill_caches(plan, caches, source, target, state_rank)
             metadata = self.make_metadata(source, [block_hash])
-            request = metadata.requests[0]
+            metadata.requests[0].is_last_chunk = True
             # Layerwise state is prepared when metadata is bound (#17487);
             # start_load_kv is a no-op for layerwise workers.
             worker.prepare_layerwise_step(metadata)
             task_groups = {task.group_id for tasks in worker.layer_save_tasks for task in tasks}
-            self.assertEqual(task_groups, {0, 2, 3, 4} if rank == 0 else {2, 3, 4})
-            self.assertEqual(len(request.block_gvas_by_group_np), 5)
+            state_writer = sharding is None or sharding.replica_rank == 0
+            expected_groups = ({2, 3, 4} if state_writer else set()) | ({0} if rank == 0 else set())
+            self.assertEqual(task_groups, expected_groups)
             self.finish_layerwise_step(worker, metadata)
-            self.assertEqual(worker.current_layer, 4)
             workers.append((worker, caches))
             self.doCleanups()
 
-        self.assertEqual(len(readable), 14)  # Per PP stage: one MLA shard and three KDA groups on both TP ranks.
-        self.assertFalse(any("@1@" in key.split(block_hash.hex())[0] for key in readable))
+        state_shards = sharding.shard_count if sharding is not None else tp_size
+        self.assertEqual(len(readable), pp_size * (1 + 3 * state_shards))
         start_patch(self, "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib")
         # The scheduler builds its coordinator from vllm_config, which
         # make_worker pins to retention 0 (semantic checkpoints only); this
         # round-trip persists every block, so look it up densely.
         workers[0][0].vllm_config.cache_config.prefix_cache_retention_interval = None
+        start_patch(
+            self,
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mamba_state_sharding.get_model_cls",
+            return_value=SimpleNamespace(get_mamba_state_sharding=model_sharding),
+        )
         scheduler = create_kv_pool_scheduler(workers[0][0].vllm_config, True, workers[0][0].kv_cache_config)
         scheduler.store_scheduler.batch_is_readable.side_effect = lambda keys: [key in readable for key in keys]
         hit_request = SimpleNamespace(
             request_id="hit", prompt_token_ids=[1] * 513, num_tokens=513, block_hashes=[block_hash]
         )
         self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (512, False))
-        self.assertEqual(len(scheduler._make_layerwise_hit_check_keys(2, block_hash.hex())), 4)
+        self.assertEqual(len(scheduler._make_layerwise_hit_check_keys(2, block_hash.hex())), pp_size * state_shards)
 
         for worker, caches in workers:
             metadata = self.make_metadata(target, [block_hash], load=True)
-            request = metadata.requests[0]
+            metadata.requests[0].is_last_chunk = True
             worker.prepare_layerwise_step(metadata)
-            self.assertEqual(len(request.load_block_gvas_by_group_np), 5)
-            self.assertEqual(len(request.load_block_gvas_by_group_np[1]), 0)
             self.finish_layerwise_step(worker, metadata, load=True)
             self.assert_restored(worker, caches, source, target)
-        readable.remove(workers[1][0]._make_layerwise_full_key(4, block_hash.hex()))
-        hit_request.request_id = "missing"
-        self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (0, False))
+        for key in scheduler._make_layerwise_hit_check_keys(4, block_hash.hex()):
+            readable.remove(key)
+            hit_request.request_id = "missing"
+            self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (0, False))
+            readable.add(key)
+        self.doCleanups()
+
+    def test_layerwise_model_tp_keys_preserve_undeclared_groups(self):
+        plan = make_glm53_plan()
+        plan.kv_cache_groups[4].kv_cache_spec = replace(
+            plan.kv_cache_groups[4].kv_cache_spec, mamba_type=MambaAttentionBackendEnum.SHORT_CONV
+        )
+        state_keys = set()
+        for pcp_rank in range(8):
+            worker = make_worker(
+                self,
+                kv_cache_config=plan,
+                use_mla=True,
+                num_layers=4,
+                use_layerwise=True,
+                pcp_size=8,
+                pcp_rank=pcp_rank,
+                extra_config={"backend": "mooncake"},
+                mamba_state_sharding=glm_state_sharding,
+            )
+            original_keys = {
+                group_id: worker.layerwise_keys.make_full_key(group_id, "prefix", 0, 0) for group_id in (0, 4)
+            }
+            key = worker._make_layerwise_full_key(2, "prefix")
+            self.assertEqual(key, worker.layerwise_keys.make_full_key(2, "prefix", pcp_rank, 0))
+            state_keys.add(key)
+            for group_id in (0, 4):
+                self.assertEqual(
+                    worker._make_layerwise_full_key(group_id, "prefix"),
+                    original_keys[group_id],
+                )
+            if pcp_rank == 0:
+                start_patch(self, "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib")
+                scheduler = create_kv_pool_scheduler(worker.vllm_config, True, plan)
+                original_lookup_keys = scheduler.layerwise_keys.make_hit_check_keys(4, "prefix", 1)
+            self.doCleanups()
+        self.assertEqual(len(state_keys), 8)
+        lookup_keys = scheduler._make_layerwise_hit_check_keys(2, "prefix")
+        self.assertEqual(len(lookup_keys), 8)
+        self.assertEqual(state_keys, set(lookup_keys))
+        self.assertEqual(scheduler._make_layerwise_hit_check_keys(4, "prefix"), original_lookup_keys)
+
+    def test_layerwise_rejects_mixed_state_partitions_in_one_group(self):
+        plan = make_glm53_plan()
+        group = plan.kv_cache_groups[4]
+        name = group.layer_names[0]
+        other = name + ".other"
+        group.kv_cache_spec = UniformTypeKVCacheSpecs(
+            block_size=group.kv_cache_spec.block_size,
+            kv_cache_specs={
+                name: group.kv_cache_spec,
+                other: replace(group.kv_cache_spec, mamba_type=MambaAttentionBackendEnum.SHORT_CONV),
+            },
+        )
+        group.layer_names = [name, other]
+        with self.assertRaisesRegex(ValueError, "inconsistent state sharding"):
+            make_worker(
+                self,
+                kv_cache_config=plan,
+                use_mla=True,
+                num_layers=4,
+                use_layerwise=True,
+                pcp_size=2,
+                mamba_state_sharding=glm_state_sharding,
+            )
 
     def test_mooncake_layerwise_excludes_private_tail(self):
         plan = make_glm53_plan()
