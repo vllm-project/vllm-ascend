@@ -41,6 +41,10 @@ ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 _EPLB_CLOSE_TIMEOUT_SECONDS = 300
 _EPLB_EVENT_POLL_SECONDS = 0.1
 EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping_ep_size", default=1)
+# ForwardContext.additional_kwargs key holding one gathered AllGather source
+# mask per micro-batch. Read directly rather than through _EXTRA_CTX: the
+# proxy cannot create the list atomically, which DBO needs.
+_ALLGATHER_SOURCE_MASK_SLOTS = "eplb_allgather_source_mask_slots"
 
 
 @contextmanager
@@ -71,9 +75,6 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         self.allgather_expert_replica_routing_table: torch.Tensor | None = None
         self.allgather_record_tensor: torch.Tensor | None = None
         self.allgather_source_is_padding: torch.Tensor | None = None
-        # One slot per micro-batch, shared with the other layers of this model.
-        # See AscendEplbState._propagate_shared_tensors.
-        self.allgather_source_masks: list[torch.Tensor | None] | None = None
         self.local_expert_start = 0
         self.local_expert_count = 0
 
@@ -130,16 +131,24 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
             num_unpadded_tokens = self.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
             # Every MoE layer of this model derives the same mask from the same
             # per-forward inputs, so gathering it in each one repeats a
-            # collective as many times as the model has MoE layers. The slots
-            # hold it for the rest of the forward and AscendEplbState.
-            # prepare_forward clears them at the start of the next one.
+            # collective as many times as the model has MoE layers. Hold it on
+            # the forward context, which lives exactly as long as the mask is
+            # valid: warmup, graph capture and draft forwards each enter their
+            # own, and none of them passes through the EPLB controller.
+            # ``setdefault`` because DBO runs its micro-batches on two threads
+            # that share one context, and a lost list would leave the ranks
+            # gathering a different number of times.
             ubatch = dbo_current_ubatch_id()
-            slots = self.allgather_source_masks
-            token_mask = None if slots is None else slots[ubatch]
+            forward_context = get_forward_context()
+            slots = forward_context.additional_kwargs.setdefault(
+                _ALLGATHER_SOURCE_MASK_SLOTS,
+                [None] * len(self.num_unpadded_tokens_tensors),
+            )
+            token_mask = slots[ubatch]
             if token_mask is None:
                 is_padding = self.allgather_source_is_padding
                 if is_padding is None:
-                    is_padding = getattr(get_forward_context(), "is_padding", None)
+                    is_padding = getattr(forward_context, "is_padding", None)
                 token_mask = make_allgather_mask(
                     num_source_tokens,
                     num_unpadded_tokens,
@@ -149,8 +158,7 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
                     tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
                 )
                 token_mask = all_gather_mask(token_mask)
-                if slots is not None:
-                    slots[ubatch] = token_mask
+                slots[ubatch] = token_mask
             local_load = count_allgather_tokens(topk_ids, token_mask, self.local_expert_start, self.local_expert_count)
             assert self.allgather_record_tensor is not None
             torch.maximum(
@@ -269,9 +277,6 @@ class AscendEplbState(_eplb_state.EplbState):
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
         self.allgather_record_tensor: torch.Tensor | None = None
-        # One list of per-micro-batch slots for each registered model, so the
-        # target and the draft never share a gathered mask.
-        self._allgather_source_mask_slots: list[list[torch.Tensor | None]] = []
         self._uses_phase_filter = False
         self._stop_async = threading.Event()
         self._suspended = False
@@ -315,52 +320,9 @@ class AscendEplbState(_eplb_state.EplbState):
             return
         if self.allgather_record_tensor is None:
             self.allgather_record_tensor = torch.full((), -1, dtype=torch.int32, device=self.device)
-        # One list per model, so the draft cannot read a mask the target
-        # gathered. Elastic EP propagates again for the same model when the EP
-        # size changes, so retire the list this one replaces instead of leaving
-        # it for clear_allgather_source_masks to walk every forward.
-        source_masks: list[torch.Tensor | None] = [None] * len(num_unpadded_tokens_tensors)
-        replaced = next(
-            (
-                layer.eplb_state.allgather_source_masks
-                for layer in model.moe_layers
-                if isinstance(layer.eplb_state, AscendEplbLayerState)
-            ),
-            None,
-        )
-        if replaced is not None:
-            self._allgather_source_mask_slots = [
-                slots for slots in self._allgather_source_mask_slots if slots is not replaced
-            ]
-        self._allgather_source_mask_slots.append(source_masks)
         for layer in model.moe_layers:
             if isinstance(layer.eplb_state, AscendEplbLayerState):
                 layer.eplb_state.allgather_record_tensor = self.allgather_record_tensor
-                layer.eplb_state.allgather_source_masks = source_masks
-
-    def prepare_forward(
-        self,
-        model_config,
-        num_unpadded_tokens: int,
-        ubatch_slices: list | None = None,
-    ) -> None:
-        """Retire the gathered source masks before filling the token counts.
-
-        A mask is only valid for the forward that built it, and this is the one
-        call every forward makes: draft models reach the state directly instead
-        of through AscendEPLBController, and a drafter runs one forward per
-        speculative step. Clearing beside the controller's other per-forward
-        resets would leave those steps reading the mask of the prefill before
-        them.
-        """
-        self.clear_allgather_source_masks()
-        super().prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
-
-    def clear_allgather_source_masks(self) -> None:
-        """Drop the gathered source masks so the next forward rebuilds them."""
-        for source_masks in self._allgather_source_mask_slots:
-            for index in range(len(source_masks)):
-                source_masks[index] = None
 
     def wait_for_rearrangement(self, stream) -> bool:
         """Allow an idle worker to stop without recording a fake device event."""
