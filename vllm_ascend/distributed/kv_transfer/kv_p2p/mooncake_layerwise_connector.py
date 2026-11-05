@@ -52,6 +52,11 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.endpoints import (
+    layerwise_handshake_port,
+    layerwise_scheduler_base_port,
+    layerwise_worker_base_port,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.protocol import (
     DONE_SENDING_MSG,
     FAILED_SENDING_MSG,
@@ -633,7 +638,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
 
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
-        handshake_port = self.side_channel_port + self.tp_rank
+        handshake_port = layerwise_handshake_port(base_port=self.side_channel_port, tp_rank=self.tp_rank)
         path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
         logger.info("KVCacheRecvingLayerThread listening on %s, tp_rank=%d", path, self.tp_rank)
         encoder = msgspec.msgpack.Encoder()
@@ -864,9 +869,10 @@ class MooncakeLayerwiseConnectorScheduler:
             )
 
         # Handshake base port
-        self.side_channel_port = (
-            vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank * vllm_config.parallel_config.tensor_parallel_size
+        self.side_channel_port = layerwise_scheduler_base_port(
+            kv_port=vllm_config.kv_transfer_config.kv_port,
+            dp_rank=vllm_config.parallel_config.data_parallel_rank,
+            tp_size=vllm_config.parallel_config.tensor_parallel_size,
         )
 
         # Requests that need to start recv.
@@ -1219,12 +1225,14 @@ class MooncakeLayerwiseConnectorWorker:
             self.total_num_kv_heads = self.vllm_config.model_config.get_total_num_kv_heads()
 
         # Handshake base port
-        self.side_channel_port = (
-            vllm_config.kv_transfer_config.kv_port
-            + self.dp_rank * self.pcp_size * self.tp_size
-            + self.pcp_rank * self.tp_size
+        self.side_channel_port = layerwise_worker_base_port(
+            kv_port=vllm_config.kv_transfer_config.kv_port,
+            dp_rank=self.dp_rank,
+            pcp_size=self.pcp_size,
+            tp_size=self.tp_size,
+            pcp_rank=self.pcp_rank,
         )
-        self.handshake_port = self.side_channel_port + self.tp_rank
+        self.handshake_port = layerwise_handshake_port(base_port=self.side_channel_port, tp_rank=self.tp_rank)
         self.sockets: dict = {}
         logger.info("Initializing Mooncake work %s", engine_id)
         inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))

@@ -54,6 +54,10 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.endpoints import (
+    pull_base_port,
+    pull_handshake_port,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.protocol import (
     DONE_RECVING_MSG,
     GET_META_MSG,
@@ -206,8 +210,14 @@ class KVCacheSendingThread(threading.Thread):
             # to have a unique port. This hack to keeps us moving. We will
             # switch when moving to etcd or where we have a single ZMQ socket in
             # the scheduler.
-            device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
-            handshake_port = self.side_channel_port + device_index
+            handshake_port = pull_handshake_port(
+                base_port=self.side_channel_port,
+                pp_rank=self.pp_rank,
+                pcp_size=self.pcp_size,
+                pcp_rank=self.pcp_rank,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+            )
             path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
             logger.info(
                 "KVCacheSendingThread started listening on path: %s. Thread: tp_rank=%d, pp_rank=%d, pcp_rank=%d",
@@ -278,8 +288,14 @@ class KVCacheSendingThread(threading.Thread):
                         if request_id not in self.port_send_num:
                             self.port_send_num[request_id] = 0
                         self.port_send_num[request_id] += 1
-                        device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
-                        handshake_port = self.side_channel_port + device_index
+                        handshake_port = pull_handshake_port(
+                            base_port=self.side_channel_port,
+                            pp_rank=self.pp_rank,
+                            pcp_size=self.pcp_size,
+                            pcp_rank=self.pcp_rank,
+                            tp_size=self.tp_size,
+                            tp_rank=self.tp_rank,
+                        )
                         if self.port_send_num[request_id] >= remote_port_send_num[handshake_port]["num"]:
                             self.task_tracker.update_done_task_count(request_id)
                             del self.port_send_num[request_id]
@@ -1648,12 +1664,12 @@ class MooncakeConnectorScheduler:
 
         # Use the serving index, which survives dense-engine DP rank reset.
         # Keep scheduler metadata and worker handshake ports consistent.
-        self.side_channel_port = (
-            vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_index
-            * vllm_config.parallel_config.tensor_parallel_size
-            * vllm_config.parallel_config.pipeline_parallel_size
-            * self.pcp_size
+        self.side_channel_port = pull_base_port(
+            kv_port=vllm_config.kv_transfer_config.kv_port,
+            dp_index=vllm_config.parallel_config.data_parallel_index,
+            tp_size=vllm_config.parallel_config.tensor_parallel_size,
+            pp_size=vllm_config.parallel_config.pipeline_parallel_size,
+            pcp_size=self.pcp_size,
         )
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
@@ -2078,15 +2094,21 @@ class MooncakeConnectorWorker:
 
         # Use the serving index, which survives dense-engine DP rank reset.
         # Keep scheduler metadata and worker handshake ports consistent.
-        self.side_channel_port = (
-            vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_index
-            * vllm_config.parallel_config.tensor_parallel_size
-            * vllm_config.parallel_config.pipeline_parallel_size
-            * self.pcp_size
+        self.side_channel_port = pull_base_port(
+            kv_port=vllm_config.kv_transfer_config.kv_port,
+            dp_index=vllm_config.parallel_config.data_parallel_index,
+            tp_size=vllm_config.parallel_config.tensor_parallel_size,
+            pp_size=vllm_config.parallel_config.pipeline_parallel_size,
+            pcp_size=self.pcp_size,
         )
-        device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
-        self.handshake_port = self.side_channel_port + device_index
+        self.handshake_port = pull_handshake_port(
+            base_port=self.side_channel_port,
+            pp_rank=self.pp_rank,
+            pcp_size=self.pcp_size,
+            pcp_rank=self.pcp_rank,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        )
         self.sockets: dict = {}
         device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
         inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
