@@ -1,0 +1,8 @@
+pr: 21067
+entries:
+  - category: feature
+    text: >-
+      Boolean environment variables COMPILE_CUSTOM_KERNELS and VERBOSE now accept
+      true/false, yes/no and on/off (case-insensitive, surrounding whitespace
+      ignored) in addition to 1/0, treat empty values as unset, and reject invalid
+      values with a ValueError that names the variable and the accepted values.
