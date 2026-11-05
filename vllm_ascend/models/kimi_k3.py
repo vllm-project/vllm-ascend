@@ -88,7 +88,10 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
+from vllm_ascend.ops.kda_parallel import KDARowParallelLinear, get_kda_state_shape
+from vllm_ascend.ops.kimi_kda import (
+    AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
+)
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import get_rotation_path, is_950, vllm_version_is
@@ -631,6 +634,9 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         if vllm_config.lora_config is not None:
             return False
         o_proj = self.self_attn.o_proj
+        # PCP KDA owns combined TP/PCP head shards and its own reductions.
+        if isinstance(o_proj, KDARowParallelLinear):
+            return False
         if KimiOProjMMReduceScatterOp.unsupported_reason(o_proj) is not None:
             return False
         o_proj.custom_op = KimiOProjMMReduceScatterOp(o_proj)
@@ -1129,6 +1135,10 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
 
     packed_modules_mapping = AscendKimiLinearModel.packed_modules_mapping
 
+    @classmethod
+    def get_mamba_state_shape_from_config(cls, vllm_config):
+        return get_kda_state_shape(vllm_config)
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         if vllm_version_is("0.32.0"):
@@ -1230,6 +1240,10 @@ class AscendKimiK3MultiModalProjector(KimiK25MultiModalProjector):
 )
 class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneration):
     """Upstream Kimi K3 multimodal wrapper with Ascend text/projector layers."""
+
+    @classmethod
+    def get_mamba_state_shape_from_config(cls, vllm_config):
+        return get_kda_state_shape(vllm_config)
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)

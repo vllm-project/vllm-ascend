@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Ascend backend for the vLLM 0.27 Kimi K3 delta-attention layer.
-
-The projections, weight loading, and cache specification stay owned by
-upstream vLLM.  Only the CUDA-specific convolution and KDA execution is
-replaced here with the Ascend metadata builder and AscendC operators.
-"""
+"""Ascend Kimi K3 delta attention with TP x PCP head-sharded state."""
 
 from functools import wraps
 
@@ -15,13 +10,18 @@ from einops import rearrange
 from fla_npu.ops.ascendc import causal_conv1d_fn, causal_conv1d_update
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.distributed import divide, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     MergedColumnParallelLinear,
 )
+from vllm.model_executor.layers.quantization.modelopt import ModelOptMixedPrecisionConfig
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
 from vllm.models.kimi_k3.nvidia.kda import (
     KimiK3DeltaAttention,
+    _make_decode_conv1d_weight_loader,
 )
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -34,8 +34,16 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.kda_parallel import (
+    KDAColumnParallelLinear,
+    KDAInputParallelLinear,
+    KDAMergedColumnParallelLinear,
+    KDARowParallelLinear,
+    get_kda_parallel_rank,
+    get_kda_parallel_size,
+)
+from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
 )
@@ -67,15 +75,29 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
         tp_size: int,
         quant_config,
         prefix: str,
+        head_parallel: bool = False,
     ) -> None:
         projection_size = num_heads * head_dim
-        super().__init__(
-            input_size=hidden_size,
-            output_sizes=[num_heads, projection_size, projection_size],
-            bias=False,
-            quant_config=quant_config,
-            prefix=prefix,
-        )
+        if head_parallel:
+            self.output_sizes = [num_heads, projection_size, projection_size]
+            ColumnParallelLinear.__init__(
+                self,
+                hidden_size,
+                sum(self.output_sizes),
+                tp_rank=get_kda_parallel_rank(),
+                tp_size=tp_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=prefix,
+            )
+        else:
+            super().__init__(
+                input_size=hidden_size,
+                output_sizes=[num_heads, projection_size, projection_size],
+                bias=False,
+                quant_config=quant_config,
+                prefix=prefix,
+            )
         if self.tp_size != tp_size:
             raise ValueError(f"KDA fused BFG TP mismatch: layer={self.tp_size}, attention={tp_size}")
         local_projection_size = projection_size // tp_size
@@ -193,6 +215,14 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             )(f"{prefix}.in_proj_qkvgfab")
         )
         super().__init__(config, vllm_config, prefix)
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        self.pcp_size = getattr(parallel_config, "prefill_context_parallel_size", 1)
+        self.pcp_group = get_pcp_group() if self.pcp_size > 1 else None
+        self.pcp_rank = self.pcp_group.rank_in_group if self.pcp_group is not None else 0
+        merged_linear = MergedColumnParallelLinear
+        if self.pcp_size > 1:
+            self._init_pcp_projections(vllm_config, prefix)
+            merged_linear = KDAMergedColumnParallelLinear
         self.uses_mixed_projection = uses_mixed_projection
         self._ascend_kda_state_copy = None
         if uses_mixed_projection:
@@ -200,7 +230,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps B/F/G
             # in floating point. Split those precision groups so DynamicQuant
             # can overlap the composed BFG projection.
-            self.in_proj_qkvgfab = MergedColumnParallelLinear(
+            self.in_proj_qkvgfab = merged_linear(
                 self.hidden_size,
                 [self.projection_size] * 3,
                 bias=False,
@@ -215,6 +245,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 tp_size=self.tp_size,
                 quant_config=quant_config,
                 prefix=f"{prefix}.in_proj_gfab",
+                head_parallel=self.pcp_size > 1,
             )
             self._fused_bfg_output_sizes = (
                 self.local_num_heads,
@@ -251,14 +282,87 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
         self.conv1d.quant_method.process_weights_after_loading = process_weights_and_pack
 
+    def _init_pcp_projections(self, vllm_config, prefix: str) -> None:
+        """Bind every KDA head parameter and cache to the same TP x PCP shard."""
+        self.tp_size = get_kda_parallel_size(vllm_config.parallel_config)
+        self.tp_rank = get_kda_parallel_rank()
+        self.local_num_heads = divide(self.num_heads, self.tp_size)
+        self.local_projection_size = divide(self.projection_size, self.tp_size)
+        local_output_size = 4 * self.local_projection_size + self.head_dim + self.local_num_heads
+        alignment = (
+            128
+            if isinstance(self.quant_config, ModelOptMixedPrecisionConfig)
+            and self.quant_config._resolve_quant_algo(f"{prefix}.in_proj_qkvgfab") == "FP8_PB_WO"
+            else 16
+        )
+        self.in_proj_padding = -local_output_size % alignment
+        output_sizes = [self.projection_size] * 4 + [self.head_dim, self.num_heads]
+        if self.in_proj_padding:
+            output_sizes.append(self.in_proj_padding * self.tp_size)
+        self.in_proj_qkvgfab = KDAInputParallelLinear(
+            self.hidden_size,
+            output_sizes,
+            self.tp_size,
+            bias=False,
+            quant_config=self.quant_config,
+            prefix=f"{prefix}.in_proj_qkvgfab",
+        )
+        if self.in_proj_padding:
+            self.in_proj_qkvgfab.weight.data[-self.in_proj_padding :].zero_()
+        self.f_b_proj = KDAColumnParallelLinear(
+            self.head_dim,
+            self.projection_size,
+            bias=False,
+            quant_config=self.quant_config,
+            prefix=f"{prefix}.f_b_proj",
+        )
+        self.dt_bias = nn.Parameter(torch.empty(self.local_projection_size, dtype=torch.float32))
+        self.dt_bias.weight_loader = self._head_weight_loader
+        self.A_log = nn.Parameter(torch.empty(self.local_num_heads, dtype=torch.float32))
+        self.A_log.weight_loader = self._head_weight_loader
+        self.conv1d = KDAColumnParallelLinear(
+            self.conv_size,
+            3 * self.projection_size,
+            bias=False,
+            params_dtype=torch.float32,
+            prefix=f"{prefix}.conv1d",
+        )
+        self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
+        self.conv1d.weight.weight_loader = _make_decode_conv1d_weight_loader(
+            [self.projection_size] * 3,
+            self.tp_size,
+            self.tp_rank,
+            None,
+        )
+        self.o_proj = KDARowParallelLinear(
+            self.projection_size,
+            self.hidden_size,
+            bias=False,
+            quant_config=self.quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+    def _head_weight_loader(self, param, loaded_weight) -> None:
+        # A_log checkpoints may use [1, 1, H, 1] or [H].
+        loaded_weight = loaded_weight.reshape(-1)
+        default_weight_loader(param, loaded_weight.narrow(0, self.tp_rank * param.numel(), param.numel()))
+
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return AscendGDNHostMetadataBackend
+        return KimiKDAHostMetadataBackend
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        if self.pcp_size > 1:
+            hidden_states = torch.ops.vllm.kda_pcp_gather(hidden_states, self.pcp_size, self.prefix)
+        output = self._forward_projections(hidden_states, positions)
+        if self.pcp_size > 1:
+            output = torch.ops.vllm.kda_pcp_scatter(output, self.pcp_size, self.prefix)
+        return output
+
+    def _forward_projections(self, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         if self.uses_mixed_projection:
             num_tokens = hidden_states.size(0)
             mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(hidden_states)
