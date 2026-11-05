@@ -102,6 +102,9 @@ class BaseKVPoolWorker(ABC):
         self._init_metadata(model_config, vllm_config, extra_config)
         self._init_backend(parallel_config, extra_config)
         self._init_kv_events(vllm_config)
+        self._previous_save_batch: KVCacheStoreBatch | None = None
+        self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
+        self._global_to_local_layer: dict[int, int] = {}
         self.kv_send_thread: KVTransferThread | None = None
         self.kv_recv_thread: KVTransferThread | None = None
         self._transfer_threads_started = False
@@ -1265,15 +1268,12 @@ class KVPoolWorker(BaseKVPoolWorker):
         kv_cache_config: KVCacheConfig | None = None,
     ) -> None:
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
-        self._previous_save_batch: KVCacheStoreBatch | None = None
         self._init_cache_layout()
 
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
         return False
 
     def _init_cache_layout(self) -> None:
-        self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
-        self._global_to_local_layer: dict[int, int] = {}
         if self.kv_cache_config is None:
             return
         physical_layers = {
