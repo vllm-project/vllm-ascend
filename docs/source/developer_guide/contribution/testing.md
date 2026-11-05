@@ -396,25 +396,29 @@ For block extraction, plan preview, and selection rules, see the usage notes and
 
 ### Run docs link check
 
-You can validate external links in the Sphinx docs locally with:
+The **Docs link check** workflow checks changed Markdown files in PRs. Scheduled
+and manual runs, or PRs changing checker-related files, scan all documentation.
+
+For local checks, use a Python 3.11+ virtual environment and run from the repository root:
 
 ```bash
-make -C docs linkcheck SPHINXOPTS="-W --keep-going"
+python -m pip install -r docs/requirements-linkcheck.txt
+
+# Check specific files, or the full documentation directory.
+python .github/workflows/scripts/check_md_links.py docs/source/user_guide/release_notes.md --timeout 300
+python .github/workflows/scripts/check_md_links.py docs/source
 ```
 
-To check links in a specific Markdown file, pass the file to `sphinx-build`.
-For example, to check only `docs/source/user_guide/release_notes.md`:
+Add `--extract-only` to list links without making requests. The checker validates
+rendered HTTP(S) links and images, skipping code examples and `docs/source/zh`.
+Relative links and remote anchors are not checked.
 
-```bash
-cd docs
-sphinx-build -b linkcheck -W --keep-going \
-  source _build/linkcheck source/user_guide/release_notes.md
-```
+The check log ends with all blocking errors and non-blocking warnings, including
+URLs, source files, and reasons. Blocking errors fail CI; unresolved HTTP 429
+responses are warnings and remain unverified.
 
-The detailed report will be written to:
-
-- `docs/_build/linkcheck/output.txt`
-- `docs/_build/linkcheck/output.json`
+Reports are saved as `output.json` and `summary.md` under `docs/_build/linkcheck/`
+and uploaded as CI artifacts. Use `--report-dir` to change the local output directory.
 
 ## PR testing requirements
 

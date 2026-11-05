@@ -99,6 +99,9 @@ class HardwareCapability(Enum):
     FP8_ATTENTION = auto()
     # CANN PoolKeyIndexer quant_mode=0 with E4M3 query/key and FP32 descales.
     POOL_KEY_INDEXER_FP8 = auto()
+    # Prepare and reuse the fixed CANN GBSA schedule across supported M3 decode layers.
+    # Callers must also check block size, dtype, and uniform query length.
+    MINIMAX_M3_GBSA_METADATA_REUSE = auto()
     # Select the compatibility grouped-top-k router used by the fused-MoE path.
     FUSED_MOE_COMPATIBILITY = auto()
     # Use npu_rotary_mul with adjacent pairs (rotary_mode="interleave").
@@ -288,6 +291,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
     HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
     HardwareCapability.DEQUANT_SITU_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
@@ -390,6 +394,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.LORA_CUSTOM_OPS,
                     HardwareCapability.MLA_FLASH,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
+                    HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
