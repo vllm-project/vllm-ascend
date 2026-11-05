@@ -334,7 +334,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `--attention-config.indexer_kv_dtype`: Uses FP8 KPool indexer cache on 950DT products and INT8 on A3 series, independently of `--kv-cache-dtype`.
 - `--mamba-ssm-cache-dtype bfloat16`: Uses BF16 SSM state in the A3 series single-node example.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
-- `--limit-mm-per-prompt '{"image":1,"video":0}'`: Allows at most one image per prompt and disables video input in all deployment examples.
+- `--limit-mm-per-prompt '{"image":1,"video":0}'`: Allows at most one image per prompt and disables video input where specified. A3 ordinary PD uses `'{"image":1}'` to limit image input only.
 - `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use five speculative tokens. GLM-5.3-Flash supports MTP draft graph execution.
 
 ### 5.2 Multi-Node Colocated Deployment
@@ -808,9 +808,9 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
+    export ASCEND_RT_VISIBLE_DEVICES="$1"
 
     exec vllm serve "$MODEL_PATH" \
-      --device-ids "$1" \
       --host 0.0.0.0 \
       --port "$2" \
       --data-parallel-size "$3" \
@@ -830,7 +830,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       --max-num-batched-tokens 16384 \
       --trust-remote-code \
       --quantization ascend \
-      --limit-mm-per-prompt '{"image":1,"video":0}' \
+      --limit-mm-per-prompt '{"image":1}' \
       --gpu-memory-utilization 0.92 \
       --tool-call-parser glm47 \
       --reasoning-parser glm47 \
@@ -842,9 +842,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       --use-replayssm \
       --mamba-ssm-cache-dtype bfloat16 \
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}' \
-      --additional-config '{
-        "enable_fused_mc2": 2
-      }' \
+      --additional-config '{"enable_shared_expert_dp": true,"enable_fused_mc2":2}' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "engine_id": "0", "kv_port": "36680"}'
     ```
@@ -889,9 +887,9 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
+    export ASCEND_RT_VISIBLE_DEVICES="$1"
 
     exec vllm serve "$MODEL_PATH" \
-      --device-ids "$1" \
       --host 0.0.0.0 \
       --port "$2" \
       --data-parallel-size "$3" \
@@ -908,7 +906,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       --max-num-batched-tokens 240 \
       --trust-remote-code \
       --quantization ascend \
-      --limit-mm-per-prompt '{"image":1,"video":0}' \
+      --limit-mm-per-prompt '{"image":1}' \
       --gpu-memory-utilization 0.92 \
       --tool-call-parser glm47 \
       --reasoning-parser glm47 \
@@ -984,8 +982,8 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
     - `--data-parallel-address` and `--data-parallel-rpc-port` coordinate DP
       ranks within one role. Prefill and Decode use their respective node IPs.
       The default RPC port `12325` can be reused on the separate hosts.
-    - `--device-ids "$1"` binds each engine to the launcher-assigned devices.
-      Do not also restrict `ASCEND_RT_VISIBLE_DEVICES` per rank.
+    - `ASCEND_RT_VISIBLE_DEVICES="$1"` selects the launcher-assigned devices
+      for each engine.
     - Prefill API ports are `9081-9082`; Decode API ports are `9900-9907`.
       All ten endpoints must be reachable from the proxy.
     - Both roles use Model Runner V2, INT8 main and indexer KV caches,
@@ -995,13 +993,13 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       for the ReplaySSM switch and its requirements.
     - Prefill runs the target eagerly and enables draft graph execution.
       It enables asynchronous EPLB with the `stair` policy and `hixl`
-      communicator. `enable_fused_mc2` is `2`; shared-expert DP is not
-      enabled because Prefill uses TP1.
+      communicator. The Prefill configuration sets `enable_fused_mc2` to `2`
+      and `enable_shared_expert_dp` to `true`.
     - Prefill uses `--max-num-seqs 32` and
       `--max-num-batched-tokens 16384`. Decode uses `40` and `240`, respectively.
     - Decode uses `FULL_DECODE_ONLY` with default capture sizes, static kernels, FlashComm1, shared-expert DP and multistream
       overlap. Recompute scheduling is enabled through `scheduler_config`.
-    - Both roles allow one image per prompt and disable video input.
+    - Both roles explicitly limit image input to one image per prompt.
     - `MooncakeConnectorV2` uses `kv_producer` and engine ID `0` on Prefill,
       and `kv_consumer` and engine ID `1` on Decode. These IDs identify the
       roles in this deployment. Base KV ports are `36680` and `36580`.
@@ -1507,7 +1505,9 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     This KV Cache Pool example uses DP2/TP1/PCP8 Prefill and DP4/TP4 Decode,
     using Model Runner V2 and native KDA. Prepare separate `run_p.sh` and
     `run_d.sh` files for this scenario from the [A3 PD scripts](#glm53-flash-5-3-a3).
-    In both files, keep `VLLM_USE_V2_MODEL_RUNNER=1` and `--device-ids "$1"`. Add
+    In both files, keep `VLLM_USE_V2_MODEL_RUNNER=1`. Replace
+    `export ASCEND_RT_VISIBLE_DEVICES="$1"` with the serving option
+    `--device-ids "$1"` for this pooling example. Add
     `--enable-prefix-caching`, remove
     `--use-replayssm`, `--mamba-ssm-cache-dtype`, and
     `--attention-config.indexer_kv_dtype`, and restore
