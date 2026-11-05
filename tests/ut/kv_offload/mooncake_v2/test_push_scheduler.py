@@ -70,6 +70,7 @@ def scheduler():
     obj.group_unique_specs = [[Mock(spec=base_scheduler.FullAttentionSpec, is_circular=False)] for _ in range(2)]
     obj.num_speculative_tokens = 0
     obj._reqs_pending_recv = {}
+    obj._reqs_failed_recv = set()
     obj._reqs_need_send_layerwise = {}
     obj._reqs_sent_to_worker = set()
     obj._reqs_need_send = {}
@@ -386,10 +387,10 @@ def test_metaserver_dispatch_is_concurrent_and_snapshots_blocks(scheduler, exter
         release.set()
         scheduler.metaserver_client.shutdown()
     assert scheduler.metaserver_client.client.is_closed
-    scheduler.metaserver_client.check_errors()
+    assert not scheduler.metaserver_client.get_failed_requests()
 
 
-@pytest.mark.parametrize("failure", ["connect", "response", "read_timeout"])
+@pytest.mark.parametrize("failure", ["connect", "connect_timeout", "response", "read_timeout", "write_timeout"])
 def test_metaserver_failure_is_propagated_without_redispatch(scheduler, failure, metaserver):
     calls = []
 
@@ -397,6 +398,10 @@ def test_metaserver_failure_is_propagated_without_redispatch(scheduler, failure,
         calls.append(request)
         if failure == "connect":
             raise httpx.ConnectError("unreachable", request=request)
+        if failure == "connect_timeout":
+            raise httpx.ConnectTimeout("connection timed out", request=request)
+        if failure == "write_timeout":
+            raise httpx.WriteTimeout("metadata may have been sent", request=request)
         if failure == "read_timeout":
             raise httpx.ReadTimeout("P may already be running", request=request)
         return httpx.Response(502)
@@ -404,9 +409,14 @@ def test_metaserver_failure_is_propagated_without_redispatch(scheduler, failure,
     scheduler.metaserver_client = metaserver(handle)
     scheduler.metaserver_client.submit("request", "http://proxy/v1/metaserver", {})
     scheduler.metaserver_client.executor.shutdown(wait=True)
-    assert len(calls) == (3 if failure == "connect" else 1)
-    with pytest.raises(RuntimeError, match="metaserver dispatch failed"):
-        scheduler.build_connector_meta(SimpleNamespace())
+    assert len(calls) == (3 if failure in ("connect", "connect_timeout") else 1)
+    # The next metadata-only step carries failures; other scheduler hooks
+    # neither raise nor consume the result before the worker can see it.
+    scheduler.update_connector_output(SimpleNamespace(finished_recving=set()))
+    scheduler.update_state_after_alloc(SimpleNamespace(kv_transfer_params=None), None, 0)
+    meta = scheduler.build_connector_meta(SimpleNamespace())
+    assert meta.push_failed_requests == {"request": failure in ("connect", "connect_timeout")}
+    assert not scheduler.build_connector_meta(SimpleNamespace()).push_failed_requests
 
 
 def test_d_full_prefix_hit_needs_no_p_transfer(producer_scheduler):
@@ -465,7 +475,7 @@ def test_metaserver_mamba_blocks_exclude_only_speculative_tail(scheduler, use_re
         Mock(spec=base_scheduler.MambaSpec, num_speculative_blocks=num_speculative_blocks, is_circular=False)
     ]
     scheduler.dcp_size = 1
-    scheduler._metadata_thread = Mock()
+    scheduler._metadata_thread = Mock(error=None)
     messages = []
 
     def handle(request):
@@ -492,3 +502,63 @@ def test_metaserver_mamba_blocks_exclude_only_speculative_tail(scheduler, use_re
         (1, 2),
         (10, 11, 12),
     )
+
+
+@pytest.mark.parametrize("failure", ["missing_metadata", "dead_metadata", "missing_client"])
+def test_unavailable_d_service_fails_request_before_publication(scheduler, failure):
+    scheduler._metadata_thread = (
+        None
+        if failure == "missing_metadata"
+        else Mock(error=RuntimeError("listener stopped") if failure == "dead_metadata" else None)
+    )
+    client = Mock()
+    scheduler.metaserver_client = None if failure == "missing_client" else client
+    request = SimpleNamespace(
+        request_id="d-request", kv_transfer_params={"do_remote_prefill": True, "num_computed_tokens": 0}
+    )
+    scheduler.update_state_after_alloc(request, SimpleNamespace(get_block_ids=lambda: ([1, 2],)), 32)
+    client.submit.assert_not_called()
+    client.get_failed_requests.return_value = {}
+    meta = scheduler.build_connector_meta(None)
+    assert meta.push_failed_requests == {"d-request": True}
+    assert meta.push_requests["d-request"].local_block_ids == ((1, 2),)
+    assert not request.kv_transfer_params["do_remote_prefill"]
+    assert not scheduler.build_connector_meta(None).push_failed_requests
+
+
+@pytest.mark.parametrize("url", [None, 123, "", "relative/path", "ftp://proxy/metaserver", "http://proxy:bad"])
+def test_invalid_metaserver_url_fails_before_http(scheduler, metaserver, url):
+    handler = Mock(return_value=httpx.Response(200))
+    scheduler.metaserver_client = metaserver(handler)
+    scheduler.metaserver_client.submit("d-request", url, {})
+    assert scheduler.build_connector_meta(None).push_failed_requests == {"d-request": True}
+    handler.assert_not_called()
+
+
+def test_executor_rejection_cannot_publish_enqueued_metadata(scheduler, metaserver, monkeypatch):
+    handler = Mock(return_value=httpx.Response(200))
+    scheduler.metaserver_client = metaserver(handler)
+    enqueued = []
+
+    def reject_after_enqueue(task):
+        enqueued.append(task)
+        raise RuntimeError("cannot start new thread")
+
+    monkeypatch.setattr(scheduler.metaserver_client.executor, "submit", reject_after_enqueue)
+    scheduler.metaserver_client.submit("d-request", "http://proxy/v1/metaserver", {})
+    # Simulate another pool thread picking up the rejected work item later.
+    enqueued[0]()
+    handler.assert_not_called()
+    assert scheduler.build_connector_meta(None).push_failed_requests == {"d-request": True}
+
+
+def test_scheduler_shutdown_stops_metadata_even_if_client_cleanup_fails(scheduler):
+    scheduler.metaserver_client = Mock()
+    scheduler.metaserver_client.shutdown.side_effect = RuntimeError("client cleanup failed")
+    thread = Mock()
+    scheduler._metadata_thread = thread
+    with pytest.raises(RuntimeError, match="client cleanup failed"):
+        scheduler.shutdown()
+    thread.shutdown.assert_called_once_with()
+    assert scheduler.metaserver_client is None
+    assert scheduler._metadata_thread is None

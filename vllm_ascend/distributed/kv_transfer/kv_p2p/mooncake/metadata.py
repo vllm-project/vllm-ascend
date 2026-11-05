@@ -181,6 +181,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.push_send_requests: dict[str, PushSendReqMeta] = {}
         # P request ID -> D request ID, including aborts before first dispatch.
         self.push_aborted_requests: dict[str, str] = {}
+        # D request ID -> whether the failed metaserver call never dispatched P.
+        self.push_failed_requests: dict[str, bool] = {}
         self.requests_to_send: dict[str, float] = {}
         self.reqs_in_batch: set[str] = set()
 

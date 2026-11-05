@@ -305,6 +305,16 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 self._reqs_recv_state[request.request_id] = _ReceiveState(request_id, request, time.monotonic())
                 for completion in self._pending_completions.pop(request.request_id, {}).values():
                     self._result_queue.put(("done", request.request_id, completion))
+            for request_id, not_dispatched in metadata.push_failed_requests.items():
+                state = self._reqs_recv_state.get(request_id)
+                if state is None:
+                    # Already finished, or no external KV was needed.
+                    continue
+                state.failed = True
+                if not_dispatched:
+                    self._result_queue.put(("failed", request_id, None))
+                # Otherwise keep the blocks pinned until all P ranks report
+                # drained WRITEs. Mark failure before consuming queued DONEs.
 
     def _get_remote_metadata(self, params: dict[str, Any]) -> MooncakeTransferMetadataGroups:
         path = params["scheduler_address"]
@@ -778,6 +788,12 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         self._control_error = RuntimeError("Conflicting early Push completion")
                         self.maybe_raise_thread_error()
                     pending[source] = payload
+                    continue
+                if kind == "failed":
+                    results.finished_recving.add(state.request_id)
+                    results.failed_recving.add(state.request_id)
+                    self._finished_requests[request_id] = (state.request_id, state.metadata)
+                    del self._reqs_recv_state[request_id]
                     continue
                 if payload["request_id"] != state.request_id:
                     raise ValueError("Push completion request identity mismatch")

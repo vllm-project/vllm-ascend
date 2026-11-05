@@ -171,3 +171,57 @@ def test_push_thread_start_failure_is_reported_and_stopped(worker, monkeypatch):
     assert isinstance(thread.error, OSError)
     assert not thread.is_alive()
     thread.shutdown()
+
+
+@pytest.mark.parametrize("same_step", [False, True])
+def test_unstarted_metaserver_failure_finishes_receive_without_done(worker, same_step):
+    meta = metadata()
+    if not same_step:
+        worker.start_load_kv(meta)
+        meta = MooncakeConnectorMetadata()
+    meta.push_failed_requests = {"d-request": True}
+    worker.start_load_kv(meta)
+    result = worker.get_transfer_results()
+    assert result.finished_recving == result.failed_recving == {"d-request"}
+    assert not worker._reqs_recv_state
+    worker.start_load_kv(meta)
+    assert not worker.get_transfer_results().finished_recving
+    # The worker remains usable for another request.
+    next_meta = MooncakeConnectorMetadata()
+    next_meta.add_new_push_req("next", ([3, 4],), 32, {"num_computed_tokens": 0})
+    worker.start_load_kv(next_meta)
+    send(worker, dict(completion(), request_id="next"))
+    result = finish(worker)
+    assert result.finished_recving == {"next"}
+    assert not result.failed_recving
+
+
+@pytest.mark.parametrize("done_queued", [False, True])
+def test_uncertain_metaserver_failure_waits_for_all_writes(worker, done_queued):
+    worker.start_load_kv(metadata())
+    first = dict(completion(), producer_sizes=[1, 1, 2])
+    if done_queued:
+        send(worker, first)
+    failed = MooncakeConnectorMetadata()
+    failed.push_failed_requests = {"d-request": False}
+    worker.start_load_kv(failed)
+    assert not worker.get_transfer_results().finished_recving
+    assert "d-request" in worker._reqs_recv_state
+    if not done_queued:
+        send(worker, first)
+    send(worker, dict(first, producer_rank=[0, 0, 1]))
+    result = finish(worker)
+    assert result.finished_recving == result.failed_recving == {"d-request"}
+
+
+def test_late_metaserver_failure_does_not_reopen_finished_receive(worker):
+    worker.start_load_kv(metadata())
+    send(worker, completion())
+    assert finish(worker).finished_recving == {"d-request"}
+    failed = MooncakeConnectorMetadata()
+    failed.push_failed_requests = {"d-request": False, "no-external-kv": True}
+    worker.start_load_kv(failed)
+    result = worker.get_transfer_results()
+    assert not result.finished_recving
+    assert not result.failed_recving
+    assert not worker._reqs_recv_state
