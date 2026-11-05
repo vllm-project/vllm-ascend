@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """CPU contract tests for the Ascend PLE prefill conv launcher."""
 
+from typing import Any
+
 import pytest
 import torch
 
@@ -10,9 +12,9 @@ from vllm_ascend.ops import triton_ple
 
 class _CaptureKernel:
     def __init__(self):
-        self.grid = None
-        self.args = None
-        self.kwargs = None
+        self.grid: Any = None
+        self.args: Any = None
+        self.kwargs: Any = None
 
     def __getitem__(self, grid):
         self.grid = grid
