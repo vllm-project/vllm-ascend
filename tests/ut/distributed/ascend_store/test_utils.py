@@ -19,7 +19,20 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.utils import collect_pp_group_owners
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.utils import (
+    collect_pp_group_owners,
+    get_group_pp_ranks,
+)
+
+
+def test_get_group_pp_ranks_uses_ownership_manifest():
+    assert get_group_pp_ranks(((0, 2), (1,)), 1, 3) == [1]
+
+
+def test_get_group_pp_ranks_falls_back_without_valid_group():
+    assert get_group_pp_ranks(None, 0, 3) == [0, 1, 2]
+    assert get_group_pp_ranks(((0,),), -1, 3) == [0, 1, 2]
+    assert get_group_pp_ranks(((0,),), 1, 3) == [0, 1, 2]
 
 
 def test_collect_pp_group_owners_without_pipeline_parallelism():

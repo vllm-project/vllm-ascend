@@ -66,7 +66,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.utils import collect_pp_group_owners
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.utils import (
+    collect_pp_group_owners,
+    get_group_pp_ranks,
+)
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -1566,7 +1569,8 @@ class KVPoolWorker:
         num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match
         # lookup_scheduler()'s [rank_shard][block] result slicing.
-        for pp_rank in self._get_group_pp_ranks(group_id):
+        owners = getattr(self, "_pp_group_owners", None)
+        for pp_rank in get_group_pp_ranks(owners, group_id, self.pp_size):
             for dcp_rank in range(self.dcp_size):
                 for head_or_tp_rank in range(num_head_or_tp_ranks):
                     for key in keys:
@@ -1574,19 +1578,6 @@ class KVPoolWorker:
                         rank_key = self._replace_key_field(rank_key, "head_or_tp_rank", head_or_tp_rank)
                         expanded.append(self._replace_key_field(rank_key, "pp_rank", pp_rank))
         return expanded
-
-    def _get_group_pp_ranks(self, group_id: int) -> list[int]:
-        """Return PP stages that own at least one layer in a cache group.
-
-        Fall back to every stage when the global ownership manifest is
-        unavailable. A conservative fallback can only lose a cache hit; it
-        must never report a partial prefix as complete.
-        """
-        all_ranks = list(range(self.pp_size))
-        owners = getattr(self, "_pp_group_owners", None)
-        if owners is None or group_id >= len(owners):
-            return all_ranks
-        return list(owners[group_id])
 
     def _expand_lookup_key_variants(self, key: str, group_id: int, include_all_ranks: bool) -> list[str]:
         if not include_all_ranks:

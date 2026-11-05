@@ -6,6 +6,17 @@ import torch
 from vllm.logger import logger
 
 
+def get_group_pp_ranks(
+    owners: tuple[tuple[int, ...], ...] | None,
+    group_id: int,
+    pp_size: int,
+) -> list[int]:
+    """Return PP ranks owning a cache group, or all ranks as fallback."""
+    if owners is None or group_id < 0 or group_id >= len(owners):
+        return list(range(pp_size))
+    return list(owners[group_id])
+
+
 def collect_pp_group_owners(
     kv_cache_config: Any,
     pp_size: int,
