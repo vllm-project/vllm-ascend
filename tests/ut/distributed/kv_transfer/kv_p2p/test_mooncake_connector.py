@@ -77,7 +77,10 @@ MOONCAKE_STORAGE_REGISTRATION_FIX = pytest.mark.skip(
 @pytest.fixture(autouse=True)
 def _parallel_groups(monkeypatch):
     """Scope fake distributed topology to each case; never patch at collection."""
-    module = sys.modules[KVCacheTaskTracker.__module__]
+    # KVCacheTaskTracker moved to mooncake_v1/common/tracker.py, which has no
+    # parallel-group symbols; patch the module that still implements the
+    # pull connector instead.
+    module = sys.modules[MooncakeConnectorWorker.__module__]
     # Worker construction writes this environment variable. Track its original
     # state even in legacy constructor tests, not only in the wire fixture.
     monkeypatch.setenv("ASCEND_TRANSFER_TIMEOUT", os.environ.get("ASCEND_TRANSFER_TIMEOUT", "30"))

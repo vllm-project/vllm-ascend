@@ -55,7 +55,13 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.protocol import (
+    DONE_SENDING_MSG,
+    FAILED_SENDING_MSG,
+    GET_META_MSG,
+    LayerMetadata,
+    LayerwiseAgentMetadata,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -87,22 +93,14 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 # isort: on
 
-DONE_SENDING_MSG = b"done_sending_msg"
-FAILED_SENDING_MSG = b"failed_sending_msg"
+# Back-compat re-exports: the layerwise wire protocol definitions moved to
+# mooncake_v1/common. The imports above keep DONE_SENDING_MSG, FAILED_SENDING_MSG
+# and LayerMetadata importable from this module; MooncakeAgentMetadata keeps its
+# historical name and is bound here (not at the end of the module) because the
+# annotations below reference it while the classes are being defined.
+MooncakeAgentMetadata = LayerwiseAgentMetadata
+
 LAYERWISE_REUSE_WAIT_LOG_INTERVAL_SECONDS = 10.0
-
-
-@dataclass
-class LayerMetadata:
-    tensor_group_idx: list[int]
-    kv_caches_base_addr: list[int]
-    block_len: list[int]
-    block_size_scale: list[int]
-
-
-class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
-    te_rpc_port: int
-    layer_metadata: dict[str, LayerMetadata]
 
 
 @dataclass
