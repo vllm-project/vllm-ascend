@@ -119,6 +119,8 @@ class HardwareCapability(Enum):
     # Let inplace_partial_rotary_mul negate sine internally; profiles without
     # this contract negate the sine input explicitly and pass negate_sin=False.
     INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN = auto()
+    # CANN FP8 indexer quantization plus separate page-strided K/scale writes.
+    INDEXER_QUANT_CACHE = auto()
     # Reserve host CPUs for interrupt handling when constructing worker CPU pools.
     IRQ_CPU_RESERVATION = auto()
     # Create the local communication resource used by supported KV-transfer deployments.
@@ -373,6 +375,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.FLA_GDN_PREFILL,
                     HardwareCapability.FP8_ATTENTION,
                     HardwareCapability.POOL_KEY_INDEXER_FP8,
+                    HardwareCapability.INDEXER_QUANT_CACHE,
                     HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
                     HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION,
                     HardwareCapability.GRAPH_MULS_ADD_FUSION,
