@@ -66,3 +66,19 @@ def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):
         f"Logprobs values differ between Triton and PyTorch.\n"
         f"Max diff: {torch.max(torch.abs(triton_output.logprobs - ref_logprobs))}"
     )
+
+
+@pytest.mark.parametrize("vocab_size", [1519, 8192, 20000])
+def test_selected_token_rank_preserves_nan_comparisons(vocab_size):
+    """Padding correction must not count real NaN lanes as >= a selected -inf."""
+    init_device_properties_triton()
+    logits = torch.zeros(2, vocab_size, device="npu", dtype=torch.float32)
+    logits[:, 0] = float("-inf")
+    logits[:, 1] = float("nan")
+    sampled_token_ids = torch.tensor([0, 1], device="npu", dtype=torch.int64)
+
+    output = compute_topk_logprobs(logits, 0, sampled_token_ids)
+    torch.npu.synchronize()
+
+    # A real NaN does not compare >= -inf; a selected NaN compares >= nothing.
+    assert output.selected_token_ranks.cpu().tolist() == [vocab_size - 1, 0]
