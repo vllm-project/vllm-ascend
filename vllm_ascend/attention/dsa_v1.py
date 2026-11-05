@@ -243,6 +243,21 @@ def _has_weight_scale(linear) -> bool:
     return getattr(linear, "weight_scale", None) is not None
 
 
+def _is_lora_wrapped(linear) -> bool:
+    """True when ``linear`` is a LoRA wrapper that still owes an adapter delta.
+
+    ``BaseLayerWithLoRA.__getattr__`` forwards public attribute reads to the
+    wrapped base layer, so ``weight``/``weight_scale``/``quant_method`` keep
+    answering after patching. Inline kernel paths in this file read those
+    tensors directly instead of calling ``forward``; they keep producing the
+    base projection and drop the adapter output without any error. Callers
+    must hand control back to the wrapper whenever this returns True.
+    """
+    from vllm.lora.layers.base import BaseLayerWithLoRA
+
+    return isinstance(linear, BaseLayerWithLoRA)
+
+
 def _dsa_layout_kv(vllm_config: VllmConfig) -> str:
     return get_dsa_attn_kv_plan(vllm_config).layout_kv
 
@@ -2267,9 +2282,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
     def _wo_a_bmm(self, o_proj_input: torch.Tensor) -> torch.Tensor:
         """Project grouped activations with FP8 or BF16, preserving the 3D layout."""
         if self.support_fp8_attention and _has_weight_scale(self.wo_a):
-            o_proj_input, act_scale = torch_npu.npu_dynamic_mx_quant(o_proj_input, dst_type=torch.float8_e4m3fn)
-            return torch_npu.npu_transpose_quant_batchmatmul(
-                o_proj_input,
+            quant_input, act_scale = torch_npu.npu_dynamic_mx_quant(o_proj_input, dst_type=torch.float8_e4m3fn)
+            output = torch_npu.npu_transpose_quant_batchmatmul(
+                quant_input,
                 self.wo_a.weight,
                 dtype=torch.bfloat16,
                 bias=None,
@@ -2280,7 +2295,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 perm_x2=(0, 1, 2),
                 perm_y=(1, 0, 2),
             )
-        return torch_npu.npu_transpose_batchmatmul(
+            return self._add_wo_a_lora_delta(o_proj_input, output)
+        output = torch_npu.npu_transpose_batchmatmul(
             o_proj_input,
             self.wo_a.weight,
             bias=None,
@@ -2290,6 +2306,69 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             perm_y=(1, 0, 2),
             batch_split_factor=1,
         )
+        return self._add_wo_a_lora_delta(o_proj_input, output)
+
+    def _add_wo_a_lora_delta(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        """Add the adapter delta that the grouped matmul cannot reach.
+
+        ``npu_transpose_batchmatmul`` multiplies every activation group with its
+        own weight block, so this projection never runs ``wo_a.forward``. A LoRA
+        wrapper keeps answering ``weight``/``weight_scale`` reads through
+        ``__getattr__``, so without this the base projection silently drops the
+        adapter. The delta is delegated to the punica wrapper, which is the same
+        kernel the wrapper's own ``forward`` would use.
+        """
+        if not _is_lora_wrapped(self.wo_a):
+            return output
+        if oproj_tp_enable() or self.n_local_groups != 1:
+            raise NotImplementedError(
+                "LoRA on wo_a requires a single local o_proj group per rank "
+                f"(got n_local_groups={self.n_local_groups}, "
+                f"fine-grained o_proj TP={oproj_tp_enable()}). Use TP equal to "
+                "o_groups, or drop wo_a from the adapter."
+            )
+
+        num_tokens = output.shape[0]
+        flat_output = output.reshape(num_tokens, -1)
+        flat_input = o_proj_input.reshape(num_tokens, -1)
+        # Same entry point the wrapper's own ``forward`` uses, so the adapter
+        # scaling and the per-request adapter selection stay identical. The
+        # punica kernel resolves which tokens carry an adapter, so requests
+        # served by the base model stay untouched.
+        flat_output = self.wo_a._apply_lora_to_output(flat_input, flat_output)
+        return flat_output.view_as(output)
+
+    def sync_projection_layers(self, attn_module) -> None:
+        """Adopt projections that were swapped out after this impl was built.
+
+        LoRA activation replaces the linear modules in the model tree, but this
+        impl was constructed from the original modules and keeps direct
+        references. Without re-binding, every ``self.wq_a`` / ``wkv`` /
+        ``wq_b`` / ``wo_a`` / ``wo_b`` call here would keep executing the base
+        layer and the adapter would be dropped without an error.
+        """
+        rebound = False
+        for name in ("wq_a", "wq_b", "wkv", "wo_a", "wo_b"):
+            live = getattr(attn_module, name, None)
+            if live is not None and live is not getattr(self, name, None):
+                setattr(self, name, live)
+                rebound = True
+        if not rebound:
+            # Steady state: this runs on every forward, so keep it free of
+            # allocations once the projections are the live modules.
+            return
+        # The CV wrappers were built from the original modules as well and keep
+        # their own reference, so they need the same refresh.
+        self.cv_wq_a = CVLinearWrapper(self.wq_a)
+        self.cv_wkv = CVLinearWrapper(self.wkv)
+        self.cv_wq_b = CVLinearWrapper(self.wq_b)
+
+    def _prolog_uses_lora(self) -> bool:
+        return _is_lora_wrapped(self.wq_a) or _is_lora_wrapped(self.wkv) or _is_lora_wrapped(self.wq_b)
+
+    def _dsv4_overlap_enabled(self) -> bool:
+        """Multi-stream overlap reads ``weight`` directly, so adapters disable it."""
+        return self.multistream_dsv4_dsa_overlap and not self._prolog_uses_lora()
 
     def reserve_oproj_buffers(self, device: torch.device, dtype: torch.dtype) -> None:
         """Reserve graph-stable OTP storage before KV cache capacity is measured."""
@@ -2505,7 +2584,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         write_swa_cache=True,
     ):
         """Run the MLA prolog on the current stream."""
-        share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
+        share_hs_quant = (
+            _is_w8a8_dynamic(self.wq_a)
+            and _is_w8a8_dynamic(self.wkv)
+            and not _is_lora_wrapped(self.wq_a)
+            and not _is_lora_wrapped(self.wkv)
+        )
         if share_hs_quant:
             hs_int8, hs_pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
             q_a = torch_npu.npu_quant_matmul(
@@ -2520,7 +2604,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             q_a = self.wq_a(hidden_states)
 
         # q
-        if _is_w8a8_dynamic(self.wq_b):
+        if _is_w8a8_dynamic(self.wq_b) and not _is_lora_wrapped(self.wq_b):
             qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                 q_a, self.q_norm.weight, epsilon=self.eps
             )
@@ -2770,7 +2854,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             overlap_plan = IndexerOverlapPlan(
                 compute_attention_compressed_kv=compute_attention_compressed_kv,
                 scatter_attention_compressed_kv=scatter_attention_compressed_kv,
-                aux_stream=dsv4_dsa_overlap_stream() if self.multistream_dsv4_dsa_overlap else None,
+                aux_stream=dsv4_dsa_overlap_stream() if self._dsv4_overlap_enabled() else None,
             )
             return self.indexer(
                 hidden_states=hidden_states,
@@ -2813,7 +2897,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
     ) -> torch.Tensor:
         # DSA PCP sets cache_is_prepared after global cache updates and forces
         # single-stream attention because there is no local KV update to overlap.
-        if cache_is_prepared and self.multistream_dsv4_dsa_overlap:
+        if cache_is_prepared and self._dsv4_overlap_enabled():
             raise RuntimeError("Prepared DSA caches require single-stream attention.")
 
         (
@@ -2842,7 +2926,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         ori_win_right = 0 if swa_req_metadata.ori_win_right is None else swa_req_metadata.ori_win_right
 
         compressor_tail_fn = None
-        if self.multistream_dsv4_dsa_overlap and self.compress_ratio > 1:
+        if self._dsv4_overlap_enabled() and self.compress_ratio > 1:
             compressor = self.compressor
             tail_compressor_metadata = layer_metadata.compressor
             assert compressor is not None
@@ -2855,7 +2939,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                     metadata=tail_compressor_metadata,
                 )
 
-        if self.multistream_dsv4_dsa_overlap:
+        # The 3-block multi-stream path never calls the projection modules: it
+        # quantizes and matmuls through ``CVLinearWrapper``, which reads
+        # ``weight``/``weight_scale`` off the layer directly. ``_dsv4_overlap_
+        # enabled()`` already reports False for a patched prolog, so the adapter
+        # keeps running through the LoRA-aware single-stream path below.
+        if self._dsv4_overlap_enabled():
             q, qr, qr_pertoken_scale, compressor_overlap_output = self._mla_prolog_multistream(
                 hidden_states,
                 cos,

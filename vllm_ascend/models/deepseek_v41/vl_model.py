@@ -7,7 +7,13 @@ from collections.abc import Iterable, Iterator
 import torch
 from torch import nn
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsEagle3, SupportsMultiModal, SupportsPP
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import maybe_prefix
 
 # Upstream #56741 normalized the V4.1 model package name from deepseek_v4_1
@@ -46,6 +52,7 @@ class AscendDeepseekV41ForCausalLM(
     nn.Module,
     SupportsMultiModal,
     SupportsPP,
+    SupportsLoRA,
     SupportsEagle3,
 ):
     """V4.1 image-span semantics with the shared Ascend vision tower."""
@@ -54,6 +61,14 @@ class AscendDeepseekV41ForCausalLM(
     requires_raw_input_tokens = True
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     language_model_cls = AscendDeepseekV41LLMForCausalLM
+    # The runner checks ``SupportsLoRA`` on the top-level module, which is this
+    # wrapper even for text-only checkpoints, so the text backbone's LoRA
+    # contract has to be surfaced here. LoRA is applied to the language model
+    # only; the vision tower stays frozen and is skipped while loading adapters.
+    embedding_modules = language_model_cls.embedding_modules
+    is_3d_moe_weight = language_model_cls.is_3d_moe_weight
+    is_non_gated_moe = language_model_cls.is_non_gated_moe
+    lora_skip_prefixes = [*language_model_cls.lora_skip_prefixes, "vision.", "aligner."]
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

@@ -253,3 +253,23 @@ def test_preprocess_equivalence_and_stream_dependencies(
     store = trace.index(("main" if cache_on_main else "aux", "cache", "scatter"))
     assert (join < store) == cache_on_main
     assert join < trace.index(("main", "rope", "apply"))
+
+
+def test_lora_wrapped_projection_disables_overlap(monkeypatch):
+    """The overlapped prolog reads base weights, so adapters must take the plain path."""
+    impl_class = dsa_v41.AscendDSAV41Impl
+    impl = impl_class.__new__(impl_class)
+    impl.multistream_dsv4_dsa_overlap = True
+
+    plain = SimpleNamespace(wq_a=torch.nn.Identity(), wq_b=torch.nn.Identity(), wkv=torch.nn.Identity())
+    assert impl._overlap_enabled(plain) is True
+
+    # The real check is ``isinstance(linear, BaseLayerWithLoRA)``; stand in for
+    # it so the test stays independent of vLLM's LoRA layer construction.
+    monkeypatch.setattr(dsa_v41, "_is_lora_wrapped", lambda linear: getattr(linear, "is_lora", False))
+    wrapped = SimpleNamespace(wq_a=torch.nn.Identity(), wq_b=torch.nn.Identity(), wkv=SimpleNamespace(is_lora=True))
+    assert impl._overlap_enabled(wrapped) is False
+
+    # Multi-stream overlap is also off by configuration alone.
+    impl.multistream_dsv4_dsa_overlap = False
+    assert impl._overlap_enabled(plain) is False
