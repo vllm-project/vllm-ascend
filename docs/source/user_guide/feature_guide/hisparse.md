@@ -1,48 +1,50 @@
-# HiSparse foundation on Ascend
+# HiSparse on Ascend
 
-## Scope
+HiSparse keeps active sparse-attention KV rows in NPU Resident/Hot storage and
+refills selected missing rows from Host memory. Core owns HMA allocation,
+Coordinator admission/eviction, request lifetimes, prefetch and mirror completion.
+The Ascend backend supplies residency resolution, transfers and the existing SFA
+Attention interface. Attention core arithmetic is unchanged.
 
-This is the foundational split of [#19109](https://github.com/vllm-project/vllm-ascend/pull/19109).
-It supplies an Ascend backend for the merged vLLM HiSparse API and the minimal
-SFA data path. It is a contribution starting point with NPU component checks
-and a complete A5 model smoke test. Dataset accuracy and performance qualification
-remain pending. Historical optimized C8 performance does not qualify this split.
+## Supported configurations
 
-Core owns HMA allocation, Coordinator admission/eviction, prefix-cache state,
-request lifetimes, prefetch control flow, mirror completion and release/rollback.
-Ascend implements device operations and cache-layout adaptation. Attention uses
-the existing CANN sparse-flash-attention and fused RMSNorm/RoPE operations;
-this PR adds no Attention core or native C++/AscendC kernel.
+- Experimental sparse RoPE MLA/SFA with Model Runner V2.
+- BF16 KV and native Ascend 950 C8: E4M3FN main/Indexer values with FP32 scales.
+  Main and Indexer cache dtypes are independently selectable.
+- Private Host pools per tensor-parallel rank and Core eager Host mirroring.
+- Ascend 950 with a SIMT-capable CANN 9.2 toolchain. A2/A3 are not newly qualified.
+- TopK must satisfy the existing SFA requirement of divisibility by 128.
 
-```text
-Core sparse index group -> logical TopK -> NPU residency/refill plan
-                                             |
-                          Resident / Hot hit / mapped-Host miss
-                                             |
-                       packed KV -> existing native SFA operation
+C4, TurboQuant, INT8-format C8, context parallelism and external P/D transport
+are outside this backend's current support.
+
+## Build the resolver
+
+Use the paired merged vLLM version in `.github/vllm-main-verified.commit` and
+install vllm-ascend normally. Its CMake build includes the fused resolver when
+the Ascend 950 SIMT headers are available. A separate resolver rebuild in the
+same Torch/torch-npu/CANN environment is also supported:
+
+```bash
+python csrc/hisparse_runtime/build.py \
+  --cann-root "$ASCEND_HOME_PATH" \
+  --output build/hisparse-resolver \
+  --npu-arch dav-3510 \
+  --resolver-ub-bytes 175616 \
+  --install
 ```
 
-The data path covers unquantized KV and the native Ascend 950 C8 format with
-the RoPE SFA layout and Model Runner V2. Model-weight quantization is independent. Private
-Host pools are used per rank because NPU IPC events are not implemented.
-The mapped-Host capability is checked at registration; hardware evidence for
-the current primitives is from Ascend 950. A3 still needs its own qualification.
+Use a dedicated output directory. Select architecture and usable per-AIV UB
+budget for the actual build target; these are hardware/compiler parameters.
+The kernel sizes its hash table from the request union and available UB. An
+unsupported capacity or missing extension raises an error before execution;
+there is no Triton resolver fallback. Other vllm-ascend features do not load this
+optional extension.
 
-The SFA kernel requires TopK divisible by 128. The resolver's int16 LRU format
-limits aligned Hot capacity to 32768 rows, and Hot must cover the complete
-verification-row union. Context parallelism is not implemented in this split.
-Request counts, lengths, layer/group counts and scratch capacities come from
-configuration, rather than benchmark-specific constants.
+## Enable HiSparse
 
-## Configuration
-
-Use the matching merged Core pin in `.github/vllm-main-verified.commit`.
-No unmerged Core PR, copied scheduler, experiment profile or source-file hash
-allowlist is required. As with other Ascend backends, paired-version ABI changes
-still need review and device validation.
-
-Set `VLLM_USE_V2_MODEL_RUNNER=1` and add these options to a compatible model's
-normal launch command:
+Set `VLLM_USE_V2_MODEL_RUNNER=1` and add these options to the compatible model's
+normal serving command:
 
 ```bash
 --block-size 128 \
@@ -51,202 +53,44 @@ normal launch command:
 --kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":4}}'
 ```
 
-The example reserves 4 GiB Host storage per rank. Size it for the model and context
-budget; it is not a model capacity claim. Keep Core's eager mirror policy for
-this foundation. External P/D transfer is not provided by this PR.
-
-For native A5 C8, replace the two dtype options above with:
+For native A5 C8, replace the two dtype options with:
 
 ```bash
 --kv-cache-dtype fp8 \
 --attention-config '{"indexer_kv_dtype":"fp8","hisparse_config":{"eager_host_mirror":true}}'
 ```
 
-The existing SFA quantizer produces each main KV row: 512 E4M3FN NoPE bytes,
-64 BF16 RoPE values and four FP32 block scales, totaling 656 bytes. The adapter
-copies these components as opaque bytes and calls the existing quantized SFA
-Attention operation. Indexer C8 uses 128 E4M3FN keys and one FP32 scale per token.
-Main and Indexer dtypes remain independently selectable. C4, TurboQuant,
-INT8-format C8 and other payload geometries are not implemented by this bridge.
-
-Core's planner receives the complete key/scale page size and packed-row stride
-alignment before choosing the shared-slab capacity. Strided views preserve the
-original allocation and layer offset. The existing scatter handles packed bytes;
-prefill Resident gathers reinterpret FP8 as bytes before using Core's gather.
-HiSparse writes through its own current destination once; the ordinary SFA C8
-source-slot store is skipped. No new fused scatter or Attention kernel is added.
-
-## Extension points for contributors
-
-Use existing interfaces, rather than adding unused placeholder hooks:
-
-| Boundary | Current consumer and responsibility | Follow-up work |
-| --- | --- | --- |
-| `NPUPlatform.get_hisparse_backend_cls` | Core selects the device backend only for HiSparse | Backend capability/version support |
-| `HiSparseBackend.create_cache_ops` | Runtime invokes resolver, refill and invalidation operations | Faster resolver/refill, vectorization and balancing |
-| `validate_kv_cache_config` / `prepare_kv_cache_views` | Core validates BF16/C8 before allocation and binds views inside rollback scope | Additional payload formats with layout tests |
-| Backend `pin_tensor` / `unpin_tensor` / `swap_blocks_batch` | Core owns completion, explicit registration release and transfer lifetime | DMA implementation and supported memory capabilities |
-| `AscendHiSparseMetadataBuilder` / `AscendHiSparseImpl` | SFA factories select metadata and the BF16/C8 layout bridge | A smaller layout-conversion cost |
-| `AscendHiSparseIndexerBackend.write_cache` | The existing cache backend interface selects HiSparse once; its override handles C8 page strides | Other Indexer payload layouts |
-
-The model's Indexer wrapper reuses the cache layer's `get_attn_backend()` choice,
-preserving model-specific backend factories. HiSparse owns its metadata builder
-and C8 write override. The ordinary Indexer write path remains unchanged, and
-BF16 HiSparse writes reuse it after metadata remaps the slots. Cache binding
-creates the key/scale views; it does not attach payload-format routing strings.
-
-`hisparse/cache_ops.py` owns operation validation and persistent per-group workspace;
-`ops/triton/hisparse.py` implements the reference NPU path. Followers share their
-leader's scratch only on that group's ordered stream. Independent groups and
-current request/state mappings remain separate.
-
-Code ownership follows these boundaries:
-
-```text
-vllm_ascend/
-  attention/sfa_hisparse.py   # Attention dispatch, C8 adaptation and native calls
-  hisparse/
-    backend.py               # Core backend interface, registration and DMA
-    binding.py               # Shared-slab specs and key/scale views
-    cache_ops.py             # Residency, refill, invalidation and byte copies
-    c8.py                    # C8 packing, views and physical-index helpers
-    prefill.py               # Core prefill plan with scoped NPU index selection
-  ops/triton/hisparse.py     # Cache-operation kernels; no Attention arithmetic
-```
-
-The common package contains no Attention invocation. The HiSparse Attention
-implementation owns query preparation, current length tensors and the call to
-the existing native SFA operation. The Triton and native Attention kernels are
-unchanged by this organization.
-
-Core's generic `torch.Stream`, `torch.Event` and current-stream interfaces retain
-their event placement and stream identities. On the supported PTA stack, generic
-waits do not drain Host submission queues to propagate a graph-capture fork before
-CANN allocates workspace. The backend wraps only the bound runtime copy stream:
-after a wait during capture, obtaining the native handle drains that Host queue.
-It adds no device synchronization or replay-time Python work and replaces no
-global Torch binding. A regression covers production-size sort workspace across
-multiple graph owners and changing replays. Remove this adapter when PTA's generic
-binding propagates the captured dependency itself.
-
-The model-owned index-group builder is carried in Core's existing
-`MLAModules.index_group_builder` field, preserving the common MLA wrapper ABI.
-
-HiSparse groups use Core's coordinator and shared-slab memory budget. Ascend's
-existing private-buffer budget correction and hybrid coordinator are bypassed
-for those groups. V2 retains Core's source/group ownership and skips metadata
-construction for Resident/Hot groups that have no Attention consumer.
-
-Follow-up contributions should be separate and measurable: other packed formats,
-native resolver/refill improvements, Host-writeback optimization, metadata
-reuse, additional hardware and P/D transport. PR19109 retains these experiments.
-AVSG, lazy-MTP policy, native optimized kernels, private Core adapters and
-machine-specific benchmarking tools are excluded here.
-
-Preserve completion-before-unregister, graph allocation owners, invalidation on
-overwrite and protection of every selected token before choosing an LRU victim.
-A same-shaped batch is not permission to reuse old lengths or request mappings.
-
-## Validation
-
-CPU boundary checks in the normal installed development environment:
-
-```bash
-python -m pytest -q \
-  tests/ut/distributed/kv_transfer/test_hisparse_foundation_cpu.py
-```
-
-These check current Host offsets, failed-unregister ownership, group scratch
-isolation, strided indexer aliases, planner alignment, unsupported formats,
-and capture-only mirror suppression. C8 checks also
-cover opaque component bytes, nonzero slab offsets, stable duplicate/padding
-ordering, Indexer key/scale writes and planner alignment before allocation.
-The tests directly import the production modules and Core/Ascend cache specs,
-using the repository's normal CPU-UT conftest. Install the matching Core and
-Ascend test dependencies before running them. CPU checks do not qualify device
-execution.
-
-The weight-loading wrapper keeps Ascend main's explicit activation-dtype ABI,
-already covered by `tests/ut/ops/test_mla_weight_processing.py`; this foundation
-does not add another calling convention or a duplicate test module.
-
-Reuse the existing suites for behavior this PR does not implement:
-
-| Behavior | Existing coverage |
+| Parameter | Meaning |
 | --- | --- |
-| Core planning and HMA budgets | Core `tests/v1/core/test_kv_cache_planning.py` and `test_kv_cache_utils.py` |
-| Core Host-mirror ordering, zero-token steps and request residency | Core `tests/v1/kv_connector/unit/test_hisparse_connector.py` |
-| Core prefill plan and sparse layout rules | Core `tests/v1/attention/test_sparse_mla_backends.py` and `test_sparse_mla_kv_cache_layout.py` |
-| Native SFA preprocessing and operator dispatch | Ascend `tests/ut/attention/test_sfa_v1.py` |
+| `hisparse_config` | Enables Core HiSparse for the supported sparse Attention backend. |
+| `eager_host_mirror` | Keep `true` for this foundation; Core maintains the Host KV mirror. |
+| `host_pool_gib` | Host pool size per rank. Size it for the workload; the example reserves 4 GiB per rank. |
+| `device_buffer_size` | Per-request Hot capacity from Core's HiSparse configuration. It must cover the selected verification-row union. |
+| `kv_cache_dtype` / `indexer_kv_dtype` | Select main and Indexer KV formats independently from model-weight quantization. |
 
-These suites retain their original platform/dependency requirements. In
-particular, Core's CUDA-kernel cases do not qualify Ascend kernels. The NPU
-modules below keep coverage for Ascend resolver/refill/invalidation, strided
-Resident/Host staging and the BF16/C8 data bridge. Preprocessing uses the existing
-native SFA operations as its reference; it contains no embedded activation dump
-or independent-versus-fused rounding requirement.
+## Capacity and correctness notes
 
-Real-NPU cases are included for resolver/refill/overwrite invalidation, independent
-FP32 Attention references, selection order/duplicates, native BF16/C8 preprocessing,
-C8 key/scale writes, packed-byte scatter and Resident/Host prefill staging, in
-eager and changing-graph cases:
+The resolver preserves the complete MTP query-row union before choosing LRU
+victims, and produces the refill plan on device. Hot capacity must fit both the
+int16 LRU representation (at most 32768 rows) and the compiled target's UB budget.
+These checks do not change the configured TopK or discard selected tokens.
 
-```bash
-pytest --confcutdir=tests/e2e/pull_request/one_card \
-  tests/e2e/pull_request/one_card/test_hisparse_ops.py \
-  tests/e2e/pull_request/one_card/test_hisparse_attention.py \
-  tests/e2e/pull_request/one_card/test_hisparse_kv_preprocess.py \
-  tests/e2e/pull_request/one_card/test_hisparse_prefill_staging.py
-```
+Native C8 main rows contain 512 E4M3FN bytes, 64 BF16 RoPE values and four FP32
+scales (656 bytes total). Indexer rows contain 128 E4M3FN keys and one FP32 scale.
+Views preserve the shared-slab page strides and layer offsets. The existing
+quantizer and Attention operations are reused; payloads are copied as bytes.
 
-On Ascend 950 with Torch 2.10.0, torch-npu 2.10.0.post7 and CANN 9.2.1,
-25 foundation CPU cases, the existing MLA-wrapper case and 32 Indexer-spec cases
-passed: 58 in total. Running the four complete NPU modules passed all 44 cases,
-including BF16/C8 Attention, pinned Host writeback, production-size cross-stream
-sort workspace and changing graph replays. The run reused the compiled Ascend
-extension and vendor package; it was not an independent native rebuild.
+Keep completion-before-unregister and graph allocation ownership intact.
+Overwriting KV still invalidates any old Hot copy. Equal batch shapes do not
+permit reusing stale request mappings or lengths. No upstream vLLM source change
+or unmerged Core PR is required.
 
-The original `test_resident_prefill_plan_shared_layers[2-128]` failure was
-traced to NPU advanced column indexing in Core's `ensure_gpu_sources` for a
-singleton-column input. The Ascend plan subclasses Core's plan and runs its
-unchanged source-resolution method inside a local `TorchFunctionMode` that
-uses equivalent `index_select` for NPU column selection. Core still constructs
-the plan and owns representative pages, source-key caching and Resident/Host
-masks. This adapter adds no global Torch replacement, copied planner or CPU readback.
-Remove this adapter when the supported device stack fixes advanced indexing.
+## Validation and performance
 
-The original case remains enabled and passes. A small regression also checks
-changing request-state rows. Prefill metadata planning executes outside the
-model graph: this stack's Core `scatter_reduce` path cannot be captured. The
-existing eager/changing-graph payload and Attention cases continue to pass;
-the tests do not claim graph capture of the complete Prefill planner.
+The previous Triton-based foundation passed its CPU/NPU component suites and a
+TP8/MTP3 full-model smoke. That evidence does not qualify this native-resolver
+integration. The fused kernel is reused from the optimized implementation;
+this foundation's integration and full-model results are recorded separately.
 
-Dataset accuracy, additional lifecycle coverage and same-workload performance
-remain prerequisites for production qualification. Existing C8 benchmark results
-are intentionally not presented as this implementation's performance.
-
-Full-model integration additionally preserves the Core Indexer cache role and
-merge semantics, and retains each Indexer cache's backend choice after the model
-construction context exits. With these fixes, the complete TP8/MTP3 model loaded,
-initialized its KV caches, captured all eight ranks and reached serving. Its
-first real request exposed a Host writeback failure; serving alone is not a
-functional pass.
-
-The DMA reproduction distinguishes page locking from mapping: pageable and
-PTA-pinned destinations passed, while a pageable allocation registered only for
-mapping failed both batch and single-copy APIs on this stack. The private-pool
-adapter reuses PR #19109's pinned-allocation approach before Core creates any
-cache views. Core still owns completion, cache views and release. Other backends
-keep their original allocator. The writeback regression passed on the NPU with
-changing payloads, completion fences and untouched-neighbor checks.
-
-The next full-model attempt exposed invalid CANN sort workspace during captured
-cross-stream execution. A production-size reproducer retained generic streams,
-events and the sort operation: the original path failed, while capture-propagated
-forks passed. With the narrow backend adapter, the complete GLM-5.2 W4A8C8 model
-loaded with TP8, MTP3, V2 and native C8 KV; all eight ranks captured. Three natural
-controls returned the expected answers. Two concurrent requests each consumed
-exactly 16,384 input tokens and returned sensible summaries (24 and 23 output
-tokens); all five responses were successful with actual token IDs. Host mirroring
-remained enabled. The model exited cleanly, its workers were reaped and the lease
-was released. This smoke test is not a dataset accuracy, P/D or performance result.
+Dataset accuracy and same-workload ON/OFF performance are not yet qualified for
+this foundation. No throughput, TTFT or TPOT improvement is claimed here.

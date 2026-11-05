@@ -16,18 +16,10 @@ import torch
 from vllm.triton_utils import triton
 
 from vllm_ascend.ops.triton.hisparse import (
-    assign_residency_kernel,
-    classify_residency_kernel,
-    finish_residency_kernel,
     gather_rows_kernel,
     invalidate_kernel,
     pack_attention_rows_kernel,
-    partition_residency_kernel,
-    prepare_residency_kernel,
-    protect_residency_kernel,
-    residency_stats_kernel,
     scatter_packed_kv_kernel,
-    update_lru_kernel,
 )
 
 _ACL_HOST_REGISTER_MAPPED = 0
@@ -127,21 +119,11 @@ class ResolverWorkspace:
         self.max_rows = max_rows
         self.hot_size = hot_size
         self.max_union_rows = max_union_rows
-        # Packed int64 keys retain exact int32 host IDs and deterministic first
-        # reference positions. torch.sort's out= ABI reuses these NPU buffers.
-        self.row_keys = torch.empty(max_rows * hot_size, dtype=torch.int64, device=device)
-        self.sorted_rows = torch.empty_like(self.row_keys)
-        self.row_sort_indices = torch.empty_like(self.row_keys)
-        self.cache_keys = torch.empty((max_rows, hot_size), dtype=torch.int64, device=device)
-        self.sorted_cache = torch.empty_like(self.cache_keys)
-        self.cache_sort_indices = torch.empty_like(self.cache_keys)
+        from vllm_ascend.hisparse.resolver import _load_resolver, scratch_layout
+
+        self.native = _load_resolver()
+        scratch_layout(hot_size, max_union_rows, self.native.scratch_capacity())
         self.first_refs = torch.empty(max_rows * hot_size, dtype=torch.int32, device=device)
-        self.first_misses = torch.empty_like(self.first_refs)
-        self.metadata = torch.empty((max_rows, 8), dtype=torch.int32, device=device)
-        self.row_stats = torch.empty((max_rows, 4), dtype=torch.int64, device=device)
-        self.lru_temp = torch.empty((max_rows, hot_size), dtype=torch.int32, device=device)
-        self.protected = torch.empty_like(self.lru_temp)
-        self.hit_prefix = torch.empty_like(self.lru_temp)
         self.errors = torch.zeros((max_rows, 8), dtype=torch.int32, device=device)
 
 
@@ -260,9 +242,9 @@ class HiSparseNPUOps:
             raise ValueError("HiSparse resolver input exceeds its prepared workspace")
         if region_stride != device_global_indices.size(1) or region_stride != hot_size or hot_size < topk:
             raise ValueError("HiSparse region and LRU widths must match and cover top-k")
-        if topk <= 0 or topk % 8 or hot_size % 16:
-            raise ValueError("Ascend HiSparse requires top-k aligned to 8 and hot capacity aligned to 16")
-        if workspace.row_keys.device != device:
+        if topk <= 0:
+            raise ValueError("HiSparse top-k must be positive")
+        if workspace.first_refs.device != device:
             raise ValueError("HiSparse resolver workspace must be on the cache device")
         if host_cache.size(0) >= 2**31:
             raise ValueError("HiSparse host row IDs must fit int32")
@@ -312,164 +294,14 @@ class HiSparseNPUOps:
             _check_tensor(swap_counts, "swap_counts", device, (torch.int32,), shape=(rows,))
         if stats is not None:
             _check_tensor(stats, "stats", device, (torch.int64,), shape=(2,))
-        dummy = hot_indices
-        source = source_block_table
-        resident = resident_block_table
-        has_swaps = swap_counts is not None
         if (
             len({tensor is not None for tensor in (swap_counts, swap_host_physical_rows, swap_device_physical_rows)})
             != 1
         ):
             raise ValueError("All three compact HiSparse swap outputs are required together")
-        row_keys = workspace.row_keys[: rows * topk].view(rows, topk)
-        sorted_rows = workspace.sorted_rows[: rows * topk].view(rows, topk)
-        row_sort_indices = workspace.row_sort_indices[: rows * topk].view(rows, topk)
-        cache_keys = workspace.cache_keys[:rows]
-        sorted_cache = workspace.sorted_cache[:rows]
-        prepare_residency_kernel[(rows,)](
-            global_indices,
-            request_ids if request_ids is not None else dummy,
-            request_state_indices if request_state_indices is not None else dummy,
-            source if source is not None else dummy,
-            resident if resident is not None else dummy,
-            device_global_indices,
-            hot_indices,
-            resolved_global_indices if resolved_global_indices is not None else dummy,
-            valid_counts if valid_counts is not None else dummy,
-            row_keys,
-            cache_keys,
-            workspace.metadata,
-            num_valid_rows if num_valid_rows is not None else dummy,
-            ROWS=rows,
-            TOP_K=topk,
-            HOT_SIZE=hot_size,
-            INPUT_STRIDE=global_indices.stride(0),
-            COUNT_STRIDE=valid_counts.stride(0) if valid_counts is not None else 1,
-            STATE_ROWS=device_global_indices.size(0),
-            STATE_COUNT=request_state_indices.numel() if request_state_indices is not None else 0,
-            HOST_ROWS=host_cache.size(0),
-            SOURCE_STRIDE=source.stride(0) if source is not None else 0,
-            SOURCE_ROWS=source.size(0) if source is not None else 0,
-            SOURCE_COLS=source.size(1) if source is not None else 0,
-            SOURCE_BLOCK=source_block_size if source is not None else 1,
-            RESIDENT_STRIDE=resident.stride(0) if resident is not None else 0,
-            RESIDENT_ROWS=resident.size(0) if resident is not None else 0,
-            RESIDENT_COLS=resident.size(1) if resident is not None else 0,
-            RESIDENT_BLOCK=resident_block_size if resident is not None else 1,
-            RESIDENT_NULL=resident_null_block,
-            HAS_REQUESTS=request_ids is not None,
-            HAS_STATE=request_state_indices is not None,
-            HAS_SOURCE=source is not None,
-            HAS_RESIDENT=resident is not None,
-            HAS_RESOLVED=resolved_global_indices is not None,
-            HAS_COUNTS=valid_counts is not None,
-            HAS_VALID_ROWS=num_valid_rows is not None,
-            BK=triton.next_power_of_2(topk),
-            multibuffer=False,
-        )
-        torch.sort(row_keys, dim=-1, out=(sorted_rows, row_sort_indices))
-        torch.sort(cache_keys, dim=-1, out=(sorted_cache, workspace.cache_sort_indices[:rows]))
-        classify_residency_kernel[(rows,)](
-            row_keys,
-            sorted_rows,
-            sorted_cache,
-            workspace.metadata,
-            hot_block_table,
-            hot_indices,
-            workspace.first_refs,
-            workspace.first_misses,
-            workspace.row_stats,
-            TOP_K=topk,
-            HOT_SIZE=hot_size,
-            HOT_BLOCK=hot_cache.size(1),
-            TABLE_STRIDE=hot_block_table.stride(0),
-            BK=triton.next_power_of_2(topk),
-            multibuffer=False,
-        )
-        protect_residency_kernel[(rows, triton.cdiv(hot_size, 256))](
-            sorted_rows,
-            workspace.metadata,
-            device_global_indices,
-            lru_slots,
-            workspace.protected,
-            TOP_K=topk,
-            HOT_SIZE=hot_size,
-            STATE_ROWS=device_global_indices.size(0),
-            BLOCK=256,
-            multibuffer=False,
-        )
-        torch.cumsum(workspace.protected[:rows], dim=-1, dtype=torch.int32, out=workspace.hit_prefix[:rows])
-        partition_residency_kernel[(rows, triton.cdiv(hot_size, 256))](
-            workspace.metadata,
-            workspace.protected,
-            workspace.hit_prefix,
-            workspace.row_stats,
-            lru_slots,
-            workspace.lru_temp,
-            workspace.errors,
-            HOT_SIZE=hot_size,
-            MAX_UNION=max_union_rows,
-            STATE_ROWS=device_global_indices.size(0),
-            BLOCK=256,
-            multibuffer=False,
-        )
-        update_lru_kernel[(rows, triton.cdiv(hot_size, 256))](
-            workspace.metadata,
-            workspace.lru_temp,
-            lru_slots,
-            workspace.errors,
-            HOT_SIZE=hot_size,
-            BLOCK=256,
-            multibuffer=False,
-        )
-        assign_residency_kernel[(rows,)](
-            row_keys,
-            workspace.metadata,
-            workspace.first_misses,
-            hot_block_table,
-            hot_indices,
-            device_global_indices,
-            workspace.lru_temp,
-            workspace.errors,
-            swap_host_physical_rows if has_swaps else dummy,
-            swap_device_physical_rows if has_swaps else dummy,
-            swap_counts if has_swaps else dummy,
-            TOP_K=topk,
-            HOT_SIZE=hot_size,
-            HOT_BLOCK=hot_cache.size(1),
-            TABLE_STRIDE=hot_block_table.stride(0),
-            HAS_SWAPS=has_swaps,
-            BK=triton.next_power_of_2(topk),
-            multibuffer=False,
-        )
-        finish_residency_kernel[(rows,)](
-            workspace.metadata,
-            workspace.first_refs,
-            workspace.first_misses,
-            hot_indices,
-            attention_indices if attention_indices is not None else dummy,
-            miss_mask if miss_mask is not None else dummy,
-            valid_counts if valid_counts is not None else dummy,
-            workspace.errors,
-            TOP_K=topk,
-            HOT_BLOCK=hot_cache.size(1),
-            ATTENTION_BLOCK=attention_block_stride,
-            ATTENTION_STRIDE=attention_indices.stride(0) if attention_indices is not None else topk,
-            COUNT_STRIDE=valid_counts.stride(0) if valid_counts is not None else 1,
-            HAS_ATTENTION=attention_indices is not None,
-            HAS_MISS_MASK=miss_mask is not None,
-            HAS_COUNTS=valid_counts is not None,
-            BK=triton.next_power_of_2(topk),
-            multibuffer=False,
-        )
-        if stats is not None:
-            residency_stats_kernel[(1,)](
-                workspace.row_stats,
-                stats,
-                ROWS=rows,
-                BLOCK=triton.next_power_of_2(rows),
-                multibuffer=False,
-            )
+        from vllm_ascend.hisparse.resolver import resolve
+
+        resolve(self, locals())
 
     def hisparse_gather_compact(
         self, host_cache, hot_cache, miss_global_indices, miss_hot_indices, miss_counts
