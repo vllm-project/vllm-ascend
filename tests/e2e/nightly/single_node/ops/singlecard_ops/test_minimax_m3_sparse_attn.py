@@ -28,6 +28,7 @@ from typing import Literal
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     _sort_valid_gbsa_prefix,
     minimax_m3_sparse_attn,
@@ -204,7 +205,7 @@ def test_decode_gbsa_prepared_metadata_replay(query_len, kv_dtype, capture, monk
         pytest.skip("This hardware does not enable prepared GBSA metadata")
     if kv_dtype == torch.float8_e4m3fn and not profile.supports(HardwareCapability.FP8_ATTENTION):
         pytest.skip("This hardware does not enable FP8 KV attention")
-    _ensure_cann_sparse_attention_ops()
+    _ensure_cann_sparse_attention_ops(kv_dtype)
     import cann_ops_transformer.ops as cann_ops
 
     batch, heads, kv_heads, dim, topk, table_width = 4, 16, 1, 128, 16, 1040
@@ -351,8 +352,12 @@ def should_do_global_cleanup_after_test() -> bool:
     return False
 
 
-def _ensure_cann_sparse_attention_ops() -> None:
+def _ensure_cann_sparse_attention_ops(kv_dtype: torch.dtype = torch.bfloat16) -> None:
     """Ensure the CANN Ops GBSA Python bindings are available."""
+    if NPU_AVAILABLE and is_950() and kv_dtype == torch.bfloat16:
+        # Remove once the M3 wrapper selects the supported precision on A5.
+        pytest.skip("Temporarily skip A5 BF16 GBSA: CANN requires softmax_precision=1, but the M3 wrapper passes 0.")
+
     global _CANN_SPARSE_OP_AVAILABLE
     if _CANN_SPARSE_OP_AVAILABLE:
         return
