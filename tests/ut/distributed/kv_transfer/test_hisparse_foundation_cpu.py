@@ -125,7 +125,15 @@ def test_mapped_addresses_retain_offsets_and_reject_expired_or_external_views():
 
 
 @pytest.mark.parametrize("max_rows,hot_rows,union_rows", [(1, 16, 8), (9, 48, 24), (37, 128, 72)])
-def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups(max_rows, hot_rows, union_rows):
+def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups(
+    monkeypatch, max_rows, hot_rows, union_rows
+):
+    from vllm_ascend.hisparse import resolver
+
+    # Loading a device extension is the only mocked boundary; the group-owned
+    # tensors below are real CPU storage, not a replacement resolver algorithm.
+    native = NS(scratch_capacity=lambda: 175616)
+    monkeypatch.setattr(resolver, "_load_resolver", lambda: native)
     backend = AscendHiSparseBackend()
 
     def group():
@@ -149,13 +157,40 @@ def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups
     assert follower.host_mapping is first.registered_host_pool._hisparse_registration
     assert second.cache_ops.workspace is not first.cache_ops.workspace
     first_workspace, second_workspace = first.cache_ops.workspace, second.cache_ops.workspace
-    assert first_workspace.row_keys.shape == (max_rows * hot_rows,)
-    assert first_workspace.cache_keys.shape == (max_rows, hot_rows)
+    assert first_workspace.first_refs.shape == (max_rows * hot_rows,)
+    assert first_workspace.errors.shape == (max_rows, 8)
     assert first_workspace.max_union_rows == union_rows
-    first_workspace.row_keys.fill_(13)
-    second_workspace.row_keys.zero_()
-    assert torch.all(follower.workspace.row_keys == 13)
-    assert torch.count_nonzero(second_workspace.row_keys) == 0
+    first_workspace.first_refs.fill_(13)
+    second_workspace.first_refs.zero_()
+    assert torch.all(follower.workspace.first_refs == 13)
+    assert torch.count_nonzero(second_workspace.first_refs) == 0
+
+
+@pytest.mark.parametrize("hot,union", [(16, 8), (8192, 8192), (12288, 64), (32768, 32768)])
+def test_native_resolver_scratch_follows_request_capacity(hot, union):
+    from vllm_ascend.hisparse.resolver import scratch_layout
+
+    buckets, size = scratch_layout(hot, union)
+    assert buckets > union and buckets & (buckets - 1) == 0
+    words = 2 * buckets + hot + 2 * ((hot + 31) // 32) + 64
+    assert size == (words + 15) // 16 * 64 + 512
+
+
+def test_native_resolver_uses_available_ub_without_truncating_the_union():
+    from vllm_ascend.hisparse.resolver import scratch_layout
+
+    buckets, size = scratch_layout(12288, 8192, 175616)
+    assert buckets == 15328 and buckets > 8192 and size == 175616
+    with pytest.raises(RuntimeError, match="needs at least 118592 UB bytes"):
+        scratch_layout(12288, 8192, 118591)
+
+
+def test_missing_native_resolver_raises_instead_of_falling_back(monkeypatch):
+    from vllm_ascend.hisparse import resolver
+
+    monkeypatch.setattr(resolver.Path, "is_file", lambda path: False)
+    with pytest.raises(RuntimeError, match="requires its compiled AscendC resolver"):
+        resolver._load_resolver()
 
 
 @pytest.fixture

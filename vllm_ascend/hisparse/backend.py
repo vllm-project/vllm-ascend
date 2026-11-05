@@ -53,12 +53,14 @@ class AscendHiSparseBackend(HiSparseBackend):
     stats_dtype = torch.int64
 
     def check_available(self) -> None:
+        from vllm_ascend.hisparse.resolver import _load_resolver
         from vllm_ascend.patch.worker.patch_hisparse_host_pool import install
         from vllm_ascend.utils import bootstrap_custom_op_env
 
         install()
         # Import the device kernels before the connector allocates Host storage.
         importlib.import_module("vllm_ascend.hisparse.cache_ops")
+        _load_resolver()
         if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
             # A5 disables the global custom-op selection policy. HiSparse still
             # needs its explicit DMA dependency; load the extension lazily here

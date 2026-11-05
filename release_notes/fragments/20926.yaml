@@ -3,6 +3,7 @@ entries:
   - category: feature
     text: >-
       Added experimental Ascend HiSparse BF16 and native C8 sparse MLA/SFA
-      support using existing Attention operators and Core lifecycle interfaces.
-      Full-model qualification of the foundation remains pending.
+      support using a fused AscendC residency resolver, existing Attention
+      operators and Core lifecycle interfaces. The resolver requires its
+      compiled extension and does not fall back to Triton.
     hardware: [A5]

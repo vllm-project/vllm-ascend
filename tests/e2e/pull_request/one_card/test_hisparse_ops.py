@@ -62,73 +62,6 @@ def test_private_host_pool_retains_pinned_storage_for_dma_writeback():
         backend.unpin_tensor(registered)
 
 
-def test_resolver_sort_workspace_survives_cross_stream_graph_owners():
-    # Production-sized Hot/TopK buffers exercise CANN's workspace sort path;
-    # the small resolver oracle cases do not need this external workspace.
-    width, topk, max_rows = 10240, 2048, 128
-    groups = []
-    for _ in range(22):
-        stream = torch.Stream(device="npu")
-        wrapped = capture_aware_stream(stream)
-        assert wrapped.stream_id == stream.stream_id and wrapped.device == stream.device
-        assert capture_aware_stream(wrapped) is wrapped
-        cache = torch.full((max_rows, width), 2**63 - 1, dtype=torch.int64, device="npu")
-        rows = torch.full((max_rows, topk), 2**63 - 1, dtype=torch.int64, device="npu")
-        groups.append(
-            (
-                wrapped,
-                torch.Event(),
-                cache,
-                torch.empty_like(cache),
-                torch.empty_like(cache),
-                rows,
-                torch.empty_like(rows),
-                torch.empty_like(rows),
-            )
-        )
-
-    def forward(count):
-        current = torch.accelerator.current_stream()
-        for stream, ready, cache, values, indices, rows, row_values, row_indices in groups:
-            stream.wait_stream(current)
-            with stream:
-                torch.sort(rows[:count], dim=-1, out=(row_values[:count], row_indices[:count]))
-                torch.sort(cache[:count], dim=-1, out=(values[:count], indices[:count]))
-                ready.record(stream)
-            current.wait_event(ready)
-
-    graphs = {}
-    pool = torch.npu.graph_pool_handle()
-    try:
-        for count in (128, 64, 32, 16, 8, 4, 1):
-            forward(count)
-            torch.npu.synchronize()
-            graph = torch.npu.NPUGraph()
-            with torch.npu.graph(graph, pool=pool):
-                forward(count)
-            graphs[count] = graph
-        for step, count in enumerate((4, 1, 8, 4, 16, 4)):
-            hot_ids = torch.arange(width, dtype=torch.int64)
-            query_ids = torch.arange(topk, dtype=torch.int64)
-            hot = ((((hot_ids + step) % 127) << 32) | hot_ids).flip(0)
-            query = ((((query_ids + step) % 67) << 32) | query_ids).flip(0)
-            hot[::17] = query[::17] = 2**63 - 1
-            expected_hot = torch.sort(hot).values.expand(count, -1)
-            expected_query = torch.sort(query).values.expand(count, -1)
-            for _, _, cache, _, _, rows, _, _ in groups:
-                cache.copy_(hot.npu())
-                rows.copy_(query.npu())
-            graphs[count].replay()
-            torch.npu.synchronize()
-            for _, _, _, values, _, _, row_values, _ in groups:
-                torch.testing.assert_close(values[:count].cpu(), expected_hot, rtol=0, atol=0)
-                torch.testing.assert_close(row_values[:count].cpu(), expected_query, rtol=0, atol=0)
-    finally:
-        torch.npu.synchronize()
-        for graph in graphs.values():
-            graph.reset()
-
-
 @pytest.mark.parametrize("capture", [False, True])
 def test_c8_bytes_reuse_existing_scatter_with_padding_and_page_gaps(capture):
     rows, pages, block, width = 5, 4, 128, 656
@@ -396,7 +329,8 @@ def test_resolver_strides_padding_graph(device_row_count):
 
 
 @pytest.mark.parametrize("query_rows,hot_size", [(2, 4096), (4, 10240)])
-def test_topk_2048_speculative_union_graph(query_rows, hot_size):
+@pytest.mark.parametrize("cross_stream", [False, True])
+def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream):
     topk, width, block = 2048, 576, 128
     union = query_rows * topk
     blocks = hot_size // block + 1
@@ -418,7 +352,10 @@ def test_topk_2048_speculative_union_graph(query_rows, hot_size):
     sh, sd, sc = torch.empty_like(out), torch.empty_like(out), torch.empty_like(counts)
     stats = torch.zeros(2, dtype=torch.int64, device="npu")
 
-    def forward():
+    stream = capture_aware_stream(torch.Stream(device="npu")) if cross_stream else None
+    ready = torch.Event() if cross_stream else None
+
+    def resolve_and_gather():
         ops.hisparse_resolve_residency(
             host,
             hot,
@@ -448,6 +385,17 @@ def test_topk_2048_speculative_union_graph(query_rows, hot_size):
             None,
         )
         ops.hisparse_gather_compact(host, hot, sh, sd, sc)
+
+    def forward():
+        if stream is None:
+            resolve_and_gather()
+            return
+        current = torch.accelerator.current_stream()
+        stream.wait_stream(current)
+        with stream:
+            resolve_and_gather()
+            ready.record(stream)
+        current.wait_event(ready)
 
     forward()
     torch.npu.synchronize()
