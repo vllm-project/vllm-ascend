@@ -57,6 +57,11 @@ on:
         required: false
         default: false
         description: 'Whether to run tests with coverage enabled.'
+      upload-coverage-to-obs:
+        type: boolean
+        required: false
+        default: true
+        description: 'Upload the assembled coverage package to OBS. Keep false when the selection is not the full suite.'
       coverage-file-suffix:
         type: string
         required: false
@@ -434,7 +439,7 @@ jobs:
           compression-level: 0
 
   upload-coverage-to-obs:
-      if: ${{ !cancelled() && inputs.enable-coverage }}
+      if: ${{ !cancelled() && inputs.enable-coverage && inputs.upload-coverage-to-obs }}
       needs: selected-tests
       runs-on: ubuntu-latest
       continue-on-error: true

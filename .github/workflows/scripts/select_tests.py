@@ -33,6 +33,10 @@ Test selection is driven by the coverage/AST based precision testing pipeline
   runner) and ``tests/e2e/pull_request`` (routed by directory convention).
   Used for ready-all runs and scheduled full scans.
 
+- ``--singlecard-ops``: Operator-only mode. Schedules
+  ``tests/e2e/nightly/single_node/ops/singlecard_ops`` on a3-2 and a5-1
+  and does not select any other tests.
+
 - ``--curated``: Curated-suite mode. Reads the named test list from
   ``curated_tests:`` in the routing config and routes each path.
 
@@ -104,6 +108,19 @@ CPU_UT_BATCH_PATH = "tests/ut"
 
 # Full-suite mode roots scanned by --all-tests.
 _ALL_TESTS_ROOTS = ("tests/ut", "tests/e2e/pull_request")
+
+# Operator tests collected with the scheduled full-suite coverage run.
+# The same files are executed on both cards; each test skips itself when the
+# device does not match. These partitions stay on the requested labels and are
+# not moved onto the 560T pool with the generic A3 groups.
+# 115 files at the 600s default need several groups to finish inside the
+# 180-minute selected-tests job.
+_SINGLECARD_OPS_ROOT = "tests/e2e/nightly/single_node/ops/singlecard_ops"
+_SINGLECARD_OPS_GROUP_COUNT = 8
+_SINGLECARD_OPS_PARTITIONS = (
+    ("singlecard-ops-a3-2", "linux-aarch64-a3-2"),
+    ("singlecard-ops-a5-1", "linux-aarch64-a5-1"),
+)
 
 # When set via --skip-cpu-ut, tests/ut targets are dropped from every selection
 # mode. CPU UTs are executed by the cpu-ut job on every PR; the PR test
@@ -484,6 +501,43 @@ def _has_accuracy_tests(
     )
 
 
+def _schedule_singlecard_ops(
+    all_groups: dict[PartitionKey, list[str]],
+    partition_config: dict[PartitionKey, PartitionInfo],
+) -> None:
+    """Add singlecard operator tests to the full-suite selection.
+
+    A3 runs on ``linux-aarch64-a3-2`` and A5 runs on ``linux-aarch64-a5-1``.
+    Call this after the 560T relabel so these groups keep those labels.
+    """
+    root = Path(_SINGLECARD_OPS_ROOT)
+    if not root.is_dir():
+        print(
+            f"Warning: singlecard ops directory does not exist: {_SINGLECARD_OPS_ROOT}",
+            file=sys.stderr,
+        )
+        return
+
+    files = [
+        _as_posix_path(str(path))
+        for path in sorted(root.rglob("test_*.py"))
+        if "__pycache__" not in path.parts
+    ]
+    if not files:
+        return
+
+    for key, runner_label in _SINGLECARD_OPS_PARTITIONS:
+        partition_config[key] = PartitionInfo(
+            runner_label=runner_label,
+            count=_SINGLECARD_OPS_GROUP_COUNT,
+        )
+        all_groups[key].extend(files)
+    print(
+        f"Scheduled {len(files)} singlecard ops tests on a3-2 and a5-1",
+        file=sys.stderr,
+    )
+
+
 def _prefer_560t_partitions(
     partition_config: dict[PartitionKey, PartitionInfo],
 ) -> dict[PartitionKey, PartitionInfo]:
@@ -733,6 +787,12 @@ def main():
         "tests/e2e/pull_request, routing e2e tests by directory convention",
     )
     input_group.add_argument(
+        "--singlecard-ops",
+        action="store_true",
+        help="Schedule only tests/e2e/nightly/single_node/ops/singlecard_ops "
+        "on a3-2 and a5-1. Does not select UT or pull-request tests.",
+    )
+    input_group.add_argument(
         "--curated",
         type=str,
         metavar="SUITE",
@@ -824,6 +884,8 @@ def main():
                     f"Warning: Path does not exist: {root}",
                     file=sys.stderr,
                 )
+    elif args.singlecard_ops:
+        matched_modules = ["singlecard-ops"]
     else:
         if args.curated not in curated_tests:
             print(
@@ -864,6 +926,11 @@ def main():
     # the mixed-pool A3 labels before resolving partitions to runners.
     if args.all_tests or _has_accuracy_tests(all_groups, accuracy_tests):
         partition_config = _prefer_560t_partitions(partition_config)
+
+    # Added after dedup and the 560T relabel. The same files are scheduled on
+    # both cards, and the generic A3 label must stay linux-aarch64-a3-2.
+    if args.singlecard_ops:
+        _schedule_singlecard_ops(all_groups, partition_config)
 
     # A command-line override is an explicit, transient choice and therefore
     # has higher priority than static routing.
