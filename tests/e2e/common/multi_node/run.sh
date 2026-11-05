@@ -85,48 +85,55 @@ print_error() {
     exit 1
 }
 
-show_vllm_info() {
+show_vllm_info () {
     cd "$WORKSPACE"
     echo "Installed vLLM-related Python packages:"
     pip list | grep vllm || echo "No vllm packages found."
 
     echo ""
-    echo "============================"
-    echo "vLLM Git information"
-    echo "============================"
+    echo"============================"
+    echo"vLLM Git information"echo"============================"
+    if [ ! -d vllm ]; then
+        echo"No vllm directory found in $WORKSPACE"
+    else
     cd vllm
     if [ -d .git ]; then
-    echo "Branch:      $(git rev-parse --abbrev-ref HEAD)"
-    echo "Commit hash: $(git rev-parse HEAD)"
-    echo "Author:      $(git log -1 --pretty=format:'%an <%ae>')"
-    echo "Date:        $(git log -1 --pretty=format:'%ad' --date=iso)"
-    echo "Message:     $(git log -1 --pretty=format:'%s')"
-    echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
-    echo "Remote:      $(git remote -v | head -n1)"
-    echo ""
+    echo"Branch:    $(git rev-parse --abbrev-ref HEAD)"
+    echo"Commit hash: $(git rev-parse HEAD)"
+    echo"Author:    $(git log -1 --pretty=format:'% an <% ae>')"
+    echo"Date:    $(git log -1 --pretty=format:'% ad' --date=iso)"
+    echo"Message:    $(git log -1 --pretty=format:'% s')"
+    echo"Tags:    $(git tag --points-at HEAD || echo 'None')"
+    echo"Remote:    $(git remote -v | head -n1)"
+    echo""
     else
     echo "No .git directory found in vllm"
     fi
     cd ..
+    fi
 
     echo ""
-    echo "============================"
-    echo "vLLM-Ascend Git information"
-    echo "============================"
+    echo"============================"
+    echo"vLLM-Ascend Git information"
+    echo"============================"
+    if [ ! -d vllm-ascend ]; then
+        echo"No vllm-ascend directory found in $WORKSPACE"
+    else
     cd vllm-ascend
     if [ -d .git ]; then
-    echo "Branch:      $(git rev-parse --abbrev-ref HEAD)"
-    echo "Commit hash: $(git rev-parse HEAD)"
-    echo "Author:      $(git log -1 --pretty=format:'%an <%ae>')"
-    echo "Date:        $(git log -1 --pretty=format:'%ad' --date=iso)"
-    echo "Message:     $(git log -1 --pretty=format:'%s')"
-    echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
-    echo "Remote:      $(git remote -v | head -n1)"
-    echo ""
+    echo"Branch:    $(git rev-parse --abbrev-ref HEAD)"
+    echo"Commit hash: $(git rev-parse HEAD)"
+    echo"Author:    $(git log -1 --pretty=format:'% an <% ae>')"
+    echo"Date:    $(git log -1 --pretty=format:'% ad' --date=iso)"
+    echo"Message:    $(git log -1 --pretty=format:'% s')"
+    echo"Tags:    $(git tag --points-at HEAD || echo 'None')"
+    echo"Remote:    $(git remote -v | head -n1)"
+    echo""
     else
     echo "No .git directory found in vllm-ascend"
     fi
     cd ..
+    fi
 }
 
 check_npu_info() {
@@ -255,11 +262,21 @@ install_aisbench() {
 
 }
 
-show_triton_ascend_info() {
+show_triton_ascend_info () {
     echo "====> Check triton ascend info"
-    clang -v
-    which bishengir-compile
-    pip show triton-ascend
+    # Diagnostic commands -- never let missing tools abort the whole script
+    # (run.sh runs under `set -e`; a missing clang would otherwise exit 127).
+    if command -v clang >/dev/null 2>&1; then
+        clang -v || echo "WARNING: clang -v failed"
+    else
+        echo "WARNING: clang not found in PATH (triton-ascend may not be usable)"
+    fi
+    if command -v bishengir-compile >/dev/null 2>&1; then
+        which bishengir-compile
+    else
+        echo "WARNING: bishengir-compile not found in PATH"
+    fi
+    pip show triton-ascend 2>/dev/null || echo "WARNING: triton-ascend pip package not installed"
 }
 
 kill_npu_processes() {
