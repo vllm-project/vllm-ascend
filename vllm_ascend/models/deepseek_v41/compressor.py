@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""C2 AscendC ring compression, BF16 projections, and FP32 ring state."""
+"""C2 uses AscendC BF16 projections on A2/A3 and FP32 projections with Triton on A5.
+
+Both C2 backends keep FP32 ring state. C1 keeps its BF16 projection path.
+"""
 
 import torch
 from torch import nn
@@ -19,10 +22,12 @@ class DeepseekV41Compressor(nn.Module):
         self.ratio = ratio
         self.width = config.head_dim
         dim = config.hidden_size
-        self.wkv = nn.Linear(dim, self.width, bias=False, dtype=torch.bfloat16)
+        self.use_native_compressor = get_current_hardware_profile().supports(HardwareCapability.DSV41_RING_COMPRESSOR)
+        projection_dtype = torch.float32 if ratio == 2 and not self.use_native_compressor else torch.bfloat16
+        self.wkv = nn.Linear(dim, self.width, bias=False, dtype=projection_dtype)
         self.norm = RMSNorm(self.width, eps=config.rms_norm_eps, dtype=torch.bfloat16)
         if ratio == 2:
-            self.wgate = nn.Linear(dim, self.width, bias=False, dtype=torch.bfloat16)
+            self.wgate = nn.Linear(dim, self.width, bias=False, dtype=projection_dtype)
             # Allocate persistent output before memory profiling, so its footprint
             # is included in the cache budget rather than added after allocation.
             if vllm_config is not None:
@@ -48,17 +53,40 @@ class DeepseekV41Compressor(nn.Module):
                 )
 
     def prepare_ring_compressor(self, max_tokens, device):
-        """Validate the native backend before graph capture."""
-        dim = self.wkv.in_features
-        if self.width not in (128, 512) or not 1024 <= dim <= 10240 or dim % 512:
-            raise ValueError("AscendC compressor requires D=128/512 and H=1024..10240 aligned to 512")
-        if not get_current_hardware_profile().supports(HardwareCapability.DSV41_RING_COMPRESSOR):
-            raise ValueError("AscendC V4.1 ring compression is currently supported on A2/A3 only")
-        if not hasattr(torch.ops._C_ascend, "compressor_v2"):
-            raise RuntimeError("Rebuild vllm-ascend custom ops to enable CompressorV2")
+        """Resolve A5 Triton cores or validate A2/A3 AscendC before capture.
+
+        max_tokens and device are retained for the model runner interface.
+        """
+        if not self.use_native_compressor:
+            from vllm_ascend.ops.triton.compressor.compressor_triton import _cube_core_num
+
+            self._ring_num_cores = _cube_core_num()
+        else:
+            dim = self.wkv.in_features
+            if self.width not in (128, 512) or not 1024 <= dim <= 10240 or dim % 512:
+                raise ValueError("AscendC compressor requires D=128/512 and H=1024..10240 aligned to 512")
+            if not get_current_hardware_profile().supports(HardwareCapability.DSV41_RING_COMPRESSOR):
+                raise ValueError("AscendC V4.1 ring compression is currently supported on A2/A3 only")
+            if not hasattr(torch.ops._C_ascend, "compressor_v2"):
+                raise RuntimeError("Rebuild vllm-ascend custom ops to enable CompressorV2")
+
+    def pool_projected(self, kv, scores, metadata):
+        """Pool A5 FP32 projections with Triton, then apply RMSNorm."""
+        from vllm_ascend.ops.triton.compressor.compressor_triton import compressor_from_projected
+
+        pooled = compressor_from_projected(
+            kv,
+            scores,
+            self.state_cache.kv_cache[0].squeeze(-2),
+            metadata.c2_ring_metadata,
+            self._ring_pooled[: kv.shape[0]],
+            max_query_len=metadata.max_query_len,
+            num_cores=self._ring_num_cores,
+        )
+        return self.norm(pooled)
 
     def compress_native(self, x, metadata):
-        """Map native compact groups back to the cache writer's token rows.
+        """Map A2/A3 AscendC compact groups back to the cache writer's token rows.
 
         Metadata stays on device, including for padded graph replay and batches
         with no completed groups. RMSNorm and RoPE remain outside the operator.
@@ -90,5 +118,5 @@ class DeepseekV41Compressor(nn.Module):
         return self.norm(pooled)
 
     def forward(self, x):
-        """Project an uncompressed source; C2 uses ``compress_native``."""
+        """Project C1; C2 uses ``compress_native`` on A2/A3 or ``pool_projected`` on A5."""
         return self.norm(self.wkv(x))

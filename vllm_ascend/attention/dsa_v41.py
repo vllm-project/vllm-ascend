@@ -605,8 +605,17 @@ class AscendDSAV41Impl:
             state_metadata = compressor_metadata.state
             if state_metadata.c2_metadata_group_id is not None:
                 wait_for_device_metadata(DeviceMetadataStage.COMPRESSOR, state_metadata.c2_metadata_group_id)
-            self._quantize_indexer_query(attn, prepared_indexer, metadata)
-            latent = compressor.compress_native(hidden_states, state_metadata)
+            if compressor.use_native_compressor:
+                self._quantize_indexer_query(attn, prepared_indexer, metadata)
+                latent = compressor.compress_native(hidden_states, state_metadata)
+            else:
+                # Keep A5's cast before query quantization so the FP32
+                # projections can overlap quantization on the auxiliary stream.
+                hidden_states_fp32 = hidden_states.float()
+                self._quantize_indexer_query(attn, prepared_indexer, metadata)
+                kv = compressor.wkv(hidden_states_fp32)
+                score = compressor.wgate(hidden_states_fp32)
+                latent = compressor.pool_projected(kv, score, state_metadata)
             source_cos = state_metadata.c2_source_cos
             source_sin = state_metadata.c2_source_sin
             if source_cos is None or source_sin is None:

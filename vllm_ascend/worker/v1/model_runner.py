@@ -4464,7 +4464,9 @@ class NPUModelRunner(GPUModelRunner):
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
                 # check how to build dummy
                 if self.use_compress:
-                    if is_deepseek_v41_cache(self.kv_cache_config.kv_cache_groups):
+                    if is_deepseek_v41_cache(
+                        self.kv_cache_config.kv_cache_groups
+                    ) and get_current_hardware_profile().supports(HardwareCapability.DSV41_RING_COMPRESSOR):
                         # C2 completion masks and native compact groups must
                         # describe the same positions. V4's all-127 dummy makes
                         # every speculative token complete, overrunning C2's
