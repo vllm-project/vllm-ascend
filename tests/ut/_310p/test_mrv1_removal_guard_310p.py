@@ -59,6 +59,14 @@ def test_310p_startup_skips_v1_patch_package() -> None:
     assert guarded
 
 
+def test_310p_mtp_shift_does_not_import_v1_proposer() -> None:
+    source = (ROOT / "vllm_ascend/_310p/worker/v2/spec_utils.py").read_text()
+    modules = _imported_modules(_tree("vllm_ascend/_310p/worker/v2/spec_utils.py"))
+    assert "llm_base_proposer" not in source
+    assert not any("worker.v1" in name or name.startswith("vllm.v1.spec_decode") for name in modules)
+    assert "tail_save" in source
+
+
 def test_310p_does_not_import_v1_mamba_kernel_at_module_scope() -> None:
     tree = _tree("vllm_ascend/patch/worker/patch_mamba_utils.py")
     top_level = _direct_imports(tree.body)

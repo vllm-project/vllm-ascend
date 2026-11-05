@@ -1021,8 +1021,8 @@
 #
 # ** 7. File: worker/patch_idex_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   MRv1-only item `2` lives in `worker/patch_v1/patch_idex_310.py`; the
-#   model/backend level items `1`, `3`, `4` below stay in `worker/`.
+#   Item `2` is the MRV2 MTP input shift in `_310p/worker/v2/spec_utils.py`.
+#   Model/backend items `1`, `3`, and `4` stay in `worker/patch_idex_310.py`.
 #   1. `vllm.model_executor.layers.fla.ops.index.prepare_chunk_indices`
 #      `vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets`
 #    Why:
@@ -1030,13 +1030,15 @@
 #    How:
 #       Replace upstream FLA chunk index helper functions with 310P implementations.
 #
-#   2. `vllm_ascend.worker.v1.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer.set_inputs_first_pass`
-#      (MRv1-only, file: `worker/patch_v1/patch_idex_310.py`)
+#   2. MTP input_ids shift on 310P
+#      (MRV2: `vllm_ascend._310p.worker.v2.spec_utils.prepare_prefill_inputs_cpu`)
 #    Why:
 #       310P needs to protect the tail slot during MTP input_ids shift to avoid
 #       GatherV2 corruption from persistent drafter input buffers.
 #    How:
-#       Reuse the 310P proposer implementation for the first-pass input shift.
+#       MRV2 saves and restores the tail element around the shift copy.
+#       The old V1 proposer monkeypatch is not installed, so 310P worker
+#       startup does not import the V1 proposer.
 #
 #   3. `vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.QwenGatedDeltaNetAttention`
 #    Why:
