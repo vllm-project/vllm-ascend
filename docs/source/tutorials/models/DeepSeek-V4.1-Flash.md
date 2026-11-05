@@ -28,10 +28,18 @@ configuration and a two-node A3 Prefill-Decode (PD) disaggregated
 configuration. It also supports a two-node hybrid A2 configuration and a
 four-node A2 PD disaggregated configuration.
 
-DeepSeek-V4.1-Flash is supported in **vLLM Ascend v0.30.0rc1 and later**. This guide uses **vLLM Ascend
-v0.32.0** as its documentation and model-validation baseline and recommends
-W4A8 for performance. To use the latest features, use the latest supported
-vLLM Ascend version.
+This document covers supported features, environment preparation, deployment,
+and accuracy and performance evaluation.
+
+DeepSeek-V4.1-Flash is supported in **vLLM Ascend v0.30.0rc1 and later**.
+This guide uses the deployment configurations for **vLLM Ascend v0.32.0**
+and recommends W4A8 for performance.
+To use the latest features, use the latest supported release candidate or
+official version of vLLM Ascend.
+
+Use the matching upstream vLLM revision for the selected vLLM Ascend version.
+For source builds, use the upstream vLLM tag recorded in
+`.github/vllm-release-tag.commit` at the selected vLLM Ascend release tag.
 
 ## 2 Supported Features
 
