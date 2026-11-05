@@ -20,7 +20,7 @@ class TestVitMropeSetupPatch(unittest.TestCase):
             for loaded_models in ((), models[:1], models[1:], models):
                 with self.subTest(n=n, loaded_models=loaded_models):
                     modules = {}
-                    names = [target, "vllm.triton_utils", "vllm.utils.torch_utils", "vllm_ascend.models"]
+                    names = [target, "vllm.triton_utils", "vllm.utils.torch_utils"]
                     names.extend(loaded_models)
                     for name in names:
                         parts = name.split(".")
@@ -51,14 +51,6 @@ class TestVitMropeSetupPatch(unittest.TestCase):
                     assert spec is not None and spec.loader is not None
                     module = importlib.util.module_from_spec(spec)
                     with patch.dict(sys.modules, modules):
-                        implementation_name = "vllm_ascend.models.mrope_vit_setup"
-                        implementation_path = path.parents[2] / "models/mrope_vit_setup.py"
-                        implementation_spec = importlib.util.spec_from_file_location(
-                            implementation_name, implementation_path
-                        )
-                        implementation = importlib.util.module_from_spec(implementation_spec)
-                        sys.modules[implementation_name] = implementation
-                        implementation_spec.loader.exec_module(implementation)
                         spec.loader.exec_module(module)
                         self.assertIs(upstream.vit_mrope_setup, module.vit_mrope_setup)
                         self.assertIs(upstream._vit_mrope_setup_kernel, kernel)

@@ -1914,9 +1914,7 @@
 #    Why:
 #       Reduce ViT mRoPE setup UB pressure on Ascend A5.
 #    How:
-#       Share the Ascend models.mrope_vit_setup wrapper with the model loader.
-#       The loader binds its returned vision module before exposing classes.
-#       Change the upstream wrapper BLOCK_N from 32
+#       Copy the upstream vit_mrope_setup wrapper and change BLOCK_N from 32
 #       to 16, using the same value for the launch grid divisor. Keep the
 #       upstream kernel unchanged. Rebind both the standard MiniMax vision tower alias and the
 #       Ascend shadow-module alias if already loaded; subsequent imports

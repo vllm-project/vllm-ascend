@@ -43,7 +43,6 @@ from vllm.utils.import_utils import import_from_path
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3SparseForCausalLM
-from vllm_ascend.models.mrope_vit_setup import vit_mrope_setup
 from vllm_ascend.utils import is_vl_model
 
 
@@ -62,15 +61,10 @@ def _load_vllm_minimax_m3_common_module(module_name: str):
     # Import the hardware-neutral common module directly. Importing
     # vllm.models.minimax_m3 first would execute its NVIDIA/AMD platform
     # dispatcher, while Ascend only needs the shared VL helpers here.
-    module = import_from_path(
+    return import_from_path(
         f"vllm_ascend.models._vllm_minimax_m3_common_{module_name}",
         module_path,
     )
-    if module_name == "vision_tower":
-        # Bind the actual module before exposing its classes. This must work
-        # even when model discovery happens before worker patches are loaded.
-        module.vit_mrope_setup = vit_mrope_setup
-    return module
 
 
 _mm_preprocess = _load_vllm_minimax_m3_common_module("mm_preprocess")
