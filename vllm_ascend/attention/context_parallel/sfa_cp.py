@@ -21,6 +21,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     build_pcp_ordered_slot_mapping,
     get_pcp_num_replicated_tokens,
 )
+from vllm_ascend.attention.context_parallel.registry import CPBackendProvider, register_cp_backend
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     build_sfa_dcp_replicated_block_table,
     build_sfa_dcp_replicated_slot_mapping,
@@ -1437,3 +1438,42 @@ def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImp
     if use_pcp:
         return AscendSFAPCPImpl
     return AscendSFAImpl
+
+
+def _resolve_sfa_cp_classes(vllm_config, topology) -> tuple[type, type]:
+    """Resolve SFA CP classes from the independent CP switches.
+
+    Registry-level mirror of ``resolve_sfa_metadata_builder``/``resolve_sfa_impl``:
+    the builder has three layouts (PCP+DCP / DCP / base) and the impl four
+    (PCP+DCP / DCP / PCP-only / base). Those functions are untouched so existing
+    callers keep their behavior until the selection reroute lands.
+    """
+    dcp_enabled = enable_sfa_dcp_replicated_indexer()
+    use_pcp = topology.is_pcp_enabled
+    if use_pcp and dcp_enabled:
+        builder_cls = AscendSFAPCPDCPMetadataBuilder
+    elif dcp_enabled:
+        builder_cls = AscendSFADCPMetadataBuilder
+    else:
+        builder_cls = AscendSFAMetadataBuilder
+    if use_pcp and dcp_enabled:
+        impl_cls = AscendSFAPCPDCPImpl
+    elif dcp_enabled:
+        impl_cls = AscendSFADCPImpl
+    elif use_pcp:
+        impl_cls = AscendSFAPCPImpl
+    else:
+        impl_cls = AscendSFAImpl
+    return builder_cls, impl_cls
+
+
+SFA_CP_BACKEND = register_cp_backend(
+    CPBackendProvider(
+        name="sfa",
+        base_builder_cls=AscendSFAMetadataBuilder,
+        base_impl_cls=AscendSFAImpl,
+        supports_pcp=True,
+        supports_dcp=True,
+        cp_resolver=_resolve_sfa_cp_classes,
+    )
+)

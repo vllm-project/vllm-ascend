@@ -36,6 +36,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPMetadataBuilderMixin,
     use_history_current_split_decode,
 )
+from vllm_ascend.attention.context_parallel.registry import CPBackendProvider, register_cp_backend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     is_dcp_enabled,
@@ -699,3 +700,16 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
 
         output[num_decode_tokens : num_decode_tokens + current_output.shape[0]] = current_output
         return output
+
+
+GQA_CP_BACKEND = register_cp_backend(
+    CPBackendProvider(
+        name="gqa",
+        base_builder_cls=AscendAttentionMetadataBuilder,
+        base_impl_cls=AscendAttentionBackendImpl,
+        cp_builder_cls=AscendAttentionDCPMetadataBuilder,
+        cp_impl_cls=AscendAttentionDCPImpl,
+        supports_pcp=False,
+        supports_dcp=True,
+    )
+)

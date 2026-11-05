@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
+from vllm_ascend.attention.context_parallel.registry import CPBackendProvider, register_cp_backend
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
 )
@@ -749,3 +750,16 @@ class AscendDSAPCPImpl(AscendDSAImpl):
             self.n_local_heads,
             self.head_dim,
         )
+
+
+DSA_CP_BACKEND = register_cp_backend(
+    CPBackendProvider(
+        name="dsa",
+        base_builder_cls=AscendDSAMetadataBuilder,
+        base_impl_cls=AscendDSAImpl,
+        cp_builder_cls=AscendDSAPCPMetadataBuilder,
+        cp_impl_cls=AscendDSAPCPImpl,
+        supports_pcp=True,
+        supports_dcp=False,
+    )
+)
