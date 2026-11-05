@@ -165,7 +165,7 @@ benchmarks:
     thinking: true
     temperature: 1.0
     top_p: 0.95
-    baseline: 93
+    baseline: 94.5
     threshold: 3
   perf_16k_prefix0:
     case_type: performance
