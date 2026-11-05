@@ -80,6 +80,7 @@
 
 # compilation
 /vllm_ascend/compilation @yiz-liu @wxsIcey
+/vllm_ascend/compilation/static_kernel.py @yiz-liu
 
 # device / device_allocator
 /vllm_ascend/device @zzzzwwjj

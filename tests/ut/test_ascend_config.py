@@ -745,16 +745,21 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_init_ascend_config_enable_npugraph_ex(self, mock_fix_incompatible_config):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {
-            "ascend_compilation_config": {"enable_npugraph_ex": True, "enable_static_kernel": True},
-            "refresh": True,
-        }
-        ascend_compilation_config = init_ascend_config(test_vllm_config).ascend_compilation_config
-        self.assertTrue(ascend_compilation_config.enable_npugraph_ex)
-        self.assertTrue(ascend_compilation_config.enable_static_kernel)
-        self.assertTrue(ascend_compilation_config.enable_super_kernel)
+    def test_init_ascend_config_resolves_npugraph_ex(self, mock_fix_incompatible_config):
+        for breakable in (False, True):
+            with (
+                self.subTest(breakable=breakable),
+                patch.dict(os.environ, {"VLLM_USE_BREAKABLE_CUDAGRAPH": str(int(breakable))}),
+            ):
+                test_vllm_config = VllmConfig()
+                test_vllm_config.additional_config = {
+                    "ascend_compilation_config": {"enable_npugraph_ex": True, "enable_static_kernel": True},
+                    "refresh": True,
+                }
+                ascend_compilation_config = init_ascend_config(test_vllm_config).ascend_compilation_config
+                self.assertEqual(ascend_compilation_config.enable_npugraph_ex, not breakable)
+                self.assertTrue(ascend_compilation_config.enable_static_kernel)
+                self.assertTrue(ascend_compilation_config.enable_super_kernel)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -923,16 +928,9 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_compilation_config.enable_static_kernel)
         self.assertFalse(ascend_compilation_config.enable_super_kernel)
         warning_messages = [call.args[0] for call in mock_warning.call_args_list]
-        self.assertIn("npugraph_ex is not supported by the current hardware profile. Disabling it.", warning_messages)
-        self.assertIn(
-            "static kernel requires npugraph_ex, which is not supported by the current hardware profile. Disabling it.",
-            warning_messages,
-        )
-        self.assertIn(
-            "super kernel requires static kernel, which is not supported by the current hardware profile. "
-            "Disabling it.",
-            warning_messages,
-        )
+        self.assertIn("Disabling npugraph_ex for the current hardware profile.", warning_messages)
+        self.assertIn("Disabling static kernel compilation for the current hardware profile.", warning_messages)
+        self.assertIn("Disabling SuperKernel for the current hardware profile.", warning_messages)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

@@ -49,6 +49,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayout
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.compilation import CompilationConfig
 else:
     VllmConfig = None
 
@@ -816,6 +817,15 @@ def vllm_version_is(target_vllm_version: str):
             "to control it by hand. And please make sure the value follows the "
             "format of x.y.z."
         )
+
+
+def is_breakable_cudagraph_enabled(compilation_config: CompilationConfig) -> bool:
+    from vllm.compilation import breakable_cudagraph
+
+    # vLLM 0.33.0 resolves Breakable from the environment. Main uses the resolved config.
+    if vllm_version_is("0.33.0"):
+        return breakable_cudagraph.is_breakable_cudagraph_enabled()
+    return breakable_cudagraph.is_breakable_cudagraph_enabled(compilation_config)
 
 
 def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:

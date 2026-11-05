@@ -59,6 +59,7 @@ from vllm_ascend.utils import (
     bootstrap_custom_op_env,
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
+    is_breakable_cudagraph_enabled,
     is_moe_model,
     model_uses_kpool_indexer,
     model_uses_sfa_sparse,
@@ -1533,19 +1534,23 @@ def _setup_compile_backend(
     # Get custom compile backend for graph fusion
     compilation_config.oot_compiler = compile_backend
     compilation_config.use_inductor = False
-    if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+    graph_mode = compilation_config.cudagraph_mode
+    if graph_mode == CUDAGraphMode.NONE:
         compilation_config.mode = CompilationMode.NONE
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
-    elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
+    elif is_breakable_cudagraph_enabled(compilation_config):
+        # Breakable splits graphs at runtime, so only the compiled path configures FX splits.
+        return
+    elif graph_mode.requires_piecewise_compilation():
         # Our is_cuda_alike is False so we cannot reuse the assertion of upstream
-        if compilation_config.mode != CompilationMode.VLLM_COMPILE and not envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH:
+        if compilation_config.mode != CompilationMode.VLLM_COMPILE:
             raise AssertionError(
                 "Compilation mode should be CompilationMode.VLLM_COMPILE "
                 "when cudagraph_mode piecewise cudagraphs is used, "
                 "cudagraph_mode=%s",
-                compilation_config.cudagraph_mode,
+                graph_mode,
             )
         compilation_config.set_splitting_ops_for_v1(
             all2all_backend=vllm_config.parallel_config.all2all_backend,
@@ -1564,11 +1569,11 @@ def _setup_compile_backend(
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
-    elif compilation_config.cudagraph_mode.has_full_cudagraphs():
+    elif graph_mode.has_full_cudagraphs():
         # Don't split the FX graph for static kernel; it would compile multiple times.
         compilation_config.splitting_ops = []
     else:
-        logger.info("cudagraph_mode %s is unsupported on NPU; falling back to NONE.", compilation_config.cudagraph_mode)
+        logger.info("cudagraph_mode %s is unsupported on NPU; falling back to NONE.", graph_mode)
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         compilation_config.mode = CompilationMode.NONE
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False

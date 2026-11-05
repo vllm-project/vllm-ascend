@@ -458,6 +458,7 @@ class TestNPUPlatform(TestBase):
     def mock_vllm_config():
         mock_vllm_config = MagicMock()
         mock_vllm_config.compilation_config = MagicMock()
+        mock_vllm_config.compilation_config.use_breakable_cudagraph = None
         mock_vllm_config.compilation_config.reduced_cg_cap = None
         mock_vllm_config.compilation_config.prefill_cudagraph_capture_token_sizes = None
         mock_vllm_config.compilation_config.max_prefill_cudagraph_capture_tokens = None
@@ -1339,6 +1340,38 @@ class TestNPUPlatform(TestBase):
                 else:
                     vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
                     self.assertEqual(compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8])
+
+    def test_setup_compile_backend_preserves_static_kernel_with_breakable_graphs(self):
+        cases = [
+            (True, CUDAGraphMode.FULL_AND_PIECEWISE, CompilationMode.NONE, True),
+            (True, CUDAGraphMode.NONE, CompilationMode.NONE, False),
+            (False, CUDAGraphMode.FULL_DECODE_ONLY, CompilationMode.VLLM_COMPILE, True),
+        ]
+        for breakable, graph_mode, mode, expected_static in cases:
+            with self.subTest(breakable=breakable, graph_mode=graph_mode):
+                config = self.mock_vllm_config()
+                config.compilation_config.mode = mode
+                config.compilation_config.cudagraph_mode = graph_mode
+                config.compilation_config.use_breakable_cudagraph = breakable
+                config.model_config.enforce_eager = False
+                config.additional_config = {
+                    "ascend_compilation_config": {
+                        "enable_npugraph_ex": not breakable,
+                        "enable_static_kernel": True,
+                        "enable_super_kernel": True,
+                    }
+                }
+
+                with (
+                    patch("vllm.envs.VLLM_USE_BREAKABLE_CUDAGRAPH", breakable),
+                    patch("vllm_ascend.platform.enable_sp", return_value=False),
+                ):
+                    _setup_compile_backend(config, compile_backend="test_backend")
+
+                resolved = config.additional_config["ascend_compilation_config"]
+                self.assertEqual(config.compilation_config.mode, mode)
+                self.assertEqual(resolved["enable_static_kernel"], expected_static)
+                self.assertEqual(resolved["enable_super_kernel"], expected_static)
 
     def test_get_device_capability(self):
         self.assertIsNone(self.platform.get_device_capability(device_id=0))

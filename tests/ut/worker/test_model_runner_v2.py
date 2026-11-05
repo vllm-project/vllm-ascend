@@ -2132,6 +2132,7 @@ def test_init_kv_zero_meta_excludes_only_registered_topk_components():
 
 def test_shutdown_releases_c8_views_and_unwraps_zeroer():
     _, _, _, runner, _ = _c8_packet(ratio=1)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     entries = runner._c8_mxfp_v_scale_caches
     wrapper_entries = list(entries)
     delegate = MagicMock()
@@ -2150,6 +2151,7 @@ def test_vmm_shutdown_orders_and_retains_failures(failure):
     from vllm_ascend.models.deepseek_v41.engram.local_shared_vmm import EngramSharedReleaseError
 
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     events = []
     first = SimpleNamespace(local_vmm=True, close_host_offload=Mock(side_effect=lambda: events.append("first")))
     error = EngramSharedReleaseError("sync") if failure == "synchronized" else RuntimeError("peer")
@@ -2193,6 +2195,7 @@ def test_vmm_shutdown_orders_and_retains_failures(failure):
 
 def test_shutdown_releases_shared_engram_after_parent_cleanup():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     embedding = MagicMock()
     embedding._shared_pool_client = object()
     runner.model = MagicMock()
@@ -2206,6 +2209,7 @@ def test_shutdown_releases_shared_engram_after_parent_cleanup():
 
 def test_shutdown_keeps_shared_engram_if_parent_cleanup_fails():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     embedding = MagicMock()
     embedding._shared_pool_client = object()
     runner.model = MagicMock()
@@ -2218,6 +2222,7 @@ def test_shutdown_keeps_shared_engram_if_parent_cleanup_fails():
 
 def test_shutdown_retries_failed_engram_and_closes_other_clients():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     failing, other = MagicMock(), MagicMock()
     failing._shared_pool_client = other._shared_pool_client = object()
     failing.close_host_offload.side_effect = [RuntimeError("failed"), None]
@@ -2233,6 +2238,7 @@ def test_shutdown_retries_failed_engram_and_closes_other_clients():
 
 def test_shutdown_retains_engram_when_parent_fails_after_deleting_model():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     embedding = MagicMock()
     embedding._shared_pool_client = object()
     runner.model = MagicMock()
@@ -2736,6 +2742,7 @@ def test_sample_tokens_refreshes_lmhead_padding_each_step(monkeypatch, lmhead_tp
 
 def test_shutdown_releases_uva_owner_without_shared_pool_client():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     embedding = torch.nn.Module()
     calls = []
     embedding.close_host_offload = lambda: calls.append("release")
@@ -2751,6 +2758,7 @@ def test_load_failure_closes_unpublished_host_owners(published_model, cleanup_fa
     from vllm_ascend.models.host_offload import register_host_offload_owner
 
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     runner.vllm_config = MagicMock()
     first, second = MagicMock(), MagicMock()
     if cleanup_fails:

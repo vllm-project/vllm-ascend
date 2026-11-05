@@ -130,7 +130,7 @@ As introduced in the [RFC](https://github.com/vllm-project/vllm-ascend/issues/47
 
 ### Default behavior
 
-Npugraph_ex is **enabled by default** on supported hardware when `cudagraph_mode` is `FULL` or `FULL_DECODE_ONLY`. It is automatically disabled in `FULL_AND_PIECEWISE`, `PIECEWISE`, and `NONE` modes.
+Npugraph_ex is **enabled by default** on supported hardware when model compilation is active and `cudagraph_mode` is `FULL` or `FULL_DECODE_ONLY`. It is automatically disabled in `FULL_AND_PIECEWISE`, `PIECEWISE`, and `NONE` modes. With `VLLM_USE_BREAKABLE_CUDAGRAPH=1`, model compilation is disabled and Ascend sets the effective `enable_npugraph_ex` value to `false`, including when the supplied value is `true`.
 
 Select a full graph mode to use this default:
 
@@ -178,7 +178,7 @@ vllm serve Qwen/Qwen2-7B-Instruct \
 
 ### Static kernel compilation
 
-Static kernel compilation is an **optional** feature that pre-compiles operator binaries with fixed shapes at compile time, reducing runtime overhead for networks with static or near-static shapes. It is **disabled by default** and must be explicitly enabled.
+Static kernel compilation builds operator binaries for fixed shapes at startup. Enable it with `enable_static_kernel`, which defaults to `false`. When `enable_npugraph_ex` is enabled, static kernels compile through the model compilation backend. With `enable_npugraph_ex` disabled, supported Model Runner V2 configurations compile static kernels during graph warmup.
 
 !!! note
 
@@ -208,9 +208,44 @@ vllm serve Qwen/Qwen2-7B-Instruct \
   --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
 ```
 
+#### Static kernels with Breakable ACLGraph
+
+With Model Runner V2, enable static kernel compilation during graph warmup:
+
+```bash
+VLLM_USE_BREAKABLE_CUDAGRAPH=1 vllm serve /path/to/model \
+  --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
+  --additional-config '{"ascend_compilation_config":{"enable_static_kernel":true,"enable_super_kernel":true}}'
+```
+
+Breakable selects `CompilationMode.NONE` and disables npugraph_ex. For each capture descriptor, the torch_npu helper collects operators during eager warmup, then compiles or reuses cached kernels before graph capture. Graph-enabled target and draft models follow their own capture schedules. Eager-only execution has no separate collection step.
+
+This path requires CANN 9.1 or newer and a torch_npu version with isolated static-kernel installation support. Use PP=1 and matching target/draft TP sizes when the draft uses graphs.
+
+When using static kernel compilation during graph warmup, keep graph memory profiling disabled. Profiling uses the same warmup path for temporary graphs and can trigger kernel compilation and installation.
+
+Both compilation paths use the torch_npu helper's default `./static_kernel_compile_outputs/` directory, relative to the worker's current working directory. Cache reuse depends on the CANN version, device type, operator descriptions, SuperKernel options, and deterministic mode. After changing torch_npu or custom operator implementations, clear this cache before restarting or rebuild with `VLLM_DISABLE_COMPILE_CACHE=1`.
+
+On shutdown, workers release their graphs before the node's installation owner removes the instance's packages. The build cache remains available for subsequent starts.
+
 #### Verifying static kernel is active
 
-The recommended way to verify static kernel is in effect is through **Ascend Profiling**:
+After distributed initialization, the global rank 0 worker logs the selected compilation path and final configuration once:
+
+```text
+Static kernel compilation is enabled during graph warmup. SuperKernel is enabled.
+```
+
+The message identifies whether static kernel compilation runs through model compilation, runs during graph warmup, or is disabled. Set `VLLM_LOGGING_LEVEL=DEBUG` to see capture-warmup progress by graph manager and descriptor:
+
+```text
+Static kernel warmup started: manager=..., descriptor=...
+Static kernel warmup finished: manager=..., descriptor=...
+```
+
+The finish message marks the end of warmup. torch_npu reports compilation, cache, installation, and kernel-selection results.
+
+Use **Ascend Profiling** to confirm which kernels execute:
 
 1. Collect a profiling trace of your running model using [Ascend PyTorch Profiler](https://www.hiascend.com/document/detail/zh/Pytorch/2600/apiref/torchnpuCustomsapi/docs/zh/custom_APIs/torch_npu-profiler/torch_npu-profiler-profile.md) (`torch_npu.profiler`).
 2. Open the generated `op_statistic.csv` file.
@@ -222,17 +257,19 @@ During the compilation phase, you will see a Python warning (visible by default)
 Starting static kernel compilation, the build directory is <path>
 ```
 
-This confirms that compilation has been triggered. The absence of this message means static kernel was not enabled or the cached result was reused directly.
+This message marks the start of static kernel compilation. The profiling trace shows which operators use static kernels.
 
 ### Super Kernel optimization
 
 [Super Kernel](https://www.hiascend.com/document/detail/en/Pytorch/latest/devguide/TorchAir/docs/en/npugraph_ex/advanced/superkernel.md) is an **optional** operator-binary fusion optimization. Unlike source-level fusion, it works on compiled kernel binaries: eligible subgraphs are identified, their child kernels are combined into a larger kernel, and synchronization is inserted according to graph dependencies. Compared with launching operators individually, this can reduce task scheduling waits, launch overhead, and operator-head overhead.
 
-In vLLM Ascend, Super Kernel optimization is applied during ACLGraph capture. It depends on both static kernel and Npugraph_ex:
+In vLLM Ascend, Super Kernel optimization is applied during ACLGraph capture. It requires static kernels and graph capture:
 
 ```text
-Super Kernel -> static kernel -> Npugraph_ex
+Super Kernel -> static kernels + ACLGraph capture
 ```
+
+The existing model compilation path compiles static kernels through npugraph_ex. The Breakable path compiles them during GraphManager warmup and applies SuperKernel optimization to each captured graph segment.
 
 !!! note
 
