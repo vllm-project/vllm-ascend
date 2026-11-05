@@ -28,6 +28,7 @@ import pytest
 from transformers import AutoTokenizer
 from vllm import SamplingParams
 from vllm.config import CompilationConfig, CompilationMode
+from vllm.inputs import TokensPrompt
 from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
@@ -279,6 +280,7 @@ def test_dflash2_v2_acceptance(
         temperature=0,
         ignore_eos=False,
         max_tokens=512,
+        seed=42,
     )
 
     prompts = [
@@ -304,12 +306,14 @@ def test_dflash2_v2_acceptance(
         "enforce_eager": False,
     }
 
-    # With max_num_seqs=1, the parallel draft has K + 1 query tokens.
-    # One capture size covers that request without adding padded requests.
+    # Keep decode within the FULL graph buckets; vary only the prefill length
+    # below to exercise PIECEWISE and eager under the same engine configuration.
+    decode_query_len = num_speculative_tokens + 1
+    capture_sizes = [batch_size * decode_query_len for batch_size in (1, 2)]
     compilation_config = CompilationConfig(
         mode=CompilationMode.VLLM_COMPILE,
-        cudagraph_mode="FULL_DECODE_ONLY",
-        cudagraph_capture_sizes=[num_speculative_tokens + 1],
+        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_capture_sizes=capture_sizes,
     )
 
     with VllmRunner(
@@ -317,7 +321,8 @@ def test_dflash2_v2_acceptance(
         max_model_len=2048,
         disable_log_stats=False,
         tensor_parallel_size=2,
-        max_num_seqs=1,
+        max_num_seqs=2,
+        max_num_batched_tokens=2048,
         distributed_executor_backend="mp",
         gpu_memory_utilization=0.9,
         speculative_config=speculative_config,
@@ -327,6 +332,31 @@ def test_dflash2_v2_acceptance(
     ) as llm:
         assert llm.model.llm_engine.vllm_config.use_v2_model_runner
         outputs = llm.model.generate(prompts, sampling_params)
+
+        # Reuse this engine for two sequential single-request generations,
+        # then submit both prompts together to exercise request-slot reuse.
+        # K=7 gives a 9-token PIECEWISE prefill and a 32-token eager prefill,
+        # followed by 8-token FULL decode in each single-request generation.
+        # Token IDs fix the lengths, and the token budget admits each prefill
+        # in one step. The joint submission also exercises batched execution.
+        prefill_lengths = (decode_query_len + 1, 2 * max(capture_sizes))
+        prompt_token_ids = tokenizer.encode("Continue counting: 1, 2, 3, 4, 5.", add_special_tokens=False)
+        assert prompt_token_ids
+        prompt_token_ids *= (max(prefill_lengths) + len(prompt_token_ids) - 1) // len(prompt_token_ids)
+        graph_sampling_params = SamplingParams(temperature=0, ignore_eos=True, max_tokens=48, seed=42)
+        graph_prompts: list[TokensPrompt] = [
+            {"prompt_token_ids": prompt_token_ids[:prefill_len]} for prefill_len in prefill_lengths
+        ]
+        # generate() completes each batch before the next one is submitted.
+        for graph_batch in [[prompt] for prompt in graph_prompts] + [graph_prompts]:
+            graph_outputs = llm.model.generate(graph_batch, graph_sampling_params)
+            assert len(graph_outputs) == len(graph_batch)
+            for output in graph_outputs:
+                assert output.finished
+                assert len(output.outputs[0].token_ids) == graph_sampling_params.max_tokens
+            outputs.extend(graph_outputs)
+
+        # Aggregate acceptance over the original request and all graph batches.
         metrics = llm.model.get_metrics()
 
     for output in outputs:

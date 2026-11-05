@@ -40,6 +40,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.kimi_k25_vit import (
@@ -1089,8 +1090,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         self,
         weights: Iterable[tuple[str, torch.Tensor] | tuple[str, torch.Tensor, dict[str, Any]]],
     ) -> set[str]:
-        """Reuse upstream loading with Ascend KDA gates and EPLB replicas."""
+        """Load standalone gates before upstream packed mappings and EPLB."""
         params_dict = dict(self.named_parameters())
+        standalone_gate_params: set[str] = set()
         gate_mapping = (
             (".indexer.wk.", ".indexer.wk_weights_proj.", 0),
             (".indexer.weights_proj.", ".indexer.wk_weights_proj.", 1),
@@ -1103,6 +1105,18 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         def remap_mixed_gate_weights():
             for args in weights:
                 name, loaded_weight = args[:2]
+                # DSA retains an independent G projection. Newer upstream
+                # loaders otherwise map it to shard 2 of the two-shard Q/KV
+                # projection. Match registered parameters, including scales
+                # and offsets, and preserve their own TP/quantization loaders.
+                # Missing PP layers and fused MLA/KDA gates stay upstream.
+                if ".g_proj." in name and name in params_dict:
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    kwargs = args[2] if len(args) > 2 else {}
+                    weight_loader(param, loaded_weight, **kwargs)
+                    standalone_gate_params.add(name)
+                    continue
                 for source, target, shard_id in gate_mapping:
                     if source not in name:
                         continue
@@ -1115,9 +1129,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 else:
                     yield args
 
-        return super().load_weights(
+        loaded_params = super().load_weights(
             load_eplb_expert_weights(self, remap_mixed_gate_weights(), self.n_redundant_experts)
         )
+        return loaded_params | standalone_gate_params
 
     def forward(
         self,
