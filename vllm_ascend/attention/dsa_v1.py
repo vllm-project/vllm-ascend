@@ -1,7 +1,7 @@
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
+from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias, cast
 
 import torch
 import torch.distributed as dist
@@ -610,10 +610,12 @@ def build_dspark_swa_indices(
     col_mask = cols[None, :] < visible_lens[:, None]
     pos = start_pos[:, None] + cols[None, :]
     if use_logical_indices:
+        # SparseFlashMla resolves positions through ori_block_table itself.
         slot_ids = pos.to(torch.int32)
     else:
         block_nums = pos // block_size
-        # Clamp out-of-range columns before gathering; col_mask discards them.
+        # Clamp to valid block-table columns so gather never goes OOB on the
+        # out-of-range columns (their results are discarded by col_mask anyway).
         safe_nums = block_nums.clamp(min=0, max=int(block_table.shape[1]) - 1)
         block_offsets = pos % block_size
         block_ids = torch.gather(block_table, 1, safe_nums)
@@ -772,6 +774,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.decode_threshold = 1
         self.spec_slot_mapping = None
         self.dspark_swa_indices_buffer: torch.Tensor | None = None
+        self.dspark_swa_topk_lengths_buffer: torch.Tensor | None = None
         kv_plan = get_dsa_attn_kv_plan(vllm_config)
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.slot_mapping_shape = (
@@ -805,8 +808,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 dtype=torch.int32,
                 device=self.device,
             )
-            # Shared entry point requires a length output in both modes.
-            # Physical-slot callers use a flat view of the same storage.
+            # Shared output contract also requires lengths for physical indices.
             self.dspark_swa_topk_lengths_buffer = torch.zeros(
                 (max_dspark_rows, 1), dtype=torch.int32, device=self.device
             )
@@ -1246,7 +1248,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 dtype=torch.int32,
                 device=query_start_loc.device,
             )
-        assert self.dspark_swa_topk_lengths_buffer is not None
         return build_dspark_swa_indices(
             block_table,
             num_speculative_tokens,
@@ -1257,7 +1258,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_decode_tokens=num_decode_tokens,
             index_width=self._dspark_index_width,
             indices_output=buffer[:num_decode_tokens],
-            lengths_output=self.dspark_swa_topk_lengths_buffer[:num_decode_tokens].view(-1),
+            lengths_output=cast(torch.Tensor, self.dspark_swa_topk_lengths_buffer)[:num_decode_tokens].view(-1),
         )
 
     def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
@@ -1535,8 +1536,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 # kernel writes in place and requires the full-capacity
                 # buffer so the pad-row cleanup ([T_active, T_padded)) fires
                 # and a captured graph never replays stale rows. The kernel
-                # emits physical slot ids, so the sparse (logical-index) draft
-                # path must take the buffer + lambda route below.
+                # emits physical slot ids for this DSA metadata path.
                 if self._dspark_swa_indices_fast_path_eligible(num_reqs):
                     num_query_per_req = self.dspark_num_query_per_req()
                     num_actual_tokens = self.num_actual_tokens
@@ -1566,18 +1566,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     dspark_swa_indices = buffer[: self.num_actual_tokens]
                 else:
                     dspark_swa_indices = self.dspark_swa_indices_buffer[: self.num_actual_tokens]
-                    assert self.dspark_swa_topk_lengths_buffer is not None
-                    lengths_output = (
-                        dspark_swa_topk_lengths
-                        if use_sparse_flash
-                        else self.dspark_swa_topk_lengths_buffer[: self.num_actual_tokens].view(-1)
-                    )
+                    lengths_output = cast(torch.Tensor, self.dspark_swa_topk_lengths_buffer)[
+                        : self.num_actual_tokens
+                    ].view(-1)
 
                     def build_dspark_swa():
                         return build_dspark_swa_indices(
                             *dspark_swa_args,
                             indices_output=dspark_swa_indices,
-                            use_logical_indices=use_sparse_flash,
                             lengths_output=lengths_output,
                         )
             else:

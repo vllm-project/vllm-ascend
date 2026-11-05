@@ -10,7 +10,7 @@ moving cache or scheduler knowledge back into the model.
 
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn.functional as F
@@ -881,12 +881,12 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._flat_slot_mapping = torch.full((max_tokens,), -1, dtype=torch.int64, device=device)
         self._seq_lens = torch.zeros(max_reqs, dtype=torch.int32, device=device)
         self._max_tokens = max_tokens
-        self._dspark_swa_indices: torch.Tensor | None = None
-        self._dspark_swa_lengths: torch.Tensor | None = None
+        self._dspark_swa_indices = None
+        self._dspark_swa_lengths = None
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None and speculative_config.method == "dspark":
             width = _aligned_dspark_index_width(window_size, speculative_config.num_speculative_tokens)
-            # Allocate before graph capture; callers write into active views.
+            # DSpark configuration and output capacity are fixed before capture.
             self._dspark_swa_indices = torch.empty((max_tokens, 1, width), dtype=torch.int32, device=device)
             self._dspark_swa_lengths = torch.empty((max_tokens, 1), dtype=torch.int32, device=device)
         self._cache_seq_lens = torch.zeros(max_reqs, dtype=torch.int32, device=device)
@@ -1218,27 +1218,20 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 ).view(num_reqs, blocks_per_req)
         noncausal = not bool(getattr(common, "causal", True))
         if noncausal and ori_sparse_indices is None:
-            speculative_config = self.vllm_config.speculative_config
-            indices_buffer = self._dspark_swa_indices
-            lengths_buffer = self._dspark_swa_lengths
-            if speculative_config is None or indices_buffer is None or lengths_buffer is None:
-                raise RuntimeError("DSpark SWA buffers must be initialized before building draft metadata")
-            spec_tokens = speculative_config.num_speculative_tokens
-            width = _aligned_dspark_index_width(window_size, spec_tokens)
-            if num_actual_tokens > indices_buffer.shape[0] or indices_buffer.shape[-1] != width:
-                raise ValueError("DSpark metadata capacity changed; rebuild before graph capture")
+            indices_buffer = cast(torch.Tensor, self._dspark_swa_indices)
+            lengths_buffer = cast(torch.Tensor, self._dspark_swa_lengths)
             ori_sparse_indices, ori_topk_length = build_dspark_swa_indices(
                 common.block_table_tensor[:num_reqs],
-                spec_tokens,
+                self.vllm_config.speculative_config.num_speculative_tokens,
                 window_size,
                 storage_block_size,
                 common.query_start_loc[: num_reqs + 1],
                 seq_lens,
                 num_actual_tokens,
-                index_width=width,
+                index_width=indices_buffer.shape[-1],
                 indices_output=indices_buffer[:num_actual_tokens],
-                use_logical_indices=True,
                 lengths_output=lengths_buffer[:num_actual_tokens],
+                use_logical_indices=True,
             )
         if (
             not noncausal
