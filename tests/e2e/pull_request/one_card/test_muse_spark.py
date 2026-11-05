@@ -6,7 +6,8 @@ Functional smoke, not accuracy: no checkpoint or tokenizer is downloaded. The
 reduced text config keeps every Muse Spark per-layer pattern (3:1 sliding to
 full attention, NoPE on the full layer, dense and latent-MoE feed-forwards)
 at small widths, and the sliding window is shorter than the prompt so the
-windowed path is exercised.
+windowed path is exercised. One case runs it with the decode graphs captured,
+since that is a different code path and not the one the other cases take.
 """
 
 import json
@@ -98,6 +99,20 @@ class MuseSparkWorker:
         assert not any(layer.self_attn.fused_qk_norm_rope_kv_insert for layer in layers)
         return True
 
+    def decode_graphs_captured(self) -> tuple[bool, str]:
+        """Whether the decode path really ended up captured, and what it is.
+
+        What the engine settles on is not what was asked: the platform lowers
+        cudagraph_mode for a model it will not capture, so a test that only
+        passed the flag would pass against a run that fell back to eager. The
+        mode is read rather than its name matched, because it can be a pair of
+        values whose string form says neither.
+        """
+        from vllm.config import CUDAGraphMode
+
+        mode = self.model_runner.compilation_config.cudagraph_mode
+        return mode.decode_mode() == CUDAGraphMode.FULL, str(mode)
+
 
 def _write_model(destination, config: dict[str, Any] = TEXT_CONFIG) -> None:
     destination.mkdir()
@@ -148,6 +163,50 @@ def test_muse_spark_dummy_forward_and_logprob_replay(tmp_path):
         seed=0,
     ) as runner:
         assert runner.model.collective_rpc("check_muse_spark_paths") == [True]
+        baseline = _generate(runner)
+        replay = _generate(runner)
+    _assert_replay_matches(baseline, replay)
+
+
+@wait_until_npu_memory_free()
+def test_muse_spark_decode_replays_under_graph_capture(tmp_path):
+    """The same reduced model with the decode graphs captured.
+
+    Capture is where this model is least like the ones the mode was built for:
+    every RMSNorm takes the PyTorch path, the routed experts end in a per-route
+    norm outside the fused combine, and the MoE moves a different number of
+    rows per expert on every step. A graph that replays stale buffers is the
+    failure that matters, because it returns tokens rather than raising, so the
+    assertion is that a second decode reproduces the first exactly.
+
+    The resolved mode is checked first. The platform lowers cudagraph_mode for
+    a model it will not capture, and without that check this test would pass
+    against a run that fell back to eager and measured nothing.
+    """
+    model = tmp_path / "model"
+    _write_model(model)
+    with VllmRunner(
+        str(model),
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        worker_extension_cls=f"{__name__}.MuseSparkWorker",
+        dtype="bfloat16",
+        max_model_len=1024,
+        max_num_seqs=2,
+        max_num_batched_tokens=1024,
+        enforce_eager=False,
+        # Only the two batch sizes this test generates with, so capture costs
+        # seconds rather than the default ladder's minutes.
+        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2]},
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.5,
+        seed=0,
+    ) as runner:
+        assert runner.model.collective_rpc("check_muse_spark_paths") == [True]
+        captured = runner.model.collective_rpc("decode_graphs_captured")
+        assert all(flag for flag, _ in captured), (
+            f"the decode path was not captured ({[mode for _, mode in captured]}), so this ran eager"
+        )
         baseline = _generate(runner)
         replay = _generate(runner)
     _assert_replay_matches(baseline, replay)
