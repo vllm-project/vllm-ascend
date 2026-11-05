@@ -329,39 +329,44 @@ Before starting:
 Wait for model loading and graph capture to complete, then check the service from the serving host. Use port `8088` for A2 series and A3 series or `8087` for 950 DT:
 
 ```bash
-curl --fail http://127.0.0.1:8088/v1/models
+curl --fail "http://127.0.0.1:8088/v1/models"
 ```
 
 The response should list the configured model name. After startup, use [Section 6](#6-functional-verification) to verify generation.
 
 ### 5.2 Basic PD Separation Deployment
 
-Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Select the hardware and parallel configuration below. Run the model commands in separate terminals and start the proxy after all model APIs are ready.
+Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Select the hardware and parallel configuration below. Replace the quoted `<...>` placeholders before running the commands. Keep the host addresses consistent across terminals; `nic_name` must identify the interface that owns `local_ip`. Run the model commands in separate terminals and start the proxy after all model APIs are ready.
 
 === "A2 series"
 
-    This W4A8 deployment uses two eight-device A2 series hosts. Prefill runs on `192.168.0.1` and Decode runs on `192.168.0.2`, each using devices 0–7. Each role uses TP2 × DP4 and loads the same checkpoint.
+    This W4A8 deployment uses two eight-device A2 series hosts. Prefill runs on `PREFILL_HOST` and Decode runs on `DECODE_HOST`, each using devices 0–7. Each role uses TP2 × DP4 and loads the same checkpoint.
 
     Before starting:
 
-    - Expose the devices used by each host and mount `/etc/hccn.conf`. Use `--shm-size=128g` and provide sufficient host memory for Engram CPU offload with DP shared memory. Replace the example IP addresses and `eth0` with your environment settings.
+    - Expose the devices used by each host and mount `/etc/hccn.conf`. Use `--shm-size=128g` and provide sufficient host memory for Engram CPU offload with DP shared memory. Replace the IP and network-interface placeholders at the start of each command block. Set `local_ip` to the current host address and `nic_name` to its network interface.
     - Run P and D in separate terminals. After both APIs are ready, start the proxy on the prefill host from the vLLM-Ascend repository root.
 
     **Prefill:**
 
     ```bash
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+    local_ip="${PREFILL_HOST}"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
-    export VLLM_HOST_IP="192.168.0.1"
-    export HCCL_IF_IP="192.168.0.1"
-    export GLOO_SOCKET_IFNAME="eth0"
-    export TP_SOCKET_IFNAME="eth0"
-    export HCCL_SOCKET_IFNAME="eth0"
-    export no_proxy="localhost,127.0.0.1,192.168.0.1,192.168.0.2"
-    export NO_PROXY="localhost,127.0.0.1,192.168.0.1,192.168.0.2"
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${PREFILL_HOST},${DECODE_HOST}"
+    export NO_PROXY="${no_proxy}"
     export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
@@ -393,18 +398,23 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     **Decode:**
 
     ```bash
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+    local_ip="${DECODE_HOST}"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
-    export VLLM_HOST_IP="192.168.0.2"
-    export HCCL_IF_IP="192.168.0.2"
-    export GLOO_SOCKET_IFNAME="eth0"
-    export TP_SOCKET_IFNAME="eth0"
-    export HCCL_SOCKET_IFNAME="eth0"
-    export no_proxy="localhost,127.0.0.1,192.168.0.1,192.168.0.2"
-    export NO_PROXY="localhost,127.0.0.1,192.168.0.1,192.168.0.2"
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${PREFILL_HOST},${DECODE_HOST}"
+    export NO_PROXY="${no_proxy}"
     export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
@@ -436,14 +446,17 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     **Proxy:**
 
     ```bash
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
-    export no_proxy="localhost,127.0.0.1,192.168.0.1,192.168.0.2"
-    export NO_PROXY="localhost,127.0.0.1,192.168.0.1,192.168.0.2"
+    export no_proxy="localhost,127.0.0.1,${PREFILL_HOST},${DECODE_HOST}"
+    export NO_PROXY="${no_proxy}"
 
     python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 25570 \
-        --prefiller-hosts "192.168.0.1" --prefiller-ports 25568 \
-        --decoder-hosts "192.168.0.2" --decoder-ports 25569
+        --prefiller-hosts "${PREFILL_HOST}" --prefiller-ports 25568 \
+        --decoder-hosts "${DECODE_HOST}" --decoder-ports 25569
     ```
 
     **Service Verification:**
@@ -451,8 +464,11 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     From the prefill host, check that both APIs list `qwen38-flash-next-a2-pd`:
 
     ```bash
-    curl --fail http://192.168.0.1:25568/v1/models
-    curl --fail http://192.168.0.2:25569/v1/models
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+
+    curl --fail "http://${PREFILL_HOST}:25568/v1/models"
+    curl --fail "http://${DECODE_HOST}:25569/v1/models"
     ```
 
     After both checks succeed, run the Proxy command in a separate terminal.
@@ -460,7 +476,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     Once the proxy is listening, verify the complete PD path:
 
     ```bash
-    curl --fail http://127.0.0.1:25570/v1/chat/completions \
+    curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d '{
             "model": "qwen38-flash-next-a2-pd",
@@ -485,28 +501,31 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
 
 === "A3 series"
 
-    This W4A8 deployment uses one 16-device A3 series host at `192.168.0.1`. Prefill uses devices 0–7 and Decode uses devices 8–15. Each role uses TP2 × DP4 and loads the same checkpoint.
+    This W4A8 deployment uses one 16-device A3 series host specified by `local_ip`. Prefill uses devices 0–7 and Decode uses devices 8–15. Each role uses TP2 × DP4 and loads the same checkpoint.
 
     Before starting:
 
-    - Expose the devices used by each host and mount `/etc/hccn.conf`. Use `--shm-size=128g` and provide sufficient host memory for Engram CPU offload with DP shared memory. Replace the example IP addresses and `eth0` with your environment settings.
+    - Expose the devices used by each host and mount `/etc/hccn.conf`. Use `--shm-size=128g` and provide sufficient host memory for Engram CPU offload with DP shared memory. Replace the IP and network-interface placeholders at the start of each command block. Set `local_ip` to the current host address and `nic_name` to its network interface.
     - Run P and D in separate terminals. After both APIs are ready, start the proxy on the prefill host from the vLLM-Ascend repository root.
 
     **Prefill:**
 
     ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
-    export VLLM_HOST_IP="192.168.0.1"
-    export HCCL_IF_IP="192.168.0.1"
-    export GLOO_SOCKET_IFNAME="eth0"
-    export TP_SOCKET_IFNAME="eth0"
-    export HCCL_SOCKET_IFNAME="eth0"
-    export no_proxy="localhost,127.0.0.1,192.168.0.1"
-    export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${local_ip}"
+    export NO_PROXY="${no_proxy}"
     export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
@@ -538,18 +557,21 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     **Decode:**
 
     ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=4800
-    export VLLM_HOST_IP="192.168.0.1"
-    export HCCL_IF_IP="192.168.0.1"
-    export GLOO_SOCKET_IFNAME="eth0"
-    export TP_SOCKET_IFNAME="eth0"
-    export HCCL_SOCKET_IFNAME="eth0"
-    export no_proxy="localhost,127.0.0.1,192.168.0.1"
-    export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${local_ip}"
+    export NO_PROXY="${no_proxy}"
     export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
@@ -581,14 +603,16 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     **Proxy:**
 
     ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
-    export no_proxy="localhost,127.0.0.1,192.168.0.1"
-    export NO_PROXY="localhost,127.0.0.1,192.168.0.1"
+    export no_proxy="localhost,127.0.0.1,${local_ip}"
+    export NO_PROXY="${no_proxy}"
 
     python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 25570 \
-        --prefiller-hosts "192.168.0.1" --prefiller-ports 25568 \
-        --decoder-hosts "192.168.0.1" --decoder-ports 25569
+        --prefiller-hosts "${local_ip}" --prefiller-ports 25568 \
+        --decoder-hosts "${local_ip}" --decoder-ports 25569
     ```
 
     **Service Verification:**
@@ -596,8 +620,8 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     From the prefill host, check that both APIs list `qwen38-flash-next-a3-pd`:
 
     ```bash
-    curl --fail http://127.0.0.1:25568/v1/models
-    curl --fail http://127.0.0.1:25569/v1/models
+    curl --fail "http://127.0.0.1:25568/v1/models"
+    curl --fail "http://127.0.0.1:25569/v1/models"
     ```
 
     After both checks succeed, run the Proxy command in a separate terminal.
@@ -605,7 +629,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     Once the proxy is listening, verify the complete PD path:
 
     ```bash
-    curl --fail http://127.0.0.1:25570/v1/chat/completions \
+    curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d '{
             "model": "qwen38-flash-next-a3-pd",
@@ -641,7 +665,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     | Mooncake role / KV base port | `kv_producer` / 30000 | `kv_consumer` / 30100 |
     | Maximum context / sequences / batched tokens | 141312 / 64 / 4096 | 141312 / 64 / 4096 |
 
-    All four processes load `Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp`. Replace `192.168.0.1` and `eth0` with the serving host address and network interface. Provide sufficient host memory for Engram CPU offload and shared memory.
+    All four processes load `Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp`. Set `local_ip` to the serving host address and `nic_name` to its network interface in each command block. Provide sufficient host memory for Engram CPU offload and shared memory.
 
     Run each rank command in a separate terminal. Start the proxy after all four APIs are ready. Port 8087 is also used by the colocated example, so stop that service before starting this proxy.
 
@@ -650,13 +674,16 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     Rank 0:
 
     ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 
-    export VLLM_HOST_IP="192.168.0.1"
-    export HCCL_IF_IP="192.168.0.1"
-    export GLOO_SOCKET_IFNAME="eth0"
-    export TP_SOCKET_IFNAME="eth0"
-    export HCCL_SOCKET_IFNAME="eth0"
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -681,7 +708,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
         --data-parallel-size 2 \
         --data-parallel-size-local 1 \
         --data-parallel-rank 0 \
-        --data-parallel-address 192.168.0.1 \
+        --data-parallel-address "${local_ip}" \
         --data-parallel-rpc-port 13388 \
         --max-model-len 141312 \
         --max-num-seqs 64 \
@@ -700,13 +727,16 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     Rank 1:
 
     ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 
-    export VLLM_HOST_IP="192.168.0.1"
-    export HCCL_IF_IP="192.168.0.1"
-    export GLOO_SOCKET_IFNAME="eth0"
-    export TP_SOCKET_IFNAME="eth0"
-    export HCCL_SOCKET_IFNAME="eth0"
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=2,3
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -731,7 +761,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
         --data-parallel-size 2 \
         --data-parallel-size-local 1 \
         --data-parallel-rank 1 \
-        --data-parallel-address 192.168.0.1 \
+        --data-parallel-address "${local_ip}" \
         --data-parallel-rpc-port 13388 \
         --max-model-len 141312 \
         --max-num-seqs 64 \
@@ -752,13 +782,16 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     Rank 0:
 
     ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 
-    export VLLM_HOST_IP="192.168.0.1"
-    export HCCL_IF_IP="192.168.0.1"
-    export GLOO_SOCKET_IFNAME="eth0"
-    export TP_SOCKET_IFNAME="eth0"
-    export HCCL_SOCKET_IFNAME="eth0"
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=4,5
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -783,7 +816,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
         --data-parallel-size 2 \
         --data-parallel-size-local 1 \
         --data-parallel-rank 0 \
-        --data-parallel-address 192.168.0.1 \
+        --data-parallel-address "${local_ip}" \
         --data-parallel-rpc-port 13389 \
         --max-model-len 141312 \
         --max-num-seqs 64 \
@@ -802,13 +835,16 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     Rank 1:
 
     ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 
-    export VLLM_HOST_IP="192.168.0.1"
-    export HCCL_IF_IP="192.168.0.1"
-    export GLOO_SOCKET_IFNAME="eth0"
-    export TP_SOCKET_IFNAME="eth0"
-    export HCCL_SOCKET_IFNAME="eth0"
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=6,7
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -833,7 +869,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
         --data-parallel-size 2 \
         --data-parallel-size-local 1 \
         --data-parallel-rank 1 \
-        --data-parallel-address 192.168.0.1 \
+        --data-parallel-address "${local_ip}" \
         --data-parallel-rpc-port 13389 \
         --max-model-len 141312 \
         --max-num-seqs 64 \
@@ -854,14 +890,16 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     Run the following command from the vLLM-Ascend repository root after all four model APIs are ready:
 
     ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 
     python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
-        --host 192.168.0.1 \
+        --host "${local_ip}" \
         --port 8087 \
-        --prefiller-hosts 192.168.0.1 192.168.0.1 \
+        --prefiller-hosts "${local_ip}" "${local_ip}" \
         --prefiller-ports 8088 8089 \
-        --decoder-hosts 192.168.0.1 192.168.0.1 \
+        --decoder-hosts "${local_ip}" "${local_ip}" \
         --decoder-ports 8092 8093
     ```
 
@@ -870,16 +908,20 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     Check that all four APIs list `qwen38-flash-next-950-dt-pd` before starting the proxy:
 
     ```bash
-    curl --fail http://192.168.0.1:8088/v1/models
-    curl --fail http://192.168.0.1:8089/v1/models
-    curl --fail http://192.168.0.1:8092/v1/models
-    curl --fail http://192.168.0.1:8093/v1/models
+    local_ip="<LOCAL_SERVICE_IP>"
+
+    curl --fail "http://${local_ip}:8088/v1/models"
+    curl --fail "http://${local_ip}:8089/v1/models"
+    curl --fail "http://${local_ip}:8092/v1/models"
+    curl --fail "http://${local_ip}:8093/v1/models"
     ```
 
     Once the proxy is listening, verify the complete PD path:
 
     ```bash
-    curl --fail http://192.168.0.1:8087/v1/chat/completions \
+    local_ip="<LOCAL_SERVICE_IP>"
+
+    curl --fail "http://${local_ip}:8087/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d '{"model":"qwen38-flash-next-950-dt-pd","messages":[{"role":"user","content":"Who are you?"}],"max_tokens":1024,"temperature":0}'
     ```
@@ -987,11 +1029,11 @@ The complete Prefill, Decode, and proxy commands are provided below.
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
 
     python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
-        --host 127.0.0.1 \
+        --host "127.0.0.1" \
         --port 8246 \
-        --prefiller-hosts 127.0.0.1 \
+        --prefiller-hosts "127.0.0.1" \
         --prefiller-ports 8247 \
-        --decoder-hosts 127.0.0.1 \
+        --decoder-hosts "127.0.0.1" \
         --decoder-ports 8248
     ```
 
@@ -1000,9 +1042,9 @@ The complete Prefill, Decode, and proxy commands are provided below.
     Wait until both model APIs are ready, then start the proxy as described above. Check that prefill uses TP2/PP2/DP1, decode uses TP2/DP2 with static kernels enabled, and both roles report `max_model_len=143360`. Send a 10K image-and-text sample through the proxy using the request below. Replace `<IMAGE_URL>` with the sample image URL and `<TEXT_PROMPT>` with its text; the image must be accessible from the serving environment.
 
     ```bash
-    curl --fail http://127.0.0.1:8247/v1/models
-    curl --fail http://127.0.0.1:8248/v1/models
-    curl --fail http://127.0.0.1:8246/v1/chat/completions \
+    curl --fail "http://127.0.0.1:8247/v1/models"
+    curl --fail "http://127.0.0.1:8248/v1/models"
+    curl --fail "http://127.0.0.1:8246/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d '{"model":"qwen38-megamoe-sp-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
     ```
@@ -1019,7 +1061,7 @@ The complete Prefill, Decode, and proxy commands are provided below.
 
 ## 6 Functional Verification
 
-Use the OpenAI-compatible `/v1/chat/completions` API to verify generation. Select the API address and served model name for your deployment:
+Use the OpenAI-compatible `/v1/chat/completions` API to verify generation. Use the API address and served model name for your deployment. Replace the host, port, and model name in the requests below as needed:
 
 | Deployment | API address | Model name |
 | --- | --- | --- |
@@ -1028,7 +1070,7 @@ Use the OpenAI-compatible `/v1/chat/completions` API to verify generation. Selec
 | Ascend 950 DT colocated | `http://127.0.0.1:8087` | `qwen3.8-flash-next-950-dt` |
 | A2 series PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a2-pd` |
 | A3 series PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a3-pd` |
-| Ascend 950 DT PD proxy | `http://192.168.0.1:8087` | `qwen38-flash-next-950-dt-pd` |
+| Ascend 950 DT PD proxy | `http://<LOCAL_SERVICE_IP>:8087` | `qwen38-flash-next-950-dt-pd` |
 | Ascend 950 DT image-and-text 10K PD proxy | `http://127.0.0.1:8246` | `qwen38-megamoe-sp-pd` |
 
 For PD, complete the proxy check in [Section 5.2](#52-basic-pd-separation-deployment), or [Section 5.3](#53-image-and-text-10k-pd-separation-deployment) for the image-and-text 10K case.
@@ -1036,7 +1078,7 @@ For PD, complete the proxy check in [Section 5.2](#52-basic-pd-separation-deploy
 ### 6.1 Basic Chat Completion
 
 ```bash
-curl http://127.0.0.1:8088/v1/chat/completions \
+curl "http://127.0.0.1:8088/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3.8-flash-next",
@@ -1055,7 +1097,7 @@ Expected result: the service returns HTTP 200 OK with a generated answer in `cho
 Use a W4A8 checkpoint that includes the vision encoder to verify image-and-text input. Replace `<IMAGE_URL>` with an image URL accessible from the serving environment:
 
 ```bash
-curl http://127.0.0.1:8088/v1/chat/completions \
+curl "http://127.0.0.1:8088/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3.8-flash-next",
@@ -1094,7 +1136,7 @@ Function Calling requires the following startup options, which are included in t
 Send a request containing the available tools and set `tool_choice` to `auto`:
 
 ```bash
-curl http://127.0.0.1:8088/v1/chat/completions \
+curl "http://127.0.0.1:8088/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3.8-flash-next",
@@ -1142,7 +1184,7 @@ Reasoning parsing requires the following startup option, which is included in th
 Qwen3.8-Flash-Next uses thinking mode by default. To request reasoning explicitly, set `enable_thinking` to `true` (or omit it). The parser returns the reasoning separately from the final answer:
 
 ```bash
-curl http://127.0.0.1:8088/v1/chat/completions \
+curl "http://127.0.0.1:8088/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3.8-flash-next",
@@ -1166,7 +1208,7 @@ The final answer is returned in `choices[0].message.content`, while the parsed r
 To disable thinking and request a direct answer, use the following request:
 
 ```bash
-curl http://127.0.0.1:8088/v1/chat/completions \
+curl "http://127.0.0.1:8088/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3.8-flash-next",
