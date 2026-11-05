@@ -21,7 +21,10 @@ import copy
 import json
 import os
 import shlex
+import shutil
+import signal
 import subprocess
+import sys
 import threading
 import traceback
 from pathlib import Path
@@ -44,8 +47,12 @@ class RemoteEPDServer(RemoteOpenAIServer):
         server_host: str = "0.0.0.0",
         env_dict: dict[str, str] | None = None,
         max_wait_seconds: float | None = 2800,
+        per_instance_env: list[dict[str, str]] | None = None,
+        assert_clean_exit: bool = True,
     ) -> None:
         self._proc_list = []
+        self.exit_codes: list[int | None] = []
+        self.assert_clean_exit = assert_clean_exit
 
         self.env_dict: dict[str, str] = {}
         if env_dict is not None:
@@ -70,10 +77,19 @@ class RemoteEPDServer(RemoteOpenAIServer):
         else:
             raise RuntimeError("vllm_serves_args must be a list")
 
+        if per_instance_env is not None and len(per_instance_env) != len(self.vllm_serve_args_list):
+            raise ValueError(
+                "per_instance_env must provide one dict per instance: "
+                f"got {len(per_instance_env)}, expected {len(self.vllm_serve_args_list)}"
+            )
+
         serve_arg_cmd = ["vllm", "serve"]
 
         for i, vllm_serve_arg in enumerate(self.vllm_serve_args_list):
-            self.env_dict["ASCEND_RT_VISIBLE_DEVICES"] = str(i)
+            instance_env = dict(self.env_dict)
+            instance_env["ASCEND_RT_VISIBLE_DEVICES"] = str(i)
+            if per_instance_env is not None:
+                instance_env.update({key: str(value) for key, value in per_instance_env[i].items()})
             if isinstance(vllm_serve_arg, list):
                 if "--port" not in vllm_serve_arg:
                     raise ValueError("You have to manually specify the port")
@@ -94,7 +110,7 @@ class RemoteEPDServer(RemoteOpenAIServer):
 
             self.health_url_list.append(super().url_for("health"))
             vllm_serve_arg = [*serve_arg_cmd, *vllm_serve_arg]
-            proc = self._start_server_with_prefix(vllm_serve_arg, self.env_dict, f"[VLLM_{i}] ")
+            proc = self._start_server_with_prefix(vllm_serve_arg, instance_env, f"[VLLM_{i}] ")
             self._proc_list.append(proc)
 
         timeout_value = float(max_wait_seconds) if max_wait_seconds is not None else 2800.0
@@ -105,18 +121,32 @@ class RemoteEPDServer(RemoteOpenAIServer):
     def _poll(self) -> int | None:
         return None
 
-    def _delete_shm(self) -> None:
-        for i, arg in enumerate(self.vllm_serve_args_list):
-            if "--ec-transfer-config" in arg:
-                index = arg.index("--ec-transfer-config")
-                config_str = arg[index + 1]
+    def _delete_shm(self) -> list[str]:
+        """Delete the EC shared-storage paths of all instances and return them.
+
+        Idempotent: ``shutil.rmtree(..., ignore_errors=True)`` makes repeated
+        calls safe, and an unparsable ``--ec-transfer-config`` only warns instead
+        of crashing the context-manager exit path.
+        """
+        deleted: list[str] = []
+        for i, arg in enumerate(getattr(self, "vllm_serve_args_list", [])):
+            if "--ec-transfer-config" not in arg:
+                continue
+            index = arg.index("--ec-transfer-config")
+            config_str = arg[index + 1]
+            try:
                 config_dict = json.loads(config_str)
-                ec_connector_extra_config = config_dict.get("ec_connector_extra_config", {})
-                shm_path = ec_connector_extra_config.get("shared_storage_path")
-                if shm_path:
-                    args = ["rm", "-r", "-f", str(shm_path)]
-                    print(f"delete shm_path is: {shm_path}")
-                    self._start_server_with_prefix(args, None, "[DELETE] ")
+            except (TypeError, ValueError) as exc:
+                print(f"warning: failed to parse --ec-transfer-config for instance {i}: {exc}")
+                continue
+            extra_config = config_dict.get("ec_connector_extra_config") if isinstance(config_dict, dict) else None
+            shm_path = extra_config.get("shared_storage_path") if isinstance(extra_config, dict) else None
+            if not shm_path:
+                continue
+            print(f"delete shm_path is: {shm_path}")
+            shutil.rmtree(str(shm_path), ignore_errors=True)
+            deleted.append(str(shm_path))
+        return deleted
 
     def _read_output(self, pipe, prefix):
         try:
@@ -148,19 +178,40 @@ class RemoteEPDServer(RemoteOpenAIServer):
         stderr_thread.start()
         return proc
 
-    def _terminate_server(self) -> None:
-        """Kill server processes and their children."""
+    def _terminate_server(self) -> list[int | None]:
+        """Kill server processes and their children, returning their exit codes."""
         print("vllm instance is stopping")
+        self.exit_codes = []
         for proc in self._proc_list:
             self._terminate_process_tree(proc)
+            try:
+                code = proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                code = None
+            self.exit_codes.append(code)
+        return self.exit_codes
+
+    def _assert_clean_shutdown(self) -> None:
+        """Assert that every server process exited with an expected code."""
+        still_alive = [(index, proc.pid) for index, proc in enumerate(self._proc_list) if proc.poll() is None]
+        if still_alive:
+            raise AssertionError(f"server processes still alive after shutdown (index, pid): {still_alive}")
+        allowed_exit_codes = {0, -signal.SIGTERM}
+        unexpected = [(index, code) for index, code in enumerate(self.exit_codes) if code not in allowed_exit_codes]
+        if unexpected:
+            raise AssertionError(f"unexpected server exit codes (index, code): {unexpected}")
 
     def __enter__(self):
         """Context manager entry point."""
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit point - clean up all processes."""
+        """Context manager exit: stop processes, clean EC storage, verify the exit."""
         self._terminate_server()
+        self._delete_shm()
+        # Never mask an exception raised inside the ``with`` block with a teardown assertion.
+        if exc_type is None and getattr(self, "assert_clean_exit", True):
+            self._assert_clean_shutdown()
 
 
 class DisaggEpdProxy(RemoteEPDServer):
@@ -170,6 +221,7 @@ class DisaggEpdProxy(RemoteEPDServer):
         env_dict: dict[str, str] | None = None,
         server_host: str = "0.0.0.0",
         max_wait_seconds: float | None = 2800,
+        assert_clean_exit: bool = True,
     ) -> None:
         if proxy_args is None:
             proxy_args_list: list[str] = []
@@ -183,10 +235,12 @@ class DisaggEpdProxy(RemoteEPDServer):
         if env_dict is not None:
             self.env_dict.update(env_dict)
         self._proc_list = list()
+        self.exit_codes: list[int | None] = []
+        self.assert_clean_exit = assert_clean_exit
         self.host = server_host
 
         print(f"proxy param is: {self.proxy_args}")
-        proxy_cmd = ["python", str(DISAGG_EPD_PROXY_SCRIPT), *self.proxy_args]
+        proxy_cmd = [sys.executable, str(DISAGG_EPD_PROXY_SCRIPT), *self.proxy_args]
         proc = self._start_server_with_prefix(proxy_cmd, self.env_dict, "[PROXY] ")
         self._proc_list.append(proc)
 
@@ -208,5 +262,5 @@ class DisaggEpdProxy(RemoteEPDServer):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit point - clean up all processes."""
-        super()._terminate_server()
+        """Context manager exit point - reuse the base teardown and verification."""
+        super().__exit__(exc_type, exc_val, exc_tb)
