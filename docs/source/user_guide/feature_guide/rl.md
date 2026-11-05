@@ -224,6 +224,137 @@ must not span weight versions.
 See the upstream [Async RL guide](https://docs.vllm.ai/en/latest/training/async_rl/)
 for the API lifecycle.
 
+### Weight checker
+
+The Weight Checker helps validate the weight-transfer path during development.
+It computes SHA-256 digests for model parameters on each rank, resets the
+parameters, and checks whether transferring the original weights back restores
+the same digests. See the upstream
+[Weight Checker guide](https://docs.vllm.ai/en/latest/training/weight_checker/)
+for the full API.
+
+All three operations use `POST /weight_checker`:
+
+| Action | Purpose | Request body | Response |
+| --- | --- | --- | --- |
+| `checksum` | Compute the current digest of each checked parameter without changing it. Save the result as the baseline before resetting weights. | `{"action":"checksum"}` | `{"checksums": {key: sha256_hex}}` |
+| `reset` | Zero the checked parameters to test the transfer path. The model cannot serve valid requests until its weights are restored. | `{"action":"reset"}` | `{"status":"reset"}` |
+| `compare` | Compute current digests and compare them with the baseline supplied by the caller. | `{"action":"compare","baseline":{key: sha256_hex}}` | `{"match":bool,"mismatches":[key]}` |
+
+A checksum key has the form `dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:{tensor_name}`,
+so each shard is checked separately. Expert-parallel ranks are identified by
+their DP/PCP/TP coordinates; there is no separate `ep` field. The server does
+not retain the baseline between requests: save the `checksum` response and
+pass its `checksums` object to `compare`.
+
+The standard check transfers the *same original weights* after `reset` and
+expects `compare` to report a full match. An old baseline should not match
+weights changed by a real training step. This procedure validates the
+weight-transfer path, not the correctness of newly trained weights.
+
+#### Example
+
+Start the server with development mode enabled and a working weight-transfer
+backend. For example, when the trainer and rollout engine use different NPUs:
+
+```bash
+VLLM_SERVER_DEV_MODE=1 \
+vllm serve Qwen/Qwen3-0.6B \
+    --weight-transfer-config '{"backend": "hccl"}' \
+    --additional-config '{"rl_config": {"enabled": true}}'
+```
+
+In another terminal, pause generation and save the original checksums:
+
+```bash
+URL=http://127.0.0.1:8000
+
+curl -fsS -X POST "$URL/pause?mode=abort"
+curl -fsS -X POST "$URL/weight_checker" \
+    -H 'Content-Type: application/json' \
+    -d '{"action":"checksum"}' > baseline.json
+
+jq -e '.checksums | length > 0' baseline.json
+```
+
+The final command should print `true`. `baseline.json` contains the actual
+parameter names and SHA-256 digests. Its response has this shape (the values
+below are placeholders):
+
+```json
+{
+  "checksums": {
+    "dp0:pp0:pcp0:tp0:<parameter_name>": "<SHA-256 hex digest>"
+  }
+}
+```
+
+Reset the weights while generation remains paused:
+
+```bash
+curl -fsS -X POST "$URL/weight_checker" \
+    -H 'Content-Type: application/json' \
+    -d '{"action":"reset"}'
+```
+
+Expected response:
+
+```json
+{"status":"reset"}
+```
+
+Transfer the *original weights* back using the configured backend. Follow the
+[Weight transfer](#weight-transfer) procedure, including its start, update,
+and finish steps. Then compare the restored weights with the saved baseline:
+
+```bash
+curl -fsS -X POST "$URL/weight_checker" \
+    -H 'Content-Type: application/json' \
+    -d "{\"action\":\"compare\",\"baseline\":$(jq -c .checksums baseline.json)}"
+```
+
+Expected response after a successful restore:
+
+```json
+{"match":true,"mismatches":[]}
+```
+
+If `match` is `false`, inspect `mismatches` and restore the weights before
+serving requests. Resume generation only after a full match:
+
+```bash
+curl -fsS -X POST "$URL/resume"
+```
+
+#### Operational constraints
+
+- Stay paused from `checksum` through `compare`. Weights are invalid between
+  `reset` and the transfer, and EPLB may move experts while serving. The
+  worker methods do not enforce the pause; the caller must do so.
+- Before `reset`, confirm that a recovery path is available: a working
+  weight-transfer configuration or a checkpoint that `reload_weights` can
+  restore. In RL mode, `rl_config.enabled=true` disables FRACTAL_NZ by setting
+  `weight_nz_mode=0`. In a non-RL deployment where `weight_nz_mode` remains
+  enabled, the weight-update transaction cannot start; checkpoint reload may
+  be needed to recover after `reset`.
+- If the transfer or comparison fails, keep generation paused and restore the
+  weights before resuming. The engine must be awake: sleep levels 1 and 2
+  release weight memory.
+- `reset` is a destructive development operation. Keep development endpoints
+  within a trusted access boundary and do not expose them to the public
+  internet.
+
+#### Limitations
+
+In addition to the
+[upstream limitations](https://docs.vllm.ai/en/latest/training/weight_checker/#limitations):
+
+- Weights held as buffers rather than parameters, such as some quantization
+  repacking paths, are invisible to the checker.
+- MoE weights padded beyond the checkpoint shape may report false mismatches;
+  validate the behavior with the target model before relying on `compare`.
+- Ascend 310P has not yet been verified with the Weight Checker.
+
 ## Training data returned by the engine
 
 ### Token log probabilities
