@@ -4,7 +4,6 @@
 """Ascend-friendly Qwen PLE short convolution."""
 
 import torch
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
@@ -23,7 +22,6 @@ def _store_ple_conv_output(
     out_ok,
     C: tl.constexpr,
     FUSE_RESIDUAL: tl.constexpr,
-    launch_pdl: tl.constexpr,
 ):
     # F.conv1d materializes its output dtype before SiLU and residual additions.
     conv = acc.to(residual_ptr.dtype.element_ty).to(tl.float32)
@@ -43,8 +41,6 @@ def _store_ple_conv_output(
             other=0.0,
         )
         ple_output = outer_residual.to(tl.float32) + ple_output.to(tl.float32)
-    if launch_pdl:
-        tl.extra.cuda.gdc_launch_dependents()
     tl.store(
         residual_ptr + output_t * C + c_offs,
         ple_output,
@@ -78,15 +74,11 @@ def _ple_conv_kernel(
     KERNEL_SIZE: tl.constexpr,
     NULL_STATE_ID: tl.constexpr,
     FUSE_RESIDUAL: tl.constexpr,
-    launch_pdl: tl.constexpr,
 ):
     t = tl.program_id(0)
     pid_c = tl.program_id(1)
     c_offs = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
     c_mask = c_offs < C
-
-    if launch_pdl:
-        tl.extra.cuda.gdc_wait()
 
     # Mixed batches map logical rows back to the original token order.
     output_t = tl.load(token_idx_ptr + t, mask=has_token_map, other=t).to(tl.int64)
@@ -146,7 +138,7 @@ def _ple_conv_kernel(
         acc += weight * tap
 
     _store_ple_conv_output(
-        acc, residual_ptr, outer_residual_ptr, output_t, c_offs, c_mask, out_ok, C, FUSE_RESIDUAL, launch_pdl
+        acc, residual_ptr, outer_residual_ptr, output_t, c_offs, c_mask, out_ok, C, FUSE_RESIDUAL
     )
 
 
@@ -173,14 +165,10 @@ def _ple_conv_decode_kernel(
     HAS_INIT: tl.constexpr,
     NULL_STATE_ID: tl.constexpr,
     FUSE_RESIDUAL: tl.constexpr,
-    launch_pdl: tl.constexpr,
 ):
     t = tl.program_id(0)
     c_offs = tl.program_id(1) * BLOCK_C + tl.arange(0, BLOCK_C)
     c_mask = c_offs < C
-
-    if launch_pdl:
-        tl.extra.cuda.gdc_wait()
 
     output_t = tl.load(token_idx_ptr + t, mask=has_token_map, other=t).to(tl.int64)
     sid = tl.load(state_idx_ptr + t * state_idx_stride).to(tl.int64)
@@ -216,7 +204,7 @@ def _ple_conv_decode_kernel(
         acc += weight * tap
 
     _store_ple_conv_output(
-        acc, residual_ptr, outer_residual_ptr, output_t, c_offs, c_mask, state_ok, C, FUSE_RESIDUAL, launch_pdl
+        acc, residual_ptr, outer_residual_ptr, output_t, c_offs, c_mask, state_ok, C, FUSE_RESIDUAL
     )
 
     # Decode has one program per request and channel block, so state writeback
@@ -339,15 +327,11 @@ def _ple_conv_spec_kernel(
     SPEC_QUERY_LEN: tl.constexpr,
     NULL_STATE_ID: tl.constexpr,
     FUSE_RESIDUAL: tl.constexpr,
-    launch_pdl: tl.constexpr,
 ):
     t = tl.program_id(0)
     pid_c = tl.program_id(1)
     c_offs = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
     c_mask = c_offs < C
-
-    if launch_pdl:
-        tl.extra.cuda.gdc_wait()
 
     output_t = tl.load(token_idx_ptr + t, mask=has_token_map, other=t).to(tl.int64)
 
@@ -408,7 +392,7 @@ def _ple_conv_spec_kernel(
         acc += weight * tap
 
     _store_ple_conv_output(
-        acc, residual_ptr, outer_residual_ptr, output_t, c_offs, c_mask, out_ok, C, FUSE_RESIDUAL, launch_pdl
+        acc, residual_ptr, outer_residual_ptr, output_t, c_offs, c_mask, out_ok, C, FUSE_RESIDUAL
     )
 
 
@@ -520,7 +504,6 @@ def ple_conv_spec(
     num_reqs = state_indices.numel()
     binary_search_iters = max(num_reqs, 1).bit_length()
 
-    launch_pdl = current_platform.is_arch_support_pdl()
     state_idx_stride = state_indices.stride(0)
     weights_by_tap = conv_weights.transpose(0, 1).contiguous()
 
@@ -549,7 +532,6 @@ def ple_conv_spec(
         SPEC_QUERY_LEN=spec_query_len,
         NULL_STATE_ID=NULL_BLOCK_ID,
         FUSE_RESIDUAL=outer_residual is not None,
-        launch_pdl=launch_pdl,
         num_warps=PLE_NUM_WARPS,
     )
     _ple_conv_spec_writeback_kernel[(num_reqs, triton.cdiv(C, BLOCK_C))](
@@ -607,7 +589,6 @@ def ple_conv_prefill(
     num_reqs = state_indices.numel()
     binary_search_iters = max(num_reqs, 1).bit_length()
 
-    launch_pdl = current_platform.is_arch_support_pdl()
     # Pure-prefill indices can be a strided block-table column view.
     state_idx_stride = state_indices.stride(0)
 
@@ -638,7 +619,6 @@ def ple_conv_prefill(
         KERNEL_SIZE=K,
         FUSE_RESIDUAL=outer_residual is not None,
         NULL_STATE_ID=NULL_BLOCK_ID,
-        launch_pdl=launch_pdl,
         num_warps=PLE_NUM_WARPS,
     )
     _ple_conv_writeback_kernel[(num_reqs, triton.cdiv(C, BLOCK_C))](
@@ -710,6 +690,5 @@ def ple_conv_decode(
         HAS_INIT=has_initial_states is not None,
         NULL_STATE_ID=NULL_BLOCK_ID,
         FUSE_RESIDUAL=outer_residual is not None,
-        launch_pdl=current_platform.is_arch_support_pdl(),
         num_warps=PLE_NUM_WARPS,
     )
