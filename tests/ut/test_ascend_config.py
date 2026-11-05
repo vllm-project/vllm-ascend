@@ -1680,6 +1680,23 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_gdn_projection_overlap_token_limit(self, mock_fix):
+        for additional_config, expected in [({}, 0), ({"gdn_projection_overlap_max_tokens": 64}, 64)]:
+            with self.subTest(additional_config=additional_config):
+                clear_ascend_config()
+                vc = VllmConfig()
+                vc.additional_config = additional_config
+                self.assertEqual(init_ascend_config(vc).gdn_projection_overlap_max_tokens, expected)
+        for value in (-1, True, 1.5, "64"):
+            with self.subTest(value=value):
+                clear_ascend_config()
+                vc = VllmConfig()
+                vc.additional_config = {"gdn_projection_overlap_max_tokens": value}
+                with self.assertRaisesRegex(ValueError, "gdn_projection_overlap_max_tokens"):
+                    init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     @patch.dict(os.environ, {"VLLM_ASCEND_KVPOOL_RANGE_DEBUG": "1"})
     def test_kv_pool_range_debug_defaults_off_without_env_fallback(self, mock_fix):
         vc = VllmConfig()

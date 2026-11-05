@@ -3,27 +3,26 @@
 """Optional overlap of independent GDN input projections during ACL capture."""
 
 import torch
+from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
 
-def initialize_gdn_projection_overlap(layer) -> None:
-    layer._ascend_ba_stream = None
+def initialize_gdn_projection_overlap(layer, config: VllmConfig) -> None:
     limit = get_ascend_config().gdn_projection_overlap_max_tokens
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
-        raise ValueError("gdn_projection_overlap_max_tokens must be a non-negative integer")
-    layer._ascend_ba_max_tokens = limit
-    config = layer.vllm_config
+    compilation_config = config.compilation_config
     # LoRA can replace these modules, and quantized GEMMs may share scratch
     # storage. Do not overlap either projection unless both are plain GEMMs.
     if (
         not limit
+        or compilation_config.mode != CompilationMode.NONE
+        or compilation_config.cudagraph_mode not in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY)
         or hasattr(layer, "in_proj_qkv")
         or config.lora_config is not None
         or config.parallel_config.use_ubatching
-        or getattr(config.parallel_config, "prefill_context_parallel_size", 1) != 1
+        or config.parallel_config.prefill_context_parallel_size != 1
         or config.model_config.dtype != torch.bfloat16
     ):
         return
@@ -37,16 +36,14 @@ def initialize_gdn_projection_overlap(layer) -> None:
     # Model-owned, device-local sharing avoids one extra stream per GDN layer.
     # Events stay per layer so each captured fork/join has distinct ownership.
     device = torch.npu.current_device()
-    context = getattr(getattr(config, "compilation_config", None), "static_forward_context", {})
-    for candidate in context.values():
+    for candidate in compilation_config.static_forward_context.values():
         if getattr(candidate, "_ascend_ba_device", None) == device:
-            stream = getattr(candidate, "_ascend_ba_stream", None)
-            if stream is not None:
-                layer._ascend_ba_stream = stream
-                break
-    if layer._ascend_ba_stream is None:
+            layer._ascend_ba_stream = candidate._ascend_ba_stream
+            break
+    else:
         layer._ascend_ba_stream = torch.npu.Stream()
     layer._ascend_ba_device = device
+    layer._ascend_ba_max_tokens = limit
     layer._ascend_ba_events = (torch.npu.Event(), torch.npu.Event())
 
 
@@ -55,7 +52,8 @@ def project_gdn_inputs(layer, hidden_states):
     if (
         stream is None
         or torch.compiler.is_compiling()
-        or hidden_states.shape[0] > layer._ascend_ba_max_tokens
+        or hidden_states.dtype != torch.bfloat16
+        or not 0 < hidden_states.shape[0] <= layer._ascend_ba_max_tokens
         or not torch.npu.is_current_stream_capturing()
     ):
         return layer.in_proj_qkvz(hidden_states)[0], layer.in_proj_ba(hidden_states)[0]

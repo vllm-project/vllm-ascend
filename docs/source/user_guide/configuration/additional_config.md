@@ -391,20 +391,26 @@ PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-
 
 ## GDN input projection overlap
 
-Enable with `--additional-config '{"gdn_projection_overlap_max_tokens": 64}'`.
-The default is 0 (disabled); 64 is a trial setting, not a measured 910C threshold.
-Only BF16 plain unquantized QKVZ and BA projections, PCP=1, no LoRA/DBO,
-no output gather or custom communication op, and ACLGraph capture outside
-Dynamo tracing are eligible. Other paths remain serial. Quantized projections
-and the split QKV/Z LoRA path are excluded. Both known upstream and Ascend
-unquantized linear methods are accepted. Weight tensors are not repacked. Eligible layers share one model-owned stream
-per NPU device, with separate events for each layer.
+Set `gdn_projection_overlap_max_tokens` to a positive integer in
+`--additional-config` to allow Qwen GDN layers to capture the QKVZ and BA
+input projections on separate NPU streams. The default is `0` (disabled).
+The threshold counts input rows after graph padding. The projections use the
+same weights and operators as the serial path.
 
-For whole-model evaluation, use MRV2 with an eager forward captured into a
-full decode ACLGraph, for example
-`--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}'`.
-`--enforce-eager` disables graph capture and therefore does not enable overlap.
-Dynamo-compiled forward regions stay serial; confirm the chosen serving path
-with a trace rather than assuming that the configuration flag proves overlap.
+This option requires an uncompiled forward (`mode: 0`) captured in
+`FULL` or `FULL_DECODE_ONLY` ACLGraph mode. It applies only to plain BF16
+projections with no LoRA, dual batch overlap, prefill context parallelism,
+output gather, or custom communication operator. Eager execution, piecewise
+graphs and other ineligible paths keep the serial projections.
 
-Validate correctness, quality and performance on the deployment hardware before enabling in production.
+For an initial 910C trial with Model Runner V2, use:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <qwen-bf16-model> --dtype bfloat16 \
+  --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --additional-config '{"gdn_projection_overlap_max_tokens":64}'
+```
+
+`64` is a trial threshold. Confirm the selected graph buckets and actual
+overlap with a profiler, and compare decode latency and output accuracy
+against the same graph configuration with the threshold set to `0`.
