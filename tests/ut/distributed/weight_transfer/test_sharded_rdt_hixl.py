@@ -213,7 +213,8 @@ def test_wait_polls_pending_then_consumes_completed_handle(session, monkeypatch)
     assert not transport._requests
 
 
-def test_producer_lease_blocks_source_deregistration():
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_producer_shutdown_releases_ipc_only_after_safe_close(close_fails):
     # Execute the actual producer lease/close methods without importing the
     # device-only module. A live reader must block teardown before HIXL close.
     tree = ast.parse((MODULE_DIR / "sharded_rdt_trainer.py").read_text(encoding="utf-8"))
@@ -229,16 +230,33 @@ def test_producer_lease_blocks_source_deregistration():
     producer._serve_lock = threading.Lock()
     producer._hixl_consumers = set()
     producer._hixl_closing = False
-    producer._hixl = SimpleNamespace(close=lambda: calls.append("close"))
+    cached_mapping = object()
+    producer._base_cache = {"ipc_handle": cached_mapping}
+
+    def close():
+        assert producer._base_cache == {"ipc_handle": cached_mapping}
+        calls.append("close")
+        if close_fails:
+            raise RuntimeError("HIXL disconnect failed")
+
+    producer._hixl = SimpleNamespace(close=close)
     for name in ("_cache", "_gens", "_sharers", "_serve_rings", "_pack_dsts"):
         setattr(producer, name, {})
     producer.hixl_add_consumer("reader:1000")
     with pytest.raises(RuntimeError, match="inference"):
         producer.shutdown()
     assert not calls
+    assert producer._base_cache == {"ipc_handle": cached_mapping}
     producer.hixl_remove_consumer("reader:1000")
+    if close_fails:
+        with pytest.raises(RuntimeError, match="disconnect failed"):
+            producer.shutdown()
+        assert calls == ["close"]
+        assert producer._base_cache == {"ipc_handle": cached_mapping}
+        return
     producer.shutdown()
     assert calls == ["close"]
+    assert not producer._base_cache
     with pytest.raises(RuntimeError, match="shutting down"):
         producer.hixl_add_consumer("late-reader:2000")
 
