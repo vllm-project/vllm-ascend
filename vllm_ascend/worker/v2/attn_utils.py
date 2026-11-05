@@ -41,14 +41,12 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
 from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    EncoderOnlyAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -70,6 +68,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -131,6 +130,15 @@ from vllm_ascend.worker.utils import (
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+if vllm_version_is("0.32.0"):
+    import vllm.models.qwen4_exp.common.qsa_cache as qsa_cache  # type: ignore[import-not-found]
+
+    QSAMetadataBuilder = qsa_cache.QSAMetadataBuilder
+else:
+    import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer  # type: ignore[import-not-found]
+
+    QSAMetadataBuilder = qsa_indexer.QSAIndexerMetadataBuilder
 
 
 # MRV2's upstream _dummy_run drops runner-specific kwargs such as``skip_gdn_state_update``
@@ -358,6 +366,9 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             )
             continue
 
+        if getattr(attn_module, "attn_backend", None) is AscendFlashAttentionBackend:
+            # Account for the kernel's physical width before sizing/allocating pages.
+            spec = AscendFlashAttentionBackend.customize_spec(spec)
         if type(spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
             spec = mxfp_cache_spec(spec)
         # vLLM #42309 annotates EAGLE groups from ``spec.is_draft``, tagged on
@@ -692,10 +703,10 @@ def build_attn_state(
     if vllm_config.model_config.runner_type == "pooling":
         if kv_cache_config is None:
             raise RuntimeError("Pooling attention state requires KVCacheConfig.")
-        if isinstance(
-            kv_cache_config.kv_cache_groups[0].kv_cache_spec,
-            EncoderOnlyAttentionSpec,
-        ):
+        kv_cache_groups = kv_cache_config.kv_cache_groups
+        # Encoder-only models (e.g. BERT/BGE) keep no KV cache, so they produce
+        # no kv cache groups and always run as uncached prefill.
+        if not kv_cache_groups:
             attn_state = AscendAttentionState.PrefillNoCache
         else:
             attn_state = AscendAttentionState.PrefillCacheHit
@@ -1011,7 +1022,7 @@ def _uses_single_raw_mla_cache(
         return False
     if not kv_cache_spec.supports_single_raw_backing:
         return False
-    if not supports_component_major_mla_pd(vllm_config) or enable_sfa(vllm_config):
+    if not supports_component_major_mla_pd(vllm_config):
         return False
 
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])
@@ -1031,6 +1042,8 @@ def _uses_single_raw_mla_cache(
         # The external reader retains its fused-cache contract, including
         # DCP. Native FIA continues to follow the dependency's exclusions.
         return True
+    if enable_sfa(vllm_config):
+        return False
     return supports_strided_mla_cache(vllm_config, attn_module, kv_cache_spec)
 
 

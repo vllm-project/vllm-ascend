@@ -19,11 +19,14 @@
 import os
 from collections.abc import Callable, Sequence
 from importlib.metadata import version
+from typing import cast
 
 import numpy as np
 import torch
 import vllm.v1.worker.gpu.buffer_utils
 from vllm.logger import logger
+
+from vllm_ascend.utils import vllm_version_is
 
 
 def check_triton_ascend_version_valid() -> bool:
@@ -81,13 +84,20 @@ def get_row_indices_from_key(key: int | slice | tuple, dim_size: int) -> set[int
 class MonitoredNumPyArray:
     """A wrapper around a NumPy array that monitors modifications."""
 
-    def __init__(self, array: np.ndarray, callback: Callable):
+    def __init__(self, array: np.ndarray, callback: Callable, prefix_callback: Callable | None = None):
         self._array = array
         self._callback = callback
+        self._prefix_callback = prefix_callback
 
     def __setitem__(self, key, value):
         self._array[key] = value
         dim_size = self._array.shape[0]
+        slice_key = key[0] if isinstance(key, tuple) and key else key
+        if self._prefix_callback is not None and isinstance(slice_key, slice):
+            start, stop, step = slice_key.indices(dim_size)
+            if start == 0 and step == 1:
+                self._prefix_callback(stop)
+                return
         row_indices = get_row_indices_from_key(key, dim_size)
         for row in row_indices:
             self._callback(row)
@@ -102,13 +112,20 @@ class MonitoredNumPyArray:
 class MonitoredTorchTensor:
     """A wrapper around a torch tensor that monitors modifications."""
 
-    def __init__(self, tensor: torch.Tensor, callback: Callable):
+    def __init__(self, tensor: torch.Tensor, callback: Callable, prefix_callback: Callable | None = None):
         self._tensor = tensor
         self._callback = callback
+        self._prefix_callback = prefix_callback
 
     def __setitem__(self, key, value):
         self._tensor[key] = value
         dim_size = self._tensor.size(0)
+        slice_key = key[0] if isinstance(key, tuple) and key else key
+        if self._prefix_callback is not None and isinstance(slice_key, slice):
+            start, stop, step = slice_key.indices(dim_size)
+            if start == 0 and step == 1:
+                self._prefix_callback(stop)
+                return
         row_indices = get_row_indices_from_key(key, dim_size)
         for row in row_indices:
             self._callback(row)
@@ -151,6 +168,7 @@ class UvaBufferWrapper:
         self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self._np: np.ndarray = self._cpu.numpy()
         self._modified_indices: set[int] = set()
+        self._dirty_prefix_end = 0
         requested_real_uva = is_uva_available()
         if requested_real_uva:
             import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
@@ -164,25 +182,44 @@ class UvaBufferWrapper:
     def _mark_cpu_modified(self, key: int):
         self._modified_indices.add(key)
 
+    def _mark_prefix_modified(self, end: int) -> None:
+        # UvaBufferPool writes [:n]; retain one bound instead of n Python indices.
+        self._dirty_prefix_end = max(self._dirty_prefix_end, end)
+
     @property
     def cpu(self):
-        return self._cpu if self._use_real_uva else MonitoredTorchTensor(self._cpu, self._mark_cpu_modified)
+        return (
+            self._cpu
+            if self._use_real_uva
+            else MonitoredTorchTensor(self._cpu, self._mark_cpu_modified, self._mark_prefix_modified)
+        )
 
     @property
     def np(self):
-        return self._np if self._use_real_uva else MonitoredNumPyArray(self._np, self._mark_cpu_modified)
+        return (
+            self._np
+            if self._use_real_uva
+            else MonitoredNumPyArray(self._np, self._mark_cpu_modified, self._mark_prefix_modified)
+        )
 
     def _sync_dirty_rows(self) -> None:
-        if not self._use_real_uva and self._modified_indices:
-            dirty_rows = sorted(self._modified_indices)
+        if self._use_real_uva:
+            return
+        prefix_end = self._dirty_prefix_end
+        if prefix_end:
+            _int64_storage(self._uva[:prefix_end]).copy_(_int64_storage(self._cpu[:prefix_end]), non_blocking=True)
+        # Sparse writes can precede or follow a prefix write. Only copy rows
+        # outside the prefix, and retire both markers after successful enqueue.
+        dirty_rows = sorted(row for row in self._modified_indices if row >= prefix_end)
+        if dirty_rows:
             n_dirty = len(dirty_rows)
-            if dirty_rows[0] == 0 and dirty_rows[-1] == n_dirty - 1:
-                # Common path: dirty rows are a contiguous prefix [0..n-1].
-                # This is always the case when copy_to_uva writes via
-                # dst[:n] = x.  Contiguous slice copy_ keeps the CPU source
-                # pinned and enables true async DMA without an intermediate
-                # tensor or stream sync.
-                _int64_storage(self._uva[:n_dirty]).copy_(_int64_storage(self._cpu[:n_dirty]), non_blocking=True)
+            start_row = dirty_rows[0]
+            if dirty_rows[-1] - start_row == n_dirty - 1:
+                # Individual row marks can cover any contiguous range.
+                # Slice copy_ preserves the pinned source for async DMA.
+                _int64_storage(self._uva[start_row : start_row + n_dirty]).copy_(
+                    _int64_storage(self._cpu[start_row : start_row + n_dirty]), non_blocking=True
+                )
             else:
                 # Sparse modification pattern — fall back to indexed copy.
                 # Explicitly re-pin the CPU source so that non_blocking is
@@ -194,7 +231,8 @@ class UvaBufferWrapper:
                     _int64_storage(self._uva)[dirty_rows] = copied
                 else:
                     self._uva[dirty_rows] = src.to(device="npu", non_blocking=True)
-            self._modified_indices.clear()
+        self._modified_indices.clear()
+        self._dirty_prefix_end = 0
 
     def uva(self, n: int | None = None) -> torch.Tensor:
         """Get the device data of the buffer.
@@ -205,5 +243,29 @@ class UvaBufferWrapper:
         self._sync_dirty_rows()
         return self._uva if n is None else self._uva[:n]
 
+    def copy_chunks_to_uva(self, chunks: Sequence, n: int) -> torch.Tensor:
+        """Concatenate staged chunks into the CPU mirror and mark them dirty.
+
+        vLLM main (#63633) stages values by reference and copies them with
+        ``np.concatenate(out=...)``, which bypasses ``MonitoredNumPyArray``'s
+        ``__setitem__``, so mark the written rows explicitly.
+        """
+        np.concatenate(chunks, out=self._np[:n], casting="unsafe")
+        self._mark_prefix_modified(n)
+        return self.uva(n)
+
 
 vllm.v1.worker.gpu.buffer_utils.UvaBuffer = UvaBufferWrapper
+
+
+if not vllm_version_is("0.32.0"):
+
+    def _copy_chunks_to_uva(self, chunks: Sequence, n: int) -> torch.Tensor:
+        buf = self._next_buf(n)
+        if isinstance(buf, UvaBufferWrapper):
+            return cast(UvaBufferWrapper, buf).copy_chunks_to_uva(chunks, n)
+        # NonUvaBuffer keeps its own CPU mirror and copy on uva().
+        np.concatenate(chunks, out=buf.np[:n], casting="unsafe")
+        return buf.uva(n)
+
+    vllm.v1.worker.gpu.buffer_utils.UvaBufferPool.copy_chunks_to_uva = _copy_chunks_to_uva  # type: ignore

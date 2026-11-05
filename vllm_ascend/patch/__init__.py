@@ -813,9 +813,9 @@
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
 #       Ascend uses the NPU v2 runner by default. Features that are not
-#       V2-ready (pooling KV, draft_window_size, suffix
+#       V2-ready (draft_window_size, suffix
 #       speculative decoding, ngram speculative decoding, draft_model
-#       speculative decoding, dflash2 graph, and p-eagle)
+#       speculative decoding, and p-eagle)
 #       default to v1.
 #       Upstream GPU-specific architecture, feature, and Triton gates must not
 #       silently switch an
@@ -887,9 +887,9 @@
 #       At worker patch time, if ``register_kv_cache_dtype`` cannot be
 #       imported from ``vllm.config.cache``, mutate
 #       ``vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"]`` to
-#       ``torch.float8_e4m3fn`` in place. No-op on vLLM builds that already
-#       provide the pluggable mechanism (kvquant_27 / future main), where the
-#       eager handler import already flipped the dtype.
+#       ``torch.float8_e4m3fn`` in place. When the API exists, also replace
+#       the upstream ``torch.uint8`` default if no handler updated it yet.
+#       Preserve any other dtype supplied by a registered handler.
 #    Related PR (if no, explain why):
 #       vLLM commit ``dd7e350c9 pluggable kv quant dtype`` (on kvquant_27).
 #    Future Plan:
@@ -1200,13 +1200,33 @@
 # ** 15. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3Model.precompute_and_store_context_kv`
+#   2. `vllm.model_executor.models.lilicorr.DFlash2Qwen3DecoderLayer`
+#   3. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3ForCausalLM._read_mask_embedding`
 #    Why:
 #       The function directly calls the ops.rms_norm and ops.rotary_imbedding operators,
 #       but NPU does not have a corresponding implementation.
+#       LiLiCorr's optional convolutional backbone otherwise resolves to the CUDA-oriented
+#       upstream DFlash2 layer rather than the Ascend implementation.
+#       Its constructor overwrites self.decoder_layer_cls with a module-level
+#       import, so a subclass factory alone cannot select the Ascend layer.
+#       ModelScope raises NotExistError when optional mask_embedding.pt is absent,
+#       instead of returning None as the upstream helper expects.
 #    How：
 #       Replace ops.* with the internal implementation of vllm-ascend.
+#       Consume returned RoPE keys for both in-place and out-of-place NPU backends,
+#       using a key-only call to avoid cloning the entire context buffer.
+#       When the paired vLLM revision provides LiLiCorr, bind its decoder factory to the
+#       Ascend DFlash2 layer while retaining the upstream LiLiCorr head and weight loader.
+#       This binding is applied once per worker before model construction;
+#       it adds no tensor operations or synchronization to inference.
+#       Treat only ModelScope's missing mask_embedding.pt error as an absent
+#       override; preserve errors for malformed data and other missing files.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/57934
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for ops.*.
+#       Remove the LiLiCorr binding when upstream exposes a platform decoder factory.
+#       Remove the mask file wrapper when vLLM handles ModelScope's absence error.
 #
 # ** 16. File: worker/patch_spec_decode_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1677,9 +1697,16 @@
 #       the target quant config during `load_dspark_model`, then restore it.
 #       Self-contained drafts (e.g. Qwen3 DSpark speculators) keep their own
 #       quant config.
+#       Mark draft reconstruction for platform validation (PR #20570).
+#       Disabled drafts may inherit the target collection phase; additional_config
+#       and the existing Ascend config initialization behavior remain unchanged.
+#    Related PR:
+#       https://github.com/vllm-project/vllm-ascend/pull/20570
 #    Future Plan:
 #       Remove this patch once upstream `load_dspark_model` inherits the target
 #       quant config for same-checkpoint drafts.
+#       Remove the draft scope when upstream exposes draft construction context
+#       to the platform validation hook.
 #
 # ** 31. File: worker/patch_adaptive_verification.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1695,6 +1722,8 @@
 #       and use a scoped `TorchFunctionMode` to route only `index_fill_` through
 #       `DeviceOperator`. The A5 adaptor temporarily implements it with the
 #       equivalent `scatter_` operation; other hardware keeps the native path.
+#       Apply this only when the legacy torch allocator exists. Newer vLLM
+#       Triton allocators are reused directly without replacing their kernels.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/47808
 #    Future Plan:

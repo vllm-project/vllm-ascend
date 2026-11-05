@@ -115,7 +115,16 @@ def cpu_cache(array):
 
 
 class TestMooncakeHybrid(unittest.TestCase):
-    def make_hybrid(self, extra_entry=False, private_tail=False, tp_rank=0, tp_size=1, use_mla=False):
+    def make_hybrid(
+        self: unittest.TestCase,
+        extra_entry=False,
+        private_tail=False,
+        tp_rank=0,
+        tp_size=1,
+        use_mla=False,
+        pcp_size=1,
+        pcp_rank=0,
+    ):
         groups = [
             KVCacheGroupSpec(
                 ["model.layers.0.kv", "model.layers.2.kv"],
@@ -165,6 +174,8 @@ class TestMooncakeHybrid(unittest.TestCase):
                 tp_rank=tp_rank,
                 tp_size=tp_size,
                 use_mla=use_mla,
+                pcp_size=pcp_size,
+                pcp_rank=pcp_rank,
             )
         store = MemoryRangeStore()
         worker.m_store = store
@@ -262,7 +273,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         config.parallel_config.tensor_parallel_size = 8
         config.model_config.use_mla = True
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
-        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"):
+        with patch.object(mooncake_backend.MooncakeBackend, "create_scheduler_client"):
             scheduler = create_kv_pool_scheduler(config, use_layerwise=True, kv_cache_config=worker.kv_cache_config)
         self.assertEqual(scheduler.cacheable_group_ids, [0, 1, 2])
         self.assertEqual(scheduler.hash_block_size, 16)
@@ -474,7 +485,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         keys = scheduler.store_scheduler.batch_is_readable.call_args_list[0].args[0]
         self.assertEqual(keys[0], "model@mooncake_hybrid_v1:layout@group:0@block:16@6831@0")
 
-    def save_prefix(self, worker, last_chunk=True):
+    def save_prefix(self: unittest.TestCase, worker, last_chunk=True):
         request = ReqMeta(
             "request",
             token_len_chunk=64,
@@ -644,7 +655,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
         with (
             patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient"),
-            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib") as importer,
+            patch.object(mooncake_backend.MooncakeBackend, "create_scheduler_client"),
             patch(
                 "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
                 side_effect=lambda spec: (
@@ -654,7 +665,6 @@ class TestMooncakeHybrid(unittest.TestCase):
                 ),
             ),
         ):
-            importer.import_module.return_value = MagicMock()
             scheduler = create_kv_pool_scheduler(config, kv_cache_config=group_config, use_layerwise=True)
             self.assertTrue(scheduler.block_key_hybrid)
             request = SimpleNamespace(request_id="r", block_hashes=[bytes([i]) * 32 for i in range(4)])

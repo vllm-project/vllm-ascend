@@ -9,6 +9,9 @@
 # do not trigger the full CI suite.
 
 estimated_times:
+  tests/e2e/pull_request/one_card/test_mc2_local_padding.py: 60
+  tests/e2e/pull_request/one_card/test_mla_prolog_head_padding.py: 30
+  tests/e2e/pull_request/one_card/model_runner_v2/test_uva_prefix.py: 30
   tests/e2e/pull_request/one_card/test_kv_pool_accuracy.py: 410
   tests/e2e/pull_request/one_card/test_flash_attn_precision.py: 30
   tests/e2e/pull_request/one_card/test_swiglu_mx_quant.py: 30
@@ -67,7 +70,6 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_ec_cpu_offload.py: 1200
   tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 360
   tests/e2e/pull_request/one_card/test_decoder_replay.py: 60
-  tests/e2e/pull_request/one_card/test_ec_mooncake_fallback.py: 60
   tests/e2e/pull_request/one_card/test_fla_lazy_imports.py: 60
   tests/e2e/pull_request/one_card/test_gdn_block_packed_states.py: 60
   tests/e2e/pull_request/one_card/test_gdn_stable_argsort.py: 60
@@ -80,6 +82,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_npu_device_synchronize.py: 60
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_npu_ipc_weight_transfer.py: 280
   tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py: 460
+  tests/e2e/pull_request/one_card/test_qwen35_evs_video.py: 180
   tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py: 320
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_pause_resume.py: 260
   tests/e2e/pull_request/two_card/rlhf/state_transitions/test_pause_device_idle.py: 300
@@ -102,10 +105,13 @@ estimated_times:
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dflash.py: 600
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dspark.py: 600
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py: 710
+  # Initial estimate: one target-only and three LiLiCorr model runs.
+  tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_8_lilicorr.py: 1200
   tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 460
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 850
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode_heavy.py: 1020
   tests/e2e/pull_request/two_card/test_data_parallel.py: 590
+  tests/e2e/pull_request/two_card/test_cpu_offloading.py: 600
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 270
   tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 170
   tests/e2e/pull_request/two_card/test_ec_mooncake_encoder_output.py: 900
@@ -144,6 +150,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 1140
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
+  tests/e2e/pull_request/four_card/test_ec_mooncake_cross_encoder_store.py: 900
   tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py: 1190
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 580
   tests/e2e/pull_request/four_card/test_deepseek_v4.py: 600
@@ -155,6 +162,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_next_w8a8.py: 360
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
   tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 300
+  tests/e2e/pull_request/four_card/test_sparse_hccl_checkpoint.py: 250
   tests/e2e/pull_request/two_card/test_gemma4.py: 290
   tests/e2e/pull_request/four_card/test_minimax_m3.py: 240
   tests/e2e/pull_request/four_card/test_kimi_k3.py: 600

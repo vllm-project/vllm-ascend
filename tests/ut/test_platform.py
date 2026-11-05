@@ -345,8 +345,9 @@ def test_setup_compile_backend_scopes_kda_splitting_to_piecewise(mode):
 
     _setup_compile_backend(config, compile_backend="test_backend")
 
+    assert "vllm::glm5next_kda_forward" not in compilation_config.splitting_ops
     expected_count = int(mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE))
-    assert compilation_config.splitting_ops.count("vllm::glm5next_kda_forward") == expected_count
+    assert compilation_config.splitting_ops.count("vllm::glm5next_kda_forward_with_output") == expected_count
     if mode in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY):
         assert compilation_config.splitting_ops == []
 
@@ -2192,6 +2193,34 @@ class TestNPUPlatform(TestBase):
 
                 parent_hook.assert_not_called()
                 self.assertEqual(vllm_config.cache_config.block_size, block_size)
+
+    def test_update_block_size_for_backend_leaves_dsv41_alone(self):
+        """DeepSeek V4.1 must keep the block size its cache was built with.
+
+        The V4.1 cache backend does not override
+        get_supported_kernel_block_sizes(), so the parent's Phase 1 would replace
+        the size settled before the model was constructed with the default 16,
+        while the allocated cache keeps the settled size.
+        AscendDSAV41MetadataBuilder then rebuilds the V4.1 MLA spec from the
+        worker's current cache_config.block_size, so the metadata would describe
+        a different page geometry than the cache it is applied to.
+        """
+        for model_type in ("deepseek_v41", "deepseek_v41_text", "deepseek_v4.1", "deepseek_v4.1_text"):
+            for block_size in (32, 64, 128):
+                with self.subTest(model_type=model_type, block_size=block_size):
+                    vllm_config = TestNPUPlatform.mock_vllm_config()
+                    vllm_config.model_config.hf_config.model_type = model_type
+                    vllm_config.cache_config.block_size = block_size
+
+                    with patch.object(Platform, "update_block_size_for_backend") as parent_hook:
+                        self.platform.update_block_size_for_backend(vllm_config)
+
+                    parent_hook.assert_not_called()
+                    self.assertEqual(vllm_config.cache_config.block_size, block_size)
+
+    def test_update_block_size_for_backend_keeps_the_settled_size_for_dsv41(self):
+        """A parent that would derive another size must not reach DeepSeek V4.1."""
+        self.assertEqual(self._run_hook_with_derived_size("deepseek_v41", 128, 16), 128)
 
     def test_update_block_size_for_backend_keeps_the_parent_value_for_other_models(self):
         self.assertEqual(self._run_hook_with_derived_size("qwen3_moe", 32, 4096), 4096)

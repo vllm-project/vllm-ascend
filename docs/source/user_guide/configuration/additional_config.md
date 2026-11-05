@@ -12,18 +12,6 @@ Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064),
 - **Recommendation**: Use `--additional-config` for new deployments and migrate existing configurations
 - **Future Plan**: Environment variables will be **removed** in a future release; only `--additional-config` will be supported
 
-### Quick Reference
-
-| Environment Variable | Config Key | Type Conversion |
-|---------------------|------------|-----------------|
-| `VLLM_ASCEND_BALANCE_SCHEDULING` | `scheduler_config.enable_balance_scheduling` | `"1"` → `true`, `"0"` → `false` |
-| `MSMONITOR_USE_DAEMON` | `msmonitor_use_daemon` | `"1"` → `true`, `"0"` → `false` |
-| `VLLM_ASCEND_ENABLE_MLAPO` | `enable_mlapo` | `"1"` → `true`, `"0"` → `false` |
-| `VLLM_ASCEND_ENABLE_NZ` | `weight_nz_mode` | Integer (unchanged, field name changed) |
-| `VLLM_ASCEND_ENABLE_FUSED_MC2` | `enable_fused_mc2` | Integer (unchanged) |
-| `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` | `enable_transpose_kv_cache_by_block` | `"1"` → `true`, `"0"` → `false` |
-| `VLLM_ASCEND_KVPOOL_RANGE_DEBUG` | `kv_pool_range_debug` | `"1"` → `true`, `"0"` → `false` |
-
 ## How to use
 
 With either online mode or offline mode, users can use additional configuration. Take Qwen3 as an example:
@@ -229,6 +217,8 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 | `enable_diagnostics` | bool | `False` | Enable verbose logs for feature validation and debugging only. It is disabled by default and should remain disabled in production. |
 
 **rejection_sampler_config**
+
+For Model Runner V2, enable Entropy Verify with `enable_entropy_verify=true` and `speculative_config.rejection_sample_method="standard"`. Entropy Verify and upstream `"block"` verification are mutually exclusive. See [Block Verify and Entropy Verify](../feature_guide/speculative_decoding.md#block-verify-and-entropy-verify) for usage and sampling semantics.
 
 > **Note**: Both block verify and entropy verify improve speculative decoding performance (higher acceptance rate, lower latency) at the cost of reduced sampling precision. A larger `posterior_alpha` makes the adjustment more aggressive — it further lowers the acceptance threshold for high-entropy tokens, improving throughput but degrading output quality. Users should tune these parameters based on their specific model weights and application scenario to find the right trade-off between performance and precision.
 

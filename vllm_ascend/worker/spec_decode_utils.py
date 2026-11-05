@@ -7,7 +7,7 @@ import torch
 
 # Single source of truth lives next to the kernel + its JIT warmup wrapper;
 # re-exported here for existing callers.
-from vllm_ascend.ops.triton.spec_decode.utils import (  # noqa: F401
+from vllm_ascend.ops.triton.v1.spec_decode.utils import (  # noqa: F401
     PREPARE_INPUTS_BLOCK_SIZE,
 )
 

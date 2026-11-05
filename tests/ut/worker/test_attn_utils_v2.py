@@ -727,6 +727,20 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, blocked_spec)
 
 
+def test_v2_flashmla_draft_cache_uses_selected_reader_with_sparse_target(monkeypatch):
+    layer_name = "draft.model.layers.0.self_attn.attn"
+    target_config = SimpleNamespace(kv_transfer_config=None, sparse=True)
+    layer = MLAAttention.__new__(MLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.impl = SimpleNamespace(use_flashmla=True)
+    spec = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {layer_name: layer})
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda config: config.sparse)
+    assert attn_utils._uses_single_raw_mla_cache(target_config, layer_name, spec)
+    layer.impl.use_flashmla = False
+    assert not attn_utils._uses_single_raw_mla_cache(target_config, layer_name, spec)
+
+
 def test_v2_zeroer_constructs_component_zeroers(monkeypatch):
     class RecordingZeroer:
         calls: list[dict[str, Any]] = []
@@ -834,6 +848,7 @@ def test_v2_model_runner_binds_tuple_aware_zeroer(monkeypatch):
         "static_forward_context": {},
         "num_blocks": 2,
         "cache_dtype": "auto",
+        "excluded_cache_components": set(),
     }
 
 
@@ -1990,6 +2005,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     pcp_manager = (
         SimpleNamespace(
             build_attention_context=MagicMock(return_value=pcp_context),
+            is_target_attn_groups=MagicMock(return_value=True),
         )
         if pcp_context is not None
         else None
@@ -2526,14 +2542,14 @@ def test_sfa_indexer_li_c4_allocates_and_reshapes_scale_views(monkeypatch):
 
 
 def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
-    encoder_spec = attn_utils.EncoderOnlyAttentionSpec.__new__(attn_utils.EncoderOnlyAttentionSpec)
     pooling_encoder = SimpleNamespace(
         model_config=SimpleNamespace(runner_type="pooling"),
     )
     pooling_other = SimpleNamespace(
         model_config=SimpleNamespace(runner_type="pooling"),
     )
-    encoder_kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=encoder_spec)])
+    # Encoder-only models (BERT/BGE) build no KV cache groups at all.
+    empty_kv_cache_config = SimpleNamespace(kv_cache_groups=[])
     other_kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())])
     mtp = SimpleNamespace(
         model_config=SimpleNamespace(runner_type="generate"),
@@ -2566,7 +2582,7 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
             2,
             seq,
             seq,
-            kv_cache_config=encoder_kv_cache_config,
+            kv_cache_config=empty_kv_cache_config,
         )
         is state.PrefillNoCache
     )
