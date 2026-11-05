@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import torch
 import torch_npu
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup, SparseMLAIndexGroupBuilder
+from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 from vllm.v1.worker.workspace import current_workspace_manager
 
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
@@ -59,14 +60,18 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
     def _build(self, common_attn_metadata, draft_index=None, pcp_context=None):
         metadata = super()._build(common_attn_metadata, draft_index, pcp_context)
         metadata.num_reqs = common_attn_metadata.num_reqs
-        rows = torch.arange(metadata.num_input_tokens, device=self.device, dtype=torch.int32)
         if draft_index not in self._request_row_buffers:
             self._request_row_buffers[draft_index] = torch.empty(
                 self._row_capacity, device=self.device, dtype=torch.int32
             )
-        metadata.req_id_per_token = self._request_row_buffers[draft_index][: metadata.num_input_tokens]
-        metadata.req_id_per_token.copy_(torch.searchsorted(metadata.query_start_loc[1:].contiguous(), rows, right=True))
-        metadata.req_id_per_token.clamp_(max=max(metadata.num_reqs - 1, 0))
+        # Use Core's device-boundary mapping with Ascend's padded input extent.
+        # Keep separate backing storage for each captured MTP graph owner.
+        metadata.req_id_per_token = compute_token_to_req_indices(
+            metadata.query_start_loc,
+            self._request_row_buffers[draft_index],
+            int(common_attn_metadata.query_start_loc_cpu[-1]),
+            metadata.num_input_tokens,
+        )
         if metadata.num_prefills:
             seq_lens_cpu = metadata.seq_lens_cpu
             if seq_lens_cpu is None:
