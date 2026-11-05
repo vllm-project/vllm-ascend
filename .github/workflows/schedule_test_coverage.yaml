@@ -43,10 +43,11 @@ defaults:
   run:
     shell: bash -el {0}
 
-# Extra coverage branch collected with the main run.
-# latest = newest releases/v* branch. none = skip. Or a releases/v* branch name.
+# This run collects singlecard operator coverage for the checked-out ref only.
+# none skips the extra release-branch plan. That branch may not have
+# select_tests.py --singlecard-ops yet.
 env:
-  COVERAGE_BRANCH: latest
+  COVERAGE_BRANCH: none
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.vllm_ascend_ref || 'main' }}
@@ -65,7 +66,7 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.vllm_ascend_ref || 'main' }}
+          ref: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_ref || 'main' }}
           fetch-depth: 0
 
       - name: Checkout coverage helper from main
