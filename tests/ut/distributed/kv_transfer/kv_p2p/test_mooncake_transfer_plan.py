@@ -10,6 +10,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan i
     context_parallel_parameters_check,
     cp_group_meta,
     kv_head_groups,
+    local_remote_block_port_mappings,
+    set_hma_shared_port,
 )
 
 
@@ -212,3 +214,173 @@ def test_cp_group_meta_port_and_group_properties(
             assert len(cp_group) == dcp_size
             all_ports.extend(cp_group)
     assert all(port_base <= port < port_base + tp_size * pcp_size for port in all_ports)
+
+
+# --------------------------------------------------- local_remote_block_port_mappings
+
+
+def _port_mappings(**overrides):
+    params = {
+        "num_key_value_heads": 8,
+        "use_mla": True,
+        "use_sparse": False,
+        "prefill_tp_size": 2,
+        "remote_cp_size": 1,
+        "local_cp_size": 1,
+        "remote_pcp_size": 1,
+        "remote_dcp_size": 1,
+        "remote_port": 30000,
+        "decode_tp_size": 2,
+        "decode_pcp_size": 1,
+        "decode_dcp_size": 1,
+        "decode_side_channel_port": 31000,
+        "r_blk": 1,
+    }
+    params.update(overrides)
+    return local_remote_block_port_mappings(**params)
+
+
+def test_local_remote_block_port_mappings_mla_single_cp():
+    p_meta, d_meta, mappings = _port_mappings()
+    assert p_meta == {(0,): {"cp_groups": [[30000], [30001]], "select_cp_groups_id": 0}}
+    assert d_meta == {(0,): {"cp_groups": [[31000], [31001]], "select_cp_groups_id": 0}}
+    assert mappings == {31000: [[30000]], 31001: [[30001]]}
+
+
+def test_local_remote_block_port_mappings_mla_dcp_two():
+    p_meta, d_meta, mappings = _port_mappings(
+        prefill_tp_size=4,
+        remote_dcp_size=2,
+        decode_tp_size=4,
+        decode_dcp_size=2,
+    )
+    assert p_meta == {(0,): {"cp_groups": [[30000, 30001], [30002, 30003]], "select_cp_groups_id": 0}}
+    assert d_meta == {(0,): {"cp_groups": [[31000, 31001], [31002, 31003]], "select_cp_groups_id": 0}}
+    assert mappings == {31000: [[30000]], 31001: [[30001]], 31002: [[30002]], 31003: [[30003]]}
+
+
+def test_local_remote_block_port_mappings_non_mla_one_head_per_rank():
+    p_meta, d_meta, mappings = _port_mappings(
+        num_key_value_heads=4,
+        use_mla=False,
+        prefill_tp_size=4,
+        decode_tp_size=4,
+    )
+    assert p_meta == {
+        (0,): {"cp_groups": [[30000]], "select_cp_groups_id": 0},
+        (1,): {"cp_groups": [[30001]], "select_cp_groups_id": 0},
+        (2,): {"cp_groups": [[30002]], "select_cp_groups_id": 0},
+        (3,): {"cp_groups": [[30003]], "select_cp_groups_id": 0},
+    }
+    assert d_meta == {
+        (0,): {"cp_groups": [[31000]], "select_cp_groups_id": 0},
+        (1,): {"cp_groups": [[31001]], "select_cp_groups_id": 0},
+        (2,): {"cp_groups": [[31002]], "select_cp_groups_id": 0},
+        (3,): {"cp_groups": [[31003]], "select_cp_groups_id": 0},
+    }
+    assert mappings == {31000: [[30000]], 31001: [[30001]], 31002: [[30002]], 31003: [[30003]]}
+
+
+def test_local_remote_block_port_mappings_block_size_ratio_two():
+    # r_blk = 2: P CP ranks q and q+1 of a group map to D rank (q // 2), so only
+    # even D CP ranks get P ports and odd ones get an empty P list.
+    _, _, mappings = _port_mappings(prefill_tp_size=4, remote_dcp_size=2, decode_tp_size=4, decode_dcp_size=2, r_blk=2)
+    assert mappings == {31000: [[30000, 30001]], 31001: [[]], 31002: [[30002, 30003]], 31003: [[]]}
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"prefill_tp_size": 4, "remote_dcp_size": 2, "decode_tp_size": 4, "decode_dcp_size": 2},
+        {"prefill_tp_size": 4, "remote_dcp_size": 2, "decode_tp_size": 4, "decode_dcp_size": 2, "r_blk": 2},
+        {"num_key_value_heads": 4, "use_mla": False, "prefill_tp_size": 4, "decode_tp_size": 4},
+        {"num_key_value_heads": 4, "use_mla": False, "prefill_tp_size": 4, "decode_tp_size": 2},
+    ],
+)
+def test_local_remote_block_port_mappings_structure(overrides):
+    p_meta, d_meta, mappings = _port_mappings(**overrides)
+    assert set(p_meta) == set(d_meta)
+    for d_port, p_port_lists in mappings.items():
+        assert isinstance(d_port, int)
+        assert isinstance(p_port_lists, list)
+        for p_ports in p_port_lists:
+            assert isinstance(p_ports, list)
+            for port in p_ports:
+                assert 30000 <= port < 30000 + overrides.get("prefill_tp_size", 2) * 1
+    for d_port in mappings:
+        assert 31000 <= d_port < 31000 + overrides.get("decode_tp_size", 2) * 1
+
+
+# ---------------------------------------------------------------- set_hma_shared_port
+
+
+def _hma(**overrides):
+    params = {
+        "is_hma_required": True,
+        "use_mla": False,
+        "use_sparse": False,
+        "num_key_value_heads": 1,
+        "prefill_tp_size": 4,
+        "remote_port": 30000,
+        "remote_dcp_size": 2,
+        "decode_tp_size": 2,
+        "decode_tp_rank": 0,
+        "chosen_tp_list": [2, 3],
+        "remote_handshake_port_list": [[30000, 30001]],
+    }
+    params.update(overrides)
+    return params
+
+
+def test_set_hma_shared_port_noop_when_not_hma():
+    port_list = [[30000, 30001]]
+    result = set_hma_shared_port(**_hma(is_hma_required=False, remote_handshake_port_list=port_list))
+    assert result is port_list
+    assert result == [[30000, 30001]]
+
+
+@pytest.mark.parametrize("use_mla,use_sparse", [(True, False), (False, True)])
+def test_set_hma_shared_port_skips_mla_or_sparse(use_mla, use_sparse):
+    port_list = [[30000, 30001]]
+    result = set_hma_shared_port(**_hma(use_mla=use_mla, use_sparse=use_sparse, remote_handshake_port_list=port_list))
+    assert result is port_list
+    assert result == [[30000, 30001]]
+
+
+def test_set_hma_shared_port_replaces_replicas_and_appends_mamba_ports():
+    port_list = [[30000, 30001]]
+    result = set_hma_shared_port(**_hma(remote_handshake_port_list=port_list))
+    # Replica swap: chosen TP ranks 2/3 pick replica 1 of the dcp repeat, so both
+    # attention ports move by +2. Mamba ports for decode TP rank 0 (k = 2) are
+    # appended to the final shard.
+    assert result is port_list
+    assert result == [[30002, 30003, 30000, 30001]]
+
+
+def test_set_hma_shared_port_single_replica_only_appends_mamba_ports():
+    # num_heads == prefill_tp => one head per prefill rank => group_span = 1 and
+    # n_replica = 1, so attention ports are untouched; Mamba ports are appended.
+    port_list = [[30000, 30001]]
+    result = set_hma_shared_port(
+        **_hma(
+            num_key_value_heads=4,
+            remote_dcp_size=1,
+            decode_tp_size=2,
+            decode_tp_rank=1,
+            chosen_tp_list=[0],
+            remote_handshake_port_list=port_list,
+        )
+    )
+    assert result is port_list
+    assert result == [[30000, 30001, 30002, 30003]]
+
+
+def test_set_hma_shared_port_skips_duplicate_mamba_ports():
+    # With one KV head over 4 prefill ranks group_span = 4, n_replica = 4 and the
+    # chosen ranks keep the original replica, so attention ports stay; the Mamba
+    # ports already exist in the final shard and must not be appended twice.
+    port_list = [[30000, 30001]]
+    result = set_hma_shared_port(**_hma(remote_dcp_size=1, chosen_tp_list=[0, 1], remote_handshake_port_list=port_list))
+    assert result is port_list
+    assert result == [[30000, 30001]]

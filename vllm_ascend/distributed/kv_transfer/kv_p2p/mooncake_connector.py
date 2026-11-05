@@ -96,6 +96,12 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan i
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
     kv_head_groups as pull_kv_head_groups,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    local_remote_block_port_mappings as pull_local_remote_block_port_mappings,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    set_hma_shared_port as pull_set_hma_shared_port,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -2944,45 +2950,31 @@ class MooncakeConnectorWorker:
             )
 
         def get_local_remote_block_port_mappings():
-            context_parallel_parameters_check()
-            p_node_cp_group_meta = get_cp_group_meta(
-                prefill_tp_size, meta.remote_pcp_size, meta.remote_dcp_size, meta.remote_port
+            p_node_cp_group_meta, d_node_cp_group_meta, mappings = pull_local_remote_block_port_mappings(
+                num_key_value_heads=self.num_key_value_heads,
+                use_mla=self.use_mla,
+                use_sparse=self.use_sparse,
+                prefill_tp_size=prefill_tp_size,
+                remote_cp_size=remote_cp_size,
+                local_cp_size=local_cp_size,
+                remote_pcp_size=meta.remote_pcp_size,
+                remote_dcp_size=meta.remote_dcp_size,
+                remote_port=meta.remote_port,
+                decode_tp_size=self.tp_size,
+                decode_pcp_size=self.pcp_size,
+                decode_dcp_size=self.dcp_size,
+                decode_side_channel_port=self.side_channel_port,
+                r_blk=r_blk,
             )
-            d_node_cp_group_meta = get_cp_group_meta(self.tp_size, self.pcp_size, self.dcp_size, self.side_channel_port)
-            local_remote_block_port_mappings: dict[int, list[list[int]]] = {}
-            for d_node_head_key in d_node_cp_group_meta:
-                for p_node_head_key in p_node_cp_group_meta:
-                    if not set(p_node_head_key).issubset(set(d_node_head_key)):
-                        continue
-                    d_node_head_group = d_node_cp_group_meta[d_node_head_key]
-                    p_node_head_group = p_node_cp_group_meta[p_node_head_key]
-                    for d_cp_group in d_node_head_group["cp_groups"]:
-                        select_cp_groups_id = p_node_head_group["select_cp_groups_id"]
-                        p_cp_groups = p_node_head_group["cp_groups"]
-                        p_cp_group = p_cp_groups[select_cp_groups_id]
-                        p_node_head_group["select_cp_groups_id"] = (
-                            select_cp_groups_id + 1 if select_cp_groups_id + 1 < len(p_cp_groups) else 0
-                        )
-                        for d_idx, d_port in enumerate(d_cp_group):
-                            if d_port not in local_remote_block_port_mappings:
-                                local_remote_block_port_mappings[d_port] = []
-                            p_port_remote_list = []
-                            for p_idx, p_port in enumerate(p_cp_group):
-                                # When Bd == Bp, r_blk = 1, which degenerates to the original `p_idx % Lcp` rule.
-                                # When Bd = r * Bp, all blocks of P CP rank q are mapped to D rank `(q // r) % Lcp`.
-                                if (p_idx // r_blk - d_idx) % min(len(d_cp_group), len(p_cp_group)) == 0:
-                                    p_port_remote_list.append(p_port)
-                            local_remote_block_port_mappings[d_port].append(p_port_remote_list)
-
             logger.info(
                 "p_node_cp_group_meta is:: %s. d_node_cp_group_meta is:: %s. "
                 "local_remote_block_port_mappings is:: %s. ",
                 p_node_cp_group_meta,
                 d_node_cp_group_meta,
-                local_remote_block_port_mappings,
+                mappings,
             )
 
-            return local_remote_block_port_mappings
+            return mappings
 
         def get_remote_port_send_num(
             local_remote_block_port_mappings: dict[int, list[list[int]]],
@@ -3016,48 +3008,24 @@ class MooncakeConnectorWorker:
             return remote_port_send_num
 
         def _set_hma_shared_port(prefill_tp_size, meta, remote_handshake_port_list, req_id):
-            """Rewrite remote attention ports for HMA load balancing and append Mamba ports.
-
-            Only applies to HMA (hybrid) non-MLA/non-sparse models. It does two things:
-
-            1. Attention replica balancing. A remote attention port offset decomposes as
-               ``kv_head_group_offset + dcp_repeat_offset + dcp_rank``. Within the same head
-               group, only the TP replicas that share the same ``dcp_rank`` but differ in
-               ``dcp_repeat`` hold the exact same attention KV shard. So substitution is
-               restricted to the dcp_repeat (replica) dimension - the head group and dcp_rank
-               parts are preserved - otherwise different DCP shards would fetch duplicated KV.
-               The replica is picked from the request's random rank choice to spread load.
-            2. Mamba port append. The Mamba state lives on a different set of P ranks than the
-               attention shards, so the matching Mamba ports are appended to the final shard
-               (which carries the Mamba transfer); duplicates are skipped.
-            """
+            """Delegate HMA attention replica balancing / Mamba port append to transfer_plan."""
             if self._is_hma_required and not (self.use_mla or self.use_sparse):
-                remote_dcp = max(meta.remote_dcp_size, 1)
-                group_span = prefill_tp_size // len(get_kv_head_groups(prefill_tp_size))
-                n_replica = max(group_span // remote_dcp, 1)
                 chosen_tp_list = self._get_remote_rank(req_id, prefill_tp_size)
-                if n_replica > 1:
-                    for shard_ports in remote_handshake_port_list:
-                        for i in range(len(shard_ports)):
-                            # Decompose the port offset into pcp segment + head-group offset +
-                            # dcp part, keeping all of them and only swapping the replica.
-                            tp_off = (shard_ports[i] - meta.remote_port) % prefill_tp_size
-                            pcp_seg = (shard_ports[i] - meta.remote_port) - tp_off
-                            group_off = tp_off // group_span * group_span
-                            dcp_part = (tp_off - group_off) % remote_dcp
-                            # Determine replica ID using random choice of current request to maintain load balancing.
-                            replica = (chosen_tp_list[i % len(chosen_tp_list)] // remote_dcp) % n_replica
-                            shard_ports[i] = meta.remote_port + pcp_seg + group_off + replica * remote_dcp + dcp_part
-                # Append this D rank's matching Mamba ports to the final shard (the one that
-                # carries the Mamba state); k = prefill_tp / decode_tp ports per D rank.
-                k = prefill_tp_size // self.tp_size
-                final_ports = remote_handshake_port_list[-1]
-                pcp_seg = (final_ports[0] - meta.remote_port) // prefill_tp_size * prefill_tp_size
-                for j in range(k):
-                    p = meta.remote_port + pcp_seg + self.tp_rank * k + j
-                    if p not in final_ports:
-                        final_ports.append(p)
-            return remote_handshake_port_list
+            else:
+                chosen_tp_list = []
+            return pull_set_hma_shared_port(
+                is_hma_required=self._is_hma_required,
+                use_mla=self.use_mla,
+                use_sparse=self.use_sparse,
+                num_key_value_heads=self.num_key_value_heads,
+                prefill_tp_size=prefill_tp_size,
+                remote_port=meta.remote_port,
+                remote_dcp_size=meta.remote_dcp_size,
+                decode_tp_size=self.tp_size,
+                decode_tp_rank=self.tp_rank,
+                chosen_tp_list=chosen_tp_list,
+                remote_handshake_port_list=remote_handshake_port_list,
+            )
 
         remote_block_size, local_cp_rank, local_cp_size, remote_cp_size, r_blk = self._get_local_remote_cp_params(meta)
 
