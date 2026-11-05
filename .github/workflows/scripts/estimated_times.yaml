@@ -134,7 +134,6 @@ estimated_times:
   tests/e2e/pull_request/two_card/_310p/test_dense_model_310p.py: 250
   tests/e2e/pull_request/two_card/_310p/test_moe_model_310p.py: 290
   tests/e2e/pull_request/two_card/_310p/test_vl_model_310p.py: 330
-  # Seconds for startup, two FSDP2 -> DP2/EP syncs, generation, and shutdown.
   tests/e2e/pull_request/four_card/test_sharded_rdt_hixl.py: 300
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 250
   tests/e2e/pull_request/four_card/_310p/test_moe_model_310p.py: 290
