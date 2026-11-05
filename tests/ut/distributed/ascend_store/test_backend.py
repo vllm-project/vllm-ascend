@@ -1790,6 +1790,18 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.store.batch_put_from_layers.return_value = [1]
         self.assertEqual(b.put(["k1"], [[100]], [[10]]), [False])
 
+    def test_put_rejects_none_descriptor_without_logging_exception(self):
+        b = self._make_backend()
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
+        ) as mock_logger:
+            result = b.put(["k1"], [None], [[10]])
+
+        self.assertEqual(result, [False])
+        b.store.batch_put_from_layers.assert_not_called()
+        error_log = _format_log_call(mock_logger.error.call_args)
+        self.assertIn("local_layer_counts=[0]", error_log)
+
     def test_put_exception(self):
         b = self._make_backend()
         b.store.batch_put_from_layers.side_effect = RuntimeError("backend fail")

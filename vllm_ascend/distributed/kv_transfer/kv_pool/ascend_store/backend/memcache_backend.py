@@ -498,7 +498,7 @@ class MemcacheBackend(Backend):
                 "Refusing memcache put rows without valid local descriptors: rows=%s keys=%s local_layer_counts=%s",
                 invalid_rows,
                 [key[index] for index in invalid_rows],
-                [len(addr[index]) for index in invalid_rows],
+                [len(addr[index]) if addr[index] is not None else 0 for index in invalid_rows],
             )
             return [False] * len(key)
         self.ensure_initialized()
