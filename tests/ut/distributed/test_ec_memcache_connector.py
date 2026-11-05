@@ -317,6 +317,43 @@ def test_ensure_cache_available_skips_similarity_prewarm_when_disabled() -> None
     connector._cache_matcher.batch_ensure_similarity_cache_available.assert_not_called()
 
 
+def test_exact_hit_count_is_recorded_when_cache_is_loaded() -> None:
+    connector = _make_scheduler_connector()
+    connector._backend.exists.return_value = [1]
+    request = MagicMock(mm_features=[MagicMock(identifier="request-exact", data="exact-data")])
+
+    connector.ensure_cache_available(request, 0)
+    assert connector._mm_hash_hits == {"request-exact"}
+    assert connector._mm_hash_hit_count == 0
+
+    connector.update_state_after_alloc(request, 0)
+    assert connector._mm_hashes_need_loads == {"request-exact"}
+    assert connector._mm_hash_hit_count == 1
+
+    # A later decode step probes the still-running request again, but does
+    # not schedule its multimodal feature again, so it is not a new hit.
+    connector.build_connector_meta(MagicMock())
+    connector.ensure_cache_available(request, 0)
+    assert connector._mm_hash_hits == {"request-exact"}
+    assert connector._mm_hash_hit_count == 1
+
+
+def test_ensure_cache_available_skips_probe_in_decode() -> None:
+    connector = _make_scheduler_connector()
+    connector._backend.exists.return_value = [1]
+    request = MagicMock(
+        request_id="request-decode",
+        num_prompt_tokens=100,
+        mm_features=[MagicMock(identifier="request-exact")],
+    )
+
+    assert connector.ensure_cache_available(request, 120)
+
+    connector._backend.exists.assert_not_called()
+    assert connector._mm_hash_hits == set()
+    assert connector._mm_hash_hit_count == 0
+
+
 def test_scheduler_selects_data_client_before_constructing_similarity_matcher() -> None:
     vllm_config = MagicMock()
     vllm_config.model_config.model = "model"

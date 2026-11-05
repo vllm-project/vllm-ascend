@@ -212,9 +212,22 @@ class ECMemcacheConnector(ECConnectorBase):
     # ``update_state_after_alloc``.
     #
     # A cache miss is a normal prewarm result rather than an availability error,
-    # so this method always returns True. ``num_computed_tokens`` is retained for
-    # the connector interface but is not needed by this request-level EC lookup.
+    # so this method always returns True. ``num_computed_tokens`` is the
+    # scheduler's computed position after subtracting speculative/output
+    # placeholders. Once it reaches the end of the prompt, the request is in
+    # decode and its multimodal encoder cache has already been handled; avoid
+    # repeated Memcache probes on every decode step.
     def ensure_cache_available(self, request: "Request", num_computed_tokens: int) -> bool:
+        if num_computed_tokens >= request.num_prompt_tokens:
+            logger.debug(
+                "Skip EC cache check: request=%s is in decode stage "
+                "(computed_prompt_tokens=%d, prompt_tokens=%d)",
+                request.request_id,
+                num_computed_tokens,
+                request.num_prompt_tokens,
+            )
+            return True
+
         similarity_enabled = self._similarity_config.enabled
         exact_match_missing_features = self._ensure_exact_cache_available(
             request,
@@ -231,7 +244,6 @@ class ECMemcacheConnector(ECConnectorBase):
         # ensure_cache_available, such as continued chunk scheduling.
         if self._backend.exists([identifier]) == [1]:
             self._mm_hash_hits.add(identifier)
-            self._mm_hash_hit_count += 1
             logger.debug("Current mm_hash=%s hits in memcache", identifier)
             return True
         return False
@@ -262,6 +274,7 @@ class ECMemcacheConnector(ECConnectorBase):
         # If there is an exact hit for current_image_mm_hash, it will certainly be loaded.
         if current_image_mm_hash in self._mm_hash_hits:
             self._mm_hashes_need_loads.add(current_image_mm_hash)
+            self._mm_hash_hit_count += 1
             return
 
         similarity_enabled = self._similarity_config.enabled
@@ -467,7 +480,6 @@ class ECMemcacheConnector(ECConnectorBase):
         ):
             if existed == 1:
                 self._mm_hash_hits.add(current_image_mm_hash)
-                self._mm_hash_hit_count += 1
                 logger.debug("Current mm_hash=%s is available in memcache", current_image_mm_hash)
             elif collect_missing:
                 missing_features.append(feature_by_mm_hash[current_image_mm_hash])
