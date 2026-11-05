@@ -75,6 +75,7 @@
 
 # ops
 /vllm_ascend/ops @zzzzwwjj
+/vllm_ascend/ops/triton/batch_invariant @Ronald1995
 /vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129
 
 # quantization
@@ -82,7 +83,7 @@
 
 # sample
 /vllm_ascend/sample @realliujiaxu
-/vllm_ascend/worker/v2/sample @realliujiaxu
+/vllm_ascend/worker/v2/sample @realliujiaxu @zouzy5137
 
 # spec decode
 /vllm_ascend/worker/v2/spec_decode @wxsIcey @Tflowers-0129
@@ -91,14 +92,15 @@
 /vllm_ascend/core/batch_job_aware_scheduler.py
 /vllm_ascend/core/dyntra_lb_scheduler.py
 /vllm_ascend/core/recompute_scheduler.py
-/vllm_ascend/core/scheduler_profiling_chunk.py
+/vllm_ascend/core/scheduler_profiling_chunk.py @weiguihua2
 /vllm_ascend/core/short_request_first_scheduler.py
+/vllm_ascend/core/profiling_chunk_predictor.py
 
 # kv cache
-/vllm_ascend/core/kv_cache_config_builder.py @yzeyu71
-/vllm_ascend/core/kv_cache_interface.py @yzeyu71
-/vllm_ascend/core/kv_cache_placement.py @yzeyu71
-/vllm_ascend/core/single_type_kv_cache_manager.py @yzeyu71
+/vllm_ascend/core/kv_cache_config_builder.py @yzeyu71 @Angazenn
+/vllm_ascend/core/kv_cache_interface.py @yzeyu71 @Angazenn
+/vllm_ascend/core/kv_cache_placement.py @yzeyu71 @Angazenn
+/vllm_ascend/core/single_type_kv_cache_manager.py @yzeyu71 @Angazenn
 
 # Core framework
 /vllm_ascend/ascend_config.py 
