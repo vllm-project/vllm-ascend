@@ -140,7 +140,10 @@ def test_adaptive_verification_patch_preserves_triton_allocator(monkeypatch):
 
     monkeypatch.delattr(adaptive, "_assign_draft_token_budget", raising=False)
     monkeypatch.delattr(adaptive, "_assign_draft_token_budget_compiled", raising=False)
-    allocator = adaptive.assign_draft_token_budget
+    # Model the newer Triton API even when CI installs a legacy vLLM release
+    # that does not export assign_draft_token_budget yet.
+    allocator = Mock()
+    monkeypatch.setattr(adaptive, "assign_draft_token_budget", allocator, raising=False)
     module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
     importlib.reload(module)
 

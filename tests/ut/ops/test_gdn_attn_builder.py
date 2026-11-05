@@ -1831,8 +1831,14 @@ def test_long_fixed_drafts_use_strided_recurrent_route(builder_cls, num_speculat
     )
     query_len = num_speculative_tokens + 1
     common = create_common_attn_metadata(BatchSpec([64, 64], [query_len, query_len]), 16, torch.device("cpu"))
+    # The generic fixture has only ceil(64 / 16) == 4 cache columns.
+    # Speculative GDN needs one state slot per verification token; retain
+    # a wider physical row to exercise the strided state-table view too.
+    state_slots = torch.arange(1, 2 * (query_len + 2) + 1, dtype=torch.int32).view(2, query_len + 2)
+    common.block_table_tensor = state_slots
     metadata = builder.build_for_cudagraph_capture(common)
     assert metadata.num_spec_decodes == 2
+    torch.testing.assert_close(metadata.spec_state_indices_tensor, state_slots[:, :query_len])
     assert metadata.spec_decode_metadata.use_upstream_recurrent is expected_fused
     assert not metadata.spec_decode_metadata.use_upstream_conv
     assert (metadata.spec_decode_metadata.actual_seq_lengths is None) is expected_fused
