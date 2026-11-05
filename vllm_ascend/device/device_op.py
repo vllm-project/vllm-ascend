@@ -577,8 +577,10 @@ class BaseDeviceAdaptor:
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # The custom QSFA kernel supports native query groups 1..128 on A3/A5.
         # Reuse the packed gather without splitting and concatenating it again.
-        query = packed_query if packed_query is not None else (
-            ql_nope.contiguous() if q_pe is None else torch.cat([ql_nope, q_pe], dim=-1)
+        query = (
+            packed_query
+            if packed_query is not None
+            else (ql_nope.contiguous() if q_pe is None else torch.cat([ql_nope, q_pe], dim=-1))
         )
         rope_head_dim = (
             sfa_impl.qk_rope_head_dim

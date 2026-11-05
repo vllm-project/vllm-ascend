@@ -53,13 +53,22 @@ class TestQuantizedSparseAttention(unittest.TestCase):
                     packed_q = torch.cat((q, rope), dim=-1) if packed else None
                     cache = torch.empty(1, 3, 1, 4, dtype=torch.int8)
                     with (
-                        patch.object(torch.ops._C_ascend, "npu_kv_quant_sparse_flash_attention_vllm", create=True) as op,
+                        patch.object(
+                            torch.ops._C_ascend, "npu_kv_quant_sparse_flash_attention_vllm", create=True
+                        ) as op,
                         patch.object(runtime, "npu_kv_quant_sparse_flash_attention", create=True) as builtin,
                     ):
                         adaptor._execute_kv_quant_sparse_flash_attention_vllm(
                             SimpleNamespace(scale=0.5, qk_rope_head_dim=rope_dim, is_kimi_k31=kimi),
-                            q, rope, cache, torch.zeros(1, 1), torch.zeros(1, 1, 1),
-                            torch.tensor([1]), torch.tensor([3]), return_lse=lse, packed_query=packed_q,
+                            q,
+                            rope,
+                            cache,
+                            torch.zeros(1, 1),
+                            torch.zeros(1, 1, 1),
+                            torch.tensor([1]),
+                            torch.tensor([3]),
+                            return_lse=lse,
+                            packed_query=packed_q,
                         )
                     self.assertEqual(op.called, custom)
                     self.assertEqual(builtin.called, not custom)
