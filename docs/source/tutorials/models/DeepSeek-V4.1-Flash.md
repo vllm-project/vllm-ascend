@@ -182,10 +182,9 @@ absolute path inside and outside every container.
 ### 4.2 Source Code Installation
 
 To build from source, follow the
-[software environment installation guide](../../getting_started/installation.md#installation-software-environment).
-
-For multi-node deployment, install the same version of vLLM and vLLM Ascend
-on each node.
+[software environment installation guide](../../getting_started/installation.md#installation-software-environment)
+and check out the **v0.32.0rc** tag of vLLM Ascend. Use the matching upstream
+vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
 ## 5 Online Service Deployment
 
