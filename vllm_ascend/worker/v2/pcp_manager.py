@@ -18,7 +18,7 @@
 #
 
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import replace
 
 import numpy as np
 import torch
@@ -36,29 +36,13 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
+from vllm_ascend.attention.context_parallel.context import (
+    AscendPCPAttentionContext,  # noqa: F401  # backward compatibility re-export
+)
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-
-
-@dataclass(frozen=True)
-class AscendPCPAttentionContext:
-    """Canonical global PCP view for one attention step."""
-
-    # The global batch and its associated metadata, used to build DSA attention metadata.
-    global_batch: AscendInputBatch
-    global_block_tables: tuple[torch.Tensor, ...]
-    global_slot_mappings: torch.Tensor
-    hidden_restore_idx: torch.Tensor
-    padded_gather_idx: torch.Tensor | None = None
-    gathered_kv_write_mask: torch.Tensor | None = None
-    # Device snapshot of allocated kernel-block counts in global request order.
-    global_block_table_num_blocks: torch.Tensor | None = None
-    # Original batch row for each local request, in upstream segment order.
-    local_to_global_req_indices: tuple[int, ...] | None = None
-    # Actual local tokens in the unpartitioned batch, excluding padding.
-    local_token_indices: torch.Tensor | None = None
 
 
 class AscendPCPManager(PCPManager):

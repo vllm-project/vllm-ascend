@@ -42,7 +42,7 @@ from vllm_ascend.worker.device_metadata import (
 )
 
 if TYPE_CHECKING:
-    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+    from vllm_ascend.attention.context_parallel.context import AscendPCPAttentionContext
 
 
 @dataclass(kw_only=True)
