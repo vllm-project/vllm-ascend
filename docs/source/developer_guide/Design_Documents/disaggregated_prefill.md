@@ -161,9 +161,9 @@ There is no feature flag. The change is split into self-contained, single-topic 
 
 #### Known limitations
 
-1. **Layerwise startup wait**: the layerwise worker used to wait for its layer threads without a timeout. It now fails back after a 5-minute timeout, polling every 3 seconds. A slow but healthy startup can therefore be delayed by up to roughly 3 extra seconds once, and a failed startup now raises instead of hanging indefinitely.
+1. **Layerwise startup wait**: the layerwise worker used to wait for its layer threads without a timeout. It now gives up after a 5-minute timeout, polling every 3 seconds. A slow but healthy startup can therefore be delayed by up to roughly 3 extra seconds once, and a failed startup now raises instead of hanging indefinitely.
 2. **Fatal thread errors are only recorded**: an unrecoverable error in a sending thread is stored in `fatal_error`, exposed by `get_thread_fatal_error()` and logged once during shutdown. It is not yet aggregated into request-level `failed_recving` results; that is a follow-up.
-3. **D2RH cleanup is partial**: the D2RH connector inherits the shared shutdown and startup-rollback paths for the base threads, executor and socket pool, but its CPU-staging thread and staging resources are not stopped yet, and its startup path is not covered by the shared rollback yet.
+3. **D2RH cleanup is partial**: the D2RH connector inherits the shared idempotent `shutdown()` for the base threads, executor and socket pool, but its overridden `register_kv_caches` does not use the shared startup rollback yet, and its CPU-staging thread and staging resources are not stopped by the inherited shutdown.
 4. **Follow-up structural work**: the reformat subsystem extraction, the remaining transfer-plan pure helpers (DCP shards, group pulls, hybrid remote-rank group pulls, SFA replicate-K block ids, remote-rank selection) and a layerwise step-controller / read-only metadata split are intentionally deferred to later changes.
 5. **V1/V2 helper unification**: V1 `mooncake_v1/common/transport.py` and V2 `mooncake/utils.py` are not unified. V2 `mooncake/__init__.py` eagerly imports the V2 package and keeps its own `zmq_ctx`/`SizedDict`, so merging the two helper layers is left for a follow-up pull request.
 
