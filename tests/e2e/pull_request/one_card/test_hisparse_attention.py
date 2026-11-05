@@ -111,8 +111,8 @@ def test_sparse_attention_reference(num_queries, strided, capture):
 
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("strided", [False, True])
-@pytest.mark.parametrize("indices_are_mapped", [False, True])
-def test_c8_attention_uses_existing_native_operator(strided, capture, indices_are_mapped):
+@pytest.mark.parametrize("index_mode", ["virtual", "mapped", "mapped_counts"])
+def test_c8_attention_uses_existing_native_operator(strided, capture, index_mode):
     from vllm_ascend.device.device_config import is_950
 
     if not is_950():
@@ -142,6 +142,7 @@ def test_c8_attention_uses_existing_native_operator(strided, capture, indices_ar
     indices[0] = -1
     indices[0, :3] = torch.tensor([3, 3, 7], dtype=torch.int32)
     indices[-1] = -1
+    indices_are_mapped = index_mode != "virtual"
 
     def selection():
         if not indices_are_mapped:
@@ -153,6 +154,7 @@ def test_c8_attention_uses_existing_native_operator(strided, capture, indices_ar
         return output
 
     selected = selection().to(device)
+    valid_counts = (indices >= 0).sum(dim=-1, dtype=torch.int32).to(device) if index_mode == "mapped_counts" else None
     query_end, key_length = (torch.empty(1, dtype=torch.int32, device=device) for _ in range(2))
     impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
     impl.enable_sparse_sfa_c8 = True
@@ -161,7 +163,9 @@ def test_c8_attention_uses_existing_native_operator(strided, capture, indices_ar
     impl._c8_length_workspace = lambda: (query_end, key_length)
 
     def forward():
-        return impl._attention_physical(q, qr, cache, selected, indices_are_mapped=indices_are_mapped)
+        return impl._attention_physical(
+            q, qr, cache, selected, indices_are_mapped=indices_are_mapped, valid_counts=valid_counts
+        )
 
     graph = None
     try:
@@ -174,6 +178,8 @@ def test_c8_attention_uses_existing_native_operator(strided, capture, indices_ar
                 output = forward()
             indices[0, :4] = torch.tensor([9, 2, 9, 0], dtype=torch.int32)
             selected.copy_(selection())
+            if valid_counts is not None:
+                valid_counts.copy_((indices >= 0).sum(dim=-1, dtype=torch.int32))
             q.neg_()
             graph.replay()
         else:
