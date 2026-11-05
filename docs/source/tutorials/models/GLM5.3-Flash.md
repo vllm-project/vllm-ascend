@@ -2049,17 +2049,16 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 
 ### 7.2 Accuracy Results with PD Disaggregation
 
-The following accuracy results were obtained using an earlier A3 series PD
+The A3 series results below were obtained using an earlier PD
 configuration with DP2/TP8 on the Prefill node and DP8/TP2 on the Decode node.
 Evaluation requests were sent through the PD proxy. The table below lists the
 generation parameters used for each dataset. See [Section 5.3](#53-1p1d-pd-disaggregated-deployment)
-for the current serving examples. These results cover A3 series only;
-950DT products accuracy results have not been recorded in this guide. Use
-[Using AISBench](#glm53-flash-accuracy-aisbench) to evaluate the selected 950DT configuration.
+for the current serving examples.
 
 | Dataset | Hardware | Score | generation_kwargs |
 | --- | --- | --- | --- |
 | GPQA | A3 series | 89.9 | `temperature=1.0, top_p=0.95, max_tokens=131072` |
+| GPQA | 950DT products | 91.2 | `temperature=1.0, top_p=0.95, max_tokens=131072` |
 | MMMU-PRO | A3 series | 78.4 | `temperature=1.0, top_p=0.95, max_tokens=98304` |
 
 ## 8 Performance Evaluation
