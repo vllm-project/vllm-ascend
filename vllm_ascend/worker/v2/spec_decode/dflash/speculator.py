@@ -5,7 +5,6 @@
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any, cast
-from unittest.mock import patch
 
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
@@ -150,8 +149,11 @@ def load_missing_pp_embedding(vllm_config: VllmConfig) -> Iterator[None]:
             reload_embedding(vllm_config)
         return original_share(draft_model, draft_inner, target_inner)
 
-    with patch.object(dflash_utils, "maybe_share_target_embed", share_target_embed):
+    dflash_utils.maybe_share_target_embed = share_target_embed
+    try:
         yield
+    finally:
+        dflash_utils.maybe_share_target_embed = original_share
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):

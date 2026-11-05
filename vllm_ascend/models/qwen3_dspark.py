@@ -33,7 +33,7 @@ def load_draft_target_embedding(model, vllm_config: VllmConfig) -> None:
     weight = model.model.embed_tokens.weight
     target_config = vllm_config.model_config.hf_text_config
     rotation_path = get_rotation_path(vllm_config)
-    rotation = get_rotation_matrix(rotation_path).cpu() if rotation_path is not None else None
+    rotation = get_rotation_matrix(rotation_path) if rotation_path is not None else None
     with torch.device(weight.device):
         embedding = VocabParallelEmbedding(
             target_config.vocab_size, target_config.hidden_size, params_dtype=weight.dtype
