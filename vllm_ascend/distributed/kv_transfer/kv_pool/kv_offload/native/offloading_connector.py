@@ -316,13 +316,11 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
         # tuple, never a set): the transfer handler resolves each group by
         # position, so ordering must match the scheduler's kv_group_configs.
         group_data_refs: list[list[CanonicalKVCacheRef]] = []
-        for group_idx in selected_group_ids:
-            group = kv_cache_config.kv_cache_groups[group_idx]
+        for group in selected_groups:
             group_refs: list[CanonicalKVCacheRef] = []
             for layer_name in group.layer_names:
                 group_refs.extend(refs_by_layer[layer_name])
             group_data_refs.append(group_refs)
-        assert len(group_data_refs) == len(selected_group_ids)
 
         if not canonical_tensors:
             raise ValueError("No KV cache tensors were registered for native offloading")
