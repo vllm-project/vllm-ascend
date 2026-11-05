@@ -1,0 +1,244 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+meta:
+  title: "Qwen3-Reranker-0.6B (Ascend historical deployment)"
+  slug: "qwen3-reranker-0.6b"
+  provider: "Qwen"
+  description: "Historical, single-NPU Qwen3-Reranker-0.6B pooling deployment on Atlas 800 A3, pinned to vLLM Ascend v0.23.0rc1."
+  date_added: "2026-11-04"
+  date_updated: "2026-11-04"
+  tasks:
+    - embedding
+  related_recipes: []
+  default_hardware: ascend_910c
+  hardware:
+    ascend_910c: supported
+
+model:
+  model_id: "Qwen/Qwen3-Reranker-0.6B"
+  min_vllm_version: "0.23.0rc1"
+  docker_image: "quay.io/ascend/vllm-ascend:v0.23.0rc1-a3"
+  nightly_required: false
+  install:
+    docker:
+      command: "docker pull quay.io/ascend/vllm-ascend:v0.23.0rc1-a3"
+      note: "Historical image only. Qwen3-Reranker is discontinued in vLLM Ascend v0.30.0 and later."
+    pip: false
+  architecture: dense
+  parameter_count: "0.6B"
+  active_parameters: "0.6B"
+  context_length: 40960
+  base_args:
+    - "--runner"
+    - "pooling"
+    - "--hf-overrides"
+    - '{"architectures":["Qwen3ForSequenceClassification"],"classifier_from_token":["no","yes"],"is_original_qwen3_reranker":true}'
+    - "--revision"
+    - "e61197ed45024b0ed8a2d74b80b4d909f1255473"
+    - "--dtype"
+    - "bfloat16"
+    - "--max-model-len"
+    - "1024"
+    - "--port"
+    - "8000"
+  base_env:
+    ASCEND_RT_VISIBLE_DEVICES: "0"
+    OMP_PROC_BIND: "false"
+    OMP_NUM_THREADS: "1"
+    PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+
+client:
+  endpoint: /v1/rerank
+  request_body:
+    query: '<|im_start|>system
+
+      Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>
+
+      <|im_start|>user
+
+      <Instruct>: Given a web search query, retrieve relevant passages that answer the query
+
+      <Query>: What is the capital of China?
+
+      '
+    documents:
+    - '<Document>: The capital of China is Beijing.<|im_end|>
+
+      <|im_start|>assistant
+
+      <think>
+
+
+      </think>
+
+
+      '
+    - '<Document>: Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.<|im_end|>
+
+      <|im_start|>assistant
+
+      <think>
+
+
+      </think>
+
+
+      '
+  benchmark:
+    backend: vllm-rerank
+    dataset_name: random-rerank
+    args:
+    - --random-input
+    - '200'
+    - --save-result
+    - --result-dir
+    - ./
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 2
+    description: "Official 0.6B checkpoint, BF16, one Ascend 910C NPU; historical image only."
+    supported_hardware:
+      - ascend_910c
+    hardware_overrides:
+      ascend_910c:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0rc1-a3"
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+notes:
+  - title: "Historical release boundary"
+    when:
+      hardware: [ascend_910c]
+    body: |-
+      Qwen3-Reranker has been discontinued in vLLM Ascend since v0.30.0.
+      This recipe retains the v0.23.0rc1 historical deployment and does not
+      establish support on main, nightly, or a later release.
+  - title: "Pooling clients"
+    when:
+      hardware: [ascend_910c]
+    body: |-
+      This is a reranking model, not a chat-generation service. Use the
+      Verify and Bench controls for the configured `/v1/rerank` endpoint;
+      the Guide also provides a Python client with response assertions.
+
+guide: |-
+  ## Overview
+
+  [Qwen/Qwen3-Reranker-0.6B](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B)
+  scores the relevance of documents to a query. The original checkpoint uses
+  the Qwen3 causal-LM architecture; the required HF overrides select
+  `Qwen3ForSequenceClassification` and the `no`/`yes` classification vectors.
+
+  This is a historical Atlas 800 A3 recipe. The
+  [current Ascend tutorial](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/Qwen3-Reranker.md)
+  states that the model was discontinued in vLLM Ascend v0.30.0 and directs
+  users to the [v0.23.0 documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Qwen3-Reranker.html).
+  The pinned image is retained from the migrated tutorial; no claim about
+  current-main support is made. The hardware entry is not marked `verified`
+  by this proposal.
+
+  The checkpoint config advertises 40,960 positions (the model card describes
+  a 32K context). The serving baseline here is 1,024 tokens. This recipe
+  makes no long-context, 4B, 8B, A2, or Atlas 300I DUO verification claim.
+
+  ## Checkpoint provenance
+
+  The model revision is pinned to
+  [`e61197ed45024b0ed8a2d74b80b4d909f1255473`](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/tree/e61197ed45024b0ed8a2d74b80b4d909f1255473).
+  Its single `model.safetensors` file is 1,191,588,280 bytes with SHA-256
+  `27cd75a405b9c1b46b59abfd88aaa209e6fed2a1972cde9b70e7659537c5e65b`.
+  The `config.json` SHA-256 is
+  `d479c427a9ca5295218063d4f9aca4f297ab4ac27487cca7af42c84643d51ef0`.
+
+  Both hashes match the checkpoint staged for the accompanying task. Staging
+  integrity does not prove that inference or an accuracy benchmark passed.
+
+  If the runtime cannot access Hugging Face, stage this exact revision in a
+  shared cache before starting the container:
+
+  ```bash
+  hf download Qwen/Qwen3-Reranker-0.6B --revision e61197ed45024b0ed8a2d74b80b4d909f1255473
+  ```
+
+  ## Client usage
+
+  After the pooling server is ready, use the builder's Verify control for
+  a JSON POST to `/v1/rerank` or its Bench control for `vllm-rerank` with
+  `random-rerank` input. The selected model and endpoint controls supply
+  both client targets. Alternatively, install `requests` in the client
+  environment and run this example. The query and document formatting is
+  required for the intended instruction-aware reranking behavior.
+
+  ```python
+  import math
+
+  import requests
+
+  prefix = '<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\n<|im_start|>user\n'
+  suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  instruction = "Given a web search query, retrieve relevant passages that answer the query"
+  query = "What is the capital of China?"
+  documents = [
+      "The capital of China is Beijing.",
+      "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.",
+  ]
+
+  response = requests.post(
+      "http://127.0.0.1:8000/v1/rerank",
+      json={
+          "model": "Qwen/Qwen3-Reranker-0.6B",
+          "query": f"{prefix}<Instruct>: {instruction}\n<Query>: {query}\n",
+          "documents": [f"<Document>: {doc}{suffix}" for doc in documents],
+      },
+      timeout=60,
+  )
+  response.raise_for_status()
+  payload = response.json()
+  results = payload.get("results")
+  assert isinstance(results, list) and len(results) == len(documents), payload
+  assert {item["index"] for item in results} == set(range(len(documents))), payload
+  scores = {item["index"]: item["relevance_score"] for item in results}
+  assert all(
+      isinstance(score, (int, float))
+      and math.isfinite(score)
+      and 0.0 <= score <= 1.0
+      for score in scores.values()
+  ), payload
+  assert scores[0] > scores[1], payload
+  print(payload)
+  ```
+
+  A successful result has HTTP 200, one finite probability score per
+  document, and a higher score for the Beijing passage. This is a functional
+  smoke check, not an MTEB quality measurement.
+
+  ## Evaluation and performance
+
+  The historical tutorial includes MTEB `MultiLongDocReranking` evaluation
+  and a `vllm-rerank` / `random-rerank` serving benchmark. Use the
+  [historical instructions](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Qwen3-Reranker.html)
+  with a matching vLLM environment. Generic text-generation benchmarks do
+  not exercise the reranking endpoint. This proposal does not supply new
+  benchmark scores or claim to reproduce model-card quality results.
+
+  ## References
+
+  - [Official model card](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B)
+  - [Pinned checkpoint](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/tree/e61197ed45024b0ed8a2d74b80b4d909f1255473)
+  - [Historical Ascend tutorial](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Qwen3-Reranker.html)
+  - [Current support notice](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/tutorials/models/Qwen3-Reranker.md)
