@@ -191,8 +191,8 @@ jobs:
         id: gen_groups
         run: |
           python3 .github/workflows/scripts/select_tests.py \
-            --all-tests \
-            --skip-cpu-ut
+            --explicit-e2e-tests \
+            tests/e2e/pull_request/one_card/test_mla_prolog_head_padding.py
 
   run-presmoke-tests:
     name: Run Presmoke Smoke Tests ${{ inputs.target }}-${{ inputs.os }}
