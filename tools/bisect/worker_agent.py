@@ -119,12 +119,13 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
         log_path = log_dir / f"round{rnd}_{commit[:12]}.log"
         logger.info("[worker] round %d: deploying %s", rnd, commit[:12])
         try:
-            builder.prepare(commit, log_path)
             version_adapter.ensure_targets(
                 cmd.get("version_targets", {}),
                 tuple(cmd.get("version_checks", ())),
                 log_path,
+                commit,
             )
+            builder.prepare(commit, log_path)
         except DEPLOY_ERRORS as exc:
             # Publish a deliberately inconsistent ready marker so the master
             # aborts the round if it managed to deploy successfully. The worker

@@ -37,6 +37,7 @@ import psutil  # type: ignore[import-untyped]
 
 from tools.bisect import git_ops
 from tools.bisect.build_manager import DEPLOY_ERRORS, BuildManager
+from tools.bisect.build_recipe import recipe_at_commit
 from tools.bisect.config import (
     MULTI_NODE_RUN_SH,
     SCENE_SINGLE,
@@ -46,8 +47,17 @@ from tools.bisect.config import (
     Candidate,
 )
 from tools.bisect.coordinator import Coordinator
+from tools.bisect.pairing import pairing_details
 from tools.bisect.verdict import RunOutcome
-from tools.bisect.version_compat import VersionAdaptationError, VersionAdapter, VersionPolicy
+from tools.bisect.version_compat import (
+    TORCH_NPU_PIP_INDEX_URL,
+    VersionAdaptationError,
+    VersionAdapter,
+    VersionPolicy,
+    expected_versions,
+    installed_torch_npu_version,
+    installed_vllm_version,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +154,36 @@ class BaseRunner:
             return
         self.version_adapter.ensure_at_commit(self.repo, commit, self.version_policy, log_path)
 
+    def _log_pairing(self, commit: str, log_path: Path, phase: str) -> None:
+        """Record the requested build recipe and actual installed pairing."""
+        if not self.opt.soc:
+            return
+        recipe = recipe_at_commit(self.repo, commit, self.opt.soc)
+        versions = expected_versions(self.repo, commit, self.opt.soc)
+        try:
+            vllm_source = git_ops.current_commit(self.opt.vllm_dir)[:12]
+        except (OSError, git_ops.GitError):
+            vllm_source = "unavailable"
+        lines = [
+            f"[pairing:{phase}] vllm-ascend={commit[:12]} SoC={recipe.soc} "
+            f"base={recipe.root_dockerfile} nightly={recipe.nightly_dockerfile}",
+            f"[pairing:{phase}] expected vLLM={recipe.vllm_ref} "
+            f"torch-npu={versions.torch_npu or 'unspecified'} CANN-image={recipe.cann_image} "
+            f"AISBench={recipe.ais_bench_tag or 'unspecified'}",
+            f"[pairing:{phase}] installed vLLM={installed_vllm_version() or 'missing'} "
+            f"source={vllm_source} torch-npu={installed_torch_npu_version() or 'missing'}",
+            f"[pairing:{phase}] indexes primary={os.getenv('PIP_INDEX_URL', TORCH_NPU_PIP_INDEX_URL)} "
+            f"PyTorch={recipe.pytorch_index_url or 'default'} "
+            f"Ascend={recipe.ascend_index_url or 'default'} "
+            f"nightly={recipe.nightly_index_url or 'default'}",
+        ]
+        if phase == "after":
+            lines.extend(pairing_details(self.repo, commit, recipe))
+        with open(log_path, "a", encoding="utf-8") as out:
+            out.write("\n".join(lines) + "\n")
+        for line in lines[:2]:
+            logger.info(line)
+
     def _base_env(self) -> dict[str, str]:
         env = dict(os.environ)
         env["CONFIG_YAML_PATH"] = self.inp.config_yaml
@@ -172,6 +212,8 @@ class BaseRunner:
         raise NotImplementedError
 
     def teardown(self) -> None:
+        if self.opt.mock_tests:
+            return
         kill_stray_servers()
 
     def finish(self) -> None:  # multi-node overrides to release workers
@@ -181,8 +223,18 @@ class BaseRunner:
 class SingleNodeRunner(BaseRunner):
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
-        decision = self.builder.prepare(candidate.commit, log_path)  # may raise BuildError
+        self._log_pairing(candidate.commit, log_path, "before")
+        self.builder.decide(candidate.commit)  # fail before changing dependencies when the image cannot match
         self._ensure_versions(candidate.commit, log_path)
+        decision = self.builder.prepare(candidate.commit, log_path)  # may raise BuildError
+        self._log_pairing(candidate.commit, log_path, "after")
+
+        if self.opt.mock_tests:
+            with open(log_path, "a", encoding="utf-8") as out:
+                out.write("\n[mock-tests] Environment prepared; pytest and model serving were not run.\n")
+            outcome = RunOutcome(exit_code=0)
+            outcome.rebuilt = decision.rebuild  # type: ignore[attr-defined]
+            return outcome
 
         # Run the WHOLE yaml (all test_cases): nightly cannot select a single
         # case, so we don't pass -k. Each case writes its own benchmark JSON
@@ -231,6 +283,7 @@ class MultiNodeRunner(BaseRunner):
 
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
+        self._log_pairing(candidate.commit, log_path, "before")
         # Pre-publish deploy decision: failing here would mean the round's
         # command never appears, stranding the worker in wait_command. Publish
         # a SKIP command so both sides stay in lockstep instead.
@@ -250,12 +303,14 @@ class MultiNodeRunner(BaseRunner):
             version_checks=self.version_policy.checked_packages,
         )
         try:
-            self.builder.prepare(candidate.commit, log_path)
             self.version_adapter.ensure_targets(
                 version_targets,
                 self.version_policy.checked_packages,
                 log_path,
+                candidate.commit,
             )
+            self.builder.prepare(candidate.commit, log_path)
+            self._log_pairing(candidate.commit, log_path, "after")
         except DEPLOY_ERRORS:
             self._abort_round(round_idx)
             raise

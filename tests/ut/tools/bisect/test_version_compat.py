@@ -9,14 +9,17 @@ import pytest
 from tools.bisect import git_ops
 from tools.bisect.config import BisectOptions
 from tools.bisect.version_compat import (
+    TORCH_NPU_PIP_INDEX_URL,
     TORCH_NPU_REQUIREMENTS_FILE,
     VLLM_PACKAGE,
+    VLLM_PIP_EXTRA_INDEX_URL,
     VLLM_TAG_FILE,
     PackageVersions,
     VersionAdapter,
     VersionPolicy,
     expected_versions,
     installed_package_version,
+    policy_with_environment_drift,
     versions_equal,
 )
 
@@ -76,6 +79,21 @@ def test_version_policy_disables_checks_when_endpoints_match():
     versions = PackageVersions(vllm="v0.25.1", torch_npu="2.10.0.post2")
 
     assert VersionPolicy.between(versions, versions).enabled is False
+
+
+def test_policy_detects_wrong_vllm_source_checkout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    vllm_dir = tmp_path / "vllm"
+    (vllm_dir / ".git").mkdir(parents=True)
+    monkeypatch.setattr("tools.bisect.version_compat.installed_vllm_version", lambda: "0.32.0+empty")
+    monkeypatch.setattr("tools.bisect.version_compat.installed_torch_npu_version", lambda: "2.10.0.post7")
+    monkeypatch.setattr(git_ops, "current_commit", lambda repo: "a" * 40)
+    monkeypatch.setattr(git_ops, "resolve_commit", lambda repo, ref: "b" * 40)
+    versions = PackageVersions(vllm="v0.32.0", torch_npu="2.10.0.post7")
+
+    policy, drift = policy_with_environment_drift(versions, versions, vllm_dir)
+
+    assert drift == ("vllm",)
+    assert policy.checked_packages == ("vllm",)
 
 
 @pytest.mark.parametrize(
@@ -156,13 +174,39 @@ def test_adapter_sets_empty_target_device_for_editable_vllm_install(
 
     # _switch_vllm sets os.environ["VLLM_VERSION"] as a side effect. Isolate it
     # so later cpu-ut cases keep resolving against the installed vllm version.
-    with mock.patch.dict(os.environ, {}):
+    with mock.patch.dict(os.environ, {}, clear=True):
         adapter.ensure_targets({"vllm": "v0.25.1"}, ("vllm",))
 
     command, env = runs[0]
-    assert command[:4] == ["pip", "install", "-e", str(vllm_dir)]
+    assert command[:4] == ["pip", "install", "-e", f"{vllm_dir}[audio]"]
     assert env is not None
     assert env["VLLM_TARGET_DEVICE"] == "empty"
+    assert env["PIP_EXTRA_INDEX_URL"] == VLLM_PIP_EXTRA_INDEX_URL
+
+
+def test_torch_npu_install_uses_mirror_and_respects_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    environments: list[dict[str, str]] = []
+
+    def capture_run(command, log_file, label, env=None):
+        assert env is not None
+        environments.append(env)
+
+    monkeypatch.setattr(
+        VersionAdapter,
+        "_run",
+        staticmethod(capture_run),
+    )
+    monkeypatch.delenv("PIP_INDEX_URL", raising=False)
+    adapter = VersionAdapter(BisectOptions(repo_dir=tmp_path))
+    adapter._switch_torch_npu("2.10.0.post7", None)
+    assert environments[-1]["PIP_INDEX_URL"] == TORCH_NPU_PIP_INDEX_URL
+
+    monkeypatch.setenv("PIP_INDEX_URL", "https://example.com/simple")
+    adapter._switch_torch_npu("2.10.0.post7", None)
+    assert environments[-1]["PIP_INDEX_URL"] == "https://example.com/simple"
 
 
 def _is_git_worktree_clean(repo: Path) -> bool:
