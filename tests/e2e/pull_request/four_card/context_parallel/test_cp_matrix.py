@@ -233,7 +233,7 @@ def _compare_cp_on_off(case: MatrixCase, graph_mode: str | None) -> None:
 @pytest.mark.e2e_coverage(
     arch="moe",
     feature="long_sequence,chunked_prefill,prefix_caching",
-    parallel="TP,PCP,DCP",
+    parallel="TP,PCP",
     deploy="pd_mix",
     hardware="A3",
     quantization="W8A8",

@@ -218,7 +218,7 @@ a3-560t:
         config_file_path: Qwen3-8B-GQA-PCP2-DCP2-32k.yaml
         config_base_path: tests/e2e/cases/features/context_parallel
       - name: DeepSeek-V3.2-W8A8-MLA-PCP2-DCP4-128k
-        os: linux-aarch64-a3-800i-8
+        os: linux-aarch64-a3-800i-4
         config_file_path: DeepSeek-V3.2-W8A8-MLA-PCP2-DCP4-128k.yaml
         config_base_path: tests/e2e/cases/features/context_parallel
       - name: Qwen3.5-397B-A17B-w8a8-mtp
