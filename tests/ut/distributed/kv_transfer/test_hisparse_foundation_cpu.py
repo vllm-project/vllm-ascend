@@ -167,6 +167,7 @@ def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups
             region_stride=hot_rows,
             max_union_rows=union_rows,
             device=torch.device("cpu"),
+            kv_dtype=torch.bfloat16,
             registered_host_pool=NS(_hisparse_registration=object()),
         )
         owner.leader = leader
