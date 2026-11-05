@@ -25,6 +25,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     DsaAttnKvPlan,
     get_dsa_attn_kv_plan,
+    get_draft_sparse_kv_plan,
+    is_a3_bf16_kv_enabled,
     is_a5_bf16_kv_enabled,
     write_dsa_cache,
 )
@@ -839,6 +841,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self._init_hadamard(layer_names)
         max_num_reqs = scheduler_config.max_num_seqs * self._request_capacity_factor
         self.start_pos_prefill: torch.Tensor = torch.zeros(max_num_reqs, dtype=torch.int32, device=self.device)
+        # A3 BF16 KV: route the DSpark draft attention through the compiled
+        # SparseFlashMla binding adapter. Cached like the TQ plan; None on
+        # every other hardware/dtype combination, so the draft keeps the
+        # target plan's operator.
+        self._draft_sparse_attn_op = None
+        self._draft_sparse_attn_metadata_op = None
+        if is_a3_bf16_kv_enabled(vllm_config):
+            draft_plan = get_draft_sparse_kv_plan(vllm_config)
+            self._draft_sparse_attn_op = draft_plan.get_draft_sparse_attn_op()
+            self._draft_sparse_attn_metadata_op = draft_plan.get_draft_sparse_attn_metadata_op()
         self.sas_metadata_buffer: torch.Tensor = torch.zeros(
             DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
         )
@@ -1458,6 +1470,56 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             hadamard=None,
         )
 
+    def _build_a3_draft_metadata(
+        self,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_kv: int,
+    ) -> torch.Tensor:
+        """Build the compiled SparseFlashMla binding's draft metadata.
+
+        The generic non-causal tiling path produces FIA-format metadata; the
+        compiled binding needs its own tiling with per-query topk lengths.
+        The adapter computes the uniform draft lengths from the caller's
+        window and sequence lengths, so the caller's metadata is bypassed.
+        """
+        assert self._draft_sparse_attn_metadata_op is not None
+        kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
+        metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        tp_size = get_tensor_model_parallel_world_size()
+        n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
+        query_lens = query_start_loc[1:] - query_start_loc[:-1]
+        win_left, _ = get_dspark_sparse_sas_window(self.vllm_config)
+        # Every query in a draft block sees the same trailing window + draft
+        # block, so the topk length is uniform per request.
+        vis = torch.minimum(seq_lens, query_lens + win_left)
+        num_tokens = int(query_start_loc[-1].item())
+        lengths = torch.repeat_interleave(vis, query_lens).unsqueeze(1).to(torch.int32)
+        return self._draft_sparse_attn_metadata_op(
+            **metadata_kwargs,
+            num_heads_q=n_local_heads,
+            num_heads_kv=1,
+            head_dim=self.model_config.get_head_size(),
+            cu_seqlens_q=query_start_loc,
+            seqused_q=self.seqused_q,
+            seqused_kv=vis,
+            ori_topk_length=lengths,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            batch_size=len(seq_lens),
+            ori_topk=int(lengths.max().item()) if num_tokens > 0 else 0,
+            cmp_ratio=1,
+            ori_mask_mode=0,
+            cmp_mask_mode=0,
+            ori_win_left=0,
+            ori_win_right=0,
+            layout_q="TND",
+            layout_kv="PA_BBND",
+            has_ori_kv=True,
+            has_cmp_kv=False,
+        )
+
     def build_req_metadata_for_drafting(
         self,
         draft_index: int,
@@ -1578,6 +1640,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         def build_attention_metadata() -> torch.Tensor:
             if build_dspark_swa is not None:
                 build_dspark_swa()
+            if self._draft_sparse_attn_metadata_op is not None and dspark_swa_indices is not None:
+                return self._build_a3_draft_metadata(query_start_loc, seq_lens, max_seqlen_q, max_seqlen_kv)
             sas_seq_lens = seq_lens
             if dspark_swa_indices is not None:
                 sas_seq_lens = torch.minimum(seq_lens, seq_lens_q + self.model_config.hf_config.sliding_window)
@@ -2930,6 +2994,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         if self.compress_ratio <= 1:
             if swa_req_metadata.dspark_swa_indices is not None:
                 attn_kwargs["ori_sparse_indices"] = swa_req_metadata.dspark_swa_indices
+                # A3 BF16 draft: switch to the compiled SparseFlashMla
+                # adapter; it detects the draft call (indices present, no
+                # prefill cu_seqlens) and builds the binding's top-k inputs
+                # from the caller's borrow-mode kwargs.
+                if self._draft_sparse_attn_op is not None:
+                    attn_op = self._draft_sparse_attn_op
         else:
             assert compressor_metadata is not None
             attn_kwargs.update(
