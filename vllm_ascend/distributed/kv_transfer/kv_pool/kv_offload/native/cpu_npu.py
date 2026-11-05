@@ -281,8 +281,12 @@ class NPUOffloadingWorker(OffloadingWorker):
         blocks_per_chunk: int,
         num_cpu_blocks: int,
         mmap_region: SharedOffloadRegion | None = None,
+        pin_shared_mmap: bool = True,
+        worker_slot_only: bool = False,
     ) -> None:
         self._mmap_region = mmap_region
+        self._mmap_pinned = False
+        self._pinned_tensors: list[torch.Tensor] = []
         pin_memory = is_pin_memory_available()
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
 
@@ -328,6 +332,8 @@ class NPUOffloadingWorker(OffloadingWorker):
                 npu_tensors.append(npu_tensor)
                 cpu_tensors.append(cpu_tensor)
 
+            self._pin_shared_region(pin_shared_mmap, worker_slot_only)
+
             self._store_handler = SingleDirectionNPUOffloadingHandler(
                 npu_tensors=npu_tensors,
                 cpu_tensors=cpu_tensors,
@@ -351,10 +357,79 @@ class NPUOffloadingWorker(OffloadingWorker):
                 handler = getattr(self, handler_name, None)
                 if handler is not None:
                     handler.shutdown()
+            self._unpin_shared_region()
             if mmap_region is not None:
                 mmap_region.cleanup()
                 self._mmap_region = None
             raise
+
+    def _pin_shared_region(self, pin_shared_mmap: bool, worker_slot_only: bool) -> None:
+        if self._mmap_region is None or not pin_shared_mmap:
+            return
+        try:
+            supported = torch.ops._C_ascend.supports_eccpu_offload()
+        except Exception:
+            logger.warning(
+                "KV offload shared mmap pinning is unavailable; using pageable mmap",
+                exc_info=True,
+            )
+            return
+        if not supported:
+            logger.warning(
+                "KV offload shared mmap pinning requires aclrtMemcpyBatchAsync "
+                "and aclrtHostRegisterV2; using pageable mmap"
+            )
+            return
+
+        slot_ranges = getattr(self._mmap_region, "iter_worker_slot_ranges", None)
+        use_worker_slots = bool(worker_slot_only and self._mmap_region.rank is not None and slot_ranges is not None)
+        if use_worker_slots:
+            try:
+                tensors = [self._mmap_region.base_tensor[offset : offset + length] for offset, length in slot_ranges()]
+            except Exception:
+                logger.warning(
+                    "Failed to build worker slot ranges; pinning the whole region",
+                    exc_info=True,
+                )
+                use_worker_slots = False
+                tensors = [self._mmap_region.base_tensor]
+        else:
+            tensors = [self._mmap_region.base_tensor]
+
+        try:
+            for tensor in tensors:
+                torch.ops._C_ascend.register_pinned_host_mmap(tensor)
+                # Retain each registered view until unregister succeeds.
+                self._pinned_tensors.append(tensor)
+                self._mmap_pinned = True
+        except Exception:
+            logger.warning(
+                "Failed to pin shared offload mmap; using pageable mmap",
+                exc_info=True,
+            )
+            self._unpin_shared_region()
+            return
+
+        pinned_bytes = sum(tensor.numel() * tensor.element_size() for tensor in self._pinned_tensors)
+        logger.info(
+            "Pinned shared offload mmap %s %.2f GB in %d range(s)",
+            "worker slots" if use_worker_slots else "whole region",
+            pinned_bytes / 1e9,
+            len(self._pinned_tensors),
+        )
+
+    def _unpin_shared_region(self) -> None:
+        if not self._pinned_tensors:
+            return
+        # Both DMA directions must finish before releasing host registrations.
+        # If synchronization or unregister fails, preserve the remaining views
+        # and propagate the error so the caller does not close a pinned mmap.
+        torch.npu.synchronize()
+        while self._pinned_tensors:
+            torch.ops._C_ascend.unregister_pinned_host_mmap(self._pinned_tensors[-1])
+            self._pinned_tensors.pop()
+        self._mmap_pinned = False
+        logger.info("Unpinned shared offload mmap")
 
     def submit_store(
         self,
@@ -389,6 +464,7 @@ class NPUOffloadingWorker(OffloadingWorker):
             try:
                 self._load_handler.shutdown()
             finally:
+                self._unpin_shared_region()
                 # Drop all mmap-backed tensor views before closing the mapping.
                 if self._mmap_region is not None:
                     self._mmap_region.cleanup()
