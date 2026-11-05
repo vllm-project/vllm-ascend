@@ -980,14 +980,6 @@ msgstr ""
 "A3上，混合Prefill/Decode部署遵循Prefill执行模式。因此HCCL默认使用AICPU；请保持`HCCL_OP_EXPANSION_MODE`未设置。"
 
 msgid ""
-"Kimi K3 on Atlas 800I A3 does not support "
-"`LD_PRELOAD=/usr/lib64/libjemalloc.so.2`; run `unset LD_PRELOAD` before "
-"starting vLLM."
-msgstr ""
-"Atlas 800I A3上的Kimi "
-"K3不支持`LD_PRELOAD=/usr/lib64/libjemalloc.so.2`；请在启动vLLM前执行`unset LD_PRELOAD`。"
-
-msgid ""
 "!!! note\n"
 "        Serving a 1M-token context requires at least eight Atlas 800I A3 (64GB × 16) nodes. Change the following parameters on every node:"
 msgstr ""
@@ -1450,3 +1442,12 @@ msgstr ""
 "答：TP 大小必须能整除检查点的注意力头数。它还会影响 KDA 状态布局和专家放置，因此需同时验证内存容量和通信性能。\n"
 "- **问：在 PD 分离中如何启用 DSpark？**\n"
 "答：下载[第 3.1 节](#31-model-weight)中列出的对应平台 DSpark 检查点，并在 Prefill 和 Decode 节点上将 `DRAFT_MODEL_PATH` 设置为其本地目录。使用第 5.2、5.3 或 5.4 节中所示的角色专属 `--speculative-config`，在两侧保持相同的 draft 检查点和 `num_speculative_tokens`。Prefill 必须保留 `--enforce-eager`。"
+
+msgid "Kimi K3 on 950DT products does not support jemalloc."
+msgstr "Kimi K3 在 Ascend 950DT系列产品上不支持 jemalloc。"
+
+msgid "Kimi K3 on Atlas 800I A3 does not support jemalloc."
+msgstr "Kimi K3 在 Atlas 800I A3 上不支持 jemalloc。"
+
+msgid "Kimi K3 on Atlas 800I A3 and 950DT products does not support jemalloc."
+msgstr "Kimi K3 在 Atlas 800I A3 和 Ascend 950DT系列产品上不支持 jemalloc。"
