@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton kernels for Ascend MRV2 suffix speculative decoding.
+"""NPU kernels and launch wrappers for MRV2 suffix speculative decoding.
 
 Adapted from vLLM #60339, merge 190df0b90007eead441d97d3abf6270f84f2c63e.
 Includes local suffix scanning, corpus lookup and voting, draft finalization,
-acceptance observation and corpus ingestion.
+acceptance observation and corpus ingestion. Host launch wrappers retain the
+upstream positional ABI and derive NPU launch metadata from tensors and scalar
+arguments. Request lifecycle and execution ordering remain with the upstream
+speculator.
 """
 
+import torch
 from vllm.triton_utils import tl, triton
 
 # Odd 64-bit multiplier (golden ratio), as a signed int64.
@@ -24,6 +28,7 @@ _INGEST_BLOCK = 1024
 # follows the workload.
 _NUM_LEN_BUCKETS = tl.constexpr(9)
 _STATS_HALF_LIFE = 1024
+_OBSERVE_RESET_BLOCK = 256
 
 
 @triton.jit
@@ -496,3 +501,179 @@ def _suffix_ingest_kernel(
                 val,
                 mask=m & (j >= 4),
             )
+
+
+@triton.jit
+def _suffix_clear_observed_kernel(
+    idx_mapping_ptr,
+    num_sampled_ptr,
+    last_bucket_ptr,
+    num_reqs,
+    BLOCK: tl.constexpr,
+):
+    """Consume previous-draft bookkeeping after all bucket reductions finish."""
+    b = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    req = tl.load(idx_mapping_ptr + b, mask=b < num_reqs, other=0).to(tl.int64)
+    sampled = tl.load(num_sampled_ptr + b, mask=b < num_reqs, other=0)
+    bucket = tl.load(last_bucket_ptr + req)
+    tl.store(last_bucket_ptr + req, -1, mask=(b < num_reqs) & (sampled > 0) & (bucket >= 0))
+
+
+def launch_suffix_local_scan(
+    grid: tuple[int, ...],
+    token_ids: torch.Tensor,
+    _token_ids_stride: int,
+    idx_mapping: torch.Tensor,
+    total_len: torch.Tensor,
+    num_sampled: torch.Tensor,
+    scratch: torch.Tensor,
+    _scratch_stride: int,
+    position_radix: int,
+    **launch_options,
+) -> None:
+    """Launch the NPU history scan using the upstream positional launch ABI.
+
+    Strides come from the actual tensors. The caller supplies the number of
+    active requests through grid metadata, so no device-to-host read is needed.
+    """
+    _suffix_local_scan_kernel[(grid[0], scratch.shape[1])](
+        token_ids,
+        token_ids.stride(0),
+        idx_mapping,
+        total_len,
+        num_sampled,
+        scratch,
+        scratch.stride(0),
+        position_radix,
+        **launch_options,
+    )
+
+
+def launch_suffix_finalize(
+    grid: tuple[int, ...],
+    token_ids: torch.Tensor,
+    _token_ids_stride: int,
+    idx_mapping: torch.Tensor,
+    total_len: torch.Tensor,
+    num_sampled: torch.Tensor,
+    last_sampled: torch.Tensor,
+    scratch: torch.Tensor,
+    _scratch_stride: int,
+    num_blocks: int,
+    position_radix: int,
+    corpus: torch.Tensor,
+    corpus_len: int,
+    table: torch.Tensor,
+    drafts: torch.Tensor,
+    num_valid: torch.Tensor,
+    accept_stats: torch.Tensor,
+    last_bucket: torch.Tensor,
+    last_valid: torch.Tensor,
+    confidence: torch.Tensor,
+    **launch_options,
+) -> None:
+    """Select history/corpus drafts and emit confidence with NPU kernels."""
+    launch_options["K_PO2"] = triton.next_power_of_2(launch_options["K"])
+    launch_options["DEPTH_PO2"] = triton.next_power_of_2(launch_options["MAX_DEPTH"])
+    launch_options["NB_PO2"] = triton.next_power_of_2(num_blocks)
+    _suffix_finalize_kernel[(grid[0],)](
+        token_ids,
+        token_ids.stride(0),
+        idx_mapping,
+        total_len,
+        num_sampled,
+        last_sampled,
+        scratch,
+        scratch.stride(0),
+        num_blocks,
+        position_radix,
+        corpus,
+        corpus_len,
+        table,
+        drafts,
+        num_valid,
+        accept_stats,
+        last_bucket,
+        last_valid,
+        confidence,
+        **launch_options,
+    )
+
+
+def launch_suffix_observe(
+    grid: tuple[int, ...],
+    idx_mapping: torch.Tensor,
+    num_sampled: torch.Tensor,
+    num_rejected: torch.Tensor,
+    accept_stats: torch.Tensor,
+    last_bucket: torch.Tensor,
+    last_valid: torch.Tensor,
+    **launch_options,
+) -> None:
+    """Translate upstream's request grid to the NPU statistics-bucket grid.
+
+    Preserve the parent observer's consumption semantics. Clearing previous
+    buckets inside the reduction kernel would race the other bucket programs,
+    so it runs as a second launch on the same stream after all reductions.
+    """
+    num_reqs = grid[0]
+    if num_reqs == 0:
+        return
+    launch_options["K_PO2"] = triton.next_power_of_2(launch_options["K"])
+    launch_options["REQS_PO2"] = triton.next_power_of_2(num_reqs)
+    launch_options["num_warps"] = 4
+    _suffix_observe_kernel[(accept_stats.shape[0],)](
+        idx_mapping,
+        num_sampled,
+        num_rejected,
+        accept_stats,
+        last_bucket,
+        last_valid,
+        num_reqs,
+        **launch_options,
+    )
+    _suffix_clear_observed_kernel[(triton.cdiv(num_reqs, _OBSERVE_RESET_BLOCK),)](
+        idx_mapping,
+        num_sampled,
+        last_bucket,
+        num_reqs,
+        BLOCK=_OBSERVE_RESET_BLOCK,
+        num_warps=4,
+    )
+
+
+def launch_suffix_ingest(
+    _grid: tuple[int, ...],
+    token_ids: torch.Tensor,
+    _token_ids_stride: int,
+    docs: torch.Tensor,
+    num_docs: int,
+    total_len: torch.Tensor,
+    corpus: torch.Tensor,
+    corpus_len: int,
+    head: torch.Tensor,
+    doc_seq: torch.Tensor,
+    head_out: torch.Tensor,
+    doc_seq_out: torch.Tensor,
+    table: torch.Tensor,
+    **launch_options,
+) -> None:
+    """Append completed responses and build indexes without owning their lifecycle."""
+    if num_docs == 0:
+        return
+    grid = (num_docs, triton.cdiv(token_ids.shape[1], launch_options["BLOCK"]))
+    _suffix_ingest_kernel[grid](
+        token_ids,
+        token_ids.stride(0),
+        docs,
+        num_docs,
+        total_len,
+        corpus,
+        corpus_len,
+        head,
+        doc_seq,
+        head_out,
+        doc_seq_out,
+        table,
+        **launch_options,
+    )

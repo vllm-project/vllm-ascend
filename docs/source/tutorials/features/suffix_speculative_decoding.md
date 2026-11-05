@@ -74,6 +74,18 @@ that use case, disable both. Under async scheduling, a finished request may
 contribute tokens beyond the scheduler's final stop point; ingestion follows
 upstream device-visible lengths.
 
+The Ascend speculator inherits upstream `SuffixSpeculator` initialization,
+slot bookkeeping and reset behavior. Proposal and finished-response ingestion
+call `super()`; NPU launch wrappers in `ops/triton/spec_decode/suffix.py` own
+stride, grid and compilation-parameter handling. The parent currently calls
+module-level kernels without overridable launch hooks, so only those entry
+points are replaced for the duration of each parent call and restored in
+`finally`. A process-local reentrant lock serializes Ascend proposal and
+ingestion while bindings are replaced. Direct upstream suffix calls in the
+same process must not execute concurrently. Restoring Python bindings does not
+wait for device completion. These scoped replacements can be removed when
+upstream exposes launch hooks or a device kernel provider.
+
 ## Model Runner V1 deployment and benchmarks
 
 This document provides step-by-step guidance on how to deploy and benchmark the Suffix Decoding speculative inference technology supported by `vllm-ascend` on Atlas A2 hardware. The setup utilizes a single Atlas 800T A2 node with a 4-card deployment of the Qwen3-32B model instance. Benchmarking is conducted using authentic open-source datasets covering the following categories:
