@@ -3,51 +3,42 @@
 /.github @zhangxinyuehfad
 /tools @zhangxinyuehfad
 /.gitignore @zhangxinyuehfad
-/.gitmodules @wangxiyuan @zzzzwwjj
 /.pre-commit-config.yaml @zhangxinyuehfad
-/codecov.yml @wangxiyuan
-/Dockerfile* @zhangxinyuehfad
-/format.sh @wangxiyuan
+/codecov.yml @zhangxinyuehfad
+/format.sh @zhangxinyuehfad
 /mypy.ini @zhangxinyuehfad
-/requirements* @wangxiyuan
-/setup.py @wangxiyuan
+/requirements* @zhangxinyuehfad
 /typos.toml @zhangxinyuehfad
-# TODO(owner): /packages.txt
-# /packages.txt
-# TODO(owner): /.markdownlint.yaml
-# /.markdownlint.yaml
-# TODO(owner): /.gitleaks.toml
-# /.gitleaks.toml
-# TODO(owner): /.clang-format
-# /.clang-format
-# repo metadata & agent config
-# TODO(owner): /.agents/
-# /.agents/
-# TODO(owner): /.claude/
-# /.claude/
-# TODO(owner): /AGENTS.md
-# /AGENTS.md
-# TODO(owner): /CLAUDE.md
-# /CLAUDE.md
-# TODO(owner): /CONTRIBUTING.md
-# /CONTRIBUTING.md
-# TODO(owner): /CODE_OF_CONDUCT.md
-# /CODE_OF_CONDUCT.md
-# TODO(owner): /LICENSE
-# /LICENSE
-# TODO(owner): /DCO
-# /DCO
-# TODO(owner): /pyproject.toml
-# /pyproject.toml
-# TODO(owner): /mkdocs.yml
-# /mkdocs.yml
-# TODO(owner): /collect_env.py
-# /collect_env.py
+/packages.txt @zhangxinyuehfad
+/.markdownlint.yaml @MrZ20
+/.gitleaks.toml @zhangxinyuehfad
+/.clang-format @MrZ20
+/setup.py @wangxiyuan
+/pyproject.toml @wangxiyuan
+/collect_env.py @zhangxinyuehfad
+/.gitmodules @zzzzwwjj
+
+# Repo metadata
+/CONTRIBUTING.md @wangxiyuan
+/CODE_OF_CONDUCT.md @wangxiyuan
+/LICENSE @wangxiyuan
+/DCO @wangxiyuan
+
+# Agent
+/.agents/ @zhangxinyuehfad
+/.claude/ @MrZ20
+/AGENTS.md @MrZ20
+/CLAUDE.md @MrZ20
+
+# Dockerfiles
+/Dockerfile* @zhangxinyuehfad
 
 # docs
 /docs @liqian79
-/.readthedocs.yaml @liqian79
+/docs/source/getting_started @MrZ20
+/.readthedocs.yaml @liqian79 @MrZ20
 /README* @liqian79
+/mkdocs.yml @MrZ20
 
 # c++ source code
 /cmake @zzzzwwjj @ZT-AIA
