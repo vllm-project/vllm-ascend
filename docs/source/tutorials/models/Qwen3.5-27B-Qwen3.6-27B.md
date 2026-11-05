@@ -5,7 +5,7 @@
 !!! note
 
     The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
-    
+
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
 
 Qwen3.5-27B and Qwen3.6-27B are dense hybrid Mamba-Transformer language models in the Qwen3.5/Qwen3.6 family, integrating breakthroughs in architectural efficiency, reinforcement learning scale, and global accessibility. They share the same hybrid attention design (GDN + full attention), so deployment on Ascend NPUs follows the same pattern for both models. They are suitable for general-purpose text generation tasks such as dialogue, content creation, and code generation running on Ascend NPUs.
@@ -336,7 +336,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
     - `--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and `Qwen3.6-27B` because they share the same MTP head design.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
-        - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
+        - `"cudagraph_capture_sizes"`: specifies the batch size tiers at which graphs are captured. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the batch size of each captured graph is fixed, and an actual batch size between two adjacent capture sizes is automatically padded up to the next capture size. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
     - `--allowed-local-media-path` allows the API server to read local images or videos from the specified directory when processing multimodal inputs. In this example, `/` whitelists the entire file system. This is security-sensitive and should only be enabled in trusted environments.
     - `--dtype bfloat16` sets the data type for model weights and activations. `bfloat16` is used on Atlas 800I A3 / Atlas 800I A2; `float16` is required on Atlas 300I DUO instead.
     - `--reasoning-parser qwen3` enables the reasoning output parser for the OpenAI-compatible API. It splits the model's thinking content from the final answer and returns it in the `reasoning_content` field of `chat.completions` responses.
@@ -364,7 +364,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         # Ensure the model path matches the directory recorded during download
 
         vllm serve $MODEL_PATH \
-            --host 127.0.0.1 \
+            --host 0.0.0.0 \
             --port 8000 \
             --tensor-parallel-size 4 \
             --served-model-name qwen3.5 \
@@ -393,7 +393,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         # Ensure the model path matches the directory recorded during download
 
         vllm serve $MODEL_PATH \
-            --host 127.0.0.1 \
+            --host 0.0.0.0 \
             --port 8000 \
             --tensor-parallel-size 4 \
             --served-model-name qwen3.6 \
@@ -412,14 +412,14 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
 
     - `--tensor-parallel-size` sets the tensor parallel size. Choose **TP=2** or **TP=4** according to the available devices.
     - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. Configure it based on the actual workload and available memory; The Qwen3.6-27B model supports up to 262144.
-    - `--max-num-seqs` indicates the maximum number of concurrent requests. Configure it as needed—setting it too high may cause OOM.
+    - `--max-num-seqs` indicates the maximum number of concurrent requests.
     - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Configure this value according to the actual device memory; setting it too high may cause OOM. The default value is `0.9`.
     - `--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On Atlas 300I DUO, only `float16` is supported.
     - `--dtype float16` must be set on Atlas 300I DUO. These devices only support the FP16 data type.
     - `--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and `Qwen3.6-27B` because they share the same MTP head design. On Atlas 300I DUO, it is recommended to set `num_speculative_tokens` to `1`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
-        - `"cudagraph_capture_sizes"`: represents different levels of graph modes. When tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`). With MTP enabled, calculate each capture size as `n * (num_speculative_tokens + 1)`, where `n` is a capture size for the deployment without MTP. For example, when `num_speculative_tokens` is `1`, the non-MTP sizes `[1,2,4,8]` become `[2,4,8,16]`.
+        - `"cudagraph_capture_sizes"`: specifies the batch size tiers at which graphs are captured. When tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`). With MTP enabled, calculate each capture size as `n * (num_speculative_tokens + 1)`, where `n` is a capture size for the deployment without MTP. For example, when `num_speculative_tokens` is `1`, the non-MTP sizes `[1,2,4,8]` become `[2,4,8,16]`.
     - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required on Atlas 300I DUO because `enable_npugraph_ex` is not supported on this platform.
 
 === "950DT Products"
@@ -485,7 +485,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
     - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.6-27B` because it shares the same MTP head design as `Qwen3.5-27B`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
-        - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
+        - `"cudagraph_capture_sizes"`: specifies the batch size tiers at which graphs are captured. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the batch size of each captured graph is fixed, and an actual batch size between two adjacent capture sizes is automatically padded up to the next capture size. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
     - `--allowed-local-media-path` allows the API server to read local images or videos from the specified directory when processing multimodal inputs. In this example, `/` whitelists the entire file system. This is security-sensitive and should only be enabled in trusted environments.
     - `--mm-processor-cache-gb` sets the size (in GiB) of the multimodal processor cache, which is used to avoid re-processing past multimodal inputs. The cache is duplicated in each API server process and engine core process, so the total host memory usage is the cache size multiplied by the number of these processes. A value of `0` disables this cache completely.
     - `--mm-encoder-tp-mode` indicates how to optimize multimodal encoder inference using tensor parallelism (TP). `data` splits the batched encoder input data across TP ranks while each rank hosts the full encoder weights, and is recommended when multimodal inputs are used. The default mode `weights` splits the encoder weights across TP ranks instead.
@@ -515,7 +515,7 @@ After the service is started, the model can be invoked by sending a prompt. Two 
 **Completions API:**
 
 ```bash
-curl http://localhost:8000/v1/completions \
+curl http://127.0.0.1:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3.5",
@@ -530,7 +530,7 @@ curl http://localhost:8000/v1/completions \
 **Chat Completions API:**
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl http://127.0.0.1:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3.5",
@@ -575,44 +575,9 @@ Here are two accuracy evaluation methods.
 
 ### 7.1 Using AISBench
 
-1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
+1. For detailed instructions, refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for accuracy evaluation.
 
-2. After execution, you can get the result. Here is the result of `Qwen3.5-27B-w8a8` in `vllm-ascend:v0.17.0rc1` for reference only. The accuracy result of `Qwen3.6-27B-w8a8` can be obtained in the same way and is not listed here.
-
-**Accuracy Evaluation Config File:**
-
-```bash
-# Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py
-from ais_bench.benchmark.models import VLLMCustomAPIChat
-from ais_bench.benchmark.utils.model_postprocessors import extract_non_reasoning_content
-
-models = [
-    dict(
-        attr="service",
-        type=VLLMCustomAPIChat,
-        abbr="vllm-api-general-chat",
-        path="your_model_path",
-        model="qwen3.5",
-        request_rate=0,
-        retry=2,
-        host_ip="127.0.0.1",
-        host_port=8000,
-        max_out_len=32768,
-        batch_size=32,
-        trust_remote_code=False,
-        generation_kwargs=dict(
-            temperature=1.0,
-            top_p=0.95,
-            top_k=20,
-            min_p=0.0,
-            presence_penalty=1.5,
-            repetition_penalty=1.0,
-            ignore_eos=False,
-        ),
-        pred_postprocessor=dict(type=extract_non_reasoning_content)
-    )
-]
-```
+2. After execution, you can get the result. For reference only, here is the result of `Qwen3.5-27B-w8a8` obtained with `vllm-ascend:v0.17.0rc1` on an Atlas 800I A3 node. The accuracy result of `Qwen3.6-27B-w8a8` can be obtained in the same way and is not listed here.
 
 > For `Qwen3.6-27B-w8a8`, change `model` to `qwen3.6` and `path` to the corresponding model weight path.
 
@@ -628,18 +593,6 @@ Using the `gsm8k` dataset as an example test dataset, run the accuracy evaluatio
 2. Run `lm_eval` to execute the accuracy evaluation.
 
 ```shell
-# For Qwen3.5-27B-w8a8
-export VLLM_USE_MODELSCOPE=True
-vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
-    --served-model-name qwen3.5 \
-    --trust-remote-code \
-    --quantization ascend \
-    --tensor-parallel-size 2 \
-    --max-model-len 133000 \
-    --max-num-seqs 32 \
-    --gpu-memory-utilization 0.90 \
-    --no-enable-prefix-caching
-
 # Run lm_eval in another terminal
 lm_eval \
   --model local-completions \
@@ -656,27 +609,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Run performance evaluation of `Qwen3.5-27B-w8a8` or `Qwen3.6-27B-w8a8` as an example.
-
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
-
-There are three `vllm bench` subcommands:
-
-- `latency`: Benchmark the latency of a single batch of requests.
-- `serve`: Benchmark the online serving throughput.
-- `throughput`: Benchmark offline inference throughput.
-
-Take the `serve` as an example. Run the code as follows.
-
-```bash
-export VLLM_USE_MODELSCOPE=True
-# For Qwen3.5-27B-w8a8:
-vllm bench serve --model Eco-Tech/Qwen3.5-27B-w8a8-mtp --served-model-name qwen3.5 --dataset-name random --random-input-len 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
-# For Qwen3.6-27B-w8a8:
-vllm bench serve --model Eco-Tech/Qwen3.6-27B-w8a8 --served-model-name qwen3.6 --dataset-name random --random-input-len 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
-```
-
-After about several minutes, you can get the performance evaluation result.
 
 ## 9 Performance Tuning
 
@@ -686,7 +619,7 @@ After about several minutes, you can get the performance evaluation result.
 >
 > **Parallelism Strategy**: `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8` are only ~30 GB and easily fit in a single NPU (64 GB HBM per NPU). Following the **DP-first** principle, **TP=2 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. **TP=8 is only recommended for ultra-long context (256k+) scenarios**, where it shards the KV cache across 8 NPUs to maximize the available context window per rank. For `Qwen3.6-27B-w8a8`, you can also raise `--max-model-len` up to 262144 in the same TP/DP layout.
 >
-> **Atlas 300I DUO**: Currently only the TP scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. With **TP=4**, `--max-model-len` can support **128k** and **256k** long-sequence scenarios; configure `--max-num-seqs` as needed—setting it too high may cause OOM.
+> **Atlas 300I DUO**: Currently only the TP scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. With **TP=4**, `--max-model-len` can support **128k** and **256k** long-sequence scenarios.
 >
 > **950DT Products**: The `Qwen3.6-27B-w8a8c8-mxfp8` model weight easily fits in a single NPU (96 GB HBM per NPU). Following the **DP-first** principle, **TP=1 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. The C8 weights are recommended for long-sequence scenarios and are served with `--kv-cache-dtype mxfp8`; for short-sequence scenarios (e.g., 16K input), use `Qwen3.6-27B-w8a8-mxfp8` without `--kv-cache-dtype mxfp8`. `--max-model-len` can support up to **262144** in the same TP=1 + DP=8 layout.
 
@@ -714,7 +647,7 @@ After about several minutes, you can get the performance evaluation result.
 | High Throughput (128k) | Single-Node (950DT Products) | 8 | 1 | 8 | 32 | 16384 | 133000 | 3 | On |
 | Long Context (256k+) | Single-Node (950DT Products) | 8 | 1 | 8 | 32 | 16384 | 262144 | 3 | On |
 
-> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment).
 
 ### 9.2 Tuning Guidelines
 

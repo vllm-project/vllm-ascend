@@ -138,16 +138,23 @@ def _health_url(bind_host: str, sock: socket.socket, port: int) -> str:
     return f"http://{host}:{port}/health_check_with_key"
 
 
+def _abort_startup(server: uvicorn.Server, sock: socket.socket) -> None:
+    """Stop a bound server that must not start serving, releasing its listener socket."""
+    server.should_exit = True
+    with suppress(OSError):
+        sock.close()
+
+
 def start_fastapi_server(
     port_queue: queue.Queue[Any],
     expected_seed_key,
     info: SeedTransferInfo,
     *,
+    stop_event: threading.Event,
+    startup_state: _ServerStartupState,
     bind_host: str = "0.0.0.0",
     port: int = 0,
     fallback_to_dynamic_port: bool = False,
-    stop_event: threading.Event | None = None,
-    startup_state: _ServerStartupState | None = None,
 ):
     logger.debug("[RFork Seed] Preparing socket with port %s on %s...", port if port > 0 else "dynamic", bind_host)
 
@@ -180,11 +187,8 @@ def start_fastapi_server(
                     "rfork_transfer_engine_info": rfork_transfer_engine_info,
                     "rfork_transfer_engine_format_info": rfork_seed_format_info,
                 }
-            return {
-                "rfork_protocol_version": RFORK_PROTOCOL_VERSION,
-                "rfork_transfer_engine_info": None,
-                "rfork_transfer_engine_format_info": None,
-            }
+            # A wrong key is a probe, not a valid request; answer with the honest status code.
+            return Response(status_code=HTTPStatus.NOT_FOUND)
 
         @app.get("/health_check_with_key")
         def health_check_with_key(seed_key: str):
@@ -195,50 +199,27 @@ def start_fastapi_server(
         config = uvicorn.Config(app, host=None, port=None, log_level="warning")
         server = uvicorn.Server(config)
         startup = _ServerStartup(server=server, sock=sock, port=actual_port)
-        if startup_state is not None:
-            # Publish before queue handoff so timeout cleanup always owns the socket.
-            with startup_state.lock:
-                startup_state.startup = startup
-                stop_requested = stop_event is not None and stop_event.is_set()
-                if stop_requested:
-                    server.should_exit = True
-                    sock.close()
-                    return
-                # Put the startup handle to the queue while still holding the lock to prevent
-                # a race where _stop_startup_thread() closes the socket between the stop check
-                # and the queue handoff.
-                try:
-                    port_queue.put(startup)
-                except Exception as exc:
-                    logger.error("[RFork Seed] Failed to send server handle via queue: %s", exc)
-                    server.should_exit = True
-                    sock.close()
-                    return
-        else:
-            stop_requested = stop_event is not None and stop_event.is_set()
-            if stop_requested:
-                server.should_exit = True
-                sock.close()
+        # Publish before queue handoff so timeout cleanup always owns the socket.
+        with startup_state.lock:
+            startup_state.startup = startup
+            if stop_event.is_set():
+                _abort_startup(server, sock)
                 return
+            # Put the startup handle to the queue while still holding the lock to prevent
+            # a race where _stop_startup_thread() closes the socket between the stop check
+            # and the queue handoff.
             try:
                 port_queue.put(startup)
             except Exception as exc:
                 logger.error("[RFork Seed] Failed to send server handle via queue: %s", exc)
-                server.should_exit = True
-                sock.close()
+                _abort_startup(server, sock)
                 return
 
-        if startup_state is not None:
-            with startup_state.lock:
-                stop_requested = stop_event is not None and stop_event.is_set()
-                if stop_requested:
-                    server.should_exit = True
-                    sock.close()
-                    return
-        elif stop_event is not None and stop_event.is_set():
-            server.should_exit = True
-            sock.close()
-            return
+        # A stop may arrive after the handoff but before the server starts serving.
+        with startup_state.lock:
+            if stop_event.is_set():
+                _abort_startup(server, sock)
+                return
 
         logger.debug("[RFork Seed] FastAPI server starting on port %s...", actual_port)
         server.run(sockets=[sock])

@@ -369,7 +369,10 @@ class NPUOffloadingWorker(OffloadingWorker):
         job_id: int,
         src_spec: LoadStoreSpec,
         dst_spec: GPULoadStoreSpec,
+        expedited: bool = False,
     ) -> bool:
+        # vLLM main submits step-synchronous loads with `expedited=True`; this
+        # worker keeps a single load path and honours the same contract.
         return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
 
     def get_finished(self) -> list[TransferResult]:

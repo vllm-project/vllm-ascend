@@ -236,7 +236,7 @@ def test_get_finished_records_store_barrier_on_npu(
 
 
 @pytest.mark.skipif(
-    vllm_version_is("0.31.0"),
+    vllm_version_is("0.32.0"),
     reason="get_simple_cpu_offload_num_cpu_blocks is a main-only RPC",
 )
 def test_npu_worker_reports_aligned_cpu_blocks(
@@ -263,7 +263,7 @@ def test_npu_worker_reports_aligned_cpu_blocks(
 
 
 @pytest.mark.skipif(
-    vllm_version_is("0.31.0"),
+    vllm_version_is("0.32.0"),
     reason="get_simple_cpu_offload_num_cpu_blocks is a main-only RPC",
 )
 def test_npu_worker_reports_no_cpu_blocks_without_transfer_group(
@@ -279,7 +279,7 @@ def test_npu_worker_reports_no_cpu_blocks_without_transfer_group(
 
 
 @pytest.mark.skipif(
-    vllm_version_is("0.31.0"),
+    vllm_version_is("0.32.0"),
     reason="get_simple_cpu_offload_num_cpu_blocks is a main-only RPC",
 )
 def test_npu_worker_reports_no_cpu_blocks_without_connector(

@@ -68,30 +68,92 @@ in the renderer. Link to [model tutorials](../docs/source/tutorials/models)
 for deployment details and record actual hardware validation for new settings.
 
 The `Recipes` PR check calls the renderer's reusable
-`validate-recipes.yml` workflow with `source: vllm-ascend` and `path: recipes`.
-While source registration is pending, `renderer-ref` is pinned to PR #1160's
-[`9ffe8f5d`](https://github.com/vllm-project/recipes/commit/9ffe8f5da08b1f2ae862464805ebc487529c34d4).
-This is an **unmerged preview renderer**, whose lock uses the companion
-vLLM split at
-[`7846aee8`](https://github.com/esmeetu/vllm/commit/7846aee877aa763108476ed035d410fe8e175bca).
-The validator replaces its Ascend source with the recipes under review,
-checks ownership, Huawei scope, conflicts and orphaned overlays, then builds
-the schema-validated JSON API. It does not enforce a fixed import count.
+`validate-recipes.yml@main` workflow with `source: vllm-ascend` and
+`path: recipes`. It uses the workflow's default `renderer-ref: main`, so
+validation follows the renderer that publishes recipes.vllm.ai.
+
+Once the Ascend source is registered, the validator replaces it with the
+recipes under review, checks ownership, Huawei scope, conflicts and orphaned
+overlays, then builds the schema-validated JSON API. Until registration lands
+in renderer `main`, validation fails with
+`has overlays/ but role is "core" (needs role: overlay)` because an unknown
+source is treated as a standalone core source. Successful validation also
+requires the staged cutover support described below.
 
 Run the same validation in a fresh, disposable renderer checkout:
 
 ```bash
-git clone https://github.com/vllm-project/recipes.git recipes-renderer-check
+git clone --branch main --single-branch https://github.com/vllm-project/recipes.git recipes-renderer-check
 cd recipes-renderer-check
-git fetch origin pull/1160/head
-git checkout --detach 9ffe8f5da08b1f2ae862464805ebc487529c34d4
 pnpm install --frozen-lockfile
 node scripts/validate-source.mjs --source vllm-ascend --dir /path/to/vllm-ascend/recipes
 ```
 
-Use a disposable checkout because this renderer version writes and removes
+Use a disposable checkout because the validator writes and removes
 `.content/validate`. Clear inherited `RECIPES_*` overrides when reproducing CI.
 Static validation does not establish NPU correctness or performance.
+
+## Pull request previews
+
+The existing PR labeler adds the `recipe` label to PRs changing `recipes/**`.
+Once enabled, the `Recipes Preview` workflow sends events to
+`vllm-project/recipes`, which owns preview builds, deployment, and cleanup:
+
+- PRs targeting `main`: opening, pushing, or reopening sends `preview-pr`
+  with `source: vllm-ascend` and the PR number. Closing sends the same event
+  so the renderer can delete the preview branch.
+- Pushes to `main` changing `recipes/**`: `recipes-updated` requests a
+  production source-lock update with `source: vllm-ascend`.
+
+The workflow's `recipes-preview` environment provides a **View deployment**
+link to
+`https://vllm-recipes-git-preview-vllm-ascend-pr-<PR number>-inferact-inc.vercel.app`.
+The renderer uses `preview/vllm-ascend-pr-<PR number>` as the preview branch.
+The link can appear before the deployment is ready; allow a few minutes for
+the build and check the preview banner for the rendered commit. A successful
+dispatch only confirms that the event was accepted, not that a build passed.
+Push runs link to [recipes.vllm.ai](https://recipes.vllm.ai); close events do
+not advertise a preview URL.
+
+### Administrator setup and activation
+
+This workflow follows [vLLM PR #63259](https://github.com/vllm-project/vllm/pull/63259).
+It is disabled until the repository Actions variable `RECIPES_PREVIEW_ENABLED`
+is set to `true`. Leave it unset or `false` during setup: the original recipes
+receiver ignores `source` and would interpret an Ascend PR number as a vLLM PR.
+
+1. Before merging the labeler rule, create the `recipe` label in
+   `vllm-project/vllm-ascend`. The existing PR labeler can apply labels but
+   does not have the `issues: write` permission needed to create them. It
+   runs independently of the preview activation variable.
+2. In `vllm-project/recipes`, finish the Ascend source registration and
+   compatible source-lock cutover described below. Extend the dispatch
+   receiver to validate and route `source: vllm-ascend`, include the source
+   in concurrency groups, and scan Ascend PRs with the `recipe` label in
+   the scheduled fallback. Confirm production source updates include Ascend.
+3. Reuse or create a dispatch GitHub App installed only on
+   `vllm-project/recipes`, with **Contents: read and write**. Keep it separate
+   from the publisher App. Confirm the receiver's rulesets prevent this App
+   from creating, updating, or deleting non-preview branches and tags; it
+   must not be a bypass actor. See the
+   [existing rollout](https://github.com/vllm-project/recipes/pull/1169).
+4. In `vllm-project/vllm-ascend`, create the `recipes-preview` environment.
+   Restrict its deployment branches to `main` only, then add the environment
+   variable `RECIPES_APP_ID` and environment secret `RECIPES_APP_PRIVATE_KEY`.
+   The workflow mints a short-lived installation token scoped to `recipes`.
+   It never checks out or executes PR code, including for fork PRs.
+5. Set `RECIPES_PREVIEW_ENABLED=true` as a **repository Actions variable**
+   (not an environment variable, since the job condition is evaluated before
+   entering the environment). Only enable it after the receiver is ready.
+6. Use a real overlay PR to verify the `recipe` label, initial preview,
+   updated commit after a push, close cleanup, and rebuild after reopening.
+   Verify that merging the PR updates the production source lock. A workflow
+   rerun or a new push can trigger a preview for an existing PR after activation.
+
+GitHub App credentials and environment settings are administrator actions;
+adding these files does not configure them. Disabling the repository variable
+stops new dispatches but does not remove existing preview branches. Preview
+activation does not change the validation renderer, which follows `main`.
 
 ## Staged source cutover
 
@@ -119,9 +181,9 @@ vllm-ascend:
 ```
 
 Update the renderer's `sources.lock.json` to official revisions rather than
-publishing its preview fork pins. Once renderer `main` includes registration
-and identical-entry support, remove `renderer-ref` from this repository's
-workflow so validation follows the published source configuration.
+publishing its preview fork pins. This repository's workflow already follows
+renderer `main`; source registration and identical-entry support must land
+there for validation and the staged source cutover to succeed.
 
 Compare the generated commands and guide placement before and after the
 split. Overlay keys are appended after base keys, so variant display order

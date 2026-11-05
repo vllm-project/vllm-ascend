@@ -46,7 +46,6 @@ from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
     oproj_tp_enable,
-    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -82,6 +81,37 @@ direct_register_custom_op(
     op_func=dsa_v41_forward,
     mutates_args=["output"],
     fake_impl=dsa_v41_forward_fake,
+    dispatch_key="PrivateUse1",
+)
+
+
+@eager_break_during_capture
+def dsa_v41_write_kv(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Write a V4.1 layer's KV caches without running attention or its MLP."""
+    forward_context = get_forward_context()
+    attn = forward_context.no_compile_layers[layer_name]
+    metadata = attn.v41_impl._get_layer_metadata(forward_context.attn_metadata)
+    hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
+    attn.v41_impl._update_caches(attn, hidden_states, metadata)
+
+
+def dsa_v41_write_kv_fake(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="dsa_v41_write_kv",
+    op_func=dsa_v41_write_kv,
+    mutates_args=["output"],
+    fake_impl=dsa_v41_write_kv_fake,
     dispatch_key="PrivateUse1",
 )
 
@@ -199,7 +229,6 @@ class AscendDSAV41Metadata(AttentionMetadata):
     c2_source_sin: torch.Tensor | None = None
     c2_metadata_group_id: int | None = None
     global_metadata: "AscendDSAV41Metadata | None" = None
-    cp_token_range: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -787,7 +816,7 @@ class AscendDSAV41Impl:
             attention_output = self._forward_attention(attn, q, metadata, compressed_indices)
             AscendDSAV41Impl._apply_rotary(attn, attention_output, cos, sin, inverse=True)
         else:
-            heads = attn.n_heads if getattr(attn, "enable_dsa_cp", False) else attn.n_local_heads
+            heads = attn.n_local_heads
             attention_output = hidden_states.new_empty((0, heads, attn.head_dim))
         self._project_output(attn, attention_output, hidden_states, metadata, projected=output)
         return output
@@ -1577,8 +1606,8 @@ class DeepseekV41CacheBackend(AttentionBackend):
     @classmethod
     def supports_batch_invariance(cls) -> bool:
         # vLLM #60271 added the batch-invariance support check in
-        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
-        return not vllm_version_is("0.31.0")
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
 
     @staticmethod
     def get_impl_cls():

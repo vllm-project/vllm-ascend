@@ -92,15 +92,16 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
-    get_layerwise_physical_layer_index,
     get_layerwise_reuse_config,
+    get_physical_layer_index,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
 )
+from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
@@ -116,9 +117,9 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
-# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on
-# main; the v0.31.0 lane still ships them in `kv_cache_utils`.
-if vllm_version_is("0.31.0"):
+# vLLM #61183 moved the planning helpers on main; v0.32.0 keeps them
+# in kv_cache_utils, so importing the main-only module breaks worker startup.
+if vllm_version_is("0.32.0"):
     from vllm.v1.core.kv_cache_utils import (
         get_kv_cache_groups,
         unify_hybrid_kv_cache_specs,
@@ -186,6 +187,10 @@ class NPUWorker(WorkerBase):
         apply_v2_model_runner_config_patch()
         sync_v2_extra_kwargs(vllm_config)
         adapt_patch()
+
+        from vllm_ascend.patch.worker.patch_kda_recoverssm import patch_kda_recoverssm
+
+        patch_kda_recoverssm(vllm_config)
 
         # Register ops when worker init.
         from vllm_ascend import ops
@@ -333,6 +338,7 @@ class NPUWorker(WorkerBase):
         self.synchronize_device()
 
         allocator = CaMemAllocator.get_instance()
+        global_te.unregister_buffer()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
@@ -357,6 +363,8 @@ class NPUWorker(WorkerBase):
             )
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
+        if tags is None or "kv_cache" in tags:
+            global_te.reregister_buffer()
 
         # Do not access or consume saved weights when only the KV pool wakes.
         wake_weights = tags is None or "weights" in tags
@@ -681,6 +689,10 @@ class NPUWorker(WorkerBase):
                 GiB(self.init_snapshot.free_memory),
                 GiB(kv_cache_memory_bytes),
             )
+            # Explicit and startup-plan budgets are physical bytes too. Apply
+            # the same private multi-group allocation correction as profiling
+            # before the offload and KVPP budget conversions.
+            kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(kv_cache_memory_bytes)
             return self._apply_kvpp_memory_budget(
                 self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
             )
@@ -789,9 +801,9 @@ class NPUWorker(WorkerBase):
                 return available_memory
 
         # vLLM #51718 overlays KV cache groups in one standardized backing
-        # allocation. For the default layer/block-compact layout, Ascend can
+        # allocation. For block-compact layouts, Ascend can
         # preserve that contract for attention/Mamba and eligible full/sliding
-        # attention models while exposing contiguous per-layer views. Do not
+        # attention models through supported cache views. Do not
         # shrink the planner budget when the runner can consume that layout.
         per_layer_specs = []
         for group in kv_cache_groups:
@@ -818,7 +830,6 @@ class NPUWorker(WorkerBase):
         if (
             has_attention
             and (has_mamba or is_step_model or shares_attention_pool)
-            and layout.is_layer_compact
             and layout.is_block_compact
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
             and not getattr(model_runner, "use_sparse", False)
@@ -955,10 +966,10 @@ class NPUWorker(WorkerBase):
         # vLLM #57516 reclaims cached memory inside `load_model` via
         # `torch.accelerator.empty_cache()`. Inside the sleep-mode pluggable
         # memory pool `torch.npu.empty_cache()` trips "captures_underway.empty()",
-        # so on main neutralize it while weights load; the pool is reclaimed by
-        # sleep()/wake_up(). The v0.31.0 lane does not reclaim inside load_model.
+        # so neutralize it while weights load on both supported lanes; the pool
+        # is reclaimed by sleep()/wake_up().
         empty_cache_context: AbstractContextManager[Any]
-        if self.vllm_config.model_config.enable_sleep_mode and not vllm_version_is("0.31.0"):
+        if self.vllm_config.model_config.enable_sleep_mode:
             empty_cache_context = patch("torch.npu.empty_cache", lambda: None)
         else:
             empty_cache_context = nullcontext()
@@ -1182,8 +1193,8 @@ class NPUWorker(WorkerBase):
         return {(pp_rank, tp_rank): metadata}
 
     def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
-        if vllm_version_is("0.31.0"):
-            # v0.31.0's engine core never issues this RPC, and the upstream
+        if vllm_version_is("0.32.0"):
+            # v0.32.0's engine core never issues this RPC, and the upstream
             # `._find_simple_cpu_offload_connector` / `get_aligned_num_cpu_blocks`
             # helpers do not exist on that lane.
             return None
@@ -1213,7 +1224,7 @@ class NPUWorker(WorkerBase):
         excluded_layer_names = (excluded_layer_names or set()) & kv_cache_spec.keys()
         target_specs = {name: spec for name, spec in kv_cache_spec.items() if name not in excluded_layer_names}
         base_layers = self.model_config.get_num_layers(self.parallel_config)
-        physical_layers = {get_layerwise_physical_layer_index(layer_name, base_layers) for layer_name in target_specs}
+        physical_layers = {get_physical_layer_index(layer_name, base_layers) for layer_name in target_specs}
         num_layers = len(physical_layers)
         if num_layers < base_layers:
             return num_layers, num_layers, 1.0
@@ -1350,7 +1361,15 @@ class NPUWorker(WorkerBase):
         if should_init_kv_zeroer and hasattr(self.model_runner, "_init_kv_zero_meta"):
             self.model_runner._init_kv_zero_meta()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
+    ):
         # Check if profiling is enabled (RFC #6954 - align with upstream vLLM)
         if self.profiler_config is None or self.profiler_config.profiler is None:
             raise RuntimeError(
@@ -1369,11 +1388,13 @@ class NPUWorker(WorkerBase):
             if self.profiler is None:
                 self.profiler = TorchNPUProfilerWrapper(self.profiler_config, trace_name)
                 logger.debug("Starting torch profiler with trace name: %s", trace_name)
-                self.profiler.start()  # type: ignore[attr-defined]
-            else:
-                # Profiler already initialized. Restart profiling but keep
-                # the original trace name from the first initialization.
-                self.profiler.start()
+            # Else: profiler already initialized. Restart profiling but keep the
+            # original trace name from the first initialization.
+            if not vllm_version_is("0.32.0"):
+                # vLLM main supports per-session profiler kwargs; the release
+                # wrapper has no slot for them.
+                self.profiler.set_profiler_kwargs(profiler_kwargs)
+            self.profiler.start(delay_iterations=delay_iterations, max_iterations=max_iterations)
         else:
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")

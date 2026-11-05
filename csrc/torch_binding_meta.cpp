@@ -298,6 +298,75 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
 }
 
+at::Tensor npu_generic_block_sparse_attention_metadata_meta(
+    const at::Tensor &sparse_block_idx, const at::Tensor &sparse_block_count,
+    int64_t num_heads_q, int64_t num_heads_kv, int64_t head_dim,
+    at::IntArrayRef block_shape,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &cu_seqlens_kv,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &seqused_kv,
+    int64_t max_seqlen_q, int64_t max_seqlen_kv,
+    c10::string_view layout_q, c10::string_view layout_kv,
+    int64_t layout_sparse_pattern, int64_t mask_mode, int64_t quant_mode,
+    int64_t softmax_precision, int64_t win_left, int64_t win_right,
+    int64_t residual_block_mode, bool is_consistent_topk)
+{
+    return at::empty_symint(
+        c10::SymDimVector{c10::SymInt(1024)},
+        sparse_block_idx.options().dtype(at::kInt).device(c10::kMeta));
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_generic_block_sparse_attention_meta(
+    const at::Tensor &q, const at::Tensor &k, const at::Tensor &v,
+    const at::Tensor &sparse_block_idx, const at::Tensor &sparse_block_count,
+    at::IntArrayRef block_shape,
+    const c10::optional<at::Tensor> &metadata,
+    const c10::optional<at::Tensor> &attn_mask,
+    const c10::optional<at::Tensor> &q_dequant_scale,
+    const c10::optional<at::Tensor> &k_dequant_scale,
+    const c10::optional<at::Tensor> &v_dequant_scale,
+    const c10::optional<at::Tensor> &p_quant_scale,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &cu_seqlens_kv,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &seqused_kv,
+    const c10::optional<at::Tensor> &block_table,
+    c10::string_view layout_q, c10::string_view layout_kv,
+    int64_t layout_sparse_pattern, double softmax_scale,
+    int64_t mask_mode, int64_t quant_mode, double dst_type_max,
+    int64_t softmax_precision, int64_t win_left, int64_t win_right,
+    bool return_softmax_lse, int64_t residual_block_mode,
+    bool is_consistent_topk,
+    c10::optional<at::ScalarType> attention_out_dtype)
+{
+    at::ScalarType output_dtype;
+    if (attention_out_dtype.has_value()) {
+        output_dtype = attention_out_dtype.value();
+    } else {
+        TORCH_CHECK(quant_mode == 0,
+                    "attention_out_dtype must be specified when quant_mode != 0");
+        output_dtype = q.scalar_type();
+    }
+    auto output = at::empty_symint(
+        q.sym_sizes(), q.options().dtype(output_dtype).device(c10::kMeta));
+
+    c10::SymDimVector lse_shape{c10::SymInt(0)};
+    if (return_softmax_lse) {
+        const auto layout_q_str = std::string(layout_q);
+        if (layout_q_str == "TND") {
+            lse_shape = {q.sym_size(0), q.sym_size(1), c10::SymInt(1)};
+        } else if (layout_q_str == "BNSD") {
+            lse_shape = {q.sym_size(0), q.sym_size(1), q.sym_size(2), c10::SymInt(1)};
+        } else {
+            lse_shape = {q.sym_size(0), q.sym_size(2), q.sym_size(1), c10::SymInt(1)};
+        }
+    }
+    auto softmax_lse = at::empty_symint(
+        lse_shape, q.options().dtype(at::kFloat).device(c10::kMeta));
+    return {output, softmax_lse};
+}
+
 at::Tensor npu_sparse_flash_mla_metadata_meta(
     int64_t num_heads_q, int64_t num_heads_kv, int64_t head_dim,
     const c10::optional<at::Tensor> &cu_seqlens_q,
@@ -368,32 +437,6 @@ std::tuple<at::Tensor, at::Tensor> npu_sparse_flash_mla_meta(
     auto lse = at::empty_symint(lse_shape,
                                 q.options().dtype(at::kFloat).device(c10::kMeta));
     return {output, lse};
-}
-
-at::Tensor npu_sparse_attention_score_meta(
-    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
-    const at::Tensor &select_idx, const at::Tensor &block_table,
-    const c10::optional<at::Tensor> &select_num_idx,
-    const c10::optional<at::Tensor> &q_dequant_scale,
-    const c10::optional<at::Tensor> &k_dequant_scale,
-    const c10::optional<at::Tensor> &v_dequant_scale,
-    const c10::optional<at::Tensor> &actual_seq_lengths,
-    const c10::optional<at::Tensor> &actual_seq_lengths_kv,
-    c10::string_view q_input_layout, c10::string_view kv_input_layout,
-    int64_t num_key_value_heads, double scale_value, int64_t block_size,
-    int64_t top_k, int64_t inner_precise,
-    const c10::optional<at::ScalarType> &attention_out_dtype)
-{
-    TORCH_CHECK(std::string(q_input_layout) == "TND",
-                "npu_sparse_attention_score only supports query TND layout");
-    at::ScalarType out_dtype = query.scalar_type();
-    if (query.scalar_type() == at::kFloat8_e4m3fn) {
-        out_dtype = attention_out_dtype.value_or(at::kBFloat16);
-        TORCH_CHECK(out_dtype == at::kHalf || out_dtype == at::kBFloat16,
-                    "attention_out_dtype must be float16 or bfloat16 for float8_e4m3fn input.");
-    }
-    return at::empty_symint(query.sym_sizes(),
-                            query.options().dtype(out_dtype).device(c10::kMeta));
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attention_vllm_meta(
@@ -514,41 +557,6 @@ void npu_fused_scatter_copy_sparse_flash_attention_meta(
     const at::Tensor&, at::Tensor, at::Tensor, const at::Tensor&,
     const at::Tensor&, double, at::Tensor)
 {
-}
-
-std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
-    const at::Tensor& x,
-    int64_t k,
-    int64_t k_group,
-    int64_t group_count,
-    int64_t group_select_mode,
-    int64_t renorm,
-    int64_t norm_type,
-    bool out_flag,
-    double routed_scaling_factor,
-    double eps,
-    const c10::optional<at::Tensor>& bias_opt
-
-    )
-{
-    TORCH_CHECK(x.dim() == 2, "The x should be 2D");
-    TORCH_CHECK(
-        x.scalar_type() == at::kHalf || x.scalar_type() == at::kFloat || x.scalar_type() == at::kBFloat16,
-        "float16、float32 or bfloat16 tensor expected but got a tensor with dtype: ",
-        x.scalar_type());
-
-    auto rows = x.sym_size(0);
-    auto expert_num = x.sym_size(1);
-    const at::Tensor &bias = c10::value_or_else(bias_opt, [] { return at::Tensor(); });
-    if (bias.defined()) {
-        TORCH_CHECK(x.scalar_type() == bias.scalar_type(), "The dtype of x and bias should be same");
-        TORCH_CHECK(bias.dim() == 1, "The bias should be 1D");
-    }
-    at::Tensor y = at::empty_symint(c10::SymDimVector{rows, c10::SymInt(k)}, x.options());
-    at::Tensor expert_idx = at::empty_symint(c10::SymDimVector{rows, c10::SymInt(k)}, x.options().dtype(at::kInt));
-    at::Tensor out = at::empty_symint(c10::SymDimVector{rows, expert_num}, x.options().dtype(at::kFloat));
-
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y,expert_idx,out);
 }
 
 std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
@@ -1802,9 +1810,12 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("attn_res_fwd", &vllm_ascend::meta::attn_res_fwd_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
+    ops.impl("npu_generic_block_sparse_attention_metadata",
+             &vllm_ascend::meta::npu_generic_block_sparse_attention_metadata_meta);
+    ops.impl("npu_generic_block_sparse_attention",
+             &vllm_ascend::meta::npu_generic_block_sparse_attention_meta);
     ops.impl("npu_sparse_flash_mla_metadata", &vllm_ascend::meta::npu_sparse_flash_mla_metadata_meta);
     ops.impl("npu_sparse_flash_mla", &vllm_ascend::meta::npu_sparse_flash_mla_meta);
-    ops.impl("npu_sparse_attention_score", &vllm_ascend::meta::npu_sparse_attention_score_meta);
     ops.impl("npu_k2q_csr", &vllm_ascend::meta::npu_k2q_csr_meta);
     ops.impl("npu_sparse_attention_score_prefill",
              &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
@@ -1820,8 +1831,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
              &vllm_ascend::meta::npu_fused_scatter_copy_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
-    // Moe_gating_top_k
-    ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     ops.impl("npu_rms_norm_cast", &vllm_ascend::meta::npu_rms_norm_cast_meta);

@@ -346,6 +346,14 @@ class BalanceScheduler(Scheduler):
                         break
 
             if new_blocks is None:
+                if not vllm_version_is("0.32.0") and (
+                    self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED
+                ):
+                    # The request was the lowest-priority running request and
+                    # preempted itself. The requests after it have higher
+                    # priority and may still fit; it was removed from
+                    # `self.running`, so `req_index` already points at the next.
+                    continue
                 # Cannot schedule this request.
                 break
 
@@ -450,9 +458,11 @@ class BalanceScheduler(Scheduler):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
+                did_prefix_cache_lookup = False
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
+                    did_prefix_cache_lookup = True
                     # Get locally-cached tokens.
                     if (
                         self.connector is not None
@@ -477,13 +487,9 @@ class BalanceScheduler(Scheduler):
                         # the last block) is transferred unconditionally by
                         # _apply_prefix_caching in nixl/worker.py.
                         num_new_local_computed_tokens = max(per_group_hits)
-                        if self.kv_cache_manager.log_stats:
-                            assert self.kv_cache_manager.prefix_cache_stats is not None
-                            self.kv_cache_manager.prefix_cache_stats.record(
-                                num_tokens=request.num_tokens,
-                                num_hits=num_new_local_computed_tokens,
-                                preempted=request.num_preemptions > 0,
-                            )
+                        # Prefix-cache stats for this per-group lookup are
+                        # recorded at admission together with the common path
+                        # below; recording here as well would double count.
                     else:
                         (
                             new_computed_blocks,
@@ -565,7 +571,7 @@ class BalanceScheduler(Scheduler):
                     if (
                         not self.scheduler_config.enable_chunked_prefill
                         and num_new_tokens > token_budget
-                        and (vllm_version_is("0.31.0") or not self.is_mm_encoder_only)
+                        and not self.is_mm_encoder_only
                     ):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
@@ -663,6 +669,13 @@ class BalanceScheduler(Scheduler):
                             num_hits=connector_prefix_cache_hits,
                             preempted=request.num_preemptions > 0,
                         )
+
+                # Record at admission so unscheduled lookups are not counted.
+                if did_prefix_cache_lookup:
+                    self.kv_cache_manager.record_prefix_cache_stats(
+                        request,
+                        num_new_local_computed_tokens,
+                    )
 
                 if load_kv_async:
                     # If loading async, allocate memory and put request
@@ -764,12 +777,17 @@ class BalanceScheduler(Scheduler):
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
                     req._all_token_ids,
+                    uses_mrope=self.model_uses_mrope,
                 )
                 for req in scheduled_new_reqs
             ]
         else:
             new_reqs_data = [
-                NewRequestData.from_request(req, req_to_new_blocks[req.request_id].get_block_ids())
+                NewRequestData.from_request(
+                    req,
+                    req_to_new_blocks[req.request_id].get_block_ids(),
+                    uses_mrope=self.model_uses_mrope,
+                )
                 for req in scheduled_new_reqs
             ]
 
@@ -789,7 +807,7 @@ class BalanceScheduler(Scheduler):
 
         # Drain every step, including without a connector, to avoid stale
         # Mamba boundary offers. Snapshot exact current block tables for the
-        # connector before building its metadata. (vLLM main/v0.31.0)
+        # connector before building its metadata on both supported vLLM lanes.
         kv_connector_block_state = None
         boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
         if self.connector is not None:

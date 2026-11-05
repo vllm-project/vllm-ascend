@@ -40,7 +40,9 @@ def copy_kv_cache_blocks_inplace(
         return
 
     cache_tensors: list[torch.Tensor] = []
-    seen_tensors: set[int] = set()
+    seen_tensors: set[tuple[torch.device, int] | tuple[torch.device, int, tuple[int, ...], tuple[int, ...], int]] = (
+        set()
+    )
     for entry in kv_caches:
         if entry is None:
             continue
@@ -52,9 +54,17 @@ def copy_kv_cache_blocks_inplace(
             if tensor is None:
                 continue
             data_ptr = tensor.data_ptr()
-            if data_ptr in seen_tensors:
+            # Hybrid models can overlay layers of different kinds on one
+            # allocation, so views at the same address can differ in geometry.
+            # Main keys on that geometry; the release lane keys on (device, address).
+            key = (
+                (tensor.device, data_ptr)
+                if vllm_version_is("0.32.0")
+                else (tensor.device, data_ptr, tuple(tensor.shape), tuple(tensor.stride()), tensor.element_size())
+            )
+            if key in seen_tensors:
                 continue
-            seen_tensors.add(data_ptr)
+            seen_tensors.add(key)
             cache_tensors.append(tensor)
 
     if not cache_tensors:
@@ -118,10 +128,6 @@ def prepare_ascend_kernel_block_sizes(
         List of kernel block sizes for each cache group.
     """
     kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
-    if vllm_version_is("0.31.0"):
-        # The release lane predates #57169 and always splits; its
-        # ``select_common_block_size`` also takes no per-group specs.
-        return kernel_block_sizes
 
     # Upstream drops only encoder-only groups, so this index tracks its output.
     index = 0

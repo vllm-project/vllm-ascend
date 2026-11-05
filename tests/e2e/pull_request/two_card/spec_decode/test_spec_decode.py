@@ -27,7 +27,8 @@ import os
 import pytest
 from transformers import AutoTokenizer
 from vllm import SamplingParams
-from vllm.config import CompilationConfig
+from vllm.config import CompilationConfig, CompilationMode
+from vllm.inputs import TokensPrompt
 from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
@@ -261,91 +262,6 @@ def test_p_eagle_acceptance(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
-@pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
-@pytest.mark.parametrize("num_speculative_tokens", [7])
-@pytest.mark.skip(reason="vLLM #57934: Model Runner V1 rejects DFlash candidate-head, remove it after drop MRV1")
-def test_dflash2_acceptance(
-    method: str,
-    num_speculative_tokens: int,
-):
-    main_model_name = DFLASH2_MODELS[method]["main"]
-    spec_model_name = DFLASH2_MODELS[method]["spec"]
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        main_model_name,
-        trust_remote_code=True,
-    )
-    sampling_params = SamplingParams(
-        temperature=0,
-        ignore_eos=False,
-        max_tokens=512,
-    )
-
-    prompts = [
-        {
-            "role": "user",
-            "content": "What is your name, please provide a detailed introduction.",
-        },
-    ]
-    prompts = [
-        tokenizer.apply_chat_template(
-            [prompt],
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-        for prompt in prompts
-    ]
-
-    speculative_config = {
-        "method": "dflash",
-        "model": spec_model_name,
-        "num_speculative_tokens": num_speculative_tokens,
-    }
-
-    compilation_config = CompilationConfig(cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[9])
-
-    with VllmRunner(
-        main_model_name,
-        max_model_len=2048,
-        disable_log_stats=False,
-        tensor_parallel_size=2,
-        max_num_seqs=1,
-        distributed_executor_backend="mp",
-        gpu_memory_utilization=0.9,
-        speculative_config=speculative_config,
-        compilation_config=compilation_config,
-        enable_prefix_caching=False,
-    ) as llm:
-        outputs = llm.model.generate(prompts, sampling_params)
-        metrics = llm.model.get_metrics()
-
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        output_tokens = output.outputs[0].token_ids
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        print(f"Output tokens: {output_tokens}")
-
-    num_drafts = 0
-    num_accepted_tokens_per_pos = [0] * num_speculative_tokens
-    for metric in metrics:
-        if metric.name == "vllm:spec_decode_num_drafts":
-            assert isinstance(metric, Counter)
-            num_drafts += metric.value
-        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
-            assert isinstance(metric, Vector)
-            for pos in range(len(metric.values)):
-                num_accepted_tokens_per_pos[pos] += metric.values[pos]
-
-    acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
-    golden = BASELINES_SP[method][:num_speculative_tokens]
-
-    match = all(abs(a - b) < 0.2 for a, b in zip(acceptance_per_pos, golden, strict=True))
-    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
-
-
 @pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [7])
 def test_dflash2_v2_acceptance(
@@ -364,6 +280,7 @@ def test_dflash2_v2_acceptance(
         temperature=0,
         ignore_eos=False,
         max_tokens=512,
+        seed=42,
     )
 
     prompts = [
@@ -386,22 +303,60 @@ def test_dflash2_v2_acceptance(
         "method": "dflash",
         "model": spec_model_name,
         "num_speculative_tokens": num_speculative_tokens,
-        "enforce_eager": True,
+        "enforce_eager": False,
     }
+
+    # Keep decode within the FULL graph buckets; vary only the prefill length
+    # below to exercise PIECEWISE and eager under the same engine configuration.
+    decode_query_len = num_speculative_tokens + 1
+    capture_sizes = [batch_size * decode_query_len for batch_size in (1, 2)]
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_capture_sizes=capture_sizes,
+    )
 
     with VllmRunner(
         main_model_name,
         max_model_len=2048,
         disable_log_stats=False,
         tensor_parallel_size=2,
-        max_num_seqs=1,
+        max_num_seqs=2,
+        max_num_batched_tokens=2048,
         distributed_executor_backend="mp",
         gpu_memory_utilization=0.9,
         speculative_config=speculative_config,
-        enforce_eager=True,
+        enforce_eager=False,
+        compilation_config=compilation_config,
         enable_prefix_caching=False,
     ) as llm:
+        assert llm.model.llm_engine.vllm_config.use_v2_model_runner
         outputs = llm.model.generate(prompts, sampling_params)
+
+        # Reuse this engine for two sequential single-request generations,
+        # then submit both prompts together to exercise request-slot reuse.
+        # K=7 gives a 9-token PIECEWISE prefill and a 32-token eager prefill,
+        # followed by 8-token FULL decode in each single-request generation.
+        # Token IDs fix the lengths, and the token budget admits each prefill
+        # in one step. The joint submission also exercises batched execution.
+        prefill_lengths = (decode_query_len + 1, 2 * max(capture_sizes))
+        prompt_token_ids = tokenizer.encode("Continue counting: 1, 2, 3, 4, 5.", add_special_tokens=False)
+        assert prompt_token_ids
+        prompt_token_ids *= (max(prefill_lengths) + len(prompt_token_ids) - 1) // len(prompt_token_ids)
+        graph_sampling_params = SamplingParams(temperature=0, ignore_eos=True, max_tokens=48, seed=42)
+        graph_prompts: list[TokensPrompt] = [
+            {"prompt_token_ids": prompt_token_ids[:prefill_len]} for prefill_len in prefill_lengths
+        ]
+        # generate() completes each batch before the next one is submitted.
+        for graph_batch in [[prompt] for prompt in graph_prompts] + [graph_prompts]:
+            graph_outputs = llm.model.generate(graph_batch, graph_sampling_params)
+            assert len(graph_outputs) == len(graph_batch)
+            for output in graph_outputs:
+                assert output.finished
+                assert len(output.outputs[0].token_ids) == graph_sampling_params.max_tokens
+            outputs.extend(graph_outputs)
+
+        # Aggregate acceptance over the original request and all graph batches.
         metrics = llm.model.get_metrics()
 
     for output in outputs:

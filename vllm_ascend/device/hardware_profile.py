@@ -97,6 +97,11 @@ class HardwareCapability(Enum):
     # Enable the FP8/C8 attention KV-cache ABI and matching attention preprocess paths.
     # This is not a general statement that every FP8 operation is supported.
     FP8_ATTENTION = auto()
+    # CANN PoolKeyIndexer quant_mode=0 with E4M3 query/key and FP32 descales.
+    POOL_KEY_INDEXER_FP8 = auto()
+    # Prepare and reuse the fixed CANN GBSA schedule across supported M3 decode layers.
+    # Callers must also check block size, dtype, and uniform query length.
+    MINIMAX_M3_GBSA_METADATA_REUSE = auto()
     # Select the compatibility grouped-top-k router used by the fused-MoE path.
     FUSED_MOE_COMPATIBILITY = auto()
     # Use npu_rotary_mul with adjacent pairs (rotary_mode="interleave").
@@ -141,11 +146,13 @@ class HardwareCapability(Enum):
     # Allow the extended NPU graph backend; static-kernel mode depends on this contract.
     MM_REDUCE_SCATTER_AI_CPU_INFERENCE = auto()
     NPUGRAPH_EX = auto()
+    # Use ``torch_npu.npu_top_k_top_p`` for sampling instead of pytorch fallback.
+    NPU_TOP_K_TOP_P = auto()
     # Allow shared paged-attention decode when graph mode, shape, and model checks pass.
     PAGED_ATTENTION = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
-    # Fused RMSNorm+cast is available for the A3/CANN 9.1 path only.
+    # Fused RMSNorm+cast is available for the A2/A3 (CANN 9.1) path.
     RMS_NORM_CAST = auto()
     # Import and register the compiled vLLM-Ascend custom-op library at runtime.
     # This is independent of whether custom ops are enabled by default.
@@ -239,6 +246,9 @@ class HardwareProfile:
     # Independent, additive contracts queried with ``supports``.
     capabilities: frozenset[HardwareCapability]
 
+    # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
+    requires_2d_nz_linear_input: bool = False
+
     def supports(self, capability: HardwareCapability) -> bool:
         """Return whether the exact documented ``capability`` contract is available."""
 
@@ -275,6 +285,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
 }
@@ -291,7 +302,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_STANDARD_CAPABILITIES,
+            capabilities=_STANDARD_CAPABILITIES
+            | {HardwareCapability.RMS_NORM_CAST, HardwareCapability.NPU_TOP_K_TOP_P},
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
@@ -307,6 +319,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             | {
                 HardwareCapability.CANN_MEGAMOE,
                 HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
+                HardwareCapability.NPU_TOP_K_TOP_P,
             },
         ),
         AscendDeviceType._310P: HardwareProfile(
@@ -334,6 +347,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A5: HardwareProfile(
             _device_type=AscendDeviceType.A5,
+            requires_2d_nz_linear_input=True,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.TOPO_AFFINITY,
             default_worker_cls=_DEFAULT_WORKER_CLS,
@@ -362,6 +376,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
                     HardwareCapability.FLA_GDN_PREFILL,
                     HardwareCapability.FP8_ATTENTION,
+                    HardwareCapability.POOL_KEY_INDEXER_FP8,
                     HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
                     HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION,
                     HardwareCapability.GRAPH_MULS_ADD_FUSION,
@@ -370,6 +385,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.LORA_CUSTOM_OPS,
                     HardwareCapability.MLA_FLASH,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
+                    HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
@@ -380,6 +396,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.SWIGLU_OAI_MX_QUANT,
                     HardwareCapability.TRITON_BATCH_MEMCPY,
                     HardwareCapability.UNRESTRICTED_MLAPO,
+                    HardwareCapability.NPU_TOP_K_TOP_P,
                 }
             ),
         ),

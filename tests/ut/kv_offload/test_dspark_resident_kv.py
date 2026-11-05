@@ -11,7 +11,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCache
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
@@ -465,7 +465,7 @@ def test_real_allocator_separates_host_target_and_persistent_mla_draft(monkeypat
         )
         for name, spec in specs.items()
     ]
-    runtime = SimpleNamespace(kv_transfer_config=None)
+    runtime = SimpleNamespace(kv_transfer_config=None, compilation_config=SimpleNamespace(static_forward_context={}))
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
     monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
