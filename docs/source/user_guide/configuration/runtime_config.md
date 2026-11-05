@@ -123,13 +123,11 @@ Guard collects `(top1, chosen)` natural-log logprobs from a pre-sample logits
 stash via v35 Triton ``_v35_partials`` / ``_v35_finish`` (no API
 ``SamplingParams.logprobs``). Sampled ids stay on device and the kernels read
 logits by stride. After collect, ``get_output`` only submits to a dedicated
-rare-pair wait queue (default); that worker waits for collect, issues the
-pair D2H, then pack+feeds — so the sample return path does not touch the pair
-copy stream. Set ``VLLM_ASCEND_RARE_PAIR_SYNC=1`` to materialize and feed
-inline for debugging. Request finish flushes rc4 look-ahead only after those
-jobs drain. Tables are per-tokenizer; `rc4_gb` is shared.
-Prefer shadow/`report` first — strict-tier holdout false-positive rate can
-exceed 0.1% on some corpora.
+rare-pair wait queue; that worker waits for collect, issues the pair D2H,
+then pack+feeds — so the sample return path does not touch the pair copy
+stream. Request finish flushes rc4 look-ahead only after those jobs drain.
+Tables are per-tokenizer; `rc4_gb` is shared. Prefer shadow/`report` first —
+strict-tier holdout false-positive rate can exceed 0.1% on some corpora.
 
 Each step runs a device ``isfinite`` reduction and one all-finite gate. Default
 path launches a non-blocking host copy of that gate and waits in
