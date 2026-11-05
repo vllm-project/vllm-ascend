@@ -16,7 +16,6 @@
 #
 
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any
 
 import torch
@@ -48,6 +47,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.state import AscendAttentionState  # noqa: F401  # backward compatibility re-export
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
@@ -152,14 +152,6 @@ class AscendAttentionBackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         return [128]
-
-
-class AscendAttentionState(Enum):
-    PrefillNoCache = 0
-    PrefillCacheHit = 1
-    DecodeOnly = 2
-    ChunkedPrefill = 3
-    SpecDecoding = 4
 
 
 @dataclass
