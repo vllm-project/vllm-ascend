@@ -18,6 +18,7 @@ import os
 
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_glm53_reasoning  # noqa
+import vllm_ascend.patch.platform.patch_kv_cache_admission  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
@@ -128,3 +129,11 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #    Future Plan:
 #       Remove this patch when upstream supports per-group or backend-defined
 #       prefill boundaries.
+
+# ** File: platform/patch_kv_cache_admission.py **
+# Targets SWA and chunked-local admission in SingleTypeKVCacheManager.
+# Shift the physical capacity cap past freed null-prefix entries so async
+# remote loads reserve enough blocks for subsequent prefill chunks. Uncapped
+# allocation and full-attention managers retain their upstream behavior.
+# Upstream plan: contribute physical-block accounting to vLLM and remove this
+# patch once both supported vLLM versions contain the fix.
