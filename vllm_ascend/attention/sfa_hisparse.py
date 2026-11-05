@@ -11,6 +11,7 @@ from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup, Sp
 from vllm.v1.worker.workspace import current_workspace_manager
 
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
+from vllm_ascend.attention.utils import PreprocessType
 from vllm_ascend.hisparse.prefill import AscendHiSparsePrefillStagingPlan, build_hisparse_prefill_staging_plan
 
 # Bound the temporary D2D packing workspace independently of prefill length.
@@ -134,9 +135,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
         self._kv_staging_capacity = (max_rows + 127) // 128 * 128
 
     def _fused_preprocess_type(self):
-        # Fused prologs write the ordinary split cache directly. HiSparse owns
-        # both the resident destination and optional host-mirror staging. This
-        # also keeps quantized linear weight layout under its normal owner.
+        # Reuse SFA's supported quantization/weight preparation. Its C8 Prolog
+        # writes owned staging below; the HiSparse handle retains the final
+        # Resident destination, row mapping and Host-mirror completion policy.
+        if self.enable_sparse_sfa_c8:
+            return super()._fused_preprocess_type()
         return None
 
     def _compose_sfa_kv_cache(self, kv_cache):
@@ -188,9 +191,53 @@ class AscendHiSparseImpl(AscendSFAImpl):
 
         return current_workspace_manager().get_persistent_resource(("ascend_hisparse_c8_lengths",), allocate)
 
+    def _c8_prolog_workspace(self):
+        from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+
+        def allocate():
+            device = self.index_group.logical_topk_indices.device
+            return (
+                torch.empty(
+                    (self._kv_staging_capacity // 128, 128, 1, C8_ROW_BYTES),
+                    dtype=self.c8_cache_dtype,
+                    device=device,
+                ),
+                torch.arange(self._kv_staging_capacity, dtype=torch.int64, device=device),
+            )
+
+        # Like the existing preprocessing workspace, these rows are consumed
+        # on the compute stream before the next layer/graph can overwrite them.
+        # Host mirroring reads the final Resident cache, never this scratch.
+        return current_workspace_manager().get_persistent_resource(
+            ("ascend_hisparse_c8_prolog", self._kv_staging_capacity, self.c8_cache_dtype), allocate
+        )
+
+    def _sfa_preprocess_prolog_v3(self, hidden_states, kv_cache, cos, sin, slot_mapping, *, attn_metadata=None):
+        from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+        from vllm_ascend.hisparse.cache_ops import scatter_packed_kv
+
+        if attn_metadata is None:
+            raise ValueError("HiSparse Prolog requires current row-validity metadata")
+        rows = hidden_states.shape[0]
+        if rows > self._kv_staging_capacity:
+            raise ValueError("HiSparse Prolog exceeds its profiled token capacity")
+        staging, local_slots = self._c8_prolog_workspace()
+        result = super()._sfa_preprocess_prolog_v3(
+            hidden_states, (staging,), cos, sin, local_slots[:rows], attn_metadata=attn_metadata
+        )
+        destination, mapping, count = self.hisparse_cache.write_target(rows, slot_mapping.numel())
+        packed = staging.view(-1, C8_ROW_BYTES)[:count].view(torch.uint8)
+        scatter_packed_kv(
+            packed, packed[:, :0], destination.view(torch.uint8), mapping, attn_metadata.query_start_loc[-1:]
+        )
+        finish_hisparse_kv_update(self.hisparse_cache, attn_metadata)
+        return result
+
     def forward(self, layer_name, hidden_states, kv_cache, attn_metadata, output=None):
         if self.enable_sparse_sfa_c8:
             self._c8_length_workspace()
+            if self.preprocess_type == PreprocessType.PROLOG_V3:
+                self._c8_prolog_workspace()
         else:
             self._workspace(hidden_states.dtype)
         if self.qk_rope_head_dim and not self.enable_sparse_sfa_c8:
