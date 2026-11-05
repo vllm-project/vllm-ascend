@@ -24,8 +24,8 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     DsaAttnKvPlan,
-    get_dsa_attn_kv_plan,
     get_draft_sparse_kv_plan,
+    get_dsa_attn_kv_plan,
     is_a3_bf16_kv_enabled,
     is_a5_bf16_kv_enabled,
     write_dsa_cache,
