@@ -17,6 +17,7 @@
 #
 
 import huggingface_hub
+import pytest
 import regex as re
 from huggingface_hub import snapshot_download as hf_snapshot_download
 from vllm import SamplingParams
@@ -26,7 +27,8 @@ from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_fr
 
 
 @wait_until_npu_memory_free()
-def test_qwen35_evs_reduces_video_prompt_tokens():
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_qwen35_evs_reduces_video_prompt_tokens(enforce_eager):
     """Verify video generation succeeds and EVS reduces prompt tokens."""
     video = VideoAsset("baby_reading", num_frames=8)
     videos = [(video.np_ndarrays, video.metadata)]
@@ -47,11 +49,15 @@ def test_qwen35_evs_reduces_video_prompt_tokens():
             dtype="bfloat16",
             max_model_len=4096,
             max_num_batched_tokens=4096,
+            max_num_seqs=8,
             limit_mm_per_prompt={"video": 1},
             mm_processor_kwargs={"fps": 1},
             video_pruning_rate=pruning_rate,
-            enforce_eager=True,
-            gpu_memory_utilization=0.75,
+            enforce_eager=enforce_eager,
+            compilation_config=None
+            if enforce_eager
+            else {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 8]},
+            gpu_memory_utilization=0.5,
         ) as runner:
             # RequestOutput exposes prompt_token_ids separately from generated
             # tokens, so the assertion measures pruning independently of EOS.

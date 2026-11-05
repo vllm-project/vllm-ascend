@@ -104,3 +104,10 @@ than the configured rate.
 Higher pruning rates can remove details needed by the task. Compare output
 quality and performance with pruning disabled on the target video workload
 before choosing a rate.
+
+When Triton Ascend is available, unquantized Qwen3.5 models use deterministic
+projection kernels on the EVS path to reduce batch-dependent numerical
+differences. These kernels can add overhead, so measure end-to-end latency
+as well as token counts. Quantized models and installations without Triton
+keep their existing projection kernels; cross-batch output consistency has
+not been validated for those configurations.
