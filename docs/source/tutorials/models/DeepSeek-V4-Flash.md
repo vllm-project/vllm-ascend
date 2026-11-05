@@ -983,7 +983,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     #### A2 Series PD Separation Deployment with DSpark (2P2D, 32 cards) {: #525-a2-series-pd-separation-deployment-with-dspark-2p2d-32-cards }
 
-    Use `DeepSeek-V4-Flash-0731-w8a8` on four Atlas 800I A2 servers (8 NPUs per server). The scripts below are the validated A2 2P2D standard: P `ExternalDP2 × TP1 × PP1 × PCP8`, D `DP16 × TP1`, and both roles use `--max-model-len 1048576`. P uses `--max-num-batched-tokens 4096`, `--max-num-seqs 16`, and GMU `0.95`; D uses `--max-num-batched-tokens 720`, `--max-num-seqs 42`, GMU `0.95`, DSpark draft 5, `--async-scheduling`, and block size 32.
+    Use `DeepSeek-V4-Flash-0731-w8a8` on four Atlas 800I A2 servers (8 NPUs per server). The scripts below are the validated A2 2P2D standard: P `ExternalDP2 × TP1 × PP1 × PCP8`, D `DP16 × TP1`, and both roles use `--max-model-len 262144`. P uses `--max-num-batched-tokens 8192`, `--max-num-seqs 16`, and GMU `0.95`; D uses `--max-num-batched-tokens 720`, `--max-num-seqs 42`, GMU `0.95`, DSpark draft 5, `--async-scheduling`, and block size 32.
 
     | Role | Nodes / NPUs | Parallelism | HTTP endpoints |
     |---|---|---|---|
@@ -997,7 +997,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
         Keep `PP1 × PCP8` with `MooncakeHybridConnector`. The validated implementation rejects simultaneous PP>1 and PCP>1. The A2 dispatch path requires `D max-num-seqs × (1 + draft tokens) <= 256`; the standard pair is `42 × (1 + 5) = 252`. Other measured pairs (for example 2/85, 4/51 and 1/128) are scenario-specific; changing the draft length changes the legal request capacity. The standard is 5/42.
 
     **Standard server settings.** Use the P/D scripts below as the standard. Scenario-specific overrides:
-    - P `--max-num-batched-tokens 8192` for PC90 / long-prefix pooling; revalidate KV capacity.
+    - P `--max-num-batched-tokens 8192` is the default for every profile, including PC90 / long-prefix pooling; revalidate KV capacity when raising it.
     - Other D draft/max-num-seqs pairs listed above are scenario-specific and are not the standard.
 
     | Profile | P token budget / prefix cache | D draft / max-num-seqs | Proxy workers |
@@ -1021,7 +1021,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     | `decode-long` / 128K native stable | 131156 / 1024 | 2960 / 960 / 0 |
     | `cold-pd` / full PD total | 16468 / 1024 | 240 / 60 / 0 |
 
-    The standard uses `--max-model-len 1048576` on both roles. Pure-D 1M remains a separate long-context case: the A2 D worker's KV pool is 21.05 GiB, below the ~24.53 GiB needed for one 1M request, so do not infer pure-D 1M from these PD scripts.
+    The standard runs at `--max-model-len 262144` on both roles, which covers every ordinary-length workload in this section. A 1M-token context is a separate deployment: raise `--max-model-len` to `1048576` on **both** roles (a request that exceeds either side's limit is rejected, so changing only one side leaves the service unable to serve 1M prompts) and lower the Prefill `--max-num-batched-tokens` to `4096`. The Prefill batched-token budget cannot grow at 1M: at `16384` the Prefill KV pool shrinks to 7.13 GiB, which cannot hold the 131,072 tokens per card that one 1M sequence needs under `PCP8`, and engine initialization fails; at `32768` the activation alone needs 24 GiB while only 13.42 GiB remains free, so the allocation fails with an out-of-memory error. Pure-D 1M also remains separate at the Decode side: the A2 D worker's KV pool is 21.05 GiB, below the ~24.53 GiB needed for one 1M request, so do not infer pure-D 1M from these PD scripts.
 
     **Prefill: run this complete script on each P node.** Set `p_rank=0` on node A and `p_rank=1` on node B; keep `head_ip` pointing at P node A. Start both ranks before waiting for readiness.
 
@@ -1084,8 +1084,8 @@ The following sections describe multi-node PD separation deployment on Atlas 800
       --prefill-context-parallel-size 8 \
       --served-model-name dsv4 \
       --enable-expert-parallel \
-      --max-model-len 1048576 \
-      --max-num-batched-tokens 4096 \
+      --max-model-len 262144 \
+      --max-num-batched-tokens 8192 \
       --max-num-seqs 16 \
       --block-size 32 \
       --gpu-memory-utilization 0.95 \
@@ -1164,7 +1164,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
         --tensor-parallel-size 1 \
         --enable-expert-parallel \
         --seed 1024 \
-        --max-model-len 1048576 \
+        --max-model-len 262144 \
         --max-num-batched-tokens 720 \
         --max-num-seqs 42 \
         --async-scheduling \
