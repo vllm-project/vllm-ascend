@@ -261,6 +261,17 @@ configuration.
 - `true`: Layer-by-layer transfer (suitable for single-node memory
   constraints)
 
+**Note on in-flight asynchronous loads:**
+
+With `load_async: true`, the KV transfer starts after the step is launched and
+the hit request is promoted only once the data has arrived. The scheduler flag
+`--max-num-inflight-kv-loads <N>` caps how many of these loads may hold KV
+blocks at the same time: a hit request can then start loading while the running
+batch is full, and requests beyond the cap wait on the async queue instead of
+blocking the rest of the waiting queue. This requires a vLLM build containing
+[vllm-project/vllm#65319](https://github.com/vllm-project/vllm/pull/65319);
+without the flag the number of in-flight loads is unbounded.
+
 ## Benchmark
 
 We recommend using the **AISBench** tool to assess performance. The test uses
