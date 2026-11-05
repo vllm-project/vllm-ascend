@@ -139,8 +139,8 @@
 
 # Worker V2
 /vllm_ascend/worker/v2/model_states @zzzzwwjj
-/vllm_ascend/worker/v2/aclgraph_utils.py @zhenwenqi2024
-/vllm_ascend/worker/v2/attn_utils.py @Angazenn @zzzzwwjj
+/vllm_ascend/worker/v2/aclgraph_utils.py
+/vllm_ascend/worker/v2/attn_utils.py @Angazenn @zzzzwwjj @zhenwenqi2024
 /vllm_ascend/worker/v2/block_table.py @Tflowers-0129 @zzzzwwjj
 /vllm_ascend/worker/v2/eplb.py
 /vllm_ascend/worker/v2/input_batch.py @yiz-liu @zzzzwwjj
