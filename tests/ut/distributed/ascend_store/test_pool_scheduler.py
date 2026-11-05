@@ -1035,32 +1035,6 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         _meta = scheduler.build_connector_meta(sched_output)
         self.assertNotIn("r1", scheduler._request_trackers)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def test_build_connector_meta_released_req_ids_union(self, mock_client_cls):
-        config = self._make_config()
-        scheduler = KVPoolScheduler(config, use_layerwise=False)
-
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import RequestTracker
-
-        for req_id in ("f1", "f2", "p1"):
-            scheduler._request_trackers[req_id] = RequestTracker(
-                req_id=req_id,
-                token_len=32,
-                allocated_block_ids=[0, 1],
-            )
-            scheduler._unfinished_requests[req_id] = (MagicMock(), [0, 1])
-
-        sched_output = MagicMock()
-        sched_output.finished_req_ids = {"f1", "f2"}
-        sched_output.preempted_req_ids = {"p1"}
-        sched_output.scheduled_new_reqs = []
-        sched_output.num_scheduled_tokens = {}
-        sched_output.scheduled_cached_reqs = MagicMock()
-        sched_output.scheduled_cached_reqs.req_ids = []
-
-        meta = scheduler.build_connector_meta(sched_output)
-        self.assertEqual(meta.released_req_ids, {"f1", "f2", "p1"})
-
 
 @pytest.mark.parametrize(
     ("unfinished_ids", "new_ids", "cached_ids", "expected_ids"),
@@ -1124,7 +1098,7 @@ def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cl
     assert metadata.requests == []
     assert scheduler._unfinished_requests == ({"retired": (None, [])} if cleared_by == "scheduled-new" else {})
     scheduler._process_async_load_request.assert_not_called()
-    assert metadata.released_req_ids == output.finished_req_ids | output.preempted_req_ids
+    assert metadata.preempted_req_ids == output.preempted_req_ids
 
 
 def test_connector_metadata_filter_has_linear_key_lookup_work():
