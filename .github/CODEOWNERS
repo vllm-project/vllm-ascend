@@ -1,64 +1,144 @@
-# See https://help.github.com/articles/about-codeowners/
-# for more info about CODEOWNERS file
-
 # Infra, CI
-/.gemini @wangxiyuan @Yikun
-/.github @wangxiyuan @Yikun
-/tools @wangxiyuan @Yikun
-/.gitignore @wangxiyuan
+/.gemini @wangxiyuan
+/.github @zhangxinyuehfad
+/tools @zhangxinyuehfad
+/.gitignore @zhangxinyuehfad
 /.gitmodules @wangxiyuan @zzzzwwjj
-/.pre-commit-config.yaml @wangxiyuan
+/.pre-commit-config.yaml @zhangxinyuehfad
 /codecov.yml @wangxiyuan
-/Dockerfile* @wangxiyuan
+/Dockerfile* @zhangxinyuehfad
 /format.sh @wangxiyuan
-/mypy.ini @wangxiyuan
+/mypy.ini @zhangxinyuehfad
 /requirements* @wangxiyuan
 /setup.py @wangxiyuan
-/typos.toml @wangxiyuan
-
-# benchmark
-# /benchmarks
+/typos.toml @zhangxinyuehfad
+# TODO(owner): /packages.txt
+# /packages.txt
+# TODO(owner): /.markdownlint.yaml
+# /.markdownlint.yaml
+# TODO(owner): /.gitleaks.toml
+# /.gitleaks.toml
+# TODO(owner): /.clang-format
+# /.clang-format
+# repo metadata & agent config
+# TODO(owner): /.agents/
+# /.agents/
+# TODO(owner): /.claude/
+# /.claude/
+# TODO(owner): /AGENTS.md
+# /AGENTS.md
+# TODO(owner): /CLAUDE.md
+# /CLAUDE.md
+# TODO(owner): /CONTRIBUTING.md
+# /CONTRIBUTING.md
+# TODO(owner): /CODE_OF_CONDUCT.md
+# /CODE_OF_CONDUCT.md
+# TODO(owner): /LICENSE
+# /LICENSE
+# TODO(owner): /DCO
+# /DCO
+# TODO(owner): /pyproject.toml
+# /pyproject.toml
+# TODO(owner): /mkdocs.yml
+# /mkdocs.yml
+# TODO(owner): /collect_env.py
+# /collect_env.py
 
 # docs
-/docs @Yikun @LCAIZJ
-/.readthedocs.yaml @Yikun
-/README* @wangxiyuan @Yikun
-
-# # example
-# /examples
-
-# # tests
-# /tests
+/docs @liqian79
+/.readthedocs.yaml @liqian79
+/README* @liqian79
 
 # c++ source code
 /cmake @zzzzwwjj @ZT-AIA
 /csrc @zzzzwwjj @ZT-AIA
 /CMakeLists.txt @zzzzwwjj @ZT-AIA
 
-# python source code
+# attention
 /vllm_ascend/attention @weijinqian0
+# compilation
 /vllm_ascend/compilation @yiz-liu
-# /vllm_ascend/core
+# device / device_allocator
 /vllm_ascend/device @weijinqian0 @zzzzwwjj
 /vllm_ascend/device_allocator @weijinqian0
+# distributed (kv_offload is a more specific sub-assignment)
 /vllm_ascend/distributed @LCAIZJ
-# /vllm_ascend/eplb
 /vllm_ascend/distributed/kv_transfer/kv_pool/kv_offload @nalinaly
+# lora
 /vllm_ascend/lora @paulyu12
-# /vllm_ascend/model_loader
+# ops
 /vllm_ascend/ops @zzzzwwjj @realliujiaxu
-# /vllm_ascend/patch
+# quantization
 /vllm_ascend/quantization @kunpengW-code
+# sample
 /vllm_ascend/sample @realliujiaxu
-# /vllm_ascend/worker/v1/spec_decode
-# /vllm_ascend/worker
+
+# ==================== 2. Pending owners (inactive, TODO) ====================
+#
+# vllm_ascend core framework
+# TODO(owner): /vllm_ascend/*.py
+# /vllm_ascend/*.py
+
+# vllm_ascend module directories (subdirs broken out one level)
+# TODO(owner): /vllm_ascend/_310p
+# /vllm_ascend/_310p
+# TODO(owner): /vllm_ascend/_cann_ops_custom
+# /vllm_ascend/_cann_ops_custom
+# TODO(owner): /vllm_ascend/core
+# /vllm_ascend/core
+# TODO(owner): /vllm_ascend/ec_manager
+# /vllm_ascend/ec_manager
+# TODO(owner): /vllm_ascend/eplb
+# /vllm_ascend/eplb
+# TODO(owner): /vllm_ascend/model_executor
+# /vllm_ascend/model_executor
+# TODO(owner): /vllm_ascend/model_loader
+# /vllm_ascend/model_loader
+# TODO(owner): /vllm_ascend/models
+# /vllm_ascend/models
+# TODO(owner): /vllm_ascend/observability
+# /vllm_ascend/observability
+# TODO(owner): /vllm_ascend/patch/platform
+# /vllm_ascend/patch/platform
+# TODO(owner): /vllm_ascend/patch/worker
+# /vllm_ascend/patch/worker
+# TODO(owner): /vllm_ascend/patch/*.py
+# /vllm_ascend/patch/*.py
+# TODO(owner): /vllm_ascend/profiler
+# /vllm_ascend/profiler
+# TODO(owner): /vllm_ascend/weight_switch
+# /vllm_ascend/weight_switch
+# TODO(owner): /vllm_ascend/worker/*.py
+# /vllm_ascend/worker/*.py
+# TODO(owner): /vllm_ascend/worker/v1
+# /vllm_ascend/worker/v1
+# TODO(owner): /vllm_ascend/worker/v2
+# /vllm_ascend/worker/v2
+# TODO(owner): /vllm_ascend/xlite
 # /vllm_ascend/xlite
-# /vllm_ascend/ascend_config.py
-# /vllm_ascend/ascend_forward_context.py
-# /vllm_ascend/batch_invariant.py
-# /vllm_ascend/cpu_binding.py
-# /vllm_ascend/envs.py
-# /vllm_ascend/meta_registration.py
-# /vllm_ascend/platform.py
-# /vllm_ascend/profiling_config.py
-# /vllm_ascend/utils.py
+
+# tests (ut subdirs mirror the source-module ownership)
+# TODO(owner): /tests/*.py
+# /tests/*.py
+# TODO(owner): /tests/coveragerc
+# /tests/coveragerc
+# TODO(owner): /tests/coverage_settingInfo.xml
+# /tests/coverage_settingInfo.xml
+# TODO(owner): /tests/manual/
+# /tests/manual/
+# TODO(owner): /tests/e2e/
+# /tests/e2e/
+# TODO(owner): /tests/ut/
+# /tests/ut/
+
+# examples / benchmarks / recipes / release notes
+# TODO(owner): /examples/
+# /examples/
+# TODO(owner): /benchmarks/
+# /benchmarks/
+# TODO(owner): /recipes/
+# /recipes/
+# TODO(owner): /release_notes/
+# /release_notes/
+
+
