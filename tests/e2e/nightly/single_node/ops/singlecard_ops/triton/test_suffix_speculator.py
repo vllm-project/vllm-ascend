@@ -20,6 +20,15 @@ from vllm_ascend.worker.v2.spec_decode.suffix.speculator import (  # noqa: E402
 DEVICE = torch.device("npu")
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _install_suffix_kernel_patches():
+    # These fixtures instantiate the speculator without creating an NPUWorker.
+    # Install the same persistent bindings that worker startup normally applies.
+    from vllm_ascend.patch.worker.patch_triton import patch_suffix_kernels
+
+    patch_suffix_kernels()
+
+
 def _local_draft(hist, k, depth):
     """Continuation of the longest, rightmost earlier occurrence of a suffix
     of ``hist`` within ``hist`` (empty if no token matches)."""
