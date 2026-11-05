@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -120,8 +121,115 @@ def test_build_draft_metadata_submits_only_non_cp_device_tasks(
         executor.submit.assert_not_called()
 
 
-@pytest.mark.parametrize("has_task", [True, False])
-def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
+class TestDSparkPrefillQuerySkip(unittest.TestCase):
+    @staticmethod
+    def _make_runner():
+        runner = SimpleNamespace(dp_size=2, dp_rank=0)
+        runner.is_kv_producer = True
+        runner.is_kv_consumer = False
+        runner.drafter = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="deepseek_v41"))
+        runner.parallel_config = SimpleNamespace(
+            pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+        )
+        runner.use_async_scheduling = False
+        runner.dynamic_eplb = False
+        runner.input_batch = SimpleNamespace(req_ids=["chunked", "final"])
+        runner.requests = {
+            req_id: SimpleNamespace(sampling_params=SimpleNamespace(max_tokens=1))
+            for req_id in runner.input_batch.req_ids
+        }
+        runner.drafter.runner = runner
+        runner.drafter.vllm_config = SimpleNamespace()
+        runner.drafter._skip_queries = False
+        return runner
+
+    def test_only_single_output_prefill_requests_skip(self):
+        for async_scheduling in (False, True):
+            with self.subTest(async_scheduling=async_scheduling):
+                runner = self._make_runner()
+                runner.use_async_scheduling = async_scheduling
+                self.assertTrue(runner.drafter._can_skip_queries())
+                runner.requests["final"].sampling_params.max_tokens = 2
+                self.assertFalse(runner.drafter._can_skip_queries())
+                runner.requests["final"].sampling_params = None
+                self.assertFalse(runner.drafter._can_skip_queries())
+                runner.input_batch.req_ids = []
+                self.assertFalse(runner.drafter._can_skip_queries())
+                self.assertTrue(runner.drafter._can_skip_queries(is_dummy=True))
+
+    def test_consumers_and_unsupported_execution_modes_keep_drafting(self):
+        for attribute, value in (
+            ("is_kv_producer", False),
+            ("is_kv_consumer", True),
+            ("dynamic_eplb", True),
+        ):
+            with self.subTest(attribute=attribute):
+                runner = self._make_runner()
+                setattr(runner, attribute, value)
+                self.assertFalse(runner.drafter._can_skip_queries())
+                self.assertFalse(runner.drafter._can_skip_queries(is_dummy=True))
+        for attribute in ("pipeline_parallel_size", "prefill_context_parallel_size", "decode_context_parallel_size"):
+            with self.subTest(parallelism=attribute):
+                runner = self._make_runner()
+                setattr(runner.parallel_config, attribute, 2)
+                self.assertFalse(runner.drafter._can_skip_queries())
+                self.assertFalse(runner.drafter._can_skip_queries(is_dummy=True))
+        runner = self._make_runner()
+        runner.model_config.hf_text_config.model_type = "deepseek_v4"
+        self.assertFalse(runner.drafter._can_skip_queries())
+        self.assertFalse(runner.drafter._can_skip_queries(is_dummy=True))
+
+    def test_draft_skip_requires_every_rank_and_resets_after_a_veto(self):
+        proposer = self._make_runner().drafter
+        module = "vllm_ascend.worker.v1.spec_decode.dspark_proposer"
+        for rank in (0, 1):
+            proposer.runner.dp_rank = rank
+            for local_vote, remote_vote in ((True, False), (False, True), (True, True), (False, False)):
+                with self.subTest(rank=rank, local_vote=local_vote, remote_vote=remote_vote):
+
+                    def all_reduce(metadata, group, rank=rank, local_vote=local_vote, remote_vote=remote_vote):
+                        self.assertEqual(tuple(metadata.shape), (2, 2))
+                        self.assertEqual(metadata[:, rank].tolist(), [8, local_vote])
+                        metadata[:, 1 - rank] = torch.tensor([32, remote_vote])
+
+                    with (
+                        patch(f"{module}.should_skip_allreduce_across_dp_group", return_value=False),
+                        patch(f"{module}.get_dp_group", return_value=SimpleNamespace(cpu_group=None)),
+                        patch(f"{module}.dist.all_reduce", side_effect=all_reduce) as collective,
+                    ):
+                        maximum, counts, mode = proposer._sync_draft_metadata(8, skip_queries=local_vote)
+                    collective.assert_called_once()
+                    self.assertEqual((maximum, mode), (32, CUDAGraphMode.NONE))
+                    self.assertEqual(counts.tolist(), [32, 32])
+                    self.assertEqual(proposer._skip_queries, local_vote and remote_vote)
+
+    def test_draft_skip_without_collective_is_conservative_for_multi_dp(self):
+        proposer = self._make_runner().drafter
+        proposer._skip_queries = True
+        proposer.runner._sync_metadata_across_dp = MagicMock(return_value=(8, None, CUDAGraphMode.NONE))
+        module = "vllm_ascend.worker.v1.spec_decode.dspark_proposer"
+        with (
+            patch(f"{module}.should_skip_allreduce_across_dp_group", return_value=True),
+            patch(f"{module}.dist.all_reduce") as collective,
+        ):
+            proposer._sync_draft_metadata(8)
+        self.assertFalse(proposer._skip_queries)
+        collective.assert_not_called()
+        proposer.runner._sync_metadata_across_dp.assert_called_once_with(8, is_draft_model=True)
+
+    def test_single_dp_draft_skip_resets_on_dummy_sync(self):
+        proposer = self._make_runner().drafter
+        proposer.runner.dp_size = 1
+        proposer._sync_draft_metadata(8)
+        self.assertTrue(proposer._skip_queries)
+        proposer._sync_draft_metadata(8, skip_queries=False)
+        self.assertFalse(proposer._skip_queries)
+
+
+@pytest.mark.parametrize(("has_task", "skip_queries"), [(True, False), (False, False), (True, True)])
+def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool, skip_queries: bool):
+    """Context-only proposals must store valid slots and release metadata work."""
     events = []
     executor = SimpleNamespace(submission_in_flight=False)
 
@@ -137,10 +245,18 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
         dynamic_eplb=False,
         eplb_heat_collection_status=False,
     )
-    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    store_context = MagicMock(side_effect=lambda *args: events.append("store"))
+
+    proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
     proposer.runner = runner
+    proposer.device = torch.device("cpu")
+    proposer._skip_queries = skip_queries
+    proposer._sync_draft_metadata = lambda num_tokens: (num_tokens, torch.tensor(1), None)
     proposer.method = "dspark"
-    proposer.model = SimpleNamespace(combine_hidden_states=lambda hidden_states: hidden_states)
+    proposer.model = SimpleNamespace(
+        combine_hidden_states=lambda hidden_states: hidden_states,
+        precompute_and_store_context_kv=store_context,
+    )
     proposer.hidden_size = 4
     proposer.use_cuda_graph = False
     proposer.dcp_size = 1
@@ -162,6 +278,12 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
     proposer._maybe_update_metadata = MagicMock()  # type: ignore[method-assign]
     proposer.set_inputs_first_pass = MagicMock()  # type: ignore[method-assign]
     proposer.build_draft_attn_metadata = MagicMock()  # type: ignore[method-assign]
+    proposer._context_slot_mapping_buffers = [torch.tensor([4], dtype=torch.int32)]
+    proposer._dflash_num_context = 1
+    proposer._dflash_hidden_states = torch.ones((1, 4))
+    proposer._context_positions_buffer = torch.tensor([7], dtype=torch.int32)
+    proposer.build_model_inputs_first_pass = AscendDSparkProposer.build_model_inputs_first_pass.__get__(proposer)
+    proposer._last_draft_probs = torch.ones(1)
 
     query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
     common_attn_metadata = SimpleNamespace(
@@ -191,11 +313,27 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
 
     proposer.build_draft_attn_metadata.side_effect = build_metadata
 
-    def run_draft(**kwargs):
+    def run_draft(
+        num_input_tokens,
+        batch_size,
+        token_indices_to_sample,
+        target_positions,
+        inputs_embeds,
+        multi_steps_attn_metadata,
+        num_tokens,
+        is_prefill=None,
+        sampling_metadata=None,
+    ):
+        assert num_input_tokens == batch_size == num_tokens == 1
+        assert token_indices_to_sample.tolist() == [0]
+        assert target_positions.tolist() == [0]
+        assert inputs_embeds is None
+        assert len(multi_steps_attn_metadata) == 1
+        assert sampling_metadata is not None
         events.append("run")
         return torch.ones((1, 1), dtype=torch.int64)
 
-    proposer._runnable = run_draft
+    proposer._runnable = proposer._run_merged_draft
     forward_context = SimpleNamespace(moe_layer_index=-1, cudagraph_runtime_mode=CUDAGraphMode.NONE)
     context_executors = []
 
@@ -206,6 +344,7 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
         yield
 
     with (
+        patch.object(AscendSpecDecodeBaseProposer, "_run_merged_draft", side_effect=run_draft),
         patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer._HIDDEN_STATE_DRAFTER_TYPES", (object,)),
         patch(
             "vllm_ascend.worker.v1.spec_decode.llm_base_proposer.set_ascend_forward_context",
@@ -226,9 +365,22 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
             sampling_metadata=MagicMock(),
         )
 
-    assert torch.equal(result, torch.ones((1, 1), dtype=torch.int64))
+    if skip_queries:
+        assert result.shape == (1, 0)
+        assert result.dtype == torch.int64
+        assert proposer._last_draft_probs is None
+        store_context.assert_called_once()
+        states, positions, slots = store_context.call_args.args
+        assert torch.equal(states, torch.ones((1, 4)))
+        assert positions.tolist() == [7]
+        assert slots[0].tolist() == [4]
+    else:
+        assert torch.equal(result, torch.ones((1, 1), dtype=torch.int64))
+        store_context.assert_not_called()
+    assert proposer.num_speculative_tokens == 3
     assert context_executors == [executor if has_task else None]
-    assert events == (["submit", "context", "run", "release"] if has_task else ["build", "context", "run"])
+    work = "store" if skip_queries else "run"
+    assert events == (["submit", "context", work, "release"] if has_task else ["build", "context", work])
 
 
 @pytest.fixture(autouse=True)
@@ -656,10 +808,8 @@ class TestDummySlotMappingCleanup(_DSparkProposerTestBase):
         monkeypatch.setattr(
             "vllm_ascend.worker.v1.spec_decode.dspark_proposer.set_ascend_forward_context", forward_context
         )
-        proposer.runner = SimpleNamespace(
-            _sync_metadata_across_dp=lambda num_tokens, **kwargs: (8, None, None),
-            dynamic_eplb=False,
-        )
+        proposer.runner = SimpleNamespace(dynamic_eplb=False)
+        proposer._sync_draft_metadata = lambda *args, **kwargs: (8, None, None)
         proposer.vllm_config = SimpleNamespace()
         proposer.use_cuda_graph = False
         proposer.uses_mrope = False
@@ -672,7 +822,13 @@ class TestDummySlotMappingCleanup(_DSparkProposerTestBase):
         assert proposer._dflash_num_context == 8
         proposer._runnable.assert_called_once()
 
-    def test_dspark_dummy_run_clears_all_group_buffers_before_forward(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("is_idle", "global_skip", "is_profile"),
+        [(False, False, False), (True, True, False), (True, False, False), (True, False, True)],
+    )
+    def test_dspark_dummy_run_clears_all_group_buffers_before_forward(
+        self, monkeypatch, is_idle, global_skip, is_profile
+    ):
         proposer = self._make_proposer(max_num_tokens=32, num_reqs=1, block_size=5)
         for buf in proposer._per_group_query_slot_mapping_buffers.values():
             buf.fill_(456)
@@ -692,24 +848,38 @@ class TestDummySlotMappingCleanup(_DSparkProposerTestBase):
         monkeypatch.setattr(
             "vllm_ascend.worker.v1.spec_decode.dspark_proposer.set_ascend_forward_context", forward_context
         )
-        proposer.runner = SimpleNamespace(
-            _sync_metadata_across_dp=lambda num_tokens, **kwargs: (num_tokens, None, None),
-            dynamic_eplb=False,
-        )
+        proposer.runner = SimpleNamespace(dynamic_eplb=False)
+        proposer._can_skip_queries = MagicMock(return_value=True)
+        proposer._skip_queries = global_skip
+        proposer._sync_draft_metadata = MagicMock(return_value=(5, None, None))
         proposer.vllm_config = SimpleNamespace()
         proposer.use_cuda_graph = False
         proposer.uses_mrope = False
         proposer.hidden_states = torch.zeros((32, 8), dtype=torch.float32)
         proposer.token_indices_to_sample = torch.zeros(5, dtype=torch.int32)
         proposer._runnable = MagicMock(side_effect=runnable)
+        proposer.model = MagicMock(side_effect=runnable)
+        proposer._last_draft_probs = torch.ones(1)
 
-        proposer.dummy_run(num_tokens=5, num_reqs=1, is_profile=False)
+        proposer.dummy_run(num_tokens=5, num_reqs=1, is_profile=is_profile, is_idle=is_idle)
 
+        proposer._sync_draft_metadata.assert_called_once_with(5, skip_queries=is_idle and not is_profile)
         for buf in proposer._per_group_query_slot_mapping_buffers.values():
             assert torch.all(buf == -1)
         for buf in proposer._per_group_context_slot_mapping_buffers.values():
             assert torch.all(buf == -1)
-        proposer._runnable.assert_called_once()
+        if global_skip:
+            proposer._runnable.assert_not_called()
+            proposer.model.assert_not_called()
+            proposer.model.precompute_and_store_context_kv.assert_not_called()
+            assert proposer._dflash_num_context == 0
+            assert proposer._last_draft_probs is None
+        elif is_profile:
+            proposer._runnable.assert_not_called()
+            proposer.model.assert_called_once()
+            proposer.model.precompute_and_store_context_kv.assert_called_once()
+        else:
+            proposer._runnable.assert_called_once()
 
 
 class TestDSparkInitialization(_DSparkProposerTestBase):

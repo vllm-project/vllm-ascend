@@ -1133,19 +1133,16 @@ class TestNPUWorker(TestBase):
             worker.compilation_config = MagicMock()
             worker.compilation_config.cudagraph_mode = MagicMock()
             worker.vllm_config = MagicMock()
-            mock_model_runner = MagicMock()
-            mock_uniform_decode_query_len = mock_model_runner.uniform_decode_query_len
-            worker.model_runner = mock_model_runner
-
-            # Test execute_dummy_batch
-            worker.execute_dummy_batch()
-
-            # Verify call
-            mock_model_runner._dummy_run.assert_called_once_with(
-                mock_uniform_decode_query_len,
-                uniform_decode=True,
-                skip_gdn_state_update=True,
-            )
+            for use_v2_model_runner in (False, True):
+                worker.use_v2_model_runner = use_v2_model_runner
+                mock_model_runner = MagicMock()
+                mock_model_runner.uniform_decode_query_len = 6
+                worker.model_runner = mock_model_runner
+                worker.execute_dummy_batch()
+                expected = {} if use_v2_model_runner else {"is_idle": True}
+                mock_model_runner._dummy_run.assert_called_once_with(
+                    6, uniform_decode=True, skip_gdn_state_update=True, **expected
+                )
 
     @patch("vllm_ascend.worker.worker.plan_sparse_kv_offload_memory")
     @patch("vllm_ascend.worker.worker.get_ascend_config")

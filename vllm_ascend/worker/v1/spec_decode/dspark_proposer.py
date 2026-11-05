@@ -4,10 +4,13 @@
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -16,6 +19,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.utils import is_pcp_enabled
 from vllm_ascend.ops.triton.v1.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
+from vllm_ascend.utils import should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v1.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
 from vllm_ascend.worker.v1.spec_decode.utils import DynamicSpecScheduler
 
@@ -104,6 +108,84 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._per_group_query_slot_mapping_buffers: dict[int, torch.Tensor] = {}
         self._per_group_context_slot_mapping_buffers: dict[int, torch.Tensor] = {}
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
+        self._skip_queries = False
+
+    def _can_skip_queries(self, *, is_dummy: bool = False) -> bool:
+        """Only pure-P V4.1 workers can omit unused single-output proposals."""
+        runner = self.runner
+        parallel = runner.parallel_config
+        if (
+            not runner.is_kv_producer
+            or runner.is_kv_consumer
+            or runner.model_config.hf_text_config.model_type != "deepseek_v41"
+            or runner.dynamic_eplb
+            or parallel.pipeline_parallel_size != 1
+            or parallel.prefill_context_parallel_size != 1
+            or parallel.decode_context_parallel_size != 1
+        ):
+            return False
+        if is_dummy:
+            return True
+        # Terminal max_tokens=1 requests do not consume drafts, including
+        # non-final prompt chunks under async scheduling.
+        return bool(runner.input_batch.req_ids) and all(
+            runner.requests[req_id].sampling_params is not None
+            and runner.requests[req_id].sampling_params.max_tokens == 1
+            for req_id in runner.input_batch.req_ids
+        )
+
+    def _sync_draft_metadata(
+        self, num_tokens: int, *, skip_queries: bool | None = None
+    ) -> tuple[int, torch.Tensor | None, CUDAGraphMode]:
+        """Sync eager query sizes and unanimous skip votes in one collective."""
+        self._skip_queries = False
+        if skip_queries is None:
+            skip_queries = self._can_skip_queries()
+        runner = self.runner
+        if runner.dp_size == 1:
+            self._skip_queries = skip_queries
+            return num_tokens, None, CUDAGraphMode.NONE
+        if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model=True):
+            return super()._sync_draft_metadata(num_tokens)
+        # DSpark is eager-only and draft inputs are uniformly padded, so only
+        # token counts and skip votes are needed, rather than graph modes.
+        metadata = torch.zeros((2, runner.dp_size), dtype=torch.int32, device="cpu")
+        metadata[0, runner.dp_rank] = num_tokens
+        metadata[1, runner.dp_rank] = skip_queries
+        dist.all_reduce(metadata, group=get_dp_group().cpu_group)
+        self._skip_queries = bool(metadata[1].min().item())
+        max_tokens = int(metadata[0].max().item())
+        return max_tokens, torch.full_like(metadata[0], max_tokens), CUDAGraphMode.NONE
+
+    def _run_merged_draft(
+        self,
+        num_input_tokens,
+        batch_size,
+        token_indices_to_sample,
+        target_positions,
+        inputs_embeds,
+        multi_steps_attn_metadata,
+        num_tokens,
+        is_prefill=None,
+        sampling_metadata: SamplingMetadata | None = None,
+    ) -> torch.Tensor:
+        if self._skip_queries:
+            # A real pure-P step must publish context KV before the connector
+            # finalizes, even though no query token will be consumed.
+            self._last_draft_probs = None
+            self.build_model_inputs_first_pass(num_input_tokens, self._context_slot_mapping_buffers)
+            return torch.empty((batch_size, 0), dtype=torch.int64, device=self.device)
+        return super()._run_merged_draft(
+            num_input_tokens,
+            batch_size,
+            token_indices_to_sample,
+            target_positions,
+            inputs_embeds,
+            multi_steps_attn_metadata,
+            num_tokens,
+            is_prefill,
+            sampling_metadata,
+        )
 
     def _compute_confidence(
         self,
@@ -377,25 +459,33 @@ class AscendDSparkProposer(AscendDflashProposer):
         batch_descriptor=None,
         dummy_compute_logits=lambda hidden_states: None,
         is_profile=False,
+        is_idle: bool = False,
         **kwargs,
     ) -> None:
         num_query_total = num_reqs * self.num_query_per_req
         num_query_tokens = min(num_query_total if num_reqs > 0 else num_tokens, self.max_query_tokens)
 
+        skip_queries = is_idle and not is_profile and self._can_skip_queries(is_dummy=True)
         (
             num_input_tokens,
             num_tokens_across_dp,
             _,
-        ) = self.runner._sync_metadata_across_dp(num_query_tokens, is_draft_model=True)
+        ) = self._sync_draft_metadata(num_query_tokens, skip_queries=skip_queries)
+
+        self.token_indices_to_sample.fill_(0)
+        self._clear_dummy_slot_mappings()
+        if self._skip_queries:
+            # All ranks agreed to omit query collectives. This idle rank has
+            # no context to store and must not execute its normal dummy forward.
+            self._last_draft_probs = None
+            self._dflash_num_context = 0
+            return
 
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
         context_positions = self._context_positions_buffer[:num_input_tokens]
         context_states = self.hidden_states[:num_input_tokens]
-
-        self.token_indices_to_sample.fill_(0)
-        self._clear_dummy_slot_mappings()
 
         with set_ascend_forward_context(
             None,

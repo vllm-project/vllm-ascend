@@ -582,6 +582,7 @@ class NPUModelRunner310(NPUModelRunner):
         profile_seq_lens: int | None = None,
         skip_gdn_state_update: bool = False,
         randomize_inputs: bool = False,
+        is_idle: bool = False,
     ):
         temporary_context = self.temporary_modify_uniform_decode_query_len() if uniform_decode else nullcontext()
         # All the spec decoding cases has to run splitfuse op on 310P.

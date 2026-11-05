@@ -1446,9 +1446,10 @@ class NPUWorker(WorkerBase):
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
+        dummy_kwargs = {"is_idle": True} if not self.use_v2_model_runner else {}
         # Idle DP worker RPCs also need the current config for replay metadata.
         with set_current_vllm_config(self.vllm_config):
-            self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)
+            self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True, **dummy_kwargs)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

@@ -1105,7 +1105,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_input_tokens,
             num_tokens_across_dp,
             _,
-        ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
+        ) = self._sync_draft_metadata(num_input_tokens)
 
         if self.use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
@@ -1456,6 +1456,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             logits = self.model.compute_logits(hidden_states)
             return self._sample_draft_from_logits(logits, sampling_metadata)
+
+    def _sync_draft_metadata(self, num_tokens: int) -> tuple[int, torch.Tensor | None, CUDAGraphMode]:
+        return self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
 
     def _run_merged_draft(
         self,
