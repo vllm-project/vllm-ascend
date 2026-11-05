@@ -68,8 +68,9 @@
 # distributed
 /vllm_ascend/distributed @LCAIZJ
 /vllm_ascend/distributed/weight_transfer @Ronald1995
-/vllm_ascend/distributed/kv_transfer/kv_pool @weijinqian0
-/vllm_ascend/distributed/kv_transfer/sparse_kv_offload @weiguihua2
+/vllm_ascend/distributed/kv_transfer/kv_pool @weijinqian0 @HF-001
+/vllm_ascend/distributed/kv_transfer/kv_p2p @wangxiaoteng888
+/vllm_ascend/distributed/kv_transfer/sparse_kv_offload @weiguihua2 @zhangsicheng5
 
 # lora
 /vllm_ascend/lora @paulyu12
@@ -88,7 +89,7 @@
 /vllm_ascend/worker/v2/sample @realliujiaxu @zouzy5137
 
 # spec decode
-/vllm_ascend/worker/v2/spec_decode @wxsIcey @Tflowers-0129
+/vllm_ascend/worker/v2/spec_decode @wxsIcey @Tflowers-0129 @HF-001 @drslark @slippersss @lilinsiman 
 
 # scheduler
 /vllm_ascend/core/batch_job_aware_scheduler.py
@@ -140,7 +141,7 @@
 /vllm_ascend/worker/v2/eplb.py
 /vllm_ascend/worker/v2/input_batch.py @yiz-liu @zzzzwwjj
 /vllm_ascend/worker/v2/kv_connector.py @yzeyu71
-/vllm_ascend/worker/v2/kvpp.py
+/vllm_ascend/worker/v2/kvpp.py @recky-c
 /vllm_ascend/worker/v2/model_runner.py @yiz-liu @zzzzwwjj
 /vllm_ascend/worker/v2/pcp_manager.py @weiguihua2
 /vllm_ascend/worker/v2/pp_transport.py
