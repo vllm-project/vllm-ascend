@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import os
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -14,6 +15,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
 )
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
@@ -71,9 +73,29 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_world_size,
 )
 
+# Upper bound on the per-block-count shard length cache used by the KV pool
+# read deduplication. Every distinct block count of a request is one entry, so
+# the cache must not grow without bound under a long running server.
+LENS_CACHE_MAX = 64
+
+# One status byte per rank is appended to the payload slot of the shard
+# exchange. The pool answers ``get`` per key, so a block missing from the pool
+# is seen only by the rank whose shard contains it - a *local* decision. The
+# fallback to the full read is a collective decision though: the exchange is an
+# all_gather, so a rank that leaves early leaves its peers waiting on it. The
+# byte rides along in the payload the exchange already transfers, so the
+# decision costs no extra collective.
+EXCHANGE_STATUS_BYTES = 1
+
 
 class KVPoolWorker:
     # The main class for the cache engine.
+    # task #14140: KV cache tensor 段表 (base_addr, region_bytes, flat uint8 view)。
+    # 第三项是注册时构造一次的展平字节视图，读侧热路径直接按字节偏移切片，
+    # 不再每次 view(torch.uint8).view(-1)。
+    # register_kv_caches 正常初始化；仓库里部分既有单测用 __new__() 造骨架
+    # 直接调 _infer_cache_group_metadata，此时由调用方 getattr 兜底。
+    _kv_cache_addr_segments: list[tuple[int, int, torch.Tensor]]
 
     def __init__(
         self,
@@ -680,6 +702,28 @@ class KVPoolWorker:
                         group_addrs.append(base_addr)
                         group_block_lens.append(block_len)
                         group_block_strides.append(block_stride)
+                # task #14140: 记录 tensor 段表（base_addr -> tensor 视图解析用）。
+                # region 覆盖 tensor 物理跨度（含 kernel block 间 gap），与
+                # _get_cache_block_metadata 的 region_len 口径一致。
+                # 段表是懒初始化的：仓库里多处既有单测用
+                # ``KVPoolWorker.__new__()`` 造骨架直接调本方法（不走 __init__），
+                # 在这里硬依赖 self._kv_cache_addr_segments 会让那 22 个用例全红。
+                seg_table = getattr(self, "_kv_cache_addr_segments", None)
+                if seg_table is None:
+                    seg_table = []
+                    self._kv_cache_addr_segments = seg_table
+                for cache in caches:
+                    # task #14140: 仅登记 contiguous tensor——view(uint8) 展平后
+                    # 字节偏移才与 data_ptr 口径一致；非连续段缺失只会让
+                    # 读侧去重回退全量读（安全降级），不会写错数据。
+                    if not cache.numel() or not cache.is_contiguous():
+                        continue
+                    region_len = (
+                        1 + sum((size - 1) * stride for size, stride in zip(cache.shape, cache.stride()))
+                    ) * cache.element_size()
+                    # 段表存的是展平后的 uint8 视图：它只在注册时构造一次，
+                    # 读侧热路径（每个 segment 一次）就不必反复 view/reshape。
+                    seg_table.append((cache.data_ptr(), int(region_len), cache.view(torch.uint8).view(-1)))
                 if combined is not None:
                     logger.info(
                         "KVPool coalesced bulk cache layer=%s group=%d descriptors=%d->%d",
@@ -695,6 +739,607 @@ class KVPoolWorker:
         self.group_layer_cache_entry_offsets[group_id] = layer_cache_entry_offsets
         self.group_cache_entry_segments[group_id] = group_cache_entry_segments
         self.group_num_layers[group_id] = len(layer_names_by_physical)
+
+    def _resolve_addr_tensor(self, addr: int, size: int) -> torch.Tensor | None:
+        """task #14140: 把 prepare_value 产出的裸 NPU 地址解析为 tensor 视图。
+
+        地址公式（metadata.prepare_value_layer）：
+            addr = base_addr + block_id * block_stride + byte_start
+        其中 base_addr 来自 KV cache tensor.data_ptr()（见
+        _get_cache_transfer_segments）。本方法在 _kv_cache_addr_segments
+        段表中定位 addr 所属 tensor，返回 [addr, addr+size) 的 uint8 视图。
+
+        段表规模 = 层数 x segments（数十个），线性扫描足够；如需优化可
+        在注册后按 base_addr 排序改 bisect。解析不到返回 None，
+        调用方（读侧去重）据此回退全量读。
+        """
+        for base, region_len, flat in getattr(self, "_kv_cache_addr_segments", ()):
+            if base <= addr and addr + size <= base + region_len:
+                start = addr - base
+                return flat[start : start + size]
+        return None
+
+    # ------------------------------------------------------------------
+    # Read-path deduplication (task #14140; MLA, put_step == tp_size)
+    #
+    # The writer already shards the key space with
+    #   starts[tp_rank % put_step :: put_step]
+    # so each block lives in exactly one rank's shard and a full TP group
+    # reconstructs the key space without overlap. The reader used to issue a
+    # full ``m_store.get`` on every rank, i.e. put_step-fold redundant I/O.
+    # The helpers below make the reader symmetric with the writer: a rank
+    # reads only its own shard and the missing shards are gathered from the
+    # peers in the TP group.
+    #
+    # Every failure (address not resolvable, collective failure, non-zero
+    # backend return code) makes the caller fall back to the pre-existing
+    # full-read path, so non-MLA / DCP / layerwise / load_async setups keep
+    # their exact previous behaviour.
+    # ------------------------------------------------------------------
+    def _kv_device(self) -> torch.device:
+        """Device that holds the KV cache (falls back to the current NPU)."""
+        segments = getattr(self, "_kv_cache_addr_segments", ())
+        if segments:
+            return segments[0][2].device
+        return torch.device("npu", torch.npu.current_device())
+
+    def _resolve_stride_tensor(self, addr: int, block_bytes: int, n: int, stride: int) -> torch.Tensor | None:
+        """Resolve ``n`` equally spaced fragments into one (n, block_bytes) view.
+
+        Inside a single shard the block ids are ``k, k + tp, k + 2 * tp, ...``
+        hence their addresses in the KV cache tensor are *arithmetic*, with
+        ``stride = tp * block_bytes``. That pattern can never be merged by a
+        contiguous copy - neither block-major nor seg-major ordering yields a
+        contiguous run - so it is expressed as a strided view and copied once.
+        """
+        need = (n - 1) * stride + block_bytes
+        for base, length, flat in getattr(self, "_kv_cache_addr_segments", ()):
+            if base <= addr and addr + need <= base + length:
+                try:
+                    off = addr - base
+                    # as_strided's storage_offset is relative to the *whole*
+                    # storage: passing 0 re-bases on the storage start and
+                    # silently reads block 0 for every rank but rank 0. Not
+                    # passing it inherits the slice offset, which is correct.
+                    return flat[off : off + need].as_strided((n, block_bytes), (stride, 1))
+                except Exception:  # noqa: BLE001 - fall back to segment copies
+                    return None
+        return None
+
+    def _seg_plan(
+        self,
+        idx: list[int],
+        addr_list: list[list[int]],
+        size_list: list[list[int]],
+        total: int,
+    ) -> list[tuple]:
+        """Split one shard into a segment-level copy plan.
+
+        Returns a list of items:
+          ("stride", addr, block_bytes, n, stride)  n equally spaced fragments
+          ("blocks", [(addr, size), ...])           plain per-segment fallback
+
+        Ordering is **segment-major**: the same segment index across all blocks
+        first, then the next segment index. A block is spread over several KV
+        cache tensors (MLA: latent + rope per layer), so block-major ordering
+        can never produce a contiguous run, while segment-major turns the
+        shard into one long run per segment that the receiver can copy back
+        with a single strided copy.
+
+        Whether the segment count is uniform is decided over **all** blocks
+        (``total``) rather than over ``idx``: different shards must pick the
+        exact same ordering, otherwise the packed bytes are permuted.
+        """
+        if not idx:
+            return []
+        nseg = len(size_list[0]) if total and size_list else 0
+        uniform = bool(nseg) and all(len(size_list[i]) == nseg for i in range(total))
+        if not uniform:
+            return [("blocks", [(addr_list[i][s], size_list[i][s]) for i in idx for s in range(len(size_list[i]))])]
+        plan: list[tuple] = []
+        n = len(idx)
+        for s in range(nseg):
+            addrs = [addr_list[i][s] for i in idx]
+            sizes = [size_list[i][s] for i in idx]
+            bb = sizes[0]
+            if n > 1 and all(x == bb for x in sizes):
+                stride = addrs[1] - addrs[0]
+                if stride >= bb and all(addrs[j + 1] - addrs[j] == stride for j in range(n - 1)):
+                    plan.append(("stride", addrs[0], bb, n, stride))
+                    continue
+            plan.append(("blocks", [(addrs[j], sizes[j]) for j in range(n)]))
+        return plan
+
+    def _read_dedup_enabled(self) -> bool:
+        """Whether the read path may be deduplicated.
+
+        Requires put_step == tp_size (MLA: one KV head, every rank of the TP
+        group owns a disjoint block subset) and no DCP replication. When
+        put_step < tp_size several ranks hold the same shard, so the
+        all_gather rank order no longer maps to shard ownership and this
+        implementation intentionally stays disabled.
+        """
+        if os.getenv("VLLM_ASCEND_KV_POOL_READ_DEDUP", "1") == "0":
+            return False
+        return (
+            self.put_step > 1
+            and self.put_step == self.tp_size
+            and self.dcp_size <= 1
+            and not getattr(self, "use_kvpp", False)
+            and bool(getattr(self, "_kv_cache_addr_segments", ()))
+        )
+
+    def _local_shard_lens(self, total: int, size_list: list[list[int]]) -> list[int]:
+        """Byte length of every shard, computed locally.
+
+        All ranks see the same size table, so the per-shard byte counts can be
+        derived without communication. This replaces a per-call small
+        all_gather plus ``put_step`` ``.item()`` syncs, which measured
+        2.3-3.2 ms per layer - the dominant part of the fixed overhead of the
+        first implementation.
+        """
+        blk = [sum(int(x) for x in size_list[i]) for i in range(total)]
+        step = self.put_step
+        return [sum(blk[k::step]) for k in range(step)]
+
+    def _pack_blocks(
+        self,
+        idx: list[int],
+        addr_list: list[list[int]],
+        size_list: list[list[int]],
+        total: int | None = None,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Pack the shard into one contiguous uint8 buffer, segment-major.
+
+        ``out`` (when large enough) is written in place, which removes a full
+        extra copy of the shard (18 MB at 64K tokens).
+        """
+        if total is None:
+            total = (max(idx) + 1) if idx else 0
+        plan = self._seg_plan(idx, addr_list, size_list, total)
+        need_bytes = 0
+        for item in plan:
+            need_bytes += item[2] * item[3] if item[0] == "stride" else sum(sz for _, sz in item[1])
+        if need_bytes == 0:
+            return torch.empty(0, dtype=torch.uint8, device=self._kv_device())
+        if out is not None and out.numel() < need_bytes:
+            out = None
+        if out is None:
+            out = torch.empty(need_bytes, dtype=torch.uint8, device=self._kv_device())
+        off = 0
+        pending_dst: list[torch.Tensor] = []
+        pending_src: list[torch.Tensor] = []
+        for item in plan:
+            if item[0] == "stride":
+                _, addr, bb, n, stride = item
+                src = self._resolve_stride_tensor(addr, bb, n, stride)
+                if src is not None:
+                    try:
+                        out[off : off + bb * n].view(n, bb).copy_(src)
+                        off += bb * n
+                        continue
+                    except Exception:  # noqa: BLE001 - strided copy unsupported
+                        pass
+                for j in range(n):
+                    a = addr + j * stride
+                    v = self._resolve_addr_tensor(a, bb)
+                    if v is None:
+                        raise RuntimeError(f"addr {a} (size {bb}) not resolvable")
+                    pending_dst.append(out[off : off + bb])
+                    pending_src.append(v)
+                    off += bb
+            else:
+                for addr, size in item[1]:
+                    v = self._resolve_addr_tensor(addr, size)
+                    if v is None:
+                        raise RuntimeError(f"addr {addr} (size {size}) not resolvable")
+                    pending_dst.append(out[off : off + size])
+                    pending_src.append(v)
+                    off += size
+        if len(pending_dst) == 1:
+            pending_dst[0].copy_(pending_src[0])
+        elif pending_dst:
+            try:
+                torch._foreach_copy_(pending_dst, pending_src)
+            except Exception:  # noqa: BLE001 - old torch / backend without foreach
+                for d, src_i in zip(pending_dst, pending_src):
+                    d.copy_(src_i)
+        return out[:need_bytes]
+
+    def _exchange_read_shards(
+        self,
+        total: int,
+        my_idx: list[int],
+        addr_list: list[list[int]],
+        size_list: list[list[int]],
+        local_ok: int = 1,
+    ) -> dict:
+        """Gather every peer's shard into the local KV cache buffers.
+
+        Four stages, all measured so the breakdown stays auditable:
+        pack (local gather) -> shard lengths -> all_gather -> write back.
+
+        ``local_ok`` is this rank's own verdict on its shard read. It is
+        published inside the gather payload, and ``all_ok`` in the result tells
+        the caller whether *every* rank is healthy: the write-back is skipped
+        when any rank is not, so a partially populated pool degrades the whole
+        group to the full read instead of splitting it into a rank that returns
+        early and ranks that block in the collective.
+        """
+        tp_group = get_tp_group()
+        step = self.put_step
+        rank = self.tp_rank % step
+        dev = self._kv_device()
+
+        if not hasattr(self, "_lens_cache"):
+            self._lens_cache: dict[int, list[int]] = {}
+            self._lens_ok: set[int] = set()
+            self._ex_send_buf: torch.Tensor | None = None
+            self._ex_recv_buf: torch.Tensor | None = None
+
+        checked = total in self._lens_ok
+
+        # ---- 1) pack this rank's shard (straight into the send buffer) ----
+        t0 = time.perf_counter()
+        if checked:
+            max_len = max(self._lens_cache[total])
+            send = self._ex_send_buf
+            slot = max_len + EXCHANGE_STATUS_BYTES
+            if send is None or send.numel() < slot or send.device != dev:
+                send = torch.empty(slot, dtype=torch.uint8, device=dev)
+                self._ex_send_buf = send
+            else:
+                send = send[:slot]
+            my_buf = self._pack_blocks(my_idx, addr_list, size_list, total, out=send[:max_len])
+        else:
+            my_buf = self._pack_blocks(my_idx, addr_list, size_list, total)
+        my_bytes = int(my_buf.numel())
+        t1 = time.perf_counter()
+
+        # ---- 2) shard byte lengths: locally derived, or exchanged once ----
+        lens: list[int] | None = None
+        if checked:
+            cached = self._lens_cache[total]
+            if cached[rank] == my_bytes:
+                lens = cached
+        if lens is None:
+            my_len = torch.tensor([my_bytes], dtype=torch.long, device=dev)
+            len_bufs = [torch.empty(1, dtype=torch.long, device=dev) for _ in range(step)]
+            torch.distributed.all_gather(len_bufs, my_len, group=tp_group.device_group)
+            lens = [int(x.item()) for x in len_bufs]
+            if not checked:
+                local = self._local_shard_lens(total, size_list)
+                if local == lens:
+                    # Same size table on every rank -> trust the local
+                    # derivation for this block count from now on.
+                    if len(self._lens_cache) >= LENS_CACHE_MAX:
+                        self._lens_cache.clear()
+                        self._lens_ok.clear()
+                    self._lens_cache[total] = lens
+                    self._lens_ok.add(total)
+                    logger.debug(
+                        "KV pool read dedup: blocks=%d local lens %s verified against all_gather",
+                        total,
+                        local,
+                    )
+                else:
+                    # Never trust the local derivation for this shape; the
+                    # gathered lengths stay authoritative.
+                    self._lens_ok.discard(total)
+                    self._lens_cache.pop(total, None)
+            else:
+                self._lens_ok.discard(total)
+                self._lens_cache.pop(total, None)
+        max_len = max(lens) if lens else 0
+        t2 = time.perf_counter()
+
+        # ---- 3) all_gather with padding (buffers are reused) ----
+        # Slot layout per rank: [shard bytes ....][status byte]. The status sits
+        # at the tail so the shard bytes stay at offset 0, where the strided
+        # copies expect them.
+        slot = max_len + EXCHANGE_STATUS_BYTES
+        send = self._ex_send_buf
+        if send is None or send.numel() < slot or send.device != dev:
+            send = torch.empty(slot, dtype=torch.uint8, device=dev)
+            self._ex_send_buf = send
+        else:
+            send = send[:slot]
+        if my_bytes and my_buf.data_ptr() != send.data_ptr():
+            send[:my_bytes] = my_buf
+        # The padding between my_bytes and max_len is deliberately left dirty:
+        # receivers trim by lens[k], so those bytes never reach the KV cache.
+        # The tail byte is a *bad* flag: 0 means this shard is complete.
+        send[max_len] = 0 if local_ok else 1
+        need = slot * step
+        recv = self._ex_recv_buf
+        if recv is None or recv.numel() < need or recv.device != dev:
+            recv = torch.empty(need, dtype=torch.uint8, device=dev)
+            self._ex_recv_buf = recv
+        else:
+            recv = recv[:need]
+        torch.distributed.all_gather_into_tensor(recv, send, group=tp_group.device_group)
+        t3a = time.perf_counter()
+        # all_gather_into_tensor only enqueues; without a synchronize the
+        # measurement is launch latency (a constant ~0.3 ms) and the real HCCL
+        # wait leaks into the write-back stage.
+        sync_ms = 0.0
+        try:
+            torch.npu.synchronize()
+            sync_ms = (time.perf_counter() - t3a) * 1e3
+        except Exception:  # noqa: BLE001
+            pass
+        t3 = time.perf_counter()
+
+        # ---- 3b) one collective decision: is every shard healthy? ----
+        # All ranks read the same bytes here, so they reach the same verdict
+        # without another collective; a single reduction keeps it to one
+        # device-to-host sync.
+        if not self._exchange_all_ok(recv, slot, max_len, step):
+            return {
+                "pack_ms": (t1 - t0) * 1e3,
+                "lens_ms": (t2 - t1) * 1e3,
+                "gather_ms": (t3a - t2) * 1e3,
+                "wb_ms": 0.0,
+                "sync_ms": sync_ms,
+                "runs": 0,
+                "wb_ops": 0,
+                "recv_bytes": need,
+                "lens_local": int(checked),
+                "stride_ops": 0,
+                "all_ok": 0,
+            }
+
+        # ---- 4) write the peer shards back into the local KV cache ----
+        runs, wb_ops, stride_ops = self._writeback_shards(recv, lens, slot, rank, addr_list, size_list, total)
+        t4 = time.perf_counter()
+        return {
+            "pack_ms": (t1 - t0) * 1e3,
+            "lens_ms": (t2 - t1) * 1e3,
+            "gather_ms": (t3a - t2) * 1e3,
+            "wb_ms": (t4 - t3) * 1e3,
+            "sync_ms": sync_ms,
+            "runs": runs,
+            "wb_ops": wb_ops,
+            "recv_bytes": need,
+            "lens_local": int(checked),
+            "stride_ops": stride_ops,
+            "all_ok": 1,
+        }
+
+    def _exchange_all_ok(self, recv: torch.Tensor, slot: int, max_len: int, step: int) -> bool:
+        """True when no rank published the "shard incomplete" flag.
+
+        One reduction, one device-to-host sync - doing it per rank would add
+        ``put_step`` small transfers and synchronisation points, which is
+        exactly the pattern to avoid as TP grows.
+        """
+        if step <= 1:
+            return int(recv[max_len]) == 0 if recv.numel() > max_len else True
+        flags = recv.view(step, slot)[:, max_len]
+        return int(flags.sum().item()) == 0
+
+    def _writeback_shards(
+        self,
+        recv: torch.Tensor,
+        lens: list[int],
+        slot: int,
+        rank: int,
+        addr_list: list[list[int]],
+        size_list: list[list[int]],
+        total: int,
+    ) -> tuple[int, int, int]:
+        """Copy the gathered peer shards into the local KV cache buffers.
+
+        The incoming shard is contiguous (the peer packed it segment-major)
+        while the destination inside a shard is arithmetic, so each segment is
+        written with a single strided copy.
+
+        ``slot`` is the per-rank stride of ``recv`` (shard bytes plus the
+        trailing status byte), not the shard length.
+
+        Returns ``(runs, wb_ops, stride_ops)`` for diagnostics.
+        """
+        # Same segment-major plan as pack, so the incoming shard is contiguous
+        # while the destination is arithmetic -> one strided copy per segment.
+        step = self.put_step
+        wb_dsts: list[torch.Tensor] = []
+        wb_srcs: list[torch.Tensor] = []
+        stride_ops = 0
+        for k in range(step):
+            if k == rank:
+                continue  # already written by m_store.get
+            shard = recv[k * slot : k * slot + lens[k]]
+            cursor = 0
+            for item in self._seg_plan(list(range(k, total, step)), addr_list, size_list, total):
+                if item[0] == "stride":
+                    _, addr, bb, n, stride = item
+                    src = shard[cursor : cursor + bb * n]
+                    dst = self._resolve_stride_tensor(addr, bb, n, stride) if src.numel() == bb * n else None
+                    if dst is not None:
+                        try:
+                            dst.copy_(src.view(n, bb))
+                            cursor += bb * n
+                            stride_ops += 1
+                            continue
+                        except Exception:  # noqa: BLE001
+                            pass
+                    for j in range(n):
+                        a = addr + j * stride
+                        v = self._resolve_addr_tensor(a, bb)
+                        if v is None:
+                            raise RuntimeError(f"addr {a} (size {bb}) not resolvable")
+                        if cursor + bb > shard.numel():
+                            raise RuntimeError(f"shard {k} overflow: need {cursor + bb}, have {shard.numel()}")
+                        wb_dsts.append(v)
+                        wb_srcs.append(shard[cursor : cursor + bb])
+                        cursor += bb
+                else:
+                    for addr, size in item[1]:
+                        v = self._resolve_addr_tensor(addr, size)
+                        if v is None:
+                            raise RuntimeError(f"addr {addr} (size {size}) not resolvable")
+                        if cursor + size > shard.numel():
+                            raise RuntimeError(f"shard {k} overflow: need {cursor + size}, have {shard.numel()}")
+                        wb_dsts.append(v)
+                        wb_srcs.append(shard[cursor : cursor + size])
+                        cursor += size
+        runs = stride_ops + len(wb_dsts)
+        wb_ops = stride_ops + (1 if wb_dsts else 0)
+        if len(wb_dsts) == 1:
+            wb_dsts[0].copy_(wb_srcs[0])
+        elif wb_dsts:
+            try:
+                torch._foreach_copy_(wb_dsts, wb_srcs)
+            except Exception:  # noqa: BLE001
+                for d, src_i in zip(wb_dsts, wb_srcs):
+                    d.copy_(src_i)
+        return runs, wb_ops, stride_ops
+
+    def _load_with_read_dedup(
+        self,
+        key_list: list[str],
+        addr_list: list[list[int]],
+        size_list: list[list[int]],
+        block_id_list: list[int],
+    ) -> bool:
+        """Load the request with put_step-fold less pool traffic.
+
+        ``key_list`` / ``addr_list`` / ``size_list`` are the already built full
+        read plan of this request. Returns True when the request is done (the
+        KV cache now holds the complete data), False when the caller must run
+        the original full read instead.
+        """
+        total = len(key_list)
+        if total == 0:
+            return False
+        step = self.put_step
+        my_idx = list(range(self.tp_rank % step, total, step))
+
+        # 1) read only this rank's shard
+        #
+        # Three outcomes mean "this shard is not (fully) in the pool", and all
+        # of them must hand the request back to the full read:
+        #   * ``None`` - backend not initialised, or the transport threw and the
+        #     backend swallowed it (memcache_backend.get returns None on both);
+        #   * a return vector shorter than the key list - the backend answered
+        #     for fewer blocks than asked;
+        #   * any non-zero code - that block is missing.
+        # A raise from the backend has to be caught here as well, because the
+        # verdict is published in the exchange below: letting it escape would
+        # skip the collective on this rank only.
+        # Continuing on ``None`` would otherwise be a *silent* correctness
+        # failure: the exchange would broadcast uninitialised KV to every rank
+        # and this method would still report success, so the full path - the
+        # only place that calls record_failed_blocks - would never run.
+        t_get = time.perf_counter()
+        local_ok = 1
+        if my_idx:
+            try:
+                ret = self.m_store.get(
+                    [key_list[i] for i in my_idx],
+                    [addr_list[i] for i in my_idx],
+                    [size_list[i] for i in my_idx],
+                )
+            except Exception as err:  # noqa: BLE001 - a failed shard read is a fallback, not a crash
+                ret = None
+                logger.warning(
+                    "KV pool read dedup: shard read raised on rank=%d blocks=%d, falling back: %s",
+                    self.tp_rank,
+                    len(my_idx),
+                    err,
+                )
+            if ret is None or len(ret) != len(my_idx) or any(r != 0 for r in ret):
+                local_ok = 0
+        get_ms = (time.perf_counter() - t_get) * 1e3
+
+        # 2) exchange the shards inside the TP group. Even with a bad local
+        # shard this rank takes part: the peers are already entering the
+        # collective, and the status byte tells all of them to fall back
+        # together instead of leaving this rank behind in the full read.
+        t_ex = time.perf_counter()
+        stats = self._exchange_read_shards(total, my_idx, addr_list, size_list, local_ok)
+        ex_ms = (time.perf_counter() - t_ex) * 1e3
+        if not stats["all_ok"]:
+            logger.debug(
+                "KV pool read dedup: rank=%d blocks=%d local_ok=%d, another rank is missing a shard, falling back",
+                self.tp_rank,
+                total,
+                local_ok,
+            )
+            return False
+        logger.debug(
+            "KV pool read dedup: rank=%d/%d layer=%d blocks=%d local_get=%d "
+            "put_step=%d get_ms=%.3f exchanged_ms=%.3f pack_ms=%.3f lens_ms=%.3f "
+            "gather_ms=%.3f sync_ms=%.3f wb_ms=%.3f runs=%d wb_ops=%d "
+            "stride_ops=%d recv_mb=%.2f lens_local=%d local_ok=%d",
+            self.tp_rank,
+            self.tp_size,
+            self.current_layer,
+            total,
+            len(my_idx),
+            step,
+            get_ms,
+            ex_ms,
+            stats["pack_ms"],
+            stats["lens_ms"],
+            stats["gather_ms"],
+            stats["sync_ms"],
+            stats["wb_ms"],
+            stats["runs"],
+            stats["wb_ops"],
+            stats["stride_ops"],
+            stats["recv_bytes"] / 1048576.0,
+            stats["lens_local"],
+        )
+        self._dedup_calls = getattr(self, "_dedup_calls", 0) + 1
+        self._dedup_blocks_total = getattr(self, "_dedup_blocks_total", 0) + total
+        self._dedup_blocks_local = getattr(self, "_dedup_blocks_local", 0) + len(my_idx)
+        if self._dedup_calls == 1:
+            logger.info(
+                "KV pool read dedup enabled: tp_rank=%d put_step=%d blocks=%d local_get=%d",
+                self.tp_rank,
+                step,
+                total,
+                len(my_idx),
+            )
+
+        # 3) optional self-check: compare the assembled buffers against a full
+        # read of the same blocks. Off by default; it doubles the pool traffic
+        # of the checked call.
+        if os.getenv("VLLM_ASCEND_KV_POOL_READ_DEDUP_VERIFY", "0") == "1" and getattr(self, "_verify_done", 0) < 1:
+            self._verify_done = getattr(self, "_verify_done", 0) + 1
+            try:
+                self._verify_read_dedup(key_list, addr_list, size_list, total)
+            except Exception as err:  # noqa: BLE001 - verification must not break serving
+                logger.warning("KV pool read dedup self-check failed to run: %s", err)
+        return True
+
+    def _verify_read_dedup(
+        self,
+        key_list: list[str],
+        addr_list: list[list[int]],
+        size_list: list[list[int]],
+        total: int,
+    ) -> None:
+        """Byte-compare the assembled KV cache against a full pool read.
+
+        The assembled data is already in the local buffers, so it is packed
+        first, then the full read overwrites the buffers (identical bytes by
+        construction of a correct exchange) and is packed the same way.
+        """
+        assembled = self._pack_blocks(list(range(total)), addr_list, size_list).clone()
+        self.m_store.get(key_list, addr_list, size_list)
+        reference = self._pack_blocks(list(range(total)), addr_list, size_list)
+        mismatch = int((assembled != reference).sum().item())
+        logger.info(
+            "KV pool read dedup self-check: blocks=%d bytes=%d mismatch=%d",
+            total,
+            int(reference.numel()),
+            mismatch,
+        )
+        if mismatch:
+            logger.error("KV pool read dedup self-check FAILED: %d bytes differ", mismatch)
 
     def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
         """
@@ -745,6 +1390,10 @@ class KVPoolWorker:
         self.group_block_stride: dict[int, list[int]] = {}
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.group_cache_entry_segments: dict[int, list[tuple[int, int]]] = {}
+        # task #14140: KV cache tensor 段表 (base_addr, region_bytes, flat uint8 view)，
+        # 由 _infer_cache_group_metadata 注册时填充，供读侧去重的
+        # addr->tensor 视图解析（_resolve_addr_tensor）使用。
+        self._kv_cache_addr_segments = []
         self.kv_caches = kv_caches
         if self.use_kvpp:
             self.physical_layer_to_group_layers.clear()
@@ -945,6 +1594,18 @@ class KVPoolWorker:
                     block_id_list.append(block_id)
             if not key_list:
                 continue
+            if not self.load_async and not self.use_layerwise and self._read_dedup_enabled():
+                # Read dedup: this rank reads only 1/put_step of the keys and
+                # gathers the rest from the TP group. Any failure falls back to
+                # the full read below.
+                try:
+                    if self._load_with_read_dedup(key_list, addr_list, size_list, block_id_list):
+                        continue
+                except Exception as err:  # noqa: BLE001 - never break serving
+                    logger.warning(
+                        "KV pool read dedup failed, falling back to full read: %s",
+                        err,
+                    )
             key_list_c = _circular_shift(key_list, self.tp_rank % len(key_list))
             addr_list_c = _circular_shift(addr_list, self.tp_rank % len(addr_list))
             size_list_c = _circular_shift(size_list, self.tp_rank % len(size_list))
