@@ -818,3 +818,15 @@ Use the exact matrix `name`, including capitalization.
 - The requested runner and node count match the test requirements.
 - Nightly and weekly entries reuse the same case when their scenarios match.
 - Local pytest execution and the applicable CI trigger have been verified.
+
+## Custom accuracy benchmark runners
+
+An accuracy benchmark may set `runner` to a trusted repository callable in
+`module.function` form. The shared AISBench dispatcher calls it with `model`,
+`port`, `host_ip` and the benchmark `config` mapping. It must return a finite
+accuracy percentage in [0,100] or raise on infrastructure/validation failure.
+Benchmarks without `runner` continue using the existing `AisbenchRunner`.
+The runner owns custom input audits and acceptance checks; it should populate
+numeric `baseline` and `threshold` values for shared result reporting.
+Single-node `model` values support environment variables such as `${MODEL_PATH}`.
+See `models/configs/Kimi/Kimi-K3-W4A8-EP256-A5.yaml` for a fixed first-500 example.

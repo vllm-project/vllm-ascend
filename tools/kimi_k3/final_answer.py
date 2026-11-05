@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Strict final-channel and numeric-answer handling for GSM8K."""
 
-import re
+import regex as re
 
 
 def final_message(message, finish_reason):

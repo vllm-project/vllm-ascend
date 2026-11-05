@@ -182,7 +182,7 @@ class SingleNodeConfigLoader:
             result.append(
                 SingleNodeConfig(
                     name=case["name"],
-                    model=case["model"],
+                    model=os.path.expandvars(case["model"]),
                     envs=case.get("envs", {}),
                     special_dependencies=case.get("special_dependencies", {}),
                     server_cmd=full_cmd,

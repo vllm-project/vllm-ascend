@@ -450,8 +450,13 @@ def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="loc
         logging.info("[%d/%d] Starting benchmark: %s (type=%s)", idx, total, benchmark_name, case_type)
         logging.info("=" * 60)
         try:
-            with AisbenchRunner(model=model, port=port, host_ip=host_ip, aisbench_config=aisbench_case) as aisbench:
-                aisbench_results.append(aisbench.result)
+            if aisbench_case.get("runner"):
+                from tools.accuracy_runner import run_custom_accuracy
+
+                aisbench_results.append(run_custom_accuracy(model, port, host_ip, aisbench_case))
+            else:
+                with AisbenchRunner(model=model, port=port, host_ip=host_ip, aisbench_config=aisbench_case) as aisbench:
+                    aisbench_results.append(aisbench.result)
             logging.info("[%d/%d] Finished benchmark: %s", idx, total, benchmark_name)
         except Exception as e:
             aisbench_results.append("")

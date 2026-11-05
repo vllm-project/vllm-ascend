@@ -10,7 +10,6 @@ import hashlib
 import json
 import math
 import os
-import re
 import shutil
 import struct
 import threading
@@ -18,6 +17,8 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+import regex as re
 
 EXPERT = re.compile(r"^language_model\.model\.layers\.(\d+)\.block_sparse_moe\.experts\.(\d+)\.(.+)$")
 ROUTER = re.compile(r"^language_model\.model\.layers\.(\d+)\.block_sparse_moe\.gate\.(weight|e_score_correction_bias)$")

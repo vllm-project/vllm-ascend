@@ -333,7 +333,8 @@ a5:
       # KIMI_EP256_BASELINE and KIMI_EP256_TOLERANCE are required.
       - name: Kimi-K3-W4A8-EP256-A5
         os: linux-aarch64-a5-8
-        tests: tests/e2e/cases/models/test_kimi_k3_ep256_accuracy.py
+        config_file_path: Kimi-K3-W4A8-EP256-A5.yaml
+        config_base_path: tests/e2e/cases/models/configs/Kimi
       - name: singlecard-ops-a5
         os: linux-aarch64-a5-8
         tests: tests/e2e/nightly/single_node/ops/singlecard_ops/

@@ -1,0 +1,64 @@
+# Requires the KIMI_EP256_MODEL, KIMI_GSM8K_DATASET, KIMI_EP256_BASELINE
+# and KIMI_EP256_TOLERANCE environment variables. Unset HCCL_OP_EXPANSION_MODE.
+test_cases:
+- name: Kimi-K3-W4A8-EP256-A5
+  model: ${KIMI_EP256_MODEL}
+  envs:
+    VLLM_USE_V2_MODEL_RUNNER: '1'
+    HCCL_BUFFSIZE: '800'
+    PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    OMP_NUM_THREADS: '1'
+    VLLM_ENGINE_READY_TIMEOUT_S: '7200'
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+  server_cmd:
+  - --served-model-name
+  - kimi-k3-ep256
+  - --host
+  - 127.0.0.1
+  - --trust-remote-code
+  - --tokenizer-mode
+  - kimi_k3
+  - --quantization
+  - ascend
+  - --generation-config
+  - vllm
+  - --reasoning-parser
+  - kimi_k3
+  - --tensor-parallel-size
+  - '8'
+  - --enable-expert-parallel
+  - --dtype
+  - bfloat16
+  - --enforce-eager
+  - --max-model-len
+  - '6144'
+  - --max-num-seqs
+  - '100'
+  - --max-num-batched-tokens
+  - '2048'
+  - --enable-chunked-prefill
+  - --gpu-memory-utilization
+  - '0.85'
+  - --no-enable-prefix-caching
+  - --mm-processor-cache-gb
+  - '0'
+  - --limit-mm-per-prompt
+  - '{"vision_chunk":0}'
+  - --additional-config
+  - '{"enable_flashcomm1":true}'
+  - --seed
+  - '42'
+  - --port
+  - $SERVER_PORT
+  test_content: []
+  benchmarks:
+    accuracy:
+      case_type: accuracy
+      runner: tools.kimi_k3.yaml_accuracy.run_accuracy
+      config_file: tests/e2e/cases/models/configs/Kimi/gsm8k_ep256_first500.py
+      baseline: ${KIMI_EP256_BASELINE}
+      threshold: ${KIMI_EP256_TOLERANCE}
+      dataset_path: gsm8k
+      num_prompts: 500
+      max_out_len: 1024
+      batch_size: 60

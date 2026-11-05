@@ -10,8 +10,8 @@
 **单节点 A5 8 卡，Kimi-K3 W4A8 减至 256 专家，GSM8K 前 500 题精度回归测试。**
 单次执行只运行一轮；历史三轮用于观察波动，不要求每次 nightly 重复三轮。
 
-pytest 入口、裁剪及评分工具、nightly 注册已在源码中实现。
-18 项 CPU 单元测试、Ruff 检查和矩阵解析通过；尚未在目标 NPU/AISBench 环境验证新入口。
+YAML 入口、裁剪及评分工具、nightly 注册已在源码中实现。
+22 项 CPU 单元测试、Ruff 检查和矩阵解析通过；尚未在目标 NPU/AISBench 环境验证新入口。
 历史远端实测结果不能当作当前分支验证通过的证据。
 
 ## 2. 文件清单
@@ -30,11 +30,14 @@ pytest 入口、裁剪及评分工具、nightly 注册已在源码中实现。
 | [test_final_answer.py](../../tests/ut/tools/kimi_k3/test_final_answer.py) | 4 项最终答案处理测试 |
 | [accuracy_case.py](accuracy_case.py) | 模型、数据校验与独立结果审计 |
 | [test_accuracy_case.py](../../tests/ut/tools/kimi_k3/test_accuracy_case.py) | 6 项输入、结果约定测试 |
-| [test_kimi_k3_ep256_accuracy.py](../../tests/e2e/cases/models/test_kimi_k3_ep256_accuracy.py) | 可执行 pytest 精度回归入口 |
+| [Kimi-K3-W4A8-EP256-A5.yaml](../../tests/e2e/cases/models/configs/Kimi/Kimi-K3-W4A8-EP256-A5.yaml) | YAML 驱动模型精度配置 |
 | [nightly_config.yaml](../../.github/workflows/configs/nightly_config.yaml) | A5 nightly 矩阵注册 |
 | [nightly-plan.yaml](nightly-plan.yaml) | 用例约定元数据，并非可执行模型 YAML |
 | [summarize_accuracy.py](summarize_accuracy.py) | 三轮均值、标准差及极差统计 |
 | [**init**.py](__init__.py) | 工具包导入入口 |
+| [yaml_accuracy.py](yaml_accuracy.py) | YAML benchmark 调用的 Kimi 严格评分 helper |
+| [accuracy_runner.py](../accuracy_runner.py) | 可选精度 runner 调度及返回值验证 |
+| [test_yaml_accuracy.py](../../tests/ut/tools/kimi_k3/test_yaml_accuracy.py) | YAML 注册、runner 约定和原有 runner 兼容性测试 |
 
 ## 3. 权重裁剪及校验
 
@@ -57,6 +60,8 @@ pytest 入口、裁剪及评分工具、nightly 注册已在源码中实现。
 以上目录标识和校验值用于定位本次实验输入；校验值覆盖配置、索引文件，
 并非全部源权重数据的哈希。第 8 节的 vLLM、vllm-ascend 版本属于运行环境版本，
 不属于原始权重版本。
+
+独立裁剪依赖安装命令为 `python -m pip install safetensors numpy regex`。
 
 输入原始量化权重；每个 MoE 层从 896 个路由专家中均匀选取 256 个：
 `keep_ids[j] = floor(j * 896 / 256)`，其中 `j=0..255`。
@@ -118,11 +123,15 @@ python -m tools.kimi_k3.prune_experts \
 | `KIMI_EP256_TOLERANCE` | 经确认的绝对容差，单位为百分点，范围 [0,100] |
 
 ```bash
-python -m pytest -sv tests/e2e/cases/models/test_kimi_k3_ep256_accuracy.py
+export CONFIG_BASE_PATH=tests/e2e/cases/models/configs/Kimi
+export CONFIG_YAML_PATH=Kimi-K3-W4A8-EP256-A5.yaml
+unset HCCL_OP_EXPANSION_MODE
+python -m pytest -sv tests/e2e/common/single_node/test_single_node.py
 ```
 
-入口先校验输入，通过共享 `RemoteOpenAIServer` 分配空闲端口并启动自己的服务，
-执行 AISBench，核对 500 个唯一题号、原题对应关系，独立重算准确率并检查请求成功情况。
+共享单节点框架通过 `RemoteOpenAIServer` 在空闲端口启动服务。benchmark 调度器通过
+可信仓库 YAML 的可选 `runner` 字段调用 Kimi helper，校验输入、执行完整 AISBench 配置，
+核对 500 个唯一题号、原题对应关系，独立重算准确率并检查请求成功情况。
 验收规则为 `abs(accuracy - baseline) <= tolerance`，采用双向偏差比较。
 缺少输入或验收参数会明确失败；服务由共享框架清理。
 历史均值和极差仅供参考，不自动作为验收标准。
@@ -170,7 +179,8 @@ python -m tools.kimi_k3.summarize_accuracy \
 ```yaml
 - name: Kimi-K3-W4A8-EP256-A5
   os: linux-aarch64-a5-8
-  tests: tests/e2e/cases/models/test_kimi_k3_ep256_accuracy.py
+  config_file_path: Kimi-K3-W4A8-EP256-A5.yaml
+  config_base_path: tests/e2e/cases/models/configs/Kimi
 ```
 
 选择命令为 `/nightly Kimi-K3-W4A8-EP256-A5`，取决于 PR 工作流和 runner 可用性。
@@ -180,11 +190,11 @@ CI 测试容器内需要配置上述四项必需变量。`nightly-plan.yaml` 仅
 ```bash
 python -m unittest discover -s tests/ut/tools/kimi_k3 -v
 python -m ruff check tools/kimi_k3 tests/ut/tools/kimi_k3 \
-  tests/e2e/cases/models/test_kimi_k3_ep256_accuracy.py \
+  tests/e2e/cases/models/configs/Kimi/Kimi-K3-W4A8-EP256-A5.yaml \
   tests/e2e/cases/models/configs/Kimi/gsm8k_ep256_first500.py
 ```
 
-已通过：8 项裁剪测试、4 项最终答案测试、6 项精度约定测试，以及 Ruff 检查和矩阵入口解析。
+已通过：8 项裁剪测试、4 项最终答案测试、6 项精度约定测试、4 项 YAML 接入测试，以及 Ruff 检查和矩阵入口解析。
 这些 CPU 验证不代表 NPU 集成验证通过。
 
 ## 8. 历史三轮测试结果与总结

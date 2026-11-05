@@ -585,6 +585,12 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
         aisbench_cases=aisbench_cases,
     )
 
+    # Custom runners may resolve runtime acceptance values (for example from CI env).
+    for key, benchmark in zip(benchmark_keys, aisbench_cases):
+        if benchmark.get("runner"):
+            for field in ("baseline", "threshold"):
+                if field in benchmark:
+                    config.benchmarks[key][field] = benchmark[field]
     _save_benchmark_results_json(config, benchmark_keys, result)
 
     if "benchmark_comparisons" in config.test_content:

@@ -11,8 +11,8 @@ This document consolidates the operating instructions, change checklist and test
 GSM8K first-500 accuracy regression.** One invocation evaluates one round.
 Three historical rounds characterize variance; they are not three nightly invocations.
 
-The pytest entry, pruning/scoring tools and nightly registration are implemented in source.
-Eighteen CPU unit tests, Ruff checks and matrix parsing passed. The entry has not
+The YAML entry, pruning/scoring tools and nightly registration are implemented in source.
+Twenty-two CPU unit tests, Ruff checks and matrix parsing passed. The entry has not
 been validated against the target NPU/AISBench runtime. Historical remote results
 do not establish a pass for the current branch.
 
@@ -32,11 +32,14 @@ configuration/entry under `tests/e2e/cases/models`, and unit tests under `tests/
 | [test_final_answer.py](../../tests/ut/tools/kimi_k3/test_final_answer.py) | Four final-answer tests |
 | [accuracy_case.py](accuracy_case.py) | Model/data checks and independent result audit |
 | [test_accuracy_case.py](../../tests/ut/tools/kimi_k3/test_accuracy_case.py) | Six input/result contract tests |
-| [test_kimi_k3_ep256_accuracy.py](../../tests/e2e/cases/models/test_kimi_k3_ep256_accuracy.py) | Executable pytest regression entry |
+| [Kimi-K3-W4A8-EP256-A5.yaml](../../tests/e2e/cases/models/configs/Kimi/Kimi-K3-W4A8-EP256-A5.yaml) | YAML-driven model accuracy configuration |
 | [nightly_config.yaml](../../.github/workflows/configs/nightly_config.yaml) | A5 nightly matrix registration |
 | [nightly-plan.yaml](nightly-plan.yaml) | Case contract metadata, not an executable YAML |
 | [summarize_accuracy.py](summarize_accuracy.py) | Three-round mean, standard deviations and range |
 | [**init**.py](__init__.py) | Importable tools package |
+| [yaml_accuracy.py](yaml_accuracy.py) | Kimi strict scoring helper called by the YAML benchmark runner |
+| [accuracy_runner.py](../accuracy_runner.py) | Optional dotted accuracy runner dispatch and return-value validation |
+| [test_yaml_accuracy.py](../../tests/ut/tools/kimi_k3/test_yaml_accuracy.py) | YAML registration, runner contracts and existing-runner compatibility tests |
 
 ## 3. Pruning and checkpoint verification
 
@@ -60,6 +63,8 @@ No upstream repository revision or release tag is recorded for this local checkp
 The directory name and recorded checksums identify the experiment input; the checksums
 cover configuration/index files, not every source weight byte. The vLLM/vllm-ascend
 runtime versions in section 8 are not checkpoint versions.
+
+Install the standalone pruning dependencies with `python -m pip install safetensors numpy regex`.
 
 Start from the original quantized checkpoint. In each of 92 MoE layers,
 select `keep_ids[j] = floor(j * 896 / 256)`, `j=0..255`. Slice router rows and
@@ -125,11 +130,16 @@ From the repository root, provision all four variables:
 | `KIMI_EP256_TOLERANCE` | Approved tolerance in percentage points, [0,100] |
 
 ```bash
-python -m pytest -sv tests/e2e/cases/models/test_kimi_k3_ep256_accuracy.py
+export CONFIG_BASE_PATH=tests/e2e/cases/models/configs/Kimi
+export CONFIG_YAML_PATH=Kimi-K3-W4A8-EP256-A5.yaml
+unset HCCL_OP_EXPANSION_MODE
+python -m pytest -sv tests/e2e/common/single_node/test_single_node.py
 ```
 
-The entry checks inputs, starts its own service with a free port through the shared
-`RemoteOpenAIServer`, executes AISBench, audits 500 unique IDs and original prompts,
+The shared single-node framework starts a service on an available port through
+`RemoteOpenAIServer`. Its benchmark dispatcher calls the optional dotted `runner`
+from the trusted repository YAML. The Kimi helper validates inputs, executes the
+complete AISBench configuration, audits 500 unique IDs and original prompts,
 recomputes accuracy, checks request success and applies
 `abs(accuracy - baseline) <= tolerance`. Service cleanup uses the shared fixture.
 This is a two-sided comparison; missing inputs/thresholds fail explicitly.
@@ -179,7 +189,8 @@ Matrix: `.github/workflows/configs/nightly_config.yaml`, `a5.single_node.test_co
 ```yaml
 - name: Kimi-K3-W4A8-EP256-A5
   os: linux-aarch64-a5-8
-  tests: tests/e2e/cases/models/test_kimi_k3_ep256_accuracy.py
+  config_file_path: Kimi-K3-W4A8-EP256-A5.yaml
+  config_base_path: tests/e2e/cases/models/configs/Kimi
 ```
 
 Selection: `/nightly Kimi-K3-W4A8-EP256-A5`, subject to the PR workflow and runner
@@ -190,11 +201,11 @@ four-node K3 case remains unchanged. Source registration does not provision a ru
 ```bash
 python -m unittest discover -s tests/ut/tools/kimi_k3 -v
 python -m ruff check tools/kimi_k3 tests/ut/tools/kimi_k3 \
-  tests/e2e/cases/models/test_kimi_k3_ep256_accuracy.py \
+  tests/e2e/cases/models/configs/Kimi/Kimi-K3-W4A8-EP256-A5.yaml \
   tests/e2e/cases/models/configs/Kimi/gsm8k_ep256_first500.py
 ```
 
-Passed: eight pruning, four final-answer and six accuracy-contract tests; Ruff and
+Passed: eight pruning, four final-answer, six accuracy-contract and four YAML integration tests; Ruff and
 matrix entry resolution. These CPU checks do not establish NPU integration correctness.
 
 ## 8. Historical three-round results and conclusions

@@ -1,4 +1,4 @@
-# Case contract metadata. The executable entry is registered separately in nightly_config.yaml.
+# Case contract metadata. The YAML entry is registered separately in nightly_config.yaml.
 status: implemented_pending_target_runtime_validation
 case_name: Kimi-K3-W4A8-EP256-A5
 matrix: a5.single_node.test_config
@@ -34,7 +34,7 @@ evaluation:
   truncated_answer_is_incorrect: true
 baseline: null
 threshold_percentage_points: null
-entry: tests/e2e/cases/models/test_kimi_k3_ep256_accuracy.py
+entry: tests/e2e/cases/models/configs/Kimi/Kimi-K3-W4A8-EP256-A5.yaml
 required_runner_variables:
   - KIMI_EP256_MODEL
   - KIMI_GSM8K_DATASET
