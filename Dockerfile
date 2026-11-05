@@ -11,7 +11,7 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
-# limitations under the License.
+# limitations under License.
 # This file is a part of the vllm-ascend project.
 #
 FROM quay.io/ascend/cann:9.2.1-910b-ubuntu22.04-py3.12
