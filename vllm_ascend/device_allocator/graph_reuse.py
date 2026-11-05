@@ -134,8 +134,8 @@ def graph_resource_signature(config: VllmConfig, runner: Any, groups: tuple, own
     tensors += _tensor_records((manager.hidden_states, manager.aux_hidden_states), "outputs")
     communicators = tuple(sorted((id(group), id(group.device_group)) for group in groups))
     allocator = CaMemAllocator.get_instance()
-    pool = allocator.allocator_and_pools.get(ACL_GRAPH_TAG)
-    pool_id = pool[0].id if pool is not None else None
+    pools = allocator.allocator_and_pools.get(ACL_GRAPH_TAG, [])
+    pool_id = tuple(pool.id for pool, _ in pools)
     allocations = tuple(
         sorted((ptr, data.tag, data.handle[1], data.handle[3]) for ptr, data in allocator.pointer_to_data.items())
     )

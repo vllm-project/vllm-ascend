@@ -61,7 +61,7 @@ def case(monkeypatch):
         ),
     )
     allocator = SimpleNamespace(
-        allocator_and_pools={ACL_GRAPH_TAG: (SimpleNamespace(id=(0, 7)), object())},
+        allocator_and_pools={ACL_GRAPH_TAG: [(SimpleNamespace(id=(0, 7)), object())]},
         pointer_to_data={},
         _check_memory_state=MagicMock(),
     )
@@ -111,7 +111,9 @@ def test_reverse_tag_order_waits_for_all_pools(case):
     assert reuse.complete_after(["weights"])
 
 
-@pytest.mark.parametrize("change", ["graph", "event", "communicator", "pool", "capture_sizes", "backend"])
+@pytest.mark.parametrize(
+    "change", ["graph", "event", "communicator", "pool", "extra_pool", "missing_pool", "capture_sizes", "backend"]
+)
 def test_changed_resource_cannot_replay(case, change):
     reuse = controller(case)
     reuse.prepare_sleep(1, (case.group,))
@@ -122,7 +124,11 @@ def test_changed_resource_cannot_replay(case, change):
     elif change == "communicator":
         case.group.device_group = object()
     elif change == "pool":
-        case.allocator.allocator_and_pools[ACL_GRAPH_TAG] = (SimpleNamespace(id=(0, 8)), object())
+        case.allocator.allocator_and_pools[ACL_GRAPH_TAG] = [(SimpleNamespace(id=(0, 8)), object())]
+    elif change == "extra_pool":
+        case.allocator.allocator_and_pools[ACL_GRAPH_TAG].append((SimpleNamespace(id=(0, 8)), object()))
+    elif change == "missing_pool":
+        case.allocator.allocator_and_pools.pop(ACL_GRAPH_TAG)
     elif change == "capture_sizes":
         case.config.compilation_config.cudagraph_capture_sizes = [1]
     else:
