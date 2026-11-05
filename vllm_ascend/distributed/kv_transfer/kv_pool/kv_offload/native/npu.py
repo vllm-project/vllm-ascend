@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import torch
 from typing_extensions import override
-from vllm.logger import logger
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec as _CPUOffloadingSpec
@@ -87,19 +86,6 @@ class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
         else:
             pin_shared_mmap = bool(pin_shared_mmap)
 
-        pin_worker_slot_only = self.extra_config.get("pin_worker_slot_only")
-        if pin_worker_slot_only is None:
-            pin_worker_slot_only = not self.replicated_layout
-        elif isinstance(pin_worker_slot_only, str):
-            pin_worker_slot_only = pin_worker_slot_only.lower() not in ("0", "false", "no")
-        else:
-            pin_worker_slot_only = bool(pin_worker_slot_only)
-        if self.replicated_layout and pin_worker_slot_only:
-            logger.warning(
-                "pin_worker_slot_only is ignored for the replicated MLA layout; pinning the whole shared region instead"
-            )
-            pin_worker_slot_only = False
-
         region_kwargs = dict(num_chunks=self.num_chunks, kv_bytes_per_chunk=self.kv_bytes_per_chunk)
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
@@ -113,5 +99,5 @@ class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
             num_cpu_blocks=self.num_chunks,
             mmap_region=worker_mmap,
             pin_shared_mmap=pin_shared_mmap,
-            worker_slot_only=pin_worker_slot_only,
+            worker_slot_only=not self.replicated_layout,
         )
