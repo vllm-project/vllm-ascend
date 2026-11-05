@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState as FromV1
+from vllm_ascend.attention.context_parallel import common_cp, metadata
 from vllm_ascend.attention.context_parallel.context import (
     AscendPCPAttentionContext as FromContext,
 )
@@ -108,3 +109,27 @@ def test_context_contract_module_does_not_import_worker() -> None:
     )
     assert isinstance(matching, PCPAttentionContext)
     assert not isinstance(SimpleNamespace(global_batch=object()), PCPAttentionContext)
+
+
+def test_common_cp_reexports_moved_symbols_are_identical() -> None:
+    # The policy module must keep re-exporting every metadata symbol that moved
+    # to `metadata`, so historical imports from `common_cp` keep working.
+    moved_symbols = [
+        "CPKVScope",
+        "DCPImplMixin",
+        "DCPMetadataBuilderMixin",
+        "_npu_attention_update",
+        "_npu_attn_out_lse_update",
+        "_out_lse_reshape",
+        "_process_attn_out_lse",
+        "_update_out_and_lse",
+        "build_pcp_ordered_slot_mapping",
+        "use_history_current_split_decode",
+    ]
+    for name in moved_symbols:
+        assert getattr(common_cp, name) is getattr(metadata, name), name
+    assert [(member.name, member.value) for member in common_cp.CPKVScope] == [
+        ("HISTORY", "history"),
+        ("CURRENT", "current"),
+        ("FULL", "full"),
+    ]
