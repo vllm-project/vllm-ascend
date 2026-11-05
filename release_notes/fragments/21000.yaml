@@ -1,0 +1,7 @@
+pr: 21000
+entries:
+  - category: feature
+    text: >-
+      Added experimental LayerwisePoolConnector and opt-in Ascend Store shared
+      objects for prefix pooling and pool-backed PD. Initial validation covers
+      GLM-5.3-Flash BF16 with matching TP8 and MTP settings in MRV2 eager mode.
