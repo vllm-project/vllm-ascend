@@ -1,0 +1,6 @@
+pr: 17211
+entries:
+  - category: feature
+    text: Added a Triton-Ascend apply_top_k_top_p fallback for V2 sampling, used when the native CANN npu_top_k_top_p op is unavailable. It is enabled with `enable_triton_apply_topk_topp: true` in `additional_config` (default false); the native CANN op stays the default whenever it is available.
+  - category: performance
+    text: The Triton fallback keeps the same topk_renorm semantics as the native op and, on A5 above the measured B/V gate, is 1.2-4.8x faster than the PyTorch reference (median 1.8x).

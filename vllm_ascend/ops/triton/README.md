@@ -6,7 +6,7 @@ Operators shared by both runners, model-layer kernels, and general utilities
 keep their functional directories. A model supported by V2 alone does not make
 all of its mathematical kernels V2 runner operators.
 
-This inventory covers all 107 non-`__init__.py` Python modules under this package.
+This inventory covers all 109 non-`__init__.py` Python modules under this package.
 It includes launch wrappers and utilities as well as JIT definitions. Operators
 defined under `worker/v2/`, `models/`, or other packages are outside this layout
 change.
@@ -56,6 +56,7 @@ examples and links together.
 | [block_table/compute_slot_mappings.py](block_table/compute_slot_mappings.py) | `worker/v2/block_table.py` | [compute_slot_mappings.md](docs/compute_slot_mappings.md) |
 | [mamba/precopy.py](mamba/precopy.py) | `patch/worker/patch_triton.py` | [mamba_precopy.md](docs/mamba_precopy.md) |
 | [metrics/num_nans.py](metrics/num_nans.py) | `patch/worker/patch_triton.py` | [num_nans.md](docs/num_nans.md) |
+| [sample/apply_top_k_top_p.py](sample/apply_top_k_top_p.py) | `patch/worker/patch_triton.py` | [apply_top_k_top_p.md](docs/apply_top_k_top_p.md) |
 | [sample/categorical_sample.py](sample/categorical_sample.py) | `patch/worker/patch_triton.py` | [categorical_sample.md](docs/categorical_sample.md) |
 | [sample/fill_logprob_token_idx.py](sample/fill_logprob_token_idx.py) | `patch/worker/patch_triton.py` | [fill_logprob_token_ids.md](docs/fill_logprob_token_ids.md) |
 | [sample/sampling_mask.py](sample/sampling_mask.py) | `patch/worker/patch_triton.py` | [sampling_mask.md](docs/sampling_mask.md) |
