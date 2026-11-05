@@ -42,6 +42,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_hooks import dispatch_ced_hook
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
@@ -90,9 +91,7 @@ def _maybe_wait_ced_layer_load(attn: Any) -> None:
     if layer_idx is None:
         return
     connector = get_kv_transfer_group()
-    wait = getattr(connector, "wait_for_ced_layer_load", None)
-    if callable(wait):
-        wait(layer_idx)
+    dispatch_ced_hook(connector, "wait_for_ced_layer_load", layer_idx)
 
 
 def _maybe_trigger_ced_save(attn: Any) -> None:
@@ -111,9 +110,7 @@ def _maybe_trigger_ced_save(attn: Any) -> None:
     if layer_idx is None:
         return
     connector = get_kv_transfer_group()
-    save_group = getattr(connector, "save_kv_group", None)
-    if callable(save_group):
-        save_group(layer_idx)
+    dispatch_ced_hook(connector, "save_kv_group", layer_idx)
 
 
 def dsa_v41_forward_fake(
@@ -143,11 +140,11 @@ def dsa_v41_write_kv(
     forward_context = get_forward_context()
     attn = forward_context.no_compile_layers[layer_name]
     metadata = attn.v41_impl._get_layer_metadata(forward_context.attn_metadata)
+    _maybe_wait_ced_layer_load(attn)
     hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
     attn.v41_impl._update_caches(attn, hidden_states, metadata)
-    # The cut layer reaches its cache-only write through this op during a
-    # bounded-replay prefill; its source slot is final here.
-    _maybe_trigger_ced_save(attn)
+    # Replay can write this source again. Its save uses the step-end event,
+    # after all replay writes, rather than this cache-only boundary.
 
 
 def dsa_v41_write_kv_fake(

@@ -949,7 +949,30 @@ Expected output: MetaService starts successfully with no errors.
 
     `use_layerwise` can be set to `true` to enable per-layer KV access, supported by both the Mooncake and Memcache backends; it is only supported on the Prefill node. `consumer_is_to_put` and `consumer_is_to_load` can also be configured via `kv_connector_extra_config`.
 
-    For DeepSeek-V4.1 deployments, `CED_layerwise` can additionally be set to `true` (with `use_layerwise=false`) to enable the CED per-source-slice session save and dependency-unit pipelined load on the bulk pool path: prefills publish each KV-source slot's pool object as soon as its source layer finishes (overlapping the transfer with the remaining forward and shrinking the save tail), and cache hits stream their load units behind in-model per-layer gates instead of waiting for one bulk transfer to complete. Requirements: the Memcache backend (GVA session plane), `load_async=true` on nodes that load, DeepSeek-V4.1 architectures, and no pipeline parallelism. `bounded_replay` on or off is supported (the derived trigger map adapts automatically). Leaving `CED_layerwise` unset keeps the existing bulk behavior unchanged.
+    **Experimental DeepSeek-V4.1 prefetch:** set `CED_layerwise=true`,
+    `use_layerwise=false`, and `load_async=false` in `kv_connector_extra_config`.
+    With the Memcache backend, eager execution, and complete cache blocks,
+    loads are submitted before forward and copied in first-consumer order.
+    Each source layer waits only for its required KV source slot. With
+    bounded replay disabled, each SWA layer also waits for its window data.
+    Pool keys and bulk object layouts remain compatible with existing saves.
+
+    Memcache release/1.3 returns shared GVAs for duplicate allocations, so
+    **saves remain on the existing atomic bulk path**. Incremental session
+    saves require a backend that explicitly guarantees exclusive allocation;
+    `CED_layerwise` does not override that requirement. On such a backend,
+    early source slices overlap later computation and the complete object
+    is published only after every slice succeeds. The bounded-replay cut
+    source uses the final step event to avoid racing replay writes.
+
+    PP, PCP, DCP, KVPP, sequence parallelism, microbatching, speculative
+    decoding/MTP, graph execution, async scheduler loads, and partial-object
+    transfers currently retain bulk behavior. A pipelined-load failure after
+    computation begins fails the step; automatic rollback/retry is not
+    supported. Hardware correctness and performance validation are required
+    before enabling this experimental mode in production. Leaving
+    `CED_layerwise` unset preserves existing behavior. See the
+    [CED design and SDK contract](../../developer_guide/Design_Documents/ced_layerwise_kv_pool.md).
 
     To start proxy_server and run inference, refer to the corresponding sub-steps in "PD Disaggregation Scenario" of [Scenario 1: Mooncake Backend](#scenario-1-mooncake-backend).
 

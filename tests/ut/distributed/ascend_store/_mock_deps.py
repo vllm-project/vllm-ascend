@@ -81,6 +81,9 @@ _vllm_mock_modules = [
     "vllm.distributed.kv_transfer.kv_connector",
     "vllm.distributed.kv_transfer.kv_connector.factory",
     "vllm.distributed.kv_transfer.kv_connector.v1",
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake",
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store",
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol",
     "vllm.distributed.kv_transfer.kv_connector.v1.base",
     "vllm.distributed.kv_transfer.kv_connector.v1.metrics",
     "vllm.distributed.parallel_state",
@@ -122,11 +125,21 @@ _vllm_mock_modules = [
     "vllm.v1.request",
     "vllm.v1.serial_utils",
     "vllm.v1.worker",
+    "vllm.v1.worker.gpu",
+    "vllm.v1.worker.gpu.spec_decode",
+    "vllm.v1.worker.gpu.spec_decode.eagle",
+    "vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils",
 ]
 if _MOCK_VLLM_DEPS:
     for _mod_name in _vllm_mock_modules:
         if _mod_name not in sys.modules:
             sys.modules[_mod_name] = MagicMock()
+    _lookup_protocol = sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol"]
+    _lookup_protocol.LOOKUP_MSG = b"lookup"
+    _lookup_protocol.RESET_MSG = b"reset"
+    _lookup_protocol.RESP_OK = b"\x01"
+    _lookup_protocol.RESP_ERR = b"\x00"
+    sys.modules["vllm.v1.worker"].mamba_utils.MambaCopyBuffers = type("MambaCopyBuffers", (), {})
 
 if _MOCK_VLLM_DEPS:
     sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
@@ -145,6 +158,8 @@ _base_mod.KVConnectorBase_V1 = type(  # type: ignore[attr-defined]
     (),
     {
         "__init__": lambda self, **kw: None,
+        "shutdown": lambda self: None,
+        "finish_forward": lambda self: None,
         "role": property(lambda self: self._role),
         "bind_connector_metadata": lambda self, metadata: setattr(self, "_connector_metadata", metadata),
         "_get_connector_metadata": lambda self: self._connector_metadata,
@@ -468,6 +483,12 @@ _vllm_ascend_package_paths = {
 for _pkg, _path in _vllm_ascend_package_paths.items():
     if _pkg not in sys.modules:
         sys.modules[_pkg] = _make_pkg(_pkg, _path)
+
+if _MOCK_VLLM_DEPS and "vllm_ascend._build_info" not in sys.modules:
+    # Standalone CPU tests have no wheel-generated hardware build metadata.
+    _build_info = types.ModuleType("vllm_ascend._build_info")
+    _build_info.__device_type__ = "A2"  # type: ignore[attr-defined]
+    sys.modules["vllm_ascend._build_info"] = _build_info
 
 _distributed_utils = types.ModuleType("vllm_ascend.distributed.utils")
 _distributed_utils.all_gather_async = MagicMock()  # type: ignore[attr-defined]

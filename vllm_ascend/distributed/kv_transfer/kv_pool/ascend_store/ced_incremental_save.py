@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import re
 import threading
+import time
 from collections.abc import Sequence
+from copy import copy
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+import regex as re
 import torch
 from vllm.config import VllmConfig
 from vllm.logger import logger
@@ -34,7 +36,9 @@ _MMC_COPY_G2L = 1  # load: pool -> device
 
 # batch_alloc returns UINT64_MAX for SSD-resident hits; anything at or above
 # this bound is not a local DRAM GVA and cannot back a session write.
-_SSD_HIT_GVA = 1 << 60
+_SSD_HIT_GVA = (1 << 64) - 1
+CED_GATE_POLL_INTERVAL_S = 0.1
+CED_LEASE_SAFETY_MARGIN_S = 1.0
 
 _CED_ARCHITECTURES = frozenset(
     {
@@ -92,12 +96,10 @@ def resolve_ced_layerwise(vllm_config: VllmConfig) -> bool:
 
 @dataclass(frozen=True)
 class CEDGroupSlice:
-    """One incrementally publishable byte range of a pool group object.
+    """One producer-ready descriptor range of a bulk pool group object.
 
-    ``member_start``/``member_end`` are indices into the cache group's
-    layer-name list and must match the entry order used by
-    ``ChunkedTokenDatabase.prepare_value`` so that the concatenation of all
-    slices of a group equals the atomic-put object layout byte for byte.
+    ``member_start``/``member_end`` index the registered transfer descriptors,
+    including scale and kernel segments, rather than resource names.
     """
 
     group_id: int
@@ -128,62 +130,70 @@ class CEDTriggerMap:
 def build_ced_trigger_map(
     group_layer_names: dict[int, Sequence[str]],
     kv_source_layer_ids: Sequence[int] = (),
+    group_entry_offsets: dict[int, Sequence[int]] | None = None,
 ) -> CEDTriggerMap:
-    """Derive per-slice trigger points from cacheable group layer names.
+    """Map physical producers to registered bulk descriptor ranges.
 
-    Full-context (MLA) groups get one slice per KV source slot, finalized by
-    the source layer's own forward; the members of one slot are contiguous
-    (long_kv, indexer[, folded]) in the group entry order. SWA groups get a
-    single slice finalized by the group's last member layer. Draft groups
-    and unrecognized layouts are left to the step-end bulk save.
+    Registration sorts resources within each physical layer and expands
+    index K/scale and kernel-page segments. Resource-list positions are
+    therefore not descriptor positions. Use registration's layer boundaries.
+    Unknown or incomplete groups remain wholly on the bulk path.
     """
-    slices_by_group: dict[int, list[CEDGroupSlice]] = {}
-    slices_by_trigger: dict[int, list[CEDGroupSlice]] = {}
-    publish_layers: dict[int, int] = {}
-
+    by_group: dict[int, tuple[CEDGroupSlice, ...]] = {}
+    by_trigger: dict[int, list[CEDGroupSlice]] = {}
     for group_id, names in sorted(group_layer_names.items()):
-        name_list = list(names)
-        if not name_list or any(_is_draft_member(name) for name in name_list):
+        if not names or any(_is_draft_member(name) for name in names):
             continue
-        member_layers = [_layer_index(name) for name in name_list]
-        if any(layer is None for layer in member_layers):
-            continue
-        is_long_kv = [name.endswith(".long_kv_cache") for name in name_list]
-        is_swa = [name.endswith(".swa_cache") for name in name_list]
-
-        group_slices: list[CEDGroupSlice] = []
-        if any(is_long_kv):
-            by_source: dict[int, tuple[int, int]] = {}
-            for member, layer in enumerate(member_layers):
-                if not (is_long_kv[member] or _is_indexer_member(name_list[member])):
+        layers: dict[int, list[str]] = {}
+        for name in names:
+            layer = _layer_index(name)
+            if layer is None:
+                break
+            layers.setdefault(layer, []).append(name)
+        else:
+            physical_layers = sorted(layers)
+            is_swa = all(name.endswith(".swa_cache") for name in names)
+            is_mla = all(name.endswith(".long_kv_cache") or _is_indexer_member(name) for name in names)
+            if not (is_swa or is_mla):
+                continue
+            if is_mla:
+                if set(kv_source_layer_ids) - layers.keys():
+                    logger.warning("CED group %d has no members for all KV sources; using bulk.", group_id)
                     continue
-                start, end = by_source.get(layer, (member, member + 1))
-                by_source[layer] = (min(start, member), max(end, member + 1))
-            for slice_index, source_layer in enumerate(sorted(by_source)):
-                start, end = by_source[source_layer]
-                group_slices.append(CEDGroupSlice(group_id, start, end, source_layer, slice_index))
-            missing_sources = set(kv_source_layer_ids) - set(by_source)
-            if missing_sources:
-                logger.warning(
-                    "CED trigger map: KV source layers %s have no members in group %d "
-                    "(PP stage split or partial layout); those slots keep the bulk save.",
-                    sorted(missing_sources),
-                    group_id,
+                if any(
+                    not any(name.endswith(".long_kv_cache") for name in members)
+                    or not any(_is_indexer_member(name) for name in members)
+                    for members in layers.values()
+                ):
+                    continue
+            offsets = None if group_entry_offsets is None else group_entry_offsets.get(group_id)
+            if offsets is None:
+                if group_entry_offsets is not None:
+                    continue
+                # Topology-only callers have not registered tensor views yet.
+                offsets = [0]
+                for layer in physical_layers:
+                    offsets.append(offsets[-1] + len(layers[layer]))
+            if (
+                len(offsets) != len(physical_layers) + 1
+                or offsets[0] != 0
+                or any(a >= b for a, b in zip(offsets, offsets[1:]))
+            ):
+                continue
+            if is_swa:
+                slices = (CEDGroupSlice(group_id, 0, offsets[-1], physical_layers[-1]),)
+            else:
+                slices = tuple(
+                    CEDGroupSlice(group_id, offsets[i], offsets[i + 1], layer, i)
+                    for i, layer in enumerate(physical_layers)
                 )
-        elif all(is_swa):
-            group_slices.append(CEDGroupSlice(group_id, 0, len(name_list), max(member_layers), 0))
-
-        if not group_slices:
-            continue
-        for group_slice in group_slices:
-            slices_by_trigger.setdefault(group_slice.trigger_layer, []).append(group_slice)
-        slices_by_group[group_id] = group_slices
-        publish_layers[group_id] = max(group_slice.trigger_layer for group_slice in group_slices)
-
+            by_group[group_id] = slices
+            for group_slice in slices:
+                by_trigger.setdefault(group_slice.trigger_layer, []).append(group_slice)
     return CEDTriggerMap(
-        slices_by_group={group_id: tuple(slices) for group_id, slices in slices_by_group.items()},
-        slices_by_trigger={trigger: tuple(slices) for trigger, slices in slices_by_trigger.items()},
-        publish_layers=publish_layers,
+        slices_by_group=by_group,
+        slices_by_trigger={layer: tuple(slices) for layer, slices in by_trigger.items()},
+        publish_layers={group: slices[-1].trigger_layer for group, slices in by_group.items()},
     )
 
 
@@ -201,41 +211,29 @@ def chunk_member_transfer(
     member_start: int,
     member_end: int,
 ) -> list[tuple[int, int, int]]:
-    """(src_addr, dst_offset, size) rows of one chunk restricted to a slice.
-
-    Mirrors ``ChunkedTokenDatabase.prepare_value``'s per-member math and adds
-    the destination offset each member occupies in the atomic-put object
-    layout, so session writes and atomic puts produce identical bytes. The
-    offset accumulates over ALL of the chunk's members (including ones
-    outside the slice) exactly as the atomic put concatenates them.
-    """
-    group_addrs = token_database.group_kv_caches_base_addr[group_id]
-    block_lens = token_database.group_block_len[group_id]
-    strides = token_database.group_block_stride.get(group_id)
+    """Select registered descriptors without duplicating bulk address math."""
+    addrs, sizes, _ = token_database.prepare_value(start, end, [], kv_cache_group_id=group_id, block_id=block_id)
+    entries = token_database.group_kv_caches_base_addr[group_id]
+    if not 0 <= member_start <= member_end <= len(entries):
+        raise ValueError("CED descriptor range is outside the registered group")
     segments = token_database.group_cache_entry_segments.get(group_id)
-    group_block_size = token_database.get_block_size(group_id)
-    block_start = start // group_block_size * group_block_size
-    start_in_block = start - block_start
-    end_in_block = end - block_start
-
-    rows: list[tuple[int, int, int]] = []
-    dst_offset = 0
-    for member in range(len(group_addrs)):
-        segment_index, segment_count = segments[member] if segments else (0, 1)
-        segment_tokens = group_block_size // segment_count
-        segment_start = segment_index * segment_tokens
-        copy_start = max(start_in_block, segment_start)
-        copy_end = min(end_in_block, segment_start + segment_tokens)
-        size = 0
-        if copy_start < copy_end:
-            block_len = block_lens[member % len(block_lens)]
-            block_stride = strides[member % len(strides)] if strides else block_len
-            byte_start = block_len * (copy_start - segment_start) // segment_tokens
-            byte_end = block_len * (copy_end - segment_start) // segment_tokens
-            size = byte_end - byte_start
-            if member_start <= member < member_end:
-                rows.append((group_addrs[member] + block_id * block_stride + byte_start, dst_offset, size))
-        dst_offset += size
+    block_size = token_database.get_block_size(group_id)
+    local_start = start % block_size
+    local_end = end - start // block_size * block_size
+    active = []
+    for index in range(len(entries)):
+        segment_index, count = segments[index] if segments else (0, 1)
+        tokens = block_size // count
+        if max(local_start, segment_index * tokens) < min(local_end, (segment_index + 1) * tokens):
+            active.append(index)
+    if len(active) != len(addrs) or len(addrs) != len(sizes):
+        raise ValueError("CED descriptor layout disagrees with bulk prepare_value")
+    rows = []
+    offset = 0
+    for index, address, size in zip(active, addrs, sizes, strict=True):
+        if member_start <= index < member_end:
+            rows.append((address, offset, size))
+        offset += size
     return rows
 
 
@@ -263,6 +261,9 @@ class CEDSaveSession:
     live_gvas: list[int] = field(default_factory=list)
     completed_slices: set[int] = field(default_factory=set)
     failed: bool = False
+    finished: bool = False
+    commit_started: bool = False
+    deadline: float = 0.0
 
     @property
     def req_id(self) -> str:
@@ -283,7 +284,7 @@ class CEDSessionSliceTask:
 
 @dataclass
 class CEDLoadUnit:
-    """One dependency unit of a pipelined load: a member range of one group.
+    """One dependency unit: a registered descriptor range of one group.
 
     ``gate_layer`` is the first consumer layer of the member range (the KV
     source layer for full-context slot slices, the member's own layer for
@@ -306,6 +307,14 @@ class CEDLoadTask:
     gate_events: dict[int, threading.Event] = field(default_factory=dict)
     remaining_by_gate: dict[int, int] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    error: BaseException | None = None
+    done: threading.Event = field(default_factory=threading.Event)
+    prepared: bool = False
+    chunks_by_group: dict[int, CEDSaveChunks] = field(default_factory=dict)
+    gva_by_key: dict[str, int] = field(default_factory=dict)
+    leased_keys: list[str] = field(default_factory=list)
+    remaining_units: int = 0
+    deadline: float = 0.0
 
     def settle_gate(self, gate_layer: int) -> None:
         with self.lock:
@@ -326,19 +335,23 @@ class CEDLoadTask:
             event.set()
 
 
+@dataclass(frozen=True)
+class CEDSessionSealTask:
+    event: Any
+
+
+@dataclass(frozen=True)
+class CEDLoadUnitTask:
+    task: CEDLoadTask
+    unit: CEDLoadUnit
+
+
 class CEDSessionSendThread(KVCacheStoreSendingThread):
-    """Sending thread with a memcache WRITING-session data plane.
+    """Incremental writes for backends that guarantee exclusive allocation.
 
-    Bulk ReqMeta requests and fence batches flow through the inherited
-    handlers unchanged. CED sessions run open -> per-slice copy -> publish:
-    keys are readability-prefiltered, allocated once per group object, filled
-    slice by slice behind per-trigger npu events, and atomically published
-    with ``batch_write_finish`` after the last slice. Failed sessions are
-    revoked and retried by the next step's plan.
-
-    The request-wide saved-offset is intentionally never advanced for
-    CED-claimed requests: the plan's readability check is the dedup, so a
-    revoked session's chunks are re-listed and retried on the next step.
+    Memcache release/1.3 batch_alloc returns shared allocations, so its
+    backend deliberately does not enable this plane. Never compensate an
+    uncertain commit with WRITE_FAIL: that SDK removes the key unconditionally.
     """
 
     def __init__(
@@ -350,342 +363,360 @@ class CEDSessionSendThread(KVCacheStoreSendingThread):
         **kwargs: Any,
     ):
         super().__init__(*args, **kwargs)
-        self.ced_trigger_map = trigger_map if trigger_map is not None else CEDTriggerMap()
+        self.ced_trigger_map = trigger_map or CEDTriggerMap()
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
         self._ced_lock = threading.Lock()
         self._ced_sessions: dict[tuple[str, int], CEDSaveSession] = {}
         self._ced_sessions_by_group: dict[int, list[CEDSaveSession]] = {}
         self._ced_claim_counts: dict[str, int] = {}
+        # Keep the claim through the following bulk fallback job, even when
+        # all session callbacks have already retired. Its offset is request-wide.
+        self._ced_claimed_requests: set[str] = set()
 
-    # ------------------------------------------------------------------
-    # Worker-facing session API
-    # ------------------------------------------------------------------
     def open_ced_session(
         self, req_meta: ReqMeta, group_id: int, chunks: CEDSaveChunks, object_size: int
     ) -> CEDSaveSession:
         session = CEDSaveSession(req_meta=req_meta, group_id=group_id, chunks=chunks, object_size=object_size)
-        with self._ced_lock:
-            existing = self._ced_sessions.get((session.req_id, group_id))
-            if existing is not None:
-                self._revoke_session_locked(existing)
-                self._finish_session_locked(existing)
-            with self.done_task_lock:
-                self._next_local_store_job_id -= 1
-                session.store_job_id = self._next_local_store_job_id
-                self.finished_requests.discard(session.req_id)
-                self.stored_requests.setdefault(session.req_id, set()).add(session.store_job_id)
+        with self._request_submit_lock:
+            self.raise_if_failed()
+            if self._stopping.is_set():
+                raise RuntimeError("Cannot open a CED session on a stopped sender")
+            with self._ced_lock:
+                key = (session.req_id, group_id)
+                if key in self._ced_sessions:
+                    raise RuntimeError("A CED session is still using this request/group")
+                with self.done_task_lock:
+                    self._next_local_store_job_id -= 1
+                    session.store_job_id = self._next_local_store_job_id
+                    self.finished_requests.discard(session.req_id)
+                    self.stored_requests.setdefault(session.req_id, set()).add(session.store_job_id)
                 self._ced_claim_counts[session.req_id] = self._ced_claim_counts.get(session.req_id, 0) + 1
-            self._ced_sessions[(session.req_id, group_id)] = session
-            self._ced_sessions_by_group.setdefault(group_id, []).append(session)
-        self.add_request(CEDSessionOpenTask(session))
+                self._ced_claimed_requests.add(session.req_id)
+                self._ced_sessions[key] = session
+                self._ced_sessions_by_group.setdefault(group_id, []).append(session)
+            self.request_queue.put(CEDSessionOpenTask(session))
         return session
 
     def enqueue_slice_tasks(self, trigger_layer: int, event: Any) -> None:
-        """Queue one slice copy for every live session of the trigger's groups."""
-        slices = self.ced_trigger_map.slices_by_trigger.get(trigger_layer)
-        if not slices:
-            return
         with self._ced_lock:
-            for group_slice in slices:
-                for session in list(self._ced_sessions_by_group.get(group_slice.group_id, ())):
-                    if session.failed:
-                        continue
-                    self.add_request(CEDSessionSliceTask(session, group_slice.slice_index, event))
+            tasks = [
+                CEDSessionSliceTask(session, group_slice.slice_index, event)
+                for group_slice in self.ced_trigger_map.slices_by_trigger.get(trigger_layer, ())
+                for session in self._ced_sessions_by_group.get(group_slice.group_id, ())
+                if not session.failed and not session.finished
+            ]
+        for task in tasks:
+            self.add_request(task)
 
-    # ------------------------------------------------------------------
-    # Thread handlers
-    # ------------------------------------------------------------------
+    def seal_ced_step(self, event: Any) -> None:
+        # FIFO puts this after all early slices and before the normal batch
+        # fence. Missing hooks and the replay cut use this final write event.
+        self.add_request(CEDSessionSealTask(event))
+
     def _handle_request(self, req_meta: Any):
-        if isinstance(req_meta, CEDSessionOpenTask):
-            try:
+        if not isinstance(req_meta, (CEDSessionOpenTask, CEDSessionSliceTask, CEDSessionSealTask)):
+            super()._handle_request(req_meta)
+            return
+        try:
+            if isinstance(req_meta, CEDSessionSealTask):
+                with self._ced_lock:
+                    sessions = list(self._ced_sessions.values())
+                for session in sessions:
+                    for index in range(len(self.ced_trigger_map.slices_by_group[session.group_id])):
+                        try:
+                            self._handle_ced_slice(session, index, req_meta.event)
+                        except Exception:
+                            logger.exception("CED final slice failed for request %s", session.req_id)
+                            self._fail_session(session)
+                            break
+            elif isinstance(req_meta, CEDSessionOpenTask):
                 self._handle_ced_open(req_meta.session)
-            except Exception:
-                logger.exception(
-                    "CED session open failed for request %s group %d",
-                    req_meta.session.req_id,
-                    req_meta.session.group_id,
-                )
-                self._fail_session(req_meta.session)
-            finally:
-                self.request_queue.task_done()
-            return
-        if isinstance(req_meta, CEDSessionSliceTask):
-            try:
+            else:
                 self._handle_ced_slice(req_meta.session, req_meta.slice_index, req_meta.event)
-            except Exception:
-                logger.exception(
-                    "CED session slice failed for request %s group %d slice %d",
-                    req_meta.session.req_id,
-                    req_meta.session.group_id,
-                    req_meta.slice_index,
-                )
-                self._fail_session(req_meta.session)
-            finally:
-                self.request_queue.task_done()
-            return
-        super()._handle_request(req_meta)
+        except Exception:
+            logger.exception("CED save failed for request %s", req_meta.session.req_id)
+            self._fail_session(req_meta.session)
+        finally:
+            self.request_queue.task_done()
 
     def _handle_stored_request(self, req_meta: ReqMeta) -> bool:
         succeeded = super()._handle_stored_request(req_meta)
-        if succeeded:
-            with self._ced_lock:
-                claimed = self._ced_claim_counts.get(req_meta.req_id, 0) > 0
-            if claimed:
-                # The group-filtered fallback job must not advance the
-                # request-wide high-water for CED-claimed requests; the plan
-                # readability check is the dedup and revoked chunks retry.
-                return False
-        return succeeded
+        with self._ced_lock:
+            claimed = req_meta.req_id in self._ced_claimed_requests
+        return succeeded and not claimed
 
-    # ------------------------------------------------------------------
-    # Session flow
-    # ------------------------------------------------------------------
+    def reset_saved_request(self, req_id: str) -> None:
+        super().reset_saved_request(req_id)
+        with self._ced_lock:
+            self._ced_claimed_requests.discard(req_id)
+
     def _handle_ced_open(self, session: CEDSaveSession) -> None:
+        if getattr(self.m_store, "supports_exclusive_allocation", False) is not True:
+            raise RuntimeError("CED save requires exclusive object allocation")
         keys = session.chunks.keys
         if not keys:
             self._complete_session(session, published=False)
             return
-        readable_fn = getattr(self.m_store, "batch_is_readable", None)
-        if callable(readable_fn):
-            readable = readable_fn(keys)
-        else:
-            readable = [bool(value) for value in self.m_store.exists(keys)]
-        if len(readable) != len(keys):
-            raise RuntimeError(f"CED readability probe returned {len(readable)} states for {len(keys)} keys")
-        missing = [index for index, state in enumerate(readable) if not state]
+        readable = self.m_store.batch_is_readable(keys)
+        if readable is None or len(readable) != len(keys) or any(type(value) is not bool for value in readable):
+            raise RuntimeError("Malformed CED readability response")
+        missing = [i for i, value in enumerate(readable) if not value]
         if not missing:
             self._complete_session(session, published=False)
             return
-        alloc_keys = [keys[index] for index in missing]
-        sizes = [session.object_size] * len(alloc_keys)
-        gvas = self.m_store.batch_alloc(alloc_keys, sizes, CED_SESSION_LEASE_TTL_MS)
+        alloc_keys = [keys[i] for i in missing]
+        session.deadline = time.monotonic() + CED_SESSION_LEASE_TTL_MS / 1000
+        gvas = self.m_store.batch_alloc(alloc_keys, [session.object_size] * len(alloc_keys), CED_SESSION_LEASE_TTL_MS)
         if gvas is None or len(gvas) != len(alloc_keys):
-            raise RuntimeError(
-                f"CED allocation returned {0 if gvas is None else len(gvas)} GVAs for {len(alloc_keys)} keys"
-            )
-        kept_keys: list[str] = []
-        kept_indices: list[int] = []
-        kept_gvas: list[int] = []
-        for key, chunk_index, gva in zip(alloc_keys, missing, gvas, strict=True):
-            if not isinstance(gva, (int, np.integer)) or gva <= 0 or gva >= _SSD_HIT_GVA:
-                # Another writer owns this object (committed or WRITING).
-                continue
-            kept_keys.append(key)
-            kept_indices.append(chunk_index)
-            kept_gvas.append(int(gva))
-        session.live_keys = kept_keys
-        session.live_chunk_indices = kept_indices
-        session.live_gvas = kept_gvas
-        if not kept_keys:
+            raise RuntimeError("Malformed CED allocation response")
+        for key, index, gva in zip(alloc_keys, missing, gvas, strict=True):
+            if isinstance(gva, bool) or not isinstance(gva, (int, np.integer)):
+                raise RuntimeError("Invalid CED allocation address")
+            if 0 < gva < _SSD_HIT_GVA:
+                session.live_keys.append(key)
+                session.live_chunk_indices.append(index)
+                session.live_gvas.append(int(gva))
+        if not session.live_keys:
             self._complete_session(session, published=False)
 
     def _handle_ced_slice(self, session: CEDSaveSession, slice_index: int, event: Any) -> None:
-        if session.failed:
+        if session.failed or session.finished:
             return
-        slices = self.ced_trigger_map.slices_by_group.get(session.group_id, ())
-        if slice_index < 0 or slice_index >= len(slices):
-            return
+        slices = self.ced_trigger_map.slices_by_group[session.group_id]
+        if not 0 <= slice_index < len(slices):
+            raise ValueError("Invalid CED slice index")
         if slice_index in session.completed_slices:
             return
-        if not session.live_keys:
-            self._complete_session(session, published=False)
-            return
-        group_slice = slices[slice_index]
         event.synchronize()
-        gvas: list[int] = []
-        addrs: list[int] = []
-        sizes: list[int] = []
-        for chunk_index, gva in zip(session.live_chunk_indices, session.live_gvas, strict=True):
+        if time.monotonic() >= session.deadline - CED_LEASE_SAFETY_MARGIN_S:
+            raise RuntimeError("CED write lease has insufficient remaining lifetime")
+        group_slice = slices[slice_index]
+        gvas, addrs, sizes = [], [], []
+        for index, gva in zip(session.live_chunk_indices, session.live_gvas, strict=True):
             rows = chunk_member_transfer(
                 self.token_database,
                 session.group_id,
-                session.chunks.block_ids[chunk_index],
-                session.chunks.starts[chunk_index],
-                session.chunks.ends[chunk_index],
+                session.chunks.block_ids[index],
+                session.chunks.starts[index],
+                session.chunks.ends[index],
                 group_slice.member_start,
                 group_slice.member_end,
             )
             if not rows:
-                continue
-            for src_addr, dst_offset, size in rows:
-                gvas.append(gva + dst_offset)
-                addrs.append(src_addr)
+                raise RuntimeError("A planned CED slice has no registered descriptors")
+            for address, offset, size in rows:
+                if offset + size > session.object_size:
+                    raise RuntimeError("CED slice exceeds its allocated object")
+                gvas.append(gva + offset)
+                addrs.append(address)
                 sizes.append(size)
-        if gvas:
-            result = self._batch_copy_with_limits(
-                np.asarray(gvas, dtype=np.int64),
-                np.asarray(addrs, dtype=np.int64),
-                np.asarray(sizes, dtype=np.int64),
-                _MMC_COPY_L2G,
-                self.max_transfer_blocks,
-                self.max_transfer_bytes,
-            )
-            if result != 0:
-                raise RuntimeError(f"CED slice copy failed with code {result}")
+        result = self._batch_copy_with_limits(
+            np.asarray(gvas, dtype=np.int64),
+            np.asarray(addrs, dtype=np.int64),
+            np.asarray(sizes, dtype=np.int64),
+            _MMC_COPY_L2G,
+            self.max_transfer_blocks,
+            self.max_transfer_bytes,
+        )
+        if result != 0:
+            raise RuntimeError(f"CED slice copy failed with code {result}")
         session.completed_slices.add(slice_index)
-        if len(session.completed_slices) >= len(slices):
+        if len(session.completed_slices) == len(slices):
+            # Set before the RPC: even an exception can mean remote success.
+            session.commit_started = True
             results = self.m_store.batch_write_finish(session.live_keys, [0] * len(session.live_keys))
-            if results is None or len(results) != len(session.live_keys) or any(int(value) != 0 for value in results):
-                raise RuntimeError("CED session publication failed")
-            remove_lease = getattr(self.m_store, "batch_remove_lease", None)
-            if callable(remove_lease):
-                remove_lease(session.live_keys)
+            if results is None or len(results) != len(session.live_keys) or any(value != 0 for value in results):
+                raise RuntimeError("CED publication outcome is unknown")
+            # WRITE_OK consumes the write lease in the SDK. Do not remove a
+            # read lease here, which may belong to a concurrent reader.
             self._complete_session(session, published=True)
 
     def _fail_session(self, session: CEDSaveSession) -> None:
-        if session.failed:
+        if session.finished:
             return
         session.failed = True
-        with self._ced_lock:
-            self._revoke_session_locked(session)
-            self._finish_session_locked(session)
+        if session.live_keys and not session.commit_started:
+            try:
+                # Only this contract permits deleting an unpublished object.
+                if getattr(self.m_store, "supports_exclusive_allocation", False) is True:
+                    self.m_store.batch_write_finish(session.live_keys, [-1] * len(session.live_keys))
+            except Exception:
+                logger.exception("CED unpublished allocation cleanup failed")
+        self._complete_session(session, published=False)
 
     def _complete_session(self, session: CEDSaveSession, published: bool) -> None:
         with self._ced_lock:
-            self._finish_session_locked(session)
-
-    def _revoke_session_locked(self, session: CEDSaveSession) -> None:
-        if not session.live_keys:
-            return
-        try:
-            self.m_store.batch_write_finish(session.live_keys, [-1] * len(session.live_keys))
-        except Exception:
-            logger.exception("CED session revoke failed for request %s group %d", session.req_id, session.group_id)
-
-    def _finish_session_locked(self, session: CEDSaveSession) -> None:
-        self._ced_sessions.pop((session.req_id, session.group_id), None)
-        sessions = self._ced_sessions_by_group.get(session.group_id)
-        if sessions and session in sessions:
-            sessions.remove(session)
+            if session.finished:
+                return
+            session.finished = True
+            key = (session.req_id, session.group_id)
+            if self._ced_sessions.get(key) is session:
+                self._ced_sessions.pop(key)
+            sessions = self._ced_sessions_by_group.get(session.group_id, [])
+            if session in sessions:
+                sessions.remove(session)
             if not sessions:
                 self._ced_sessions_by_group.pop(session.group_id, None)
-        with self.done_task_lock:
-            jobs = self.stored_requests.get(session.req_id)
-            if jobs is not None and session.store_job_id in jobs:
-                jobs.remove(session.store_job_id)
-                remaining = len(jobs)
-                if remaining == 0:
-                    del self.stored_requests[session.req_id]
-            else:
-                remaining = len(jobs) if jobs else 0
             count = self._ced_claim_counts.get(session.req_id, 0) - 1
             if count > 0:
                 self._ced_claim_counts[session.req_id] = count
             else:
                 self._ced_claim_counts.pop(session.req_id, None)
-        if remaining == 0:
-            self.set_finished_request(session.req_id)
+            with self.done_task_lock:
+                jobs = self.stored_requests.get(session.req_id, set())
+                jobs.discard(session.store_job_id)
+                if not jobs:
+                    self.stored_requests.pop(session.req_id, None)
+                    self.finished_requests.add(session.req_id)
 
 
 class CEDPipelinedRecvingThread(KVCacheStoreRecvingThread):
-    """Recving thread draining CED dependency units back-to-back.
+    """Copy leased bulk descriptor ranges before their first consumer.
 
-    Bulk load requests flow through the inherited handler unchanged. A CED
-    task resolves every key's GVA once, then copies each unit's member range
-    from the pool object straight into the local cache (GVA + object offset
-    addressing, direction G2L), settling the unit's gate event on arrival.
-    Failures mark the request failed, release every remaining gate, and the
-    in-model gates raise so the step aborts instead of reading half-loaded
-    KV.
+    A task owns its error and completion events until the whole step drains.
+    Enqueuing work never reports finished receiving to the scheduler.
     """
 
-    def __init__(
-        self,
-        *args: Any,
-        max_transfer_blocks: int = 0,
-        max_transfer_bytes: int = 0,
-        **kwargs: Any,
-    ):
+    def __init__(self, *args: Any, max_transfer_blocks: int = 0, max_transfer_bytes: int = 0, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
 
     def _handle_request(self, request_data: Any):
-        if isinstance(request_data, CEDLoadTask):
-            try:
-                self._handle_ced_load(request_data)
-            except Exception:
-                logger.exception("CED pipelined load failed for request %s", request_data.req_meta.req_id)
-                self._fail_ced_load(request_data)
-            finally:
-                self.request_queue.task_done()
+        if not isinstance(request_data, (CEDLoadTask, CEDLoadUnitTask)):
+            super()._handle_request(request_data)
             return
-        super()._handle_request(request_data)
-
-    def _handle_ced_load(self, task: CEDLoadTask) -> None:
-        req_meta = task.req_meta
+        task = request_data.task if isinstance(request_data, CEDLoadUnitTask) else request_data
+        units = [request_data.unit] if isinstance(request_data, CEDLoadUnitTask) else task.units
+        if not isinstance(request_data, CEDLoadUnitTask):
+            task.remaining_units = len(units)
         try:
-            load_masks = self.token_database.load_mask(req_meta.block_hashes, task.token_len)
-        except AssertionError:
-            load_masks = None
-        unit_chunks: list[tuple[CEDLoadUnit, CEDSaveChunks]] = []
-        for unit in task.units:
-            chunks = self._list_load_chunks(req_meta, task.token_len, unit.group_id, load_masks)
-            if chunks.keys:
-                unit_chunks.append((unit, chunks))
-        if not unit_chunks:
+            for unit in units:
+                try:
+                    if task.error is None:
+                        if not task.prepared:
+                            self._prepare_ced_load(task)
+                        self._copy_ced_load_unit(task, unit)
+                except Exception as exc:
+                    # Publish the error before opening any gate. Do not rely on
+                    # failed_requests, which get_transfer_results can consume.
+                    task.error = exc
+                    logger.exception("CED load failed for request %s", task.req_meta.req_id)
+                    task.settle_all_gates()
+                finally:
+                    task.remaining_units -= 1
+                    if task.remaining_units == 0:
+                        self._finish_ced_load(task)
+        finally:
+            self.request_queue.task_done()
+
+    def _prepare_ced_load(self, task: CEDLoadTask) -> None:
+        request = task.req_meta
+        masks = self.token_database.load_mask(request.block_hashes, task.token_len)
+        for group_id in sorted({unit.group_id for unit in task.units}):
+            task.chunks_by_group[group_id] = self._list_load_chunks(request, task.token_len, group_id, masks)
+        expected_sizes: dict[str, int] = {}
+        for group_id, chunks in task.chunks_by_group.items():
+            for start, end, key, block_id in zip(
+                chunks.starts, chunks.ends, chunks.keys, chunks.block_ids, strict=True
+            ):
+                _, sizes, _ = self.token_database.prepare_value(
+                    start, end, [], kv_cache_group_id=group_id, block_id=block_id
+                )
+                size = sum(sizes)
+                if key in expected_sizes and expected_sizes[key] != size:
+                    raise RuntimeError("One CED key has inconsistent object sizes")
+                expected_sizes[key] = size
+        keys = list(expected_sizes)
+        if keys:
+            # for_load rewarms SSD-only blobs using the existing backend path.
+            infos = self.m_store.batch_get_key_info(keys, for_load=True)
+            if infos is None or len(infos) != len(keys):
+                raise RuntimeError("Malformed CED load metadata")
+            results = self.m_store.batch_add_lease(keys, CED_SESSION_LEASE_TTL_MS)
+            if results is not None:
+                task.leased_keys.extend(key for key, result in zip(keys, results) if result == 0)
+            if results is None or len(results) != len(keys) or any(result != 0 for result in results):
+                raise RuntimeError("Could not lease all CED load objects")
+            task.deadline = time.monotonic() + CED_SESSION_LEASE_TTL_MS / 1000
+            # Resolve again while the allocation is pinned. The pre-lease GVA
+            # can have been evicted or changed by SSD rewarm.
+            infos = self.m_store.batch_get_key_info(keys)
+            if infos is None or len(infos) != len(keys):
+                raise RuntimeError("Malformed leased CED metadata")
+            for key, info in zip(keys, infos, strict=True):
+                if info is None or info.size() != expected_sizes[key]:
+                    raise RuntimeError("CED object size does not match the registered bulk layout")
+                gva = next((int(gva) for gva in info.gva_list() if 0 < gva < _SSD_HIT_GVA), 0)
+                if not gva:
+                    raise RuntimeError("CED object has no leased DRAM address")
+                task.gva_by_key[key] = gva
+        task.prepared = True
+
+    def _copy_ced_load_unit(self, task: CEDLoadTask, unit: CEDLoadUnit) -> None:
+        chunks = task.chunks_by_group[unit.group_id]
+        src_gvas, dst_addrs, sizes = [], [], []
+        for index, key in enumerate(chunks.keys):
+            rows = chunk_member_transfer(
+                self.token_database,
+                unit.group_id,
+                chunks.block_ids[index],
+                chunks.starts[index],
+                chunks.ends[index],
+                unit.member_start,
+                unit.member_end,
+            )
+            if not rows:
+                raise RuntimeError("A CED load dependency has no descriptors")
+            for address, offset, size in rows:
+                src_gvas.append(task.gva_by_key[key] + offset)
+                dst_addrs.append(address)
+                sizes.append(size)
+        if src_gvas:
+            if time.monotonic() >= task.deadline - CED_LEASE_SAFETY_MARGIN_S:
+                raise RuntimeError("CED read lease has insufficient remaining lifetime")
+            # SDK 1.3 BatchDataOperation waits for all transfer futures; this
+            # gate is opened after copy completion, not merely submission.
+            result = self._batch_copy_with_limits(
+                np.asarray(src_gvas, dtype=np.int64),
+                np.asarray(dst_addrs, dtype=np.int64),
+                np.asarray(sizes, dtype=np.int64),
+                _MMC_COPY_G2L,
+                self.max_transfer_blocks,
+                self.max_transfer_bytes,
+            )
+            if result != 0:
+                raise RuntimeError(f"CED load copy failed with code {result}")
+        task.settle_gate(unit.gate_layer)
+
+    def _finish_ced_load(self, task: CEDLoadTask) -> None:
+        try:
+            if task.leased_keys and self.m_store.batch_remove_lease(list(task.leased_keys)) != 0:
+                raise RuntimeError("Could not release CED read leases")
+        except Exception as exc:
+            task.error = task.error or exc
+        finally:
+            task.leased_keys.clear()
+            if task.error is not None:
+                with self.done_task_lock:
+                    self.failed_requests.add(task.req_meta.req_id)
+                # Conservative diagnostics; the consumer raises a fatal step
+                # error rather than claiming that hybrid state can be retried.
+                with self._invalid_block_ids_lock:
+                    self._invalid_block_ids.update(
+                        block for chunks in task.chunks_by_group.values() for block in chunks.block_ids if block > 0
+                    )
             task.settle_all_gates()
-            return
-        keys = []
-        for _unit, chunks in unit_chunks:
-            keys.extend(chunks.keys)
-        keys = list(dict.fromkeys(keys))
-        key_infos = self.m_store.batch_get_key_info(keys)
-        if key_infos is None or len(key_infos) != len(keys):
-            raise RuntimeError(f"CED load key resolution returned {len(key_infos or [])} infos for {len(keys)} keys")
-        gva_by_key: dict[str, int] = {}
-        for key, key_info in zip(keys, key_infos, strict=True):
-            gvas = key_info.gva_list() if key_info is not None else []
-            gva_by_key[key] = int(gvas[0]) if gvas else 0
-        for unit, chunks in unit_chunks:
-            src_gvas: list[int] = []
-            dst_addrs: list[int] = []
-            sizes: list[int] = []
-            for index, key in enumerate(chunks.keys):
-                gva = gva_by_key.get(key, 0)
-                if gva <= 0:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.add(chunks.block_ids[index])
-                    raise RuntimeError(f"CED load key {key} is not resolvable for request {req_meta.req_id}")
-                rows = chunk_member_transfer(
-                    self.token_database,
-                    unit.group_id,
-                    chunks.block_ids[index],
-                    chunks.starts[index],
-                    chunks.ends[index],
-                    unit.member_start,
-                    unit.member_end,
-                )
-                for device_addr, object_offset, size in rows:
-                    src_gvas.append(gva + object_offset)
-                    dst_addrs.append(device_addr)
-                    sizes.append(size)
-            if src_gvas:
-                result = self._batch_copy_with_limits(
-                    np.asarray(src_gvas, dtype=np.int64),
-                    np.asarray(dst_addrs, dtype=np.int64),
-                    np.asarray(sizes, dtype=np.int64),
-                    _MMC_COPY_G2L,
-                    self.max_transfer_blocks,
-                    self.max_transfer_bytes,
-                )
-                if result != 0:
-                    raise RuntimeError(f"CED load copy failed with code {result}")
-            task.settle_gate(unit.gate_layer)
+            task.done.set()
 
     def _list_load_chunks(self, req_meta: ReqMeta, token_len: int, group_id: int, load_masks: Any) -> CEDSaveChunks:
         chunks = CEDSaveChunks()
         if group_id >= len(req_meta.block_ids_by_group):
-            return chunks
+            raise ValueError("Missing block table for a CED load group")
         block_ids = req_meta.block_ids_by_group[group_id]
-        group_block_size = self._get_block_size(group_id)
-        load_spec = req_meta.load_spec
-        mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size if load_spec else 0
-
-        def chunk_filter(start: int) -> bool:
-            return self.token_database.mask_allows_chunk(load_masks, group_id, start)
-
+        block_size = self._get_block_size(group_id)
+        mask_num = req_meta.load_spec.vllm_cached_tokens // block_size * block_size
         iterator = self.token_database.process_token_key_strings_with_block_ids(
             token_len,
             req_meta.block_hashes,
@@ -693,7 +724,7 @@ class CEDPipelinedRecvingThread(KVCacheStoreRecvingThread):
             mask_num,
             kv_cache_group_id=group_id,
             skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
-            chunk_filter=chunk_filter,
+            chunk_filter=lambda start: self.token_database.mask_allows_chunk(load_masks, group_id, start),
         )
         for start, end, key, _block_hash, block_id in iterator:
             chunks.starts.append(start)
@@ -702,271 +733,264 @@ class CEDPipelinedRecvingThread(KVCacheStoreRecvingThread):
             chunks.block_ids.append(block_id)
         return chunks
 
-    def _fail_ced_load(self, task: CEDLoadTask) -> None:
-        task.settle_all_gates()
-        self._mark_failed_requests([task.req_meta])
-
 
 class CEDSaveWorker(KVPoolWorker):
-    """Bulk pool worker extended with the CED incremental session save.
+    """Bulk-compatible CED worker with step-local producer/consumer plans.
 
-    Inherits the non-layerwise AscendStore behavior unchanged; the CED
-    per-slice session save is layered on top and only activates for trigger
-    points present in the derived map. Groups and steps without early
-    triggers keep the step-end bulk save (draft groups, decode fallbacks,
-    replay steps without derived slices).
-
-    CED sessions never advance the request-wide saved-offset; the plan's
-    readability probe is the dedup, so revoked or failed sessions retry on
-    the next step. BlockStored KV events are not yet emitted for session
-    saves.
+    Only eager, non-speculative TP deployments are enabled initially. Other
+    parallel layouts and async scheduler loads retain their existing bulk
+    behavior. SDK 1.3 supports pipelined reads, but not exclusive session saves.
     """
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        use_layerwise: bool,
-        kv_cache_config: KVCacheConfig | None = None,
-    ):
+    def __init__(self, vllm_config: VllmConfig, use_layerwise: bool, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
-        self.ced_trigger_map = build_ced_trigger_map(
-            self._cacheable_group_layer_names(),
-            _kv_source_layer_ids(self.hf_config),
-        )
+        self.ced_trigger_map = CEDTriggerMap()
+        self.ced_trigger_layers: tuple[int, ...] = ()
         self._ced_fallback_groups: dict[str, list[int]] = {}
         self._ced_fired_triggers: set[int] = set()
         self._ced_load_gates: dict[str, dict[int, threading.Event]] = {}
-        # The pipelined load rides the async-loading connector contract: the
-        # scheduler holds the request in WAITING_FOR_REMOTE_KV until
-        # get_finished reports it, and the early finished notification below
-        # releases it while units stream in behind the in-model gates.
-        self._ced_load_capable = (
-            bool(self.ced_trigger_map.slices_by_group)
-            and self.load_async
-            and callable(getattr(self.m_store, "batch_get_key_info", None))
+        self._ced_load_tasks: list[CEDLoadTask] = []
+        self._ced_step_active = False
+        self._ced_load_started = False
+        compilation = vllm_config.compilation_config
+        mode = getattr(compilation.cudagraph_mode, "name", str(compilation.cudagraph_mode))
+        eager = bool(vllm_config.model_config.enforce_eager) or mode == "NONE"
+        parallel = vllm_config.parallel_config
+        self._ced_runtime_supported = (
+            self._extra_config.get("backend", "mooncake") == "memcache"
+            and eager
+            and not self.load_async
+            and self.pp_size == self.pcp_size == self.dcp_size == 1
+            and not self.use_kvpp
+            and not getattr(parallel, "use_ubatching", False)
+            and not getattr(parallel, "use_sequence_parallel_moe", False)
+            and vllm_config.speculative_config is None
+            and self._extra_config.get("discard_partial_chunks", True) is True
         )
-        if self.ced_trigger_map.slices_by_group:
-            if self.pp_size > 1:
-                logger.warning("CED_layerwise session saves fall back to bulk under PP>1 in this revision.")
-                self.ced_trigger_map = CEDTriggerMap()
-            elif not (
-                callable(getattr(self.m_store, "batch_alloc", None))
-                and callable(getattr(self.m_store, "batch_write_finish", None))
-            ):
-                logger.warning(
-                    "CED_layerwise requires a session-capable backend (memcache); falling back to bulk saves."
-                )
-                self.ced_trigger_map = CEDTriggerMap()
-            elif self.enable_kv_event:
-                logger.warning("CED_layerwise session saves do not emit BlockStored KV events yet.")
-        self.ced_trigger_layers = self.ced_trigger_map.trigger_layers()
-        if self.ced_trigger_layers:
-            logger.info(
-                "CED incremental pool path active: groups=%d trigger_layers=%s",
-                len(self.ced_trigger_map.slices_by_group),
-                list(self.ced_trigger_layers[:8]),
+        self._ced_save_capable = False
+        self._ced_load_capable = False
+        if not self._ced_runtime_supported:
+            logger.warning(
+                "CED_layerwise requires eager memcache, load_async=false, full blocks and no "
+                "PP/PCP/DCP/KVPP/microbatching/speculation; retaining bulk transfers."
             )
 
     def _cacheable_group_layer_names(self) -> dict[int, list[str]]:
         if self.kv_cache_config is None:
             return {}
-        groups = self.kv_cache_config.kv_cache_groups
         return {
-            group_id: list(groups[group_id].layer_names)
-            for group_id in range(len(groups))
+            group_id: list(group.layer_names)
+            for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups)
             if group_id in self.cacheable_group_ids
         }
 
-    # ------------------------------------------------------------------
-    # Thread selection
-    # ------------------------------------------------------------------
     def _start_kv_transfer_threads(self) -> None:
         if self._transfer_threads_started:
             return
-        ced_active = bool(self.ced_trigger_layers)
-        if ced_active and (self.can_put or self._ced_load_capable):
-            if self.can_put:
-                ready_event_sending = threading.Event()
-                self.kv_send_thread = CEDSessionSendThread(
-                    self.m_store,
-                    self.token_database,
-                    self.grouped_block_size,
-                    self.tp_rank,
-                    self.tp_size,
-                    0 if self.use_kvpp else self.pcp_rank,
-                    1 if self.use_kvpp else self.pcp_size,
-                    self.dcp_size,
-                    self.put_step,
-                    self.kv_role,
-                    ready_event_sending,
-                    self.group_uses_align_state,
-                    self.enable_kv_events,
-                    worker=self if self.tp_mismatch else None,
-                    trigger_map=self.ced_trigger_map,
-                    max_transfer_blocks=int(self._extra_config.get("ced_max_transfer_blocks", 0)),
-                    max_transfer_bytes=int(self._extra_config.get("ced_max_transfer_bytes", 0)),
-                )
-                self.kv_send_thread.start()
-                ready_event_sending.wait()
-            if self.load_async:
-                self._start_ced_recving_thread()
-            self._transfer_threads_started = True
-            return
-        super()._start_kv_transfer_threads()
-
-    def _start_ced_recving_thread(self) -> None:
-        ready_event = threading.Event()
-        common_args = (
-            self.m_store,
-            self.token_database,
-            self.grouped_block_size,
-            self.tp_rank,
-            self.tp_size,
-            self.dcp_size,
-            ready_event,
+        self.ced_trigger_map = build_ced_trigger_map(
+            self._cacheable_group_layer_names(),
+            _kv_source_layer_ids(self.hf_config),
+            self.group_layer_cache_entry_offsets,
         )
-        common_kwargs = {
-            "invalid_block_ids": self._invalid_block_ids,
-            "invalid_block_ids_lock": self._invalid_block_ids_lock,
-            "worker": self if self.tp_mismatch else None,
-            "record_operation": self._record_kv_connector_operation,
-        }
-        if self._ced_load_capable:
-            self.kv_recv_thread = CEDPipelinedRecvingThread(
-                *common_args,
-                **common_kwargs,
+        self.ced_trigger_layers = self.ced_trigger_map.trigger_layers()
+        mapped = self._ced_runtime_supported and bool(self.ced_trigger_layers)
+        self._ced_save_capable = (
+            mapped
+            and not self.enable_kv_events
+            and getattr(self.m_store, "supports_exclusive_allocation", False) is True
+        )
+        self._ced_load_capable = mapped
+        if mapped and self.can_put and not self._ced_save_capable:
+            logger.warning(
+                "CED incremental saves require exclusive allocation. Memcache release/1.3 "
+                "batch_alloc returns shared GVAs; preserving atomic bulk saves."
+            )
+        if self._ced_save_capable and self.can_put:
+            ready = threading.Event()
+            self.kv_send_thread = CEDSessionSendThread(
+                self.m_store,
+                self.token_database,
+                self.grouped_block_size,
+                self.tp_rank,
+                self.tp_size,
+                self.pcp_rank,
+                self.pcp_size,
+                self.dcp_size,
+                self.put_step,
+                self.kv_role,
+                ready,
+                self.group_uses_align_state,
+                self.enable_kv_events,
+                trigger_map=self.ced_trigger_map,
                 max_transfer_blocks=int(self._extra_config.get("ced_max_transfer_blocks", 0)),
                 max_transfer_bytes=int(self._extra_config.get("ced_max_transfer_bytes", 0)),
             )
+            self.kv_send_thread.start()
+            ready.wait()
+            self._transfer_threads_started = True
         else:
-            self.kv_recv_thread = KVCacheStoreRecvingThread(*common_args, **common_kwargs)
-        self.kv_recv_thread.start()
-        ready_event.wait()
+            super()._start_kv_transfer_threads()
+        if self._ced_load_capable:
+            ready = threading.Event()
+            self.kv_recv_thread = CEDPipelinedRecvingThread(
+                self.m_store,
+                self.token_database,
+                self.grouped_block_size,
+                self.tp_rank,
+                self.tp_size,
+                self.dcp_size,
+                ready,
+                invalid_block_ids=self._invalid_block_ids,
+                invalid_block_ids_lock=self._invalid_block_ids_lock,
+                record_operation=self._record_kv_connector_operation,
+                max_transfer_blocks=int(self._extra_config.get("ced_max_transfer_blocks", 0)),
+                max_transfer_bytes=int(self._extra_config.get("ced_max_transfer_bytes", 0)),
+            )
+            self.kv_recv_thread.start()
+            ready.wait()
 
-    # ------------------------------------------------------------------
-    # Step lifecycle
-    # ------------------------------------------------------------------
-    def start_load_kv(self, metadata: Any):
-        self._ced_fired_triggers = set()
-        self._ced_fallback_groups.clear()
+    def prepare_ced_step(self, metadata: Any) -> None:
+        # bind happens before forward even for save-only steps. First drain
+        # old target writes before any block table or gate can be replaced.
+        self.finish_ced_loads()
+        self._ced_load_tasks.clear()
         self._ced_load_gates.clear()
-        if self._ced_load_capable and metadata.requests:
-            self._prepare_ced_loads(metadata)
-        if self.can_put and self.ced_trigger_layers and metadata.requests:
-            send_thread = self.kv_send_thread
-            if isinstance(send_thread, CEDSessionSendThread):
-                self._prepare_ced_sessions(send_thread, metadata)
-        super().start_load_kv(metadata)
+        self._ced_fired_triggers.clear()
+        self._ced_fallback_groups.clear()
+        self._ced_step_active = True
+        self._ced_load_started = False
+        if self._ced_save_capable and self.can_put:
+            sender = self.kv_send_thread
+            if isinstance(sender, CEDSessionSendThread):
+                self._prepare_ced_sessions(sender, metadata)
 
-    def _prepare_ced_loads(self, metadata: Any) -> None:
-        recv_thread = self.kv_recv_thread
-        if not isinstance(recv_thread, CEDPipelinedRecvingThread):
+    def start_load_kv(self, metadata: Any):
+        if not self._ced_load_capable:
+            return super().start_load_kv(metadata)
+        if self._ced_load_started:
             return
+        self._ced_load_started = True
+        self.ensure_store_initialized()
+        native = self.m_store.store
+        required = ("batch_copy", "batch_get_key_info", "batch_add_lease", "batch_remove_lease")
+        if not all(callable(getattr(native, name, None)) for name in required):
+            return super().start_load_kv(metadata)
+        handled = self._prepare_ced_loads(metadata)
+        bulk_metadata = copy(metadata)
+        bulk_metadata.requests = [request for request in metadata.requests if request.req_id not in handled]
+        super().start_load_kv(bulk_metadata)
+
+    def _prepare_ced_loads(self, metadata: Any) -> set[str]:
+        receiver = self.kv_recv_thread
+        if not isinstance(receiver, CEDPipelinedRecvingThread):
+            return set()
+        handled = set()
+        submissions: list[CEDLoadUnitTask] = []
         for request in metadata.requests:
-            load_spec = request.load_spec
-            if load_spec is None or not load_spec.can_load:
+            spec = request.load_spec
+            if spec is None or not spec.can_load:
                 continue
-            group_ids = request.kv_cache_group_ids or [0]
-            if any(group not in self.ced_trigger_map.slices_by_group for group in group_ids):
-                # Draft or unrecognized groups keep the bulk load.
+            groups = set(request.kv_cache_group_ids or [0]) & set(self.cacheable_group_ids)
+            if not groups or any(group not in self.ced_trigger_map.slices_by_group for group in groups):
                 continue
-            token_len = request.token_len_chunk
-            if (load_spec.kvpool_cached_tokens % self.cache_transfer_granularity != 0) and (
-                load_spec.kvpool_cached_tokens == token_len - 1
-            ):
-                token_len = load_spec.kvpool_cached_tokens + 1
-            else:
-                token_len = load_spec.kvpool_cached_tokens
-            units = self._build_ced_load_units(set(group_ids))
+            if spec.kvpool_cached_tokens % self.cache_transfer_granularity:
+                continue
+            units = self._build_ced_load_units(groups)
             if not units:
                 continue
-            gate_events = {unit.gate_layer: threading.Event() for unit in units}
-            remaining: dict[int, int] = {}
-            for unit in units:
-                remaining[unit.gate_layer] = remaining.get(unit.gate_layer, 0) + 1
-            recv_thread.add_request(
-                CEDLoadTask(
-                    req_meta=request,
-                    token_len=token_len,
-                    units=units,
-                    gate_events=gate_events,
-                    remaining_by_gate=remaining,
-                )
+            snapshot = self._copy_req_meta_for_groups(request, sorted(groups))
+            snapshot.skip_null_blocks_by_group = list(self.group_uses_align_state)
+            gates = {unit.gate_layer: threading.Event() for unit in units}
+            counts = {layer: sum(unit.gate_layer == layer for unit in units) for layer in gates}
+            task = CEDLoadTask(
+                snapshot,
+                spec.kvpool_cached_tokens,
+                units,
+                gates,
+                counts,
+                remaining_units=len(units),
             )
-            # Early release: the request reports finished recving as soon as
-            # its unit task is queued, so the scheduler starts the forward
-            # while units stream in; the in-model gates enforce arrival.
-            recv_thread.set_finished_request(request.req_id)
-            self._ced_load_gates[request.req_id] = gate_events
-            load_spec.can_load = False
+            self._ced_load_tasks.append(task)
+            self._ced_load_gates[request.req_id] = gates
+            submissions.extend(CEDLoadUnitTask(task, unit) for unit in units)
+            handled.add(request.req_id)
+        # Interleave requests by first consumer, rather than finishing every
+        # source of a long request before another request can start L0/L2.
+        submissions.sort(key=lambda item: item.unit.gate_layer)
+        for submission in submissions:
+            receiver.add_request(submission)
+        return handled
 
     def _build_ced_load_units(self, group_ids: set[int]) -> list[CEDLoadUnit]:
-        """One load unit per (group, consumer layer), members merged.
-
-        Uses the physical layer -> (group, member index) map, so full-context
-        slots gate at their KV source layer and every SWA member gates at its
-        own layer without model-specific branching.
-        """
-        by_group_layer: dict[tuple[int, int], tuple[int, int]] = {}
-        for local_layer, entries in self.physical_layer_to_group_layers.items():
-            for group_id, member_index in entries:
-                if group_id not in group_ids:
-                    continue
-                start, end = by_group_layer.get((group_id, local_layer), (member_index, member_index + 1))
-                by_group_layer[(group_id, local_layer)] = (min(start, member_index), max(end, member_index + 1))
-        units = [
-            CEDLoadUnit(group_id, start, end, local_layer)
-            for (group_id, local_layer), (start, end) in by_group_layer.items()
-        ]
+        units = []
+        names_by_group = self._cacheable_group_layer_names()
+        for group_id in sorted(group_ids):
+            slices = self.ced_trigger_map.slices_by_group[group_id]
+            names = names_by_group[group_id]
+            if all(name.endswith(".swa_cache") for name in names):
+                layers = sorted({_layer_index(name) for name in names})
+                offsets = self.group_layer_cache_entry_offsets[group_id]
+                units.extend(CEDLoadUnit(group_id, offsets[i], offsets[i + 1], layer) for i, layer in enumerate(layers))
+            else:
+                units.extend(
+                    CEDLoadUnit(group_id, part.member_start, part.member_end, part.trigger_layer) for part in slices
+                )
         units.sort(key=lambda unit: unit.gate_layer)
         return units
 
-    def wait_for_ced_layer_load(self, layer_idx: int) -> None:
-        """Block the forward at a consumer layer until its unit arrives.
+    def _wait_ced_event(self, event: threading.Event) -> None:
+        receiver = self.kv_recv_thread
+        if receiver is None:
+            raise RuntimeError("CED receiver is not initialized")
+        while not event.wait(timeout=CED_GATE_POLL_INTERVAL_S):
+            receiver.raise_if_failed()
+            if receiver._stopping.is_set() or not receiver.is_alive():
+                raise RuntimeError("CED receiver stopped before completing a load")
+        receiver.raise_if_failed()
 
-        Polls the recving thread while waiting so a fatal transfer error
-        surfaces here instead of hanging the step; request-level load
-        failures raise so the step aborts before reading half-loaded KV.
-        """
-        gates = self._ced_load_gates
-        if not gates:
-            return
-        recv_thread = self.kv_recv_thread
-        if recv_thread is None:
-            return
-        pending = [(req_id, events[layer_idx]) for req_id, events in gates.items() if layer_idx in events]
-        if not pending:
-            return
-        for _req_id, event in pending:
-            while not event.wait(timeout=1.0):
-                recv_thread.raise_if_failed()
-        with recv_thread.done_task_lock:
-            failed = [req_id for req_id, _event in pending if req_id in recv_thread.failed_requests]
-        if failed:
-            raise RuntimeError(f"CED pipelined load failed for requests {failed}")
-        recv_thread.raise_if_failed()
+    def wait_for_ced_layer_load(self, layer_idx: int) -> None:
+        for task in self._ced_load_tasks:
+            event = task.gate_events.get(layer_idx)
+            if event is not None:
+                self._wait_ced_event(event)
+                if task.error is not None:
+                    # No target writes may survive the failing forward.
+                    self.finish_ced_loads()
+
+    def finish_ced_loads(self) -> None:
+        for task in self._ced_load_tasks:
+            self._wait_ced_event(task.done)
+        errors = [task.error for task in self._ced_load_tasks if task.error is not None]
+        if errors:
+            raise RuntimeError("CED pipelined load failed; this step's state cannot be reused") from errors[0]
 
     def _prepare_ced_sessions(self, send_thread: CEDSessionSendThread, metadata: Any) -> None:
         for request in metadata.requests:
-            if request.can_save is None or not request.can_save:
+            if not request.can_save:
                 continue
-            claimed: list[int] = []
-            group_ids = request.kv_cache_group_ids or [0]
-            try:
-                store_masks = self.token_database.store_mask(request.token_len_chunk, request.num_prompt_tokens)
-            except AssertionError:
-                store_masks = None
-            for group_id in group_ids:
+            groups = list(request.kv_cache_group_ids or [0])
+            self._ced_fallback_groups[request.req_id] = groups
+            # Save only committed prefill pages. Speculation is gated above;
+            # generated/decode extents and partial objects stay on bulk.
+            if (
+                request.num_prompt_tokens is None
+                or request.target_token_len > request.num_prompt_tokens
+                or request.token_len_chunk % self.cache_transfer_granularity
+            ):
+                continue
+            snapshot = self._copy_req_meta_for_groups(request, groups)
+            masks = self.token_database.store_mask(snapshot.token_len_chunk, snapshot.num_prompt_tokens)
+            claimed = []
+            for group_id in groups:
                 if group_id not in self.ced_trigger_map.slices_by_group:
                     continue
-                chunks = self._list_ced_save_chunks(send_thread, request, group_id, store_masks)
+                chunks = self._list_ced_save_chunks(send_thread, snapshot, group_id, masks)
                 if not chunks.keys:
                     continue
-                object_size = sum(self.token_database.group_block_len[group_id])
-                send_thread.open_ced_session(request, group_id, chunks, object_size)
+                size = sum(self.token_database.group_block_len[group_id])
+                send_thread.open_ced_session(snapshot, group_id, chunks, size)
                 claimed.append(group_id)
-            if claimed:
-                self._ced_fallback_groups[request.req_id] = [group for group in group_ids if group not in claimed]
+            self._ced_fallback_groups[request.req_id] = [group for group in groups if group not in claimed]
 
     def _list_ced_save_chunks(
         self,
@@ -1029,66 +1053,63 @@ class CEDSaveWorker(KVPoolWorker):
         return chunks
 
     def wait_for_save(self, connector_metadata: Any) -> None:
-        send_thread = self.kv_send_thread
-        if not isinstance(send_thread, CEDSessionSendThread):
-            # Fallback mode (backend without session support, PP>1): the
-            # parent behavior covers every group through the bulk path.
+        sender = self.kv_send_thread
+        if not isinstance(sender, CEDSessionSendThread):
             super().wait_for_save(connector_metadata)
             return
-        requests: list[ReqMeta] = []
-        current_event = None
+        event = torch.npu.Event()
+        event.record()
+        sender.seal_ced_step(event)
+        requests = []
         for request in connector_metadata.requests:
-            if request.can_save is None or not request.can_save:
+            if not request.can_save:
                 continue
-            unclaimed = self._ced_fallback_groups.pop(request.req_id, None)
-            if unclaimed:
-                fallback = self._copy_req_meta_for_groups(request, unclaimed)
-                if current_event is None:
-                    current_event = torch.npu.Event()
-                    current_event.record()
-                fallback.skip_null_blocks_by_group = self.group_uses_align_state
-                fallback.current_event = current_event
+            groups = self._ced_fallback_groups.get(request.req_id, list(request.kv_cache_group_ids or [0]))
+            if groups:
+                fallback = self._copy_req_meta_for_groups(request, groups)
+                fallback.skip_null_blocks_by_group = list(self.group_uses_align_state)
+                fallback.current_event = event
                 requests.append(fallback)
-        # Always enqueue the fence batch: FIFO order makes it cover this
-        # step's session tasks as well, so wait_for_previous_save fences both.
-        self._previous_save_batch = send_thread.add_save_batch(requests)
+        # Includes early tasks, cut/missing-hook slices and fallback bulk puts.
+        self._previous_save_batch = sender.add_save_batch(requests)
+        self._ced_step_active = False
 
     @staticmethod
     def _copy_req_meta_for_groups(request: ReqMeta, group_ids: list[int]) -> ReqMeta:
-        return ReqMeta(
-            req_id=request.req_id,
-            token_len_chunk=request.token_len_chunk,
-            block_ids_by_group=request.block_ids_by_group,
-            block_hashes=request.block_hashes,
-            can_save=request.can_save,
-            load_spec=request.load_spec,
-            is_last_chunk=request.is_last_chunk,
-            kv_cache_group_ids=group_ids,
-            skip_null_blocks_by_group=request.skip_null_blocks_by_group,
-            num_prompt_tokens=request.num_prompt_tokens,
-            token_ids=request.token_ids,
-            original_block_size=request.original_block_size,
-            save_end_token=request.save_end_token,
-            target_token_len=request.target_token_len,
-            save_start_token=request.save_start_token,
-        )
+        snapshot = copy(request)
+        snapshot.kv_cache_group_ids = list(group_ids)
+        snapshot.block_ids_by_group = [list(blocks) for blocks in request.block_ids_by_group]
+        snapshot.block_hashes = list(request.block_hashes)
+        snapshot.load_spec = copy(request.load_spec) if request.load_spec is not None else None
+        snapshot.token_ids = list(request.token_ids) if request.token_ids is not None else None
+        return snapshot
 
     def on_ced_save_trigger(self, trigger_layer: int) -> None:
-        """Handle a per-slice save trigger raised at a V4.1 layer boundary.
-
-        The dsa_v41 hooks call this at every attention layer end and at the
-        cut layer's cache-only write, so it is idempotent per step and a
-        no-op for layers without derived slices.
-        """
-        if trigger_layer in self._ced_fired_triggers:
+        if not self._ced_step_active or not self._ced_save_capable:
             return
-        slices = self.ced_trigger_map.slices_by_trigger.get(trigger_layer)
-        if not slices:
+        if trigger_layer in self._ced_fired_triggers or trigger_layer not in self.ced_trigger_map.slices_by_trigger:
             return
-        send_thread = self.kv_send_thread
-        if not isinstance(send_thread, CEDSessionSendThread) or not send_thread.is_alive():
+        sources = _kv_source_layer_ids(self.hf_config)
+        if sources and getattr(self.vllm_config.cache_config, "swa_bounded_replay", False):
+            if trigger_layer == max(sources):
+                # Cache-only cut writes can be repeated during replay. The
+                # final step event is the conservative last-write boundary.
+                return
+        sender = self.kv_send_thread
+        if not isinstance(sender, CEDSessionSendThread):
             return
+        sender.raise_if_failed()
         self._ced_fired_triggers.add(trigger_layer)
         event = torch.npu.Event()
         event.record()
-        send_thread.enqueue_slice_tasks(trigger_layer, event)
+        sender.enqueue_slice_tasks(trigger_layer, event)
+
+    def shutdown(self) -> None:
+        try:
+            self.finish_ced_loads()
+        finally:
+            super().shutdown()
+
+    def reset_store(self) -> None:
+        self.finish_ced_loads()
+        super().reset_store()

@@ -18,15 +18,18 @@
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+import torch
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_hooks import dispatch_ced_hook
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_incremental_save import (
     CED_LAYERWISE_CONFIG_KEY,
     CEDLoadTask,
     CEDLoadUnit,
     CEDSaveChunks,
+    CEDSaveWorker,
     CEDSessionSendThread,
     CEDPipelinedRecvingThread,
     build_ced_trigger_map,
@@ -39,10 +42,35 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     KeyMetadata,
     ReqMeta,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 # isort: on
 
 V41_SOURCES = (2, 8, 14, 20)
+
+
+class TestCEDHookDispatch(unittest.TestCase):
+    def test_nested_multi_connector_reaches_all_children(self):
+        wait = MagicMock()
+        other_wait = MagicMock()
+        connector = SimpleNamespace(
+            sub_connectors=[
+                SimpleNamespace(),
+                SimpleNamespace(sub_connectors=[SimpleNamespace(wait_for_ced_layer_load=wait)]),
+                SimpleNamespace(wait_for_ced_layer_load=other_wait),
+            ]
+        )
+        dispatch_ced_hook(connector, "wait_for_ced_layer_load", 8)
+        wait.assert_called_once_with(8)
+        other_wait.assert_called_once_with(8)
+
+    def test_direct_hook_owns_forwarding(self):
+        save = MagicMock()
+        child_save = MagicMock()
+        connector = SimpleNamespace(save_kv_group=save, sub_connectors=[SimpleNamespace(save_kv_group=child_save)])
+        dispatch_ced_hook(connector, "save_kv_group", 14)
+        save.assert_called_once_with(14)
+        child_save.assert_not_called()
 
 
 def _vllm_config(extra, architectures=("DeepseekV41ForCausalLM",)):
@@ -165,7 +193,7 @@ class TestBuildCEDTriggerMap(unittest.TestCase):
         groups = {0: _v41_layout()[0][:4]}
         with self.assertLogs(level="WARNING") as captured:
             trigger_map = build_ced_trigger_map(groups, V41_SOURCES)
-        self.assertEqual(len(trigger_map.slices_by_group[0]), 2)
+        self.assertNotIn(0, trigger_map.slices_by_group)
         self.assertIn("no members", "; ".join(captured.output))
 
 
@@ -187,6 +215,8 @@ _MLA_MEMBER_SIZES = (8, 4, 8, 4)
 
 class FakeCEDStore:
     """Session-capable store recording GVA traffic into simulated memory."""
+
+    supports_exclusive_allocation = True
 
     def __init__(self, device: bytearray):
         self.device = device
@@ -247,18 +277,22 @@ class FakeCEDStore:
                 self.alloc_sizes.pop(key, None)
         return [0] * len(keys)
 
-    def batch_get_key_info(self, keys):
+    def batch_get_key_info(self, keys, *, for_load=False):
         infos = []
         for key in keys:
             base = self.alloc_base.get(key)
             if base is None:
                 infos.append(None)
             else:
-                infos.append(SimpleNamespace(gva_list=lambda b=base: [b]))
+                size = len(self.published[key]) if key in self.published else self.alloc_sizes[key]
+                infos.append(SimpleNamespace(gva_list=lambda b=base: [b], size=lambda s=size: s))
         return infos
 
     def batch_remove_lease(self, keys):
         return 0
+
+    def batch_add_lease(self, keys, lease_ttl_ms=0):
+        return [0 if key in self.published else -1 for key in keys]
 
     def put(self, keys, addrs, sizes):
         self.put_calls.append((list(keys), list(addrs), list(sizes)))
@@ -368,7 +402,7 @@ class TestCEDSessionFlow(unittest.TestCase):
         )
         self.assertTrue(thread._handle_stored_request(request))
         with thread._ced_lock:
-            thread._ced_claim_counts["r1"] = 1
+            thread._ced_claimed_requests.add("r1")
         self.assertFalse(thread._handle_stored_request(request))
 
 
@@ -489,6 +523,426 @@ class TestCEDPipelinedLoad(unittest.TestCase):
         self.assertTrue(task.gate_events[2].is_set())
         self.assertIn("r1", recv_thread.failed_requests)
         self.assertIn(7, recv_thread._invalid_block_ids)
+
+
+def _plan_worker(database, trigger_map, *, store=None):
+    worker = object.__new__(CEDSaveWorker)
+    worker.token_database = database
+    worker.ced_trigger_map = trigger_map
+    worker.ced_trigger_layers = trigger_map.trigger_layers()
+    worker.cacheable_group_ids = [0]
+    worker.group_uses_align_state = [False]
+    worker.group_layer_cache_entry_offsets = {0: [0, 2, 4]}
+    worker.cache_transfer_granularity = 16
+    worker.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=[
+                    "model.layers.2.self_attn.long_kv_cache",
+                    "model.layers.2.self_attn.indexer.k_cache",
+                    "model.layers.8.self_attn.long_kv_cache",
+                    "model.layers.8.self_attn.indexer.k_cache",
+                ]
+            )
+        ]
+    )
+    worker._ced_load_tasks = []
+    worker._ced_load_gates = {}
+    worker._ced_fired_triggers = set()
+    worker._ced_fallback_groups = {}
+    worker._ced_save_capable = False
+    worker._ced_load_capable = True
+    worker._ced_step_active = False
+    worker._ced_load_started = False
+    worker.can_put = True
+    worker.m_store = store
+    worker.kv_send_thread = MagicMock(spec=CEDSessionSendThread)
+    worker.kv_recv_thread = MagicMock(spec=CEDPipelinedRecvingThread)
+    worker.hf_config = SimpleNamespace(kv_source_layer_ids=[2, 8])
+    worker.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(swa_bounded_replay=True))
+    return worker
+
+
+class TestCEDRegisteredLayout(unittest.TestCase):
+    def test_real_registration_includes_index_scale_and_uses_effective_bytes(self):
+        worker = object.__new__(KVPoolWorker)
+        worker.num_blocks = 2
+        worker.num_layers = 40
+        worker.hf_config = SimpleNamespace(num_hidden_layers=40)
+        worker._global_to_local_layer = {}
+        worker.use_layerwise = False
+        worker.use_kvpp = False
+        worker._extra_config = {}
+        worker.grouped_block_size = [128]
+        worker.cache_transfer_granularity = 128
+        worker.dcp_size = 1
+        worker.group_uses_align_state = [False]
+        worker.kv_caches = {}
+        for attr in (
+            "group_kv_caches_base_addr",
+            "group_block_len",
+            "group_block_stride",
+            "group_layer_cache_entry_offsets",
+            "group_cache_entry_segments",
+            "group_num_layers",
+        ):
+            setattr(worker, attr, {})
+        backings = []
+        for index, layer in enumerate(V41_SOURCES):
+            rows = 64 if index < 3 else 128
+            stride = 131072 if index < 3 else 147712
+            backing = torch.zeros(2 * stride, dtype=torch.uint8)
+            backings.append(backing)
+            views = []
+            for dtype, width, offset in (
+                (torch.bfloat16, 512, 0),
+                (torch.int8, 128, rows * 1024),
+                (torch.float16, 1, rows * (1024 + 128)),
+            ):
+                item = torch.empty((), dtype=dtype).element_size()
+                views.append(
+                    torch.as_strided(
+                        backing.view(dtype),
+                        (2, rows, 1, width),
+                        (stride // item, width, width, 1),
+                        offset // item,
+                    )
+                )
+            prefix = f"model.layers.{layer}.self_attn"
+            worker.kv_caches[prefix + ".long_kv_cache"] = views[0]
+            worker.kv_caches[prefix + ".indexer.k_cache"] = tuple(views[1:])
+        names = list(reversed(worker.kv_caches))
+        worker._infer_cache_group_metadata(0, names)
+        database = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0)], [128], None)
+        database.set_group_buffers(
+            worker.group_kv_caches_base_addr,
+            worker.group_block_len,
+            worker.group_block_stride,
+            group_layer_cache_entry_offsets=worker.group_layer_cache_entry_offsets,
+            group_cache_entry_segments=worker.group_cache_entry_segments,
+        )
+        plan = build_ced_trigger_map({0: names}, V41_SOURCES, worker.group_layer_cache_entry_offsets)
+        self.assertEqual(
+            [(p.member_start, p.member_end) for p in plan.slices_by_group[0]], [(0, 3), (3, 6), (6, 9), (9, 12)]
+        )
+        addrs, sizes, _ = database.prepare_value(0, 128, [1])
+        rows = [
+            row
+            for part in plan.slices_by_group[0]
+            for row in chunk_member_transfer(database, 0, 1, 0, 128, part.member_start, part.member_end)
+        ]
+        self.assertEqual([row[0] for row in rows], addrs)
+        self.assertEqual([row[2] for row in rows], sizes)
+        self.assertEqual(sum(sizes), 369280)
+        self.assertEqual([sum(sizes[: p.member_start]) for p in plan.slices_by_group[0]], [0, 73856, 147712, 221568])
+
+    def test_unknown_member_rejects_the_whole_group(self):
+        names = _v41_layout()[0] + ["model.layers.2.self_attn.unknown_cache"]
+        self.assertNotIn(0, build_ced_trigger_map({0: names}, V41_SOURCES).slices_by_group)
+
+    def test_bounded_off_load_has_44_units(self):
+        groups = _v41_layout()
+        groups.pop(1)
+        offsets = {group: list(range(len(names) + 1)) if group else [0, 3, 6, 9, 12] for group, names in groups.items()}
+        plan = build_ced_trigger_map(groups, V41_SOURCES, offsets)
+        worker = _plan_worker(_mla_database(), plan)
+        worker.group_layer_cache_entry_offsets = offsets
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=groups.get(i, [])) for i in range(12)]
+        )
+        worker.cacheable_group_ids = list(groups)
+        units = worker._build_ced_load_units(set(groups))
+        self.assertEqual(len(units), 44)
+        self.assertEqual([u.gate_layer for u in units], sorted(u.gate_layer for u in units))
+
+
+class TestCEDSafePublication(unittest.TestCase):
+    _fixture = TestCEDSessionFlow._fixture
+    _device_bytes = TestCEDSessionFlow._device_bytes
+
+    def test_uncertain_commit_never_sends_compensating_write_fail(self):
+        sender, store = self._fixture()
+        original_finish = store.batch_write_finish
+
+        def lose_reply(keys, results):
+            original_finish(keys, results)
+            raise TimeoutError("response lost after remote commit")
+
+        store.batch_write_finish = lose_reply
+        request = ReqMeta("r", block_ids=[7])
+        session = sender.open_ced_session(request, 0, CEDSaveChunks([0], [16], ["k"], [7]), 24)
+        sender._handle_ced_open(session)
+        sender._handle_ced_slice(session, 0, MagicMock())
+        with self.assertRaises(TimeoutError):
+            sender._handle_ced_slice(session, 1, MagicMock())
+        sender._fail_session(session)
+        sender._fail_session(session)
+        self.assertTrue(session.commit_started)
+        self.assertTrue(session.finished)
+        self.assertIn("k", store.published)
+        self.assertEqual(store.finish_calls, [(["k"], [0])])
+
+    def test_shared_allocation_contract_is_rejected_before_allocating(self):
+        sender, store = self._fixture()
+        store.supports_exclusive_allocation = False
+        session = sender.open_ced_session(ReqMeta("r"), 0, CEDSaveChunks([0], [16], ["k"], [7]), 24)
+        with self.assertRaisesRegex(RuntimeError, "exclusive"):
+            sender._handle_ced_open(session)
+        self.assertFalse(store.alloc_base)
+
+    def test_duplicate_completed_slice_does_not_publish_or_retire_twice(self):
+        sender, store = self._fixture()
+        session = sender.open_ced_session(ReqMeta("r"), 0, CEDSaveChunks([0], [16], ["k"], [7]), 24)
+        sender._handle_ced_open(session)
+        sender._handle_ced_slice(session, 0, MagicMock())
+        sender._handle_ced_slice(session, 1, MagicMock())
+        sender._handle_ced_slice(session, 1, MagicMock())
+        self.assertEqual(store.finish_calls, [(["k"], [0])])
+        self.assertEqual(sender._ced_claim_counts, {})
+
+    def test_step_end_seal_covers_missing_and_cut_hooks(self):
+        sender, store = self._fixture()
+        sender.open_ced_session(ReqMeta("r"), 0, CEDSaveChunks([0], [16], ["k"], [7]), 24)
+        event = MagicMock()
+        sender.seal_ced_step(event)
+        fence = sender.add_save_batch([])
+        while not sender.request_queue.empty():
+            sender._handle_request(sender.request_queue.get_nowait())
+        self.assertEqual(store.published["k"], self._device_bytes(store.device))
+        self.assertTrue(fence.done.is_set())
+        self.assertEqual(sender.request_queue.unfinished_tasks, 0)
+
+    def test_bulk_fallback_keeps_all_unclaimed_groups(self):
+        sender, _store = self._fixture()
+        worker = _plan_worker(sender.token_database, sender.ced_trigger_map)
+        request = ReqMeta("r", block_ids=[7], can_save=True, kv_cache_group_ids=[0, 2])
+        worker.wait_for_save(SimpleNamespace(requests=[request]))
+        requests = worker.kv_send_thread.add_save_batch.call_args.args[0]
+        self.assertEqual(requests[0].kv_cache_group_ids, [0, 2])
+        self.assertIsNot(requests[0], request)
+
+    def test_bounded_replay_cut_is_deferred_until_step_end(self):
+        sender, _store = self._fixture()
+        worker = _plan_worker(sender.token_database, sender.ced_trigger_map)
+        worker._ced_save_capable = True
+        worker._ced_step_active = True
+        worker.on_ced_save_trigger(8)
+        worker.kv_send_thread.enqueue_slice_tasks.assert_not_called()
+        worker.on_ced_save_trigger(2)
+        worker.kv_send_thread.enqueue_slice_tasks.assert_called_once()
+        worker.on_ced_save_trigger(2)
+        self.assertEqual(worker.kv_send_thread.enqueue_slice_tasks.call_count, 1)
+
+
+class TestCEDLoadLifecycle(unittest.TestCase):
+    _derived_key = TestCEDPipelinedLoad._derived_key
+    _publish_reference_object = TestCEDPipelinedLoad._publish_reference_object
+
+    def test_lease_then_refresh_and_release_once_after_all_units(self):
+        database, _plan, store = self._publish_reference_object()
+        key = self._derived_key(database)
+        old = store.alloc_base[key]
+        expected = bytes(store.pool[old : old + 24])
+        refreshed = old + 1024
+        store.pool[refreshed : refreshed + 24] = expected
+        order = []
+        original_get = store.batch_get_key_info
+
+        def key_info(keys, *, for_load=False):
+            order.append("rewarm" if for_load else "refresh")
+            return original_get(keys, for_load=for_load)
+
+        def add_lease(keys, ttl):
+            order.append("lease")
+            store.alloc_base[key] = refreshed
+            return [0] * len(keys)
+
+        store.batch_get_key_info = key_info
+        store.batch_add_lease = add_lease
+        store.batch_remove_lease = MagicMock(return_value=0)
+        request = ReqMeta("r", block_ids=[7], block_hashes=["h0"], load_spec=SimpleNamespace(vllm_cached_tokens=0))
+        task = CEDLoadTask(
+            request,
+            16,
+            [CEDLoadUnit(0, 0, 2, 2), CEDLoadUnit(0, 2, 4, 8)],
+            {2: threading.Event(), 8: threading.Event()},
+            {2: 1, 8: 1},
+        )
+        store.device = bytearray(0x10000)
+        receiver = CEDPipelinedRecvingThread(store, database, [16], tp_rank=0)
+        receiver.request_queue.put(task)
+        receiver._handle_request(task)
+        self.assertIsNone(task.error)
+        self.assertEqual(order, ["rewarm", "lease", "refresh"])
+        store.batch_remove_lease.assert_called_once_with([key])
+        restored = b"".join(
+            bytes(store.device[base + 168 : base + 168 + size])
+            for base, size in zip(_MLA_MEMBER_BASES, _MLA_MEMBER_SIZES)
+        )
+        self.assertEqual(restored, expected)
+
+    def test_no_early_finished_notification_and_interleaved_prefetch(self):
+        database, plan, store = self._publish_reference_object()
+        worker = _plan_worker(database, plan, store=store)
+        requests = [
+            ReqMeta(
+                req_id,
+                block_ids=[7],
+                block_hashes=["h0"],
+                load_spec=SimpleNamespace(can_load=True, vllm_cached_tokens=0, kvpool_cached_tokens=16),
+                kv_cache_group_ids=[0, 1],
+            )
+            for req_id in ("r1", "r2")
+        ]
+        handled = worker._prepare_ced_loads(SimpleNamespace(requests=requests))
+        self.assertEqual(handled, {"r1", "r2"})
+        submitted = [call.args[0] for call in worker.kv_recv_thread.add_request.call_args_list]
+        self.assertEqual(
+            [(s.task.req_meta.req_id, s.unit.gate_layer) for s in submitted],
+            [("r1", 2), ("r2", 2), ("r1", 8), ("r2", 8)],
+        )
+        worker.kv_recv_thread.set_finished_request.assert_not_called()
+        self.assertTrue(all(r.load_spec.can_load for r in requests))
+        self.assertIsNot(submitted[0].task.req_meta.block_ids_by_group, requests[0].block_ids_by_group)
+
+    def test_empty_units_settle_gates_without_waiting_forever(self):
+        database, _plan, store = self._publish_reference_object()
+        request = ReqMeta("r", block_ids=[7], block_hashes=["h0"], load_spec=SimpleNamespace(vllm_cached_tokens=16))
+        task = CEDLoadTask(request, 16, [CEDLoadUnit(0, 0, 2, 2)], {2: threading.Event()}, {2: 1})
+        receiver = CEDPipelinedRecvingThread(store, database, [16], tp_rank=0)
+        receiver.request_queue.put(task)
+        receiver._handle_request(task)
+        self.assertTrue(task.done.is_set())
+        self.assertTrue(task.gate_events[2].is_set())
+        self.assertIsNone(task.error)
+
+    def test_task_error_survives_consumed_failed_request_notifications(self):
+        database, plan, _store = self._publish_reference_object()
+        worker = _plan_worker(database, plan)
+        task = CEDLoadTask(ReqMeta("r"), 16, [], {2: threading.Event()})
+        task.error = RuntimeError("late unit failure")
+        task.gate_events[2].set()
+        task.done.set()
+        worker._ced_load_tasks = [task]
+        worker.kv_recv_thread.failed_requests = set()
+        with self.assertRaisesRegex(RuntimeError, "cannot be reused"):
+            worker.wait_for_ced_layer_load(2)
+
+    def test_next_step_cannot_clear_failed_inflight_state(self):
+        database, plan, _store = self._publish_reference_object()
+        worker = _plan_worker(database, plan)
+        task = CEDLoadTask(ReqMeta("r"), 16, [])
+        task.done.set()
+        task.error = RuntimeError("cannot resume")
+        worker._ced_load_tasks = [task]
+        with self.assertRaisesRegex(RuntimeError, "cannot be reused"):
+            worker.prepare_ced_step(SimpleNamespace(requests=[]))
+        self.assertEqual(worker._ced_load_tasks, [task])
+
+    def test_partial_lease_failure_releases_successful_leases(self):
+        database, _plan, store = self._publish_reference_object()
+        key = self._derived_key(database)
+        store.batch_add_lease = MagicMock(return_value=[0, -1])
+        store.batch_remove_lease = MagicMock(return_value=0)
+        request = ReqMeta("r", block_ids=[7], block_hashes=["h0"], load_spec=SimpleNamespace(vllm_cached_tokens=0))
+        task = CEDLoadTask(request, 16, [CEDLoadUnit(0, 0, 2, 2)], {2: threading.Event()}, {2: 1})
+        receiver = CEDPipelinedRecvingThread(store, database, [16], tp_rank=0)
+        receiver.request_queue.put(task)
+        receiver._handle_request(task)
+        self.assertIsNotNone(task.error)
+        self.assertTrue(task.done.is_set())
+        store.batch_remove_lease.assert_called_once_with([key])
+
+    def test_first_consumer_runs_while_later_unit_is_still_copying(self):
+        database, plan, store = self._publish_reference_object()
+        key = self._derived_key(database)
+        base = store.alloc_base[key]
+        original_copy = store.batch_copy
+        later_started, release_later = threading.Event(), threading.Event()
+
+        def copy_with_late_second_source(gvas, addrs, sizes, direction):
+            if direction == 1 and gvas[0] == base + 12:
+                later_started.set()
+                if not release_later.wait(timeout=2):
+                    raise TimeoutError("test did not release the later source")
+            return original_copy(gvas, addrs, sizes, direction)
+
+        store.batch_copy = copy_with_late_second_source
+        receiver = CEDPipelinedRecvingThread(store, database, [16], tp_rank=0)
+        worker = _plan_worker(database, plan, store=store)
+        worker.kv_recv_thread = receiver
+        request = ReqMeta(
+            "r",
+            block_ids=[7],
+            block_hashes=["h0"],
+            kv_cache_group_ids=[0],
+            load_spec=SimpleNamespace(can_load=True, vllm_cached_tokens=0, kvpool_cached_tokens=16),
+        )
+        receiver.start()
+        self.assertTrue(receiver.ready_event.wait(timeout=2))
+        try:
+            worker._prepare_ced_loads(SimpleNamespace(requests=[request]))
+            worker.wait_for_ced_layer_load(2)
+            self.assertTrue(later_started.wait(timeout=2))
+            self.assertFalse(worker._ced_load_tasks[0].done.is_set())
+            release_later.set()
+            worker.wait_for_ced_layer_load(8)
+            worker.finish_ced_loads()
+            self.assertTrue(worker._ced_load_tasks[0].done.is_set())
+            self.assertFalse(receiver.finished_requests)
+        finally:
+            release_later.set()
+            receiver.stop()
+            receiver.join(timeout=2)
+        self.assertFalse(receiver.is_alive())
+
+
+class TestCEDWorkerCapabilities(unittest.TestCase):
+    def test_memcache_shared_alloc_keeps_bulk_save_and_enables_load(self):
+        database = _mla_database()
+        store = FakeCEDStore(bytearray(0x10000))
+        store.supports_exclusive_allocation = False
+        names = _v41_layout(sources=(2, 8), num_layers=8)[0]
+        config = SimpleNamespace(
+            compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(name="NONE")),
+            model_config=SimpleNamespace(enforce_eager=True),
+            parallel_config=SimpleNamespace(use_ubatching=False, use_sequence_parallel_moe=False),
+            speculative_config=None,
+        )
+
+        def initialize(worker, *_args):
+            worker._extra_config = {"backend": "memcache"}
+            worker.pp_size = worker.pcp_size = worker.dcp_size = worker.tp_size = 1
+            worker.tp_rank = 0
+            worker.use_kvpp = worker.load_async = worker.enable_kv_events = False
+            worker.can_put = True
+            worker._transfer_threads_started = False
+            worker.token_database = database
+            worker.grouped_block_size = [16]
+            worker.group_layer_cache_entry_offsets = {0: [0, 2, 4]}
+            worker.cacheable_group_ids = [0]
+            worker.kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=names)])
+            worker.hf_config = SimpleNamespace(kv_source_layer_ids=[2, 8])
+            worker.m_store = store
+            worker._invalid_block_ids = set()
+            worker._invalid_block_ids_lock = threading.Lock()
+
+        def receiver_factory(*args, **kwargs):
+            return SimpleNamespace(start=args[6].set)
+
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_incremental_save"
+        with (
+            patch.object(KVPoolWorker, "__init__", autospec=True, side_effect=initialize),
+            patch.object(KVPoolWorker, "_start_kv_transfer_threads", autospec=True) as start_bulk,
+            patch(module + ".CEDPipelinedRecvingThread", side_effect=receiver_factory),
+        ):
+            worker = CEDSaveWorker(config, False)
+            worker._start_kv_transfer_threads()
+        self.assertTrue(worker._ced_runtime_supported)
+        self.assertTrue(worker._ced_load_capable)
+        self.assertFalse(worker._ced_save_capable)
+        start_bulk.assert_called_once_with(worker)
+        self.assertFalse(store.alloc_base)
 
 
 if __name__ == "__main__":

@@ -365,6 +365,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         super().bind_connector_metadata(connector_metadata)
+        if getattr(self, "ced_layerwise", False) and isinstance(self.connector_worker, CEDSaveWorker):
+            self.connector_worker.prepare_ced_step(connector_metadata)
         if self.use_layerwise:
             assert self.connector_worker is not None
             # Layerwise hooks need this step's tasks before target forward.
@@ -480,14 +482,19 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def wait_for_ced_layer_load(self, layer_idx: int) -> None:
         """Gate a V4.1 consumer layer on its pipelined load unit.
 
-        No-op unless ``CED_layerwise`` is enabled with the async-loading
-        contract, so the hook is free to call this unconditionally.
+        CED keeps synchronous scheduler admission and waits only for each
+        consumer's dependencies, without an early finished-receiving signal.
         """
         if not self.ced_layerwise:
             return
         worker = self.connector_worker
         if isinstance(worker, CEDSaveWorker):
             worker.wait_for_ced_layer_load(layer_idx)
+
+    def finish_forward(self) -> None:
+        if getattr(self, "ced_layerwise", False) and isinstance(self.connector_worker, CEDSaveWorker):
+            self.connector_worker.finish_ced_loads()
+        super().finish_forward()
 
     def wait_for_save(self):
         if not self.can_put:

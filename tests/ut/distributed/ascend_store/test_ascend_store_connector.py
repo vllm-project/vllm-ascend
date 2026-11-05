@@ -34,6 +34,18 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import As
 
 
 class TestKVPoolWorkerConstruction(unittest.TestCase):
+    def test_ced_plan_is_bound_before_start_load_kv(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_incremental_save import CEDSaveWorker
+
+        connector = object.__new__(AscendStoreConnector)
+        connector.ced_layerwise = True
+        connector.use_layerwise = False
+        connector.connector_worker = MagicMock(spec=CEDSaveWorker)
+        metadata = AscendConnectorMetadata(set())
+        connector.bind_connector_metadata(metadata)
+        connector.connector_worker.prepare_ced_step.assert_called_once_with(metadata)
+        connector.connector_worker.start_load_kv.assert_not_called()
+
     def test_factory_passes_only_current_constructor_arguments(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import ascend_store_connector as connector
 
