@@ -10,7 +10,7 @@
 
 Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experimental preview of the architecture that will underpin Qwen4. Its language model combines Gated DeltaNet (GDN) and Qwen Sparse Attention (QSA), gated residual connections, Position Learning Enhancement (PLE), and a native Multi-Token Prediction (MTP) head.
 
-This tutorial describes model preparation, installation, online serving, functional verification, and evaluation. It covers colocated deployment and prefill/decode (PD) separation on A2 series, A3 series, and Ascend 950 DT. A2 series and A3 series use the same parallel topology; PD separation requires 16 devices in total for the shared TP2 × DP4 configuration.
+This tutorial covers model preparation, installation, colocated and prefill/decode (PD) deployment, functional verification, and evaluation on A2 series, A3 series, and Ascend 950 DT.
 
 Qwen3.8-Flash-Next (experimental) was first supported in `vllm-ascend:v0.26.0rc`. The original A3 series W8A8 configuration was validated with text and multimodal input. The deployment examples below use W4A8 checkpoints (W4A8-MXFP on Ascend 950 DT) and additional performance settings; they require separate runtime and accuracy validation. For the best performance, it is recommended to use **vLLM-Ascend v0.32.0rc** (`releases/v0.32.0rc`).
 
@@ -34,7 +34,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 | `Qwen3.8-Flash-Next-w4a8` (quantized version) | A2 series / A3 series | |
 | `Qwen3.8-Flash-Next-w4a8-mxfp` (quantized version) | Ascend 950 DT | |
 
-The commands use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. For PD separation, both roles must load the same checkpoint.
+The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`, except for the 950 DT TP2 × PP2 prefill case, which uses a dedicated local checkpoint. Both PD roles must load the same checkpoint.
 
 ## 4 Installation
 
@@ -162,7 +162,7 @@ python -c "import vllm, vllm_ascend; print('vllm and vllm-ascend are ready')"
 
 ### 4.2 Source Code Installation
 
-For A2 series and A3 series and Ascend 950 DT, install `vllm-ascend` from source by following [installation](../../getting_started/installation.md#installation-existing-cann-install).
+For source installation on A2 series, A3 series, or Ascend 950 DT, follow the [installation guide](../../getting_started/installation.md#installation-existing-cann-install).
 
 Initialize the CANN and ATB environments in the serving shell as described in the installation guide. For multi-node deployment, set up the environment on each node.
 
@@ -214,21 +214,13 @@ Before starting:
 
     **Key parameters:**
 
-    - `--quantization ascend` loads the Ascend-compatible W4A8 checkpoint.
-    - `--tensor-parallel-size 8` and `--data-parallel-size 1` configure the A2 series single-DP TP8 topology.
-    - `--max-model-len 131072` caps the maximum context length. Common values: `65536` (64K), `131072` (128K).
-    - `--enable-expert-parallel` enables expert parallelism for the MoE layers.
-    - `--enable-prefix-caching --mamba-cache-mode align` enables prefix caching with aligned GDN and PLE state checkpoints.
-    - The command does not set `--language-model-only`. Multimodal requests require a checkpoint that includes the vision encoder; verify them with the selected W4A8 checkpoint. For a text-only deployment, you may add `--language-model-only` to skip loading the vision encoder.
-    - `--enable-auto-tool-choice --tool-call-parser qwen3_xml` enables automatic Function Calling with the Qwen3 XML parser.
-    - `--reasoning-parser qwen3` separates reasoning from the final answer in the OpenAI-compatible response.
-    - `--speculative-config` uses the model's MTP head to draft three tokens.
-    - `--compilation-config` enables `FULL_DECODE_ONLY` ACLGraph for decode.
-    - `--engram-config` enables Engram embedding-table CPU offload with `cpu_offload=true`. This DP1 configuration sets `dp_shared_memory=false`; provide sufficient host memory and use a checkpoint with supported n-gram layers.
-    - `fuse_norm_quant=false` disables norm/quantization fusion for this W4A8 deployment.
-    - `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2.
-    - `--async-scheduling` enables asynchronous scheduling.
-    - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert multistream overlap. Shared expert DP requires expert parallelism and TP > 1. `enable_fused_mc2=0` disables fused MC2 and is compatible with shared expert overlap.
+    - `--quantization ascend` loads the W4A8 checkpoint; TP8 × DP1 runs one model instance across eight devices.
+    - Model Runner V2, async scheduling, and expert parallelism are enabled. `FULL_DECODE_ONLY` captures decode graphs, and MTP drafts three tokens per step.
+    - `--mamba-cache-mode align` aligns GDN and PLE state checkpoints for prefix caching.
+    - `cpu_offload=true` offloads Engram embedding tables to host memory; `dp_shared_memory=false` disables sharing for this DP1 configuration. Use a checkpoint with supported n-gram layers and provide sufficient host memory.
+    - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert overlap. Shared expert DP requires expert parallelism and TP > 1; `enable_fused_mc2=0` disables fused MC2 and is compatible with overlap. Norm/quantization fusion is disabled.
+    - `--enable-auto-tool-choice --tool-call-parser qwen3_xml` enables function calling; `--reasoning-parser qwen3` separates reasoning from the final answer.
+    - Multimodal requests require a checkpoint with a vision encoder. For text-only serving, add `--language-model-only` to skip loading it.
     - `enable_npugraph_ex=true` enables NPU graph extension; static kernels and super kernels remain disabled.
 
 === "A3 series"
@@ -268,21 +260,13 @@ Before starting:
 
     **Key parameters:**
 
-    - `--quantization ascend` loads the Ascend-compatible W4A8 checkpoint.
-    - `--tensor-parallel-size 8` and `--data-parallel-size 1` configure the A3 series single-DP TP8 topology.
-    - `--max-model-len 131072` caps the maximum context length. Common values: `65536` (64K), `131072` (128K).
-    - `--enable-expert-parallel` enables expert parallelism for the MoE layers.
-    - `--enable-prefix-caching --mamba-cache-mode align` enables prefix caching with aligned GDN and PLE state checkpoints.
-    - The command does not set `--language-model-only`. Multimodal requests require a checkpoint that includes the vision encoder; verify them with the selected W4A8 checkpoint. For a text-only deployment, you may add `--language-model-only` to skip loading the vision encoder.
-    - `--enable-auto-tool-choice --tool-call-parser qwen3_xml` enables automatic Function Calling with the Qwen3 XML parser.
-    - `--reasoning-parser qwen3` separates reasoning from the final answer in the OpenAI-compatible response.
-    - `--speculative-config` uses the model's MTP head to draft three tokens.
-    - `--compilation-config` enables `FULL_DECODE_ONLY` ACLGraph for decode.
-    - `--engram-config` enables Engram embedding-table CPU offload with `cpu_offload=true`. This DP1 configuration sets `dp_shared_memory=false`; provide sufficient host memory and use a checkpoint with supported n-gram layers.
-    - `fuse_norm_quant=false` disables norm/quantization fusion for this W4A8 deployment.
-    - `VLLM_USE_V2_MODEL_RUNNER=1` selects Model Runner V2.
-    - `--async-scheduling` enables asynchronous scheduling.
-    - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert multistream overlap. Shared expert DP requires expert parallelism and TP > 1. `enable_fused_mc2=0` disables fused MC2 and is compatible with shared expert overlap.
+    - `--quantization ascend` loads the W4A8 checkpoint; TP8 × DP1 runs one model instance across eight devices.
+    - Model Runner V2, async scheduling, and expert parallelism are enabled. `FULL_DECODE_ONLY` captures decode graphs, and MTP drafts three tokens per step.
+    - `--mamba-cache-mode align` aligns GDN and PLE state checkpoints for prefix caching.
+    - `cpu_offload=true` offloads Engram embedding tables to host memory; `dp_shared_memory=false` disables sharing for this DP1 configuration. Use a checkpoint with supported n-gram layers and provide sufficient host memory.
+    - `--additional-config` enables CPU binding, FlashComm1, shared expert DP, and shared expert overlap. Shared expert DP requires expert parallelism and TP > 1; `enable_fused_mc2=0` disables fused MC2 and is compatible with overlap. Norm/quantization fusion is disabled.
+    - `--enable-auto-tool-choice --tool-call-parser qwen3_xml` enables function calling; `--reasoning-parser qwen3` separates reasoning from the final answer.
+    - Multimodal requests require a checkpoint with a vision encoder. For text-only serving, add `--language-model-only` to skip loading it.
     - `enable_npugraph_ex=true` and `enable_static_kernel=true` enable NPU graph extension and static kernels; super kernels remain disabled.
 
 === "Ascend 950 DT"
@@ -352,7 +336,7 @@ The response should list the configured model name. After startup, use [Section 
 
 ### 5.2 PD Separation Deployment
 
-Select the hardware tab below.
+Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Select the hardware and parallel configuration below. Run the model commands in separate terminals and start the proxy after all model APIs are ready.
 
 === "A2 series"
 
@@ -360,7 +344,6 @@ Select the hardware tab below.
 
     Before starting:
 
-    - Install compatible vLLM and vLLM-Ascend, and follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake).
     - Expose the devices used by each host and mount `/etc/hccn.conf`. Use `--shm-size=128g` and provide sufficient host memory for Engram CPU offload with DP shared memory. Replace the example IP addresses and `eth0` with your environment settings.
     - Run P and D in separate terminals. After both APIs are ready, start the proxy on the prefill host from the vLLM-Ascend repository root.
 
@@ -506,7 +489,6 @@ Select the hardware tab below.
 
     Before starting:
 
-    - Install compatible vLLM and vLLM-Ascend, and follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake).
     - Expose the devices used by each host and mount `/etc/hccn.conf`. Use `--shm-size=128g` and provide sufficient host memory for Engram CPU offload with DP shared memory. Replace the example IP addresses and `eth0` with your environment settings.
     - Run P and D in separate terminals. After both APIs are ready, start the proxy on the prefill host from the vLLM-Ascend repository root.
 
@@ -659,7 +641,7 @@ Select the hardware tab below.
     | Mooncake role / KV base port | `kv_producer` / 30000 | `kv_consumer` / 30100 |
     | Maximum context / sequences / batched tokens | 141312 / 64 / 4096 | 141312 / 64 / 4096 |
 
-    All four processes use the same ModelScope model ID, `Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp`. Install compatible vLLM, vLLM-Ascend, and Mooncake in the active Python environment. Follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake), using a Mooncake version compatible with the installed vLLM-Ascend release. Replace `192.168.0.1` and `eth0` with the serving host address and network interface. Provide sufficient host memory for Engram CPU offload and shared memory.
+    All four processes load `Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp`. Replace `192.168.0.1` and `eth0` with the serving host address and network interface. Provide sufficient host memory for Engram CPU offload and shared memory.
 
     Run each rank command in a separate terminal. Start the proxy after all four APIs are ready. Port 8087 is also used by the colocated example, so stop that service before starting this proxy.
 
@@ -1025,9 +1007,7 @@ Select the hardware tab below.
 
 ## 6 Functional Verification
 
-After the service is started, the model can be invoked by sending a prompt. The `chat/completions` API is supported. Use the `--served-model-name` you configured (`qwen3.8-flash-next` for `Qwen3.8-Flash-Next`).
-
-Use the API address and served model name for your deployment:
+Use the OpenAI-compatible `/v1/chat/completions` API to verify generation. Select the API address and served model name for your deployment:
 
 | Deployment | API address | Model name |
 | --- | --- | --- |
@@ -1199,7 +1179,7 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 
 Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for evaluation setup and usage. The result below is for reference only.
 
-The following result was recorded for the original A3 series W8A8 TP8 × DP1 configuration. It is historical reference data and does not establish the accuracy of any current W4A8 or W4A8-MXFP deployment example in this guide.
+The result below is from the original A3 series W8A8 TP8 × DP1 deployment. Evaluate the W4A8 and W4A8-MXFP configurations separately.
 
 | Hardware | Dataset | Metric | Score |
 | --- | --- | --- | --- |
@@ -1223,31 +1203,29 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 Use the configuration for your hardware and deployment mode. The table summarizes the commands in [Section 5](#5-online-service-deployment); tune context length, concurrency, and memory utilization for the target workload.
 
-| Hardware | Deployment / role | Devices | TP × DP | Max model length | Max sequences | Batch tokens |
+| Hardware | Deployment / role | Devices | TP × PP × DP | Max model length | Max sequences | Batch tokens |
 | --- | --- | --- | --- | --- | --- | --- |
-| A2 series | Colocated | 0–7 | 8 × 1 | 131072 | 8 | 4096 |
-| A3 series | Colocated | 0–7 | 8 × 1 | 131072 | 8 | 4096 |
-| Ascend 950 DT | Colocated | 0–3 | 4 × 1 | 141312 | 32 | 4096 |
-| A2 series | Prefill | 0–7 on prefill host | 2 × 4 | 141312 | 32 | 8192 |
-| A3 series | Prefill | 0–7 | 2 × 4 | 141312 | 32 | 8192 |
-| Ascend 950 DT | Prefill | 0–3 | 2 × 2 | 141312 | 64 | 4096 |
-| A2 series | Decode | 0–7 on decode host | 2 × 4 | 141312 | 32 | 8192 |
-| A3 series | Decode | 8–15 | 2 × 4 | 141312 | 32 | 4096 |
-| Ascend 950 DT | Decode | 4–7 | 2 × 2 | 141312 | 64 | 4096 |
-
-The alternative Ascend 950 DT PD case uses TP2 × PP2 × DP1 for prefill and TP2 × DP2 for decode. Both roles use a maximum model length of 143360, 64 sequences, and 8192 batch tokens.
+| A2 series | Colocated | 0–7 | 8 × 1 × 1 | 131072 | 8 | 4096 |
+| A3 series | Colocated | 0–7 | 8 × 1 × 1 | 131072 | 8 | 4096 |
+| Ascend 950 DT | Colocated | 0–3 | 4 × 1 × 1 | 141312 | 32 | 4096 |
+| A2 series | Prefill | 0–7 on prefill host | 2 × 1 × 4 | 141312 | 32 | 8192 |
+| A3 series | Prefill | 0–7 | 2 × 1 × 4 | 141312 | 32 | 8192 |
+| Ascend 950 DT | Prefill | 0–3 | 2 × 1 × 2 | 141312 | 64 | 4096 |
+| A2 series | Decode | 0–7 on decode host | 2 × 1 × 4 | 141312 | 32 | 8192 |
+| A3 series | Decode | 8–15 | 2 × 1 × 4 | 141312 | 32 | 4096 |
+| Ascend 950 DT | Decode | 4–7 | 2 × 1 × 2 | 141312 | 64 | 4096 |
+| Ascend 950 DT | Prefill (PP case) | 0–3 | 2 × 2 × 1 | 143360 | 64 | 8192 |
+| Ascend 950 DT | Decode (PP case) | 4–7 | 2 × 1 × 2 | 143360 | 64 | 8192 |
 
 ### 9.2 Tuning Guidelines
 
-Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-
-Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods and the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for feature descriptions.
 
 #### 9.2.1 Tool-Assisted Tuning with msmodeling
 
-The msmodeling tool (MindStudio-Modeling) optimizes serving and benchmark parameters together, combining measured results with knowledge-base experience to determine a better parameter set in one run and push performance toward the hardware limit.
+MindStudio-Modeling (msmodeling) tunes serving and benchmark parameters using measured results and its knowledge base.
 
-For the complete, step-by-step usage guide, please refer to **[Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md)**.
+For instructions, see [Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md).
 
 ### 9.3 Model Runner V2 Decode Submission
 
