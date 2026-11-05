@@ -1697,9 +1697,16 @@
 #       the target quant config during `load_dspark_model`, then restore it.
 #       Self-contained drafts (e.g. Qwen3 DSpark speculators) keep their own
 #       quant config.
+#       Mark draft reconstruction for platform validation (PR #20570).
+#       Disabled drafts may inherit the target collection phase; additional_config
+#       and the existing Ascend config initialization behavior remain unchanged.
+#    Related PR:
+#       https://github.com/vllm-project/vllm-ascend/pull/20570
 #    Future Plan:
 #       Remove this patch once upstream `load_dspark_model` inherits the target
 #       quant config for same-checkpoint drafts.
+#       Remove the draft scope when upstream exposes draft construction context
+#       to the platform validation hook.
 #
 # ** 31. File: worker/patch_adaptive_verification.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
