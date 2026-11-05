@@ -54,6 +54,9 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     is_deepseek_v41_cache,
     make_cache_groups,
     make_folded_index_cache_spec,
+    make_index_cache_spec,
+    make_mla_cache_spec,
+    make_swa_cache_spec,
 )
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, build_layer_plan
@@ -205,7 +208,7 @@ def test_owner_counts_nested_config_and_source_resolution(config, runtime):
 
 
 @pytest.mark.parametrize("packed_groups", [False, True])
-def test_swa_only_reduced_backbone_uses_independent_cache_allocations(config, runtime, packed_groups):
+def test_swa_only_reduced_backbone_uses_independent_slots(config, runtime, packed_groups):
     config.num_hidden_layers = 2
     config.compress_ratios = [0, 0]
     config.kv_source_layer_ids = []
@@ -227,10 +230,13 @@ def test_swa_only_reduced_backbone_uses_independent_cache_allocations(config, ru
     assert cache_config.num_blocks == 10
     assert len(cache_config.kv_cache_tensors) == 2
     assert {tuple(tensor.layers) for tensor in cache_config.kv_cache_tensors} == {(name,) for name in specs}
-    assert sum(tensor.size for tensor in cache_config.kv_cache_tensors) == 10 * page_bytes
+    assert {tensor.size for tensor in cache_config.kv_cache_tensors} == {10 * page_bytes}
+    offset = 0
     for tensor in cache_config.kv_cache_tensors:
         assert tensor.block_stride == specs[tensor.layers[0]].page_size_bytes
-        assert tensor.offset == tensor.layer_stride == 0
+        assert tensor.offset == offset
+        assert tensor.layer_stride == 10 * tensor.block_stride
+        offset += tensor.layer_stride
 
 
 def test_twelve_groups_share_four_layer_slots(config, runtime):
@@ -255,16 +261,15 @@ def test_twelve_groups_share_four_layer_slots(config, runtime):
         get_deepseek_v41_pool_bytes_per_block(groups) * 10 + 1,
     )
     blocks = cache_config.num_blocks
-    allocations = cache_config.kv_cache_tensors
-    assert blocks == 10 and len(allocations) == 4
+    placements = {d.layers[0]: d for d in cache_config.kv_cache_tensors}
+    assert blocks == 10 and len(placements) == len(original)
     raw, caches = allocate_cache_views(cache_config)
-    assert len({t.data_ptr() for t in raw}) == 4
-    assert sum(t.numel() for t in raw) == blocks * get_deepseek_v41_pool_bytes_per_block(groups)
+    assert len(raw) == 1
+    backing = raw[0]
+    assert backing.numel() == blocks * get_deepseek_v41_pool_bytes_per_block(groups)
     assert set(caches) == set(original)
-    for backing, allocation, page_size, layer_tuple in zip(raw, allocations, page_sizes, layer_tuples):
-        assert allocation.offset == 0 and allocation.block_stride == page_size
-        assert allocation.size == blocks * page_size
-        assert allocation.layers == list(layer_tuple)
+    slot_offset = 0
+    for page_size, layer_tuple in zip(page_sizes, layer_tuples):
         for name in layer_tuple:
             spec = specs[name]
             cache = caches[name]
@@ -272,7 +277,9 @@ def test_twelve_groups_share_four_layer_slots(config, runtime):
             storage_block_size = get_storage_block_size(spec)
             assert views[0].shape == (blocks, storage_block_size, 1, spec.head_size)
             is_index = isinstance(spec, AscendMLAAttentionSpec) and spec.scale_dim
-            expected_offset = specs[layer_tuple[0]].unpadded_page_size_bytes if is_index else 0
+            expected_offset = slot_offset + (specs[layer_tuple[0]].unpadded_page_size_bytes if is_index else 0)
+            assert placements[name].offset == expected_offset
+            assert placements[name].size == backing.numel()
             assert views[0].data_ptr() == backing.data_ptr() + expected_offset
             assert all(v.stride(0) * v.element_size() == page_size for v in views)
             if is_index:
@@ -280,6 +287,7 @@ def test_twelve_groups_share_four_layer_slots(config, runtime):
                 assert key.dtype == torch.int8 and scale.dtype == torch.float16
                 assert scale.data_ptr() - key.data_ptr() == storage_block_size * spec.head_size
                 assert scale.shape == (blocks, storage_block_size, 1, 1)
+        slot_offset += blocks * page_size
 
 
 def test_candidate_source_folded_index_cache_is_in_same_physical_slot(runtime):
@@ -294,16 +302,42 @@ def test_candidate_source_folded_index_cache_is_in_same_physical_slot(runtime):
     assert page_sizes[source_slot] >= sum(specs[layer].unpadded_page_size_bytes for layer in tuples[source_slot][:3])
     groups = make_cache_groups(group_cache_specs(specs))
     planned = get_deepseek_v41_kv_cache_config(runtime, groups, get_deepseek_v41_pool_bytes_per_block(groups) * 2)
-    assert planned.kv_cache_tensors[source_slot].layers[:3] == [long_name, index_name, name]
-    assert planned.kv_cache_tensors[source_slot].block_stride == page_sizes[source_slot]
+    placements = {d.layers[0]: d for d in planned.kv_cache_tensors}
+    slot_offset = planned.num_blocks * sum(page_sizes[:source_slot])
+    assert placements[long_name].offset == slot_offset
+    assert placements[index_name].offset == slot_offset + specs[long_name].unpadded_page_size_bytes
+    assert placements[name].offset == slot_offset + sum(
+        specs[n].unpadded_page_size_bytes for n in (long_name, index_name)
+    )
+    assert placements[name].block_stride == page_sizes[source_slot]
 
 
 @pytest.mark.parametrize("block_size", [32, 64, 128])
-def test_mrv2_folded_indexer_view_does_not_alias_long_kv(runtime, monkeypatch, block_size):
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("kv_transfer", [False, True])
+def test_mrv2_unified_pool_preserves_slot_layout(runtime, monkeypatch, block_size, packed, kv_transfer):
     from vllm_ascend.worker.v2 import attn_utils
 
     runtime.cache_config.block_size = block_size
     specs = collect_specs(runtime)
+    runtime.kv_transfer_config = object() if kv_transfer else None
+    if packed:
+        monkeypatch.setattr("vllm_ascend.models.deepseek_v41.cache_config.uses_a5_packed_cache", lambda: True)
+        for name, spec in specs.items():
+            if isinstance(spec, AscendSlidingWindowMLASpec):
+                specs[name] = make_swa_cache_spec(
+                    block_size=spec.block_size,
+                    window_size=128,
+                    head_size=512,
+                    dtype=torch.bfloat16,
+                    cache_dtype="auto",
+                )
+            elif isinstance(spec, AscendMLAAttentionSpec):
+                specs[name] = (
+                    make_index_cache_spec(block_size=spec.block_size, head_size=128, compress_ratio=2)
+                    if spec.scale_dim
+                    else make_mla_cache_spec(block_size=spec.block_size, head_size=512, compress_ratio=2)
+                )
     folded = "model.layers.20.self_attn.indexer.k_cache_folded"
     index = folded.removesuffix("_folded")
     long_kv = folded.removesuffix(".indexer.k_cache_folded") + ".long_kv_cache"
@@ -311,25 +345,61 @@ def test_mrv2_folded_indexer_view_does_not_alias_long_kv(runtime, monkeypatch, b
     groups = make_cache_groups(group_cache_specs(specs))
     planned = get_deepseek_v41_kv_cache_config(runtime, groups, get_deepseek_v41_pool_bytes_per_block(groups) * 2)
     layer_specs = attn_utils._get_layer_kv_cache_specs(planned)
-    allocation = next(d for d in planned.kv_cache_tensors if folded in d.layers)
-    backing = torch.zeros(allocation.size, dtype=torch.int8)
-    backend = SimpleNamespace(get_kv_cache_shape=lambda *shape: shape)
-    names = [long_kv, index, folded]
-    attn_groups = [
-        SimpleNamespace(kv_cache_group_id=i, kv_cache_spec=layer_specs[name], layer_names=[name], backend=backend)
-        for i, name in enumerate(names)
-    ]
+    layers = {name: DeepseekV41CacheLayer(runtime, name, spec) for name, spec in layer_specs.items()}
+    runtime.model_config.hf_text_config.model_type = "deepseek_v41"
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
-    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
-    views = attn_utils._reshape_kv_cache_v2(
-        attn_groups, dict.fromkeys(names, backing), "auto", [runtime.cache_config.block_size] * 3, {}, planned
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    allocations = []
+    allocate = attn_utils._allocate_int8_cache_tensor
+
+    def record_allocation(size, alignment, device):
+        backing = allocate(size, alignment, device)
+        allocations.append(backing)
+        return backing
+
+    monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", record_allocation)
+    monkeypatch.setattr(attn_utils, "_allocate_kv_cache", Mock(side_effect=AssertionError("legacy allocation")))
+    monkeypatch.setattr(attn_utils, "_reshape_kv_cache_v2", Mock(side_effect=AssertionError("legacy reshape")))
+    monkeypatch.setattr(
+        dsa_v41.DeepseekV41CacheBackend,
+        "get_kv_cache_shape",
+        Mock(side_effect=AssertionError("legacy backend shapes")),
     )
-    expected_offset = layer_specs[long_kv].unpadded_page_size_bytes + layer_specs[index].unpadded_page_size_bytes
-    assert views[folded].data_ptr() - backing.data_ptr() == expected_offset
-    assert views[folded].stride(0) * views[folded].element_size() == allocation.block_stride
-    views[folded].fill_(7)
+    caches = attn_utils.allocate_kv_cache_main(
+        planned, torch.device("cpu"), None, [g.kv_cache_spec.block_size for g in groups]
+    )
+    assert len(allocations) == 1
+    backing = allocations[0]
+    assert backing.numel() == planned.num_blocks * get_deepseek_v41_pool_bytes_per_block(groups)
+    if kv_transfer:
+        assert backing.data_ptr() % (2 * 1024 * 1024) == 0
+    placements = {d.layers[0]: d for d in planned.kv_cache_tensors}
+    views = {}
+    for name, components in caches.items():
+        layers[name].bind_kv_cache(components)
+        views[name] = layers[name].kv_cache[0]
+        first = components[0]
+        assert first.untyped_storage().data_ptr() == backing.untyped_storage().data_ptr()
+        assert first.data_ptr() - backing.data_ptr() == placements[name].offset
+    assert views[folded].stride(0) * views[folded].element_size() == placements[folded].block_stride
+    views[folded][1].fill_(7)
     assert torch.count_nonzero(views[long_kv]) == 0
     assert all(torch.count_nonzero(part) == 0 for part in views[index])
+    expected = torch.zeros_like(backing)
+    start = placements[folded].offset + placements[folded].block_stride
+    expected[start : start + layer_specs[folded].unpadded_page_size_bytes].fill_(7)
+    torch.testing.assert_close(backing, expected)
+    data, scales = views[index]
+    assert data.dtype == (torch.uint8 if packed else torch.int8)
+    assert scales.dtype == (torch.uint8 if packed else torch.float16)
+    data[0].fill_(3)
+    scales[0].fill_(5)
+    index_start = placements[index].offset
+    data_bytes = data[0].numel() * data.element_size()
+    scale_bytes = scales[0].numel() * scales.element_size()
+    expected[index_start : index_start + data_bytes].view(data.dtype).fill_(3)
+    expected[index_start + data_bytes : index_start + data_bytes + scale_bytes].view(scales.dtype).fill_(5)
+    torch.testing.assert_close(backing, expected)
 
 
 def test_production_layout_matches_design(config, runtime):
@@ -454,7 +524,7 @@ def test_safe_override_capacity(runtime):
     page = get_deepseek_v41_pool_bytes_per_block(groups)
     runtime.cache_config.num_gpu_blocks_override = 3
     config = get_deepseek_v41_kv_cache_config(runtime, groups, 5 * page + 1)
-    assert config.num_blocks == 3 and sum(t.size for t in config.kv_cache_tensors) == 3 * page
+    assert config.num_blocks == 3 and {t.size for t in config.kv_cache_tensors} == {3 * page}
 
 
 def test_upstream_entrypoint_and_admission_use_slot_reservation(runtime):
@@ -463,8 +533,8 @@ def test_upstream_entrypoint_and_admission_use_slot_reservation(runtime):
     groups = make_cache_groups(group_cache_specs(collect_specs(runtime)))
     page = get_deepseek_v41_pool_bytes_per_block(groups)
     config = kv_cache_planning.get_kv_cache_config_from_groups(runtime, groups, 100 * page)
-    assert config.num_blocks == 100 and len(config.kv_cache_tensors) == 4
-    assert sum(t.size for t in config.kv_cache_tensors) == 100 * page
+    assert config.num_blocks == 100
+    assert {t.size for t in config.kv_cache_tensors} == {100 * page}
     demand = _max_memory_usage_bytes_from_groups(runtime, groups) // page
     assert _pool_bytes_per_block(runtime, groups) == page
     assert _max_memory_usage_bytes_from_groups(runtime, groups) == demand * page
@@ -499,8 +569,8 @@ def test_dspark_is_one_additional_group_in_existing_slots(runtime):
     assert groups[:12] == target.kv_cache_groups
     assert groups[12].layer_names == [f"mtp.{i}.self_attn.swa_cache" for i in range(3)]
     assert all(isinstance(s, AscendSlidingWindowMLASpec) for s in groups[12].kv_cache_spec.kv_cache_specs.values())
-    assert len(draft.kv_cache_tensors) == 4
-    assert [t.size for t in draft.kv_cache_tensors] == [t.size for t in target.kv_cache_tensors]
+    assert len(draft.kv_cache_tensors) == len(target.kv_cache_tensors) + 3
+    assert {t.size for t in draft.kv_cache_tensors} == {t.size for t in target.kv_cache_tensors}
     assert get_deepseek_v41_pool_bytes_per_block(groups) == 540928
     added = (
         _max_memory_usage_bytes_from_groups(runtime, groups)
@@ -514,8 +584,8 @@ def test_dspark_is_one_additional_group_in_existing_slots(runtime):
     assert sum(b.numel() for b in backings) == 17 * 540928
     for stage in range(3):
         name = f"mtp.{stage}.self_attn.swa_cache"
-        assert name in draft.kv_cache_tensors[stage].layers
-        assert views[name].data_ptr() == backings[stage].data_ptr()
+        placement = next(d for d in draft.kv_cache_tensors if name in d.layers)
+        assert views[name].data_ptr() == backings[0].data_ptr() + placement.offset
         assert views[name].shape == (17, 128, 1, 512)
         assert views[name].stride() == (65536, 512, 512, 1)
 

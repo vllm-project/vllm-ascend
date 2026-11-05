@@ -26,10 +26,11 @@ from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import CircularBufferSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.utils import KVCacheRuntimeShapes
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -1629,6 +1630,17 @@ class DeepseekV41CacheBackend(AttentionBackend):
     def get_kv_cache_shape(num_blocks, block_size, num_kv_heads, head_size, cache_dtype_str="auto"):
         return num_blocks, block_size, num_kv_heads, head_size
 
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: AttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Expose NHD data/scale pages, including packed A5 byte widths."""
+        return AscendDSABackend.get_runtime_shapes(spec, num_blocks, layout, kernel_block_size)
+
 
 class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
     supports_dcp = False
@@ -1641,8 +1653,10 @@ class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
         context = vllm_config.compilation_config.static_forward_context
         context[prefix] = self
 
-    def bind_kv_cache(self, kv_cache: torch.Tensor | tuple[torch.Tensor, ...]) -> None:
-        """Bind one allocated slot view, keeping the ``kv_cache[0]`` contract."""
+    def bind_kv_cache(self, kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor]) -> None:
+        """Keep tensor/tuple consumers behind the ``kv_cache[0]`` contract."""
+        if isinstance(kv_cache, list):
+            kv_cache = kv_cache[0] if len(kv_cache) == 1 else tuple(kv_cache)
         self.kv_cache = [kv_cache]
 
     def get_kv_cache_spec(self, vllm_config):

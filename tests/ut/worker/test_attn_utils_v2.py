@@ -2673,12 +2673,12 @@ def test_mrv2_binding_wraps_only_v41_slots():
     other_layer = SimpleNamespace(kv_cache=None)
     other_layer.bind_kv_cache = lambda cache: setattr(other_layer, "kv_cache", cache)
     kv_caches = {
-        # V4.1 reshape output: one slot tensor per layer.
-        "model.layers.0.self_attn.attn": torch.zeros(4, 2),
+        # Unified V4.1 allocation exposes a list of runtime components.
+        "model.layers.0.self_attn.attn": [torch.zeros(4, 2)],
         # Non-V4.1 Ascend allocation: a (k, v) tuple.
         "model.layers.1.self_attn.attn": (torch.zeros(2, 2), torch.zeros(2, 2)),
-        # V4.1 indexer reshape output: a (kv, scale) tuple slot view.
-        "model.layers.2.self_attn.indexer.k_cache": (torch.zeros(2, 2), torch.zeros(2, 1)),
+        # The indexer binds its two components as a (kv, scale) tuple.
+        "model.layers.2.self_attn.indexer.k_cache": [torch.zeros(2, 2), torch.zeros(2, 1)],
     }
     forward_context = {
         "model.layers.0.self_attn.attn": v41_layer,
@@ -2692,7 +2692,7 @@ def test_mrv2_binding_wraps_only_v41_slots():
     # V4.1 slots dispatch to their own bind_kv_cache (kv_cache[0] contract)
     # while other layers keep the raw (k, v) allocation.
     assert isinstance(v41_layer.kv_cache, list)
-    assert v41_layer.kv_cache[0] is kv_caches["model.layers.0.self_attn.attn"]
+    assert v41_layer.kv_cache[0] is kv_caches["model.layers.0.self_attn.attn"][0]
     assert other_layer.kv_cache is kv_caches["model.layers.1.self_attn.attn"]
     # The indexer consumer unpacks kv_cache[0] into (kv, scale).
     kv_view, scale_view = v41_indexer.kv_cache[0]

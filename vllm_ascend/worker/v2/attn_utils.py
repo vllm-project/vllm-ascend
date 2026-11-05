@@ -96,7 +96,6 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
-from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
@@ -1082,12 +1081,6 @@ def _allocate_kv_cache(
             kv_cache_config,
             lambda size: _allocate_int8_cache_tensor(size, alignment, device),
         )
-    if is_deepseek_v41_cache(layer_kv_cache_spec):
-        for allocation in kv_cache_config.kv_cache_tensors:
-            backing = _allocate_int8_cache_tensor(allocation.size, alignment, device)
-            for name in get_kv_cache_tensor_layers(allocation):
-                kv_cache_raw_tensors[name] = backing
-        return kv_cache_raw_tensors
     uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
     has_shared_slot_descriptors = any(descriptor.layer_stride == 0 for descriptor in kv_cache_config.kv_cache_tensors)
     # GLM-Next emits one descriptor for each physical cache slot. Layers
@@ -1707,7 +1700,7 @@ def allocate_kv_cache_main(
     """
     vllm_config = get_current_vllm_config()
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
-    if model_type == "deepseek_v4":
+    if model_type in ("deepseek_v4", "deepseek_v41"):
         return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {
@@ -1775,14 +1768,6 @@ def _reshape_kv_cache_v2(
         kv_cache_config.kv_cache_groups,
         kv_cache_config.num_blocks,
     )
-    layer_tuple_strides: dict[str, int] = {}
-    if is_deepseek_v41_cache(layer_kv_cache_spec):
-        layer_tuple_strides = {
-            name: descriptor.block_stride
-            for descriptor in kv_cache_config.kv_cache_tensors
-            for name in get_kv_cache_tensor_layers(descriptor)
-        }
-
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
             continue
@@ -1916,52 +1901,6 @@ def _reshape_kv_cache_v2(
                     continue
                 if owner.role != HIDDEN:
                     raise RuntimeError(f"Unsupported Qwen4 hybrid owner {owner}.")
-
-            if layer_name in layer_tuple_strides:
-                # Descriptor-driven cache view construction
-                block_stride = layer_tuple_strides[layer_name]
-                initial_offset = 0
-                kv_cache_shape = group.backend.get_kv_cache_shape(
-                    kv_cache_config.num_blocks,
-                    get_storage_block_size(kv_cache_spec),
-                    kv_cache_spec.num_kv_heads,
-                    kv_cache_spec.head_size,
-                )
-                kv_cache_shape_list = [kv_cache_shape]
-                kv_cache_dtype_list = [kv_cache_spec.dtype]
-                is_index = isinstance(kv_cache_spec, AscendMLAAttentionSpec) and kv_cache_spec.scale_dim
-                if is_index:
-                    source_name = layer_name.removesuffix(".indexer.k_cache") + ".long_kv_cache"
-                    source_spec = layer_kv_cache_spec[source_name]
-                    initial_offset = source_spec.unpadded_page_size_bytes
-                    kv_cache_shape_list.append(
-                        group.backend.get_kv_cache_shape(
-                            kv_cache_config.num_blocks,
-                            get_storage_block_size(kv_cache_spec),
-                            kv_cache_spec.num_kv_heads,
-                            kv_cache_spec.scale_dim,
-                        )
-                    )
-                    kv_cache_dtype_list.append(kv_cache_spec.scale_dtype)
-                elif layer_name.endswith(".indexer.k_cache_folded"):
-                    # A5 QSLI's folded indexer is the third view in the shared
-                    # page, after long KV and split indexer K/scale. Offset 0
-                    # aliases long KV and corrupts both consumers on writes.
-                    source_name = layer_name.removesuffix(".indexer.k_cache_folded") + ".long_kv_cache"
-                    index_name = layer_name.removesuffix("_folded")
-                    initial_offset = (
-                        layer_kv_cache_spec[source_name].unpadded_page_size_bytes
-                        + layer_kv_cache_spec[index_name].unpadded_page_size_bytes
-                    )
-                views = create_cache_component_views(
-                    kv_cache_raw_tensors[layer_name],
-                    kv_cache_shape_list,
-                    kv_cache_dtype_list,
-                    block_stride,
-                    initial_offset_bytes=initial_offset,
-                )
-                kv_caches[layer_name] = tuple(views) if is_index else views[0]
-                continue
 
             if isinstance(group_spec, AscendSFAIndexerCacheSpec):
                 assert kv_cache_config is not None
