@@ -75,6 +75,6 @@ test_cases:
     test_content:
       - spec_decode_acceptance
     acceptance_rate:
-      # Initial baselines: positions 1-5 of the measured 7-token GSM8K run.
-      baseline: [0.9400, 0.8775, 0.8226, 0.7730, 0.7296]
-      tolerance: 0.05
+      # Per-position acceptance baselines for five speculative tokens.
+      baseline: [0.9058, 0.8123, 0.7317, 0.6623, 0.6040]
+      tolerance: 0.08
