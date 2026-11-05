@@ -99,8 +99,12 @@ affinity groups.
    - include non-running NPUs only when their affinity overlaps this process's allowed cpuset
 2. For each candidate NPU, intersect topo affinity with `allowed_cpus`.
 3. If the intersection is empty for a candidate, binding fails for this rank.
-4. If the affinity CPUs are all on one NUMA node, extend the pool with CPUs from the next NUMA node, constrained by `allowed_cpus`.
-5. Group NPUs with identical extended pools and split each shared pool evenly across that group.
+4. Group NPUs with identical affinity pools, and split each shared pool evenly
+   across that group. Keeping workers on the affinity NUMA node is the
+   preferred outcome, so the split happens *before* borrowing CPUs.
+5. Only when the shared affinity NUMA cannot feed every NPU in the group (less
+   than `min_cpus_per_npu` per NPU) is the pool extended with CPUs from the next
+   NUMA node, constrained by `allowed_cpus`.
 6. Keep only running NPUs in the final `npu_cpu_pool`.
 
 The non-running candidate step is intentional. It prevents two independent

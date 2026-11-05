@@ -567,25 +567,37 @@ class CpuAlloc:
             if npu in self.device_info.running_npu_list
             or any(cpu in allowed_cpu_set for cpu in self.device_info.npu_affinity.get(npu, []))
         ]
+        # Group NPUs by their affinity-only (home NUMA) CPU pool and split
+        # that pool before borrowing CPUs from the next NUMA node. Extending
+        # first, as this previously did, made every shared pool span the next
+        # NUMA node and then split by CPU index; the extra slice handed to a
+        # group member could therefore land on a remote NUMA node even though
+        # its home affinity node had enough CPUs for the whole group.
+        groups: dict[tuple[int, ...], list[int]] = defaultdict(list)
         for npu in candidate_npus:
             base_cpu_list = [
                 cpu for cpu in self.device_info.npu_affinity.get(npu, []) if cpu in self.device_info.allowed_cpus
             ]
             if not base_cpu_list:
                 raise RuntimeError("CPUs available in 'Cpus_allowed_list' conflict with NUMA affinity.")
-            extra_cpu_list = self.extend_numa(base_cpu_list)
-            self.npu_cpu_pool[npu] = extra_cpu_list
+            self.npu_cpu_pool[npu] = base_cpu_list
+            groups[tuple(sorted(base_cpu_list))].append(npu)
 
-        groups = defaultdict(list)
-        for npu, cpus in self.npu_cpu_pool.items():
-            groups[str(cpus)].append(npu)
-
+        min_cpus_per_npu = self._min_cpus_per_npu()
         final: dict[int, list[int]] = {}
-        for key, npu_list in groups.items():
+        for npu_list in groups.values():
+            cpu_list = sorted(self.npu_cpu_pool[npu_list[0]])
+            if len(cpu_list) < min_cpus_per_npu * len(npu_list):
+                # Only borrow CPUs from the next NUMA node when the shared
+                # home NUMA cannot feed every NPU in this group.
+                cpu_list = self.extend_numa(cpu_list)
             if len(npu_list) == 1:
-                final[npu_list[0]] = self.npu_cpu_pool[npu_list[0]]
+                final[npu_list[0]] = cpu_list
             else:
-                final.update(self.average_distribute({key: npu_list}))
+                # average_distribute reads the pool from npu_cpu_pool, so
+                # materialize the (possibly extended) pool for the anchor NPU.
+                self.npu_cpu_pool[npu_list[0]] = cpu_list
+                final.update(self.average_distribute({str(cpu_list): npu_list}))
         # Keep only visible NPUs in the final binding pool. Non-visible NPUs are used only to avoid overlap.
         self.npu_cpu_pool = {npu: final[npu] for npu in self.device_info.running_npu_list}
 

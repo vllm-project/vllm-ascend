@@ -834,12 +834,47 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         npu0_process = build_single_card_process(0)
         npu2_process = build_single_card_process(2)
 
-        self.assertEqual(npu0_process.npu_cpu_pool, {0: list(range(144, 168))})
-        self.assertEqual(npu2_process.npu_cpu_pool, {2: list(range(168, 192))})
+        self.assertEqual(npu0_process.npu_cpu_pool, {0: list(range(144, 156))})
+        self.assertEqual(npu2_process.npu_cpu_pool, {2: list(range(156, 168))})
         self.assertFalse(set(npu0_process.npu_cpu_pool[0]) & set(npu2_process.npu_cpu_pool[2]))
         self.assertFalse(set(npu0_process.assign_main[0]) & set(npu2_process.assign_main[2]))
         self.assertFalse(set(npu0_process.assign_acl[0]) & set(npu2_process.assign_acl[2]))
         self.assertFalse(set(npu0_process.assign_rel[0]) & set(npu2_process.assign_rel[2]))
+
+    @patch(
+        "vllm_ascend.cpu_binding.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+    )
+    def test_build_cpu_pools_topo_affinity_keeps_shared_home_node_local(self, _mock_get_device_type):
+        # Regression for https://github.com/vllm-project/vllm-ascend/issues/20268
+        # Two visible NPUs share one home NUMA node (144-167). The shared pool
+        # already has enough CPUs for the whole group, so the planner must split
+        # it before borrowing from the next NUMA node. Otherwise each slot is
+        # doubled first, and CPU-index-ordered splitting hands one worker the
+        # next NUMA node's CPUs.
+        cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.all_logic_npus = [0, 1]
+        cpu_alloc.device_info.running_npu_list = [0, 1]
+        cpu_alloc.device_info.allowed_cpus = list(range(144, 192))
+        cpu_alloc.device_info.npu_affinity = {
+            0: list(range(144, 168)),
+            1: list(range(144, 168)),
+        }
+        cpu_alloc.cpu_node = {c: 6 for c in range(144, 168)} | {c: 7 for c in range(168, 192)}
+        cpu_alloc.numa_to_cpu_map = defaultdict(list, {6: list(range(144, 168)), 7: list(range(168, 192))})
+
+        with (
+            patch.object(cpu_alloc, "build_cpu_node_map"),
+            patch.object(cpu_alloc, "extend_numa", wraps=cpu_alloc.extend_numa) as mock_extend,
+        ):
+            cpu_alloc.build_cpu_pools()
+            cpu_alloc.allocate()
+
+        mock_extend.assert_not_called()
+        self.assertEqual(cpu_alloc.npu_cpu_pool[0], list(range(144, 156)))
+        self.assertEqual(cpu_alloc.npu_cpu_pool[1], list(range(156, 168)))
+        # Both workers stay on the shared home NUMA node 6; no CPU from node 7.
+        self.assertTrue(set(cpu_alloc.assign_main[0]).issubset(set(range(144, 168))))
+        self.assertTrue(set(cpu_alloc.assign_main[1]).issubset(set(range(144, 168))))
 
     @patch(
         "vllm_ascend.cpu_binding.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A5)
