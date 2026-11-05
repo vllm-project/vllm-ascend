@@ -1,6 +1,23 @@
 #!/bin/bash
 set -euo pipefail
 
+report_bootstrap_failure() {
+    if [ "$1" -ne 0 ]; then
+        echo "${FAIL_TAG:-test_failed} bootstrap exited with status $1"
+    fi
+}
+
+# Cover failures before main installs the log-archiving exit handler too.
+trap 'report_bootstrap_failure "$?"' EXIT
+
+git_network() {
+    if git "$@"; then
+        return 0
+    fi
+    echo "Git network operation failed; retrying without the global mirror configuration" >&2
+    GIT_CONFIG_GLOBAL=/dev/null git "$@"
+}
+
 BISECT_SOC="${1:-}"
 MAX_GOOD_AGE_DAYS="${2:-3}"
 BISECT_SCENE="${3:-multi_node}"
@@ -184,9 +201,9 @@ checkout_and_install_vllm() {
     # "git fetch origin <tag>" only fetches the commit object and leaves
     # no local tag ref, so vllm's setuptools_scm falls back to a wrong
     # 0.1.dev1+g<sha> version instead of the release version.
-    if ! git fetch --depth 1 origin "+refs/tags/${VLLM_REF}:refs/tags/${VLLM_REF}" 2>/dev/null; then
-        if ! git fetch --depth 1 origin "$VLLM_REF"; then
-            git fetch --depth 1 origin "refs/heads/$VLLM_REF" || \
+    if ! git_network fetch --depth 1 origin "+refs/tags/${VLLM_REF}:refs/tags/${VLLM_REF}" 2>/dev/null; then
+        if ! git_network fetch --depth 1 origin "$VLLM_REF"; then
+            git_network fetch --depth 1 origin "refs/heads/$VLLM_REF" || \
                 { echo "ERROR: cannot fetch vllm ref '$VLLM_REF' (use a full commit SHA, tag, or branch name)"; return 1; }
         fi
     fi
@@ -211,17 +228,17 @@ checkout_src() {
 
     if [ ! -d "$WORKSPACE/vllm-ascend" ]; then
         echo "Cloning vllm-ascend from $VLLM_ASCEND_REMOTE_URL"
-        git clone --depth 1 --recurse-submodules "$VLLM_ASCEND_REMOTE_URL" "$WORKSPACE/vllm-ascend"
+        git_network clone --depth 1 --recurse-submodules "$VLLM_ASCEND_REMOTE_URL" "$WORKSPACE/vllm-ascend"
         cd "$WORKSPACE/vllm-ascend"
-        PR_REF=$(git ls-remote origin 'refs/pull/*/head' | grep "^${VLLM_ASCEND_REF}" | awk '{print $2}' | head -1)
+        PR_REF=$(git_network ls-remote origin 'refs/pull/*/head' | grep "^${VLLM_ASCEND_REF}" | awk '{print $2}' | head -1)
         if [ -n "$PR_REF" ]; then
-            git fetch --depth 1 origin "$PR_REF"
+            git_network fetch --depth 1 origin "$PR_REF"
             git checkout FETCH_HEAD
         else
-            git fetch origin '+refs/pull/*/head:refs/remotes/pull/*' 2>/dev/null || true
+            git_network fetch origin '+refs/pull/*/head:refs/remotes/pull/*' 2>/dev/null || true
             git checkout "$VLLM_ASCEND_REF"
         fi
-        git submodule update --init --recursive
+        git_network submodule update --init --recursive
     fi
 }
 
@@ -609,6 +626,7 @@ finish_run() {
 
 finish_without_aop() {
     local rc=$?
+    report_bootstrap_failure "$rc"
     backup_ascend_logs || true
     backup_requested_directory || true
     return "$rc"
