@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""310P sampling primitives backed by the shared CPU generator cache.
+"""310P sampling helpers.
 
-Lives under the MRv2 worker so that the MRv1-only ``vllm_ascend._310p.sample``
-package can be deleted without affecting the 310P MRv2 sampling path.
+CPU helpers retain the legacy MRV1 behavior. MRV2 uses the shared device
+random sampler and the NPU categorical sampler.
 """
 
 import torch
