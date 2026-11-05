@@ -50,6 +50,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    KVCacheTensor,
     KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
@@ -1194,26 +1195,44 @@ def _allocate_kv_cache(
     # generic main layout, which treats descriptor layers as independent
     # regions within one common backing.
     if uses_padded_page_layout and has_shared_slot_descriptors:
-        slot_layers: set[str] = set()
+        pooled_descriptors: list[KVCacheTensor] = []
+        pooled_layers: set[str] = set()
+        private_layers: set[str] = set()
         for descriptor in kv_cache_config.kv_cache_tensors:
             names = get_kv_cache_tensor_layers(descriptor)
+            if not names:
+                raise ValueError("Invalid padded shared-slot KV cache descriptor geometry.")
+            if not any(getattr(layer_kv_cache_spec[name], "page_size_padded", None) is not None for name in names):
+                # Foreign descriptor (for example a spec-decode draft's own
+                # attention cache riding along with a GLM-Next target): its
+                # layers are not part of the padded page layout and keep the
+                # generic packed layout with private per-layer buffers below,
+                # matching the main-layout semantics of ordinary attention
+                # specs. Only descriptors covering pooled layers are validated
+                # (and rejected) as GLM-Next shared slots.
+                private_layers.update(names)
+                continue
+            expected_size = kv_cache_config.num_blocks * descriptor.block_stride
             if (
-                not names
-                or descriptor.offset != 0
+                descriptor.offset != 0
                 or descriptor.layer_stride != 0
                 or descriptor.block_stride <= 0
-                or descriptor.size != kv_cache_config.num_blocks * descriptor.block_stride
+                or descriptor.size != expected_size
                 or any(layer_kv_cache_spec[name].page_size_bytes != descriptor.block_stride for name in names)
             ):
                 raise ValueError("Invalid padded shared-slot KV cache descriptor geometry.")
-            slot_layers.update(names)
-        if layer_kv_cache_spec.keys() != (slot_layers | shared_layers.keys()):
+            pooled_descriptors.append(descriptor)
+            pooled_layers.update(names)
+        if layer_kv_cache_spec.keys() != (pooled_layers | private_layers | shared_layers.keys()):
             raise ValueError("Padded shared-slot KV cache descriptors must cover every cache spec.")
 
-        for descriptor in kv_cache_config.kv_cache_tensors:
+        for descriptor in pooled_descriptors:
             backing = _allocate_int8_cache_tensor(descriptor.size, alignment, device)
             for name in get_kv_cache_tensor_layers(descriptor):
                 kv_cache_raw_tensors[name] = backing
+        for name in private_layers:
+            layer_size = kv_cache_config.num_blocks * layer_kv_cache_spec[name].page_size_bytes
+            kv_cache_raw_tensors[name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
         return kv_cache_raw_tensors
     has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
