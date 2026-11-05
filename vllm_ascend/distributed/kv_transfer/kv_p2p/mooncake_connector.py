@@ -160,6 +160,12 @@ MooncakeAgentMetadata = PullAgentMetadata
 # other peers already waiting in the global executor queue can make progress.
 MAX_REQUESTS_PER_PEER_HANDLER = 5
 KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
+# Poll/timeout used by the background threads so a stop request can interrupt a
+# blocking wait. The threads observe the stop event and exit on their own; the
+# ZMQ socket is never closed from another thread.
+THREAD_STOP_POLL_SECONDS = 0.2
+# Best-effort upper bound for joining a background thread during shutdown.
+SHUTDOWN_JOIN_TIMEOUT_SECONDS = 5.0
 
 
 class KVCacheSendingThread(threading.Thread):
@@ -193,6 +199,8 @@ class KVCacheSendingThread(threading.Thread):
         self.port_send_num: dict[str, int] = {}
 
         self.task_tracker = KVCacheTaskTracker()
+        # Set by stop() to let the busy loop exit; see run_busy_loop().
+        self._stop_event = threading.Event()
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -207,6 +215,10 @@ class KVCacheSendingThread(threading.Thread):
 
     def add_delayed_request(self, request_id: str, delay_start_time: float):
         return self.task_tracker.add_delayed_request(request_id, delay_start_time)
+
+    def stop(self) -> None:
+        """Signal the busy loop to exit; idempotent."""
+        self._stop_event.set()
 
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
@@ -253,8 +265,10 @@ class KVCacheSendingThread(threading.Thread):
             logger.debug("Size of encoded MooncakeAgentMetadata: %s bytes", str(size_in_bytes))
 
         decoder = msgspec.msgpack.Decoder(type=tuple)
-        while True:
+        while not self._stop_event.is_set():
             try:
+                if sock.poll(int(THREAD_STOP_POLL_SECONDS * 1000)) == 0:
+                    continue
                 frames = sock.recv_multipart()
                 if len(frames) < 2:
                     logger.error(
@@ -481,6 +495,8 @@ class KVCacheRecvingThread(threading.Thread):
                 self.num_draft_layers = (
                     self.vllm_config.speculative_config.draft_model_config.hf_config.num_hidden_layers
                 )
+        # Set by stop() to let the request loop drain and exit; see run().
+        self._stop_event = threading.Event()
 
     def add_request(
         self,
@@ -556,12 +572,19 @@ class KVCacheRecvingThread(threading.Thread):
             if not self.use_request_level_recv_errors:
                 self.invalid_block_ids.update(local_block_ids[0])
 
+    def stop(self) -> None:
+        """Signal the request loop to exit; idempotent."""
+        self._stop_event.set()
+
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         self.ready_event.set()
-        while True:
+        while not self._stop_event.is_set():
             try:
-                request_data = self.request_queue.get()
+                request_data = self.request_queue.get(timeout=THREAD_STOP_POLL_SECONDS)
+            except queue.Empty:
+                continue
+            try:
                 if request_data is None:
                     logger.warning("Received a None request. ")
                     self.request_queue.task_done()
@@ -1495,6 +1518,17 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+        # Scheduler side holds no owned resources; the worker side owns threads,
+        # the executor and the remote socket pool.
+        self._shutdown_complete = False
+
+    def shutdown(self) -> None:
+        """Idempotent connector shutdown; delegates to the worker side."""
+        if self._shutdown_complete:
+            return
+        self._shutdown_complete = True
+        if self.connector_worker is not None:
+            self.connector_worker.shutdown()
 
     def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
         # vLLM main's scheduler uses this for skip_zeroing_group_ids.
@@ -2010,6 +2044,9 @@ class MooncakeConnectorWorker:
         # Background thread for sending or receiving KV caches.
         self.kv_send_thread: KVCacheSendingThread | None = None
         self.kv_recv_thread: KVCacheRecvingThread | None = None
+        # Idempotent shutdown state; see shutdown().
+        self._shutdown_complete = False
+        self._shutdown_lock = threading.Lock()
 
         # Handshake metadata of this worker
         self.xfer_handshake_metadata: MooncakeAgentMetadata | None = None
@@ -2025,6 +2062,40 @@ class MooncakeConnectorWorker:
             self.tp_num_need_pulls = num_d_block_heads // num_p_block_heads
         self.local_remote_block_port_mapping: dict[str, list[list[int]] | None] = {}
         self.remote_port_send_num: dict[str, dict[int, RemotePortInfo]] = {}
+
+    def shutdown(self) -> None:
+        """Idempotent best-effort shutdown of worker-owned threads and resources."""
+        with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            self._shutdown_complete = True
+        threads = [t for t in (self.kv_recv_thread, self.kv_send_thread) if t is not None]
+        for thread in threads:
+            try:
+                thread.stop()
+            except Exception as error:
+                logger.warning("Failed to signal mooncake thread stop. thread=%s. error=%s. ", thread.name, error)
+        for thread in threads:
+            try:
+                thread.join(timeout=SHUTDOWN_JOIN_TIMEOUT_SECONDS)
+                if thread.is_alive():
+                    logger.warning(
+                        "Mooncake thread did not stop within %.1f s. thread=%s. ",
+                        SHUTDOWN_JOIN_TIMEOUT_SECONDS,
+                        thread.name,
+                    )
+            except Exception as error:
+                logger.warning("Failed to join mooncake thread. thread=%s. error=%s. ", thread.name, error)
+        if self.kv_recv_thread is not None:
+            try:
+                self.kv_recv_thread.executor.shutdown(wait=True)
+            except Exception as error:
+                logger.warning("Failed to shutdown mooncake recv executor. error=%s. ", error)
+            try:
+                self.kv_recv_thread.remote_socket_pool.close()
+            except Exception as error:
+                logger.warning("Failed to close mooncake remote socket pool. error=%s. ", error)
+        logger.info("MooncakeConnectorWorker shutdown complete. engine_id=%s", self.engine_id)
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
