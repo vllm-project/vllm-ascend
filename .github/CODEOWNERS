@@ -44,6 +44,7 @@
 
 # examples
 /examples/ @MrZ20
+/examples/eplb/ @freyfwt
 
 # c++ source code
 /cmake @zzzzwwjj @ZT-AIA
@@ -52,8 +53,9 @@
 /vllm_ascend/_cann_ops_custom @ZT-AIA
 
 # attention
-/vllm_ascend/attention/
-/vllm_ascend/attention/context_parallel @weiguihua2 @zhenwenqi2024
+# TODO(owner): /vllm_ascend/attention/
+# /vllm_ascend/attention/
+/vllm_ascend/attention/context_parallel @weiguihua2 @zhenwenqi2024 @pisceskkk
 /vllm_ascend/attention/sfa_v1.py @lijiahang226
 /vllm_ascend/attention/dsa*.py @weijinqian0 
 /vllm_ascend/attention/indexer.py @weijinqian0 @lijiahang226
@@ -68,6 +70,7 @@
 
 # distributed
 /vllm_ascend/distributed @LCAIZJ
+/vllm_ascend/distributed/eplb @freyfwt
 /vllm_ascend/distributed/weight_transfer @Ronald1995
 /vllm_ascend/distributed/kv_transfer/kv_pool @weijinqian0 @HF-001
 /vllm_ascend/distributed/kv_transfer/kv_p2p @wangxiaoteng888
@@ -81,8 +84,11 @@
 /vllm_ascend/ops/linear_op.py @xuchi-0808
 /vllm_ascend/ops/vocab_parallel_embedding.py @xuchi-0808
 /vllm_ascend/ops/triton @AuroraEmiya @ZT-AIA
+/vllm_ascend/ops/triton/eplb.py @freyfwt
 /vllm_ascend/ops/triton/batch_invariant @Ronald1995
 /vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA @zhenwenqi2024
+/vllm_ascend/ops/fused_moe/eplb.py @freyfwt
+/vllm_ascend/ops/fused_moe/force_eplb.py @freyfwt
 
 # quantization
 /vllm_ascend/quantization @kunpengW-code @menogrey @Tflowers-0129
@@ -96,59 +102,66 @@
 /vllm_ascend/worker/v2/spec_decode/lmhead_tp_utils.py @xuchi-0808
 
 # scheduler
-/vllm_ascend/core/batch_job_aware_scheduler.py
-/vllm_ascend/core/dyntra_lb_scheduler.py
-/vllm_ascend/core/recompute_scheduler.py
+# TODO(owner): /vllm_ascend/core/batch_job_aware_scheduler.py
+# /vllm_ascend/core/batch_job_aware_scheduler.py
+# TODO(owner): /vllm_ascend/core/dyntra_lb_scheduler.py
+# /vllm_ascend/core/dyntra_lb_scheduler.py
+# TODO(owner): /vllm_ascend/core/recompute_scheduler.py
+# /vllm_ascend/core/recompute_scheduler.py
 /vllm_ascend/core/scheduler_profiling_chunk.py @weiguihua2
-/vllm_ascend/core/short_request_first_scheduler.py
-/vllm_ascend/core/profiling_chunk_predictor.py
+# TODO(owner): /vllm_ascend/core/short_request_first_scheduler.py
+# /vllm_ascend/core/short_request_first_scheduler.py
+# TODO(owner): /vllm_ascend/core/profiling_chunk_predictor.py
+# /vllm_ascend/core/profiling_chunk_predictor.py
 
 # kv cache
-/vllm_ascend/core/kv_cache_config_builder.py @yzeyu71 @Angazenn
-/vllm_ascend/core/kv_cache_interface.py @yzeyu71 @Angazenn
-/vllm_ascend/core/kv_cache_placement.py @yzeyu71 @Angazenn
+/vllm_ascend/core/kv_cache_config_builder.py @yzeyu71 @Angazenn @zhenwenqi2024
+/vllm_ascend/core/kv_cache_interface.py @yzeyu71 @Angazenn @zhenwenqi2024
+/vllm_ascend/core/kv_cache_placement.py @yzeyu71 @Angazenn @zhenwenqi2024
 /vllm_ascend/core/single_type_kv_cache_manager.py @yzeyu71 @Angazenn @zhenwenqi2024
 
 # Core framework
 /vllm_ascend/ascend_config.py @ningjingbengxiaohai @zzzzwwjj
 /vllm_ascend/ascend_forward_context.py @zzzzwwjj
 /vllm_ascend/batch_invariant.py @Ronald1995
-/vllm_ascend/config_utils.py
-/vllm_ascend/cpu_binding.py
+# TODO(owner): /vllm_ascend/config_utils.py
+# /vllm_ascend/config_utils.py
+# TODO(owner): /vllm_ascend/cpu_binding.py
+# /vllm_ascend/cpu_binding.py
 /vllm_ascend/envs.py @ningjingbengxiaohai @zzzzwwjj
-/vllm_ascend/logger.py
-/vllm_ascend/meta_registration.py
+# TODO(owner): /vllm_ascend/logger.py
+# /vllm_ascend/logger.py
+# TODO(owner): /vllm_ascend/meta_registration.py
+# /vllm_ascend/meta_registration.py
 /vllm_ascend/mrv2_utils.py @yzeyu71
 /vllm_ascend/platform.py @wxsIcey @Tflowers-0129
-/vllm_ascend/profiling_config.py
-/vllm_ascend/utils.py
+# TODO(owner): /vllm_ascend/profiling_config.py
+# /vllm_ascend/profiling_config.py
+# TODO(owner): /vllm_ascend/utils.py
+# /vllm_ascend/utils.py
 
 # Patch
 /vllm_ascend/patch @wxsIcey
+/vllm_ascend/patch/platform/patch_eplb.py @freyfwt
 
 # Worker base
-/vllm_ascend/worker/dcp_utils.py @weiguihua2 @zhenwenqi2024
-# /vllm_ascend/worker/device_metadata.py
-# /vllm_ascend/worker/dspark_utils.py @wxsIcey
-# /vllm_ascend/worker/encoder_acl_graph.py
-# /vllm_ascend/worker/kvpp_cache.py
-# /vllm_ascend/worker/npu_input_batch.py
-# /vllm_ascend/worker/spec_decode_utils.py
-# /vllm_ascend/worker/utils.py
+/vllm_ascend/worker/dcp_utils.py @weiguihua2 @zhenwenqi2024 @pisceskkk
 /vllm_ascend/worker/worker.py @wxsIcey
 
 # Worker V2
 /vllm_ascend/worker/v2/model_states @zzzzwwjj
-/vllm_ascend/worker/v2/aclgraph_utils.py
+# TODO(owner): /vllm_ascend/worker/v2/aclgraph_utils.py
+# /vllm_ascend/worker/v2/aclgraph_utils.py
 /vllm_ascend/worker/v2/attn_utils.py @Angazenn @zzzzwwjj @zhenwenqi2024
 /vllm_ascend/worker/v2/block_table.py @Tflowers-0129 @zzzzwwjj
-/vllm_ascend/worker/v2/eplb.py
+/vllm_ascend/worker/v2/eplb.py @freyfwt
 /vllm_ascend/worker/v2/input_batch.py @yiz-liu @zzzzwwjj
 /vllm_ascend/worker/v2/kv_connector.py @yzeyu71
 /vllm_ascend/worker/v2/kvpp.py @recky-c
 /vllm_ascend/worker/v2/model_runner.py @yiz-liu @zzzzwwjj @xuchi-0808 @zhenwenqi2024
-/vllm_ascend/worker/v2/pcp_manager.py @weiguihua2
-/vllm_ascend/worker/v2/pp_transport.py
+/vllm_ascend/worker/v2/pcp_manager.py @weiguihua2 @pisceskkk
+# TODO(owner): /vllm_ascend/worker/v2/pp_transport.py
+# /vllm_ascend/worker/v2/pp_transport.py
 /vllm_ascend/worker/v2/states.py @yiz-liu @zzzzwwjj
 /vllm_ascend/worker/v2/utils.py @zzzzwwjj
 
@@ -171,21 +184,87 @@
 /tests/e2e/nightly @wenjun91
 /tests/e2e/nightly/single_node/ops @Foriv
 
+# EPLB
+/vllm_ascend/eplb @freyfwt
+
+# observability
+# TODO(owner): /vllm_ascend/observability
+# /vllm_ascend/observability
+/vllm_ascend/observability/ms_metrics/config/eplb_metrics.yaml @freyfwt
+/vllm_ascend/observability/ms_metrics/handlers/eplb.py @freyfwt
+
 # vllm_ascend module directories (subdirs broken out one level)
 # TODO(owner): /vllm_ascend/ec_manager
 # /vllm_ascend/ec_manager
-# TODO(owner): /vllm_ascend/eplb
-# /vllm_ascend/eplb
 # TODO(owner): /vllm_ascend/model_executor
 # /vllm_ascend/model_executor
 # TODO(owner): /vllm_ascend/model_loader
 # /vllm_ascend/model_loader
-# TODO(owner): /vllm_ascend/observability
-# /vllm_ascend/observability
 # TODO(owner): /vllm_ascend/profiler
 # /vllm_ascend/profiler
 # TODO(owner): /vllm_ascend/weight_switch
 # /vllm_ascend/weight_switch
-
 # TODO(owner): /benchmarks/
 # /benchmarks/
+
+# worker root files pending owners (uncomment + set owner to activate)
+# TODO(owner): /vllm_ascend/worker/device_metadata.py
+# /vllm_ascend/worker/device_metadata.py
+# TODO(owner): /vllm_ascend/worker/dspark_utils.py @wxsIcey
+# /vllm_ascend/worker/dspark_utils.py @wxsIcey
+# TODO(owner): /vllm_ascend/worker/encoder_acl_graph.py
+# /vllm_ascend/worker/encoder_acl_graph.py
+# TODO(owner): /vllm_ascend/worker/kvpp_cache.py
+# /vllm_ascend/worker/kvpp_cache.py
+# TODO(owner): /vllm_ascend/worker/npu_input_batch.py
+# /vllm_ascend/worker/npu_input_batch.py
+# TODO(owner): /vllm_ascend/worker/spec_decode_utils.py
+# /vllm_ascend/worker/spec_decode_utils.py
+# TODO(owner): /vllm_ascend/worker/utils.py
+# /vllm_ascend/worker/utils.py
+
+# ---- gaps found by coverage check on 2026-11-05 ----
+# TODO(owner): /vllm_ascend/*.py
+# /vllm_ascend/*.py
+# TODO(owner): /vllm_ascend/worker/v2/*.py
+# /vllm_ascend/worker/v2/*.py
+# TODO(owner): /vllm_ascend/worker/v2/README.md
+# /vllm_ascend/worker/v2/README.md
+# (covers worker/v2/__init__.py & README.md; specific owned files take
+#  precedence via last-match-wins — keep this line ABOVE them when activated)
+# TODO(owner): /vllm_ascend/models
+# /vllm_ascend/models
+# (minimax_m3 is owned by an active rule above; when activated this line must
+#  stay ABOVE that rule, or models/minimax_m3 gets re-owned by mistake)
+# TODO(owner): /tests/*.py
+# /tests/*.py
+# TODO(owner): /tests/coveragerc
+# /tests/coveragerc
+# TODO(owner): /tests/coverage_settingInfo.xml
+# /tests/coverage_settingInfo.xml
+# TODO(owner): /tests/manual/
+# /tests/manual/
+# TODO(owner): /tests/e2e/
+# /tests/e2e/
+# (e2e/nightly is owned by active rules above; same ordering caveat as models)
+
+# ==================== Deliberately unowned (no entry needed) ====================
+# Paths below are intentionally left without a CODEOWNERS entry:
+# - vllm_ascend/worker/v1/ is scheduled for removal; assigning an owner is wasted effort.
+# - vllm_ascend/worker/block_table.py is scheduled for removal.
+# - tests/ut/ is touched by virtually every PR; a single owner would create a review
+#   bottleneck, so ownership stays with the PR author and reviewers.
+# Do NOT add TODO(owner) entries for these paths; remove them from this list only
+# when the situation changes (e.g. worker/v1 deletion is reverted).
+
+# Deliberately unowned: scheduled for removal
+# SKIP(owner): /vllm_ascend/worker/v1/
+# SKIP(owner): /vllm_ascend/worker/v1/_310p/
+# SKIP(owner): /vllm_ascend/worker/v1/spec_decode/
+# SKIP(owner): /vllm_ascend/worker/v1/xlite/
+# SKIP(owner): /vllm_ascend/worker/block_table.py
+
+# Deliberately unowned: touched by every PR, ownership stays with PR author
+# SKIP(owner): /tests/ut/
+# (includes non-.py files under tests/ut/, e.g. _fake_weight/config.json,
+#  eplb/core/expert_map.json, runtime_guard/TEST_MATRIX.md)
