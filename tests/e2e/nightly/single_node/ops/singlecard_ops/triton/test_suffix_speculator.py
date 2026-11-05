@@ -12,6 +12,7 @@ from vllm.platforms import current_platform
 if current_platform.device_type != "npu":
     pytest.skip("requires Ascend NPU", allow_module_level=True)
 
+from vllm_ascend.ops.triton.spec_decode.suffix import _suffix_local_scan_kernel  # noqa: E402
 from vllm_ascend.worker.v2.spec_decode.suffix.speculator import (  # noqa: E402
     AscendSuffixSpeculator as SuffixSpeculator,
 )
@@ -110,6 +111,80 @@ def _propose(spec, req_states, slots, num_sampled=None, num_rejected=None):
         None,
     )
     return drafts.cpu().numpy(), spec.num_valid[:n].cpu().numpy()
+
+
+@pytest.mark.parametrize("depth", [8, 24])
+@pytest.mark.parametrize("max_len", [300, 2048])
+def test_local_scan_matches_reference(depth, max_len):
+    """Exercise loop compilation, boundaries and mismatch persistence directly."""
+    block = 128 if max_len < 2048 else 256
+    lengths = [0, 1, 2, block - 1, block, block + 1, max_len - 1, max_len, max_len]
+    slots = [13, 2, 11, 4, 9, 6, 7, 0, 15]
+    sampled = [1] * (len(slots) - 1) + [0]
+    rng = np.random.default_rng(42)
+    tokens = rng.integers(0, 4, size=(16, max_len), dtype=np.int32)
+    # Repeated tokens cover full-depth matches and rightmost-position ties.
+    tokens[slots[-3:]] = 1
+    total_len = np.zeros(16, dtype=np.int32)
+    total_len[slots] = lengths
+    num_blocks = (max_len + block - 1) // block
+    expected = np.zeros((len(slots), num_blocks), dtype=np.int64)
+    for batch_idx, (slot, length, num_sampled) in enumerate(zip(slots, lengths, sampled)):
+        if not num_sampled:
+            continue
+        for pos in range(1, length):
+            matched = 0
+            while matched < min(depth, pos) and tokens[slot, pos - 1 - matched] == tokens[slot, length - 1 - matched]:
+                matched += 1
+            if matched:
+                block_idx = pos // block
+                expected[batch_idx, block_idx] = max(expected[batch_idx, block_idx], matched * (max_len + 1) + pos)
+
+    scratch = torch.full(expected.shape, -1, dtype=torch.int64, device=DEVICE)
+    _suffix_local_scan_kernel[(len(slots), num_blocks)](
+        torch.tensor(tokens, device=DEVICE),
+        max_len,
+        torch.tensor(slots, dtype=torch.int32, device=DEVICE),
+        torch.tensor(total_len, device=DEVICE),
+        torch.tensor(sampled, dtype=torch.int32, device=DEVICE),
+        scratch,
+        num_blocks,
+        max_len + 1,
+        MAX_DEPTH=depth,
+        BLOCK=block,
+        num_warps=4,
+    )
+    np.testing.assert_array_equal(scratch.cpu().numpy(), expected)
+
+
+@pytest.mark.parametrize("k,depth,max_len", [(1, 1, 300), (3, 8, 300), (8, 24, 2048)])
+@pytest.mark.parametrize("corpus_enabled", [False, True])
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_kernel_feature_combinations(k, depth, max_len, corpus_enabled, adaptive):
+    """Compile each feature path and check local, corpus and fallback outputs."""
+    spec, rs = _make(k, depth, 8, max_len, 4096 if corpus_enabled else 0, adaptive=adaptive)
+    key = list(range(100, 100 + depth))
+    continuation = list(range(300, 300 + k))
+    if corpus_enabled:
+        _set(rs, 7, [], key + continuation)
+        _finish(spec, rs, {"done": 7})
+
+    # Three sparse slots exercise padded request reductions; histories use
+    # both partial and full scan blocks, and K=3 requires padded draft lanes.
+    local = list(range(1000, 1000 + max_len - 2 * depth - 1)) + key + [700] + key
+    corpus_query = list(range(5000, 5000 + max_len - depth)) + key
+    histories = [local, corpus_query, [991]]
+    slots = [6, 1, 4]
+    for slot, history in zip(slots, histories):
+        _set(rs, slot, [], history)
+    expected = [_local_draft(local, k, depth), continuation if corpus_enabled and depth >= 2 else [], []]
+    drafts, valid = _propose(spec, rs, slots)
+    for batch_idx, (history, reference) in enumerate(zip(histories, expected)):
+        assert valid[batch_idx] == len(reference)
+        assert drafts[batch_idx].tolist() == reference + [history[-1]] * (k - len(reference))
+        if adaptive:
+            confidence = spec.draft_token_confidence_probs[batch_idx].tolist()
+            assert confidence == pytest.approx([0.5] * len(reference) + [0.0] * (k - len(reference)))
 
 
 @pytest.mark.parametrize("vocab", [4, 16, 1000])
@@ -387,12 +462,13 @@ def _ref_ingest(state, docs, cap, num_buckets, slots=8):
         state["doc_seq"] = seq + 1
 
 
-@pytest.mark.parametrize("corpus_tokens", [97, 300, 4096])
-def test_ingestion_matches_reference(corpus_tokens):
+@pytest.mark.parametrize("max_len", [64, 2048])
+@pytest.mark.parametrize("corpus_tokens", [2, 97, 300, 4096])
+def test_ingestion_matches_reference(corpus_tokens, max_len):
     """Bursts of finished requests, including bursts larger than the ring
     that overwrite their own earlier documents, give exactly the state of
     placing documents one after another."""
-    k, depth, max_reqs, max_len = 4, 8, 8, 64
+    k, depth, max_reqs = 4, 8, 8
     rng = np.random.default_rng(corpus_tokens)
     spec, rs = _make(k, depth, max_reqs, max_len, corpus_tokens=corpus_tokens)
     nb = spec.num_buckets
@@ -505,3 +581,43 @@ def test_observe_reduces_all_requests_in_the_same_bucket():
     # First request: accept two, observe the third rejection. Second:
     # reject immediately. Third: no verdict this step.
     assert spec.accept_stats.sum(dim=0).tolist() == [[1, 2], [1, 1], [0, 1]]
+
+
+@pytest.mark.parametrize("num_reqs,k", [(64, 8), (65, 3)])
+def test_observe_large_batches_match_reference(num_reqs, k):
+    """Check production batch size and padded reductions with sparse slots."""
+    spec, rs = _make(k, 24, 2 * num_reqs + 1, 64, corpus_tokens=0, adaptive=True)
+    slots = list(range(2 * num_reqs - 1, 0, -2))
+    for slot in slots:
+        _set(rs, slot, [], [1, 2, 3, 1, 2])
+    _propose(spec, rs, slots)
+    sampled = [[3, 1, 0][i % 3] for i in range(num_reqs)]
+    rejected = [[1, 3, 0][i % 3] for i in range(num_reqs)]
+    _propose(spec, rs, slots, num_sampled=sampled, num_rejected=rejected)
+    accepted_count = sampled.count(3)
+    rejected_count = sampled.count(1)
+    expected = [
+        [accepted_count, accepted_count + rejected_count],
+        [accepted_count, accepted_count],
+        [0, accepted_count],
+    ]
+    expected += [[0, 0]] * (k - 3)
+    assert spec.accept_stats.sum(dim=0).tolist() == expected
+
+
+@pytest.mark.parametrize("k", [3, 5, 7, 9])
+def test_adaptive_padded_drafts_match_learned_statistics(k):
+    """Non-power-of-two drafts compile and use learned, nonuniform rates."""
+    spec, rs = _make(k, 24, 8, 300, corpus_tokens=0, adaptive=True)
+    slots = [6, 1, 4]
+    for slot in slots:
+        _set(rs, slot, [], [1, 2, 3, 1, 2])
+    _propose(spec, rs, slots)
+    _, valid = _propose(spec, rs, slots, num_sampled=[3, 1, 0], num_rejected=[1, 3, 0])
+    assert valid.tolist() == [3, 3, 0]
+    expected_stats = [[1, 2], [1, 1], [0, 1]] + [[0, 0]] * (k - 3)
+    assert spec.accept_stats.sum(dim=0).tolist() == expected_stats
+    expected_confidence = [0.5, 2 / 3, 1 / 3] + [0.0] * (k - 3)
+    for batch_idx in (0, 1):
+        assert spec.draft_token_confidence_probs[batch_idx].tolist() == pytest.approx(expected_confidence)
+    assert spec.draft_token_confidence_probs[2].tolist() == [0.0] * k
