@@ -7,6 +7,7 @@ from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
     MergedQKVParallelLinearWithLoRA,
+    ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
 )
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
@@ -15,6 +16,7 @@ from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.platforms import current_platform
@@ -199,8 +201,21 @@ class AscendColumnParallelLinearWithLoRA(_SingleLinearLoRAWrapper, ColumnParalle
     base_layer_cls = ColumnParallelLinear
 
 
+class AscendReplicatedLinearWithLoRA(_SingleLinearLoRAWrapper, ReplicatedLinearWithLoRA):
+    """Replicated (non-TP) linear with the Ascend packed-B expand kernel.
+
+    ``ReplicatedLinear`` is never split across ranks, so the whole output is
+    produced locally. Without this class the generic Ascend runtime leaves
+    those layers unwrapped, e.g. the ``wq_a``/``wkv`` projections of the
+    DeepSeek-V4.1 compressed attention, and adapters silently do nothing there.
+    """
+
+    base_layer_cls = ReplicatedLinear
+
+
 def refresh_all_lora_classes():
     ascend_classes = (
+        AscendReplicatedLinearWithLoRA,
         AscendRowParallelLinearWithLoRA,
         AscendColumnParallelLinearWithLoRA,
         AscendMergedColumnParallelLinearWithLoRA,

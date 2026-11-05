@@ -47,21 +47,6 @@ _MOE_LORA_INDEX_FIELDS = (
     "exchanged_lora_indices",
 )
 
-_DEBUG_COUNTS: dict[str, int] = {}
-
-
-def _debug_trace(site: str, message: str, limit: int = 3) -> None:
-    """Print a one-line trace of the MoE LoRA index pipeline when enabled."""
-    import os
-
-    if not os.environ.get("DSV41_LORA_DEBUG"):
-        return
-    seen = _DEBUG_COUNTS.get(site, 0)
-    if seen >= limit:
-        return
-    _DEBUG_COUNTS[site] = seen + 1
-    print(f"[dsv41-lora-debug][{site}][{seen}] {message}", flush=True)
-
 
 def has_lora(lora_context) -> bool:
     """Return whether the current batch contains at least one LoRA token."""
@@ -111,21 +96,6 @@ def prepare_lora_indices(
     else:
         # use ep for dp without tp.
         lora_context.split_lora_indices = token_indices
-    _debug_trace(
-        "prepare",
-        f"num_tokens={num_tokens} pad_size={pad_size} tp={tp_rank}/{tp_size} "
-        f"indices_len={list(indices_len)} "
-        f"split_numel={lora_context.split_lora_indices.numel()} "
-        f"split={lora_context.split_lora_indices[:16].tolist()} "
-        f"split_minmax={_minmax(lora_context.split_lora_indices)}",
-    )
-
-
-def _minmax(tensor: torch.Tensor) -> tuple[int, int] | None:
-    """Return (min, max) for a non-empty tensor, else ``None`` (debug only)."""
-    if tensor.numel() == 0:
-        return None
-    return (int(tensor.min()), int(tensor.max()))
 
 
 def _align_rows(tensor: torch.Tensor, target: int, fill: int = -1) -> torch.Tensor:
@@ -199,13 +169,6 @@ def preprocess_lora_indices(
     # can never be indexed out of bounds (see ``_align_rows``).
     expanded = _align_rows(expanded, permutation.numel())
     lora_context.permuted_lora_indices = expanded[permutation]
-    _debug_trace(
-        "preprocess",
-        f"split_numel={split_indices.numel()} topk={topk_ids.shape[1]} "
-        f"expanded_numel={expanded.numel()} perm_numel={permutation.numel()} "
-        f"rev_numel={reversed_permutation_mapping.numel()} "
-        f"permuted_minmax={_minmax(lora_context.permuted_lora_indices)}",
-    )
 
 
 def postprocess_lora_indices(
@@ -260,14 +223,6 @@ def all2all_lora_indices(
     _, exchanged, handle = async_all_to_all(permuted, output_splits, input_splits, ep_group)
     handle.wait()
     lora_context.exchanged_lora_indices = exchanged.to(lora_dtype)
-    _debug_trace(
-        "all2all",
-        f"permuted_numel={permuted.numel()} dtype={lora_dtype} "
-        f"in_total={send_total} out_total={_split_total(output_splits)} "
-        f"exchanged_numel={lora_context.exchanged_lora_indices.numel()} "
-        f"exchanged_minmax={_minmax(lora_context.exchanged_lora_indices)} "
-        f"exchanged_values={lora_context.exchanged_lora_indices[:32].tolist()}",
-    )
 
 
 def sync_lora_context(quant_method, lora_context):
@@ -363,13 +318,6 @@ def _recover_moe_lora_routing_all2all(
             f"received {lora_per_row.numel()} LoRA indices."
         )
 
-    _debug_trace(
-        "routing",
-        f"group_list={group_list.tolist()} expert_numel={expert_per_row.numel()} "
-        f"lora_numel={lora_per_row.numel()} "
-        f"lora_minmax={_minmax(lora_per_row)} "
-        f"lora_values={lora_per_row[:32].tolist()}",
-    )
     return expert_per_row, lora_per_row
 
 

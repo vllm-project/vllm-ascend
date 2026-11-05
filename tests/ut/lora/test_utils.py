@@ -20,6 +20,7 @@ from vllm_ascend.lora.utils import (
     AscendColumnParallelLinearWithLoRA,
     AscendMergedColumnParallelLinearWithLoRA,
     AscendMergedQKVParallelLinearWithLoRA,
+    AscendReplicatedLinearWithLoRA,
     AscendRowParallelLinearWithLoRA,
     refresh_all_lora_classes,
 )
@@ -33,6 +34,7 @@ def test_refresh_all_lora_classes_prepends_ascend_wrappers() -> None:
         refresh_all_lora_classes()
         classes = list(lora_utils._all_lora_classes)
         expected_prefix = [
+            AscendReplicatedLinearWithLoRA,
             AscendRowParallelLinearWithLoRA,
             AscendColumnParallelLinearWithLoRA,
             AscendMergedColumnParallelLinearWithLoRA,
