@@ -49,18 +49,20 @@ decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode.
 
 ## 3 Prerequisites
 
-### 3.1 Model Weights and Hardware
+### 3.1 Model Weight
 
 The official DeepSeek-V4.1-Flash-1017 checkpoint is available from
 [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) and
 [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4.1-Flash-1017).
 
-The following Ascend quantized checkpoints are available on ModelScope:
+Download the quantized checkpoint from ModelScope for the hardware shown below.
 
-| Quantization | Checkpoint | Notes |
-|--------------|------------|-------|
-| W4A8 | [DeepSeek-V4.1-Flash-1017-w4a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8) | Recommended for performance. Includes DSpark draft parameters and INT8 Engram tables. |
-| W8A8 | [DeepSeek-V4.1-Flash-1017-w8a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8) | Also supported for deployment. |
+| Checkpoint | Hardware | Deployment | Download | Notes |
+| --- | --- | --- | --- | --- |
+| `DeepSeek-V4.1-Flash-1017-w4a8` | A3 series (8 NPUs × 128GB per node; 16 logical devices) | 1 node for single-node deployment; 2 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8) | Recommended for performance. Includes DSpark draft parameters and INT8 Engram tables. |
+| `DeepSeek-V4.1-Flash-1017-w8a8` | A3 series (8 NPUs × 128GB per node; 16 logical devices) | 1 node for single-node deployment; 2 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8) | Also supported. For PD, use Prefill DP4/TP4 and Decode DP8/TP2. |
+| `DeepSeek-V4.1-Flash-1017-w4a8` | A2 series (64GB × 8 per node) | 2 nodes for colocated deployment; 4 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8) | / |
+| `DeepSeek-V4.1-Flash-1017-w8a8` | A2 series (64GB × 8 per node) | 2 nodes for colocated deployment; 4 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8) | / |
 
 Alternatively, use [ModelSlim](https://github.com/Ascend/msmodelslim) to
 prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
@@ -72,15 +74,6 @@ command to that checkpoint directory. The examples below use W4A8; to use
 W8A8, set `MODEL_PATH` to the W8A8 directory instead. For A3 PD deployment
 with W8A8 weights, use Prefill DP4/TP4 and Decode DP8/TP2, as described in
 Section 5.2.
-
-Use one of the following hardware configurations:
-
-- **A3 single-node colocated**: one Atlas 800I A3 server with 8 NPUs and 128GB
-  memory per NPU. The server exposes 16 logical devices to the container.
-- **A3 1P1D**: two Atlas 800I A3 servers with the same device configuration.
-- **A2 series**: two Atlas 800I A2 servers. Each server has 8 NPUs with 64GB
-  memory per NPU and exposes 8 devices to the container.
-- **A2 1P1D**: four Atlas 800I A2 servers with the same device configuration.
 
 ### 3.2 Verify Multi-node Communication
 
@@ -1843,9 +1836,6 @@ parameters used for each dataset.
 |---------|----------|-------|-------------------|
 | GPQA | A3 series | 89.9 | `temperature=1.0, top_p=1.0, max_tokens=131072` |
 | MMMU-PRO | A3 series | 81.3 | `temperature=1.0, top_p=0.95, max_tokens=131072` |
-
-When reporting results, record the checkpoint, prompt encoder, reasoning
-effort, sampling parameters, dataset version, and whether DSpark is enabled.
 
 ## 8 Performance Evaluation
 
