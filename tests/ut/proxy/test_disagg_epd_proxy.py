@@ -530,17 +530,36 @@ def _install_fake_aiohttp(monkeypatch, sessions):
     return fake
 
 
-def test_record_encode_failure_ignores_4xx(monkeypatch):
+def test_record_encode_failure_classification(monkeypatch):
     # 4xx is a request-side problem and must not mark the encoder unhealthy.
     _run_single_encode(monkeypatch, FakeResponse(400, b"bad request"))
     assert proxy.app.state.encode_failures == {}
 
+    # Downstream 5xx is a health-relevant encoder failure.
     _run_single_encode(monkeypatch, FakeResponse(500, b"server exploded"))
     assert ENCODE_URL in proxy.app.state.encode_failures
 
     proxy.app.state.encode_failures.clear()
     _run_single_encode(monkeypatch, FakeResponse(enter_exc=aiohttp.ClientConnectionError("boom")))
     assert ENCODE_URL in proxy.app.state.encode_failures
+
+    # Stage timeouts count as encoder failures.
+    proxy.app.state.encode_failures.clear()
+    _run_single_encode(monkeypatch, FakeResponse(enter_exc=asyncio.TimeoutError()))
+    assert ENCODE_URL in proxy.app.state.encode_failures
+
+    # A non-connection client error (payload corruption) is not an unhealthy encoder.
+    proxy.app.state.encode_failures.clear()
+    payload_error = aiohttp.ClientPayloadError("bad payload")
+    _run_single_encode(monkeypatch, FakeResponse(enter_exc=payload_error))
+    assert proxy.app.state.encode_failures == {}
+
+    # Generic exceptions are not encoder-health signals either.
+    session = FakeSession([FakeResponse(enter_exc=RuntimeError("boom"))])
+    monkeypatch.setattr(proxy, "encode_session", session, raising=False)
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(proxy._encode_single_request(_image_request(), ENCODE_URL, "req-1"))
+    assert proxy.app.state.encode_failures == {}
 
     # A successful encode clears a previous failure timestamp.
     proxy.app.state.encode_failures[ENCODE_URL] = time.time()
@@ -556,20 +575,21 @@ def _health_state(monkeypatch, e_urls, failures, cooldown=30.0):
     monkeypatch.setattr(proxy.app.state, "encoder_failure_cooldown_seconds", cooldown, raising=False)
 
 
-def test_failure_cooldown_prefers_healthy_encoder(monkeypatch):
+def test_failure_cooldown_returns_only_healthy_encoder_subset(monkeypatch):
     now = time.time()
+    # A recently failed encoder is excluded while at least one healthy one exists.
     _health_state(monkeypatch, ["e1", "e2", "e3"], {"e2": now})
-    assert proxy._encoder_urls_by_health() == ["e1", "e3", "e2"]
+    assert proxy._encoder_urls_by_health() == ["e1", "e3"]
 
     # A stale failure outside the cooldown window is healthy again.
     _health_state(monkeypatch, ["e1", "e2"], {"e2": now - 120.0}, cooldown=30.0)
     assert proxy._encoder_urls_by_health() == ["e1", "e2"]
 
-    # cooldown <= 0 disables health-aware ordering.
+    # cooldown <= 0 disables health-aware filtering.
     _health_state(monkeypatch, ["e1", "e2"], {"e2": now}, cooldown=0.0)
     assert proxy._encoder_urls_by_health() == ["e1", "e2"]
 
-    # All encoders failing falls back to the full list (best effort).
+    # All encoders failing falls back to the full list (best effort), original order.
     _health_state(monkeypatch, ["e1", "e2"], {"e1": now, "e2": now})
     assert proxy._encoder_urls_by_health() == ["e1", "e2"]
 
@@ -579,22 +599,21 @@ def test_failure_cooldown_prefers_healthy_encoder(monkeypatch):
 
 
 def test_single_mode_picks_healthy_encoder(monkeypatch):
-    _health_state(monkeypatch, ["e1", "e2"], {"e1": time.time()})
+    _health_state(monkeypatch, ["http://e1:1", "http://e2:2"], {"http://e1:1": time.time()})
     monkeypatch.setattr(proxy.app.state, "encoder_dispatch_mode", proxy.EncoderDispatchMode.SINGLE, raising=False)
     session = FakeSession([FakeResponse(200, b"{}")])
     monkeypatch.setattr(proxy, "encode_session", session, raising=False)
-    seen = []
 
-    def fake_choice(candidates):
-        seen.append(list(candidates))
-        return candidates[0]
-
-    monkeypatch.setattr(proxy.random, "choice", fake_choice)
     asyncio.run(proxy.fanout_encoder_primer(_image_request(), "req-1"))
-    assert seen and seen[0][0] == "e2"
+
+    # The failing encoder is excluded from the candidate set, so the real
+    # random choice can only dispatch to the healthy one.
+    assert proxy._encoder_urls_by_health() == ["http://e2:2"]
+    assert len(session.calls) == 1
+    assert session.calls[0]["url"].startswith("http://e2:2/")
 
 
-def test_fanout_mode_rotates_from_healthy_encoder(monkeypatch):
+def test_fanout_mode_uses_only_healthy_encoder(monkeypatch):
     _health_state(monkeypatch, ["e1", "e2"], {"e1": time.time()})
     monkeypatch.setattr(proxy.app.state, "encoder_dispatch_mode", proxy.EncoderDispatchMode.FANOUT, raising=False)
     captured = {}
@@ -604,7 +623,18 @@ def test_fanout_mode_rotates_from_healthy_encoder(monkeypatch):
 
     monkeypatch.setattr(proxy, "_encode_fanout", fake_fanout)
     asyncio.run(proxy.fanout_encoder_primer(_image_request(), "req-1"))
-    assert captured["urls"] == ["e2", "e1"]
+    assert captured["urls"] == ["e2"]
+
+
+def test_fanout_requests_go_only_to_healthy_encoder(monkeypatch):
+    _health_state(monkeypatch, ["http://e1:1", "http://e2:2"], {"http://e1:1": time.time()})
+    session = FakeSession([FakeResponse(200, b"{}"), FakeResponse(200, b"{}")])
+    monkeypatch.setattr(proxy, "encode_session", session, raising=False)
+
+    asyncio.run(proxy._encode_fanout(_image_request(num_images=2), proxy._encoder_urls_by_health(), "req-1"))
+
+    assert len(session.calls) == 2
+    assert all(call["url"].startswith("http://e2:2/") for call in session.calls)
 
 
 # --------------------------------------------------------------------------- #
@@ -826,3 +856,186 @@ def test_health_contract_unchanged(monkeypatch):
     response = asyncio.run(proxy.health_check())
     assert response.status_code == 503
     assert json.loads(response.body)["encode_cluster"] == "unhealthy"
+
+
+# --------------------------------------------------------------------------- #
+# Streaming in-flight gauge (N5-r2)
+# --------------------------------------------------------------------------- #
+def _asgi_scope(spec_version="2.4"):
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": spec_version},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/chat/completions",
+        "raw_path": b"/v1/chat/completions",
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 1234),
+        "server": ("127.0.0.1", 8000),
+    }
+
+
+class _FakeRequest:
+    def __init__(self, payload, req_id="req-1"):
+        self._payload = payload
+        self.headers = {"x-request-id": req_id}
+
+    async def json(self):
+        return self._payload
+
+
+class _UnstartedStream:
+    """Async iterator that records whether it was ever iterated or closed."""
+
+    def __init__(self):
+        self.started = False
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        self.started = True
+        raise StopAsyncIteration
+
+    async def aclose(self):
+        self.closed = True
+
+
+def test_tracked_streaming_response_normal_completion():
+    stats = proxy.app.state.stats
+    stats.inflight = 1
+    events = []
+
+    async def body():
+        events.append("started")
+        try:
+            yield b"chunk-1"
+            yield b"chunk-2"
+        finally:
+            events.append("finished")
+
+    response = proxy._TrackedStreamingResponse(body(), media_type="text/event-stream", stats=stats)
+    sent = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(response(_asgi_scope(), receive, send))
+
+    assert stats.inflight == 0
+    assert events == ["started", "finished"]
+    bodies = [message["body"] for message in sent if message["type"] == "http.response.body"]
+    assert b"chunk-1" in bodies and b"chunk-2" in bodies
+
+
+def test_tracked_streaming_response_releases_when_not_started(monkeypatch):
+    stats = proxy.app.state.stats
+    stats.inflight = 1
+    stream = _UnstartedStream()
+    response = proxy._TrackedStreamingResponse(stream, media_type="text/event-stream", stats=stats)
+
+    # Simulate the ASGI cancel path where the body iterator is never iterated.
+    async def cancelled_call(self, scope, receive, send):
+        return
+
+    monkeypatch.setattr(proxy.StreamingResponse, "__call__", cancelled_call)
+    asyncio.run(response(_asgi_scope(spec_version="2.3"), None, None))
+
+    assert stats.inflight == 0
+    assert stream.started is False
+    assert stream.closed is True
+
+
+def test_tracked_streaming_response_releases_on_exception():
+    stats = proxy.app.state.stats
+    stats.inflight = 1
+
+    async def body():
+        yield b"first"
+        raise RuntimeError("stream broke")
+
+    response = proxy._TrackedStreamingResponse(body(), media_type="text/event-stream", stats=stats)
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        pass
+
+    with pytest.raises(RuntimeError, match="stream broke"):
+        asyncio.run(response(_asgi_scope(), receive, send))
+    assert stats.inflight == 0
+
+
+def test_tracked_streaming_response_releases_on_cancellation():
+    stats = proxy.app.state.stats
+    stats.inflight = 1
+
+    async def body():
+        yield b"first"
+
+    response = proxy._TrackedStreamingResponse(body(), media_type="text/event-stream", stats=stats)
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(response(_asgi_scope(), receive, send))
+    assert stats.inflight == 0
+
+
+def test_chat_handler_non_stream_releases_inflight(monkeypatch):
+    stats = proxy.app.state.stats
+    request = _FakeRequest({"model": "m", "messages": [], "stream": False})
+
+    async def fake_forward(req_data, req_id, p_url, d_url):
+        return {"choices": []}
+
+    monkeypatch.setattr(proxy, "forward_non_stream", fake_forward)
+    response = asyncio.run(proxy.chat_completions(request))
+    assert response.status_code == 200
+    assert stats.inflight == 0
+
+
+def test_chat_handler_non_stream_exception_releases_inflight(monkeypatch):
+    stats = proxy.app.state.stats
+    request = _FakeRequest({"model": "m", "messages": [], "stream": False})
+
+    async def failing_forward(req_data, req_id, p_url, d_url):
+        raise proxy.HTTPException(status_code=400, detail="bad request")
+
+    monkeypatch.setattr(proxy, "forward_non_stream", failing_forward)
+    with pytest.raises(proxy.HTTPException):
+        asyncio.run(proxy.chat_completions(request))
+    assert stats.inflight == 0
+
+
+def test_chat_handler_streaming_tracks_inflight_until_response(monkeypatch):
+    stats = proxy.app.state.stats
+    request = _FakeRequest({"model": "m", "messages": [], "stream": True})
+
+    async def fake_stream(req_data, req_id, p_url, d_url):
+        yield b"data: ok\n\n"
+
+    monkeypatch.setattr(proxy, "forward_stream", fake_stream)
+    response = asyncio.run(proxy.chat_completions(request))
+    assert stats.inflight == 1
+    assert isinstance(response, proxy._TrackedStreamingResponse)
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        pass
+
+    asyncio.run(response(_asgi_scope(), receive, send))
+    assert stats.inflight == 0

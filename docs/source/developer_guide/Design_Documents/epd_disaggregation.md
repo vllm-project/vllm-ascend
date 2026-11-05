@@ -223,10 +223,11 @@ accepts these opt-in options; the defaults keep the previous behavior:
   responses to 502; all of them are retried. Every 2xx response is success.
 - Downstream 4xx responses keep their status and are not retried.
 - When several encoder URLs are configured, connection/timeout/5xx failures
-  mark the encoder URL unhealthy for `--encoder-failure-cooldown-seconds` and
-  retries prefer healthy encoders; when every encoder is marked unhealthy the
-  proxy falls back to the full list. 4xx responses are request-side errors and
-  never mark an encoder unhealthy.
+  remove the encoder URL from selection for
+  `--encoder-failure-cooldown-seconds`; single dispatch and fanout rotation
+  then use only the healthy subset, and the proxy falls back to the full list
+  only when every encoder is inside the cooldown window. 4xx responses are
+  request-side errors and never mark an encoder unhealthy.
 - Streaming requests are not retried after the first chunk is forwarded;
   non-streaming requests are retried normally. Encoder and prefill stages are
   never streamed, so they are always retried as non-streaming requests.
@@ -314,8 +315,10 @@ The reference proxy exposes Prometheus text metrics at `GET /metrics`
 
 With `--shutdown-drain-seconds` greater than zero the shutdown hook waits
 until `epd_requests_inflight` reaches zero or the window expires (logging the
-remaining count), then closes the client sessions. With the default `0` the
-sessions close immediately, matching the previous behavior.
+remaining count), then closes the client sessions. The gauge is decremented at
+the ASGI response boundary (a tracked streaming response), so a client that
+disconnects before the first streamed chunk cannot leak it. With the default
+`0` the sessions close immediately, matching the previous behavior.
 
 ### Logging
 

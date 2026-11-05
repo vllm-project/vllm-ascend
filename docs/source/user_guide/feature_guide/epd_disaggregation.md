@@ -916,7 +916,9 @@ check device health while the service is starting.
 The reference proxy supports an optional drain window via
 `--shutdown-drain-seconds` (default `0`, which closes immediately as before).
 When it is greater than zero, shutdown waits until no request is in flight or
-the window expires, then closes the client sessions. Stop in this order:
+the window expires, then closes the client sessions. The in-flight counter is
+released at the ASGI response boundary, including requests whose client
+disconnects before the first streamed chunk. Stop in this order:
 
 1. Stop the proxy; it drains and closes its client sessions in its shutdown
    hook.
@@ -941,13 +943,15 @@ the window expires, then closes the client sessions. Stop in this order:
   are retried. Every 2xx response is treated as success.
 - **Downstream 4xx**: the 4xx status is preserved and the request is **not**
   retried.
-- **Multi-encoder routing**: when several encoder URLs are configured, a
-  failed encoder is deprioritized for `--encoder-failure-cooldown-seconds`.
-  Only connection errors, timeouts and 5xx count as encoder failures; 4xx is a
-  request-side error and does not mark the encoder unhealthy. Retries
-  therefore prefer healthy encoders, and when all encoders are failing the
-  proxy falls back to the full list. With a single encoder the selection is
-  unchanged.
+- **Multi-encoder routing**: when several encoder URLs are configured, an
+  encoder that failed with a connection error, a stage timeout or a downstream
+  5xx is removed from selection for `--encoder-failure-cooldown-seconds`
+  (default 30). While at least one healthy encoder remains, `single` dispatch
+  draws only from the healthy subset and `fanout` round-robins only the healthy
+  subset, so retries avoid recently failed encoders. When every encoder is
+  failing the proxy falls back to the full list (best effort). 4xx responses
+  and other client-side errors do not mark an encoder unhealthy. With a single
+  encoder the selection is unchanged.
 - **Exhaustion**: when all attempts fail, the client receives HTTP 500.
 - **P stage failure**: a prefill failure returns its mapped status (4xx
   preserved, otherwise 502/504) and D is not started, so no partial output is

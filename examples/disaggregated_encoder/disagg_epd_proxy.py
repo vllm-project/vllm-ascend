@@ -201,13 +201,25 @@ def _http_exception_status(exc: BaseException) -> int | None:
     return None
 
 
-def _record_encode_failure(url: str, status: int | None = None) -> None:
-    """Record a health-relevant encoder failure (connection, timeout or 5xx).
+def _http_exception_error(exc: BaseException) -> str | None:
+    """Return the failure class carried by an HTTPException detail, if any."""
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict):
+        error = detail.get("error")
+        if isinstance(error, str):
+            return error
+    return None
 
-    Client errors (4xx) are request-side problems and must not mark the encoder
-    instance as unhealthy.
+
+def _record_encode_failure(url: str, status: int | None = None, error: str | None = None) -> None:
+    """Record a failure only when the encoder instance itself looks unhealthy.
+
+    Only connection errors, stage timeouts and downstream 5xx responses count.
+    Client errors (4xx), non-connection client errors and generic exceptions are
+    request-side or unrelated failures and must not deprioritize the encoder.
     """
-    if status is not None and status < 500:
+    health_relevant = (status is not None and status >= 500) or (status is None and error in {"timeout", "connection"})
+    if not health_relevant:
         return
     if not hasattr(app.state, "encode_failures"):
         app.state.encode_failures = {}
@@ -230,16 +242,14 @@ def _encoder_urls_by_health() -> list[str]:
         return e_urls
     now = time.time()
     healthy: list[str] = []
-    failing: list[str] = []
     for url in e_urls:
         failed_at = failures.get(url)
-        if failed_at is not None and now - failed_at <= cooldown:
-            failing.append(url)
-        else:
+        if failed_at is None or now - failed_at > cooldown:
             healthy.append(url)
     if not healthy:
+        # Every encoder is inside the cooldown window: best effort, keep all URLs.
         return e_urls
-    return healthy + failing
+    return healthy
 
 
 def _stage_timeout(stage: str) -> aiohttp.ClientTimeout | None:
@@ -402,7 +412,11 @@ async def _encode_fanout(
     failures: list[tuple[int, str, BaseException]] = []
     for idx, result in enumerate(results):
         if isinstance(result, BaseException):
-            _record_encode_failure(target_urls[idx], status=_http_exception_status(result))
+            _record_encode_failure(
+                target_urls[idx],
+                status=_http_exception_status(result),
+                error=_http_exception_error(result),
+            )
             failures.append((idx, target_urls[idx], result))
             continue
         status, body = result
@@ -464,10 +478,10 @@ async def _encode_single_request(
         if not (200 <= status < 300):
             raise _downstream_status_error("encode", url, status, body)
     except HTTPException as exc:
-        _record_encode_failure(e_url, status=_http_exception_status(exc))
+        _record_encode_failure(e_url, status=_http_exception_status(exc), error=_http_exception_error(exc))
         raise
     except Exception:
-        _record_encode_failure(e_url)
+        # Unexpected failures are not encoder-health signals.
         raise
     _clear_encode_failure(e_url)
 
@@ -778,7 +792,7 @@ async def non_stream_retry_wrap(forward_func, max_retries: int = 3, delay: float
     raise RuntimeError(f"all {max_retries} retries failed.") from last_exc
 
 
-async def _forward_stream_impl(req_data: dict, req_id: str, p_url: str, d_url: str) -> AsyncIterator[str]:
+async def forward_stream(req_data: dict, req_id: str, p_url: str, d_url: str) -> AsyncIterator[str]:
     try:
         # Step 1: Process through Encoder instance (if has MM input)
         async def run_encoder():
@@ -834,14 +848,32 @@ async def _forward_stream_impl(req_data: dict, req_id: str, p_url: str, d_url: s
         raise HTTPException(status_code=500, detail=f"Proxy streaming error: {str(e)}") from e
 
 
-async def forward_stream(req_data: dict, req_id: str, p_url: str, d_url: str) -> AsyncIterator[str]:
-    """Stream the response and always release the in-flight request gauge."""
-    stats = _get_stats()
-    try:
-        async for chunk in _forward_stream_impl(req_data, req_id, p_url, d_url):
-            yield chunk
-    finally:
-        stats.inflight = max(0, stats.inflight - 1)
+class _TrackedStreamingResponse(StreamingResponse):
+    """Streaming response that releases the in-flight gauge at the ASGI boundary.
+
+    Releasing the gauge inside the body generator is not enough: when a client
+    disconnects before the first iteration the generator never starts and its
+    finally block never runs. The response object's __call__ always runs, so it
+    is the reliable place to decrement once and to close the body iterator.
+    """
+
+    def __init__(self, *args, stats: ProxyStats, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._stats = stats
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._stats.inflight = max(0, self._stats.inflight - 1)
+            aclose = getattr(self.body_iterator, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except asyncio.CancelledError:
+                    logger.debug("Streaming body close was cancelled")
+                except Exception:
+                    logger.debug("Failed to close the streaming body iterator", exc_info=True)
 
 
 ###############################################################################
@@ -864,11 +896,12 @@ async def chat_completions(request: Request):
         is_streaming = req_data.get("stream", False)
 
         if is_streaming:
-            response = StreamingResponse(
+            response = _TrackedStreamingResponse(
                 forward_stream(req_data, req_id, p_url, d_url),
                 media_type="text/event-stream",
+                stats=stats,
             )
-            # forward_stream releases the gauge when the generator finishes.
+            # The tracked response releases the gauge at the ASGI boundary.
             streaming_handed_off = True
             return response
         result = await forward_non_stream(req_data, req_id, p_url, d_url)
