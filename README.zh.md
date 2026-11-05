@@ -68,7 +68,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在 Huawei A
 
 ## 准备
 
-- 硬件：Atlas 800I A2 Inference系列、Atlas A2 Training系列、Atlas 800I A3 Inference系列、Atlas A3 Training系列、Atlas 300I Duo（实验性支持）
+- 硬件：Atlas 800I A2 系列、Atlas 800I A3 系列、Atlas 300I Duo、Ascend 950PR&950DT 系列产品
 - 操作系统：Linux
 - 软件：
     - Python == 3.12
