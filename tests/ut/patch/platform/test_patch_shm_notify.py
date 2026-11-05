@@ -2,8 +2,8 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import zmq
-from zmq.constants import Flag
+from zmq.constants import Flag, SocketType
+from zmq.sugar.context import Context
 
 from vllm_ascend.patch.platform import patch_shm_notify
 
@@ -44,8 +44,8 @@ def test_empty_notification_socket_does_not_block_shm_reads():
 
 
 def test_busy_reader_consumes_real_notification():
-    context = zmq.Context()
-    publisher = context.socket(zmq.XPUB)
+    context = Context()
+    publisher = context.socket(SocketType.XPUB)
     publisher.bind("inproc://shm-notify-regression")
     reader = patch_shm_notify.SpinCondition(True, context, "inproc://shm-notify-regression")
     try:
