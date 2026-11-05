@@ -236,7 +236,7 @@ class AisbenchRunner:
             subprocess.call(command)
         if self.task_type == "performance":
             conf_path = os.path.join(DATASET_CONF_DIR, f"{self.dataset_conf}.py")
-            #修改
+            # 修改
             if self.prefix_num and self.prefix_num > 1:
                 self.dataset_path = self._regroup_prefix(self.dataset_path)
             if self.dataset_conf.startswith("textvqa"):
@@ -526,7 +526,7 @@ def maybe_download_from_modelscope(
     return model_path
 
 
-#修改
+# 修改
 def _regroup_prefix(self, dataset_path):
     """将数据集重组为 prefix_num 个前缀组"""
     import json
@@ -537,7 +537,7 @@ def _regroup_prefix(self, dataset_path):
     prefixes = [lines[i]["question"] for i in range(self.prefix_num)]
     for i, line in enumerate(lines):
         prefix = prefixes[i % self.prefix_num]
-        suffix = line["question"][len(prefix):]
+        suffix = line["question"][len(prefix) :]
         line["question"] = prefix + suffix
 
     new_path = dataset_path + f".prefix_num{self.prefix_num}.jsonl"
