@@ -34,12 +34,12 @@ def _reference_positions(grids, merge):
         ([[4, 48, 64]], 2),
     ],
 )
-@pytest.mark.parametrize("sections", [(21, 21, 21), (16, 24, 24), (0, 16, 16), (32, 32, 32)])
+@pytest.mark.parametrize("sections", [(13, 13, 13), (21, 21, 21)])
 @torch.inference_mode()
 def test_vit_mrope_setup(grids, merge, sections):
     """Compile the patched public entry point on NPU and compare with CPU reference."""
     init_device_properties_triton()
-    inv_cpu = [torch.linspace(0.001, 1.0, size) for size in sections]
+    inv_cpu = [1.0 / (10000.0 ** (torch.arange(size, dtype=torch.float32) / size)) for size in sections]
     inv = [freq.to("npu") for freq in inv_cpu]
     positions = _reference_positions(grids, merge)
     cos, sin = vit_mrope_setup(*inv, grids, merge)

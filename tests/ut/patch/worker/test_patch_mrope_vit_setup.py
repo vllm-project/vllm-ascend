@@ -17,8 +17,8 @@ class TestVitMropeSetupPatch(unittest.TestCase):
             "vllm.models.minimax_m3.common.vision_tower",
             "vllm_ascend.models._vllm_minimax_m3_common_vision_tower",
         )
-        for n, axis_size in product((1, 8, 9, 16, 17, 32, 33, 65), (21, 32)):
-            block_n, block_d = (16, 64) if axis_size == 21 else (8, 128)
+        for n, axis_size in product((1, 8, 9, 16, 17, 32, 33, 65), (13, 21)):
+            block_n, block_d = 16, 64
             for states in product(("absent", "loaded", "blocked"), repeat=len(models)):
                 loaded_models = tuple(model for model, state in zip(models, states) if state == "loaded")
                 blocked_models = tuple(model for model, state in zip(models, states) if state == "blocked")

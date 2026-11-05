@@ -9,18 +9,6 @@ from vllm.model_executor.layers.rotary_embedding.mrope_vit_setup import _vit_mro
 from vllm.triton_utils import triton
 from vllm.utils.torch_utils import async_tensor_h2d
 
-_MAX_BLOCK_N = 16
-_MAX_TILE_ELEMENTS = 1024
-
-
-def _get_mrope_block_shape(half_rot: int) -> tuple[int, int]:
-    # A5 validation covers half_rot=32/63/64/96. The 16x128 tile exceeds
-    # compiler UB capacity; use 8x128 instead. This is a launch heuristic,
-    # not a guarantee of UB capacity for arbitrary widths/compiler versions.
-    block_d = triton.next_power_of_2(half_rot)
-    block_n = min(_MAX_BLOCK_N, max(1, _MAX_TILE_ELEMENTS // block_d))
-    return block_n, block_d
-
 
 def vit_mrope_setup(
     inv_freq_t: torch.Tensor,
@@ -61,7 +49,7 @@ def vit_mrope_setup(
     half_rot = half_t + half_h + half_w
     cos = torch.empty(3, n, half_rot, device=device, dtype=torch.float32)
     sin = torch.empty(3, n, half_rot, device=device, dtype=torch.float32)
-    block_n, block_d = _get_mrope_block_shape(half_rot)
+    block_n = 16
     _vit_mrope_setup_kernel[(triton.cdiv(n, block_n),)](
         inv_freq_t,
         inv_freq_h,
@@ -77,7 +65,7 @@ def vit_mrope_setup(
         half_w=half_w,
         spatial_merge=spatial_merge_size,
         BLOCK_N=block_n,
-        BLOCK_D=block_d,
+        BLOCK_D=triton.next_power_of_2(half_rot),
         num_warps=8,
     )
     return cos, sin
