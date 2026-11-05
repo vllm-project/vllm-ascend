@@ -27,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
 )
 
+from vllm_ascend.attention.context_parallel.topology import resolve_cp_topology
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
@@ -322,13 +323,11 @@ def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAt
 
 
 def is_dcp_enabled():
-    parallel_config = get_current_vllm_config().parallel_config
-    return parallel_config.decode_context_parallel_size > 1
+    return resolve_cp_topology(get_current_vllm_config()).is_dcp_enabled
 
 
 def is_pcp_enabled():
-    parallel_config = get_current_vllm_config().parallel_config
-    return parallel_config.prefill_context_parallel_size > 1
+    return resolve_cp_topology(get_current_vllm_config()).is_pcp_enabled
 
 
 def uses_pcp_sharded_layout(common_attn_metadata: "AscendCommonAttentionMetadata", use_pcp: bool) -> bool:

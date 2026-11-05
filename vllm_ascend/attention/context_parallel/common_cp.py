@@ -13,6 +13,7 @@ from vllm_ascend.attention.context_parallel.metadata import (
     build_pcp_ordered_slot_mapping,
     use_history_current_split_decode,
 )
+from vllm_ascend.attention.context_parallel.topology import resolve_cp_topology
 from vllm_ascend.utils import enable_sfa, model_uses_kpool_indexer
 
 __all__ = [
@@ -61,8 +62,8 @@ def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
         # TODO: Adapt PCP decode request sharding for GLM-5.3-Flash, including
         # recurrent-state ownership and request ordering across PCP ranks.
         return False
-    parallel_config = vllm_config.parallel_config
-    return parallel_config.prefill_context_parallel_size > 1 and parallel_config.decode_context_parallel_size == 1
+    topology = resolve_cp_topology(vllm_config)
+    return topology.pcp_size > 1 and topology.dcp_size == 1
 
 
 def get_pcp_num_replicated_tokens(num_decode_tokens: int, is_decode_sharded: bool) -> int:
