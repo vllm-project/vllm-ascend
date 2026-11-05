@@ -70,6 +70,11 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.utils import (
+    HostSeqLensRequirement,
+    HostSeqLensRequirements,
+    resolve_host_seq_lens_requirements,
+)
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
@@ -256,6 +261,13 @@ class NPUModelRunner(GPUModelRunner):
             device="cpu",
             pin_memory=True,
         )
+
+        # Host seq-lens requirement contract (see
+        # https://github.com/vllm-project/vllm-ascend/issues/17479). Resolved
+        # over the instantiated target/draft metadata builders in
+        # initialize_kv_cache; EXACT is the conservative default before that.
+        self._host_seq_lens_requirements: HostSeqLensRequirements | None = None
+        self._host_seq_lens_requirement = HostSeqLensRequirement.EXACT
 
         # NOTE: In GPUModelRunner, decode_query_len is initialized in load_model(),
         # +1 is hardcoded here but not in vllm.
@@ -506,6 +518,17 @@ class NPUModelRunner(GPUModelRunner):
             for groups in self.attn_groups
             for group in groups
         )
+
+        # RFC #17479: aggregate the host seq-lens requirement over target and
+        # draft metadata builders. Never derived from model names or concrete
+        # backend tuples; a single EXACT consumer forces exact materialization
+        # for the whole execution so hybrid models stay correct.
+        self._host_seq_lens_requirements = resolve_host_seq_lens_requirements(
+            self.attn_groups,
+            self.speculator,
+        )
+        self._host_seq_lens_requirement = self._host_seq_lens_requirements.requirement
+        self._log_host_seq_lens_diagnostics()
 
         self.kvpp = KVPPRuntime.create_from_kv_cache(
             vllm_config=self.vllm_config,
@@ -1296,6 +1319,25 @@ class NPUModelRunner(GPUModelRunner):
             and not spec.enable_adaptive_verification
         )
 
+    def _log_host_seq_lens_diagnostics(self) -> None:
+        """RFC #17479 section 9.1: one structured startup diagnostic.
+
+        Built from configuration and class metadata only; never inspects
+        device tensors or synchronizes the NPU.
+        """
+        assert self._host_seq_lens_requirements is not None
+        requirements = self._host_seq_lens_requirements
+        consumers = {requirement.name: names for requirement, names in sorted(requirements.consumers.items())}
+        logger.debug(
+            "Host seq-lens requirement contract (RFC #17479, MRV2): requirement=%s consumers=%s undeclared=%s",
+            requirements.requirement.name,
+            consumers,
+            requirements.undeclared,
+        )
+
+    def _needs_exact_host_seq_lens(self) -> bool:
+        return self._host_seq_lens_requirement == HostSeqLensRequirement.EXACT
+
     def postprocess_sampled(
         self,
         idx_mapping,
@@ -1337,13 +1379,15 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         # Non-last PP stages receive rejections without owning a speculator.
-        if self.speculator is not None or self.sync_spec_pp_cpu_counts:
+        # RFC #17479: stage the exact-host snapshot only when an active
+        # consumer requires it.
+        if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and self._needs_exact_host_seq_lens():
             self._copy_num_computed_tokens_to_cpu()
 
     def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
         super().postprocess_num_computed_tokens(input_batch)
         # Unsampled prefill chunks must also refresh the next step's snapshot.
-        if self.sync_spec_pp_cpu_counts:
+        if self.sync_spec_pp_cpu_counts and self._needs_exact_host_seq_lens():
             self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
@@ -1371,8 +1415,13 @@ class NPUModelRunner(GPUModelRunner):
 
         # Wait for and consume the snapshot only when its producer runs.
         # req_states.num_computed_tokens_cpu also backs the NumPy view used by PCP.
-        if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and not self._can_skip_spec_cpu_length_sync():
-            # Blocks CPU submission until D2H completes; may stall the async pipeline.
+        # RFC #17479: exact-host materialization boundary; skipped entirely
+        # when no active consumer requires exact host seq lens.
+        if (
+            (self.speculator is not None or self.sync_spec_pp_cpu_counts)
+            and self._needs_exact_host_seq_lens()
+            and not self._can_skip_spec_cpu_length_sync()
+        ):
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]

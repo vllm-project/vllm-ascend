@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.utils import HostSeqLensRequirement
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.hardware_profile import (
     DeviceAdaptorFamily,
@@ -331,6 +332,10 @@ class AscendMiniMaxM3IndexerMetadata(AttentionMetadata):
 class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniMaxM3IndexerMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     reorder_batch_threshold: int = 1
+
+    # The M3 prefill path still syncs context lengths on host, so exact host
+    # seq lens stay materialized for it.
+    HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.EXACT
 
     def __init__(
         self,
@@ -799,6 +804,10 @@ class AscendMiniMaxM3SparseMetadata(AttentionMetadata):
 class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMaxM3SparseMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     reorder_batch_threshold: int = 1
+
+    # The M3 prefill path still syncs context lengths on host, so exact host
+    # seq lens stay materialized for it.
+    HOST_SEQ_LENS_REQUIREMENT = HostSeqLensRequirement.EXACT
 
     def __init__(
         self,
