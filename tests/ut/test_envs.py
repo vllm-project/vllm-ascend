@@ -61,7 +61,14 @@ class TestEnvVariables(TestBase):
     def test_boolean_env_parsing_and_invalid_values(self):
         truthy = ["1", "true", "yes", "on", "  True  ", "YES"]
         falsy = ["0", "false", "no", "off", "  False  ", "Off"]
-        for var_name in envs_ascend.BOOLEAN_ENV_VARS:
+        # The expected defaults are spelled out on purpose: deriving them from
+        # the implementation would let a wrong default still pass the assertions
+        # below.
+        expected_defaults = {"COMPILE_CUSTOM_KERNELS": True, "VERBOSE": False}
+        # Fail loudly if a boolean variable is added without covering it here.
+        self.assertEqual(set(expected_defaults), set(envs_ascend.BOOLEAN_ENV_VARS))
+
+        for var_name, expected_default in expected_defaults.items():
             with self.subTest(var=var_name):
                 original_val = os.environ.get(var_name)
                 try:
@@ -72,14 +79,12 @@ class TestEnvVariables(TestBase):
                         getattr(envs_ascend, var_name)
                     self.assertIn(var_name, str(ctx.exception))
 
-                    # Unset value yields the documented default; an empty value
-                    # (common with `export VAR=`) must fall back to exactly that
-                    # same default, so a variable whose default is True cannot
-                    # silently degrade to False.
+                    # Unset and empty values (the latter is common with
+                    # `export VAR=`) must both yield the documented default.
                     os.environ.pop(var_name, None)
-                    default_val = getattr(envs_ascend, var_name)
+                    self.assertIs(getattr(envs_ascend, var_name), expected_default)
                     os.environ[var_name] = ""
-                    self.assertIs(getattr(envs_ascend, var_name), default_val)
+                    self.assertIs(getattr(envs_ascend, var_name), expected_default)
 
                     # Every supported spelling maps to the expected boolean.
                     for val in truthy:
