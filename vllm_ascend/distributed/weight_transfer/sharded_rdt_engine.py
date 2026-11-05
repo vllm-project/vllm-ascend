@@ -71,6 +71,18 @@ class ShardedRDTHixlWeightTransferEngine(ShardedRDTWeightTransferEngine):
         # Start the background post-processing worker (pull/process pipelining).
         self._ensure_proc_worker()
 
+    def _bake(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
+        from vllm.model_executor.model_loader.reload.meta import SKIP_LOAD_TENSORS, SKIP_TENSORS
+
+        # Ascend's EP dispatcher registers this runtime routing buffer on the
+        # expert layer. It has no checkpoint entry: counting it makes a complete
+        # expert load look partial, and materializing it would corrupt routing.
+        # Extend the upstream process-wide skip registries, just as _expert_map
+        # is excluded there; do not temporarily mutate them around worker threads.
+        SKIP_LOAD_TENSORS.add("expert_ids_per_ep_rank")
+        SKIP_TENSORS.add("expert_ids_per_ep_rank")
+        super()._bake(init_info)
+
     def _resolve_producers(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Work out this worker's consumer identity, build the router, and bind
         EVERY producer actor.
