@@ -36,15 +36,16 @@ def _bool_env(name: str, default: str) -> bool:
     Unset or empty values fall back to the default.
     Invalid values raise a ValueError naming the variable.
     """
-    value = os.getenv(name, default).strip().lower()
-    if value in ("", None):
-        value = default.strip().lower()
+    raw_value = os.getenv(name, default)
+    value = raw_value.strip().lower() if raw_value is not None else ""
+    if value == "":
+        value = default.strip().lower() if default is not None else ""
     if value in ("1", "true", "yes", "on"):
         return True
     if value in ("0", "false", "no", "off"):
         return False
     raise ValueError(
-        f"Invalid value {os.getenv(name)!r} for environment variable {name!r}. "
+        f"Invalid value {raw_value!r} for environment variable {name!r}. "
         f"Expected one of: 1/0, true/false, yes/no, on/off (case-insensitive)."
     )
 
