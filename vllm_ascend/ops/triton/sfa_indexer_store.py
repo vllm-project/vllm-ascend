@@ -49,8 +49,8 @@ def store_indexer_key_scale(
     """Publish at the existing cache-write point, after the connector wait."""
     rows = slots.numel()
     key_width = quant.shape[-1]
-    key_block_stride = key_width if key_block_stride is None else key_block_stride
-    scale_block_stride = 1 if scale_block_stride is None else scale_block_stride
+    key_block_stride = block_size * key_width if key_block_stride is None else key_block_stride
+    scale_block_stride = block_size if scale_block_stride is None else scale_block_stride
     # Rows only set the launch grid; 12 was a test setting, not a kernel limit.
     _store_indexer_key_scale[(rows,)](
         quant,
