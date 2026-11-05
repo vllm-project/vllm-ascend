@@ -184,6 +184,12 @@ def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
     with (
         patch.object(AscendMambaHybridModelState, "__init__", side_effect=init_parent, autospec=True) as parent_init,
         patch.object(Ascend310PMambaHybridModelState, "_replace_310p_rope_state") as replace_rope,
+        # CPU-only UT never registers PrivateUse1 hooks, so the pinned
+        # staging allocation must be disabled here.
+        patch(
+            "vllm_ascend._310p.worker.v2.model_state.is_pin_memory_available",
+            return_value=False,
+        ),
     ):
         Ascend310PMambaHybridModelState.__init__(state, config, model, encoder_cache, device)
     parent_init.assert_called_once_with(state, config, model, encoder_cache, device)
@@ -517,6 +523,7 @@ def test_postprocess_sampled_keeps_last_token_on_device() -> None:
     runner._sampled_tokens_cpu = sampled_tokens
     runner._num_sampled_cpu = num_sampled
     runner._num_rejected_cpu = num_rejected
+    runner._last_tokens_staging = torch.empty(2, dtype=torch.int64)
 
     with patch.object(model_runner_module, "_post_update_cpu", return_value=num_sampled.cpu()) as post_update:
         runner.postprocess_sampled(
@@ -552,6 +559,7 @@ def test_sample_without_drafts_updates_cpu_history(has_rejection_sampler, needs_
     runner.sampler.needs_cpu_token_history.return_value = needs_cpu_history
     runner._postprocess_idx_mapping_np = np.array([1, 0], dtype=np.int32)
     runner._postprocess_query_start_loc_np = np.array([0, 2, 4], dtype=np.int32)
+    runner._last_tokens_staging = torch.empty(2, dtype=torch.int64)
     for name, dtype in (
         ("_num_sampled_staging", torch.int32),
         ("_num_rejected_staging", torch.int32),
@@ -752,6 +760,20 @@ def test_sampler_logprobs_returns_sampled_and_topk() -> None:
     assert out.logprobs_tensors.logprobs.shape == (1, 3)
 
 
+def _init_packed_copy_buffers(
+    rejection: RejectionSampler310V2,
+    max_num_reqs: int,
+    num_spec: int,
+) -> None:
+    """Set up the packed-D2H staging buffers skipped by ``__new__`` construction."""
+    rejection._packed_width = num_spec + 3
+    rejection._packed_dev = torch.empty(max_num_reqs * rejection._packed_width, dtype=torch.int32)
+    rejection._packed_cpu = torch.empty_like(rejection._packed_dev)
+    rejection._chunked_prefill_cpu = torch.empty(max_num_reqs, dtype=torch.bool)
+    rejection._copy_pending = False
+    rejection._pending_num_reqs = 0
+
+
 def test_rejection_sampler_uses_processed_logits_and_raw_logprobs() -> None:
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=3)
     _add_request(sampler, 0, 1, SamplingParams(temperature=0, allowed_token_ids=[2], logprobs=1))
@@ -763,7 +785,7 @@ def test_rejection_sampler_uses_processed_logits_and_raw_logprobs() -> None:
     rejection.sampled_tokens_cpu = torch.empty((1, 2), dtype=torch.int32)
     rejection.num_sampled_cpu = torch.empty(1, dtype=torch.int32)
     rejection.num_rejected_cpu = torch.empty(1, dtype=torch.int32)
-    rejection._copy_stream = MagicMock()
+    _init_packed_copy_buffers(rejection, max_num_reqs=1, num_spec=1)
     rejection._copy_event = MagicMock()
     batch = SimpleNamespace(
         num_reqs=1,
@@ -854,7 +876,7 @@ def test_mtp_history_uses_logits_input_rows(num_spec, processor):
     rejection.sampled_tokens_cpu = torch.empty((1, num_spec + 1), dtype=torch.int32)
     rejection.num_sampled_cpu = torch.empty(1, dtype=torch.int32)
     rejection.num_rejected_cpu = torch.empty(1, dtype=torch.int32)
-    rejection._copy_stream = MagicMock()
+    _init_packed_copy_buffers(rejection, max_num_reqs=1, num_spec=num_spec)
     rejection._copy_event = MagicMock()
     # Prefix input tokens do not produce logits; they must not count as drafts.
     batch = SimpleNamespace(
