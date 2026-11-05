@@ -113,3 +113,104 @@ def test_preprocess_writes_hisparse_mapping_once(cache_dtype, capture):
         torch.npu.synchronize()
         if graph is not None:
             graph.reset()
+
+
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("rows", [4, 16])
+def test_c8_prolog_keeps_parent_outputs_and_hisparse_destination(rows, capture):
+    _setup()
+    from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
+    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+    from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+
+    torch.manual_seed(71)
+    device, block, width = "npu", 128, 656
+    impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
+    impl._quant_type = AscendW8A8DynamicLinearMethod
+    impl.enable_sparse_sfa_c8 = True
+    impl.c8_cache_dtype = torch.float8_e4m3fn
+    impl.q_lora_rank, impl.kv_lora_rank, impl.qk_rope_head_dim = 2048, 512, 64
+    impl.local_num_heads, impl.has_indexer = 8, True
+    impl.is_kv_consumer, impl.rl_weight_update_enabled = False, False
+    impl.sfa_qsfa_tile_size = block
+    impl._kv_staging_capacity = block
+    impl.fused_qkv_a_proj = SimpleNamespace(
+        weight=torch.randint(-4, 5, (6144, 2624), dtype=torch.int8, device=device),
+        weight_scale=torch.full((2624,), 0.02, dtype=torch.float32, device=device),
+    )
+    impl.q_proj = SimpleNamespace(
+        weight=torch.randint(-4, 5, (2048, 2048), dtype=torch.int8, device=device),
+        weight_scale=torch.full((2048,), 0.02, dtype=torch.float32, device=device),
+    )
+    impl.W_UK_T = torch.randn(8, 192, 512, dtype=torch.bfloat16, device=device) * 0.02
+    impl.q_a_layernorm = SimpleNamespace(
+        weight=torch.ones(2048, dtype=torch.bfloat16, device=device), variance_epsilon=1e-5
+    )
+    impl.kv_a_layernorm = SimpleNamespace(
+        weight=torch.ones(512, dtype=torch.bfloat16, device=device), variance_epsilon=1e-5
+    )
+    # Use the parent's production quantized-weight preparation and Prolog as
+    # the oracle. This case tests ownership/addressing, not Prolog arithmetic.
+    impl._process_weights_for_fused_prolog_v3()
+    impl.sfa_qsfa_kr_cache_dummy = torch.empty(0, dtype=torch.bfloat16, device=device)
+    staging = torch.empty((1, block, 1, width), dtype=impl.c8_cache_dtype, device=device)
+    local_slots = torch.arange(block, dtype=torch.int64, device=device)
+    impl._c8_prolog_workspace = lambda: (staging, local_slots)
+    raw = torch.full((3, 2, block, width), 90, dtype=torch.uint8, device=device)
+    destination = raw[:, 1].view(impl.c8_cache_dtype)
+    logical = [-1, 129, 0, 257, 128][:rows] + list(range(16, 16 + max(0, rows - 5)))
+    slots = torch.tensor(logical, dtype=torch.int64, device=device)
+    impl.hisparse_cache = SimpleNamespace(write_target=lambda count, slot_count: (destination, slots, count))
+    metadata = SimpleNamespace(
+        query_start_loc=torch.tensor([0, rows], dtype=torch.int32, device=device), hisparse_for_capture=True
+    )
+    x = torch.randn(rows, 6144, dtype=torch.bfloat16, device=device)
+    cos = torch.ones(rows, 1, 1, 64, dtype=x.dtype, device=device)
+    sin = torch.zeros_like(cos)
+    reference = torch.empty_like(staging)
+
+    def forward():
+        return impl._sfa_preprocess_prolog_v3(x, (), cos, sin, slots, attn_metadata=metadata)
+
+    def compare(actual, expected):
+        if isinstance(actual, tuple):
+            assert len(actual) == len(expected)
+            for a, e in zip(actual, expected):
+                compare(a, e)
+        elif actual is not None:
+            torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
+        else:
+            assert expected is None
+
+    graph = None
+    try:
+        forward()
+        torch.npu.synchronize()
+        if capture:
+            graph = torch.npu.NPUGraph()
+            with torch.npu.graph(graph):
+                captured = forward()
+        for valid in (rows - 1, 2):
+            x.neg_()
+            metadata.query_start_loc[-1:].fill_(valid)
+            raw.fill_(90)
+            if graph is None:
+                actual = forward()
+            else:
+                graph.replay()
+                actual = captured
+            expected = AscendSFAImpl._sfa_preprocess_prolog_v3(
+                impl, x, (reference,), cos, sin, local_slots[:rows], attn_metadata=metadata
+            )
+            torch.npu.synchronize()
+            compare(actual, expected)
+            payload = reference.view(torch.uint8).reshape(block, width).cpu()
+            wanted = torch.full(raw.shape, 90, dtype=torch.uint8)
+            for row, slot in enumerate(logical):
+                if row < valid and slot >= 0:
+                    wanted[slot // block, 1, slot % block] = payload[row]
+            torch.testing.assert_close(raw.cpu(), wanted, rtol=0, atol=0)
+    finally:
+        torch.npu.synchronize()
+        if graph is not None:
+            graph.reset()
