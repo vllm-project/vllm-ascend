@@ -193,6 +193,34 @@ def test_zero_expert_contribution_is_consumed_once_before_hc_post(monkeypatch):
     assert router._zero_expert_output is None
 
 
+def test_precombined_mega_moe_output_keeps_native_hc_post(monkeypatch):
+    shared, routed, residual, post, comb = _inputs()
+    combined = shared + routed
+    runner = module.AscendMoERunner.__new__(module.AscendMoERunner)
+    torch.nn.Module.__init__(runner)
+    runner.moe_config = SimpleNamespace(tp_size=2, ep_size=16, is_sequence_parallel=False)
+    runner.router = SimpleNamespace()
+    runner._should_reduce_routed_before_combine = lambda: False
+    runner._maybe_reduce_final_output = MagicMock(side_effect=lambda value, size, reduced: value)
+    runner._maybe_add_zero_expert_output = lambda value: value
+    monkeypatch.setattr(module, "_EXTRA_CTX", SimpleNamespace(moe_comm_type=MoECommType.MC2))
+    monkeypatch.setattr(module, "get_forward_context", lambda: SimpleNamespace(no_compile_layers={"layer": runner}))
+    fused = MagicMock(side_effect=AssertionError("MegaMoE has already combined the expert outputs"))
+    monkeypatch.setattr(module, "fused_hc_post_add", fused)
+    monkeypatch.setattr(
+        torch.ops._C_ascend,
+        "npu_hc_post",
+        lambda value, h, p, c: _post_reference(value[0], h[0], p[0], c[0]).unsqueeze(0),
+        raising=False,
+    )
+
+    actual = module._ascend_moe_hc_post(None, combined, residual, post, comb, "layer", 0)
+
+    assert torch.equal(actual, _post_reference(combined, residual, post, comb))
+    runner._maybe_reduce_final_output.assert_called_once_with(combined, None, True)
+    fused.assert_not_called()
+
+
 def test_reference_keeps_bf16_add_rounding():
     shared = torch.tensor([[1.0]], dtype=torch.bfloat16)
     routed = torch.tensor([[2**-8]], dtype=torch.bfloat16)
