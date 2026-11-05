@@ -52,9 +52,18 @@ static ge::graphStatus InferShape4GroupedMatmulSwigluQuantV2(gert::InferShapeCon
     OP_CHECK_NULL_WITH_CONTEXT(context, weightScaleShape);
     int64_t m = xShape->GetDim(M_DIM_INDEX);
     int64_t nDimIndex = weightScaleShape->GetDimNum() - 1;
+    // MX quantMode=2 produces a 3D outScale [m, ceil(n/2/64), 2]; the trailing
+    // dim of weightScale is always the e8m0 pair, so detect MX via the attr
+    // instead of the weightScale dim num (packed MX is 4D, per-expert list MX
+    // is 3D [K/64, N, 2]).
+    bool mxQuantMode = false;
+    if (auto attrs = context->GetAttrs()) {
+        const int64_t *quantModePtr = attrs->GetInt(GMMSQ_INDEX_ATTR_QUANT_MODE);
+        mxQuantMode = quantModePtr != nullptr && *quantModePtr == QUANT_MODE_MX_TYPE;
+    }
     auto outScaleShape = context->GetOutputShape(1);
     OP_CHECK_NULL_WITH_CONTEXT(context, outScaleShape);
-    if (nDimIndex == OUT_DIM_LEN) {
+    if (nDimIndex == OUT_DIM_LEN || mxQuantMode) {
         auto attrs = context->GetAttrs();
         OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
         const bool *transposeWeightPtr = attrs->GetBool(WEIGHTSCALE_INDEX);

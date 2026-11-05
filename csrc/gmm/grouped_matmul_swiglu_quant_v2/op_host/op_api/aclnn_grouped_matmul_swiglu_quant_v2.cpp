@@ -112,22 +112,26 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzV2GetWorkspaceSize(const aclTen
     // weight在该场景下强制绑定StorageFormat 和 ViewFormat 为NZ
     CHECK_RET(weight != nullptr, ACLNN_ERR_PARAM_NULLPTR);
     size_t wLength = weight->Size();
+    // Detect transposed layout from weight strides (strides[-2]==1 and
+    // strides[-1]==shape[-2]). The k-dim check in the handler runs BEFORE the
+    // stride-based transpose detection (CheckMXTranspose), so the attr must
+    // reflect the actual layout here.
+    auto isTransposeLastTwoDims = [](const aclTensor *t) {
+        auto viewShape = t->GetViewShape();
+        int64_t dimNum = viewShape.GetDimNum();
+        if (dimNum < 2) {
+            return false;
+        }
+        auto strides = t->GetViewStrides();
+        return strides[dimNum - 2] == 1 && strides[dimNum - 1] == viewShape.GetDim(dimNum - 2);
+    };
+    bool transposeWeight = isTransposeLastTwoDims((*weight)[0]);
     if (wLength == 1) {
         // 单Tensor场景
         auto w = (*weight)[0];
         auto storgeShape = w->GetStorageShape();
         auto viewShape = w->GetViewShape();
         aclTensor *weightNZ = const_cast<aclTensor *>(w);
-        auto storageShape = w->GetStorageShape();
-        auto groupListViewShape = groupList->GetViewShape();
-        auto expertNum = groupListViewShape[0];
-        auto weightScale0 = (*weightScale)[0];
-        auto weightScaleStorageShape = weightScale0->GetViewShape();
-        auto n = weightScaleStorageShape[1];
-        auto xViewShape = x->GetViewShape();
-        auto k = xViewShape[1];
-        storageShape = {expertNum, n / 64, k / 16, 16, 8};
-        w->SetStorageShape(storageShape);
         CHECK_COND((storgeShape.GetDimNum() == WEIGHT_NZ_DIM_LIMIT), ACLNN_ERR_PARAM_INVALID,
                    "aclnnGroupedMatmulSwigluQuantWeightNzV2, The dimnum of storageShape for second input (weight)"
                  "must be 5. \n But StorageShape got %s , and dimNum is %lu.",
@@ -148,15 +152,6 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzV2GetWorkspaceSize(const aclTen
             auto storgeShape = w->GetStorageShape();
             auto viewShape = w->GetViewShape();
             aclTensor *weightNZ = const_cast<aclTensor *>(w);
-            auto storageShape = w->GetStorageShape();
-            auto groupListViewShape = groupList->GetViewShape();
-            auto weightScale0 = (*weightScale)[i];
-            auto weightScaleStorageShape = weightScale0->GetViewShape();
-            auto n = weightScaleStorageShape[0];
-            auto xViewShape = x->GetViewShape();
-            auto k = xViewShape[1];
-            storageShape = {n / 64, k / 16, 16, 8};
-            w->SetStorageShape(storageShape);
             CHECK_COND((storgeShape.GetDimNum() == MULTI_WEIGHT_NZ_DIM_LIMIT), ACLNN_ERR_PARAM_INVALID,
                        "aclnnGroupedMatmulSwigluQuantWeightNzV2, The dimnum of storageShape for second input (weight)"
                      "must be 4. \n But StorageShape got %s , and dimNum is %lu.",
@@ -178,7 +173,9 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzV2GetWorkspaceSize(const aclTen
         .SetGroupList(groupList).SetGroupListType(groupListType)
         .SetWeightAssistMatrix(weightAssistMatrix)
         .SetDequantAttr(dequantMode, dequantDtype)
+        .SetQuantAttr(quantMode, static_cast<int64_t> (output->GetDataType()))
         .SetLimitAttr(swigluLimit)
+        .SetTransposeAttr(transposeWeight)
         .SetScenario()
         .SetTuningConfig(tuningConfigOptional).Build();
     // 调用公共接口
