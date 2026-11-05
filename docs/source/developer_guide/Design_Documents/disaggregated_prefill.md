@@ -102,6 +102,25 @@ Taking MooncakeConnector as an example, the system is organized into three prima
 - **MooncakeConnectorScheduler**: Interface for scheduling the connectors within the engine core, responsible for managing KV cache transfer requirements and completion.
 - **MooncakeConnectorWorker**: Interface for managing KV cache registration and transfer in worker processes.
 
+#### V1 Mooncake internal layering
+
+The V1 Mooncake connectors keep their registration names and user-facing configuration, but their internals are split into a shared `mooncake_v1` package so that the wire protocol, transport helpers and pure-computation helpers no longer live inside the two engine-facing modules and can be unit-tested on their own.
+
+| Module | Responsibility |
+|---|---|
+| `kv_p2p/mooncake_v1/common/protocol.py` | Wire message constants (`GET_META_MSG`, `DONE_RECVING_MSG`, `DONE_SENDING_MSG`, `FAILED_SENDING_MSG`) and the shared metadata structures `PullAgentMetadata`, `LayerwiseAgentMetadata`, `LayerMetadata`, `RemotePortInfo`. Field names, field order and defaults are unchanged. |
+| `kv_p2p/mooncake_v1/common/tracker.py` | `KVCacheTaskTracker`: finished-request set consumed by the scheduler plus the delayed-free queue that bounds how long the prefill node keeps KV blocks alive after an aborted request. |
+| `kv_p2p/mooncake_v1/common/transport.py` | `SizedDict`, ZMQ helpers (`zmq_ctx`, `ensure_zmq_send`, `ensure_zmq_recv`, `group_concurrent_contiguous`, `split_if_not_byte_contiguous`, `string_to_int64_hash`) and the `RemoteSocketPool` with its idempotent `close()`. |
+| `kv_p2p/mooncake_v1/common/endpoints.py` | Handshake base/handshake port formulas for both connector families. The two historical pull and layerwise formula sets are kept independent; they are not merged. |
+| `kv_p2p/mooncake_v1/common/block_selection.py` | `GroupTransferInfo` plus 11 block-selection/truncation pure helpers (6 used by the pull scheduler, 5 by the layerwise scheduler). |
+| `kv_p2p/mooncake_v1/pull/metadata.py` | Pull request metadata types `ReqMeta`, `GroupPull`, `MooncakeConnectorMetadata` and the frozen `TransferRequest` wrapper, including the legacy-dict adapters (`from_legacy_kwargs`, `from_legacy_dict`, `as_legacy_dict`). |
+| `kv_p2p/mooncake_v1/pull/transfer_plan.py` | Pure transfer-plan helpers of the pull family: KV-head grouping, CP parameter validation/group metadata, port mapping and HMA shared-port balancing, remote host/port resolution, CP block-size parameters and kernel block parameters. |
+| `kv_p2p/mooncake_v1/layerwise/metaserver.py` | `MetaserverClient`: the TLS/plain `httpx.Client` construction, retry loop and idempotent `close()` used by the layerwise scheduler. |
+
+**Dependency direction.** The registered V1 entry modules (`kv_p2p/mooncake_connector.py` and `kv_p2p/mooncake_layerwise_connector.py`, selected by `KVConnectorFactory` with the existing connector names) compose these helpers and re-export the moved symbols, so existing imports and subclasses keep working. `mooncake_v1/common` never imports the V1 entry modules, which keeps the shared layer acyclic. The V2 `mooncake/` connector and the Hybrid connector are not modified by this layering.
+
+**Lifecycle.** Both V1 connectors implement an idempotent `shutdown()` hook. The pull worker signals and joins its transfer threads, shuts down the receive `ThreadPoolExecutor` and closes the remote socket pool; the layerwise scheduler first shuts down its executor and then closes the metaserver client, while the layerwise worker signals and joins its layer threads. The transfer-thread startup path uses the same idempotent shutdown for rollback when a thread exits early or does not become ready within the startup timeout. The sending threads record an unrecoverable error in `fatal_error`, which the worker exposes through `get_thread_fatal_error()` and logs once during shutdown; request-level aggregation of that error is not implemented yet.
+
 ### 4. Specifications Design
 
 This feature is flexible and supports various configurations, including setups with MLA and GQA models. It is compatible with A2 and A3 hardware configurations and facilitates scenarios involving equal TP setups and certain unequal TP setups across multiple P and D nodes.
@@ -120,6 +139,33 @@ This feature is flexible and supports various configurations, including setups w
 - 🚧 WIP: Under active development, will be supported soon.
 - 🟡 Planned: Scheduled for future implementation (some may have open PRs/RFCs).
 - 🔴 NO plan/Deprecated: No plan or deprecated by vLLM.
+
+### 5. Compatibility, rollback and known limitations
+
+#### Compatibility
+
+- **Configuration**: `--kv-transfer-config` keeps the same fields, semantics and defaults. No new required configuration key or environment variable is introduced.
+- **Registration**: the connector names registered through `KVConnectorFactory` are unchanged (`MooncakeConnectorV1` / `MooncakeConnector`, `MooncakeLayerwiseConnector`, `MooncakeD2RHConnectorV1` and the Hybrid connector). Existing P/D deployment scripts keep working as-is.
+- **Imports**: the pre-refactor Python import paths keep working. The V1 entry modules re-export the symbols that moved to `mooncake_v1` (for example the wire message constants and the metadata types; the pull module additionally keeps `KVCacheTaskTracker` and `RemotePortInfo` importable), so downstream code that imports them from `mooncake_connector` / `mooncake_layerwise_connector` does not need to change.
+- **Wire format**: message constants and metadata field names, field order and default values are unchanged, so peers running the old and the new code remain compatible.
+- **D2RH inheritance seam**: the D2RH connector still receives a legacy dictionary in `_transfer_kv_cache_all_groups(req_meta: dict)`; the pull thread queue keeps carrying a dictionary produced by `TransferRequest.as_legacy_dict()` with the same keys and order as before.
+- **Out of scope**: the Hybrid connector and the V2 `mooncake/` connector are untouched by this layering.
+
+#### Migration
+
+No user action is required: there are no new required configuration keys, environment variables, connector names or wire changes. As an internal refactor it needs no release note.
+
+#### Rollback
+
+There is no feature flag. The change is split into self-contained, single-topic commits (shared layer, scheduler helpers, worker transfer-plan helpers, lifecycle/error handling, documentation), so it can be reverted per commit or per pull request without touching the remaining layers.
+
+#### Known limitations
+
+1. **Layerwise startup wait**: the layerwise worker used to wait for its layer threads without a timeout. It now fails back after a 5-minute timeout, polling every 3 seconds. A slow but healthy startup can therefore be delayed by up to roughly 3 extra seconds once, and a failed startup now raises instead of hanging indefinitely.
+2. **Fatal thread errors are only recorded**: an unrecoverable error in a sending thread is stored in `fatal_error`, exposed by `get_thread_fatal_error()` and logged once during shutdown. It is not yet aggregated into request-level `failed_recving` results; that is a follow-up.
+3. **D2RH cleanup is partial**: the D2RH connector inherits the shared shutdown and startup-rollback paths for the base threads, executor and socket pool, but its CPU-staging thread and staging resources are not stopped yet, and its startup path is not covered by the shared rollback yet.
+4. **Follow-up structural work**: the reformat subsystem extraction, the remaining transfer-plan pure helpers (DCP shards, group pulls, hybrid remote-rank group pulls, SFA replicate-K block ids, remote-rank selection) and a layerwise step-controller / read-only metadata split are intentionally deferred to later changes.
+5. **V1/V2 helper unification**: V1 `mooncake_v1/common/transport.py` and V2 `mooncake/utils.py` are not unified. V2 `mooncake/__init__.py` eagerly imports the V2 package and keeps its own `zmq_ctx`/`SizedDict`, so merging the two helper layers is left for a follow-up pull request.
 
 ---
 
