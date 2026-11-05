@@ -181,9 +181,18 @@ def _check_payload_rows(tensor, name, device, dtype, rows) -> None:
 class HiSparseNPUOps:
     """Runtime-owned implementations of the upstream HiSparse operator ABI."""
 
-    def __init__(self, host_mapping: MappedHostTensor, workspace: ResolverWorkspace | None = None) -> None:
+    def __init__(
+        self,
+        host_mapping: MappedHostTensor,
+        workspace: ResolverWorkspace | None = None,
+        *,
+        attention_capacity: int = 0,
+        attention_block_stride: int | None = None,
+    ) -> None:
         self.host_mapping = host_mapping
         self.workspace = workspace
+        self.attention_capacity = attention_capacity
+        self.attention_block_stride = attention_block_stride
 
     def hisparse_resolve_residency(
         self,

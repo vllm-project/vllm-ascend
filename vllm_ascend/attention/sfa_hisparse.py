@@ -321,7 +321,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # which would duplicate the write and can overwrite unrelated slab rows.
         return k_pe, k_nope
 
-    def _c8_physical_attention(self, query, query_rope, cache, indices):
+    def _c8_physical_attention(self, query, query_rope, cache, indices, *, indices_are_mapped=False):
         """Adapt native packed rows to the existing quantized SFA operation.
 
         Keep compaction stable, including duplicates. The two current lengths are
@@ -348,7 +348,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
             raise ValueError("HiSparse C8 lengths must be int32 scalar tensors")
         if not math.isfinite(scale) or scale <= 0:
             raise ValueError("HiSparse C8 attention scale must be finite and positive")
-        mapped = compact_c8_indices(map_c8_physical_indices(indices, block, stride_rows, capacity))
+        mapped = (
+            indices
+            if indices_are_mapped
+            else compact_c8_indices(map_c8_physical_indices(indices, block, stride_rows, capacity))
+        )
         packed_query = torch.cat((query, query_rope), dim=-1)
         query_ends.fill_(rows)
         key_length.fill_(view.shape[0])
@@ -376,9 +380,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
             result = result[0]
         return torch.where((mapped >= 0).any(dim=-1)[:, None, None], result, 0)
 
-    def _attention_physical(self, query, query_rope, packed_cache, physical_topk):
+    def _attention_physical(self, query, query_rope, packed_cache, physical_topk, *, indices_are_mapped=False):
         if self.enable_sparse_sfa_c8:
-            return self._c8_physical_attention(query, query_rope, packed_cache, physical_topk)
+            return self._c8_physical_attention(
+                query, query_rope, packed_cache, physical_topk, indices_are_mapped=indices_are_mapped
+            )
         from vllm_ascend.hisparse.cache_ops import pack_attention_rows
 
         latent, rope, block_table, indices, query_ends, seq_lens = self._workspace(query.dtype)
@@ -437,8 +443,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
         logical = topk_indices.squeeze(1) if topk_indices.ndim == 3 else topk_indices
         assert metadata.req_id_per_token is not None
         assert metadata.query_start_loc is not None
-        rows = torch.arange(logical.shape[0], dtype=torch.int32, device=logical.device)
-        logical = torch.where(rows[:, None] < metadata.query_start_loc[-1], logical, -1)
+        if metadata.num_prefills:
+            rows = torch.arange(logical.shape[0], dtype=torch.int32, device=logical.device)
+            logical = torch.where(rows[:, None] < metadata.query_start_loc[-1], logical, -1)
+        # Decode's resolver already masks graph padding from this same device
+        # scalar. Keep that validation at the producer of physical indices.
         self.index_group.set_logical_topk_ready(self.index_group_index)
         outputs = []
         num_decode = metadata.num_decode_tokens
@@ -461,6 +470,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
                     q_pe[:num_decode] if q_pe is not None else None,
                     self.index_group.physical_kv_cache(self.index_group_index),
                     physical,
+                    indices_are_mapped=cache.runtime.cache_ops.attention_capacity > 0,
                 )
             )
         if metadata.num_prefills:

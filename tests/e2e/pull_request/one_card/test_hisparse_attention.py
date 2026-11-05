@@ -111,7 +111,8 @@ def test_sparse_attention_reference(num_queries, strided, capture):
 
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("strided", [False, True])
-def test_c8_attention_uses_existing_native_operator(strided, capture):
+@pytest.mark.parametrize("indices_are_mapped", [False, True])
+def test_c8_attention_uses_existing_native_operator(strided, capture, indices_are_mapped):
     from vllm_ascend.device.device_config import is_950
 
     if not is_950():
@@ -141,7 +142,17 @@ def test_c8_attention_uses_existing_native_operator(strided, capture):
     indices[0] = -1
     indices[0, :3] = torch.tensor([3, 3, 7], dtype=torch.int32)
     indices[-1] = -1
-    selected = indices.to(device)
+
+    def selection():
+        if not indices_are_mapped:
+            return indices
+        output = torch.full_like(indices, -1)
+        for original, target in zip(indices.tolist(), output):
+            values = [value // block * (cache.stride(0) // 656) + value % block for value in original if value >= 0]
+            target[: len(values)] = torch.tensor(values, dtype=torch.int32)
+        return output
+
+    selected = selection().to(device)
     query_end, key_length = (torch.empty(1, dtype=torch.int32, device=device) for _ in range(2))
     impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
     impl.enable_sparse_sfa_c8 = True
@@ -150,7 +161,7 @@ def test_c8_attention_uses_existing_native_operator(strided, capture):
     impl._c8_length_workspace = lambda: (query_end, key_length)
 
     def forward():
-        return impl._attention_physical(q, qr, cache, selected)
+        return impl._attention_physical(q, qr, cache, selected, indices_are_mapped=indices_are_mapped)
 
     graph = None
     try:
@@ -162,7 +173,7 @@ def test_c8_attention_uses_existing_native_operator(strided, capture):
             with torch.npu.graph(graph):
                 output = forward()
             indices[0, :4] = torch.tensor([9, 2, 9, 0], dtype=torch.int32)
-            selected.copy_(indices)
+            selected.copy_(selection())
             q.neg_()
             graph.replay()
         else:
