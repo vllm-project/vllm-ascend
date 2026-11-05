@@ -3,14 +3,18 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 
-"""Collect live model tensors and adapt their layout for RFork transfer."""
+"""Collect and describe live model tensors for RFork transfer."""
 
+import dataclasses
 import enum
 import hashlib
 import json
 import logging
+import weakref
+from bisect import bisect_right
+from collections import Counter
 from collections.abc import Iterator
-from types import FunctionType, MethodType
+from types import FunctionType, MethodType, ModuleType
 from typing import Any
 
 import regex as re
@@ -19,13 +23,6 @@ from torch import nn
 from vllm.logger import logger
 
 from vllm_ascend.model_loader.rfork.local_weights import get_local_tensor_ids
-from vllm_ascend.model_loader.rfork.manifest import (
-    normalize_dtype_name,
-    numel_from_shape,
-    read_npu_format,
-)
-
-TENSOR_LAYOUT_SAMPLE_LIMIT = 3
 
 # Exact types only: numeric subclasses can carry tensor attributes.
 _TENSOR_ATTRIBUTE_LEAF_TYPES = frozenset({str, bytes, int, float, bool, complex, type(None)})
@@ -34,6 +31,49 @@ _TENSOR_ATTRIBUTE_LEAF_TYPES = frozenset({str, bytes, int, float, bool, complex,
 _RUNTIME_ONLY_TENSOR_NAMES = frozenset({"topk_indices_buffer", "_rope_derived_cos_cache", "_rope_derived_sin_cache"})
 
 _PLAIN_PATH_SEGMENT = re.compile(r"[A-Za-z0-9_]+")
+
+# Workspaces that post-load processing allocates without reading weight values.
+POST_LOAD_RUNTIME_ONLY_ATTRS = _RUNTIME_ONLY_TENSOR_NAMES | frozenset(
+    {
+        "_flashmla_writer_buffers",
+        "_strided_kv_workspace",
+        "_dcp_current_kv_buffers",
+        "_dcp_prefill_current_kv_buffers",
+    }
+)
+
+_MODULE_INTERNAL_ATTRS = frozenset(vars(nn.Module()))
+_MODEL_STATE_SKIPPED_TYPES = (nn.Module, str, bytes, type, FunctionType, MethodType, ModuleType, enum.Enum)
+# Bounds the walk through configs and helpers reachable from module attributes.
+_MAX_MODEL_STATE_DEPTH = 8
+
+
+def normalize_dtype_name(dtype: Any) -> str | None:
+    if dtype is None:
+        return None
+    if isinstance(dtype, torch.dtype):
+        name = str(dtype)
+    elif isinstance(dtype, str):
+        name = dtype.strip()
+    else:
+        return None
+    if name.startswith("torch."):
+        name = name[6:]
+    return name.lower() if name else None
+
+
+def read_npu_format(tensor: torch.Tensor) -> int | None:
+    """Return the NPU storage format when it is available."""
+    if tensor.device.type != "npu":
+        return None
+    try:
+        import torch_npu
+    except Exception:  # pragma: no cover - CPU-only inspection and tests
+        return None
+    try:
+        return int(torch_npu.get_npu_format(tensor))
+    except Exception:
+        return None
 
 
 def _is_runtime_only_tensor(name: str) -> bool:
@@ -48,7 +88,7 @@ def _layout_digest(records: list[dict[str, Any]]) -> str:
 def build_structural_digest(
     tensors: list[tuple[str, torch.Tensor]], known_formats: dict[str, int] | None = None
 ) -> str:
-    """Hash the manifest's tensor IDs, shapes, dtypes, and NPU formats.
+    """Hash the manifest's tensor IDs, shapes, strides, dtypes, and NPU formats.
 
     Pass ``collect_transferable_tensors`` output to exclude runtime buffers.
     ``known_formats`` reuses NPU formats read during registration.
@@ -57,6 +97,7 @@ def build_structural_digest(
         {
             "name": name,
             "shape": tuple(int(dim) for dim in tensor.shape),
+            "stride": tuple(int(stride) for stride in tensor.stride()),
             "dtype": normalize_dtype_name(tensor.dtype),
             "npu_format": (
                 known_formats[name] if known_formats is not None and name in known_formats else read_npu_format(tensor)
@@ -72,156 +113,35 @@ def log_tensor_layout_summary(
     *,
     stage: str,
     session_id: str | None,
-    processed_layout: bool,
     peer_session_id: str | None = None,
     known_formats: dict[str, int] | None = None,
 ) -> None:
-    """Log a bounded summary of logical and physical tensor layouts at INFO."""
+    """Log a compact summary without affecting model loading."""
     if not logger.isEnabledFor(logging.INFO):
         return
-
     try:
-        import torch_npu
-    except Exception:
-        torch_npu = None
-
-    semantic_records: list[dict[str, Any]] = []
-    physical_records: list[dict[str, Any]] = []
-    samples: list[dict[str, Any]] = []
-    fallback_samples: list[dict[str, Any]] = []
-    format_counts: dict[str, int] = {}
-    error_counts: dict[str, int] = {}
-    logical_bytes_total = 0
-    unique_storage_bytes = 0
-    unique_storages: set[tuple[str, int]] = set()
-    storage_view_tensors = 0
-    physical_nonlogical_tensors = 0
-
-    def capture(read, field: str):
-        try:
-            return read()
-        except Exception as exc:
-            error_name = f"{field}:{type(exc).__name__}"
-            error_counts[error_name] = error_counts.get(error_name, 0) + 1
-            return "unavailable"
-
-    for name, tensor in sorted(tensors, key=lambda item: item[0]):
-        device = capture(lambda tensor=tensor: str(tensor.device), "device")
-        dtype = capture(lambda tensor=tensor: str(tensor.dtype), "dtype")
-        shape = capture(lambda tensor=tensor: tuple(int(value) for value in tensor.shape), "shape")
-        stride = capture(lambda tensor=tensor: tuple(int(value) for value in tensor.stride()), "stride")
-        numel = capture(lambda tensor=tensor: int(tensor.numel()), "numel")
-        element_size = capture(lambda tensor=tensor: int(tensor.element_size()), "element_size")
-        logical_bytes = (
-            numel * element_size if isinstance(numel, int) and isinstance(element_size, int) else "unavailable"
+        formats = Counter(
+            str(known_formats[name] if known_formats is not None and name in known_formats else read_npu_format(tensor))
+            for name, tensor in tensors
         )
-        storage_offset = capture(lambda tensor=tensor: int(tensor.storage_offset()), "storage_offset")
-        storage_bytes = capture(lambda tensor=tensor: int(tensor.untyped_storage().nbytes()), "storage_bytes")
-        storage_ptr = capture(lambda tensor=tensor: int(tensor.untyped_storage().data_ptr()), "storage_ptr")
-        if known_formats is not None and name in known_formats:
-            npu_format: Any = known_formats[name]
-        elif getattr(getattr(tensor, "device", None), "type", None) == "npu" and torch_npu is not None:
-            npu_format = capture(
-                lambda tensor=tensor: int(torch_npu.get_npu_format(tensor)),
-                "npu_format",
-            )
-        else:
-            npu_format = "unavailable"
-        if getattr(getattr(tensor, "device", None), "type", None) == "npu" and torch_npu is not None:
-            npu_storage_numel: Any = capture(
-                lambda tensor=tensor: int(torch_npu.get_storage_size(tensor)),
-                "npu_storage_numel",
-            )
-        else:
-            npu_storage_numel = "unavailable"
-
-        if isinstance(logical_bytes, int):
-            logical_bytes_total += logical_bytes
-        if isinstance(storage_ptr, int) and isinstance(storage_bytes, int):
-            storage_key = (str(device), storage_ptr)
-            if storage_key not in unique_storages:
-                unique_storages.add(storage_key)
-                unique_storage_bytes += storage_bytes
-        is_storage_view = (
-            isinstance(storage_offset, int)
-            and isinstance(storage_bytes, int)
-            and isinstance(logical_bytes, int)
-            and (storage_offset != 0 or storage_bytes != logical_bytes)
+        total_bytes = sum(tensor.numel() * tensor.element_size() for _, tensor in tensors)
+        logger.info(
+            "RFork tensor layout summary: stage=%s session=%s peer_session=%s tensors=%d bytes=%d formats=%s",
+            stage,
+            session_id,
+            peer_session_id,
+            len(tensors),
+            total_bytes,
+            dict(sorted(formats.items())),
         )
-        is_physical_nonlogical = (
-            isinstance(npu_storage_numel, int) and isinstance(numel, int) and npu_storage_numel != numel
-        )
-        storage_view_tensors += int(is_storage_view)
-        physical_nonlogical_tensors += int(is_physical_nonlogical)
-
-        semantic = {
-            "name": name,
-            "dtype": dtype,
-            "shape": shape,
-            "stride": stride,
-            "logical_bytes": logical_bytes,
-            "npu_format": npu_format,
-        }
-        physical = {
-            "name": name,
-            "storage_offset": storage_offset,
-            "storage_bytes": storage_bytes,
-            "npu_storage_numel": npu_storage_numel,
-        }
-        semantic_records.append(semantic)
-        physical_records.append(physical)
-        sample = {**semantic, **physical, "device": device}
-        if len(fallback_samples) < TENSOR_LAYOUT_SAMPLE_LIMIT:
-            fallback_samples.append(sample)
-        if (is_storage_view or is_physical_nonlogical) and len(samples) < TENSOR_LAYOUT_SAMPLE_LIMIT:
-            samples.append(sample)
-
-        format_key = str(npu_format)
-        format_counts[format_key] = format_counts.get(format_key, 0) + 1
-
-    if not samples:
-        samples = fallback_samples
-    logger.info(
-        "RFork tensor layout summary: stage=%s session=%s peer_session=%s layout=%s tensors=%d "
-        "logical_bytes=%d unique_storage_bytes=%d storage_view_tensors=%d physical_nonlogical_tensors=%d "
-        "formats=%s semantic_digest=%s physical_digest=%s samples=%s errors=%s",
-        stage,
-        session_id,
-        peer_session_id,
-        "processed" if processed_layout else "checkpoint",
-        len(semantic_records),
-        logical_bytes_total,
-        unique_storage_bytes,
-        storage_view_tensors,
-        physical_nonlogical_tensors,
-        format_counts,
-        _layout_digest(semantic_records),
-        _layout_digest(physical_records),
-        samples,
-        error_counts,
-    )
-
-
-def reshape_tensor_to_seed_shape(
-    name: str,
-    tensor: torch.Tensor,
-    seed_shape: tuple[int, ...] | None,
-    reshape_events: list[tuple[str, tuple[int, ...], tuple[int, ...]]] | None = None,
-) -> bool:
-    if seed_shape is None or tuple(tensor.shape) == seed_shape:
-        return True
-    if tensor.numel() != numel_from_shape(seed_shape):
-        logger.error("Weight shape mismatch for %s: local=%s, seed=%s", name, tuple(tensor.shape), seed_shape)
-        return False
-    local_shape = tuple(tensor.shape)
-    try:
-        tensor.data = tensor.data.view(seed_shape)
     except Exception as exc:
-        logger.error("Failed to reshape RFork tensor %s from %s to %s: %s", name, local_shape, seed_shape, exc)
-        return False
-    if reshape_events is not None:
-        reshape_events.append((name, local_shape, seed_shape))
-    return True
+        logger.info(
+            "RFork tensor layout summary: stage=%s session=%s peer_session=%s unavailable=%s",
+            stage,
+            session_id,
+            peer_session_id,
+            type(exc).__name__,
+        )
 
 
 def is_tensor_on_transfer_device(tensor: torch.Tensor) -> bool:
@@ -305,7 +225,7 @@ def _tensor_child_path(parent_path: str, kind: str, name: Any) -> str:
 
 
 def _iter_tensor_children(
-    value: Any, scan_objects: bool, processed_layout: bool, registered_only: bool
+    value: Any, scan_objects: bool, registered_only: bool
 ) -> Iterator[tuple[str, Any, Any, bool]]:
     if isinstance(value, nn.Module):
         # Read local registries: named_parameters/named_modules discard aliases before we can canonicalize them.
@@ -315,14 +235,9 @@ def _iter_tensor_children(
                     yield kind, name, item, False
         if registered_only:
             return
-        if processed_layout:
-            for name, item in vars(value).items():
-                if not name.startswith("_") and type(item) not in _TENSOR_ATTRIBUTE_LEAF_TYPES:
-                    yield "attribute", name, item, name == "impl"
-        else:
-            impl = getattr(value, "impl", None)
-            if type(impl) not in _TENSOR_ATTRIBUTE_LEAF_TYPES:
-                yield "attribute", "impl", impl, True
+        for name, item in vars(value).items():
+            if not name.startswith("_") and type(item) not in _TENSOR_ATTRIBUTE_LEAF_TYPES:
+                yield "attribute", name, item, name == "impl"
     elif registered_only:
         return
     elif isinstance(value, (list, tuple)):
@@ -380,7 +295,6 @@ def _tensor_child_key(
 
 def _collect_shortest_path_tensors(
     model: nn.Module,
-    processed_layout: bool,
     registered_only: bool,
     claimed: set[tuple[Any, ...]],
     tensor_metadata: dict[int, tuple[torch.Tensor, tuple[Any, ...] | None]],
@@ -403,7 +317,7 @@ def _collect_shortest_path_tensors(
                 collected.append((path, value))
                 continue
 
-            children = _iter_tensor_children(value, scan_objects, processed_layout, registered_only)
+            children = _iter_tensor_children(value, scan_objects, registered_only)
             child_paths: set[str] = set()
             for kind, name, item, child_scan_objects in children:
                 child_key = _tensor_child_key(kind, name, item, child_scan_objects, tensor_metadata, path)
@@ -425,7 +339,7 @@ def _collect_shortest_path_tensors(
         frontier = next_frontier
 
 
-def collect_transferable_tensors(model: nn.Module, processed_layout: bool) -> list[tuple[str, torch.Tensor]]:
+def collect_transferable_tensors(model: nn.Module) -> list[tuple[str, torch.Tensor]]:
     """Collect each tensor range once under its canonical shortest-path ID.
 
     Registered parameters and buffers take priority over attribute aliases so
@@ -435,11 +349,107 @@ def collect_transferable_tensors(model: nn.Module, processed_layout: bool) -> li
     tensor_metadata: dict[int, tuple[torch.Tensor, tuple[Any, ...] | None]] = {}
     collected: list[tuple[str, torch.Tensor]] = []
     for registered_only in (True, False):
-        _collect_shortest_path_tensors(model, processed_layout, registered_only, claimed, tensor_metadata, collected)
+        _collect_shortest_path_tensors(model, registered_only, claimed, tensor_metadata, collected)
     tensor_ids = [tensor_id for tensor_id, _ in collected]
     if len(tensor_ids) != len(set(tensor_ids)):
         raise ValueError("RFork encountered conflicting tensor IDs in one model.")
     return collected
+
+
+def _iter_model_state_tensors(model: nn.Module, exempt_attrs: frozenset[str]) -> Iterator[tuple[str, torch.Tensor]]:
+    """Yield tensors held by module attributes, including private attributes and nested helpers."""
+    if not isinstance(model, nn.Module):
+        return
+    stack: list[tuple[str, Any, int]] = []
+    for module_name, module in model.named_modules():
+        for name, value in vars(module).items():
+            if name not in _MODULE_INTERNAL_ATTRS and name not in exempt_attrs:
+                stack.append((f"{module_name}.{name}" if module_name else name, value, 0))
+    visited: set[int] = set()
+    while stack:
+        path, value, depth = stack.pop()
+        if isinstance(value, torch.Tensor):
+            yield path, value
+            continue
+        if (
+            type(value) in _TENSOR_ATTRIBUTE_LEAF_TYPES
+            or isinstance(value, _MODEL_STATE_SKIPPED_TYPES)
+            or depth >= _MAX_MODEL_STATE_DEPTH
+            or id(value) in visited
+        ):
+            continue
+        visited.add(id(value))
+        if isinstance(value, dict):
+            children = ((f"{path}[{key!r}]", item) for key, item in value.items())
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            children = ((f"{path}[{index}]", item) for index, item in enumerate(value))
+        elif dataclasses.is_dataclass(value):
+            children = (
+                (f"{path}.{field.name}", getattr(value, field.name, None))
+                for field in dataclasses.fields(value)
+                if field.name not in exempt_attrs
+            )
+        elif hasattr(value, "__dict__"):
+            children = ((f"{path}.{name}", item) for name, item in vars(value).items() if name not in exempt_attrs)
+        else:
+            continue
+        stack.extend((child_path, item, depth + 1) for child_path, item in children)
+
+
+def snapshot_model_state_tensors(
+    model: nn.Module, exempt_attrs: frozenset[str] = POST_LOAD_RUNTIME_ONLY_ATTRS
+) -> dict[int, weakref.ref[torch.Tensor]]:
+    """Record tensors that exist before post-load processing.
+
+    References are weak so the snapshot does not pin weights that processing replaces.
+    """
+    return {id(tensor): weakref.ref(tensor) for _, tensor in _iter_model_state_tensors(model, exempt_attrs)}
+
+
+def _tensor_byte_span(tensor: torch.Tensor) -> int:
+    extent = 1 + sum((int(size) - 1) * int(stride) for size, stride in zip(tensor.shape, tensor.stride(), strict=True))
+    return extent * tensor.element_size()
+
+
+def find_untransferred_post_load_tensors(
+    model: nn.Module,
+    baseline: dict[int, weakref.ref[torch.Tensor]],
+    transferable_tensors: list[tuple[str, torch.Tensor]],
+    exempt_attrs: frozenset[str] = POST_LOAD_RUNTIME_ONLY_ATTRS,
+) -> list[str]:
+    """Return tensors created by post-load processing outside the transferred byte ranges.
+
+    A receiver processes uninitialized weights before the transfer, so such tensors would keep
+    values derived from them. This misses values written in place into tensors that existed
+    before processing, and Python scalars derived from weights.
+    """
+    ranges: list[tuple[int, int]] = []
+    for start, end in sorted(
+        (tensor.data_ptr(), tensor.data_ptr() + tensor.numel() * tensor.element_size())
+        for _, tensor in transferable_tensors
+    ):
+        if ranges and start <= ranges[-1][1]:
+            ranges[-1] = (ranges[-1][0], max(ranges[-1][1], end))
+        else:
+            ranges.append((start, end))
+    starts = [start for start, _ in ranges]
+
+    untransferred: list[str] = []
+    seen: set[int] = set()
+    for path, tensor in _iter_model_state_tensors(model, exempt_attrs):
+        if id(tensor) in seen:
+            continue
+        seen.add(id(tensor))
+        previous = baseline.get(id(tensor))
+        if (previous is not None and previous() is tensor) or tensor.is_meta or tensor.numel() == 0:
+            continue
+        if is_tensor_on_transfer_device(tensor):
+            start = tensor.data_ptr()
+            index = bisect_right(starts, start) - 1
+            if index >= 0 and start + _tensor_byte_span(tensor) <= ranges[index][1]:
+                continue
+        untransferred.append(path)
+    return sorted(untransferred)
 
 
 def find_non_npu_state_tensors(model: Any) -> list[str]:

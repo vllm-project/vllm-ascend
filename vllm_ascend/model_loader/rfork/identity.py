@@ -305,8 +305,6 @@ def _resolve_sharded_dp_rank(vllm_config: VllmConfig) -> int | None:
 
 def build_seed_key(
     tp_rank: int,
-    model_url: str,
-    model_deploy_strategy_name: str,
     compatibility_fingerprint: str,
     structural_digest: str,
     is_draft_model: bool = False,
@@ -314,13 +312,6 @@ def build_seed_key(
     ep_rank: int | None = None,
     sharded_dp_rank: int | None = None,
 ) -> str:
-    if not model_url or not model_deploy_strategy_name:
-        raise RuntimeError(
-            f"RFork seed key is not set: model_url={model_url!r}, "
-            f"model_deploy_strategy_name={model_deploy_strategy_name!r}. "
-            "Configure both values through model_loader_extra_config or "
-            "MODEL_URL and MODEL_DEPLOY_STRATEGY_NAME."
-        )
     if not isinstance(compatibility_fingerprint, str) or not compatibility_fingerprint:
         raise RuntimeError(
             "RFork requires a compatibility fingerprint for the seed key; "
@@ -335,8 +326,6 @@ def build_seed_key(
     descriptor = {
         "compatibility_fingerprint": str(compatibility_fingerprint),
         "structural_digest": structural_digest,
-        "model_url": model_url,
-        "model_deploy_strategy_name": model_deploy_strategy_name,
         "tp_rank": tp_rank,
         "pp_rank": pp_rank,
         "ep_rank": ep_rank,

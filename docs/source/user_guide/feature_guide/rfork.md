@@ -15,11 +15,9 @@ The RFork loading flow in the current implementation is:
 3. RFork builds a **seed key** from the configuration fingerprint, structural digest, and deployment topology, then asks the planner for a compatible seed.
 4. If a seed is returned, RFork fetches its transfer metadata and copies weights into the registered local buffers through `YuanRong TransferEngine`.
 5. If no compatible seed is returned, or RFork setup, seed acquisition, or transfer fails with one of the error classes RFork handles (import, I/O, runtime, and value errors) in a stage that can be retried, RFork releases its registered memory and seed service, then falls back to the default loader. Fallback is conditional on that cleanup succeeding: if registered memory or the seed service cannot be released, RFork raises instead of allocating a second model while the old weights are still pinned.
-6. A successfully loaded model can publish a local seed service and send heartbeats to the planner. Publication waits for any source lease to be released.
+6. A successfully loaded model can publish a local seed service and send heartbeats to the planner. Publication runs in the background after any source lease is released.
 
 If the seed service or its planner advertisement fails after the model is loaded, inference continues. RFork logs the failure and keeps the model available, but that instance is not advertised as a seed.
-
-A draft model whose transferable weights are already owned by the loaded target model skips registration, seed acquisition, and transfer, and reports `source=shared_target`; see [MTP draft weight reuse](#when-does-a-draft-model-report-shared_target).
 
 Engram host-table handling and deployment-wide coordination are covered in the [FAQ](#faq).
 
@@ -33,7 +31,7 @@ Engram host-table handling and deployment-wide coordination are covered in the [
 | **Compatibility fingerprint** | Digest of configuration that changes tensor contents but not shapes, such as the RFork protocol version, model revision, quantization config, architecture, RoPE settings, `kv_role`, and `mix_placement`. |
 | **Structural digest** | Digest of the built model's transferable tensor inventory: stable IDs, shapes, dtypes, and NPU formats. |
 | **Lease** | Temporary allocation of seed capacity for one receiver, released through `/put_seed` after use. |
-| **Load source** | Final result reported in the load summary: `transfer`, `local`, `fallback`, or `shared_target`. |
+| **Load source** | Final result reported in the load summary: `transfer`, `local`, or `fallback`. |
 
 ## Architecture
 
@@ -46,9 +44,7 @@ flowchart TD
     A["vLLM starts with --load-format rfork"] --> B{"Bypassed by sleep mode, online weight transfer, or EPLB?"}
     B -- Yes --> Z["Default loader; no seed advertised"]
     B -- No --> C["Build model and prepare tensor layout"]
-    C --> D{"Draft weights fully owned by the target?"}
-    D -- Yes --> E["Reuse target weights; log source=shared_target"]
-    D -- No --> F["Register weight memory and bind seed key"]
+    C --> F["Register weight memory and bind seed key"]
     F --> G["Request a lease from the planner"]
     G --> H{"Compatible seed returned?"}
     H -- No --> I["Release RFork memory and seed service"]
@@ -107,7 +103,7 @@ in favor of the environment variable or the documented default, as described bel
 failure falls back depends on the exception class and, with Engram enabled, on the loading stage:
 the handled classes — import, I/O, runtime, and value errors — fall back in retryable loading stages,
 exceptions outside those classes abort startup, and coordinated stages that cannot be safely retried
-(model construction, shared-weight finalization, fallback cleanup, and local loading) abort on any
+(model construction, fallback cleanup, and local loading) abort on any
 failure. Unknown `model_loader_extra_config` keys are ignored with a warning, so check the
 spelling of every field.
 
@@ -235,22 +231,17 @@ On multi-NIC or multi-node deployments, pin both planes per node: set `rfork_see
 - `<deploy_strategy>`: Stable deployment-strategy name used to build the RFork seed key.
 - `<port>`: Serving port of the vLLM instance being started.
 
-Successful loads log `source=transfer`, `local`, `fallback`, or `shared_target`.
+Successful loads log `source=transfer`, `local`, or `fallback`.
 Successful TP0 weight reads also log transfer elapsed time, bytes, chunks, and
 throughput at INFO; other TP ranks and per-chunk timings remain at DEBUG.
+`RFork load timing` reports exclusive wall-clock stages for every RFork load attempt,
+including successful loads, fallback, and errors. `RFork registration timing` reports
+nested memory-registration stages; do not add the two totals together.
 Every successful registration, receiver-before-read, and final receiver stage
-emits one bounded `RFork tensor layout summary` at INFO per rank. The summary hashes all
-tensor IDs, shapes, strides, dtypes, NPU formats, logical byte counts, storage byte
-capacities, storage offsets, and NPU descriptor element counts into fixed-size
-semantic and physical digests. It also reports aggregate counts and at most
-three representative tensors, preferring storage views or tensors whose NPU
-descriptor size differs from logical `numel`. Match a receiver's `peer_session`
-to the seed's `session`. Digest differences are diagnostic and do not by
-themselves reject a transfer. On checkpoint-layout transfers, compare
-`receiver_before_read` with `receiver_after_post_load` to determine whether the
-post-load hook rebuilt the layout. Processed-layout transfers instead emit
-`receiver_after_transfer_finalize`, because their layout processing happened
-before the read. The summary does not copy tensor data or prove value equality;
+emits one `RFork tensor layout summary` at INFO per rank. The summary reports the
+stage, the local `session`, the `peer_session`, the tensor count, the logical byte
+count, and the number of tensors per NPU format. Match a receiver's `peer_session`
+to the seed's `session`. The summary does not copy tensor data or prove value equality;
 validate output accuracy separately on NPU hardware.
 Set `VLLM_LOGGING_LEVEL=DEBUG` for per-rank registration, metadata, transfer,
 lease-release, and publication timing.
@@ -333,13 +324,13 @@ The planner never connects to seed services; it only returns the advertised `SEE
 
 ## Supported Models
 
-RFork targets mainstream model families such as DeepSeek, Qwen, and GLM, but compatibility is determined by the transfer contract rather than the model family name. A model is eligible when its built NPU tensor inventory passes the structural-digest, tensor-ID, manifest, dtype, NPU-format, alias-graph, and non-NPU-state checks. DeepSeek V4.1 Engram CPU offload and `AscendDeepSeekMTP` checkpoint preparation have model-specific handling. For other models, quantization variants, or NPU formats, qualify RFork on the target model and hardware by confirming `source=transfer` and comparing output accuracy with the default loader.
+RFork targets mainstream model families such as DeepSeek, Qwen, and GLM, but compatibility is determined by the transfer contract rather than the model family name. A model is eligible when its built NPU tensor inventory passes the structural-digest, tensor-ID, manifest, dtype, NPU-format, alias-graph, post-load-state, and non-NPU-state checks. DeepSeek V4.1 Engram CPU offload and `AscendDeepSeekMTP` checkpoint preparation have model-specific handling. For other models, quantization variants, or NPU formats, qualify RFork on the target model and hardware by confirming `source=transfer` and comparing output accuracy with the default loader.
 
 ## Performance Considerations
 
 RFork indexes tensor address ranges to find backing allocations and uses binary search for memory-coverage checks during registration. Registration still adds seed startup cost, so RFork is most beneficial when later replicas reuse a seed rather than for a single cold start.
 
-For processed-layout transfers, RFork reuses the full registration inventory to compute the initial structural digest and reuses the final post-eval layout digest for immediate seed publication. Deferred publication scans the live model again; a structural mismatch prevents publication. Checkpoint-layout processing rebuilds memory registration and the transfer manifest after post-load processing, while retaining the initially bound digest and seed key without a publication-time digest check. This allows compatible post-load reshapes to keep the receiver's original lookup identity. Tensor names, element counts, dtypes, and NPU formats are still validated against the seed manifest before transfer.
+RFork computes the structural digest from the registration inventory, which already has the final post-load layout, and binds the seed key once. After the transfer and finalization, the receiver scans the model again and falls back to the default loader if its structure differs from registration. Seed publication reuses the transfer metadata captured at registration and does not scan the model again. A seed answers metadata requests only for its own seed key, which includes the structural digest, so tensor IDs, shapes, strides, dtypes, and NPU formats match before any bytes are read.
 
 Performance depends on model size, shard topology, NPU tensor layout, TransferEngine registration time, network bandwidth, and the number of concurrent destinations. Compare with the default loader using:
 
@@ -407,7 +398,6 @@ If you intentionally start a new seed pool without upgrading, change `model_depl
 - **Startup aborts during RFork setup or transfer.** The failure was not a fallback-eligible error class, or it happened in a stage that cannot be retried. The exception in the log identifies the failed step; fix it and restart the workers.
 - **`source=local` in the load summary.** No usable lease was acquired: no compatible seed was available, all seeds were out of capacity, or the planner request or response failed validation. Compare the logged `seed_key` and `structural_digest` against the seed instance's values, and check the planner's lease and capacity state. The example planner allows one concurrent lease per seed unless `--default-resource-points` is raised. A lease rejected after allocation is retained for release, so the planner may still show a short-lived allocation for this attempt.
 - **`source=fallback` in the load summary.** RFork failed with a handled error in a retryable stage and fell back to the default loader. This does not imply a lease was acquired: registration initializes the TransferEngine before any seed lease. Inspect the `RFork transfer failed` WARNING and the planner warning next to it.
-- **`source=shared_target` in the load summary.** A draft model reused weights already owned by its target model. No planner request or transfer occurred; this is expected when every draft tensor is shared, and it is not a fallback.
 - **Every instance reports `source=local`.** Usually a seed-key mismatch across instances: different model revisions or quantization configs, different `model_url` or `model_deploy_strategy_name` values, or different shard and layout settings. Diff the identity log (`RFork ... seed identity bound`) across instances. If the keys match, check whether the planner has exhausted each seed's capacity.
 - **Fingerprints match but structural digests differ.** The tensor inventories differ. Check weight dtype, NZ or fused MC2 layout switches, TP/PP/EP sharding, and quantization post-processing; use the `RFork tensor layout summary` to locate the differing tensors.
 - **Planner heartbeat or advertisement failures.** Temporary planner outages do not stop inference; retries continue in the background and logging is bounded to the first failure, periodic summaries, and recovery events. Check `rfork_scheduler_url` reachability and `rfork_request_timeout_sec`.
@@ -430,17 +420,16 @@ UVA pointers are not transferred.
 
 > **Coordination scope:** Whenever `engram_config` is set — with or without CPU offload — the loader stages wrapped by
 > the deployment-wide coordinator run over the deployment world's CPU group: session setup, model construction,
-> model-state preparation, host weight loading, shared-weight inspection, transfer-layout preparation, weight transfer,
+> model-state preparation, host weight loading, transfer-layout preparation, weight transfer,
 > transferred-model finalization, fallback cleanup, and local model loading. A fallback-eligible failure in one of those
 > stages — such as a seed miss, registration failure, or transfer failure — on any rank makes every rank load locally,
-> while failures in wrapped stages that cannot be safely retried, such as model construction, shared-weight
-> finalization, fallback cleanup, and local loading, abort every rank instead of splitting the group. Bypass selection
-> and processed-layout detection run before the coordinator is created, so they are not covered by this coordination.
+> while failures in wrapped stages that cannot be safely retried, such as model construction, fallback cleanup,
+> and local model loading, abort every rank instead of splitting the group. Bypass selection
+> runs before the coordinator is created, so it is not covered by this coordination.
 > This coordination is not yet covered by dedicated distributed tests; validate group fallback behavior on target
 > hardware before relying on it.
 
-The host-table rules below apply only with Engram CPU offload. The host table must finish loading before destination registration or shared-weight
-reuse. RFork records completion for the supported DeepSeek table implementation
+The host-table rules below apply only with Engram CPU offload. The host table must finish loading before destination registration. RFork records completion for the supported DeepSeek table implementation
 and checks tensor identity, storage address, and checkpoint binding before exempting
 its host tensors from the non-NPU state check. Other registered parameters and
 buffers that remain on CPU are still rejected. After the default loader successfully returns, RFork records the same
@@ -488,11 +477,11 @@ Seed removal and draining are optional control-plane extensions controlled by `r
 
 RFork transfers live NPU tensors after Ascend weight post-processing instead of raw checkpoint parameters. The receiver builds the same post-load tensor layout as the seed, and RFork copies the live NPU tensors used by inference. This handles weight transposition, NZ conversion, packed weights, derived scale tensors, and MLA/SFA runtime tensors such as `W_UV` and `W_UK_T`. Empty tensors released during post-processing are not included in the manifest.
 
-The processed-layout path also applies to non-quantized models when the Ascend configuration sets `weight_nz_mode=2` or the hardware weight-layout policy is `FORCE_NZ`; other non-quantized configurations use checkpoint-layout transfer. To validate, use the same vLLM Ascend code, compatible vLLM versions, the same model revision and quantization configuration, and matching shard and layout settings on both sides, then confirm `source=transfer` and compare output accuracy on NPU hardware. Tensor layout summaries help diagnose structural differences but do not prove tensor value equality.
+All models, quantized or not, use this post-load layout. Before registration, RFork checks that post-load processing did not create tensors the transfer cannot fill, such as private caches derived from weight values or host tensors. If it did, RFork logs the affected tensor paths and falls back to the default loader instead of keeping values derived from uninitialized weights. The MLA PROLOG_V3 projection cache is the exception: RFork rebuilds it from the transferred weights after the read. To validate, use the same vLLM Ascend code, compatible vLLM versions, the same model revision and quantization configuration, and matching shard and layout settings on both sides, then confirm `source=transfer` and compare output accuracy on NPU hardware. Tensor layout summaries help diagnose structural differences but do not prove tensor value equality.
 
 ### How do I tell a seed miss from a transfer failure?
 
-Seed acquisition that produces no usable lease — whether because no compatible seed is available, all seeds are out of capacity, or because the planner request or response fails validation — logs `seed acquisition was unsuccessful; loading locally` (INFO on the summary rank, DEBUG elsewhere) and reports `source=local`. A failure during RFork setup or transfer, such as registration, metadata, or weight-read errors, logs `RFork transfer failed` at WARNING and reports `source=fallback`. Inspect the planner warning to distinguish the two. A draft model that reuses target-owned weights reports `source=shared_target` instead and does not contact the planner. If the response fails validation after an allocation was created, RFork keeps that allocation for release and still reports `source=local`.
+Seed acquisition that produces no usable lease — whether because no compatible seed is available, all seeds are out of capacity, or because the planner request or response fails validation — logs `seed acquisition was unsuccessful; loading locally` (INFO on the summary rank, DEBUG elsewhere) and reports `source=local`. A failure during RFork setup or transfer, such as registration, metadata, or weight-read errors, logs `RFork transfer failed` at WARNING and reports `source=fallback`. Inspect the planner warning to distinguish the two. If the response fails validation after an allocation was created, RFork keeps that allocation for release and still reports `source=local`.
 
 ### Why do tensor IDs differ between seed and receiver?
 
@@ -500,7 +489,7 @@ Tensor IDs are readable canonical paths such as `layers.0.self_attn.impl.scales[
 
 ### Does RFork copy padding outside a tensor's payload?
 
-No. RFork intentionally reads exactly `numel * element_size` bytes for each tensor entry, including processed NZ, packed-weight, and derived-scale tensors. Allocation capacity, descriptor-only padding outside the tensor's dense logical range, and adjacent or shared storage are not part of that tensor's payload and are not copied implicitly. A future NPU format that requires bytes outside this range needs explicit manifest and transfer-protocol support. For dense transposes and reshapes, RFork transfers the one continuous byte range covered by a non-overlapping dense tensor and does not require a separate stride-equality check; gapped or overlapping layouts are rejected.
+No. RFork intentionally reads exactly `numel * element_size` bytes for each tensor entry, including processed NZ, packed-weight, and derived-scale tensors. Allocation capacity, descriptor-only padding outside the tensor's dense logical range, and adjacent or shared storage are not part of that tensor's payload and are not copied implicitly. A future NPU format that requires bytes outside this range needs explicit manifest and transfer-protocol support. For dense transposes and reshapes, RFork transfers the continuous byte range covered by each non-overlapping dense tensor. The structural digest includes stride, so seed and receiver must report matching strides. Gapped or overlapping layouts are rejected.
 
 ### What happens when MTP checkpoint metadata cannot be read?
 
@@ -514,17 +503,7 @@ head-ownership helper. It currently covers `AscendDeepSeekMTP` only. Other MTP i
 before registration; qualify `source=transfer` and output accuracy on the target model and hardware before relying on
 MTP weight reuse.
 
-### When does a draft model report `shared_target`? { #when-does-a-draft-model-report-shared_target }
-
-When a draft model is loaded after its target model, RFork checks whether every transferable draft tensor already falls
-inside a weight block registered by the target. If all draft weights are shared, no draft weight is independent, and no
-non-NPU state remains, RFork skips destination registration, seed acquisition, and the TransferEngine copy. It also
-skips post-load processing, because reprocessing can mutate target-owned storage, then finalizes the model and logs
-`source=shared_target`. This path never contacts the planner and does not publish the draft as a separate seed.
-
-If any draft tensor is independent or any non-NPU state exists, RFork follows the normal `transfer`, `local`, or
-`fallback` path instead. With Engram enabled, every deployment rank must reach the same decision; a split decision
-aborts startup rather than mixing shared and transferred draft weights.
+For MTP and EAGLE, RFork loads and transfers the draft model before the proposer shares weights with the target.
 
 ### How do I configure TransferEngine ports?
 

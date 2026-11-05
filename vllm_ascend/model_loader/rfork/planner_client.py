@@ -35,6 +35,14 @@ def lease_log_id(lease: SeedLease) -> str:
     return hashlib.sha256(lease.user_id.encode()).hexdigest()[:12]
 
 
+class InvalidSeedLeaseError(Exception):
+    """A planner allocation that cannot be used but still needs to be released."""
+
+    def __init__(self, lease: SeedLease, message: str) -> None:
+        super().__init__(message)
+        self.lease = lease
+
+
 class RForkPlannerClient:
     def __init__(
         self,
@@ -55,7 +63,6 @@ class RForkPlannerClient:
         self._advertisement_lock = threading.Lock()
         # None requires evidence from this endpoint before a 404 can acknowledge withdrawal.
         self._seed_removal_supported: bool | None = getattr(config, "seed_removal_supported", False)
-        self._rejected_seed_lease: SeedLease | None = None
         compatibility_fingerprint = identity.compatibility_fingerprint
         if compatibility_fingerprint is None:
             raise RuntimeError(
@@ -79,21 +86,6 @@ class RForkPlannerClient:
     def structural_digest(self) -> str | None:
         return self._structural_digest
 
-    def verify_structural_digest(self, digest: str) -> bool:
-        """Bind on first use; log when the live structure drifted from registration."""
-        if self._structural_digest is None:
-            self.bind_structural_digest(digest)
-            return True
-        if self._structural_digest != digest:
-            logger.error(
-                "RFork structural digest changed between registration and seed advertisement: "
-                "bound=%s current=%s; retaining the registered digest.",
-                self._structural_digest,
-                digest,
-            )
-            return False
-        return True
-
     @property
     def seed_key(self) -> str:
         if self._seed_key is None:
@@ -101,8 +93,6 @@ class RForkPlannerClient:
                 raise RuntimeError("RFork seed key requires a bound structural digest")
             self._seed_key = build_seed_key(
                 tp_rank=self.tp_rank,
-                model_url=self.config.model_url,
-                model_deploy_strategy_name=self.config.model_deploy_strategy_name,
                 compatibility_fingerprint=self._compatibility_fingerprint,
                 structural_digest=self._structural_digest,
                 is_draft_model=self._is_draft_model,
@@ -128,19 +118,7 @@ class RForkPlannerClient:
             "IS_DRAFT": str(self._is_draft_model).lower(),
         }
 
-    def take_rejected_lease(self) -> SeedLease | None:
-        """Hand a rejected allocation to the session for release retries, never for transfer."""
-        lease = self._rejected_seed_lease
-        self._rejected_seed_lease = None
-        return lease
-
     def acquire_seed(self) -> SeedLease | None:
-        if self._rejected_seed_lease is not None:
-            result = self.release_seed_once(self._rejected_seed_lease)
-            if result is not LeaseReleaseResult.RELEASED:
-                return None
-            self._rejected_seed_lease = None
-        lease_for_release: SeedLease | None = None
         try:
             self._require_planner()
             response = requests.get(
@@ -185,23 +163,16 @@ class RForkPlannerClient:
                 try:
                     parsed_lease_ttl_sec = float(lease_ttl_sec)
                 except (TypeError, ValueError, OverflowError) as exc:
-                    raise ValueError(f"planner returned malformed LEASE_TTL_SEC={lease_ttl_sec!r}") from exc
+                    raise InvalidSeedLeaseError(
+                        lease_for_release, f"planner returned malformed LEASE_TTL_SEC={lease_ttl_sec!r}"
+                    ) from exc
                 if not math.isfinite(parsed_lease_ttl_sec) or parsed_lease_ttl_sec <= 0:
-                    raise ValueError(f"planner returned invalid LEASE_TTL_SEC={lease_ttl_sec!r}")
+                    raise InvalidSeedLeaseError(
+                        lease_for_release, f"planner returned invalid LEASE_TTL_SEC={lease_ttl_sec!r}"
+                    )
             return replace(lease_for_release, lease_ttl_sec=parsed_lease_ttl_sec)
         except (requests.RequestException, RuntimeError, ValueError) as exc:
             logger.warning("RFork planner seed acquisition failed: %s", exc)
-            if lease_for_release is not None:
-                self._rejected_seed_lease = lease_for_release
-                result = self.release_seed_once(lease_for_release)
-                if result is LeaseReleaseResult.RELEASED:
-                    self._rejected_seed_lease = None
-                else:
-                    logger.warning(
-                        "RFork rejected a seed lease but could not return its planner allocation: lease=%s result=%s",
-                        lease_log_id(lease_for_release),
-                        result.name,
-                    )
             return None
 
     def release_seed_once(self, lease: SeedLease) -> LeaseReleaseResult:
