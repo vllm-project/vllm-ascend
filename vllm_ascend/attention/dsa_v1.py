@@ -1,3 +1,5 @@
+"""DeepSeek sparse attention backends and kernel runtime interfaces."""
+
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -31,6 +33,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapes,
     get_or_register_attention_buffer,
     is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
@@ -332,6 +335,28 @@ class AscendDSABackend(AttentionBackend):
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
         return num_blocks, block_size, num_kv_heads, head_size
+
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: AttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Return page components as byte shapes [B,H,N,C] (RFC vLLM#65650).
+
+        V4 stores NHD components regardless of the generic layout selection.
+        Its compressed-token count comes from the spec, not the manager's
+        raw-token kernel block size. The combined indexer view is an alias,
+        rather than a third sequential component.
+        """
+        tokens = get_storage_block_size(spec)
+        prefix = (num_blocks, spec.num_kv_heads, tokens)
+        shapes = [(*prefix, spec.head_size * spec.dtype.itemsize)]
+        if getattr(spec, "scale_dim", 0):
+            shapes.append((*prefix, spec.scale_dim * spec.scale_dtype.itemsize))
+        return tuple(shapes)
 
     @staticmethod
     def get_scale_shape(num_blocks: int, block_size: int, scale_size: int) -> tuple[int, ...]:

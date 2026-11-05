@@ -13,6 +13,20 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant import cache
 from vllm_ascend.worker.v2 import attn_utils
 
 
+def _runtime_views(raw, spec, num_blocks, *, block_stride=None):
+    from vllm_ascend.worker.v2.attn_utils import create_runtime_component_views
+
+    shapes = AscendDSAC4Backend.get_runtime_shapes(spec, num_blocks, None)
+    dtypes = (spec.dtype, spec.scale_dtype) if getattr(spec, "scale_dim", 0) else (spec.dtype,)
+    return create_runtime_component_views(
+        raw,
+        shapes,
+        dtypes,
+        spec.page_size_bytes,
+        spec.page_size_bytes if block_stride is None else block_stride,
+    )
+
+
 @pytest.mark.parametrize("num_tokens", [None, 0, 2])
 def test_non_turboquant_cache_write_preserves_scatter_call(monkeypatch, num_tokens):
     scatter = Mock()
@@ -81,7 +95,7 @@ def test_dsv4_cache_view_validates_backing_size_in_bytes():
         dtype=torch.bfloat16,
     )
 
-    views = attn_utils._view_dsv4_cache(raw, spec, AscendDSAC4Backend, config)
+    views = _runtime_views(raw, spec, config.num_blocks)
 
     assert views[0].nbytes == spec.page_size_bytes
 
@@ -170,7 +184,7 @@ def test_tq_v2_uses_one_backing_and_preserves_strided_pages(monkeypatch):
         name = d.layers[0]
         if name == "swa":
             continue
-        views[name] = attn_utils._view_dsv4_cache(raw[name], specs[name], AscendDSAC4Backend, config, d.block_stride)[0]
+        views[name] = _runtime_views(raw[name], specs[name], config.num_blocks, block_stride=d.block_stride)[0]
         assert views[name].shape == (3, 32, 1, 258)
         assert views[name].stride(0) == d.block_stride
     assert len({v.untyped_storage().data_ptr() for v in views.values()}) == 1
@@ -179,3 +193,116 @@ def test_tq_v2_uses_one_backing_and_preserves_strided_pages(monkeypatch):
     for index, view in enumerate(views.values(), start=1):
         assert (view[1] == index).all()
         assert (view[0] == 0).all() and (view[2] == 0).all()
+
+
+@pytest.mark.parametrize("turboquant", [False, True])
+@pytest.mark.parametrize("kv_transfer", [False, True])
+def test_unified_dsv4_matches_existing_allocation_and_views(monkeypatch, turboquant, kv_transfer):
+    """The MRV2 route preserves backing alignment, page packing and group aliases."""
+    names = ["model.layers.0.attn", "model.layers.1.attn"]
+    alias_name = "model.layers.2.attn"
+    spec = AscendMLAAttentionSpec(
+        block_size=128,
+        tokens_per_state=4,
+        num_kv_heads=1,
+        head_size=258 if turboquant else 512,
+        dtype=torch.uint8 if turboquant else torch.bfloat16,
+        model_version="deepseek_v4",
+        cache_dtype_str="turboquant_4bit_nc" if turboquant else "bfloat16",
+    )
+    blocks = 3
+    stride = spec.page_size_bytes * (2 if turboquant else 1)
+    layer_span = blocks * stride
+    pool_size = 2 * layer_span
+    config = KVCacheConfig(
+        num_blocks=blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(size=pool_size, layers=names, offset=0, layer_stride=layer_span, block_stride=stride),
+            KVCacheTensor(size=pool_size, layers=[alias_name], offset=0, layer_stride=0, block_stride=stride),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(names, UniformTypeKVCacheSpecs.from_specs(dict.fromkeys(names, spec))),
+            KVCacheGroupSpec([alias_name], UniformTypeKVCacheSpecs.from_specs({alias_name: spec})),
+        ],
+    )
+    runtime = SimpleNamespace(
+        additional_config={},
+        kv_transfer_config=object() if kv_transfer else None,
+        cache_config=SimpleNamespace(cache_dtype=spec.cache_dtype_str),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(compress_ratios=[4]),
+            hf_text_config=SimpleNamespace(model_type="deepseek_v4"),
+        ),
+    )
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendDSAC4Backend) for name in (*names, alias_name)}
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args: False)
+    raw = attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
+    groups = attn_utils._get_cache_attention_groups(config, layers, {})
+    expected = attn_utils.create_kv_cache_runtime_views(config, raw, groups, [128, 128], {})
+    legacy_allocate = Mock(side_effect=AssertionError("Unified route must allocate its own backing"))
+    monkeypatch.setattr(attn_utils, "_allocate_kv_cache", legacy_allocate)
+    monkeypatch.setattr(
+        attn_utils,
+        "_reshape_kv_cache_v2",
+        Mock(side_effect=AssertionError("V4 must not use legacy reshape")),
+    )
+    original_allocate = attn_utils._allocate_int8_cache_tensor
+    allocated = []
+
+    def allocate(size, alignment, device):
+        buf = original_allocate(size, alignment, device)
+        allocated.append(buf)
+        return buf
+
+    monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", allocate)
+    actual = attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, [128, 128])
+    assert len(allocated) == 1 and allocated[0].numel() == pool_size
+    if kv_transfer:
+        assert allocated[0].data_ptr() % (2 * 1024 * 1024) == 0
+    for name in actual:
+        for before, after in zip(expected[name], actual[name]):
+            assert before.shape == after.shape
+            assert before.stride() == after.stride()
+            assert before.dtype == after.dtype
+            assert before.data_ptr() - raw[name].data_ptr() == after.data_ptr() - allocated[0].data_ptr() - (
+                layer_span if name == names[1] else 0
+            )
+    assert actual[names[0]][0].data_ptr() == actual[alias_name][0].data_ptr()
+    assert actual[names[1]][0].data_ptr() - actual[names[0]][0].data_ptr() == layer_span
+    actual[names[0]][0][1].fill_(3)
+    actual[names[1]][0][2].fill_(5)
+    oracle = torch.zeros(pool_size, dtype=torch.int8)
+    first = stride
+    second = layer_span + 2 * stride
+    oracle[first : first + spec.real_page_size_bytes].view(spec.dtype).fill_(3)
+    oracle[second : second + spec.real_page_size_bytes].view(spec.dtype).fill_(5)
+    torch.testing.assert_close(allocated[0], oracle)
+
+
+@pytest.mark.parametrize("scale_dtype", [torch.float16, torch.float32])
+def test_dsa_runtime_shapes_are_byte_shapes_from_storage_spec(monkeypatch, scale_dtype):
+    spec = AscendMLAAttentionSpec(
+        block_size=128,
+        tokens_per_state=4,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=scale_dtype,
+        model_version="deepseek_v4",
+    )
+    monkeypatch.setattr(
+        AscendDSAC4Backend,
+        "get_kv_cache_shape",
+        Mock(side_effect=AssertionError("Runtime shapes must derive from the spec")),
+    )
+    assert AscendDSAC4Backend.get_runtime_shapes(spec, 3, None, 128) == (
+        (3, 1, 32, 128),
+        (3, 1, 32, scale_dtype.itemsize),
+    )
+    raw = torch.zeros(3 * spec.page_size_bytes, dtype=torch.int8)
+    components = _runtime_views(raw, spec, 3)
+    assert components[0].shape == (3, 32, 1, 128)
+    assert components[1].shape == (3, 32, 1, 1)

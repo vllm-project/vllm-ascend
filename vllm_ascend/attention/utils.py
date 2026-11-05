@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import import_module
 from importlib.util import find_spec
+from math import prod
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -48,6 +49,27 @@ MLAPO_MAX_SUPPORTED_TOKENS = 1024
 # MLA models keep the FIA-compatible component-major cache layout on A5.
 # N1 is the post-TP local head count, not the global model configuration.
 MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
+
+
+RuntimeComponentShape = tuple[int, int, int, int]
+KVCacheRuntimeShapes = tuple[RuntimeComponentShape, ...]
+
+
+def combine_cache_components(data: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Recover a packed-page alias from adjacent data and scale components.
+
+    The alias preserves [all data | all scales] packing; its logical rows do
+    not imply token-interleaved metadata. Both inputs must share this page ABI.
+    """
+    if (
+        data.untyped_storage().data_ptr() != scales.untyped_storage().data_ptr()
+        or scales.data_ptr() - data.data_ptr() != prod(data.shape[1:]) * data.element_size()
+        or data.stride(0) * data.element_size() != scales.stride(0) * scales.element_size()
+    ):
+        raise ValueError("Combined cache views require adjacent components in the same physical pages.")
+    shape = (*data.shape[:-1], data.shape[-1] + scales.shape[-1] * scales.element_size() // data.element_size())
+    inner = tuple(prod(shape[dim + 1 :]) for dim in range(1, len(shape)))
+    return torch.as_strided(data, shape, (data.stride(0), *inner), storage_offset=data.storage_offset())
 
 
 def supports_strided_mla_cache(

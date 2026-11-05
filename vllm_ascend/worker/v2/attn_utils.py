@@ -18,6 +18,8 @@
 #
 
 
+"""MRV2 attention metadata, cache allocation and runtime views."""
+
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
@@ -42,7 +44,6 @@ from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
-from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
@@ -72,6 +73,7 @@ from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapes,
     get_sfa_qsfa_packed_head_dim,
     get_tq_fused_slot_bytes,
     requires_contiguous_pa_kv_cache,
@@ -81,13 +83,11 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
-    AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
     requires_padded_page_layout,
     supports_component_major_mla_pd,
 )
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     allocate_shared_indexer_cache,
     get_layerwise_reuse_config,
@@ -757,37 +757,6 @@ def _get_attention_kv_cache_dims(
     return kv_cache_spec.head_size, head_size_v
 
 
-def _adjust_dsv4_kv_layout(
-    raw_tensor: torch.Tensor,
-    cache_shapes: list[tuple[int, ...]],
-    cache_dtypes: list[torch.dtype],
-    page_size_bytes: int,
-    overlap_full_kv_cache: bool = False,
-    initial_offset_bytes: int = 0,
-) -> list[torch.Tensor]:
-    caches = []
-    base_offset_bytes = raw_tensor.storage_offset() * raw_tensor.element_size() + initial_offset_bytes
-    offset_bytes = base_offset_bytes
-    for index, (shape, dtype) in enumerate(zip(cache_shapes, cache_dtypes)):
-        if overlap_full_kv_cache and index == 2:
-            offset_bytes = base_offset_bytes
-        dtype_size = get_dtype_size(dtype)
-        page_stride = page_size_bytes // dtype_size
-        stride = torch.empty(shape).stride()
-        if offset_bytes % dtype_size:
-            raise ValueError(f"DSA cache offset {offset_bytes} is not aligned to {dtype}.")
-        caches.append(
-            torch.as_strided(
-                raw_tensor.view(dtype),
-                size=shape,
-                stride=(page_stride, *stride[1:]),
-                storage_offset=offset_bytes // dtype_size,
-            )
-        )
-        offset_bytes += stride[0] * dtype_size
-    return caches
-
-
 def _reshape_combined_mla_kv_cache(
     raw_cache: torch.Tensor,
     k_shape: tuple[int, ...],
@@ -861,68 +830,6 @@ def _reshape_combined_attention_kv_cache(
         ),
     )
     return combined_cache[0], combined_cache[1]
-
-
-def _view_dsv4_cache(
-    raw_tensor: torch.Tensor,
-    kv_cache_spec: AttentionSpec,
-    attn_backend: AttentionBackend,
-    kv_cache_config: KVCacheConfig,
-    page_stride: int | None = None,
-) -> list[torch.Tensor]:
-    """Create DSA cache views without applying normal MLA K/V splitting."""
-    if page_stride is None:
-        page_stride = kv_cache_spec.page_size_bytes
-    num_blocks = kv_cache_config.num_blocks
-    allocation_bytes = raw_tensor.nbytes
-    if page_stride == kv_cache_spec.page_size_bytes:
-        if allocation_bytes % page_stride:
-            raise ValueError("DSA cache allocation is not a whole number of physical pages.")
-        if allocation_bytes // page_stride != num_blocks:
-            raise ValueError(f"DSA cache has {allocation_bytes // page_stride} blocks, expected {num_blocks}.")
-    required_bytes = (num_blocks - 1) * page_stride + kv_cache_spec.page_size_bytes
-    if allocation_bytes < required_bytes:
-        raise ValueError("DSA cache view exceeds the backing allocation")
-
-    k_shape = attn_backend.get_kv_cache_shape(
-        num_blocks,
-        get_storage_block_size(kv_cache_spec),
-        kv_cache_spec.num_kv_heads,
-        kv_cache_spec.head_size,
-    )
-    cache_shapes = [k_shape]
-    cache_dtypes = [kv_cache_spec.dtype]
-    overlap_full_kv_cache = False
-
-    scale_dim = int(getattr(kv_cache_spec, "scale_dim", 0))
-    if scale_dim:
-        scale_dtype = kv_cache_spec.scale_dtype
-        scale_shape = attn_backend.get_kv_cache_shape(
-            num_blocks,
-            get_storage_block_size(kv_cache_spec),
-            kv_cache_spec.num_kv_heads,
-            scale_dim,
-        )
-        cache_shapes.append(scale_shape)
-        cache_dtypes.append(scale_dtype)
-        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
-            full_shape = attn_backend.get_kv_cache_shape(
-                num_blocks,
-                get_storage_block_size(kv_cache_spec),
-                kv_cache_spec.num_kv_heads,
-                kv_cache_spec.head_size + scale_dim * get_dtype_size(scale_dtype),
-            )
-            cache_shapes.append(full_shape)
-            cache_dtypes.append(kv_cache_spec.dtype)
-            overlap_full_kv_cache = True
-
-    return _adjust_dsv4_kv_layout(
-        raw_tensor,
-        cache_shapes,
-        cache_dtypes,
-        page_stride,
-        overlap_full_kv_cache,
-    )
 
 
 def _align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
@@ -1604,34 +1511,12 @@ def _allocate_kv_cache(
     return kv_cache_raw_tensors
 
 
-def allocate_kv_cache_main(
+def _get_cache_attention_groups(
     kv_cache_config: KVCacheConfig,
-    device: torch.device,
-    layout: Any,
-    kernel_block_sizes: list[int],
-) -> dict[str, Any]:
-    """Allocate Ascend KV cache through vLLM main's #51718 entry point.
-
-    vLLM #51718 replaced ``_allocate_kv_cache`` + ``_reshape_kv_cache`` with
-    ``allocate_kv_cache`` and generic ``[B, H, N, C]`` views. Ascend attention
-    still consumes separate K/V (and backend-specific state) tensors, so keep
-    the Ascend allocation/reshape contract behind the new entry point.
-    """
-    del layout
-    vllm_config = get_current_vllm_config()
-    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
-    shared_layers = {
-        layer_name: target_layer
-        for layer_name, layer in attn_layers.items()
-        if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
-    }
-
-    raw_tensors = _allocate_kv_cache(
-        kv_cache_config,
-        shared_layers=shared_layers,
-        device=device,
-    )
-
+    attn_layers: Mapping[str, AttentionLayerBase],
+    shared_layers: Mapping[str, str],
+) -> list[AttentionGroup]:
+    """Resolve each cache owner's backend and spec without changing placement."""
     attn_groups: list[AttentionGroup] = []
     for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
         group_map: dict[tuple[str, KVCacheSpec, int], AttentionGroup] = {}
@@ -1657,6 +1542,188 @@ def allocate_kv_cache_main(
                 group_map[key].layer_names.append(layer_name)
         attn_groups.extend(group_map[key] for key in group_order)
 
+    return attn_groups
+
+
+def create_runtime_component_views(
+    raw: torch.Tensor,
+    shapes: KVCacheRuntimeShapes,
+    dtypes: tuple[torch.dtype, ...],
+    page_bytes: int,
+    block_stride: int,
+) -> list[torch.Tensor]:
+    """Interpret canonical byte shapes [B,H,N,C] using the existing NHD ABI."""
+    num_blocks = shapes[0][0]
+    if block_stride == page_bytes:
+        if raw.nbytes % page_bytes:
+            raise ValueError("Cache allocation is not a whole number of physical pages.")
+        if raw.nbytes // page_bytes != num_blocks:
+            raise ValueError(f"Cache has {raw.nbytes // page_bytes} blocks, expected {num_blocks}.")
+    if raw.nbytes < (num_blocks - 1) * block_stride + page_bytes:
+        raise ValueError("Cache view exceeds the backing allocation")
+
+    typed_shapes = [
+        (blocks, tokens, heads, content_bytes // dtype.itemsize)
+        for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes)
+    ]
+    return create_cache_component_views(raw, typed_shapes, list(dtypes), block_stride)
+
+
+def create_cache_component_views(
+    raw_tensor: torch.Tensor,
+    cache_shapes: list[tuple[int, ...]],
+    cache_dtypes: list[torch.dtype],
+    page_size_bytes: int,
+    overlap_full_kv_cache: bool = False,
+    initial_offset_bytes: int = 0,
+) -> list[torch.Tensor]:
+    """Create dense page-internal components with a fixed physical page stride."""
+    base = raw_tensor.storage_offset() * raw_tensor.element_size() + initial_offset_bytes
+    offset = base
+    views = []
+    for index, (shape, dtype) in enumerate(zip(cache_shapes, cache_dtypes)):
+        if overlap_full_kv_cache and index == 2:
+            offset = base
+        itemsize = dtype.itemsize
+        if offset % itemsize or page_size_bytes % itemsize:
+            raise ValueError(f"Cache component placement is not aligned to {dtype}.")
+        dense_strides = tuple(math.prod(shape[dim + 1 :]) for dim in range(len(shape)))
+        views.append(
+            torch.as_strided(
+                raw_tensor.view(dtype),
+                shape,
+                (page_size_bytes // itemsize, *dense_strides[1:]),
+                storage_offset=offset // itemsize,
+            )
+        )
+        offset += math.prod(shape[1:]) * itemsize
+    return views
+
+
+def create_kv_cache_runtime_views(
+    kv_cache_config: KVCacheConfig,
+    raw_tensors: Mapping[str, torch.Tensor],
+    attn_groups: Sequence[AttentionGroup],
+    kernel_block_sizes: Sequence[int],
+    shared_layers: Mapping[str, str],
+    layout: Any = None,
+) -> dict[str, Any]:
+    """Delegate component views to backends using the descriptor block strides."""
+    specs = _get_layer_kv_cache_specs(kv_cache_config)
+    placements = {name: descriptor for descriptor in kv_cache_config.kv_cache_tensors for name in descriptor.layers}
+    caches = {}
+    for group in attn_groups:
+        if group.kv_cache_group_id >= len(kernel_block_sizes):
+            continue
+        for name in group.layer_names:
+            if name in shared_layers:
+                continue
+            spec = specs[name]
+            descriptor = placements[name]
+            shapes = group.backend.get_runtime_shapes(
+                spec,
+                kv_cache_config.num_blocks_of(descriptor),
+                layout,
+                kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
+            )
+            dtypes = (spec.dtype,)
+            if getattr(spec, "scale_dim", 0):
+                dtypes += (spec.scale_dtype,)
+            caches[name] = create_runtime_component_views(
+                raw_tensors[name],
+                shapes,
+                dtypes,
+                spec.page_size_bytes,
+                descriptor.block_stride,
+            )
+    for name, target in shared_layers.items():
+        caches[name] = caches[target]
+    return caches
+
+
+def unified_allocate_kv_cache(
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    layout: Any,
+    kernel_block_sizes: list[int],
+) -> dict[str, Any]:
+    """Materialize the shared pool described by upstream byte placements.
+
+    Backends interpret each layer's page through their runtime view interface;
+    allocation and component construction do not use the legacy reshape path.
+    """
+    if not kv_cache_config.kv_cache_tensors:
+        return {}
+    sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
+    if len(sizes) != 1:
+        raise ValueError("Unified KV cache descriptors must share one backing allocation.")
+    vllm_config = get_current_vllm_config()
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+    shared_layers = {
+        name: target
+        for name, layer in attn_layers.items()
+        if (target := getattr(layer, "kv_sharing_target_layer_name", None))
+    }
+    specs = _get_layer_kv_cache_specs(kv_cache_config)
+    backing_size = sizes.pop()
+    regions = []
+    for descriptor in kv_cache_config.kv_cache_tensors:
+        num_blocks = kv_cache_config.num_blocks_of(descriptor)
+        for layer_index, name in enumerate(descriptor.layers):
+            spec = specs[name]
+            start = descriptor.offset + layer_index * descriptor.layer_stride
+            span = (num_blocks - 1) * descriptor.block_stride + spec.page_size_bytes
+            if start < 0 or descriptor.block_stride < spec.page_size_bytes or start + span > backing_size:
+                raise ValueError(f"KV cache placement for {name} exceeds its backing allocation.")
+            regions.append((name, start, span))
+
+    # Preserve the existing 2 MiB base-address alignment for KV transfer.
+    alignment = 2 * 1024 * 1024
+    buf = _allocate_int8_cache_tensor(backing_size, alignment, device)
+    raw_tensors = {name: buf[start : start + span] for name, start, span in regions}
+    raw_tensors.update({name: raw_tensors[target] for name, target in shared_layers.items()})
+    return create_kv_cache_runtime_views(
+        kv_cache_config,
+        raw_tensors,
+        _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers),
+        kernel_block_sizes,
+        shared_layers,
+        layout,
+    )
+
+
+def allocate_kv_cache_main(
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    layout: Any,
+    kernel_block_sizes: list[int],
+) -> dict[str, Any]:
+    """Allocate Ascend KV cache through vLLM main's #51718 entry point.
+
+    vLLM #51718 replaced ``_allocate_kv_cache`` + ``_reshape_kv_cache`` with
+    ``allocate_kv_cache`` and generic ``[B, H, N, C]`` views. Ascend attention
+    still consumes separate K/V (and backend-specific state) tensors, so keep
+    the Ascend allocation/reshape contract behind the new entry point.
+    """
+    vllm_config = get_current_vllm_config()
+    model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
+    if model_type == "deepseek_v4":
+        return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+    shared_layers = {
+        layer_name: target_layer
+        for layer_name, layer in attn_layers.items()
+        if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
+    }
+
+    raw_tensors = _allocate_kv_cache(
+        kv_cache_config,
+        shared_layers=shared_layers,
+        device=device,
+    )
+
+    attn_groups = _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers)
+
     return _reshape_kv_cache_v2(
         attn_groups=attn_groups,
         kv_cache_raw_tensors=raw_tensors,
@@ -1679,7 +1746,7 @@ def _reshape_mamba_kv_cache(
         raise ValueError("Mamba cache allocation is not a whole number of physical pages.")
     num_blocks = raw_cache.numel() // physical_page_size
     cache_shapes = [(num_blocks, *shape) for shape in kv_cache_spec.shapes]
-    return _adjust_dsv4_kv_layout(
+    return create_cache_component_views(
         raw_cache,
         cache_shapes,
         list(kv_cache_spec.dtypes),
@@ -1699,7 +1766,6 @@ def _reshape_kv_cache_v2(
         raise ValueError("Reshape KV cache requires KVCacheConfig.")
 
     vllm_config = get_current_vllm_config()
-    is_dsv4_model = _is_dsv4_model(vllm_config)
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     kv_caches: dict[str, Any] = {}
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
@@ -1716,16 +1782,6 @@ def _reshape_kv_cache_v2(
             for descriptor in kv_cache_config.kv_cache_tensors
             for name in get_kv_cache_tensor_layers(descriptor)
         }
-
-    dsv4_page_strides = (
-        {
-            name: descriptor.block_stride
-            for descriptor in kv_cache_config.kv_cache_tensors
-            for name in get_kv_cache_tensor_layers(descriptor)
-        }
-        if is_dsv4_model and uses_turboquant_groups(kv_cache_config.kv_cache_groups)
-        else {}
-    )
 
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
@@ -1897,7 +1953,7 @@ def _reshape_kv_cache_v2(
                         layer_kv_cache_spec[source_name].unpadded_page_size_bytes
                         + layer_kv_cache_spec[index_name].unpadded_page_size_bytes
                     )
-                views = _adjust_dsv4_kv_layout(
+                views = create_cache_component_views(
                     kv_cache_raw_tensors[layer_name],
                     kv_cache_shape_list,
                     kv_cache_dtype_list,
@@ -2017,18 +2073,6 @@ def _reshape_kv_cache_v2(
                     kernel_block_size * get_kv_cache_compression_ratio(kv_cache_spec),
                 )
                 continue
-            if is_dsv4_model and isinstance(kv_cache_spec, (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec)):
-                if not isinstance(raw_cache, torch.Tensor):
-                    raise ValueError(f"DSA cache for {layer_name} must use one raw tensor.")
-                kv_caches[layer_name] = _view_dsv4_cache(
-                    raw_cache,
-                    kv_cache_spec,
-                    group.backend,
-                    kv_cache_config,
-                    dsv4_page_strides.get(layer_name),
-                )
-                continue
-
             if isinstance(kv_cache_spec, MambaSpec):
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError(f"Mamba cache for {layer_name} must use one raw tensor.")

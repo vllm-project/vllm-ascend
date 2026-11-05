@@ -410,11 +410,11 @@ def test_view_with_nonzero_backing_storage_offset():
 
 
 def test_v2_view_with_nonzero_initial_offset():
-    from vllm_ascend.worker.v2.attn_utils import _adjust_dsv4_kv_layout
+    from vllm_ascend.worker.v2.attn_utils import create_cache_component_views
 
     backing = torch.zeros(16 + 2 * 256, dtype=torch.uint8)
     raw = backing[16:]
-    cache = _adjust_dsv4_kv_layout(
+    cache = create_cache_component_views(
         raw,
         [(2, 16, 1, 4)],
         [torch.bfloat16],
