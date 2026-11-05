@@ -1763,10 +1763,12 @@ def _validate_minimax_ecosystem_fa3(backend_key, selector) -> bool:
     from vllm.v1.attention.backend import AttentionType
 
     config = get_current_vllm_config_or_none()
+    spec = config.speculative_config
+    if spec is None or spec.draft_model_config is None:
+        return False
     if config is None or config.model_config is None or not _uses_minimax_ecosystem_fa3(config):
         return False
     parallel = config.parallel_config
-    spec = config.speculative_config
     return (
         selector.attn_type == AttentionType.DECODER
         and selector.dtype in (torch.float16, torch.bfloat16)
@@ -1797,8 +1799,6 @@ def _validate_minimax_ecosystem_fa3(backend_key, selector) -> bool:
 def _uses_minimax_ecosystem_fa3(config) -> bool:
     """Keep unrelated models and drafts on their configured attention backend."""
     architectures = config.model_config.hf_config.architectures or ()
-    if _MINIMAX_M3_ARCHITECTURES.intersection(architectures):
-        return True
     spec = config.speculative_config
     target = getattr(spec, "target_model_config", None)
     target_hf = getattr(target, "hf_config", None)
@@ -1807,12 +1807,9 @@ def _uses_minimax_ecosystem_fa3(config) -> bool:
         "MiniMaxM31FlashA3DSparkModel",
         "Qwen3DSparkModel",
         "Qwen3OmniDSparkModel",
-        "Eagle3LlamaForCausalLM",
-        "LlamaForCausalLMEagle3",
-        "LlamaForCausalLMVwnEagle3",
     }
     return (
-        getattr(spec, "method", None) in ("dspark", "eagle3")
+        getattr(spec, "method", None) in ("dspark")
         and bool(draft_architectures.intersection(architectures))
         and bool(_MINIMAX_M3_ARCHITECTURES.intersection(getattr(target_hf, "architectures", None) or ()))
     )
