@@ -5,5 +5,7 @@ entries:
       Added experimental Ascend HiSparse BF16 and native C8 sparse MLA/SFA
       support using a fused AscendC residency resolver, existing Attention
       operators and Core lifecycle interfaces. The resolver requires its
-      compiled extension and does not fall back to Triton.
+      compiled extension and does not fall back to Triton. Native C8 reuses
+      supported SFA Prolog preprocessing and consumes the resolver's physical
+      Decode indices while preserving the separate refill plan.
     hardware: [A5]
