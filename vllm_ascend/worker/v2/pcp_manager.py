@@ -421,7 +421,7 @@ class AscendPCPManager(PCPManager):
         assert isinstance(local_batch, AscendInputBatch)
         self._global_batch = input_batch
 
-        prefill_runs_as_decode = input_batch.prefill_runs_as_decode_np
+        prefill_runs_as_decode = getattr(input_batch, "prefill_runs_as_decode_np", None)
         if prefill_runs_as_decode is not None:
             global_flags = {
                 int(req_state): bool(flag)
