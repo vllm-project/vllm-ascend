@@ -207,7 +207,9 @@ def build_embeds(image: Image.Image, phrase: str) -> str:
         emb = emb.reshape(b, n, c).squeeze(0).clone().detach()
 
     buf = io.BytesIO()
-    torch.save(emb, buf)
+    # Keep the payload portable: a CPU tensor can be saved/validated on any host,
+    # and the server remaps it to CPU anyway (safe_load_prompt_embeds uses map_location="cpu").
+    torch.save(emb.cpu(), buf)
     return pybase64.b64encode(buf.getvalue()).decode()
 
 image = Image.open("demo.jpg").convert("RGB")
