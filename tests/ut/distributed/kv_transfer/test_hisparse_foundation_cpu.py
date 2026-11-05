@@ -18,7 +18,6 @@ from vllm_ascend.attention.sfa_hisparse import (
 )
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.hisparse import cache_ops as hisparse_ops
 from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 from vllm_ascend.hisparse.binding import (
@@ -32,6 +31,7 @@ from vllm_ascend.hisparse.c8 import (
     map_c8_physical_indices,
     pack_c8_components,
 )
+from vllm_ascend.ops.triton import sfa_indexer_store
 
 
 @pytest.mark.parametrize("mxfp8", [False, True])
@@ -409,12 +409,18 @@ def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(monkeypatch
     values = values_raw.view(torch.float8_e4m3fn)
     scales = torch.arange(6, dtype=torch.float32).reshape(6, 1) + 0.5
 
-    def scatter(destination, indexes, source):
-        indexes = indexes.flatten()
-        valid = indexes >= 0
-        destination[indexes[valid].long()] = source[valid]
+    def store(quant, scales, slots, cache, scale_cache, *, block_size, key_block_stride, scale_block_stride):
+        # Emulate only the device-store boundary; production views and addresses
+        # are checked against the independent byte oracle below.
+        assert block_size == 128 and key_block_stride == stride and scale_block_stride == stride // 4
+        assert cache.dtype == torch.int8 and scale_cache.dtype == torch.int32
+        for i, slot in enumerate(slots.tolist()):
+            if 0 <= slot < pages * block_size:
+                page, row = divmod(slot, block_size)
+                cache[page, row, 0].copy_(quant[i])
+                scale_cache[page, row, 0, 0] = scales[i]
 
-    monkeypatch.setattr(DeviceOperator, "scatter_cache", scatter)
+    monkeypatch.setattr(sfa_indexer_store, "store_indexer_key_scale", store)
     writer = AscendHiSparseIndexerBackend.__new__(AscendHiSparseIndexerBackend)
     torch.nn.Module.__init__(writer)
     writer.k_cache = NS(kv_cache=caches["indexer"])
