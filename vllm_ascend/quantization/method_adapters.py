@@ -17,7 +17,7 @@
 #
 
 import torch
-from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase, FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import LinearMethodBase, RowParallelLinear
@@ -34,90 +34,6 @@ from .methods.base import PreparedLinearInput
 # vLLM's typed parameter classes take these through their constructor and expose
 # them as read-only properties, so replaying them via set_weight_attrs raises.
 _VLLM_PARAMETER_CTOR_ATTRS = frozenset({"weight_loader", "output_dim", "input_dim"})
-
-
-def _validate_block_quant_shape(
-    layer: torch.nn.Module,
-    input_size: int,
-    output_size: int,
-    input_size_per_partition: int,
-    output_partition_sizes: list[int],
-    block_n: int,
-    block_k: int,
-) -> None:
-    """Reject a TP shard a block-quantized scheme cannot dequantize correctly.
-
-    A block-FP8 scale resolves one entry per ``block_n x block_k`` tile of the
-    *global, unsharded* checkpoint tensor. ``process_weights_after_loading``
-    only ever sees one rank's already-sharded slice, with no way to tell
-    whether that slice's row/column range starts at a global tile boundary --
-    silently assigning the wrong scale to part of the shard if it does not
-    (see https://github.com/vllm-project/vllm-ascend/issues/20652). Mirrors
-    vLLM's own ``validate_fp8_block_shape`` for the same checkpoint format
-    (``vllm/model_executor/layers/quantization/utils/fp8_utils.py``), which
-    takes the same approach: refuse the configuration outright rather than
-    attempt to resolve it.
-    """
-    tp_size = getattr(layer, "tp_size", None)
-    if tp_size is None:
-        tp_size = get_tensor_model_parallel_world_size()
-
-    # Required for a row-parallel shard: the input dimension is split, and
-    # each rank's slice must start and end on a block_k boundary.
-    if tp_size > 1 and input_size // input_size_per_partition == tp_size and input_size_per_partition % block_k != 0:
-        raise ValueError(
-            f"Weight input_size_per_partition = {input_size_per_partition} is not divisible by "
-            f"weight quantization block_k = {block_k}. This would silently dequantize the shard "
-            "incorrectly; see https://github.com/vllm-project/vllm-ascend/issues/20652."
-        )
-
-    # Required for a column-parallel shard, or for a merged/stacked weight
-    # (several logical sub-weights sharing one parameter): every logical
-    # sub-weight's local shard must start and end on a block_n boundary.
-    is_tp_split = tp_size > 1 and output_size // sum(output_partition_sizes) == tp_size
-    is_merged_gemm = len(output_partition_sizes) > 1
-    if is_tp_split or is_merged_gemm:
-        sizes_to_check = output_partition_sizes
-        if not is_tp_split and is_merged_gemm:
-            # A merged weight whose sub-weights are each replicated (not TP
-            # split) only needs every sub-weight but the last to be aligned --
-            # same allowance vLLM's own validation makes for this case.
-            sizes_to_check = output_partition_sizes[:-1]
-        for output_partition_size in sizes_to_check:
-            if output_partition_size % block_n != 0:
-                raise ValueError(
-                    f"Weight output_partition_size = {output_partition_size} is not divisible by "
-                    f"weight quantization block_n = {block_n}. This would silently dequantize the "
-                    "shard incorrectly; see https://github.com/vllm-project/vllm-ascend/issues/20652."
-                )
-
-
-def _validate_block_quant_shape_moe(
-    layer: torch.nn.Module, intermediate_size_per_partition: int, block_n: int, block_k: int
-) -> None:
-    """The ``AscendFusedMoEMethod`` counterpart of ``_validate_block_quant_shape``.
-
-    Mirrors vLLM's own ``validate_fp8_block_shape_moe``. Experts partitioned
-    by whole expert index under expert-parallelism are never sharded within a
-    single expert's weight and so never trigger this; it only matters for a
-    scheme that additionally tensor-shards each expert's own intermediate
-    dimension.
-    """
-    if intermediate_size_per_partition % block_n != 0:
-        raise ValueError(
-            f"The per-partition intermediate size = {intermediate_size_per_partition} is not "
-            f"divisible by weight quantization block_n = {block_n}. This would silently "
-            "dequantize experts incorrectly; see https://github.com/vllm-project/vllm-ascend/issues/20652."
-        )
-    tp_size = getattr(layer, "tp_size", None)
-    if tp_size is None:
-        tp_size = get_tensor_model_parallel_world_size()
-    if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
-        raise ValueError(
-            f"The per-partition intermediate size = {intermediate_size_per_partition} is not "
-            f"divisible by weight quantization block_k = {block_k}. This would silently "
-            "dequantize experts incorrectly; see https://github.com/vllm-project/vllm-ascend/issues/20652."
-        )
 
 
 def _forwardable_weight_attrs(extra_weight_attrs: dict) -> dict:
@@ -181,12 +97,9 @@ class AscendLinearMethod(LinearMethodBase):
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
 
-        block_n = getattr(self.quant_method, "block_n", None)
-        block_k = getattr(self.quant_method, "block_k", None)
-        if block_n is not None and block_k is not None:
-            _validate_block_quant_shape(
-                layer, input_size, output_size, input_size_per_partition, output_partition_sizes, block_n, block_k
-            )
+        self.quant_method.validate_weight_shapes(
+            layer, input_size, output_size, input_size_per_partition, output_partition_sizes
+        )
 
         weight_dict = self.quant_method.get_weight(input_size_per_partition, output_size_per_partition, params_dtype)
 
@@ -384,10 +297,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
-        block_n = getattr(self.quant_method, "block_n", None)
-        block_k = getattr(self.quant_method, "block_k", None)
-        if block_n is not None and block_k is not None:
-            _validate_block_quant_shape_moe(layer, intermediate_size_per_partition, block_n, block_k)
+        self.quant_method.validate_weight_shapes(layer, intermediate_size_per_partition)
 
         weight_param = self.quant_method.get_weight(
             num_experts, intermediate_size_per_partition, hidden_size, params_dtype

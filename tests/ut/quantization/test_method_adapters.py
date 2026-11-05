@@ -1,6 +1,5 @@
 from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -157,87 +156,13 @@ class TestAscendLinearMethod(TestBase):
         self.method.process_weights_after_loading(layer)
         self.mock_scheme.process_weights_after_loading.assert_called_once_with(layer)
 
-    def _create_weights_with_block_scheme(self, block_n, block_k, **kwargs):
-        self.mock_scheme.block_n = block_n
-        self.mock_scheme.block_k = block_k
+    def test_create_weights_validates_before_allocating(self):
+        self.mock_scheme.validate_weight_shapes.side_effect = ValueError("invalid shape")
         layer = torch.nn.Module()
-        defaults = dict(
-            input_size_per_partition=256,
-            output_partition_sizes=[128],
-            input_size=256,
-            output_size=128,
-            params_dtype=torch.bfloat16,
-            weight_loader=MagicMock(),
-        )
-        defaults.update(kwargs)
-        self.method.create_weights(layer, **defaults)
-        return layer
-
-    def test_block_quant_rejects_a_column_shard_not_a_multiple_of_block_n(self):
-        # A 1536-row output TP-sharded 8 ways gives 192 rows/rank -- not a
-        # multiple of block_n=128. This is a hypothetical sharded projection,
-        # not evidence of corruption in a shipped model.
-        with (
-            patch(f"{MODULE}.get_tensor_model_parallel_world_size", return_value=8),
-            self.assertRaisesRegex(ValueError, "output_partition_size"),
-        ):
-            self._create_weights_with_block_scheme(
-                block_n=128, block_k=128, output_partition_sizes=[192], output_size=1536
-            )
-
-    def test_block_quant_rejects_a_row_shard_not_a_multiple_of_block_k(self):
-        with (
-            patch(f"{MODULE}.get_tensor_model_parallel_world_size", return_value=8),
-            self.assertRaisesRegex(ValueError, "input_size_per_partition"),
-        ):
-            self._create_weights_with_block_scheme(
-                block_n=128, block_k=128, input_size_per_partition=192, input_size=1536
-            )
-
-    def test_block_quant_accepts_an_aligned_column_shard(self):
-        # Same layer, but TP=4: 1536 / 4 = 384, a multiple of block_n=128.
-        # vLLM's typed parameters read the TP rank while constructing, which is
-        # unavailable without a distributed group.
-        with (
-            patch(f"{MODULE}.get_tensor_model_parallel_world_size", return_value=4),
-            patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0),
-            patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=4),
-        ):
-            self._create_weights_with_block_scheme(
-                block_n=128, block_k=128, output_partition_sizes=[384], output_size=1536
-            )  # must not raise
-
-    def test_block_quant_rejects_a_merged_weights_misaligned_sub_shard(self):
-        # Synthetic merged local sizes [192, 512]: the first sub-weight
-        # ends inside a block. This does not represent a replicated
-        # q_a_proj + kv_a_proj pair, whose sizes [1536, 512] are aligned.
-        with (
-            patch(f"{MODULE}.get_tensor_model_parallel_world_size", return_value=8),
-            self.assertRaisesRegex(ValueError, "output_partition_size"),
-        ):
-            self._create_weights_with_block_scheme(
-                block_n=128, block_k=128, output_partition_sizes=[192, 512], output_size=2048
-            )
-
-    def test_block_quant_is_skipped_for_schemes_without_a_block_size(self):
-        # The mocked scheme has no block_n/block_k (not part of
-        # AscendLinearScheme's spec), so the validation must not run at all --
-        # this would otherwise raise, since output_size=128 is not a multiple
-        # of a would-be block_n=256.
-        with (
-            patch(f"{MODULE}.get_tensor_model_parallel_world_size", return_value=8),
-            patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0),
-            patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=8),
-        ):
-            self.method.create_weights(
-                torch.nn.Module(),
-                input_size_per_partition=256,
-                output_partition_sizes=[128],
-                input_size=256,
-                output_size=128,
-                params_dtype=torch.bfloat16,
-                weight_loader=MagicMock(),
-            )  # must not raise
+        with self.assertRaisesRegex(ValueError, "invalid shape"):
+            self.method.create_weights(layer, 256, [192], 256, 1536, torch.bfloat16)
+        self.mock_scheme.validate_weight_shapes.assert_called_once_with(layer, 256, 1536, 256, [192])
+        self.mock_scheme.get_weight.assert_not_called()
 
     def test_apply_delegates_to_scheme(self):
         layer = MagicMock(spec=ColumnParallelLinear)
@@ -338,39 +263,11 @@ class TestAscendFusedMoEMethod(TestBase):
         )
         return layer
 
-    def test_block_quant_rejects_a_misaligned_intermediate_size(self):
-        self.mock_scheme.get_weight.return_value = {
-            "w13_weight": torch.empty(8, 500, 128, dtype=torch.int8),
-            "w2_weight": torch.empty(8, 128, 250, dtype=torch.int8),
-        }
-        self.mock_scheme.block_n = 128
-        self.mock_scheme.block_k = 128
-        with (
-            patch(f"{MODULE}.get_tensor_model_parallel_world_size", return_value=8),
-            self.assertRaisesRegex(ValueError, "per-partition intermediate size"),
-        ):
+    def test_create_weights_validates_before_allocating(self):
+        self.mock_scheme.validate_weight_shapes.side_effect = ValueError("invalid shape")
+        with self.assertRaisesRegex(ValueError, "invalid shape"):
             self.create_moe_weights(intermediate_size_per_partition=250)
-
-    def test_block_quant_accepts_an_aligned_intermediate_size(self):
-        self.mock_scheme.get_weight.return_value = {
-            "w13_weight": torch.empty(8, 512, 128, dtype=torch.int8),
-            "w2_weight": torch.empty(8, 128, 256, dtype=torch.int8),
-        }
-        self.mock_scheme.get_dynamic_quant_param.return_value = {}
-        self.mock_scheme.block_n = 128
-        self.mock_scheme.block_k = 128
-        with patch(f"{MODULE}.get_tensor_model_parallel_world_size", return_value=8):
-            self.create_moe_weights(intermediate_size_per_partition=256)  # must not raise
-
-    def test_block_quant_is_skipped_for_moe_schemes_without_a_block_size(self):
-        # The mocked scheme has no block_n/block_k, so this would otherwise
-        # raise for intermediate_size_per_partition=250 against a would-be
-        # block_n=128.
-        self.mock_scheme.get_weight.return_value = {
-            "w13_weight": torch.empty(8, 500, 128, dtype=torch.int8),
-            "w2_weight": torch.empty(8, 128, 250, dtype=torch.int8),
-        }
-        self.create_moe_weights(intermediate_size_per_partition=250)  # must not raise
+        self.mock_scheme.get_weight.assert_not_called()
 
     def test_apply_method(self):
         layer = torch.nn.Module()
@@ -397,30 +294,3 @@ class TestAscendFusedMoEMethod(TestBase):
 
         self.assertIs(result, weight_views)
         self.mock_scheme.get_eplb_weight_views.assert_called_once_with(layer)
-
-
-def test_block_quant_validation_uses_layer_tp_size():
-    from vllm_ascend.quantization.method_adapters import _validate_block_quant_shape
-
-    layer = torch.nn.Module()
-    layer.tp_size = 4
-    with patch(f"{MODULE}.get_tensor_model_parallel_world_size") as global_tp:
-        with pytest.raises(ValueError, match="input_size_per_partition"):
-            _validate_block_quant_shape(layer, 768, 128, 192, [128], 128, 128)
-        with pytest.raises(ValueError, match="output_partition_size"):
-            _validate_block_quant_shape(layer, 256, 768, 256, [192], 128, 128)
-        _validate_block_quant_shape(layer, 256, 2048, 256, [1536, 512], 128, 128)
-        global_tp.assert_not_called()
-
-
-def test_block_quant_moe_validation_uses_layer_tp_size():
-    from vllm_ascend.quantization.method_adapters import _validate_block_quant_shape_moe
-
-    layer = torch.nn.Module()
-    layer.tp_size = 4
-    with patch(f"{MODULE}.get_tensor_model_parallel_world_size") as global_tp:
-        with pytest.raises(ValueError, match="block_k"):
-            _validate_block_quant_shape_moe(layer, 192, 64, 128)
-        layer.tp_size = 1
-        _validate_block_quant_shape_moe(layer, 192, 64, 128)
-        global_tp.assert_not_called()
