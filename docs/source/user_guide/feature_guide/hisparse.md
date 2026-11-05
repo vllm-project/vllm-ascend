@@ -21,25 +21,19 @@ are outside this backend's current support.
 ## Build the resolver
 
 Use the paired merged vLLM version in `.github/vllm-main-verified.commit` and
-install vllm-ascend normally. Its CMake build includes the fused resolver when
-the Ascend 950 SIMT headers are available. A separate resolver rebuild in the
-same Torch/torch-npu/CANN environment is also supported:
+install vllm-ascend normally in the matching Torch/torch-npu/CANN environment.
+The standard CMake build compiles `csrc/hisparse/hisparse_resolver.cpp` using
+CANN's ASC integration when the Ascend 950 SIMT headers are available. It links
+the kernel into `vllm_ascend_C` and registers
+`torch.ops._C_ascend.hisparse_resolve_residency` with the other Ascend operators;
+there is no separate resolver build or library-loading step.
 
-```bash
-python csrc/hisparse_runtime/build.py \
-  --cann-root "$ASCEND_HOME_PATH" \
-  --output build/hisparse-resolver \
-  --npu-arch dav-3510 \
-  --resolver-ub-bytes 175616 \
-  --install
-```
-
-Use a dedicated output directory. Select architecture and usable per-AIV UB
-budget for the actual build target; these are hardware/compiler parameters.
+The architecture and usable per-AIV UB budget are selected for the build target
+in `csrc/hisparse/CMakeLists.txt`; these are hardware/compiler parameters.
 The kernel sizes its hash table from the request union and available UB. An
 unsupported capacity or missing extension raises an error before execution;
-there is no Triton resolver fallback. Other vllm-ascend features do not load this
-optional extension.
+there is no Triton resolver fallback. Builds for other targets retain their
+existing operators without registering this resolver.
 
 ## Enable HiSparse
 

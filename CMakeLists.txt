@@ -235,9 +235,8 @@ else()
   install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 endif()
 
-# The optional HiSparse resolver uses SIMT, independently of Attention kernels.
-# Older toolkits and other SOCs keep their ordinary build unchanged; selecting
-# HiSparse without this extension raises an explicit availability error.
+# SIMT HiSparse kernels use CANN's ASC CMake language integration. Other SOCs
+# retain their existing build and report HiSparse unavailable when selected.
 if(SOC_VERSION MATCHES "ascend950")
   find_path(HISPARSE_SIMT_INCLUDE_DIR simt_api/asc_simt.h
     PATHS
@@ -245,19 +244,8 @@ if(SOC_VERSION MATCHES "ascend950")
       ${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/asc/include
     NO_DEFAULT_PATH)
   if(HISPARSE_SIMT_INCLUDE_DIR)
-    set(HISPARSE_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/csrc/hisparse_runtime)
-    set(HISPARSE_OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/hisparse_runtime)
-    add_custom_command(
-      OUTPUT ${HISPARSE_OUTPUT}/hisparse_resolver60103_args.so ${HISPARSE_OUTPUT}/torch_binding.so
-      COMMAND ${PYTHON_EXECUTABLE} ${HISPARSE_SOURCE}/build.py
-        --cann-root ${ASCEND_HOME_PATH} --output ${HISPARSE_OUTPUT}
-        --npu-arch dav-3510 --resolver-ub-bytes 175616
-      DEPENDS ${HISPARSE_SOURCE}/build.py ${HISPARSE_SOURCE}/resolver.asc ${HISPARSE_SOURCE}/torch_binding.cpp
-      VERBATIM)
-    add_custom_target(hisparse_resolver
-      DEPENDS ${HISPARSE_OUTPUT}/hisparse_resolver60103_args.so ${HISPARSE_OUTPUT}/torch_binding.so)
-    add_dependencies(vllm_ascend_C hisparse_resolver)
-    install(FILES ${HISPARSE_OUTPUT}/hisparse_resolver60103_args.so ${HISPARSE_OUTPUT}/torch_binding.so
-      DESTINATION ${VLLM_ASCEND_INSTALL_PATH}/hisparse)
+    add_subdirectory(csrc/hisparse)
+    target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_HISPARSE_RESOLVER)
+    target_link_libraries(vllm_ascend_C PRIVATE vllm_ascend_hisparse)
   endif()
 endif()

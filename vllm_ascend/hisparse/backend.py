@@ -60,7 +60,6 @@ class AscendHiSparseBackend(HiSparseBackend):
         install()
         # Import the device kernels before the connector allocates Host storage.
         importlib.import_module("vllm_ascend.hisparse.cache_ops")
-        _load_resolver()
         if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
             # A5 disables the global custom-op selection policy. HiSparse still
             # needs its explicit DMA dependency; load the extension lazily here
@@ -72,6 +71,7 @@ class AscendHiSparseBackend(HiSparseBackend):
                 raise RuntimeError("Ascend HiSparse requires the compiled Ascend DMA extension.") from error
             if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
                 raise RuntimeError("Ascend HiSparse requires the Ascend swap_blocks_batch operator.")
+        _load_resolver()
 
     def allocate_private_host_pool(self, size: int) -> tuple[torch.Tensor, torch.Tensor]:
         from vllm_ascend.hisparse.cache_ops import allocate_mapped_host
