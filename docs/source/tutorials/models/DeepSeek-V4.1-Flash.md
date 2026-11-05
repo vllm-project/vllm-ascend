@@ -41,7 +41,7 @@ the hardware-specific configurations.
 | --- | --- | --- | --- |
 | A2 | Ascend W4A8 or W8A8; model runner V1 | Two nodes, DP2/TP8 | Four nodes: Prefill DP4/TP4 and Decode DP8/TP2; optional Mooncake pooling. |
 | A3 | Ascend W4A8, INT8 Engram storage; model runner V2 | One node, DP4/TP4 | Two nodes: Prefill DP4/PCP4/TP1 and Decode DP16/TP1; SWA bounded replay and MegaMoE on Prefill; optional Memcache pooling. |
-| 950DT products | Original MXFP checkpoint; model runner V2 | One node, DP8/TP1/EP8 | Two nodes, DP8/TP1/EP8 per role; SWA bounded replay on ordinary Prefill; optional Memcache pooling. |
+| 950DT products | Original MXFP checkpoint; model runner V2 | One node, DP8/TP1/EP8 | Two nodes, DP8/TP1/EP8 per role; SWA bounded replay on Prefill; optional Memcache pooling. |
 
 ## 3 Prerequisites
 
@@ -800,7 +800,7 @@ revision.
     existing startup command. Update its connector's `prefill.dp_size` to `1`.
     For Memcache pooling, start from the pooled Prefill template in
     [Section 5.3.1](#531-memcache-kv-cache-pool), increase its
-    batch limit from `4096` to `16384`, and set `prefill.dp_size` to `1` in
+    batch limit from `5120` to `16384`, and set `prefill.dp_size` to `1` in
     the nested `MooncakeHybridConnector` on both roles. Keep `use_layerwise=false`. See the [Context Parallel guide](../../user_guide/feature_guide/context_parallel.md)
     for PCP details.
 
@@ -1623,9 +1623,10 @@ Select the tab for the target hardware.
     stores reusable prefixes; Decode receives KV from Prefill. DeepSeek-V4.1-Flash
     uses bulk pool access: set `use_layerwise` to `false` on both roles.
 
-    Set `--max-num-batched-tokens` to `4096` on Prefill and disable local prefix
-    caching so that repeated-prefix requests exercise the external pool. On
-    Decode, use `1024` batch tokens and disable local prefix caching.
+    On Prefill, set `--max-num-batched-tokens` to `5120` and enable
+    `--swa-bounded-replay`. Disable local prefix caching so that repeated-prefix
+    requests exercise the external pool. On Decode, use `1024` batch tokens
+    and disable local prefix caching.
 
     ##### 5.3.1.1 Prepare Memcache
 
@@ -1887,7 +1888,7 @@ Select the tab for the target hardware.
         --tensor-parallel-size "$7" \
         --enable-expert-parallel \
         --max-model-len 1048576 \
-        --max-num-batched-tokens 4096 \
+        --max-num-batched-tokens 5120 \
         --max-num-seqs 16 \
         --gpu-memory-utilization 0.90 \
         --block-size 128 \
@@ -1899,6 +1900,7 @@ Select the tab for the target hardware.
         --enable-auto-tool-choice \
         --trust-remote-code \
         --no-enable-prefix-caching \
+        --swa-bounded-replay \
         --enforce-eager \
         --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
         --additional-config '{
