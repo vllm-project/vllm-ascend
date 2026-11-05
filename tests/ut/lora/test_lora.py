@@ -427,7 +427,7 @@ def test_assert_warns_once_for_shared_experts() -> None:
 
 @pytest.mark.parametrize(
     ("index_mapping", "expected_no_lora"),
-    [((0, 0), True), ((0, 1), False), ((2, 0), False)],
+    [((-1, -1), True), ((0, 0), False), ((0, 1), False), ((2, 0), False)],
 )
 def test_decode_metadata_refreshes_no_lora(index_mapping, expected_no_lora) -> None:
     wrapper = object.__new__(PunicaWrapperNPU)
