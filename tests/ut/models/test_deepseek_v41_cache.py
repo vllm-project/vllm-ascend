@@ -940,9 +940,11 @@ def test_async_compressed_lengths_use_device_values_at_rejection_boundary(runtim
     assert metadata.cmp_residual.tolist() == [seq_len % 2, 0]
 
 
-@pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize("mode", ["inline", "deferred", "captured"])
 @pytest.mark.parametrize("query_len", [1, 3])
-def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monkeypatch, deferred, query_len):
+def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monkeypatch, mode, query_len):
+    deferred = mode != "inline"
+    captured = mode == "captured"
     groups = make_cache_config(17).kv_cache_groups
     builders = []
     for group in groups:
@@ -978,10 +980,11 @@ def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monk
             # Only native operator dispatch is mocked; all coordinates use CPU torch.
             builder._supports_device_ops = builder._cache_kind != "compressor_state"
             builder._device_metadata_enabled = deferred
+            builder._device_metadata_in_graph = captured
 
     def build_batch(lengths, block_offset=0, idle=False):
         batch_shared: dict[str, Any] = {}
-        results, tasks = [], []
+        results, tasks, expected_swa_slots = [], [], []
         positions = torch.tensor(
             [*range(lengths[0] - query_len, lengths[0]), *range(lengths[1] - query_len, lengths[1]), 0]
         )
@@ -1030,13 +1033,25 @@ def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monk
             if gid >= 2:
                 expected = torch.stack((flat_slots.clamp_min(0) // 128, flat_slots.clamp_min(0) % 128), dim=1).int()
                 expected[-1] = -1
-                torch.testing.assert_close(group_results[0].slot_mapping, expected)
+                expected_swa_slots.append(expected)
         for task in sorted(tasks, key=lambda task: task.stage):
             task.run()
+        for group_results, expected in zip(results[2:], expected_swa_slots, strict=True):
+            torch.testing.assert_close(group_results[0].slot_mapping, expected)
         if deferred:
             assert [task.stage for task in tasks].count(DeviceMetadataStage.ATTENTION) == 3
             assert [task.stage for task in tasks].count(DeviceMetadataStage.INDEXER) == 2
-            assert [task.stage for task in tasks].count(DeviceMetadataStage.COMPRESSOR) == 1
+            assert [task.stage for task in tasks].count(DeviceMetadataStage.COMPRESSOR) == int(not captured)
+            if captured:
+                prepare_ids = {task.group_id for task in tasks if task.stage == DeviceMetadataStage.PREPARE}
+                slot_ids = {
+                    item.slot_metadata_group_id
+                    for group in results
+                    for item in group
+                    if item.slot_metadata_group_id is not None
+                }
+                assert slot_ids <= prepare_ids
+                assert len(prepare_ids - slot_ids) == 1  # One shared C2 length producer.
         else:
             assert not tasks
         return results, tuple((task.stage, task.group_id) for task in tasks)
@@ -1249,7 +1264,7 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
         head_dim=8,
         nope_head_dim=6,
     )
-    cache = SimpleNamespace(slot_mapping=slots)
+    cache = SimpleNamespace(slot_mapping=slots, slot_metadata_group_id=None)
     metadata = SimpleNamespace(
         compressor=SimpleNamespace(cache=cache, state=state),
         indexer=SimpleNamespace(cache=cache),
