@@ -1,0 +1,4 @@
+pr: 21073
+entries:
+  - category: bugfix
+    text: Fixed V1 thinking-budget enforcement for draftless speculative steps, multi-token reasoning end sequences, and resumed requests with committed end prefixes on Ascend.
