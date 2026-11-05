@@ -57,18 +57,16 @@
 /vllm_ascend/attention/indexer.py @weijinqian0
 /vllm_ascend/attention/indexer_kpool.py @weijinqian0
 
-
-
-
 # compilation
 /vllm_ascend/compilation @yiz-liu @wxsIcey
 
 # device / device_allocator
 /vllm_ascend/device @zzzzwwjj
-/vllm_ascend/device_allocator @weijinqian0
+/vllm_ascend/device_allocator @weijinqian0 @Ronald1995
 
 # distributed
 /vllm_ascend/distributed @LCAIZJ
+/vllm_ascend/distributed/weight_transfer @Ronald1995
 /vllm_ascend/distributed/kv_transfer/kv_pool @weijinqian0
 /vllm_ascend/distributed/kv_transfer/sparse_kv_offload @weiguihua2
 
@@ -77,17 +75,17 @@
 
 # ops
 /vllm_ascend/ops @zzzzwwjj
-/vllm_ascend/ops/fused_moe @weijinqian0
+/vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129
 
 # quantization
-/vllm_ascend/quantization @kunpengW-code @menogrey
+/vllm_ascend/quantization @kunpengW-code @menogrey @Tflowers-0129
 
 # sample
 /vllm_ascend/sample @realliujiaxu
 /vllm_ascend/worker/v2/sample @realliujiaxu
 
 # spec decode
-/vllm_ascend/worker/v2/spec_decode @wxsIcey
+/vllm_ascend/worker/v2/spec_decode @wxsIcey @Tflowers-0129
 
 # scheduler
 /vllm_ascend/core/batch_job_aware_scheduler.py
@@ -105,14 +103,14 @@
 # Core framework
 /vllm_ascend/ascend_config.py 
 /vllm_ascend/ascend_forward_context.py
-/vllm_ascend/batch_invariant.py
+/vllm_ascend/batch_invariant.py @Ronald1995
 /vllm_ascend/config_utils.py
 /vllm_ascend/cpu_binding.py
 /vllm_ascend/envs.py
 /vllm_ascend/logger.py
 /vllm_ascend/meta_registration.py
 /vllm_ascend/mrv2_utils.py @yzeyu71
-/vllm_ascend/platform.py @wxsIcey
+/vllm_ascend/platform.py @wxsIcey @Tflowers-0129
 /vllm_ascend/profiling_config.py
 /vllm_ascend/utils.py
 
@@ -134,15 +132,15 @@
 /vllm_ascend/worker/v2/model_states
 /vllm_ascend/worker/v2/aclgraph_utils.py
 /vllm_ascend/worker/v2/attn_utils.py
-/vllm_ascend/worker/v2/block_table.py
+/vllm_ascend/worker/v2/block_table.py @Tflowers-0129
 /vllm_ascend/worker/v2/eplb.py
-/vllm_ascend/worker/v2/input_batch.py
+/vllm_ascend/worker/v2/input_batch.py @yiz-liu
 /vllm_ascend/worker/v2/kv_connector.py @yzeyu71
 /vllm_ascend/worker/v2/kvpp.py
-/vllm_ascend/worker/v2/model_runner.py
+/vllm_ascend/worker/v2/model_runner.py @yiz-liu
 /vllm_ascend/worker/v2/pcp_manager.py @weiguihua2
 /vllm_ascend/worker/v2/pp_transport.py
-/vllm_ascend/worker/v2/states.py
+/vllm_ascend/worker/v2/states.py @yiz-liu
 /vllm_ascend/worker/v2/utils.py
 
 # Models
