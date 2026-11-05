@@ -154,6 +154,12 @@ class HardwareCapability(Enum):
     RC_DEVICE_DISCOVERY = auto()
     # Fused RMSNorm+cast is available for the A2/A3 (CANN 9.1) path.
     RMS_NORM_CAST = auto()
+    # Fused RMSNorm and dynamic per-token INT8 quantization on A3.
+    RMS_NORM_DYNAMIC_QUANT = auto()
+    # BF16 SiTU plus per-token INT8 quantization on the A3 dense-MLP path.
+    DEQUANT_SITU_QUANT = auto()
+    # BF16 SiTU plus group-32 MXFP8 quantization on A5.
+    SITU_MX_QUANT = auto()
     # Import and register the compiled vLLM-Ascend custom-op library at runtime.
     # This is independent of whether custom ops are enabled by default.
     RUNTIME_CUSTOM_OPS = auto()
@@ -286,6 +292,8 @@ _STANDARD_CAPABILITIES = frozenset(
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+    HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
+    HardwareCapability.DEQUANT_SITU_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
 }
@@ -372,6 +380,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.ENGRAM_UNROTATED_GATE,
                     HardwareCapability.ENGRAM_MXFP8,
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
+                    HardwareCapability.SITU_MX_QUANT,
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
                     HardwareCapability.FLA_GDN_PREFILL,
                     HardwareCapability.FP8_ATTENTION,

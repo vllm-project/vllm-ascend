@@ -671,8 +671,8 @@ class AscendSharedExperts:
             milestones.shared_activation_overlap_start,
             "shared_activation_overlap_start",
         )
-        # MC2 and All2All prepare Down during routed GMM1/GMM2; AllGather
-        # starts at GMM2. The Down matmul remains behind combine.
+        # All staged backends place activation/quantization alongside routed
+        # GMM2. The Down matmul remains behind combine.
         if submitted_gate_up.path is SharedExpertMLPPath.W8A8_MXFP_LINEAR:
             down_input = self._prepare_w8a8_mxfp_down_input(submitted_gate_up.gate_up)
         else:
