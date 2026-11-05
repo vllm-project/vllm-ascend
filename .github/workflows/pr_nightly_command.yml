@@ -287,6 +287,7 @@ jobs:
               PENDING_OPTION=""
             elif [ "$PENDING_OPTION" = "--profile-benchmark-names" ]; then
               PROFILE_OPTIONS_JSON=$(jq -c --arg value "$WORD" '.benchmark_names = $value' <<< "$PROFILE_OPTIONS_JSON")
+              PENDING_OPTION=""
             elif [ "$NEXT_IS_VLLM_REF" = "1" ]; then
               VLLM_REF="$WORD"
               NEXT_IS_VLLM_REF=0
