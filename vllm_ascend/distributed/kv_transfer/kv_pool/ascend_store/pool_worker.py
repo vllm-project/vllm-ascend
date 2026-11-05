@@ -848,6 +848,9 @@ class KVPoolWorker:
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
         self.current_layer = 0
+        if self.load_async and self.kv_recv_thread is not None:
+            # Retire old completions before enqueuing a same-ID resumed load.
+            self.kv_recv_thread.discard_finished_requests(metadata.preempted_req_ids)
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
             return
@@ -1384,7 +1387,11 @@ class KVPoolWorker:
 
         done_recving = set()
         if self.kv_recv_thread is not None:
-            self.kv_recv_thread.discard_finished_requests(meta.preempted_req_ids)
+            preempted_req_ids = meta.preempted_req_ids
+            if self.load_async and not self.use_layerwise:
+                # A same-tick resume may have completed its new load already.
+                preempted_req_ids = preempted_req_ids - meta.loading_req_ids
+            self.kv_recv_thread.discard_finished_requests(preempted_req_ids)
             if self.load_async and not self.use_layerwise:
                 done_recving = self.kv_recv_thread.get_and_clear_finished_requests(meta.loading_req_ids)
 

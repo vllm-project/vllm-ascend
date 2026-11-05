@@ -33,7 +33,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import assert_scheduler_empty, create_model_runner_output, create_vllm_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec, is_prefix_cacheable
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_scheduler, pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import backend_map
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
@@ -168,6 +168,9 @@ def cache_layout(request, speculative_method):
 def devices_and_store(monkeypatch):
     monkeypatch.setattr(MemoryBackend, "payloads", {})
     monkeypatch.setitem(backend_map, "cpu", {"path": __name__, "name": "MemoryBackend"})
+    # The mock-dependency bootstrap may reload the registry during collection.
+    for module in (pool_scheduler, pool_worker):
+        monkeypatch.setitem(module.backend_map, "cpu", {"path": __name__, "name": "MemoryBackend"})
     monkeypatch.setattr(pool_worker, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(pool_worker, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(pool_worker, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
@@ -382,18 +385,23 @@ def test_scheduler_worker_roundtrip_preserves_bytes_and_page_gaps(byte_pooling_s
 
 
 @pytest.mark.parametrize("use_v2", [False, True])
-def test_preempted_request_restores_bytes_into_new_blocks_before_appending(byte_pooling_session, use_v2):
-    session = byte_pooling_session(use_v2=use_v2)
+@pytest.mark.parametrize("same_step_resume", [False, True])
+@pytest.mark.parametrize("load_async", [False, True])
+def test_preempted_request_restores_bytes_into_new_blocks_before_appending(
+    byte_pooling_session, use_v2, same_step_resume, load_async
+):
+    session = byte_pooling_session(use_v2=use_v2, load_async=load_async)
     request = session.new_request("byte-resume", list(range(384)))
     session.scheduler.add_request(request)
     session.execute(session.scheduler.schedule(), request)
     session.pool.handle_released_saves({request.request_id})
     previous_blocks = list(session.block_ids(request))
     assert session.scheduler.reset_prefix_cache(reset_running_requests=True)
-    # Deliver the release notification before the next tick resumes the request.
-    session.scheduler.set_pause_state(PauseState.PAUSED_ALL)
-    session.execute(session.scheduler.schedule())
-    session.scheduler.set_pause_state(PauseState.UNPAUSED)
+    if not same_step_resume:
+        # Also exercise release notification and resume in separate scheduling ticks.
+        session.scheduler.set_pause_state(PauseState.PAUSED_ALL)
+        session.execute(session.scheduler.schedule())
+        session.scheduler.set_pause_state(PauseState.UNPAUSED)
     # Old addresses contain deliberately wrong bytes; a stale block table cannot pass.
     for _, _, _, tensor in cache_entries(session.plan, session.caches):
         tensor.fill_(252)
