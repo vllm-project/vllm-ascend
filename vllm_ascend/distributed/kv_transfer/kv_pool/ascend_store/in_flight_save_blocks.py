@@ -19,7 +19,7 @@ class InFlightSaveBlockTracker:
         speculative_blocks_by_group: dict[int, int],
         block_pool: BlockPool | None,
     ) -> None:
-        if not speculative_blocks_by_group or not req_meta.can_save:
+        if not req_meta.can_save or not speculative_blocks_by_group:
             return
 
         block_ids: list[int] = []

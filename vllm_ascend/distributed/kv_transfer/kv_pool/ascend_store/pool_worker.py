@@ -1092,10 +1092,11 @@ class KVPoolWorker:
             request.current_event = current_event
             requests.append(request)
 
-        if not requests:
-            return
-
-        self._previous_save_batch = send_thread.add_save_batch(requests)
+        if requests:
+            self._previous_save_batch = send_thread.add_save_batch(requests)
+        # Complete queued PUTs before the next prefill chunk can reuse SWA slots.
+        send_thread.request_queue.join()
+        send_thread.raise_if_failed()
 
     def _make_sub_key_str(self, base_key: str, effective_rank: int) -> str:
         """Rewrite ``@head_or_tp_rank:<local>`` in serialized ``base_key`` to ``<effective_rank>``.
