@@ -940,7 +940,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
 
 ### 5.3 Image-and-Text 10K PD Separation Deployment
 
-This case uses the same eight-device Ascend 950 DT host as the basic PD example in [Section 5.2](#52-basic-pd-separation-deployment). For image-and-text 10K validation, prefill uses TP2 × PP2 × DP1 with a `25,23` layer partition, and decode uses TP2 × DP2 behind one API endpoint. Both roles use 8192 batch tokens and `HCCL_BUFFSIZE=512`. Prefill disables prefix caching; decode enables prefix caching and static kernels.
+This case uses the same eight-device Ascend 950 DT host as the basic PD example in [Section 5.2](#52-basic-pd-separation-deployment). For image-and-text 10K validation, prefill uses TP2 × PP2 × DP1 with a `25,23` layer partition, and decode uses TP2 × DP2 behind one API endpoint. Both roles use 8192 batch tokens and `HCCL_BUFFSIZE=512`. Both roles enable prefix caching; decode also enables static kernels.
 
 The 10K target is the processed input length, including text and image tokens. Both roles retain `--max-model-len 143360`; keep the input plus requested output within this limit. Use the W4A8-MXFP checkpoint from [Section 3.1](#31-model-weight) with its vision encoder and image processor.
 
@@ -976,7 +976,7 @@ The complete Prefill, Decode, and proxy commands are provided below.
         --max-num-seqs 64 \
         --max-num-batched-tokens 8192 \
         --gpu-memory-utilization 0.9 \
-        --no-enable-prefix-caching \
+        --enable-prefix-caching \
         --async-scheduling \
         --enable-expert-parallel \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
@@ -1055,7 +1055,7 @@ The complete Prefill, Decode, and proxy commands are provided below.
 
     - Prefill partitions the layers across two pipeline stages with `VLLM_PP_LAYER_PARTITION=25,23`. Keep `pp_size=2` and `pp_layer_partition="25,23"` in both Mooncake configurations consistent with this partition.
     - Decode uses TP2 × DP2 behind one API endpoint on port `8248`; the proxy routes to that endpoint rather than separate DP-rank APIs.
-    - Prefill disables prefix caching and graph capture and sets MTP `enforce_eager=true`. Decode enables prefix caching and `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, enables static kernels, and disables super kernels.
+    - Both roles enable prefix caching. Prefill disables graph capture and sets MTP `enforce_eager=true`. Decode uses `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, enables static kernels, and disables super kernels.
     - Both roles enable Engram CPU offload with `dp_shared_memory=false`, use `HCCL_BUFFSIZE=512`, and retain the supplied case's startup timeout of 2400 seconds. Provide sufficient host memory for the checkpoint and the decode DP replicas.
     - This case retains `VLLM_ASCEND_PLE_BACKEND=torch` from the supplied scripts. It only selects a backend in runtimes that implement this variable; an unknown-variable warning means it has no effect.
 
