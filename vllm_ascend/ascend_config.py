@@ -923,6 +923,25 @@ class AscendConfig:
                     "Please disable one of them."
                 )
 
+        # Adaptive verification trims the verification batch on the device only,
+        # so batch-sharded sampling must read the admitted draft split back to
+        # the host. That plumbing only exists on vLLM main; the 0.32.0 release
+        # tree returns three fields and would silently shard on scheduled counts.
+        if (
+            vc.parallel_config.enable_batch_sharded_sampling
+            and vc.speculative_config is not None
+            and getattr(vc.speculative_config, "enable_adaptive_verification", False)
+        ):
+            from vllm_ascend.utils import vllm_version_is
+
+            if vllm_version_is("0.32.0"):
+                raise ValueError(
+                    "enable_adaptive_verification combined with "
+                    "enable_batch_sharded_sampling requires vLLM main; the 0.32.0 "
+                    "release tree does not forward the admitted draft counts. "
+                    "Please disable one of them."
+                )
+
         # mix_placement mutex
         self._check_mix_placement()
 

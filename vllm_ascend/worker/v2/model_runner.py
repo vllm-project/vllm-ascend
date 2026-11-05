@@ -885,6 +885,7 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc = self.input_buffers.query_start_loc
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
+        num_admitted_draft_tokens = None
         if adaptive_verification_active:
             # vLLM main appends the admitted draft counts (a 4th element) for
             # batch-sharded sampling; the release tree returns three fields.
@@ -892,7 +893,7 @@ class NPUModelRunner(GPUModelRunner):
             if vllm_version_is("0.32.0"):
                 cu_num_logits, query_start_loc, total_num_draft_tokens = draft_split
             else:
-                cu_num_logits, query_start_loc, total_num_draft_tokens, _ = draft_split
+                cu_num_logits, query_start_loc, total_num_draft_tokens, num_admitted_draft_tokens = draft_split
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
 
             # Non-fia backends skip padding query boundary when using adaptive verification
@@ -986,7 +987,6 @@ class NPUModelRunner(GPUModelRunner):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
-        pp_kwargs = {"max_seq_len_np": batch_req_state.max_seq_len_np}
         input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1000,6 +1000,7 @@ class NPUModelRunner(GPUModelRunner):
             num_tokens_after_padding=num_tokens_after_padding,
             num_draft_tokens=total_num_draft_tokens,
             num_draft_tokens_per_req=num_draft_tokens_per_req,
+            num_admitted_draft_tokens=num_admitted_draft_tokens,
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
@@ -1012,7 +1013,7 @@ class NPUModelRunner(GPUModelRunner):
             has_prefill=batch_req_state.has_prefill,
             decode_graph_eligible=batch_req_state.decode_graph_eligible,
             prefill_runs_as_decode_np=batch_req_state.prefill_runs_as_decode_np,
-            **pp_kwargs,
+            max_seq_len_np=batch_req_state.max_seq_len_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
