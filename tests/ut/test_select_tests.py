@@ -33,9 +33,7 @@ def test_pytest_node_exists_handles_functions_classes_and_parameters(tmp_path):
     module = _load_select_tests()
     test_file = tmp_path / "test_sample.py"
     test_file.write_text(
-        "async def test_async():\n    pass\n\n"
-        "class TestGroup:\n"
-        "    def test_case(self):\n        pass\n",
+        "async def test_async():\n    pass\n\nclass TestGroup:\n    def test_case(self):\n        pass\n",
         encoding="utf-8",
     )
 
