@@ -13,13 +13,20 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-name: Presmoke Trigger On Label
+name: Presmoke Trigger On Dockerfile Change
 on:
   pull_request:
-    types: [labeled]
+    paths:
+      - 'Dockerfile'
+      - 'Dockerfile.openEuler'
+      - 'Dockerfile.a3'
+      - 'Dockerfile.a3.openEuler'
+      - 'Dockerfile.a5'
+      - 'Dockerfile.a5.openEuler'
+      - 'Dockerfile.310p'
+      - 'Dockerfile.310p.openEuler'
 jobs:
   run-presmoke-pipeline:
-    if: ${{ github.event.label.name == 'presmoke' }}
     uses: ./.github/workflows/schedule_nightly_image_build_with_base_presmoke.yaml
     with:
       # 对齐上游workflow注释：os 只允许 ubuntu / openeuler
