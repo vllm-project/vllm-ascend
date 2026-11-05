@@ -264,7 +264,7 @@ def test_pcp_fake_ops_keep_shapes_traceable():
 def test_capture_capacity_counts_global_kda_tokens_without_changing_runner():
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=2),
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=16),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=16, max_num_seqs=4),
         compilation_config=SimpleNamespace(max_cudagraph_capture_size=4),
     )
 
