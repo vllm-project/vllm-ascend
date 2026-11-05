@@ -43,12 +43,13 @@
 /mkdocs.yml @MrZ20
 
 # examples
-/examples/  @MrZ20
+/examples/ @MrZ20
 
 # c++ source code
 /cmake @zzzzwwjj @ZT-AIA
 /csrc @zzzzwwjj @ZT-AIA
 /CMakeLists.txt @zzzzwwjj @ZT-AIA
+/vllm_ascend/_cann_ops_custom @ZT-AIA
 
 # attention
 /vllm_ascend/attention/
@@ -75,8 +76,9 @@
 
 # ops
 /vllm_ascend/ops @zzzzwwjj
+/vllm_ascend/ops/triton @AuroraEmiya @ZT-AIA
 /vllm_ascend/ops/triton/batch_invariant @Ronald1995
-/vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129
+/vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA
 
 # quantization
 /vllm_ascend/quantization @kunpengW-code @menogrey @Tflowers-0129
@@ -155,6 +157,9 @@
 # 310P
 /vllm_ascend/_310p @Tflowers-0129
 
+# xlite
+/vllm_ascend/xlite @lulina
+
 # release_notes
 /release_notes/ @wangxiyuan
 
@@ -163,10 +168,9 @@
 
 # tests
 /tests/e2e/nightly @wenjun91
+/tests/e2e/nightly/single_node/ops @Foriv
 
 # vllm_ascend module directories (subdirs broken out one level)
-# TODO(owner): /vllm_ascend/_cann_ops_custom
-# /vllm_ascend/_cann_ops_custom
 # TODO(owner): /vllm_ascend/ec_manager
 # /vllm_ascend/ec_manager
 # TODO(owner): /vllm_ascend/eplb
@@ -181,8 +185,6 @@
 # /vllm_ascend/profiler
 # TODO(owner): /vllm_ascend/weight_switch
 # /vllm_ascend/weight_switch
-# TODO(owner): /vllm_ascend/xlite
-# /vllm_ascend/xlite
 
 # TODO(owner): /benchmarks/
 # /benchmarks/
