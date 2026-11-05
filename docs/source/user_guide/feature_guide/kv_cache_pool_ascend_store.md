@@ -949,6 +949,8 @@ Expected output: MetaService starts successfully with no errors.
 
     `use_layerwise` can be set to `true` to enable per-layer KV access, supported by both the Mooncake and Memcache backends; it is only supported on the Prefill node. `consumer_is_to_put` and `consumer_is_to_load` can also be configured via `kv_connector_extra_config`.
 
+    For DeepSeek-V4.1 deployments, `CED_layerwise` can additionally be set to `true` (with `use_layerwise=false`) to enable the CED per-source-slice session save and dependency-unit pipelined load on the bulk pool path: prefills publish each KV-source slot's pool object as soon as its source layer finishes (overlapping the transfer with the remaining forward and shrinking the save tail), and cache hits stream their load units behind in-model per-layer gates instead of waiting for one bulk transfer to complete. Requirements: the Memcache backend (GVA session plane), `load_async=true` on nodes that load, DeepSeek-V4.1 architectures, and no pipeline parallelism. `bounded_replay` on or off is supported (the derived trigger map adapts automatically). Leaving `CED_layerwise` unset keeps the existing bulk behavior unchanged.
+
     To start proxy_server and run inference, refer to the corresponding sub-steps in "PD Disaggregation Scenario" of [Scenario 1: Mooncake Backend](#scenario-1-mooncake-backend).
 
     Expected output: Same as Mooncake scenario, returns OpenAI Completions API JSON response.

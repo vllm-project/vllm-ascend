@@ -1030,7 +1030,11 @@ class CEDSaveWorker(KVPoolWorker):
 
     def wait_for_save(self, connector_metadata: Any) -> None:
         send_thread = self.kv_send_thread
-        assert isinstance(send_thread, CEDSessionSendThread)
+        if not isinstance(send_thread, CEDSessionSendThread):
+            # Fallback mode (backend without session support, PP>1): the
+            # parent behavior covers every group through the bulk path.
+            super().wait_for_save(connector_metadata)
+            return
         requests: list[ReqMeta] = []
         current_event = None
         for request in connector_metadata.requests:
