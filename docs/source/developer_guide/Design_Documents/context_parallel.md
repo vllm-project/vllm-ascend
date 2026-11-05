@@ -268,7 +268,7 @@ Provider registration is import-time and cached for the process lifetime; adapte
 
 ### Adding a new PCP/DCP backend
 
-1. Add an adapter module `vllm_ascend/attention/context_parallel/<name>_cp.py` containing the CP metadata builder and attention implementation. Reuse `DCPMetadataBuilderMixin`, `DCPImplMixin` and the `context_parallel/dcp_metadata.py` helpers, and inherit from the backend's v1 builder and implementation where possible. Register the provider at module scope as shown below. The adapter imports the v1 classes it extends, so the v1 module must not import the adapter at module scope (see step 2).
+1. Add an adapter module `vllm_ascend/attention/context_parallel/<name>_cp.py` containing the CP metadata builder and attention implementation. Reuse `DCPMetadataBuilderMixin`, `DCPImplMixin` and the `context_parallel/dcp_metadata.py` helpers, and inherit from the backend's v1 builder and implementation where possible. Register the provider when the adapter module is imported, as shown below. The adapter imports the v1 classes it extends, so the v1 module must not import the adapter at its top (see step 2).
 2. Make the backend's v1 module resolve through the registry. The existing `attention_v1`, `mla_v1`, `sfa_v1`, `dsa_v1` and `dsa_v41` modules already do this; a new v1 backend should mirror them:
    ```python
    @staticmethod
@@ -281,7 +281,7 @@ Provider registration is import-time and cached for the process lifetime; adapte
        vllm_config = get_current_vllm_config()
        return resolve_cp_classes("<name>", vllm_config, resolve_cp_topology(vllm_config))[0]
    ```
-   Import the adapter lazily so the provider is registered before the first `resolve_cp_classes` call: either inside `get_impl_cls`/`get_builder_cls` (a function-level import) or at the bottom of the v1 module. A module-level import at the top would create a v1 ↔ adapter cycle because the adapter imports the v1 classes. The built-in adapters instead rely on the registry's internal lazy-loading table, which only covers the built-in backend names. Do not add a second selection table or edit `vllm_ascend/platform.py`.
+   Import the adapter lazily so the provider is registered before the first `resolve_cp_classes` call: either inside `get_impl_cls`/`get_builder_cls` (a function-level import) or at the end of the v1 module after its class definitions. Importing the adapter at the top would create a v1 ↔ adapter cycle because the adapter imports the v1 classes. The built-in adapters instead rely on the registry's internal lazy-loading table, which only covers the built-in backend names. Do not add a second selection table or edit `vllm_ascend/platform.py`.
 3. Declare optional hooks only when the backend needs them: `cp_resolver` for more than one CP layout, `spec_decode_drafting_updater` for graph-stable drafting metadata (return `True` only for builders the hook handles), and `validate` once provider-routed validation exists.
 4. Add an isolated test to `tests/ut/attention/test_cp_registry.py`: register the provider, resolve it for a base and a CP topology, and assert that the built-in providers are unchanged. `test_simulated_backend_registers_without_touching_existing_backends` is the reference; its `sim_provider` fixture removes the temporary provider during teardown.
 
@@ -348,9 +348,9 @@ Use `main@b87b0d881`, the branch point of the refactor, as the baseline and comp
 | Workload | Model | Topology | Requests and sizes | Purpose |
 | --- | --- | --- | --- | --- |
 | CP-off anchor | MLA model | TP2, PCP1, DCP1 | 200 prompts, 32768 input / 128 output tokens, max concurrency 8 | Absolute baseline and functional anchor |
-| CP-off anchor | `Qwen/Qwen3-8B` | TP2, PCP1, DCP1 | Same prompt set as the GQA stacked run | Absolute baseline and functional anchor |
+| CP-off anchor | `Qwen/Qwen3-8B` | TP2, PCP1, DCP1 | Same workload as the GQA stacked run | Absolute baseline and functional anchor |
 | PCP+DCP stacked | MLA model (for example `vllm-ascend/DeepSeek-V3.2-W8A8-Pruning`) | TP2, PCP2, DCP2 | Same as the MLA anchor | PCP+DCP overhead |
-| PCP+DCP stacked | `Qwen/Qwen3-8B` | TP2, PCP2, DCP2 | Same as the GQA anchor | GQA stacking overhead |
+| PCP+DCP stacked | `Qwen/Qwen3-8B` | TP2, PCP2, DCP2 | Same as the MLA anchor | GQA stacking overhead |
 
 Set `--block-size 128 --cp-kv-cache-interleave-size 128` for the DCP workloads; with `dcp_size > 1` the interleave size must divide the block size (see [KV-cache layout](#kv-cache-layout)). For SFA, keep `cp_kv_cache_interleave_size` equal to the block size.
 
@@ -388,7 +388,7 @@ Keep the benchmark flags, request sizes and concurrency identical between baseli
 
 ### Metrics, thresholds and record template
 
-Report time to first token (TTFT) p50/p90/p99 and time per output token (TPOT) p50/p90/p99 in milliseconds, output tokens per second, requests per second, and peak HBM per device. Read peak HBM in the server process before it exits with `torch.npu.max_memory_allocated()` and `torch.npu.max_memory_reserved()`: the counters belong to the process that owns the model, so a separate observer process cannot read them. If the in-process counters are unavailable, use `npu-smi info -t memory -i <device>` while the server is loaded.
+Report time to first token (TTFT) p50/p90/p99 and time per output token (TPOT) p50/p90/p99 in milliseconds, output tokens per second, requests per second, and peak HBM per device. Read peak HBM in the server process before it exits with `torch.npu.max_memory_allocated()` and `torch.npu.max_memory_reserved()` (torch_npu exposes both counters on `torch.npu`): the counters belong to the process that owns the model, so a separate observer process cannot read them. If the in-process counters are unavailable, use `npu-smi info -t memory -i <device>` while the server is loaded.
 
 A run passes when:
 
@@ -419,9 +419,9 @@ Run this on an NPU machine (or the nightly/PR NPU CI); CPU unit tests do not cov
 
 The extension interface is designed so that it does not add work to the model-step hot path:
 
-- Topology derivation and provider/class resolution run during backend initialization, not during model steps: `get_builder_cls`/`get_impl_cls` call `resolve_cp_classes`/`resolve_cp_topology`, and builders and implementations store the CP flags and process-group handles (`use_dcp`, `use_pcp`, DCP size and rank) in their constructors. Per-step code reads those stored values instead of consulting the registry.
+- Topology derivation and provider/class resolution run during backend initialization, not during model steps: `get_builder_cls`/`get_impl_cls` call `resolve_cp_classes`/`resolve_cp_topology`. Builders and implementations store the CP flags and process-group handles (`use_dcp`, `use_pcp`, DCP size and rank) in their constructors, and per-step code reads those stored values instead of consulting the registry.
 - `find_cp_backend_for_builder` is only called when speculative-decoding drafting metadata is updated (`vllm_ascend/worker/dcp_utils.py`), not on the normal attention path. When no provider hook matches, `dcp_metadata.validate_spec_decode_drafting_metadata` only checks metadata invariants and adds no copies; the SFA hook performs the same single device-buffer update as before.
-- When CP is disabled or a backend does not support the requested axis, `resolve_cp_classes` returns the base pair, so no CP-specific builder, hook or collective is constructed.
+- When CP is disabled, or when the provider resolves to the base pair (GQA/MLA keep PCP inlined in their v1 implementation), no DCP-specific builder or drafting hook is constructed; the PCP-inlined v1 path still runs its normal logic when PCP is enabled.
 
 These constraints are what make the expected performance outcome "no measurable overhead"; a regression outside the thresholds above points at a broken invariant rather than at an expected cost of the extension interface.
 
