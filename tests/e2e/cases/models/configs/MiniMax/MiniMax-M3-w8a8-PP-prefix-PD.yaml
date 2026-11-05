@@ -106,7 +106,7 @@ templates:
       - "--additional-config"
       - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}'
       - "--speculative-config"
-      - '{"model":"Inferact/MiniMax-M3-EAGLE3-GQA", "method":"eagle3", "num_speculative_tokens":3}'
+      - '{"model":"nv-community/MiniMax-M3-DSpark", "method":"dspark", "num_speculative_tokens":7,"enforce_eager":false}'
       - "--kv-transfer-config"
       - '{
         "kv_connector":"MooncakeConnectorV1",
@@ -165,7 +165,7 @@ templates:
       - "--additional-config"
       - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true}'
       - "--speculative-config"
-      - '{"model":"Inferact/MiniMax-M3-EAGLE3-GQA", "method":"eagle3", "num_speculative_tokens":3}'
+      - '{"model":"nv-community/MiniMax-M3-DSpark", "method":"dspark", "num_speculative_tokens":7,"enforce_eager":false}'
       - "--kv-transfer-config"
       - '{
         "kv_connector":"MooncakeConnectorV1",
@@ -225,7 +225,7 @@ templates:
       - "--additional-config"
       - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true}'
       - "--speculative-config"
-      - '{"model":"Inferact/MiniMax-M3-EAGLE3-GQA", "method":"eagle3", "num_speculative_tokens":3}'
+      - '{"model":"nv-community/MiniMax-M3-DSpark", "method":"dspark", "num_speculative_tokens":7,"enforce_eager":false}'
       - "--kv-transfer-config"
       - '{
         "kv_connector":"MooncakeConnectorV1",
@@ -298,3 +298,4 @@ benchmarks:
     request_rate: 0
     baseline: 0
     threshold: 0.97
+    tpot_threshold: 0
