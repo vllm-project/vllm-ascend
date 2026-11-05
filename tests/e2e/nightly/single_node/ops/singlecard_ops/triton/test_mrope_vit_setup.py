@@ -5,6 +5,7 @@ import pytest
 import torch
 from vllm.triton_utils import triton
 
+from vllm_ascend.models.minimax_m3.minimax_m3_vl import _load_vllm_minimax_m3_common_module
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.patch.worker.patch_mrope_vit_setup import _vit_mrope_setup_kernel, vit_mrope_setup
 
@@ -40,6 +41,11 @@ def _reference_positions(grids, merge):
 def test_vit_mrope_setup(grids, merge, sections):
     """Compile on NPU and compare both the kernel and patched public entry point."""
     init_device_properties_triton()
+    # Exercise the function resolved by the actual upstream vision method,
+    # rather than only testing the directly imported patch implementation.
+    vision_module = _load_vllm_minimax_m3_common_module("vision_tower")
+    setup = vision_module.MiniMaxVLVisionTransformer.prepare_encoder_metadata.__globals__["vit_mrope_setup"]
+    assert setup is vit_mrope_setup
     inv_cpu = [torch.linspace(0.001, 1.0, size) for size in sections]
     inv = [freq.to("npu") for freq in inv_cpu]
     positions = _reference_positions(grids, merge)
@@ -68,7 +74,7 @@ def test_vit_mrope_setup(grids, merge, sections):
         BLOCK_D=triton.next_power_of_2(half_rot),
         num_warps=8,
     )
-    public_cos, public_sin = vit_mrope_setup(*inv, grids, merge)
+    public_cos, public_sin = setup(*inv, grids, merge)
     cos, sin, public_cos, public_sin = [value.cpu() for value in (cos, sin, public_cos, public_sin)]
     start = 0
     for axis, size in enumerate(sections):
