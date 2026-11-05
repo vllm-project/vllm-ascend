@@ -5,6 +5,7 @@ import importlib.util
 import sys
 import types
 import unittest
+from itertools import product
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -17,8 +18,10 @@ class TestVitMropeSetupPatch(unittest.TestCase):
             "vllm_ascend.models._vllm_minimax_m3_common_vision_tower",
         )
         for n in (1, 16, 17, 32, 33, 65):
-            for loaded_models in ((), models[:1], models[1:], models):
-                with self.subTest(n=n, loaded_models=loaded_models):
+            for states in product(("absent", "loaded", "blocked"), repeat=len(models)):
+                loaded_models = tuple(model for model, state in zip(models, states) if state == "loaded")
+                blocked_models = tuple(model for model, state in zip(models, states) if state == "blocked")
+                with self.subTest(n=n, states=states):
                     modules = {}
                     names = [target, "vllm.triton_utils", "vllm.utils.torch_utils"]
                     names.extend(loaded_models)
@@ -39,6 +42,8 @@ class TestVitMropeSetupPatch(unittest.TestCase):
                     upstream.vit_mrope_setup = original
                     for model in loaded_models:
                         modules[model].vit_mrope_setup = original
+                    for model in blocked_models:
+                        modules[model] = None
                     vars(upstream)["_vit_mrope_setup_kernel"] = kernel
                     vars(modules["vllm.triton_utils"])["triton"] = types.SimpleNamespace(
                         cdiv=lambda x, y: (x + y - 1) // y,
@@ -55,6 +60,9 @@ class TestVitMropeSetupPatch(unittest.TestCase):
                         self.assertIs(upstream.vit_mrope_setup, module.vit_mrope_setup)
                         self.assertIs(upstream._vit_mrope_setup_kernel, kernel)
                         for model in models:
+                            if model in blocked_models:
+                                self.assertIsNone(sys.modules[model])
+                                continue
                             if model not in loaded_models:
                                 self.assertNotIn(model, sys.modules)
                                 modules[model] = types.ModuleType(model)
@@ -63,8 +71,12 @@ class TestVitMropeSetupPatch(unittest.TestCase):
                         inv = MagicMock()
                         inv.numel.return_value = 21
                         for model in models:
+                            if model in blocked_models:
+                                continue
                             modules[model].vit_mrope_setup(inv, inv, inv, [[1, 1, n]], 1)
-                    self.assertEqual(kernel.__getitem__.call_count, len(models))
+                    self.assertEqual(kernel.__getitem__.call_count, len(models) - len(blocked_models))
+                    if len(blocked_models) == len(models):
+                        continue
                     kernel.__getitem__.assert_called_with(((n + 15) // 16,))
                     args, kwargs = kernel.__getitem__.return_value.call_args
                     self.assertEqual(args[7:9], (n, 1))

@@ -81,8 +81,9 @@ def _patch_loaded_vision_towers():
         "vllm.models.minimax_m3.common.vision_tower",
         "vllm_ascend.models._vllm_minimax_m3_common_vision_tower",
     ):
-        if module_name in sys.modules:
-            vars(sys.modules[module_name])["vit_mrope_setup"] = vit_mrope_setup
+        module = sys.modules.get(module_name)
+        if module is not None:
+            module.vit_mrope_setup = vit_mrope_setup
 
 
 _patch_loaded_vision_towers()
