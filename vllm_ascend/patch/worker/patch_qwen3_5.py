@@ -387,11 +387,11 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PA
     _GDN_PATCH_TARGET._pack_conv_weights = AscendGatedDeltaNetAttention._pack_conv_weights
 
     @wraps(_GDN_ORIGINAL_INIT)
-    def _gdn_init_with_packed_weight(self, *args, **kwargs):
-        _GDN_ORIGINAL_INIT(self, *args, **kwargs)
+    def _gdn_init_with_packed_weight(self, config, vllm_config, *args, **kwargs):
+        _GDN_ORIGINAL_INIT(self, config, vllm_config, *args, **kwargs)
         initialize_packed_conv_weight(self)
         initialize_gdn_checkpoints(self)
-        initialize_gdn_projection_overlap(self)
+        initialize_gdn_projection_overlap(self, vllm_config)
 
     _GDN_PATCH_TARGET.__init__ = _gdn_init_with_packed_weight
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
