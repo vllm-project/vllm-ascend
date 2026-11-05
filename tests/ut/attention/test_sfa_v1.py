@@ -1397,16 +1397,31 @@ class TestAscendSFAImpl(TestBase):
     def test_process_weights_for_fused_prolog_v3_mxfp(self):
         self._run_prolog_v3_weight_test(AscendW8A8MXFP8DynamicLinearMethod, True)
 
-    def test_k31_binds_cann_prolog_without_changing_other_models(self):
+    def test_prolog_v3_binding_follows_rope_mode(self):
         cann = MagicMock()
-        with patch.dict(sys.modules, {"cann_ops_transformer": cann}):
-            self.impl.is_kimi_k31 = True
-            self._run_prolog_v3_weight_test(AscendW8A8MXFP8DynamicLinearMethod, True)
-            self.assertIs(self.impl._prolog_v3_op, cann.mla_prolog)
-            self.impl.is_kimi_k31 = False
-            with patch("torch_npu.npu_mla_prolog_v3", create=True) as standard:
-                self._run_prolog_v3_weight_test(AscendW8A8MXFP8DynamicLinearMethod, True)
-                self.assertIs(self.impl._prolog_v3_op, standard)
+        self.impl.is_kimi_k31 = True
+        with (
+            patch.dict(sys.modules, {"cann_ops_transformer": cann}),
+            patch("torch_npu.npu_mla_prolog_v3", create=True) as standard,
+        ):
+            for use_rope in (False, True):
+                with self.subTest(use_rope=use_rope):
+                    self.impl.use_rope = use_rope
+                    self._run_prolog_v3_weight_test(AscendW8A8MXFP8DynamicLinearMethod, True)
+                    expected = standard if use_rope else cann.mla_prolog
+                    self.assertIs(self.impl._prolog_v3_op, expected)
+
+    def test_prolog_v3_with_rope_does_not_require_cann_extension(self):
+        self.impl.use_rope = True
+        with (
+            patch.dict(sys.modules, {"cann_ops_transformer": None}),
+            patch("torch_npu.npu_mla_prolog_v3", create=True) as standard,
+        ):
+            for is_kimi_k31 in (False, True):
+                with self.subTest(is_kimi_k31=is_kimi_k31):
+                    self.impl.is_kimi_k31 = is_kimi_k31
+                    self._run_prolog_v3_weight_test(AscendW8A8MXFP8DynamicLinearMethod, True)
+                    self.assertIs(self.impl._prolog_v3_op, standard)
 
     def test_process_weights_for_fused_prolog_v3_unquantized(self):
         self._run_prolog_v3_weight_test(None, False)

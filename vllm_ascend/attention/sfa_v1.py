@@ -1080,9 +1080,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         assert self.q_proj is not None
 
         self._prolog_v3_op = torch_npu.npu_mla_prolog_v3
-        if self.is_kimi_k31:
+        if not self.use_rope:
             # Resolve in the model worker before graph capture. CANN's V4
-            # entry uses the V3 kernel and accepts None without dropping Dr.
+            # entry disables RoPE while preserving the learned tail dimension.
             from cann_ops_transformer import mla_prolog
 
             self._prolog_v3_op = mla_prolog
