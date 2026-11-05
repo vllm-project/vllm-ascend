@@ -1,5 +1,0 @@
-pr: 21015
-entries:
-  - category: performance
-    text: >-
-      Reduced CPU and NPU token transfers during ordinary decoding on Ascend 310P Model Runner V2.
