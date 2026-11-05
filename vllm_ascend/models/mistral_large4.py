@@ -36,7 +36,7 @@ What this module does replace:
 * **``record_logical_topk_ready``.** Upstream calls it on the attention impl
   for sparse layers. The Ascend SFA impl has no such method, so the call is
   made only where it exists.
-* **The KV-sharing write.** See :class:`AscendSharedKVSlotMappingMixin`.
+* **The KV-sharing write.** See :func:`adopt_shared_kv_skip`.
 
 Everything else — MLA, the DSA indexer, the shared-indexer schedule, NoPE,
 YaRN, the MoE block and the FP8 block-scaled checkpoint — is carried by paths
@@ -62,14 +62,23 @@ __all__ = [
     "AscendMistralIndexerBackend",
     "AscendMistralLarge4ForCausalLM",
     "AscendMistralMLAAttention",
-    "AscendSharedKVSlotMappingMixin",
     "adopt_ascend_modules",
+    "adopt_shared_kv_skip",
+    "has_shared_kv_skip",
     "prepare_indexer_for_ascend",
     "validate_moe_parallelism",
 ]
 
 
-class AscendSharedKVSlotMappingMixin:
+_SHARED_KV_SKIP_MARKER = "_ascend_shared_kv_skip"
+
+
+def has_shared_kv_skip(impl: Any) -> bool:
+    """Whether the KV-sharing write skip is installed on *impl*."""
+    return bool(getattr(impl, _SHARED_KV_SKIP_MARKER, False))
+
+
+def adopt_shared_kv_skip(attn: nn.Module) -> None:
     """Stop a KV-sharing layer from writing over the cache it borrows.
 
     Nine of the 72 layers hold no KV compression weights: they read layer 35's
@@ -91,31 +100,21 @@ class AscendSharedKVSlotMappingMixin:
 
     Narrowing the slot mapping to zero rows is the one hook that covers every
     write site, since all of them route through this method.
-    """
 
-    def _get_sfa_kv_slot_mapping(self, attn_metadata: Any) -> torch.Tensor:
-        # A zero-row mapping, not a sentinel value: the Ascend scatter writes
-        # at the indices it is given, so -1 would land on the last slot.
-        return attn_metadata.slot_mapping[:0]
+    The override is installed on the instance, not by reassigning ``__class__``
+    to a subclass carrying a mixin. That reassignment is refused for this
+    chain: ``AttentionImplBase`` derives from ``abc.ABC`` and ``Generic`` and
+    declares no slots, so it is the class that adds the instance dict, and a
+    mixin in front of it adds one too. CPython compares the two layouts and
+    raises::
 
+        TypeError: __class__ assignment:
+        'AscendSharedKVAscendSFAImpl' object layout differs from 'AscendSFAImpl'
 
-def _shared_kv_impl_class(base: type) -> type:
-    """Return ``base`` with the shared-KV mixin ahead of it in the MRO."""
-    name = f"AscendSharedKV{base.__name__}"
-    cached = getattr(base, "_ascend_shared_kv_cls", None)
-    if cached is not None and cached.__name__ == name:
-        return cached
-    cls = type(name, (AscendSharedKVSlotMappingMixin, base), {})
-    base._ascend_shared_kv_cls = cls  # type: ignore[attr-defined]
-    return cls
-
-
-def adopt_shared_kv_skip(attn: nn.Module) -> None:
-    """Install the shared-KV write skip on one attention module's impl.
-
-    The impl is built by the attention layer's constructor, so the mixin is
-    installed afterwards by reassigning ``__class__``. The mixin adds no state,
-    so parameters and buffers are untouched.
+    A function in the instance dict shadows the method for this impl alone and
+    needs no class. Stored unbound on purpose: attribute lookup from ``self``
+    finds it before the class attribute and does not bind it, so it receives
+    the single argument the call site passes.
     """
     impl = getattr(getattr(attn, "attn", None), "impl", None)
     if impl is None:
@@ -124,9 +123,16 @@ def adopt_shared_kv_skip(attn: nn.Module) -> None:
             "refusing to run, because the layer would otherwise overwrite the "
             "latent cache it borrows."
         )
-    if isinstance(impl, AscendSharedKVSlotMappingMixin):
+    if has_shared_kv_skip(impl):
         return
-    impl.__class__ = _shared_kv_impl_class(type(impl))
+
+    def _get_sfa_kv_slot_mapping(attn_metadata: Any) -> torch.Tensor:
+        # A zero-row mapping, not a sentinel value: the Ascend scatter writes
+        # at the indices it is given, so -1 would land on the last slot.
+        return attn_metadata.slot_mapping[:0]
+
+    impl._get_sfa_kv_slot_mapping = _get_sfa_kv_slot_mapping
+    setattr(impl, _SHARED_KV_SKIP_MARKER, True)
 
 
 class AscendMistralMLAAttention(MistralMLAAttention):

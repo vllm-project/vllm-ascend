@@ -20,8 +20,10 @@ The upstream model package is not in a vLLM release yet
 (vllm-project/vllm#64534), so every test here skips where it is absent.
 """
 
+import abc
 import importlib.util
 from types import SimpleNamespace
+from typing import Generic, TypeVar
 
 import pytest
 import torch
@@ -32,6 +34,8 @@ pytest.importorskip(
 )
 
 from vllm_ascend.models import mistral_large4 as ml4  # noqa: E402
+
+_T = TypeVar("_T")
 
 
 def _spec(layer_idx: int, kv_source_layer: int, has_indexer: bool = True):
@@ -47,8 +51,16 @@ def _spec(layer_idx: int, kv_source_layer: int, has_indexer: bool = True):
     )
 
 
-class _Impl:
-    """Stand-in for AscendSFAImpl: only the one hook the mixin overrides."""
+class _Impl(abc.ABC, Generic[_T]):
+    """Stand-in for AscendSFAImpl, with its object layout.
+
+    The bases matter. ``AscendSFAImpl`` descends from ``MLAAttentionImpl`` and
+    ``AttentionImplBase(ABC, Generic[T])``, none of which declare ``__slots__``,
+    so ``AttentionImplBase`` is the class that adds the instance dict. Putting
+    a mixin in front of that layout is refused by CPython, which is why the
+    write skip is installed on the instance instead. A plain stand-in would
+    accept the class switch and let that regression back in.
+    """
 
     def _get_sfa_kv_slot_mapping(self, attn_metadata):
         return attn_metadata.slot_mapping
@@ -96,10 +108,11 @@ class _Model(torch.nn.Module):
 # --------------------------------------------------------------- KV sharing
 
 
-def test_shared_kv_mixin_narrows_the_slot_mapping_to_nothing():
+def test_shared_kv_skip_narrows_the_slot_mapping_to_nothing():
     """A borrowing layer must write no latent rows at all."""
     impl = _Impl()
-    impl.__class__ = ml4._shared_kv_impl_class(_Impl)
+    ml4.adopt_shared_kv_skip(SimpleNamespace(attn=SimpleNamespace(impl=impl)))
+    assert ml4.has_shared_kv_skip(impl)
     metadata = SimpleNamespace(slot_mapping=torch.arange(8, dtype=torch.int32))
 
     mapped = impl._get_sfa_kv_slot_mapping(metadata)
@@ -124,18 +137,26 @@ def test_adopt_installs_the_skip_on_borrowing_layers_only():
     shared = ml4.adopt_ascend_modules(model)
 
     assert shared == 2
-    installed = [isinstance(layer.attn.impl, ml4.AscendSharedKVSlotMappingMixin) for layer in model.layers]
+    installed = [ml4.has_shared_kv_skip(layer.attn.impl) for layer in model.layers]
     assert installed == [False, False, True, True]
 
 
 def test_adopt_is_idempotent():
+    """A second walk must leave the installed skip alone.
+
+    Comparing the impl's type would pass for free, since the skip no longer
+    changes it. What has to hold is that the override itself is not replaced:
+    reinstalling would wrap the function already in the instance dict.
+    """
     model = _Model([_spec(39, 35)])
 
     ml4.adopt_ascend_modules(model)
-    first = type(model.layers[0].attn.impl)
+    impl = model.layers[0].attn.impl
+    first = impl._get_sfa_kv_slot_mapping
     ml4.adopt_ascend_modules(model)
 
-    assert type(model.layers[0].attn.impl) is first
+    assert model.layers[0].attn.impl is impl
+    assert impl._get_sfa_kv_slot_mapping is first
 
 
 def test_the_skip_refuses_a_layer_with_no_impl():
