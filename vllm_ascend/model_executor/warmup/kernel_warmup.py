@@ -169,6 +169,13 @@ def kernel_warmup(worker: NPUWorker) -> None:
     start = time.perf_counter()
     registry = worker.model_runner.jit_warmup_registry
 
+    # State-copy keys include the final local cache layout/alignment, which is
+    # unavailable during model construction. Both runners bind plans before here.
+    from vllm_ascend.ops.kda_state_copy_plan import register_kda_state_copy_warmup
+
+    with registry.activate():
+        register_kda_state_copy_warmup(worker.vllm_config.compilation_config.static_forward_context)
+
     dspark_registered = _register_dspark_swa_indices_warmup(worker)
     pruned = _prune_unlaunchable_registrations(registry)
     if dspark_registered or pruned:

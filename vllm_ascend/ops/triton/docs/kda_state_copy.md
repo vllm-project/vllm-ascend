@@ -9,16 +9,12 @@ unsupported layouts use a masked byte-copy plan prepared during startup.
 Triton replaces the native gather/clear and scatter kernels on eligible A5
 caches, not chunk math, recurrent decode, GLM KDA or unrelated kernels.
 
-Flow: worker binds cache -> choose fused / masked byte-copy fallback
--> prepare disposable samples -> seal all plans -> publish -> prefill gather ->
-unchanged chunk math -> scatter. Preparation failure aborts startup; it must not
-silently publish a partially ready worker.
-
-Both V1 and V2 runners invoke initialization after cache binding. A Kimi layer
-cannot serve until initialization has completed. Unsupported contiguous and
-strided caches both use the PR's byte-pointer copy algorithm with a startup-precompiled
-batch-memcpy launcher. The fallback uses Torch clearing to avoid a second lazy Triton kernel.
-Invalid inner layouts remain rejected by the strided fallback, as in the PR.
+Flow: worker binds cache -> validate and publish plans -> late-register bound
+layouts in `kernel_warmup()` -> registry compile-only warmup -> prefill gather ->
+unchanged chunk math -> scatter. Both V1 and V2 runners bind plans before warmup.
+Preparation reads metadata only; it neither allocates device tensors nor launches
+kernels. Invalid layouts abort initialization before publishing a partial worker.
+The byte-copy fallback retains Torch clearing and invalid-row masks.
 
 ## Numerical contract
 
@@ -37,55 +33,45 @@ Invalid inner layouts remain rejected by the strided fallback, as in the PR.
 - The fallback gathers invalid indices as zero and skips invalid scatter
   destinations, including contiguous unsupported caches.
 
-## Startup preparation and no serving recompilation
+## Registry warmup and shared launch path
 
-`KDAStateCopyPlan` prepares exactly four compiled variants per bound cache layout:
-INT32/INT64 indices multiplied by gather/scatter. All variants use fixed cache
-metadata and block size 8192. Gather flags are aligned contiguous BOOL. Index
-values and selected counts are runtime data; launch grid is rebound without a
-JIT call. `0 <= selected <= scheduler.max_num_seqs` does not expand the plan variant table.
+`KDAStateCopyKernel` derives four keys per bound layout: INT32/INT64 indices
+multiplied by gather/scatter. Keys retain the actual cache dtype, row count,
+page stride, payload size and pointer alignment. Runtime scalars reproduce their
+Triton integer specialization, including 64-bit page strides. Metadata and packed
+buffers remain aligned and contiguous; gather flags are BOOL, while scatter uses
+its index pointer for the unused flag argument. The block size stays 8192.
+Selected count appears only in the two-dimensional grid, so all admitted counts
+from zero through `scheduler.max_num_seqs` use the same four variants.
 
-Preparation uses one disposable payload row and small metadata tensors. The
-actual row count, stride and alignment are scalar/layout information only; all
-kernel pointers refer to scratch allocations. Index zero ensures the scratch
-never needs to span the live cache. Startup synchronizes before releasing it.
-The strided fallback separately prepares one byte-copy variant with scratch
-source/destination pointers, not live cache pointers.
+`register_kda_state_copy_warmup()` registers only bound layer plans inside the
+shared registry window immediately before `registry.warmup()`. Cache layout and
+alignment are unavailable during model construction, which requires this late
+registration. Equal layouts are registered once. A non-950 or unsupported-dtype
+plan instead registers one aligned INT64 `BatchMemcpyKernel` key.
 
-Serving invokes only stored compiled objects. An unsealed plan, changed cache
-layout, excess selected count, or unexpected JIT hook is rejected before launch.
-No request can add a variant or evict one. Different worker layouts require
-reinitialization; equal layouts may share plans. Plans retain no request tensors,
-stream handles or live data pointers.
+Warmup uses `TritonWarmupTensor` and native `kernel.warmup(grid=(1,))`: it compiles
+without allocating scratch tensors or reading/writing the live cache. Serving
+uses the same `@kernel_launcher` wrapper and normal Triton cache lookup, avoiding
+manual compiled-launch argument lists and their version-dependent constexpr ABI.
+The shared registry controls parallel compilation and `enable_jit_warmup`; when
+warmup is disabled, ordinary lazy compilation remains available.
 
-Aligned contiguous INT32 inputs remain INT32: no per-call INT64 conversion.
-Strided/misaligned metadata is normalized only when needed, preserving dtype.
-This bounded normalization avoids treating arbitrary strides/alignment classes
-as new compiler signatures. Pointer addresses and metadata values can change.
-The current stream is resolved by the compiled launcher for each invocation.
-
-### Compiler-environment contract
-
-Compiler environment/version snapshots are compared during `prepare`/`seal`,
-not scanned on every gather/scatter. Changing compiler environment, backend
-binaries or loaded implementation after startup is unsupported: restart and
-prepare again. This is a deliberate change from the previous strict wrapper's
-per-call drift detection. It does **not** make a stored compiled object capable
-of JIT compilation, nor does it remove tensor-layout validation.
-
-Do not reintroduce per-copy `os.environ` enumeration, or convert every INT32
-index tensor to INT64 simply to minimize startup variant count. Both were
-measured regressions in the preceding implementation.
+Plans retain cache metadata and layer names, with no request tensors, live
+pointers, stream handles, private compiled-object tables or environment snapshots.
+An unsealed plan, changed layout or excess selected count is rejected before
+launch. Compiler/runtime environment changes require a worker restart, as for
+other Triton kernels. There is no per-copy environment scan. Current streams and
+devices are resolved by the normal launcher on each invocation.
 
 ## Dynamo and FakeTensor boundary
 
-Eager plan calls keep the direct compiled launch. During Dynamo tracing, plans
+Eager plan calls use the shared Triton launcher. During Dynamo tracing, plans
 bound by worker initialization emit `vllm::kda_state_gather` and
 `vllm::kda_state_scatter`. Their Fake implementations validate pointer-free
 metadata and model output allocation / cache mutation. Actual execution resolves
 the sealed plan from the current forward context's `no_compile_layers`, as other
-Ascend custom ops do. No extra global plan registry or runtime compilation is
-introduced. Standalone `prepare()` plans without a worker binding are eager/graph
+Ascend custom ops do. Standalone `prepare()` plans without a worker binding are eager/graph
 APIs, not exportable layer-context handles.
 
 These are not ABI replacements for `_C_ascend::kda_state_copy`; they preserve the
@@ -96,70 +82,30 @@ full-model compilation or every compilation backend.
 
 ## Validation
 
-CPU tests cover device/layout routing, startup deduplication,
-all-or-nothing publication and actual prefill dispatch. NPU integration tests
-cover optional exact FP32/BF16 comparisons with a separately built PR17301 native operator,
-INT32/INT64, dynamic selected counts, gaps/offsets, invalid indices, graph replay,
-real prefill/chunk math, and the FP16 strided byte-copy fallback.
+`tests/ut/model_executor/warmup/test_jit_warmup_kda_state_copy.py` covers the
+key-space golden set, aligned/misaligned caches, 64-bit strides, metadata-only
+preparation, registration windows, layout deduplication, fallback registration,
+compile-only warmup and the runtime two-dimensional grid.
 
-Formal serving tests replace the KDA JIT entry and compiler APIs with functions
-that fail immediately. Fallback tests also disable the byte-copy JIT entry.
-The suite separately asserts that aligned INT32 inputs retain their identity
-and serving never invokes the compiler-environment scanner. Changing selected
-counts and graph input values must succeed with a constant variant table.
-
-Run the integration and independent plan-copy suites together; the latter
-uses test-local worker-owned plans and a compiler-denying fixture:
+NPU copy tests cover exact FP32/BF16 values, INT32/INT64 indices, gaps/offsets,
+invalid rows, flags, empty selections, more than 4 GiB address strides, dynamic
+counts, current streams, graph replay, and the FP16 byte-copy fallback. Standalone
+tests explicitly run registry warmup before forbidding compiler APIs. Normal JIT
+cache lookup remains allowed; any new compilation during serving fails the test.
+Optional native-reference comparisons require a separately built PR #17301 op.
 
 ```bash
-python -m pytest --confcutdir=tests/ut/ops \
-  tests/ut/ops/test_kda_state_copy_lifecycle.py \
-  tests/ut/ops/test_kda_state_copy_integration.py \
-  tests/ut/ops/test_kimi_kda.py
-python -m pytest --confcutdir=tests/e2e/nightly/single_node/ops/singlecard_ops \
+python -m pytest --confcutdir=tests/ut/model_executor/warmup \
+  tests/ut/model_executor/warmup/test_jit_warmup_kda_state_copy.py
+python -m pytest --confcutdir=tests/e2e/nightly/single_node/ops/singlecard_ops/triton \
   tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_state_copy_integration.py \
   tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_state_copy_triton.py
 ```
 
-## Performance acceptance and remaining boundaries
+## Performance and acceptance boundaries
 
-Use identical inputs and allocation boundaries for native versus Triton
-production calls. Include output allocation, necessary metadata work and final
-state conversion. Compare old and new implementations in the same process and
-rotate order. Record eager Event, synchronized wall time, and graph replay
-separately; an Event interval includes host dispatch gaps, not just kernel time.
-A historical preallocated operator benchmark is a secondary reference, not a
-substitute for production-wrapper timing.
-
-Local tests are not full model-server, TP/PP, concurrency, sleep/wake or generation
-quality acceptance. The native comparison reuses the installed extension and is
-not a clean Ascend C build. Non-950 fallback is code-routed but requires
-additional hardware validation. Full-model compilation/Inductor acceptance is
-not established by operator tracing tests. The no-JIT guarantee here covers
-prepared state-copy routes, not unrelated model kernels.
-
-There is one lifecycle: `KDAStateCopyPlan.prepare` compiles four variants on
-scratch, `seal` validates startup configuration, and the worker publishes only
-after all layer plans are ready. Tests instantiate the same plan independently.
-`ops/triton/kda_state_copy_kernel.py` retains only the kernel and common metadata
-validation, not a process-global launcher registry, signature budget, lock,
-per-call environment scan, or mutation of the JIT object's `run` method.
-
-Previous standalone-only policy tests were migrated as follows:
-
-| Old assertion | Unified-lifecycle assertion |
-|---|---|
-| global empty registry / irreversible global seal | unsealed plan rejects use; independent plans may prepare and seal |
-| unknown signature, tensor identity, dynamic grid | cache layout/alignment checked; same-layout rebinding and dynamic S reuse four variants |
-| global 128-signature budget / block-size overrides | canceled: finite worker layout set and fixed 8192 block replace user-specified signature budget |
-| metadata errors / empty selection | invalid layout and metadata reject before compile/launch; S=0 launches nothing |
-| per-call compiler-environment drift | canceled: prepare/seal checks drift; serving must not scan configuration |
-| global `kernel.run` replacement | canceled: compiled launch object only; compiler entry denied in tests |
-
-`test_kda_state_copy_lifecycle.py` tests the production plan with isolated host
-stubs. `test_kda_state_copy_triton.py` retains the original numerical assertions
-but invokes sealed production plans rather than a standalone registry.
-
-### Optional native reference
-
-The optional native differential tests skip only when the separately built PR #17301 reference op is absent. Independent correctness tests remain required. Production does not depend on that op.
+Compare startup cold/heat cache and runtime eager/graph timings separately, with
+identical layouts, allocation boundaries and compiler versions. Include output
+allocation and metadata normalization when measuring production calls. Operator
+tests establish copy and tracing behavior; they do not establish full-model
+generation quality, distributed serving, sleep/wake behavior or throughput.
