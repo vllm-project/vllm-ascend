@@ -441,6 +441,17 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             and attn_metadata.num_actual_tokens > attn_metadata.num_decode_tokens
         )
 
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config=None,
+        speculative_config=None,
+        draft_attn_metadatas=None,
+    ):
+        raise NotImplementedError("FIA and PA should be use UpdatableGraph.")
+
     def get_context_block_table(self, attn_metadata: AscendMLAMetadata) -> torch.Tensor:
         """Use the global PCP request table for DCP prefill KV loading."""
         if not self.use_pcp:
