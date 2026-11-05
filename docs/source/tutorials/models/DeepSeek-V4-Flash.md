@@ -1976,10 +1976,10 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
     #### A2 KV Pooling: Mooncake SSD Profile and Memcache Integration {: #526-a2-kv-pooling-mooncake-ssd-profile-and-memcache-integration }
 
-    Pooling adds `AscendStoreConnector` to the Hybrid P-to-D transport through `MultiConnector`. A PC90 or third-level-pooling scenario name does not select a backend or prove that SSD offload is active. Select and prepare one backend, then copy its complete P/D scripts below. They use P token budget8192, P/D prefix caching enabled and D draft4/mns51/GMU0.97.
+    Pooling adds `AscendStoreConnector` to the Hybrid P-to-D transport through `MultiConnector`. A PC90 or third-level-pooling scenario name does not select a backend or prove that SSD offload is active. Select and prepare one backend, then copy its complete P/D scripts below. They use a P token budget of 8192, P/D prefix caching enabled and D draft4/mns51/GMU0.97.
 
     !!! note "Standard A2 server script"
-        The standard A2 2P2D server script is in Section 5.2: P PCP8 with `--max-num-batched-tokens 4096`, D `--max-num-batched-tokens 720` / `--max-num-seqs 42` / draft 5 / GMU 0.95. The scripts below are the recorded KV-pooling scenario (P `--max-num-batched-tokens 8192`, D `--max-num-seqs 128` / draft 1 / GMU 0.97); use them only for that scenario and revalidate against the 5.2 standard. The prose's draft4/mns51 pair is another measured scenario; the script pair is authoritative for the script.
+        The standard A2 2P2D server script is in Section 5.2: P PCP8 with `--max-num-batched-tokens 8192`, D `--max-num-batched-tokens 720` / `--max-num-seqs 42` / draft 5 / GMU 0.95. The scripts below are the recorded KV-pooling scenario (P `--max-num-batched-tokens 8192`, D `--max-num-seqs 128` / draft 1 / GMU 0.97); use them only for that scenario and revalidate against the 5.2 standard. The prose's draft4/mns51 pair is another measured scenario; the script pair is authoritative for the script.
 
     | Backend | Preparation | Validation scope |
     |---|---|---|
