@@ -83,7 +83,7 @@ def _patch_loaded_vision_towers():
     ):
         module = sys.modules.get(module_name)
         if module is not None:
-            module.vit_mrope_setup = vit_mrope_setup
+            vars(module)["vit_mrope_setup"] = vit_mrope_setup
 
 
 _patch_loaded_vision_towers()
