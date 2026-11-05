@@ -53,10 +53,11 @@
 
 # attention
 /vllm_ascend/attention/
-/vllm_ascend/attention/context_parallel @weiguihua2
+/vllm_ascend/attention/context_parallel @weiguihua2 @zhenwenqi2024
+/vllm_ascend/attention/sfa_v1.py @lijiahang226
 /vllm_ascend/attention/dsa*.py @weijinqian0 
-/vllm_ascend/attention/indexer.py @weijinqian0
-/vllm_ascend/attention/indexer_kpool.py @weijinqian0
+/vllm_ascend/attention/indexer.py @weijinqian0 @lijiahang226
+/vllm_ascend/attention/indexer_kpool.py @weijinqian0 @lijiahang226
 
 # compilation
 /vllm_ascend/compilation @yiz-liu @wxsIcey
@@ -70,26 +71,29 @@
 /vllm_ascend/distributed/weight_transfer @Ronald1995
 /vllm_ascend/distributed/kv_transfer/kv_pool @weijinqian0 @HF-001
 /vllm_ascend/distributed/kv_transfer/kv_p2p @wangxiaoteng888
-/vllm_ascend/distributed/kv_transfer/sparse_kv_offload @weiguihua2 @zhangsicheng5
+/vllm_ascend/distributed/kv_transfer/sparse_kv_offload @weiguihua2 @zhangsicheng5 @zhenwenqi2024
 
 # lora
 /vllm_ascend/lora @paulyu12
 
 # ops
 /vllm_ascend/ops @zzzzwwjj
+/vllm_ascend/ops/linear_op.py @xuchi-0808
+/vllm_ascend/ops/vocab_parallel_embedding.py @xuchi-0808
 /vllm_ascend/ops/triton @AuroraEmiya @ZT-AIA
 /vllm_ascend/ops/triton/batch_invariant @Ronald1995
-/vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA
+/vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA @zhenwenqi2024
 
 # quantization
 /vllm_ascend/quantization @kunpengW-code @menogrey @Tflowers-0129
 
 # sample
 /vllm_ascend/sample @realliujiaxu
-/vllm_ascend/worker/v2/sample @realliujiaxu @zouzy5137
+/vllm_ascend/worker/v2/sample @realliujiaxu @zouzy5137 @zhenwenqi2024
 
 # spec decode
-/vllm_ascend/worker/v2/spec_decode @wxsIcey @Tflowers-0129 @HF-001 @drslark @slippersss @lilinsiman 
+/vllm_ascend/worker/v2/spec_decode @wxsIcey @Tflowers-0129 @HF-001 @drslark @slippersss @lilinsiman @zhenwenqi2024
+/vllm_ascend/worker/v2/spec_decode/lmhead_tp_utils.py @xuchi-0808
 
 # scheduler
 /vllm_ascend/core/batch_job_aware_scheduler.py
@@ -103,7 +107,7 @@
 /vllm_ascend/core/kv_cache_config_builder.py @yzeyu71 @Angazenn
 /vllm_ascend/core/kv_cache_interface.py @yzeyu71 @Angazenn
 /vllm_ascend/core/kv_cache_placement.py @yzeyu71 @Angazenn
-/vllm_ascend/core/single_type_kv_cache_manager.py @yzeyu71 @Angazenn
+/vllm_ascend/core/single_type_kv_cache_manager.py @yzeyu71 @Angazenn @zhenwenqi2024
 
 # Core framework
 /vllm_ascend/ascend_config.py @ningjingbengxiaohai @zzzzwwjj
@@ -123,7 +127,7 @@
 /vllm_ascend/patch @wxsIcey
 
 # Worker base
-/vllm_ascend/worker/dcp_utils.py @weiguihua2
+/vllm_ascend/worker/dcp_utils.py @weiguihua2 @zhenwenqi2024
 # /vllm_ascend/worker/device_metadata.py
 # /vllm_ascend/worker/dspark_utils.py @wxsIcey
 # /vllm_ascend/worker/encoder_acl_graph.py
@@ -135,14 +139,14 @@
 
 # Worker V2
 /vllm_ascend/worker/v2/model_states @zzzzwwjj
-/vllm_ascend/worker/v2/aclgraph_utils.py
+/vllm_ascend/worker/v2/aclgraph_utils.py @zhenwenqi2024
 /vllm_ascend/worker/v2/attn_utils.py @Angazenn @zzzzwwjj
 /vllm_ascend/worker/v2/block_table.py @Tflowers-0129 @zzzzwwjj
 /vllm_ascend/worker/v2/eplb.py
 /vllm_ascend/worker/v2/input_batch.py @yiz-liu @zzzzwwjj
 /vllm_ascend/worker/v2/kv_connector.py @yzeyu71
 /vllm_ascend/worker/v2/kvpp.py @recky-c
-/vllm_ascend/worker/v2/model_runner.py @yiz-liu @zzzzwwjj
+/vllm_ascend/worker/v2/model_runner.py @yiz-liu @zzzzwwjj @xuchi-0808 @zhenwenqi2024
 /vllm_ascend/worker/v2/pcp_manager.py @weiguihua2
 /vllm_ascend/worker/v2/pp_transport.py
 /vllm_ascend/worker/v2/states.py @yiz-liu @zzzzwwjj
@@ -150,10 +154,6 @@
 
 # Models
 /vllm_ascend/models/minimax_m3 @realliujiaxu
-/vllm_ascend/models
-/vllm_ascend/models
-/vllm_ascend/models
-/vllm_ascend/models
 
 # 310P
 /vllm_ascend/_310p @Tflowers-0129
