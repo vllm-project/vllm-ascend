@@ -101,6 +101,12 @@ def register_connector():
     )
 
     KVConnectorFactory.register_connector(
+        "LayerwisePoolConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.connector",
+        "LayerwisePoolConnector",
+    )
+
+    KVConnectorFactory.register_connector(
         "MooncakeHybridConnector",
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector",
         "MooncakeConnector",

@@ -53,6 +53,8 @@ def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
 
 
 class KVPoolScheduler:
+    shared_pool_enabled = False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -63,6 +65,11 @@ class KVPoolScheduler:
         self.use_layerwise = use_layerwise
         self.kv_cache_config = kv_cache_config
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self.shared_groups = None
+        if "store_tp_size" in extra_config:
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import get_shared_groups
+
+            self.shared_groups = get_shared_groups(vllm_config, kv_cache_config)
         backend_name = str(extra_config.get("backend", "mooncake"))
         self.backend_name = backend_name.lower()
         self.layerwise_offload = False
@@ -107,6 +114,8 @@ class KVPoolScheduler:
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
+        if self.shared_groups is not None:
+            self.cacheable_group_ids = self.shared_groups["prefix_groups"]
         cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
@@ -152,6 +161,7 @@ class KVPoolScheduler:
             use_hybrid=self.use_hybrid,
         )
         self.tp_mismatch = tp_mismatch_info.enabled
+        self.shared_pool_enabled = "store_tp_size" in extra_config
 
         if self.use_layerwise:
             self._init_layerwise_runtime(vllm_config, kv_cache_config)
@@ -780,6 +790,7 @@ class KVPoolScheduler:
                 if (
                     not new_block_ids
                     and not self.tp_mismatch
+                    and not self.shared_pool_enabled
                     and not self.layerwise_offload
                     and not self.save_decode_cache
                 ):

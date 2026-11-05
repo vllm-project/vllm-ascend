@@ -74,6 +74,7 @@ from vllm_ascend.distributed.utils import (
 
 class KVPoolWorker:
     # The main class for the cache engine.
+    shared_pool = None
 
     def __init__(
         self,
@@ -86,6 +87,11 @@ class KVPoolWorker:
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.vllm_config = vllm_config
         self.use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
+        if "store_tp_size" in extra_config:
+            if not model_config.use_mla and envs.VLLM_KV_CACHE_LAYOUT not in ("HND", "LBHNC"):
+                raise ValueError("Shared pool currently requires Ascend HND cache layout")
+            if self.use_kvpp:
+                raise ValueError("Shared pool KVPP buffer ownership is not implemented")
         self.kv_cache_config = kv_cache_config
         hf_text_config = getattr(model_config, "hf_text_config", None)
         hf_config = getattr(model_config, "hf_config", hf_text_config)
@@ -110,6 +116,11 @@ class KVPoolWorker:
             self._init_cache_layout()
         self._kv_stats = AscendStoreKVConnectorStats()
         self._kv_stats_lock = threading.Lock()
+        self.shared_pool = None
+        if "store_tp_size" in extra_config:
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_transfer import SharedPoolTransfer
+
+            self.shared_pool = SharedPoolTransfer(self)
 
     def _init_parallelism_info(self, model_config, parallel_config) -> None:
         self.local_rank = envs.LOCAL_RANK
@@ -400,6 +411,8 @@ class KVPoolWorker:
     def shutdown(self) -> None:
         if self._closed:
             return
+        if self.shared_pool is not None:
+            self.shared_pool.close()
         threads = [thread for thread in (self.kv_send_thread, self.kv_recv_thread) if thread is not None]
         for thread in threads:
             thread.stop()
@@ -719,6 +732,9 @@ class KVPoolWorker:
         """Register draft caches when the layerwise worker enables prefix reuse."""
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        if self.shared_pool is not None:
+            self.shared_pool.register(kv_caches)
+            return
         draft_names = getattr(self, "_dspark_draft_layer_names", ())
         draft_caches = {name: cache for name, cache in kv_caches.items() if name in draft_names}
         if draft_names:
@@ -847,6 +863,9 @@ class KVPoolWorker:
         self._start_kv_transfer_threads()
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
+        if self.shared_pool is not None:
+            self.shared_pool.start_load(metadata)
+            return
         self.current_layer = 0
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
@@ -1407,6 +1426,8 @@ class KVPoolWorker:
         Join first so a put already on the send thread cannot land after
         ``remove_all`` and repopulate the pool with the previous weights.
         """
+        if self.shared_pool is not None:
+            raise RuntimeError("Shared pool reset requires a new cache_prefix; global deletion is not allowed")
         if self.kv_send_thread is not None:
             self.kv_send_thread.request_queue.join()
         self.m_store.remove_all()
@@ -1625,6 +1646,8 @@ class KVPoolWorker:
         :param tokens: the input tokens, with shape [seq_len]
         :return: An int indicating how many prefix tokens are cached.
         """
+        if self.shared_pool is not None:
+            return self.shared_pool.lookup(token_len, block_hashes)
         try:
             hits: list[list[int]] = []
             max_hit_position = self.max_model_len
@@ -1773,6 +1796,10 @@ class KVPoolWorker:
         return []
 
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
+        if self.shared_pool is not None:
+            events = self.shared_pool.completed_events
+            self.shared_pool.completed_events = {}
+            return AscendStoreKVConnectorWorkerMetadata(events) if events else None
         if isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
             if ce := self.kv_send_thread.get_completed_events():
                 return AscendStoreKVConnectorWorkerMetadata(ce)

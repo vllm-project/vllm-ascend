@@ -27,6 +27,7 @@ from vllm_ascend.ascend_config import (
     init_ascend_config,
 )
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import truncate_stateful_prefill_request
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -193,29 +194,8 @@ class MooncakeBaseConnectorScheduler:
 
     def _truncate_request_for_prefill(self, request: "Request") -> None:
         """Drop the last P-side prompt token for stateful model transfer."""
-        params = request.kv_transfer_params
-        if (
-            params is None
-            or not self.need_truncate
-            or params.get("_p_side_truncated")
-            or request.num_prompt_tokens <= 1
-        ):
-            return
-
-        if request.prompt_token_ids is not None:
-            request.prompt_token_ids.pop()
-        elif request.prompt_embeds is not None:
-            request.prompt_embeds = request.prompt_embeds[:-1]
-        else:
-            return
-
-        request._all_token_ids.pop()
-        request.num_prompt_tokens -= 1
-        request.max_tokens = 1
-        # Request already hashed the full prompt. Rebuild for the shortened one.
-        request.block_hashes.clear()
-        request.update_block_hashes()
-        params["_p_side_truncated"] = True
+        if self.need_truncate:
+            truncate_stateful_prefill_request(request)
 
     def on_new_request(self, request: "Request") -> None:
         # Truncate before local prefix-cache lookup so its hit count stays

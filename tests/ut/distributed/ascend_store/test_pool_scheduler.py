@@ -664,6 +664,29 @@ class TestKVPoolScheduler(unittest.TestCase):
 
 
 class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.get_shared_groups",
+        return_value={"prefix_groups": [0], "target_groups": [0], "stateful": False},
+    )
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_shared_pool_publishes_chunk_without_a_new_allocation(self, mock_client_cls, mock_groups):
+        for shared in (False, True):
+            with self.subTest(shared=shared):
+                extra = {"store_tp_size": 4, "cache_prefix": "weights-v1"} if shared else {}
+                scheduler = KVPoolScheduler(self._make_config(extra_config=extra), use_layerwise=False)
+                self._set_running_chunk(scheduler)
+                # The entire prompt was allocated already; the second chunk
+                # completes another block without allocating a new one.
+                scheduler._request_trackers["r1"].allocated_block_ids_by_group = [[1, 2, 3, 4]]
+                meta = scheduler.build_connector_meta(self._make_running_chunk_output(None))
+                if not shared:
+                    self.assertEqual(meta.requests, [])
+                    continue
+                self.assertEqual(len(meta.requests), 1)
+                self.assertEqual(meta.requests[0].save_start_token, 16)
+                self.assertEqual(meta.requests[0].save_end_token, 32)
+                self.assertFalse(meta.requests[0].is_last_chunk)
+
     def _make_config(self, kv_role="kv_producer", block_size=16, extra_config=None, num_layers=2):
         config = MagicMock()
         config.kv_transfer_config.kv_role = kv_role

@@ -53,6 +53,100 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 
+class TestSharedPoolConnector(unittest.TestCase):
+    def test_pd_connector_callbacks_publish_tail(self):
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.connector import LayerwisePoolConnector
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.metadata import PoolPDMetadata, PoolPDRequest
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.worker import PoolPDWorker
+
+        from .test_shared_io import MemoryBackend
+        from .test_shared_transfer import step, transfer
+
+        for layerwise in (False, True):
+            with self.subTest(layerwise=layerwise), patch.object(torch.npu, "Event", MagicMock):
+                backend = MemoryBackend()
+                execution, caches = transfer(backend, 2, 0, layerwise, True)
+                connector = LayerwisePoolConnector.__new__(LayerwisePoolConnector)
+                connector._mamba_state = None
+                connector.worker = PoolPDWorker(SimpleNamespace(shared_pool=execution))
+                metadata = PoolPDMetadata(step(), tails=[PoolPDRequest("p", 3, "prompt", [[1]], [])])
+                connector.bind_connector_metadata(metadata)
+                connector.start_load_kv(None)
+                for owner in caches:
+                    connector.wait_for_layer_load(owner)
+                    connector.save_kv_layer(owner, None, None)
+                connector.wait_for_save()
+                assert len(backend.readable) == 2
+                assert not backend.leases
+
+    def test_mla_registration_uses_existing_main_indexer_bundle(self):
+        from dataclasses import replace
+
+        from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_transfer import SharedPoolTransfer
+
+        from .test_shared_io import MemoryBackend
+        from .test_shared_mla import mla
+
+        _, caches = mla(2, 0, True)
+        main = AscendMLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float32)
+        indexer = AscendSFAIndexerCacheSpec(
+            block_size=4, num_kv_heads=1, head_size=7, dtype=torch.int8, scale_dim=1, scale_dtype=torch.float32
+        )
+        groups = [
+            KVCacheGroupSpec(layer_names=["draft.layers.0"], kv_cache_spec=replace(main, is_draft=True)),
+            KVCacheGroupSpec(layer_names=["model.layers.0.attn"], kv_cache_spec=main),
+            KVCacheGroupSpec(layer_names=["model.layers.0.indexer"], kv_cache_spec=indexer),
+        ]
+        worker = SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                kv_transfer_config=SimpleNamespace(
+                    kv_connector_extra_config={"store_tp_size": 4, "cache_prefix": "epoch", "use_layerwise": True}
+                )
+            ),
+            kv_cache_config=SimpleNamespace(kv_cache_groups=groups, num_blocks=3),
+            m_store=MemoryBackend(),
+            model_name="model",
+            tp_size=2,
+            tp_rank=0,
+            hash_block_size=2,
+            _as_cache_tuple=tuple,
+        )
+        transfer = SharedPoolTransfer(worker)
+        transfer.register(caches)
+        assert set(transfer.layouts) == {1, 2}
+        assert transfer.layer_bundles == {"model.layers.0.attn": ("model.layers.0.attn", "model.layers.0.indexer")}
+        transfer.close()
+
+    def test_existing_connector_callbacks_drive_shared_objects(self):
+        from .test_shared_io import MemoryBackend
+        from .test_shared_transfer import saved_request, step, transfer
+
+        for layerwise in (False, True):
+            with self.subTest(layerwise=layerwise), patch.object(torch.npu, "Event", MagicMock):
+                backend = MemoryBackend()
+                execution, caches = transfer(backend, 2, 0, layerwise, True)
+                connector = AscendStoreConnector.__new__(AscendStoreConnector)
+                connector.shared_pool_enabled = True
+                connector.use_layerwise = layerwise
+                connector.can_put = True
+                connector._mamba_state = None
+                connector.connector_worker = SimpleNamespace(
+                    shared_pool=execution,
+                    start_load_kv=execution.start_load,
+                )
+                metadata = step(saved_request())
+                connector.bind_connector_metadata(metadata)
+                connector.start_load_kv(None)
+                for owner, tensors in caches.items():
+                    connector.wait_for_layer_load(owner)
+                    connector.save_kv_layer(owner, tensors, None)
+                connector.wait_for_save()
+                self.assertEqual(len(backend.readable), 2)
+                self.assertFalse(backend.leases)
+                execution.close()
+
+
 class TestDSparkPrefixRegistration(unittest.TestCase):
     def test_only_final_pipeline_stage_registers_draft_cache(self):
         for pp_rank in (0, 1):

@@ -122,7 +122,6 @@ from vllm_ascend.utils import (
     is_c8_mxfp_kv_quant,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
-    vllm_version_is,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.utils import (
@@ -364,14 +363,6 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             spec = AscendFlashAttentionBackend.customize_spec(spec)
         if type(spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
             spec = mxfp_cache_spec(spec)
-        # vLLM #42309 annotates EAGLE groups from ``spec.is_draft``, tagged on
-        # the spec while specs are built. The v0.32.0 lane has no ``is_draft``
-        # field and annotates EAGLE groups through the packed hook, so only main
-        # propagates the flag here; without it no group is flagged as the draft
-        # model's and the coordinator fallback treats the target groups as
-        # EAGLE groups too.
-        if not vllm_version_is("0.32.0") and getattr(attn_module, "is_draft_layer", False):
-            spec = replace(spec, is_draft=True)
         kv_cache_spec[layer_name] = spec
         if isinstance(spec, AttentionSpec) and getattr(attn_module, "align_kv_cache_with_mamba", True):
             attention_layer_names.append(layer_name)
@@ -410,6 +401,14 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 if spec.page_size_bytes < common_page_size:
                     mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
             kv_cache_spec.update(mamba_specs)
+
+    # Ascend reconstructs several specs above, so propagate ownership after
+    # those transformations, including auxiliary indexer and recurrent caches.
+    # Older vLLM versions lack this metadata field; shared Store validates
+    # that capability separately instead of changing ordinary MTP execution.
+    for layer_name, spec in kv_cache_spec.items():
+        if getattr(attn_layers.get(layer_name), "is_draft_layer", False) and hasattr(spec, "is_draft"):
+            kv_cache_spec[layer_name] = replace(spec, is_draft=True)
 
     return kv_cache_spec
 

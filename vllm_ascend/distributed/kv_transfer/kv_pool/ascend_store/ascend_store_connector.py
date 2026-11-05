@@ -62,6 +62,10 @@ if TYPE_CHECKING:
 def create_kv_pool_scheduler(
     vllm_config: VllmConfig, use_layerwise: bool, kv_cache_config: KVCacheConfig | None = None
 ) -> KVPoolScheduler:
+    if "store_tp_size" in vllm_config.kv_transfer_config.kv_connector_extra_config:
+        # Shared objects have ordinary block ownership even when their copies
+        # are submitted per layer. Do not enable shared-HBM offload scheduling.
+        return KVPoolScheduler(vllm_config, False, kv_cache_config)
     scheduler_class = LayerwiseKVPoolScheduler if use_layerwise else KVPoolScheduler
     return scheduler_class(vllm_config, use_layerwise, kv_cache_config)
 
@@ -71,6 +75,8 @@ def create_kv_pool_worker(
     use_layerwise: bool,
     kv_cache_config: KVCacheConfig | None = None,
 ) -> KVPoolWorker:
+    if "store_tp_size" in vllm_config.kv_transfer_config.kv_connector_extra_config:
+        return KVPoolWorker(vllm_config, False, kv_cache_config)
     worker_class = LayerwiseKVPoolWorker if use_layerwise else KVPoolWorker
     return worker_class(
         vllm_config,
@@ -114,6 +120,8 @@ class AscendStoreKVEvents(KVConnectorKVEvents):
 
 
 class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
+    shared_pool_enabled = False
+
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """
@@ -127,6 +135,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self.shared_pool_enabled = "store_tp_size" in extra_config
+        if self.shared_pool_enabled:
+            # Import only for the opt-in format; legacy paths do not acquire a
+            # dependency on the new upstream StoreLayout API.
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_transfer import validate_shared_pool
+
+            validate_shared_pool(vllm_config, kv_cache_config, worker=role != KVConnectorRole.SCHEDULER)
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
@@ -142,6 +157,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             and self.save_decode_cache
             and not self.consumer_is_to_put
             and self.use_layerwise
+            and not self.shared_pool_enabled
         ):
             raise ValueError(
                 "save_decode_cache on a kv_consumer does not support use_layerwise "
@@ -183,7 +199,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 kv_cache_config,
             )
             assert self.connector_worker is not None
-            if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
+            if (not self.use_layerwise or self.shared_pool_enabled) and vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
 
     def configure_dspark_prefix_cache(self, vllm_config: VllmConfig) -> bool:
@@ -242,6 +258,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Scheduler Side Methods
     ############################################################
+
+    def get_loaded_kv_cache_group_ids(self, request):
+        if self.shared_pool_enabled:
+            return tuple(self.connector_scheduler.shared_groups["prefix_groups"])
+        return super().get_loaded_kv_cache_group_ids(request)
 
     def set_xfer_handshake_metadata_pp_aware(
         self,
@@ -352,6 +373,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         super().bind_connector_metadata(connector_metadata)
+        if self.shared_pool_enabled:
+            self.connector_worker.shared_pool.prepare_step(connector_metadata)
+            return
         if self.use_layerwise:
             assert self.connector_worker is not None
             # Layerwise hooks need this step's tasks before target forward.
@@ -389,12 +413,20 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if not self.use_layerwise:
             return
         assert self.connector_worker is not None
+        if self.shared_pool_enabled:
+            self.connector_worker.shared_pool.load_layer(layer_name, execution=False)
+            return
         cast(LayerwiseKVPoolWorker, self.connector_worker).wait_for_layer_load_ready(layer_name)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
             return
         assert self.connector_worker is not None
+        if self.shared_pool_enabled:
+            self.connector_worker.shared_pool.load_layer(layer_name)
+            if self._mamba_state is not None:
+                self._mamba_state.do_mamba_copy_for_layer(layer_name)
+            return
         # PLE and attention can share one physical layer. Load its groups once,
         # then let each cache owner copy its own recurrent state before use.
         layer = self.connector_worker._extract_physical_layer_index(layer_name)
@@ -450,9 +482,15 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             # A load-only consumer does not publish KV.
             return
         assert self.connector_worker is not None
+        if self.shared_pool_enabled:
+            self.connector_worker.shared_pool.save_layer(layer_name)
+            return
         cast(LayerwiseKVPoolWorker, self.connector_worker).save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
+        if self.shared_pool_enabled:
+            self.connector_worker.shared_pool.finish_step()
+            return
         if not self.can_put:
             # A load-only consumer has no store thread to wait for.
             return

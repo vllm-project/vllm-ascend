@@ -31,6 +31,29 @@ if TYPE_CHECKING:
 KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
 
 
+def truncate_stateful_prefill_request(request) -> None:
+    """Leave the last prompt token to D, before P performs prefix lookup.
+
+    Shared by direct-transfer and pool-backed PD. Callers decide whether the
+    cache contract requires truncation and retain any original prompt identity.
+    """
+    params = request.kv_transfer_params
+    if params is None or params.get("_p_side_truncated") or request.num_prompt_tokens <= 1:
+        return
+    if request.prompt_token_ids is not None:
+        request.prompt_token_ids.pop()
+    elif request.prompt_embeds is not None:
+        request.prompt_embeds = request.prompt_embeds[:-1]
+    else:
+        return
+    request._all_token_ids.pop()
+    request.num_prompt_tokens -= 1
+    request.max_tokens = 1
+    request.block_hashes.clear()
+    request.update_block_hashes()
+    params["_p_side_truncated"] = True
+
+
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[Any]:
     """Create a Mooncake ROUTER or REQ socket and clean up its context."""

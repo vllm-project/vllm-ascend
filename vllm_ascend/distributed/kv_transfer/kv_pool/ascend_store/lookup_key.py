@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from typing import TYPE_CHECKING
 
@@ -19,6 +20,41 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+
+DESCRIBE_SHARED_GROUPS_MSG = b"ascend_shared_groups_v1"
+
+
+def validate_shared_groups(description, group_count):
+    """Validate worker-owned group IDs against the scheduler's allocation."""
+    if not isinstance(description, dict) or description.get("version") != 1:
+        raise ValueError("Invalid shared pool group description version")
+    if type(description.get("group_count")) is not int or description["group_count"] != group_count:
+        raise ValueError("Shared pool worker/scheduler group count mismatch")
+    for name in ("target_groups", "prefix_groups"):
+        groups = description.get(name)
+        if (
+            not isinstance(groups, list)
+            or not groups
+            or any(type(gid) is not int or not 0 <= gid < group_count for gid in groups)
+            or groups != sorted(set(groups))
+        ):
+            raise ValueError(f"Invalid shared pool {name}")
+    if not set(description["prefix_groups"]) <= set(description["target_groups"]):
+        raise ValueError("Shared prefix groups must belong to target groups")
+    if type(description.get("stateful")) is not bool:
+        raise ValueError("Shared pool description is missing stateful semantics")
+    return description
+
+
+def get_shared_groups(vllm_config, cache_config):
+    # Worker registration precedes scheduler construction. Use its full owner
+    # metadata: scheduler configs may retain only one representative per group.
+    client = LookupKeyClient(vllm_config)
+    try:
+        return client.describe_shared_groups(len(cache_config.kv_cache_groups))
+    finally:
+        client.close()
 
 
 def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
@@ -92,6 +128,18 @@ class LookupKeyClient:
         self.socket.send(RESET_MSG)
         resp = self.socket.recv()
         return bytes(resp) == RESP_OK
+
+    def describe_shared_groups(self, group_count):
+        if self._closed:
+            raise RuntimeError("Shared pool lookup client is closed")
+        try:
+            self.socket.send(DESCRIBE_SHARED_GROUPS_MSG)
+            response = self.socket.recv()
+            return validate_shared_groups(json.loads(response), group_count)
+        except Exception:
+            self.close()
+            # Ownership errors cannot safely degrade to a prefix-cache miss.
+            raise
 
     def close(self):
         if self._closed:
@@ -167,6 +215,11 @@ class LookupKeyServer:
                                 result,
                             )
                             response = result.to_bytes(4, "big")
+                        elif msg_type == DESCRIBE_SHARED_GROUPS_MSG:
+                            shared = self.pool_worker.shared_pool
+                            if shared is None:
+                                raise ValueError("Shared pool is not enabled")
+                            response = json.dumps(shared.describe_groups()).encode()
                         elif msg_type == RESET_MSG:
                             self.pool_worker.reset_store()
                             logger.info("AscendStore reset via remove_all succeeded.")
