@@ -22,20 +22,9 @@ speculative decoding. These designs reduce the global KV cache footprint to
 one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports
 a continuously adjustable reasoning effort from 1 to 100.
 
-This guide uses **vLLM Ascend v0.32.0** and covers A2, A3, and 950DT products
-(A5). The A2/A3 examples use Ascend W4A8 weights, with W8A8 alternatives;
-the 950DT examples use the original MXFP checkpoint.
-
-- **A2**: two-node colocated deployment and four-node Prefill-Decode (PD)
-  disaggregated deployment.
-- **A3**: single-node colocated deployment and two-node PD deployment.
-- **950DT (A5)**: single-node colocated deployment, two-node PD deployment,
-  and PD with a Memcache DRAM pool. Section 5.2 also covers experimental
-  PCP8 Prefill and multi-node EP16 Decode.
-
-Use the matching upstream vLLM revision for the selected vLLM Ascend version.
-For source builds, use the upstream vLLM tag recorded in
-`.github/vllm-release-tag.commit` at the vLLM Ascend **v0.32.0rc** tag.
+This guide covers single-node, multi-node, Prefill-Decode (PD) disaggregated,
+and KV Cache Pool deployment on A2 and A3 servers and 950DT products.
+It targets **vLLM Ascend v0.32.0rc** with **vLLM v0.32.0**.
 
 ## 2 Supported Features
 
@@ -44,19 +33,15 @@ for the complete support matrix and the
 [Feature Guide](../../user_guide/feature_guide/index.md) for feature
 configuration.
 
-The following table summarizes the configurations in this guide.
+The examples use DSpark speculative decoding and `FULL_DECODE_ONLY` ACL
+Graph for colocated serving and Decode. The following table summarizes
+the hardware-specific configurations.
 
 | Hardware | Weights and model runner | Colocated deployment | PD deployment and features |
 | --- | --- | --- | --- |
-| A2 | Ascend W4A8 or W8A8; model runner V1 | Two nodes, DP2/TP8 | Four nodes: Prefill DP4/TP4 and Decode DP8/TP2; DSpark and `FULL_DECODE_ONLY` on Decode. |
-| A3 | Ascend W4A8, INT8 Engram storage; model runner V2 | One node, DP4/TP4 | Two nodes: Prefill DP4/PCP4/TP1 and Decode DP16/TP1; SWA bounded replay and MegaMoE on Prefill, DSpark and `FULL_DECODE_ONLY` on Decode. |
-| 950DT (A5) | Original MXFP checkpoint; model runner V2 | One node, DP8/TP1/EP8 | Two nodes, DP8/TP1/EP8 per role; SWA bounded replay on ordinary Prefill, DSpark and `FULL_DECODE_ONLY` on Decode, and optional Memcache pooling. |
-
-The 950DT single-node example also uses DSpark and `FULL_DECODE_ONLY`.
-In ordinary 950DT PD, Prefill enables local prefix caching and Decode
-disables it. The Memcache example disables local prefix caching on both
-roles so that external pool hits can be checked. Optional PCP8 Prefill
-and EP16 Decode layouts are described in [A5 Deployment Extensions](#a5-deployment-extensions).
+| A2 | Ascend W4A8 or W8A8; model runner V1 | Two nodes, DP2/TP8 | Four nodes: Prefill DP4/TP4 and Decode DP8/TP2; optional Mooncake pooling. |
+| A3 | Ascend W4A8, INT8 Engram storage; model runner V2 | One node, DP4/TP4 | Two nodes: Prefill DP4/PCP4/TP1 and Decode DP16/TP1; SWA bounded replay and MegaMoE on Prefill; optional Memcache pooling. |
+| 950DT products | Original MXFP checkpoint; model runner V2 | One node, DP8/TP1/EP8 | Two nodes, DP8/TP1/EP8 per role; SWA bounded replay on ordinary Prefill; optional Memcache pooling. |
 
 ## 3 Prerequisites
 
@@ -66,7 +51,8 @@ The official DeepSeek-V4.1-Flash-1017 checkpoint is available from
 [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) and
 [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4.1-Flash-1017).
 
-Download the checkpoint for the hardware shown below.
+Select a checkpoint for the target hardware below. The A2/A3 examples use
+W4A8; W8A8 alternatives and their PD layouts are listed in the table.
 
 | Checkpoint | Hardware | Deployment | Download | Notes |
 | --- | --- | --- | --- | --- |
@@ -76,23 +62,14 @@ Download the checkpoint for the hardware shown below.
 | `DeepSeek-V4.1-Flash-1017-w8a8` | A2 series (64GB × 8 per node) | 2 nodes for colocated deployment; 4 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8) | / |
 | `DeepSeek-V4.1-Flash` (original MXFP) | 950DT products (96 GiB × 8 per node) | 1 node for colocated deployment; 2 nodes for PD | [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash), [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4.1-Flash) | Includes DSpark parameters and Engram tables. Use `--quantization deepseek_v4_fp8`. |
 
-For 950DT products, use the original MXFP checkpoint, including the DSpark
-parameters and Engram tables. Set `<YOUR_MODEL_PATH>` to its local directory
-and use `--quantization deepseek_v4_fp8`.
+For A2/A3, you can also use [ModelSlim](https://github.com/Ascend/msmodelslim)
+to prepare a compatible W8A8 checkpoint from the official weights.
 
-Alternatively, use [ModelSlim](https://github.com/Ascend/msmodelslim) to
-prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
-
-Download the selected checkpoint to the same absolute path on every server,
-for example `/data/weights/DeepSeek-V4.1-Flash-1017-w4a8` or
-`/data/weights/DeepSeek-V4.1-Flash-1017-w8a8`. Set `MODEL_PATH` in each serving
-command to that checkpoint directory. The A2/A3 examples below use W4A8;
-to use W8A8, set `MODEL_PATH` to the W8A8 directory instead. For A3 PD deployment
-with W8A8 weights, use Prefill DP4/TP4 and Decode DP8/TP2, as described in
-Section 5.2.
-
-For 950DT, Memcache pooling also needs host DRAM alongside Engram offload.
-The optional EP16 Decode configuration uses a second Decode server.
+Download the selected checkpoint to the same absolute path on every server
+and make that directory available inside each container. Replace
+`<YOUR_MODEL_PATH>` in the subsequent `MODEL_PATH` assignments with this path.
+Reserve host memory for Engram offloading and, when enabled, the DRAM KV
+Cache Pool.
 
 ### 3.2 Verify Multi-node Communication
 
@@ -106,7 +83,7 @@ interfaces, and the service ports must not be blocked.
 ### 4.1 Docker Image Installation
 
 Select the tab for the target hardware. A2, A3, and 950DT products use
-separate images from the v0.32.0 release branch.
+separate images from the `releases/v0.32.0rc` branch.
 
 === "A3 series"
 
@@ -193,7 +170,7 @@ separate images from the v0.32.0 release branch.
 
 === "950DT products"
 
-    On each participating server, pull the A5 Ubuntu release image. Set
+    On each participating server, pull the 950DT Ubuntu release image. Set
     `MODEL_ROOT` to the parent directory of the checkpoint.
 
     ```bash
@@ -247,8 +224,9 @@ absolute path inside and outside every container.
 
 To build from source, follow the
 [software environment installation guide](../../getting_started/installation.md#installation-software-environment)
-and check out the **v0.32.0rc** tag of vLLM Ascend. Use the matching upstream
-vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
+and check out the `releases/v0.32.0rc` branch of vLLM Ascend. Use the matching
+upstream vLLM tag recorded in `.github/vllm-release-tag.commit` at the selected
+revision.
 
 ## 5 Online Service Deployment
 
@@ -391,7 +369,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
 === "950DT products"
 
-    #### A5 DP8 Prefill and DP8 Decode
+    #### 950DT DP8 Prefill and DP8 Decode
 
     Use two eight-NPU servers for 1P1D. Both roles use DP8/TP1/EP8, with
     one API endpoint per DP rank.
@@ -409,13 +387,13 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     and sets `multistream_engram_overlap: false`. Decode uses
     `FULL_DECODE_ONLY` for the target model and the default draft graph execution,
     with `combine_quant_mode: 4` and the recompute scheduler. The examples use
-    the A5 defaults for CPU binding, DSA overlap, and Decode Engram overlap.
+    the 950DT defaults for CPU binding, DSA overlap, and Decode Engram overlap.
 
     Prefill and Decode form separate DP groups on different servers, so both
     can use RPC port `12321`. Within each group, all ranks must use the same
     coordinator IP and RPC port.
 
-    ##### Prepare the A5 DP Launcher
+    ##### Prepare the 950DT DP Launcher
 
     On both nodes, create a working directory inside the container:
 
@@ -505,7 +483,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     Prefill and Decode can start concurrently in separate terminals. Each
     launcher runs in the foreground; keep its terminal open.
 
-    ##### Start the A5 Decode Node
+    ##### Start the 950DT Decode Node
 
     On Decode, save the following as `~/dsv41-pd/run_dp_template.sh`, beside
     `launch_online_dp.py`. Set `local_ip`, `nic_name`, and `MODEL_PATH` for the
@@ -618,7 +596,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         --vllm-start-port 7100
     ```
 
-    ##### Start the A5 Prefill Node
+    ##### Start the 950DT Prefill Node
 
     On Prefill, save the following as `~/dsv41-pd/run_dp_template.sh`, beside
     its own `launch_online_dp.py`. Set `local_ip`, `nic_name`, and `MODEL_PATH`
@@ -732,11 +710,11 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         --vllm-start-port 7100
     ```
 
-    ##### Deploy the A5 PD Proxy
+    ##### Deploy the 950DT PD Proxy
 
     Each Prefill and Decode engine reports `Application startup complete.` in
     its terminal when startup is complete. Once all engines are ready, start
-    the proxy inside the A5 container in a separate terminal on a node that
+    the proxy inside the 950DT container in a separate terminal on a node that
     can reach both servers. The image contains the non-layerwise proxy used
     by the Hybrid Connector. Register all eight endpoints from each role:
 
@@ -769,7 +747,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     contain `dsv41`. Reuse `SERVICE_URL` for the text request in
     [Section 6.1](#61-text-request). Check the P/D logs for successful KV transfer.
 
-    ##### A5 Replay Configuration Notes
+    ##### 950DT Replay Configuration Notes
 
     - On Prefill, enable local prefix caching and `--swa-bounded-replay`.
       After a prefix hit, the engine reuses cached non-SWA blocks and
@@ -778,8 +756,6 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
       `scheduler_config.recompute_scheduler_enable` to `true`. The recompute
       scheduler cannot perform bounded replay, so use `--no-swa-bounded-replay`.
     - Set `--max-num-batched-tokens` to `5120` on Prefill and `1024` on Decode.
-      See [950DT recommended configurations](#91-recommended-configurations) for the sequence limits,
-      memory utilization, and execution mode for each role.
     - Each launcher child starts one local DP engine. The templates therefore
       pass `--data-parallel-size-local 1`, while the launcher starts eight
       children with `--dp-size-local 8`.
@@ -788,9 +764,9 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     build. See the [Public FAQs](../../faqs.md) for startup and environment
     troubleshooting.
 
-    ##### A5 Deployment Extensions
+    ##### 950DT Deployment Extensions
 
-    ###### A5 PCP Prefill (Experimental)
+    ###### 950DT PCP Prefill (Experimental)
 
     For long prompts, PCP can distribute one Prefill request across all eight
     NPUs. Starting from the DP8 Prefill template above, make these changes:
@@ -828,7 +804,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     the nested `MooncakeHybridConnector` on both roles. Keep `use_layerwise=false`. See the [Context Parallel guide](../../user_guide/feature_guide/context_parallel.md)
     for PCP details.
 
-    ###### A5 Decode with Wide Expert Parallelism
+    ###### 950DT Decode with Wide Expert Parallelism
 
     For higher Decode performance, evaluate a wider EP group across multiple
     Decode servers. Two eight-NPU Decode servers can form DP16/TP1/EP16 while
@@ -1639,7 +1615,7 @@ Select the tab for the target hardware.
     #### 5.3.1 Memcache KV Cache Pool
 
     This example adds a DRAM KV Cache Pool to the two-server DP8 Prefill / DP8
-    Decode deployment in [A5 DP8 Prefill and DP8 Decode](#a5-dp8-prefill-and-dp8-decode). The model layout, ports, and proxy are
+    Decode deployment in [950DT DP8 Prefill and DP8 Decode](#950dt-dp8-prefill-and-dp8-decode). The model layout, ports, and proxy are
     the same as ordinary PD deployment.
 
     `MultiConnector` combines `MooncakeHybridConnector` for P-to-D transfer with
@@ -1661,7 +1637,7 @@ Select the tab for the target hardware.
     ```
 
     Save `launch_online_dp.py` from
-    [Prepare the A5 DP Launcher](#prepare-the-a5-dp-launcher) in this directory on each
+    [Prepare the 950DT DP Launcher](#prepare-the-950dt-dp-launcher) in this directory on each
     node. It uses the same arguments described there. Save the corresponding
     pooled `run_dp_template.sh` below beside it and run all launcher commands
     from this directory, because the launcher opens `./run_dp_template.sh`.
@@ -1990,7 +1966,7 @@ Select the tab for the target hardware.
 
     Each Prefill and Decode engine reports `Application startup complete.` in
     its terminal when startup is complete. Once all engines are ready, start
-    the proxy from [Deploy the A5 PD Proxy](#deploy-the-a5-pd-proxy) with the same
+    the proxy from [Deploy the 950DT PD Proxy](#deploy-the-950dt-pd-proxy) with the same
     endpoints. Verify the service using [Section 5.6](#56-service-verification).
     Send a long prompt to populate the pool, then reuse its prefix with a
     different suffix.
@@ -2714,52 +2690,23 @@ For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool gui
 
 ### 5.6 Service Verification
 
-Use the host and port for your deployment to set `SERVICE_URL` in the HTTP example below.
-
-| Deployment | Host and port | `HEALTH_PATH` |
-| ---------- | ------------- | ------------- |
-| 950DT products single-node colocated | `<SERVICE_IP>:8000` | `health` |
-| A3 single-node colocated | `<A3_IP>:8900` | `health` |
-| 950DT products PD proxy | `<PROXY_IP>:1999` | `healthcheck` |
-| A3 PD proxy | `<PROXY_IP>:<PROXY_PORT>` | `healthcheck` |
-| A2 PD proxy | `<PROXY_IP>:2999` | `healthcheck` |
-| A2 multi-node colocated | `<A2_NODE0_IP>:8000` | `health` |
-
-The 950DT products proxy example uses port `1999`, and the A2 proxy example
-uses `2999`. For A3, set `PROXY_PORT` to the port chosen when starting its
-proxy. Use the configured proxy port in `SERVICE_URL`.
-
-The proxy's `/healthcheck` reports the configured Prefill and Decode instance
-counts. To check whether a backend is ready, send `GET /health` to its host
-and API port, for example `<PREFILL_NODE_IP>:7100` or `<DECODE_NODE_IP>:7100`.
-The backend API ports start at `7100` on A2, A3, and 950DT products.
-
-The following example checks a colocated service. For PD, use the proxy host and port
-with `healthcheck` from the table. Reuse `SERVICE_URL` for the requests
-in [Section 6](#6-functional-verification).
+Set `SERVICE_URL` to the host and port configured when starting the service.
+For colocated deployment, use the vLLM API endpoint with `HEALTH_PATH=health`;
+for PD deployment, use the proxy endpoint with `HEALTH_PATH=healthcheck`.
 
 ```shell
-export SERVICE_URL="http://<SERVICE_IP>:8000"
-export HEALTH_PATH=health
+export SERVICE_URL="http://<SERVICE_IP>:<SERVICE_PORT>"
+export HEALTH_PATH=health  # Use healthcheck for the PD proxy.
 
 curl -sS -o /dev/null -w 'HTTP %{http_code}\n' \
   "$SERVICE_URL/$HEALTH_PATH"
-```
-
-Expected output:
-
-```output
-HTTP 200
-```
-
-Then verify that the configured model is available:
-
-```shell
 curl -sS "$SERVICE_URL/v1/models"
 ```
 
-The response must contain a model entry whose `id` is `dsv41`, matching
-`--served-model-name dsv41` in the serving examples.
+Expect `HTTP 200` and a model entry whose `id` matches `--served-model-name`
+(`dsv41` in these examples). A proxy's `/healthcheck` reports configured
+instances; also check `GET /health` on each backend API endpoint to confirm
+readiness. Reuse `SERVICE_URL` for the requests in [Section 6](#6-functional-verification).
 
 ## 6 Functional Verification
 
@@ -2844,59 +2791,14 @@ No production performance baseline is published for this configuration.
 
 ## 9 Performance Tuning
 
-### 9.1 Recommended Configurations
-
-[Section 5.1](#51-single-node-colocated-deployment) and
-[Section 5.2](#52-1p1d-pd-disaggregated-deployment) provide the recommended
-performance configurations for the hardware and deployment modes covered
-by this guide. Use the corresponding startup commands to reproduce these
-configurations.
-
-Keep DP4/TP4 for A3 single-node deployment,
+The values in [Section 5.1](#51-single-node-colocated-deployment) and [Section 5.2](#52-1p1d-pd-disaggregated-deployment) are starting points rather than globally
+optimal settings. Tune `--max-num-seqs`, `--max-num-batched-tokens`, and
+`--gpu-memory-utilization` together for the target input length, image sizes,
+output length, and concurrency. Keep DP4/TP4 for A3 single-node deployment,
 or Prefill DP4/PCP4/TP1 and Decode DP16/TP1 for A3 PD deployment, until an
 alternative configuration has been validated.
 
-Use the 950DT configurations below as starting points. Compare latency and
-throughput on your own workload before changing the limits. `max-num-seqs` and
-`max-num-batched-tokens` apply per DP engine. The recommended 1P1D layout
-uses eight DP ranks on each node; PCP and wider Decode EP groups are optional
-extensions in [A5 Deployment Extensions](#a5-deployment-extensions).
-
-| Deployment / role | NPUs | DP / TP / PCP | Max sequences | Batch tokens | Memory utilization | Execution |
-| ----------------- | ---- | ------------- | ------------- | ------------ | ------------------ | --------- |
-| Single-node colocated | 8 | 8 / 1 / 1 | 64 | 4096 | 0.90 | FULL_DECODE_ONLY |
-| 1P1D Prefill | 8 | 8 / 1 / 1 | 16 | 5120 | 0.90 | Eager |
-| 1P1D Decode | 8 | 8 / 1 / 1 | 64 | 1024 | 0.92 | FULL_DECODE_ONLY |
-
-These configurations use DSpark with five speculative tokens and Engram
-host offloading. In ordinary 1P1D, Prefill enables local prefix caching
-and SWA bounded replay. The [Memcache example](#531-memcache-kv-cache-pool)
-uses `4096` batch tokens on Prefill with local prefix caching disabled to
-measure external hits. In both examples, Decode uses `1024` batch tokens
-and disables local prefix caching.
-
-### 9.2 Workload-Specific Tuning
-
-When the workload changes, evaluate configurations with the tools in
-[Section 8](#8-performance-evaluation). Keep input and output lengths,
-image sizes, prefix cache hit rate, reasoning effort, and request
-concurrency the same when comparing results. Measure time to first token,
-time per output token, throughput, and NPU memory usage against the
-service's latency and capacity requirements.
-
-For 950DT products, [A5 Deployment Extensions](#a5-deployment-extensions) describes
-wider Decode EP groups for workloads that require higher Decode performance
-and experimental PCP Prefill for long prompts. For workloads with repeated
-prefixes, keep Prefill local prefix caching enabled and verify its actual hit
-rate. To reuse prefixes across ranks or servers, evaluate the
-[950DT Memcache KV Cache Pool](#531-memcache-kv-cache-pool).
-The pooling verification example disables local caching to expose external
-pool hits; this is separate from the ordinary PD performance configuration.
-
-For general tuning methods, refer to the
-[Performance Tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md).
-
-### 9.3 Tool-Assisted Tuning with msmodeling
+### 9.1 Tool-Assisted Tuning with msmodeling
 
 The msmodeling tool (MindStudio-Modeling) optimizes serving and benchmark
 parameters together, combining measured results with knowledge-base experience
