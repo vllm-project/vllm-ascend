@@ -1,0 +1,8 @@
+pr: 20883
+entries:
+  - category: bugfix
+    hardware: [A3, A5]
+    text: >-
+      Use shared DCP query, index-remapping and output-packing implementations
+      on A3 and A5, preserving exact indices and FP32 softmax statistics across
+      attention output exchange paths.

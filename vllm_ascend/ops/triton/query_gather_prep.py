@@ -20,7 +20,6 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
-from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 
@@ -116,8 +115,8 @@ def prep_query_head_major(
         raise RuntimeError(
             f"prep_query_head_major requires matching (T, H), got {tuple(ql_nope.shape)} and {tuple(q_pe.shape)}"
         )
-    if ql_nope.dtype != q_pe.dtype:
-        raise RuntimeError("prep_query_head_major requires ql_nope and q_pe to share a dtype")
+    if ql_nope.dtype != q_pe.dtype or ql_nope.device != q_pe.device:
+        raise RuntimeError("prep_query_head_major requires ql_nope and q_pe to share a dtype and device")
 
     num_tokens, num_heads, nope_dim = ql_nope.shape
     rope_dim = q_pe.shape[-1]
@@ -131,7 +130,7 @@ def prep_query_head_major(
         return out
     init_device_properties_triton()
     num_vectorcore = get_vectorcore_num()
-    block_rows = 8 if is_950() and num_tokens * num_heads >= 8 * num_vectorcore else 1
+    block_rows = 8 if num_tokens * num_heads >= 8 * num_vectorcore else 1
     grid = (min(triton.cdiv(num_tokens, block_rows) * num_heads, num_vectorcore),)
 
     _q_gather_prep_head_major_kernel[grid](

@@ -5,7 +5,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.ops.triton.sparse_index_remap import _a5_sort
+from vllm_ascend.ops.triton.sparse_index_remap import _sort
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 # Bound the paired-sort live set to the Kimi Top-K shape.
@@ -33,7 +33,6 @@ def _pack_candidates(
     INTERLEAVE: tl.constexpr,
     BLOCK: tl.constexpr,
     ROWS_PER_PROGRAM: tl.constexpr,
-    SORT_LOG2: tl.constexpr = 0,
 ):
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)[None, :]
     lanes = tl.program_id(1) * (2 * BLOCK) + tl.arange(0, 2 * BLOCK)[None, :]
@@ -49,16 +48,6 @@ def _pack_candidates(
     global_id = local + (local_block * (WORLD - 1) + RANK) * INTERLEAVE
     global_id = tl.where(valid, global_id, -1)
     score = tl.where(valid, score, -float("inf"))
-    if SORT_LOG2:
-        # Sorting before the exchange distributes this work across DCP ranks.
-        # Invalid IDs must follow every valid ID when comparator scores tie.
-        score, ordered_ids = _sort_candidate_pairs(
-            tl.reshape(score, (BLOCK,)),
-            tl.reshape(tl.where(valid, global_id.to(tl.float32), float("inf")), (BLOCK,)),
-            SORT_LOG2,
-        )
-        global_id = tl.reshape(tl.where(tl.abs(score) < float("inf"), ordered_ids, -1).to(tl.int32), (1, BLOCK))
-        score = tl.reshape(score, (1, BLOCK))
     pair = tl.reshape(tl.join(global_id, score.to(tl.int32, bitcast=True)), (ROWS_PER_PROGRAM, 2 * BLOCK))
     tl.store(packed + row * K * 2 + lanes, pair, (lanes < 2 * K) & (row < ROWS))
 
@@ -106,7 +95,7 @@ def _finalize_candidates(
         owner = block - cycle * WORLD
         keep = (col < K) & valid & (result >= 0) & (owner == RANK)
         local = cycle * INTERLEAVE + (result - block * INTERLEAVE)
-        order = _a5_sort(tl.where(keep, col.to(tl.float32), float("inf")), descending=False)
+        order = _sort(tl.where(keep, col.to(tl.float32), float("inf")), descending=False)
         lookup = tl.minimum(order, BLOCK - 1).to(tl.int32)
         selected = tl.gather(local.to(tl.float32, bitcast=True), lookup, 0).to(tl.int32, bitcast=True)
         result = tl.where(order < float("inf"), selected, -1)
@@ -173,7 +162,7 @@ def _radix_sort_candidate_pairs(
             digit = (ids.to(tl.int32) >> start) | (word << (ID_BITS - start))
         digit &= (1 << min(DIGIT_BITS, ID_BITS + SCORE_BITS - start)) - 1
         key = digit.to(tl.float32) * (1 << LOG_BLOCK) + col.to(tl.float32)
-        order = _a5_sort(key, descending=False)
+        order = _sort(key, descending=False)
         lookup = (order - tl.floor(order * (1.0 / (1 << LOG_BLOCK))) * (1 << LOG_BLOCK)).to(tl.int32)
         scores = tl.gather(scores, lookup, 0)
         ids = tl.gather(ids, lookup, 0)
@@ -194,7 +183,6 @@ def _pack_sorted_candidates(
     RANK: tl.constexpr,
     INTERLEAVE: tl.constexpr,
     LOG_BLOCK: tl.constexpr,
-    RADIX: tl.constexpr = False,
 ):
     BLOCK: tl.constexpr = 1 << LOG_BLOCK
     col = tl.arange(0, BLOCK)
@@ -206,10 +194,10 @@ def _pack_sorted_candidates(
         valid = (local.to(tl.float32) >= 0) & (tl.abs(score) < float("inf"))
         # This rank's local-to-global map is strictly increasing. Sorting
         # local keys preserves global-ID ties without rounding mapped IDs.
-        keys = tl.where(valid, local.to(tl.float32), 0.0 if RADIX else float("inf"))
+        keys = tl.where(valid, local.to(tl.float32), 0.0 if scores.dtype.element_ty == tl.bfloat16 else float("inf"))
         score = tl.where(valid, score, -float("inf"))
-        if RADIX:
-            SCORE_BITS: tl.constexpr = 16 if scores.dtype.element_ty == tl.bfloat16 else 32
+        if scores.dtype.element_ty == tl.bfloat16:
+            SCORE_BITS: tl.constexpr = 16
             DIGIT_BITS: tl.constexpr = 24 - LOG_BLOCK
             # Include the exact 2**24 boundary ID. An on-device range check
             # saves one pass where possible, without imposing a support limit.
@@ -259,8 +247,11 @@ def _merge_owner_prefix(
         head_score = tl.load(own + 1, upper > 0, 0).to(tl.float32, bitcast=True)
         equal_scores = (upper > 0) & (head_score == tail_score)
         head_mask = (ranks.to(tl.float32) < WORLD) & (ranks != OWNER) & (upper > 0)
-        peer_id = tl.load(packed + (ranks * ROWS + row) * K * 2, head_mask, -1).to(tl.float32)
-        peer_score = tl.load(packed + (ranks * ROWS + row) * K * 2 + 1, head_mask, 0).to(tl.float32, bitcast=True)
+        # A3's strided masked loads can still fault on padded peer addresses.
+        # Bound the addresses as well as the mask for non-power-of-two worlds.
+        peer_rank = tl.minimum(ranks, WORLD - 1)
+        peer_id = tl.load(packed + (peer_rank * ROWS + row) * K * 2, head_mask, -1).to(tl.float32)
+        peer_score = tl.load(packed + (peer_rank * ROWS + row) * K * 2 + 1, head_mask, 0).to(tl.float32, bitcast=True)
         peer_valid = (peer_id >= 0) & (tl.abs(peer_score) < float("inf"))
         before_tail = peer_valid & ((peer_score > tail_score) | ((peer_score == tail_score) & (peer_id < tail_id)))
         # If even the worst own candidate precedes every peer head, all own
@@ -408,7 +399,7 @@ def _merge_candidates(
 
 
 def select_local_candidates(indices, scores, world_size: int, rank: int, interleave: int, *, out=None):
-    """Fuse final score masking, local remap and stable compaction on A5."""
+    """Fuse final score masking, local remap and stable compaction."""
     output = torch.empty_like(indices, dtype=torch.int32) if out is None else out
     if indices.numel() == 0:
         return output
@@ -517,7 +508,6 @@ def pack_local_candidates(
                     rank,
                     interleave,
                     log_block,
-                    RADIX=scores.dtype == torch.bfloat16,
                     multibuffer=False,
                 )
                 return packed
@@ -540,7 +530,6 @@ def pack_local_candidates(
             interleave,
             block,
             rows_per_program,
-            0,
         )
     return packed
 
@@ -661,14 +650,14 @@ def merge_packed_candidates(
     return output
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["REQUESTS", "ROWS"])
 def _local_lengths_small_batch(
     seq_lens,
     query_ends,
     key_lengths,
     visible_lengths,
-    REQUESTS: tl.constexpr,
-    ROWS: tl.constexpr,
+    REQUESTS,
+    ROWS,
     WORLD: tl.constexpr,
     RANK: tl.constexpr,
     INTERLEAVE: tl.constexpr,
@@ -695,14 +684,14 @@ def _local_lengths_small_batch(
     tl.store(visible_lengths + row, local, row < ROWS)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["REQUESTS", "ROWS"])
 def _local_lengths(
     seq_lens,
     query_ends,
     key_lengths,
     visible_lengths,
-    REQUESTS: tl.constexpr,
-    ROWS: tl.constexpr,
+    REQUESTS,
+    ROWS,
     WORLD: tl.constexpr,
     RANK: tl.constexpr,
     INTERLEAVE: tl.constexpr,
@@ -717,7 +706,7 @@ def _local_lengths(
     # Upper_bound on device query ends also handles empty requests. Values
     # change on graph replay without rebuilding or copying a CPU row map.
     lower = tl.full((BLOCK,), 0, tl.int32)
-    upper = tl.full((BLOCK,), REQUESTS, tl.int32)
+    upper = tl.full((BLOCK,), 0, tl.int32) + REQUESTS
     for _ in range(STEPS):
         mid = (lower + upper) // 2
         end = tl.load(query_ends + mid, mid < REQUESTS, 2147483647)
@@ -735,8 +724,8 @@ def _local_lengths(
     tl.store(visible_lengths + offsets, local, offsets < ROWS)
 
 
-@triton.jit
-def _zero_visible_lengths(visible_lengths, ROWS: tl.constexpr, BLOCK: tl.constexpr):
+@triton.jit(do_not_specialize=["ROWS"])
+def _zero_visible_lengths(visible_lengths, ROWS, BLOCK: tl.constexpr):
     row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     tl.store(visible_lengths + row, 0, row < ROWS)
 
@@ -780,11 +769,11 @@ def build_local_lengths(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["REQUESTS"])
 def _local_key_lengths(
     seq_lens,
     key_lengths,
-    REQUESTS: tl.constexpr,
+    REQUESTS,
     WORLD: tl.constexpr,
     RANK: tl.constexpr,
     INTERLEAVE: tl.constexpr,
@@ -807,10 +796,8 @@ def build_local_key_lengths(seq_lens, key_lengths, world_size: int, rank: int, i
         )
 
 
-@triton.jit
-def _normalize_dcp_candidates(
-    indices, scores, query_start_loc, REQUESTS: tl.constexpr, K: tl.constexpr, BLOCK: tl.constexpr
-):
+@triton.jit(do_not_specialize=["REQUESTS"])
+def _normalize_dcp_candidates(indices, scores, query_start_loc, REQUESTS, K: tl.constexpr, BLOCK: tl.constexpr):
     row = tl.program_id(0)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     active_rows = tl.load(query_start_loc + REQUESTS)
@@ -829,7 +816,7 @@ def normalize_dcp_candidates(indices, scores, query_start_loc):
     kernel lane owns its index/score slot, so no extra transport buffer is needed.
     """
     if scores.dtype != torch.float32:
-        raise TypeError("A3 DCP QLI requires native FP32 scores; rebuild the extension and PR48 OPP together")
+        raise TypeError("DCP candidate normalization requires native FP32 QLI scores")
     rows, _, topk = indices.shape
     if rows:
         _normalize_dcp_candidates[(rows, triton.cdiv(topk, 256))](

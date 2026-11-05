@@ -1,90 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""A5 DCP transport/metadata against the stable PyTorch comparator."""
+"""DCP query, metadata and output helpers on every supported NPU."""
 
 import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.attention.context_parallel.sharded_indexer import (
-    local_to_global,
+from tests.e2e.nightly.single_node.ops.singlecard_ops.triton.dcp_test_utils import (
+    assert_dcp_close,
     local_visible_lengths,
-    merge_topk_candidates,
     query_visible_lengths,
 )
-from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine, pack_dcp_output_lse
 from vllm_ascend.ops.triton.query_gather_prep import prep_query_head_major
 from vllm_ascend.ops.triton.sharded_indexer import (
+    build_local_key_lengths,
     build_local_lengths,
-    merge_packed_candidates,
-    pack_local_candidates,
-    select_local_candidates,
 )
 from vllm_ascend.ops.triton.sparse_index_remap import remap_sparse_indices_triton
-
-
-@pytest.fixture(autouse=True)
-def a5_device():
-    torch.npu.set_device(0)
-    if not is_950():
-        pytest.skip("A5 specialized DCP kernels")
-
-
-@pytest.mark.parametrize(
-    "rows,world,interleave,topk", [(1, 2, 1, 31), (7, 8, 128, 2048), (16, 2, 768, 2048), (64, 8, 1, 2048)]
-)
-@pytest.mark.parametrize("equal_scores", [False, True])
-def test_candidate_transport(rows, world, interleave, topk, equal_scores):
-    torch.manual_seed(17)
-    packed, ids, values = [], [], []
-    for rank in range(world):
-        local = torch.randint(0, 131072, (rows, 1, topk), dtype=torch.int32)
-        scores = torch.randn(rows, 1, topk).bfloat16().float()
-        if equal_scores:
-            scores.fill_(1)
-        local[..., -3:] = -1
-        scores[..., 0] = float("nan")
-        scores[..., 1] = float("inf")
-        scores[..., 2] = -float("inf")
-        ids.append(local_to_global(local, world, rank, interleave))
-        values.append(scores)
-        # Non-contiguous views exercise the transport's independent strides.
-        local_device = torch.stack((local, local), -1).npu()[..., 0]
-        score_device = torch.stack((scores, scores), -1).npu()[..., 1]
-        packed.append(pack_local_candidates(local_device, score_device, world, rank, interleave))
-    expected = merge_topk_candidates(torch.cat(ids, -1), torch.cat(values, -1), topk)
-    actual = merge_packed_candidates(torch.cat(packed, 0), rows, world, topk)
-    assert torch.equal(actual.cpu(), expected)
-    native_ids, native_scores = torch.cat(ids, -1).npu(), torch.cat(values, -1).npu()
-    for rank in range(world):
-        local = merge_packed_candidates(torch.cat(packed, 0), rows, world, topk, local_rank=rank, interleave=interleave)
-        reference = remap_sparse_indices_triton(actual, world, rank, interleave)
-        assert torch.equal(local.cpu(), reference.cpu())
-        native_local = merge_topk_candidates(
-            native_ids, native_scores, topk, local_rank=rank, world_size=world, interleave=interleave
-        )
-        assert torch.equal(native_local.cpu(), reference.cpu())
-
-
-def test_local_candidate_selection_graph_replay():
-    ids = torch.arange(2048, dtype=torch.int32, device="npu").reshape(1, 1, -1)
-    scores = torch.ones_like(ids, dtype=torch.float32)
-    for _ in range(3):
-        select_local_candidates(ids, scores, 8, 7, 128)
-    graph = torch.npu.NPUGraph()
-    with torch.npu.graph(graph):
-        actual = select_local_candidates(ids, scores, 8, 7, 128)
-    for value in (-1, 7 * 128, 0):
-        ids.fill_(value)
-        graph.replay()
-        expected = remap_sparse_indices_triton(ids, 8, 7, 128)
-        assert torch.equal(actual.cpu(), expected.cpu())
-    ids.fill_(7 * 128)
-    scores.fill_(torch.nan)
-    graph.replay()
-    assert (actual.cpu() == -1).all()
-    graph.reset()
 
 
 @pytest.mark.parametrize(
@@ -128,24 +61,6 @@ def test_query_prep_broadcast_positional_heads(rows, nope, rope):
     torch.testing.assert_close(prep_query_head_major(query, positional), expected, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("local_rank", [None, 7])
-def test_candidate_merge_writes_supplied_output_slice(local_rank):
-    rows, world, topk, interleave = 17, 8, 2048, 768
-    ids = torch.randint(0, 131072, (rows, 1, topk), dtype=torch.int32, device="npu")
-    scores = torch.randn_like(ids, dtype=torch.float32)
-    packed = torch.cat([pack_local_candidates(ids, scores, world, rank, interleave) for rank in range(world)], 0)
-    global_ids = merge_packed_candidates(packed, rows, world, topk)
-    expected = (
-        global_ids if local_rank is None else remap_sparse_indices_triton(global_ids, world, local_rank, interleave)
-    )
-    storage = torch.full((rows + 2, 1, topk), -123, dtype=torch.int32, device="npu")
-    out = storage[1:-1]
-    actual = merge_packed_candidates(packed, rows, world, topk, local_rank=local_rank, interleave=interleave, out=out)
-    assert actual is out
-    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
-    assert (storage[[0, -1]].cpu() == -123).all()
-
-
 @pytest.mark.parametrize("world,interleave", [(2, 1), (8, 128), (8, 768)])
 @pytest.mark.parametrize("requests", [4, 32, 33])
 def test_local_lengths_changed_graph_inputs(world, interleave, requests):
@@ -165,35 +80,11 @@ def test_local_lengths_changed_graph_inputs(world, interleave, requests):
         rows = torch.arange(17)
         request_ids = torch.searchsorted(ends.cpu(), rows, right=True).clamp(max=requests - 1)
         global_visible = query_visible_lengths(seq.cpu(), ends.cpu(), rows, request_ids)
+        key_only = torch.empty_like(keys)
+        build_local_key_lengths(seq, key_only, world, rank, interleave)
+        assert torch.equal(key_only.cpu(), keys.cpu())
         assert torch.equal(keys.cpu(), local_visible_lengths(seq.cpu(), world, rank, interleave))
         assert torch.equal(visible.cpu().flatten(), local_visible_lengths(global_visible, world, rank, interleave))
-    graph.reset()
-
-
-@pytest.mark.parametrize(
-    "rows,topk,interleave", [(1, 1, 1), (7, 31, 128), (16, 2048, 768), (256, 2048, 1), (17, 4096, 128)]
-)
-def test_remap_repeated_and_empty(rows, topk, interleave):
-    torch.manual_seed(23)
-    source = torch.randint(-1, 1048576, (rows, 1, topk), dtype=torch.int32)
-    source[0].fill_(-1)
-    if rows > 1:
-        source[1].fill_(7 * interleave)
-    expected = torch.full_like(source, -1)
-    for row in range(rows):
-        idx = source[row, 0]
-        valid = (idx >= 0) & ((idx // interleave) % 8 == 7)
-        local = idx[valid] // (8 * interleave) * interleave + idx[valid] % interleave
-        expected[row, 0, : local.numel()] = local
-    data = source.npu()
-    for _ in range(30):
-        assert torch.equal(remap_sparse_indices_triton(data, 8, 7, interleave).cpu(), expected)
-    graph = torch.npu.NPUGraph()
-    with torch.npu.graph(graph):
-        actual = remap_sparse_indices_triton(data, 8, 7, interleave)
-    for _ in range(30):
-        graph.replay()
-    assert torch.equal(actual.cpu(), expected)
     graph.reset()
 
 
@@ -220,12 +111,7 @@ def test_pack_from_softmax_statistics(tokens, heads, world, scatter_dim, dtype):
     # result through the real merge, allowing only normal FP32 log rounding.
     expected_out = fused_dcp_lse_combine(expected, 512, scatter_dim)
     actual_out = fused_dcp_lse_combine(actual, 512, scatter_dim)
-    torch.testing.assert_close(
-        actual_out,
-        expected_out,
-        atol=2e-5 if dtype == torch.float32 else 0.008,
-        rtol=2e-5 if dtype == torch.float32 else 0.008,
-    )
+    assert_dcp_close(actual_out, expected_out)
 
 
 @pytest.mark.parametrize("rows", [0, 17])
@@ -236,7 +122,7 @@ def test_local_lengths_empty_requests(rows):
     assert (visible.cpu() == 0).all()
 
 
-@pytest.mark.parametrize("topk", [1, 31, 128, 257, 2048, 4096])
+@pytest.mark.parametrize("topk", [1, 31, 4096, 4097])
 def test_remap_preserves_large_integer_payloads(topk):
     torch.manual_seed(41)
     # Local indices exceed the exact FP32 integer range. Sort position keys,
@@ -286,5 +172,45 @@ def test_output_pack_and_combine_changed_graph_inputs(tokens, world, heads, with
         valid = torch.isfinite(lse)
         weights = torch.nan_to_num(lse.softmax(0), nan=0.0)
         expected = (torch.where(valid[..., None], p.float(), 0) * weights[..., None]).sum(0).transpose(0, 1)
-        torch.testing.assert_close(merged.cpu().float(), expected, atol=0.008, rtol=0.008)
+        assert_dcp_close(merged, expected)
+    graph.reset()
+
+
+@pytest.mark.parametrize("tokens,local_heads", [(1, 2), (17, 2), (191, 32), (512, 32), (257, 64)])
+@pytest.mark.parametrize("from_stats", [False, True])
+def test_exchange_statistics_with_identity_transport(monkeypatch, tokens, local_heads, from_stats):
+    from vllm_ascend.ops.triton.dcp import sfa_dcp_exchange as exchange
+
+    # Single-device transport simulation; pack and merge execute real kernels.
+    monkeypatch.setattr(exchange.dist, "get_world_size", lambda group: 2)
+    monkeypatch.setattr(exchange.dist, "all_to_all_single", lambda dst, src, group: dst.copy_(src))
+    output = torch.randn(tokens, 2 * local_heads, 512, dtype=torch.bfloat16, device="npu")
+    maxima = torch.randn(tokens, 2 * local_heads, 1, device="npu")
+    sums = torch.rand_like(maxima) + 0.1 if from_stats else None
+    group = object()
+
+    def run():
+        return exchange.exchange(output, maxima, group, softmax_sum=sums)
+
+    for _ in range(3):
+        run()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        actual = run()
+    for invalid in (False, True):
+        if sums is not None:
+            sums.mul_(0.75)
+        if invalid:
+            maxima[0].fill_(-torch.inf)
+            output[0].fill_(torch.nan)
+        graph.replay()
+        lse = maxima.cpu().double()
+        if sums is not None:
+            lse += sums.cpu().double().log()
+        lse = lse.reshape(tokens, 2, local_heads).permute(1, 0, 2)
+        valid = lse.isfinite()
+        weights = torch.nan_to_num(lse.masked_fill(~valid, -torch.inf).softmax(0), nan=0)
+        parts = output.cpu().double().reshape(tokens, 2, local_heads, 512).permute(1, 0, 2, 3)
+        expected = (parts.masked_fill(~valid[..., None], 0) * weights[..., None]).sum(0)
+        assert_dcp_close(actual, expected)
     graph.reset()

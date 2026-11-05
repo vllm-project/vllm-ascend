@@ -15,54 +15,8 @@ def use_local_topk_output(sharded_indexer: bool, pcp_size: int, dsa_cp: bool, *,
     return sharded_indexer and pcp_size == 1 and not dsa_cp and not turboquant
 
 
-def query_visible_lengths(seq_lens, cum_query_lens, rows, requests):
-    """Global causal prefix length per varlen query, with padded rows empty."""
-    visible = (seq_lens[requests] - cum_query_lens[requests] + rows + 1).clamp_min(0)
-    return torch.where(rows < cum_query_lens[-1], visible, 0)
-
-
-def local_visible_lengths(visible, world_size: int, rank: int, interleave: int):
-    """Count owner-local tokens in the global prefix [0, visible)."""
-    cycles = visible // (world_size * interleave)
-    tail = (visible % (world_size * interleave) - rank * interleave).clamp(0, interleave)
-    return cycles * interleave + tail
-
-
-def local_to_global(indices, world_size: int, rank: int, interleave: int):
-    mapped = (indices // interleave) * (world_size * interleave) + rank * interleave + indices % interleave
-    return torch.where(indices >= 0, mapped, -1).to(torch.int32)
-
-
-def merge_topk_candidates(
-    indices, scores, topk: int, *, local_rank: int | None = None, world_size: int = 1, interleave: int = 1
-):
-    """Use the QLI comparator score and global-ID ascending tie order.
-
-    Scores are FP32 transport values of the native QLI comparator. Casting
-    them does not introduce more precision than the local kernel provides.
-    Invalid candidates never enter the selected valid prefix.
-    """
-    valid = (indices >= 0) & torch.isfinite(scores)
-    safe_ids = torch.where(valid, indices, torch.iinfo(torch.int32).max)
-    # Ascend's INT32 argsort dispatches to AiCPU. Token IDs up to 2**24 are
-    # exactly representable as FP32 (validated by the owning backend), so use
-    # a temporary AiCore sort key while storing and exchanging actual INT32 IDs.
-    id_keys = safe_ids.to(torch.float32) if getattr(indices, "is_npu", False) else safe_ids
-    id_order = torch.argsort(id_keys, dim=-1, stable=True)
-    ids = torch.gather(indices, -1, id_order)
-    values = torch.gather(torch.where(valid, scores, -torch.inf), -1, id_order)
-    score_order = torch.argsort(values, dim=-1, descending=True, stable=True)[..., :topk]
-    selected_ids = torch.gather(ids, -1, score_order)
-    selected_scores = torch.gather(values, -1, score_order)
-    if local_rank is not None:
-        from vllm_ascend.ops.triton.sharded_indexer import select_local_candidates
-
-        return select_local_candidates(selected_ids, selected_scores, world_size, local_rank, interleave)
-    return torch.where(torch.isfinite(selected_scores), selected_ids, -1).to(torch.int32)
-
-
 def gathered_candidate_row_tile(rows: int, world_size: int, local_k: int) -> int:
-    """Use PR35's single-tile decode ceiling and byte-budgeted long batches.
+    """Budget candidate exchange for long batches using shared host shapes.
 
     The 256-row guarantee may exceed the nominal budget for large world*K.
     Only shared host-side shapes determine collective boundaries.

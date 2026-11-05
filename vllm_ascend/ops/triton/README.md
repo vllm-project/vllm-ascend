@@ -98,7 +98,7 @@ configuration rather than the V1/V2 runner input or sampling interface.
 | [dcp/dcp_a2a_batched.py](dcp/dcp_a2a_batched.py) | Distributed attention |
 | [dcp/sfa_dcp_exchange.py](dcp/sfa_dcp_exchange.py) | Model/attention primitive or shared utility |
 | [dcp/sfa_dcp_merge.py](dcp/sfa_dcp_merge.py) | Model/attention primitive or shared utility |
-| [dcp/sfa_dcp_query.py](dcp/sfa_dcp_query.py) | Model/attention primitive or shared utility |
+| [sharded_indexer.py](sharded_indexer.py) | DCP candidate transport and causal metadata |
 | [dspark_swa_indices.py](dspark_swa_indices.py) | Model/attention primitive or shared utility |
 | [engram_gate.py](engram_gate.py) | Model/attention primitive or shared utility |
 | [engram_hash.py](engram_hash.py) | Model/attention primitive or shared utility |

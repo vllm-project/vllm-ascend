@@ -41,10 +41,8 @@ from vllm_ascend.attention.utils import (
     is_dcp_enabled,
     split_decodes_and_prefills,
 )
-from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.ops.triton.dcp.sfa_dcp_query import unpack_query
 from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
 from vllm_ascend.utils import (
     enable_pcp_o_proj_weight_sharding,
@@ -336,7 +334,6 @@ class DCPGatherContext(NamedTuple):
     handle: torch.distributed.Work | None
     restore_perm: tuple[int, ...] | None
     split_sizes: tuple[int, ...]
-    query_prepared: bool = False
 
 
 @dataclass
@@ -959,10 +956,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         context: DCPGatherContext,
         keep_view: bool = False,
     ) -> tuple[torch.Tensor, ...]:
-        if context.query_prepared and not keep_view:
-            if context.handle is not None:
-                context.handle.wait()
-            return unpack_query(context.gathered, context.split_sizes)
         gathered = cls._finish_dcp_packed_gather(context, keep_view=keep_view)
         return torch.split(gathered, context.split_sizes, dim=-1)
 
@@ -1316,13 +1309,9 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         sfa_output, softmax_max, softmax_sum = self._mask_nope_dcp_padding(
             sfa_output, actual_seq_lengths_query, softmax_max, softmax_sum
         )
-        # A5 packs softmax max and sum directly into the transport buffer.
-        sum_for_pack = None
-        if is_950():
-            softmax_lse = softmax_max
-            sum_for_pack = softmax_sum.permute(1, 0, 2).reshape(softmax_sum.shape[1], -1, 1)
-        else:
-            softmax_lse = softmax_max + torch.log(softmax_sum)
+        # Form LSE while packing on every device; keep max/sum in FP32.
+        softmax_lse = softmax_max
+        sum_for_pack = softmax_sum.permute(1, 0, 2).reshape(softmax_sum.shape[1], -1, 1)
         softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
         output_dtype = sfa_output.dtype
         output = self._merge_dcp_outputs(
