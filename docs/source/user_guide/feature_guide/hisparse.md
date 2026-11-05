@@ -80,6 +80,10 @@ supported projection schemes retain the native preprocessing path.
 C8 Decode consumes the resolver's mapped, stably compacted indices directly.
 The refill plan retains separate virtual page-row IDs. Prefill keeps its existing
 layout bridge, including stable ordering and duplicate selections.
+Decode's padded query-shape lengths and physical KV extent are prepared before
+capture and owned by the current binding. Per-round request mappings and valid
+rows remain current. Native C8 Attention already clears empty query outputs;
+the adapter returns that output without another index scan and output mask.
 
 Keep completion-before-unregister and graph allocation ownership intact.
 Overwriting KV still invalidates any old Hot copy. Equal batch shapes do not
@@ -97,10 +101,16 @@ In the current GLM-5.2 C4 comparison (32768 input and 8192 output tokens,
 TP8/DP1, MTP3, Model Runner V2, prefix caching off and explicit
 `weight_nz_mode=0`), both arms completed two rounds with 65536 actual output
 token IDs per arm. ON's settled reported miss/H2D deltas were zero. Mean TPOT was
-12.21 ms OFF and 14.20 ms ON: an observed increase of 16.29%. The second round
-had identical output tokens and MTP acceptance, with an 18.11% TPOT increase;
-the first round had different outputs/acceptance. These measurements do not
-establish statistical significance or acceptable performance for other workloads.
+11.96 ms OFF and 13.89 ms ON: an observed increase of 16.09%. Outputs and MTP
+work differed between these arms, so this mean is not an isolated measure of
+backend overhead. A preceding paired round with identical outputs and MTP work
+still showed an 18.11% increase.
+
+Against the preceding direct-index ON cohort, removing redundant C8 output
+masking and Decode length writes reduced observed mean ON TPOT from 14.20 to
+13.89 ms (2.19%). Complete input/output-sequence multisets and aggregate MTP
+work matched across those two ON cohorts. Two rounds do not establish
+statistical significance or acceptable performance for other workloads.
 
 Dataset accuracy, the full-model miss path and a TPOT regression within 3%
 remain unqualified. Profiling requests are separate from formal performance

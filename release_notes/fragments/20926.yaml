@@ -7,5 +7,7 @@ entries:
       operators and Core lifecycle interfaces. The resolver requires its
       compiled extension and does not fall back to Triton. Native C8 reuses
       supported SFA Prolog preprocessing and consumes the resolver's physical
-      Decode indices while preserving the separate refill plan.
+      Decode indices while preserving the separate refill plan. Decode lengths
+      are prepared with the cache binding and native empty-query clearing is
+      reused without redundant output masking.
     hardware: [A5]
