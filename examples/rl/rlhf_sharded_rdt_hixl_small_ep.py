@@ -102,7 +102,6 @@ NUM_INFERENCE_CONSUMERS = INFERENCE_TP_SIZE * INFERENCE_DP_SIZE
 PROMPTS = ["The capital of France is", "The future of AI is"]
 
 
-@ray.remote(resources={"NPU": 1})
 class FSDPTrainWorker:
     """One FSDP2 rank per NPU. Identical to the 8-NPU example's worker: the
     sharded-RDT engine owns the HIXL serve surface, so this stays a plain Ray
@@ -152,6 +151,8 @@ class FSDPTrainWorker:
         )
 
     def sync_weights(self):
+        if self.engine is None:
+            raise RuntimeError("Set up the weight transfer engine before syncing")
         self.engine.send_weights()
 
     def close(self):
@@ -216,8 +217,9 @@ def main():
 
     master_port = ray.get(_free_port.remote())
 
+    worker_cls = ray.remote(resources={"NPU": 1})(FSDPTrainWorker)
     workers = [
-        FSDPTrainWorker.options(
+        worker_cls.options(
             scheduling_strategy=PlacementGroupSchedulingStrategy(
                 placement_group=trainer_pg, placement_group_bundle_index=rank
             ),
