@@ -15,22 +15,19 @@ from vllm_ascend.models.deepseek_v41 import model as model_module
 
 
 @pytest.mark.parametrize(
-    "sp,dp,pcp,microbatch,dsa_cp,comm,expected",
+    "sp,dp,pcp,microbatch,comm,expected",
     [
-        (True, 1, 1, False, False, MoECommType.ALLGATHER, True),
-        (False, 1, 1, False, False, MoECommType.ALLGATHER, False),
-        (True, 2, 1, False, False, MoECommType.ALLGATHER, False),
-        (True, 1, 2, False, False, MoECommType.ALLGATHER, False),
-        (True, 1, 1, True, False, MoECommType.ALLGATHER, False),
-        (True, 1, 1, False, True, MoECommType.ALLGATHER, False),
-        (True, 1, 1, False, False, MoECommType.MC2, False),
-        (True, 1, 1, False, False, MoECommType.ALLTOALL, False),
-        (True, 1, 1, False, False, MoECommType.FUSED_MC2, False),
+        (True, 1, 1, False, MoECommType.ALLGATHER, True),
+        (False, 1, 1, False, MoECommType.ALLGATHER, False),
+        (True, 2, 1, False, MoECommType.ALLGATHER, False),
+        (True, 1, 2, False, MoECommType.ALLGATHER, False),
+        (True, 1, 1, True, MoECommType.ALLGATHER, False),
+        (True, 1, 1, False, MoECommType.MC2, False),
+        (True, 1, 1, False, MoECommType.ALLTOALL, False),
+        (True, 1, 1, False, MoECommType.FUSED_MC2, False),
     ],
 )
-def test_replicated_routing_ids_require_fixed_allgather_layout(
-    monkeypatch, sp, dp, pcp, microbatch, dsa_cp, comm, expected
-):
+def test_replicated_routing_ids_require_fixed_allgather_layout(monkeypatch, sp, dp, pcp, microbatch, comm, expected):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             use_sequence_parallel_moe=sp,
@@ -39,7 +36,6 @@ def test_replicated_routing_ids_require_fixed_allgather_layout(
             use_ubatching=microbatch,
         )
     )
-    monkeypatch.setattr(model_module, "enable_dsa_cp", lambda: dsa_cp)
     monkeypatch.setattr(model_module, "select_moe_comm_method", lambda num_tokens, config: comm)
     assert model_module._can_reuse_routing_input_ids(config) is expected
 
@@ -61,7 +57,6 @@ def test_a2_reuse_policy_is_constant_across_prefill_and_decode(monkeypatch, ep_s
         model_config=SimpleNamespace(get_num_experts=lambda: experts),
         lora_config=None,
     )
-    monkeypatch.setattr(model_module, "enable_dsa_cp", lambda: False)
     monkeypatch.setattr(context_module, "is_moe_model", lambda config: True)
     monkeypatch.setattr(context_module, "get_mc2_tokens_capacity", lambda: 64)
     monkeypatch.setattr(context_module, "get_ep_group", lambda: SimpleNamespace(world_size=ep_size))

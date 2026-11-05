@@ -113,7 +113,6 @@ def _can_reuse_routing_input_ids(vllm_config: VllmConfig) -> bool:
         and parallel.data_parallel_size == 1
         and parallel.prefill_context_parallel_size == 1
         and not parallel.use_ubatching
-        and not enable_dsa_cp()
         # Zero admits the low-token MC2 path in the communication selectors.
         # If it still selects ALLGATHER, increasing the batch cannot enable MC2.
         and select_moe_comm_method(0, vllm_config) == MoECommType.ALLGATHER
