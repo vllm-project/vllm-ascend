@@ -1775,6 +1775,7 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
         recv_thread.reset_mock()
         recv_thread.get_and_clear_finished_requests.return_value = set()
         meta = AscendConnectorMetadata({"r_preempted"}, loading_req_ids=set())
+        worker.retire_preempted_requests(meta.preempted_req_ids)
         worker.get_finished(set(), meta)
         recv_thread.discard_finished_requests.assert_called_once_with({"r_preempted"})
 
@@ -2078,6 +2079,28 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
         worker._wait_for_final_layer_save.assert_called_once_with(worker.num_layers, worker.kv_send_thread)
         self.assertFalse(worker._pending_last_save_drain)
+
+    def test_layerwise_retirement_drains_old_save_and_preserves_resumed_session(self):
+        worker = make_worker(self, use_layerwise=True)
+        worker.use_block_key_layerwise = True
+        worker._pending_last_save_drain = True
+        worker.kv_send_thread = MagicMock()
+        order = []
+        worker._wait_for_final_layer_save = lambda *args: order.append("drain")
+        worker.m_store.batch_get_end.side_effect = lambda keys: order.append(keys) or 0
+        tracker = worker._layerwise_session_tracker
+        tracker.prepare_load_entries("resumed", [("old-key", 0)])
+        tracker.record_get_result("old-key", {"resumed"}, succeeded=True)
+
+        worker.retire_preempted_requests({"resumed"})
+        self.assertEqual(order, ["drain", ["old-key"]])
+        tracker.prepare_load_entries("resumed", [("new-key", 0)])
+        tracker.record_get_result("new-key", {"resumed"}, succeeded=True)
+        worker.get_finished(set(), AscendConnectorMetadata({"resumed"}))
+
+        # Polling the old preemption notification must not end the new session.
+        self.assertEqual(order, ["drain", ["old-key"]])
+        self.assertEqual(tracker.release_terminal({"resumed"}), ["new-key"])
 
     def test_bound_layerwise_state_survives_deferred_start_and_mtp(self):
         for deferred in (False, True):

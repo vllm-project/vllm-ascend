@@ -473,6 +473,10 @@ class TestAscendStoreConnector(unittest.TestCase):
         meta = AscendConnectorMetadata(preempted_req_ids={"p1"})
         connector.handle_preemptions(meta)
         connector.connector_worker.handle_released_saves.assert_called_once_with({"p1"})
+        self.assertEqual(
+            connector.connector_worker.mock_calls,
+            [call.handle_released_saves({"p1"}), call.retire_preempted_requests({"p1"})],
+        )
 
     def test_handle_preemptions_tolerates_metadata_without_released_ids(self):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)

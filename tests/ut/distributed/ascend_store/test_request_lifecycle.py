@@ -290,7 +290,7 @@ class BytePoolingSession:
         self.worker.handle_preemptions(meta)
         self.worker.bind_connector_metadata(meta)
         self.worker.start_load_kv(SimpleNamespace() if output.total_num_scheduled_tokens else None)
-        sending, recving = self.worker.get_finished(output.finished_req_ids)
+        sending, recving = set(), set()
         if request is not None and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
             deadline = time.monotonic() + 5
             while request.request_id not in recving:
@@ -300,8 +300,6 @@ class BytePoolingSession:
                 done_sending, done_recving = self.worker.get_finished(output.finished_req_ids)
                 sending |= done_sending
                 recving |= done_recving
-        errors = self.worker.get_block_ids_with_load_errors()
-        self.reported_errors.append(errors)
         scheduled = output.num_scheduled_tokens.get(request.request_id, 0) if request else 0
         if before_compute is not None:
             before_compute(output)
@@ -313,6 +311,12 @@ class BytePoolingSession:
                 if start < (index + 1) * self.block_size <= end:
                     view.copy_(self.expected_bytes(request, index, name, plane, view.shape))
         self.worker.wait_for_save()
+        # Match the model runner: collect completions after submitting saves.
+        done_sending, done_recving = self.worker.get_finished(output.finished_req_ids)
+        sending |= done_sending
+        recving |= done_recving
+        errors = self.worker.get_block_ids_with_load_errors()
+        self.reported_errors.append(errors)
         result = create_model_runner_output([request] if scheduled else [])
         if scheduled and request.num_computed_tokens < len(request.prompt_token_ids):
             result.sampled_token_ids = [[]]
@@ -539,6 +543,66 @@ def test_released_save_fence_protects_bytes_before_physical_block_reuse(byte_poo
 
     session.run(reader, check_old_payload)
     assert verified == [True]
+
+
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_resumed_save_survives_post_forward_completion_poll(byte_pooling_session, monkeypatch, use_v2):
+    session = byte_pooling_session(use_v2=use_v2)
+    request = session.new_request("resume-pending-save", list(range(384)))
+    session.scheduler.add_request(request)
+    session.execute(session.scheduler.schedule(), request)
+    session.pool.handle_released_saves({request.request_id})
+    assert session.scheduler.reset_prefix_cache(reset_running_requests=True)
+    # A pool miss makes the resumed generation save immediately instead of load.
+    session.backend.payloads.clear()
+    output = session.scheduler.schedule()
+    assert request.request_id in output.kv_connector_metadata.preempted_req_ids
+    put_entered, release_put, put_completed = (threading.Event() for _ in range(3))
+    fence_entered, fence_returned = threading.Event(), threading.Event()
+    real_put = session.backend.put
+
+    def paused_put(*args):
+        put_entered.set()
+        assert release_put.wait(5)
+        result = real_put(*args)
+        put_completed.set()
+        return result
+
+    monkeypatch.setattr(session.backend, "put", paused_put)
+    waiter = None
+    try:
+        # execute() polls after submitting this tick's saves, as real runners do.
+        session.execute(output, request)
+        assert put_entered.wait(5)
+        expected = [
+            session.expected_bytes(request, index, name, plane, view.shape).numpy().tobytes()
+            for index, name, plane, view in session.block_views(request)
+            if index == 0
+        ]
+
+        def wait_for_release():
+            fence_entered.set()
+            session.pool.handle_released_saves({request.request_id})
+            fence_returned.set()
+
+        waiter = threading.Thread(target=wait_for_release, daemon=True)
+        waiter.start()
+        assert fence_entered.wait(5)
+        early = fence_returned.wait(0.2)
+        if early:
+            # Model the overwrite allowed by an incorrectly completed reuse fence.
+            for index, _, _, view in session.block_views(request):
+                if index == 0:
+                    view.fill_(252)
+    finally:
+        release_put.set()
+        if waiter is not None:
+            waiter.join(timeout=5)
+    assert put_completed.wait(5)
+    assert not waiter.is_alive()
+    actual = [data for row in session.backend.payloads.values() for data in row]
+    assert sorted(actual) == sorted(expected), "resumed KV saved bytes from the reused page"
+    assert not early, "release fence returned before the resumed put completed"
 
 
 @pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
