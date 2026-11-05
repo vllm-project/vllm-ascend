@@ -34,6 +34,23 @@ from vllm_ascend.utils import (
 )
 
 
+@pytest.mark.parametrize("block_size", [768, 1536])
+def test_kimi_hybrid_pd_keeps_kernel_interleave_after_manager_block_growth(block_size):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architecture="KimiK31ForConditionalGeneration"),
+        cache_config=SimpleNamespace(block_size=block_size, cache_dtype="fp8"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=8, cp_kv_cache_interleave_size=768),
+        kv_transfer_config=SimpleNamespace(kv_connector="MooncakeConnectorV2"),
+        use_v2_model_runner=True,
+    )
+    with (
+        patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True),
+        patch("vllm_ascend.platform.enable_sp", return_value=False),
+    ):
+        _validate_sfa_dcp_kv_sp(config)
+    assert config.parallel_config.cp_kv_cache_interleave_size == 768
+
+
 @pytest.mark.parametrize(
     "partition",
     ["20,23", "19,24", "28,15", "20,8,15", "23,20", "21,22", "17,26", "20,4,19"],

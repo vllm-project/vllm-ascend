@@ -1628,10 +1628,25 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
 
     use_dcp = parallel_config.decode_context_parallel_size > 1
     use_sparse = model_uses_sfa_sparse(model_config)
+    # Hybrid Kimi enlarges manager blocks to hold KDA state pages. The
+    # Mooncake pull path transfers kernel blocks and retains the DCP token
+    # interleave; changing that interleave after worker initialization would
+    # reinterpret the already allocated block tables.
+    interleave = parallel_config.cp_kv_cache_interleave_size
+    hybrid_kernel_interleave = (
+        getattr(model_config, "architecture", None) == "KimiK31ForConditionalGeneration"
+        and vllm_config.use_v2_model_runner
+        and cache_config.cache_dtype == "fp8"
+        and vllm_config.kv_transfer_config is not None
+        and vllm_config.kv_transfer_config.kv_connector in ("MooncakeConnectorV2", "MooncakePullConnector")
+        and interleave > 0
+        and cache_config.block_size % interleave == 0
+    )
     if (
         vllm_config.kv_transfer_config is not None
         and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
         and use_dcp
+        and not hybrid_kernel_interleave
     ):
         raise AssertionError(
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
@@ -1639,7 +1654,12 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
             "needs to be equal if DCP is enabled in P/D disaggregate and kv pool scenario."
         )
 
-    if use_sparse and use_dcp and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
+    if (
+        use_sparse
+        and use_dcp
+        and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size
+        and not hybrid_kernel_interleave
+    ):
         logger.warning_once(
             "The current SFA decode-context-parallel implementation requires "
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
