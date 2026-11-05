@@ -18,6 +18,10 @@ These configurations position Kimi K3 for native multimodal inference, reasoning
 
 ## 2 Supported Features
 
+!!! important
+
+    Kimi K3 currently supports only Model Runner V2. Set `VLLM_USE_V2_MODEL_RUNNER=1` on every node before starting the service.
+
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
@@ -276,6 +280,8 @@ The A2 capabilities have not changed in this release and remain consistent with 
 
     The 950DT products feature set and service options are the same as A3, except that 950DT products uses TP8 and exposes eight devices per node. Leave `HCCL_OP_EXPANSION_MODE` unset for this mixed Prefill/Decode deployment.
 
+    Kimi K3 on 950DT products does not support jemalloc.
+
     Before starting the service:
 
     - Replace the model path, local IP address, network interface, service port, and DP RPC port with values from the target environment.
@@ -294,6 +300,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
         export RPC_PORT=<DP_RPC_PORT>
         export DRAFT_MODEL_PATH=<YOUR_DRAFT_MODEL_PATH>
 
+        export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_BUFFSIZE=800
         export HCCL_IF_IP=$LOCAL_IP
         export HCCL_SOCKET_IFNAME=$NIC_NAME
@@ -350,6 +357,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
         export DP_START_RANK=<1_OR_2_OR_3>
         export DRAFT_MODEL_PATH=<YOUR_DRAFT_MODEL_PATH>
 
+        export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_BUFFSIZE=800
         export HCCL_IF_IP=$LOCAL_IP
         export HCCL_SOCKET_IFNAME=$NIC_NAME
@@ -463,7 +471,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
 
     On Atlas 800I A3, a mixed Prefill/Decode deployment follows the Prefill execution mode. HCCL therefore uses AICPU by default; leave `HCCL_OP_EXPANSION_MODE` unset.
 
-    Kimi K3 on Atlas 800I A3 does not support `LD_PRELOAD=/usr/lib64/libjemalloc.so.2`; run `unset LD_PRELOAD` before starting vLLM.
+    Kimi K3 on Atlas 800I A3 does not support jemalloc.
 
     Before starting the service:
 
@@ -483,13 +491,13 @@ The A2 capabilities have not changed in this release and remain consistent with 
         export RPC_PORT=<DP_RPC_PORT>
         export DRAFT_MODEL_PATH=<YOUR_DRAFT_MODEL_PATH>
 
+        export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_BUFFSIZE=800
         export HCCL_IF_IP=$LOCAL_IP
         export HCCL_SOCKET_IFNAME=$NIC_NAME
         export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
         export GLOO_SOCKET_IFNAME=$NIC_NAME
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
 
         SPECULATIVE_CONFIG="$(
           printf \
@@ -540,13 +548,13 @@ The A2 capabilities have not changed in this release and remain consistent with 
         export DP_START_RANK=<1_OR_2_OR_3>
         export DRAFT_MODEL_PATH=<YOUR_DRAFT_MODEL_PATH>
 
+        export VLLM_USE_V2_MODEL_RUNNER=1
         export HCCL_BUFFSIZE=800
         export HCCL_IF_IP=$LOCAL_IP
         export HCCL_SOCKET_IFNAME=$NIC_NAME
         export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
         export GLOO_SOCKET_IFNAME=$NIC_NAME
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
 
         SPECULATIVE_CONFIG="$(
           printf \
@@ -805,11 +813,11 @@ On 950DT products, use CCU communication on both Prefill and Decode by setting `
 
 This deployment supports DSpark speculative decoding. Select the DSpark checkpoint for your platform from [Section 3.1](#31-model-weight), and configure the same draft-model path and `num_speculative_tokens` on both Prefill and Decode nodes. The configuration uses draft TP8 on 950DT products or draft TP16 on A3, greedy drafting, and seven speculative tokens. On both platforms, Prefill keeps eager execution, while Decode sets the draft model's `enforce_eager` to `false` and retains `FULL_DECODE_ONLY` for the target model. The seventh argument of the engine template is the tensor-parallel size: `8` for 950DT products and `16` for A3.
 
-Kimi K3 on Atlas 800I A3 does not support `LD_PRELOAD=/usr/lib64/libjemalloc.so.2`; run `unset LD_PRELOAD` before starting vLLM.
+Kimi K3 on Atlas 800I A3 and 950DT products does not support jemalloc.
 
 The Prefill and Decode templates below assume equal tensor-parallel sizes on both sides. Both `prefill.tp_size` and `decode.tp_size` are taken from the seventh template argument (`$7`) and must match the engine TP: `8` for 950DT products or `16` for A3.
 
-Both platforms use Model Runner V2 and MooncakeConnectorV2, a maximum model length of `262144` (256K), and GPU memory utilization of `0.80`. Prefill enables MegaMoE and shared expert DP with shared-expert multistream overlap disabled. Decode enables the recompute scheduler and MLAPO. KV block/interleave sizes are `768` on 950DT products and `384` on A3. On 950DT products with MooncakeConnectorV2, specify the Prefill layer partition only through `VLLM_PP_LAYER_PARTITION`. On A3, retain `VLLM_PP_LAYER_PARTITION="25,25,24,19"` on Prefill and `"pp_layer_partition": "25,25,24,19"` in the KV connector's `prefill` configuration on both Prefill and Decode, including pooled deployment.
+Both platforms use Model Runner V2 and MooncakeConnectorV2 with a maximum model length of `262144` (256K). GPU memory utilization is `0.80` for Prefill and `0.90` for Decode on 950DT products, and `0.80` for both stages on A3. Prefill enables MegaMoE and shared expert DP with shared-expert multistream overlap disabled. Decode enables the recompute scheduler and MLAPO. KV block/interleave sizes are `768` on 950DT products and `384` on A3. On 950DT products with MooncakeConnectorV2, specify the Prefill layer partition only through `VLLM_PP_LAYER_PARTITION`. On A3, retain `VLLM_PP_LAYER_PARTITION="25,25,24,19"` on Prefill and `"pp_layer_partition": "25,25,24,19"` in the KV connector's `prefill` configuration on both Prefill and Decode, including pooled deployment.
 
 The basic templates leave DCP disabled (its default size is `1`).
 
@@ -844,7 +852,6 @@ The basic templates leave DCP disabled (its default size is `1`).
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_HOST_IP=${local_ip}
@@ -927,7 +934,6 @@ The basic templates leave DCP disabled (its default size is `1`).
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export VLLM_USE_V2_MODEL_RUNNER=1
 
         SPECULATIVE_CONFIG="$(
@@ -957,7 +963,7 @@ The basic templates leave DCP disabled (its default size is `1`).
             --max-num-batched-tokens 768 \
             --max-num-seqs 32 \
             --trust-remote-code \
-            --gpu-memory-utilization 0.80 \
+            --gpu-memory-utilization 0.90 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
             --mm-processor-cache-gb 1 \
@@ -1015,7 +1021,6 @@ The basic templates leave DCP disabled (its default size is `1`).
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_HOST_IP=${local_ip}
@@ -1099,7 +1104,6 @@ The basic templates leave DCP disabled (its default size is `1`).
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export VLLM_USE_V2_MODEL_RUNNER=1
 
         SPECULATIVE_CONFIG="$(
@@ -1214,7 +1218,7 @@ Key PD settings:
 | `HCCL_BUFFSIZE` | `800` | `800` | `1024` | `1024` |
 | `HCCL_OP_EXPANSION_MODE` | `CCU_SCHED` | `CCU_SCHED` | Unset (AICPU) | `AIV` |
 | `--max-model-len` | `262144` | `262144` | `262144` | `262144` |
-| `--gpu-memory-utilization` | `0.80` | `0.80` | `0.80` | `0.80` |
+| `--gpu-memory-utilization` | `0.80` | `0.90` | `0.80` | `0.80` |
 | `enable_fused_mc2` | `2` (MegaMoE) | Omitted | `2` (MegaMoE) | Omitted |
 | `enable_shared_expert_dp` | `true` | Omitted | `true` | Omitted |
 | `multistream_overlap_shared_expert` | `false` | `true` | `false` | `true` |
@@ -1257,7 +1261,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_HOST_IP=${local_ip}
@@ -1340,7 +1343,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export VLLM_USE_V2_MODEL_RUNNER=1
 
         SPECULATIVE_CONFIG="$(
@@ -1371,7 +1373,7 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
             --max-num-batched-tokens 768 \
             --max-num-seqs 32 \
             --trust-remote-code \
-            --gpu-memory-utilization 0.80 \
+            --gpu-memory-utilization 0.90 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
             --mm-processor-cache-gb 1 \
@@ -1429,7 +1431,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_HOST_IP=${local_ip}
@@ -1513,7 +1514,6 @@ Use the platform-specific DSpark weights from [Section 3.1](#31-model-weight). T
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export VLLM_USE_V2_MODEL_RUNNER=1
 
         SPECULATIVE_CONFIG="$(
@@ -1629,7 +1629,7 @@ Key PD settings:
 | `HCCL_BUFFSIZE` | `800` | `800` | `1024` | `1024` |
 | `HCCL_OP_EXPANSION_MODE` | `CCU_SCHED` | `CCU_SCHED` | Unset (AICPU) | `AIV` |
 | `--max-model-len` | `1048576` | `1048576` | `1048576` | `1048576` |
-| `--gpu-memory-utilization` | `0.80` | `0.80` | `0.80` | `0.80` |
+| `--gpu-memory-utilization` | `0.80` | `0.90` | `0.80` | `0.80` |
 | `enable_fused_mc2` | `2` (MegaMoE) | Omitted | `2` (MegaMoE) | Omitted |
 | `enable_shared_expert_dp` | `true` | Omitted | `true` | Omitted |
 | `multistream_overlap_shared_expert` | `false` | `true` | `false` | `true` |
@@ -1786,7 +1786,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
         export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export MMC_LOCAL_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-local.conf
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1
@@ -1887,7 +1886,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
         export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export MMC_LOCAL_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-local.conf
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1
@@ -1919,7 +1917,7 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
             --max-num-batched-tokens 768 \
             --max-num-seqs 32 \
             --trust-remote-code \
-            --gpu-memory-utilization 0.80 \
+            --gpu-memory-utilization 0.90 \
             --speculative-config "$SPECULATIVE_CONFIG" \
             --mm-encoder-tp-mode data \
             --mm-processor-cache-gb 1 \
@@ -1994,7 +1992,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
         export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export MMC_LOCAL_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-local.conf
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1
@@ -2096,7 +2093,6 @@ Reuse `launch_online_dp.py` from Section 5.2. Prefill uses DP1/PP4, so the fourt
         export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
         export GLOO_SOCKET_IFNAME=${nic_name}
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        unset LD_PRELOAD
         export MMC_LOCAL_CONFIG_PATH=<MEMCACHE_CONFIG_DIR>/mmc-local.conf
         export PYTHONHASHSEED=0
         export VLLM_USE_V2_MODEL_RUNNER=1

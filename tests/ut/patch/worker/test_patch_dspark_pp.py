@@ -6,7 +6,7 @@ import pytest
 import vllm.envs as vllm_envs
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 
-from vllm_ascend.patch.worker.patch_v2 import patch_dspark
+from vllm_ascend.patch.worker import patch_dspark
 
 
 @pytest.mark.parametrize("inherits_quant", [True, False])

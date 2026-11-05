@@ -106,7 +106,7 @@ def test_build_draft_metadata_submits_only_non_cp_device_tasks(
     )
 
     metadata, first = AscendSpecDecodeBaseProposer.build_draft_attn_metadata(
-        proposer,
+        proposer,  # type: ignore[arg-type]
         common_attn_metadata,
         num_input_tokens=1,
         num_actual_tokens=1,
@@ -151,17 +151,17 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
     proposer.slot_mapping_group = [torch.zeros(2, dtype=torch.int32)]
     proposer.seq_lens_group = [torch.zeros(2, dtype=torch.int32)]
     proposer.query_start_loc_group = [torch.zeros(3, dtype=torch.int32)]
-    proposer._pad_draft_buffers = MagicMock()
+    proposer._pad_draft_buffers = MagicMock()  # type: ignore[method-assign]
     proposer.uses_mrope = False
     proposer.positions = torch.arange(2, dtype=torch.int32)
     proposer.parallel_drafting = True
     proposer.token_indices_to_sample = torch.zeros(2, dtype=torch.int32)
     proposer.enable_enpu = False
     proposer.draft_attn_groups = [MagicMock()]
-    proposer._update_full_graph_params_if_needed = MagicMock()
-    proposer._maybe_update_metadata = MagicMock()
-    proposer.set_inputs_first_pass = MagicMock()
-    proposer.build_draft_attn_metadata = MagicMock()
+    proposer._update_full_graph_params_if_needed = MagicMock()  # type: ignore[method-assign]
+    proposer._maybe_update_metadata = MagicMock()  # type: ignore[method-assign]
+    proposer.set_inputs_first_pass = MagicMock()  # type: ignore[method-assign]
+    proposer.build_draft_attn_metadata = MagicMock()  # type: ignore[method-assign]
 
     query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
     common_attn_metadata = SimpleNamespace(
@@ -174,6 +174,7 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
         _seq_lens_cpu=torch.tensor([8], dtype=torch.int32),
         block_table_tensor=torch.ones((1, 1), dtype=torch.int32),
         slot_mapping=torch.zeros(1, dtype=torch.int32),
+        invalidate_cached_layout=lambda: None,
     )
     proposer.set_inputs_first_pass.return_value = (
         1,
@@ -526,7 +527,7 @@ class TestDSparkDraftQueryPhase(_DSparkProposerTestBase):
             decode_threshold=6,
             treat_short_extends_as_decodes=False,
         ) == ((2, 0, 10, 0) if dcp_size > 1 else (1, 1, 5, 5))
-        assert manager.prepare_parallel_draft_metadata.call_count == (dcp_size > 1)
+        assert manager.prepare_parallel_draft_metadata.call_count == (dcp_size > 1)  # type: ignore[attr-defined]
 
 
 class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):

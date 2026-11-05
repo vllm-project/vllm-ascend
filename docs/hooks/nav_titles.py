@@ -134,6 +134,10 @@ TITLES = {
     },
     "tutorials/models/MiniMax-M2.md": {"en": "MiniMax-M2", "zh": "MiniMax-M2"},
     "tutorials/models/MiniMax-M3.md": {"en": "MiniMax-M3", "zh": "MiniMax-M3"},
+    "tutorials/models/MiniMax-M3.1-Flash.md": {
+        "en": "MiniMax-M3.1-Flash (Experimental)",
+        "zh": "MiniMax-M3.1-Flash（实验性支持）",
+    },
     "tutorials/models/Minitron-8B-Base.md": {"en": "Minitron-8B-Base", "zh": "Minitron-8B-Base"},
     "tutorials/models/Mixtral-8x7B-Instruct-v0.1.md": {
         "en": "Mixtral-8x7B-Instruct-v0.1",

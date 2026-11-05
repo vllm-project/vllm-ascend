@@ -16,22 +16,22 @@ import pytest
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LoadSpec, ReqMeta
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
-    KVPoolWorker,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import (
+    LayerwiseKVPoolWorker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LoadSpec, ReqMeta
 
 
 def test_reuse_layout_remap_to_stage_local():
     stage_globals = list(range(38, 79))
 
-    local_map, local_independent = KVPoolWorker._remap_layout_to_stage_local(
+    local_map, local_independent = LayerwiseKVPoolWorker._remap_layout_to_stage_local(
         {42: 39, 43: 40, 44: 41, 45: 42}, [38], stage_globals
     )
 
     assert local_map == {4: 1, 5: 2, 6: 3, 7: 4}
     assert local_independent == [0]
-    assert KVPoolWorker._remap_layout_to_stage_local({3: 0, 4: 1}, [0], list(range(38))) == ({3: 0, 4: 1}, [0])
+    assert LayerwiseKVPoolWorker._remap_layout_to_stage_local({3: 0, 4: 1}, [0], list(range(38))) == ({3: 0, 4: 1}, [0])
 
 
 def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_layerwise_transfer=False, num_groups=2):
@@ -40,7 +40,7 @@ def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_la
         [f"model.layers.{layer_offset + i}.attn" for i in range(group_id, 4, num_groups)]
         for group_id in range(num_groups)
     ]
-    worker = KVPoolWorker.__new__(KVPoolWorker)
+    worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
     attention_spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.uint8)
     worker.kv_cache_config = KVCacheConfig(
         num_blocks=2,
@@ -170,7 +170,7 @@ def test_pp_stage_maps_multiple_cache_groups_to_local_layers(
         worker._attention_saved_layers = set()
         worker.block_key_hybrid = False
         worker._wait_for_final_layer_save = Mock()
-        monkeypatch.setitem(KVPoolWorker.save_kv_layer.__globals__, "_LW_DEFER_LAST_SAVE", False)
+        monkeypatch.setitem(LayerwiseKVPoolWorker.save_kv_layer.__globals__, "_LW_DEFER_LAST_SAVE", False)
 
         worker.save_kv_layer(None)
 

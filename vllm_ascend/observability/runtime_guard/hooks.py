@@ -347,9 +347,9 @@ class AscendAsyncOutput(AsyncModelRunnerOutput):
 
     # vLLM main makes ``get_kv_connector_output`` abstract on
     # ``AsyncModelRunnerOutput``: it salvages the step's KV output when
-    # ``get_output`` fails. v0.31.0 neither declares nor calls it, so the
+    # ``get_output`` fails. v0.32.0 neither declares nor calls it, so the
     # release lane needs no override.
-    if not vllm_version_is("0.31.0"):
+    if not vllm_version_is("0.32.0"):
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorOutput
 
         def get_kv_connector_output(self) -> KVConnectorOutput | None:

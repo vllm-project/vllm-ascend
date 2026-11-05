@@ -24,6 +24,7 @@ from vllm_ascend.patch.platform.patch_pp_mtp import (
     _use_pp_ipc_runtime_patch,
     _use_pp_mtp_runtime_patch,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
@@ -56,8 +57,7 @@ def test_model_config_validates_local_drafter_as_single_pp_rank(monkeypatch, mod
         enable_expert_parallel=False,
         pipeline_parallel_size=2,
         decode_context_parallel_size=1,
-        # vLLM main reads this during model/parallel validation; the v0.31.0
-        # lane ignores the extra attribute.
+        # Both supported vLLM lanes read this during model/parallel validation.
         enable_hc_sp=False,
     )
 
@@ -84,8 +84,7 @@ def test_model_config_keeps_target_model_pp_validation(monkeypatch):
         enable_expert_parallel=False,
         pipeline_parallel_size=2,
         decode_context_parallel_size=1,
-        # vLLM main reads this during model/parallel validation; the v0.31.0
-        # lane ignores the extra attribute.
+        # Both supported vLLM lanes read this during model/parallel validation.
         enable_hc_sp=False,
     )
 
@@ -235,7 +234,7 @@ def test_pp_ipc_sampled_token_handoff_advances_async_non_last_rank_state(
     runner.discard_request_mask = SimpleNamespace(
         np=np.zeros(2, dtype=bool),
     )
-    runner.input_batch = SimpleNamespace(
+    runner.input_batch = SimpleNamespace(  # type: ignore[assignment]
         num_reqs=2,
         req_ids=["req-0", "req-1"],
         prev_sampled_token_ids=None,
@@ -261,7 +260,7 @@ def test_pp_ipc_sampled_token_handoff_advances_async_non_last_rank_state(
         "req-0": 0,
         "req-1": 1,
     }
-    assert runner.input_batch.prev_sampled_token_ids.tolist() == [[101], [202]]
+    assert runner.input_batch.prev_sampled_token_ids.tolist() == [[101], [202]]  # type: ignore[union-attr]
     assert runner.requests["req-0"].output_token_ids == [
         31,
         PLACEHOLDER_TOKEN_ID,
@@ -289,7 +288,7 @@ def test_pp_ipc_sampled_token_handoff_keeps_sync_path_on_scheduler_tokens(
     runner.is_kv_consumer = False
     runner.use_async_scheduling = False
     runner.device = torch.device("cpu")
-    runner.input_batch = SimpleNamespace(
+    runner.input_batch = SimpleNamespace(  # type: ignore[assignment]
         num_reqs=1,
         req_ids=["req-0"],
         prev_sampled_token_ids="keep",
@@ -388,7 +387,7 @@ def test_pp_mtp_post_step_skips_inflight_batch():
 
 def test_pp_mtp_spec_token_id_edge_cases():
     finished = SimpleNamespace(is_finished=lambda: True, spec_token_ids=["keep"])
-    grammar = SimpleNamespace(validate_tokens=lambda tokens: tokens[:1])
+    grammar = SimpleNamespace(validate_tokens=lambda tokens: tokens[:1], is_terminated=lambda: False)
     advancing = SimpleNamespace(
         spec_token_ids=[],
         is_finished=lambda: False,
@@ -417,7 +416,9 @@ def test_pp_mtp_spec_token_id_edge_cases():
     _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_output)
     assert finished.spec_token_ids == ["keep"]
     assert empty_sampled.spec_token_ids == []
-    assert advancing.spec_token_ids == [401]
+    # Main trims to the validated prefix plus one lookahead token; 0.32.0 returns
+    # only the validated prefix.
+    assert advancing.spec_token_ids == ([401] if vllm_version_is("0.32.0") else [401, 402])
 
 
 def test_pp_mtp_spec_tokens_remain_unconstrained_during_reasoning(monkeypatch):

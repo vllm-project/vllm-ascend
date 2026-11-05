@@ -22,7 +22,6 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     make_cache_groups,
 )
 from vllm_ascend.models.deepseek_v41.model import build_layer_plan
-from vllm_ascend.utils import vllm_version_is
 
 
 def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
@@ -53,8 +52,8 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             dtype=torch.bfloat16,
             tokens_per_state=role.compress_ratio,
             model_version="deepseek_v41",
-            # vLLM main (#57169) dropped MLA `storage_block_size`; v0.31.0 declares it.
-            **({"storage_block_size": block_size // role.compress_ratio} if vllm_version_is("0.31.0") else {}),
+            # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
+            **{},
         )
         specs[f"{attn_prefix}.indexer.k_cache"] = AscendMLAAttentionSpec(
             block_size=block_size,
@@ -63,8 +62,8 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             dtype=torch.int8,
             tokens_per_state=role.compress_ratio,
             model_version="deepseek_v41",
-            # vLLM main (#57169) dropped MLA `storage_block_size`; v0.31.0 declares it.
-            **({"storage_block_size": block_size // role.compress_ratio} if vllm_version_is("0.31.0") else {}),
+            # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
+            **{},
             scale_dim=1,
             scale_dtype=torch.float16,
         )

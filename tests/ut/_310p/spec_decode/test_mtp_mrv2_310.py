@@ -183,7 +183,7 @@ class TestMRv2Mtp310(TestBase):
 
         speculator = object.__new__(AscendMTPSpeculator310)
         with patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.AscendAutoRegressiveSpeculator._run_model",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.AscendTargetDependentARSpeculator._run_model",
             mock_parent_run,
         ):
             AscendMTPSpeculator310._run_model(

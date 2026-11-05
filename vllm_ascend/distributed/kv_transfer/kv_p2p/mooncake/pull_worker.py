@@ -323,6 +323,9 @@ class MooncakePullRecvingThread(threading.Thread):
     ) -> list[list[int]]:
         """Infer one matched layer's TP strategy and remote rank groups."""
         if isinstance(spec, MambaSpec):
+            if getattr(spec, "tp_replicated", False):
+                # PLE keeps the complete state on every PCP/TP worker.
+                return [list(range(remote_pcp_size * remote_tp_size))]
             return self._get_mamba_remote_tp_rank_groups(
                 remote_pcp_size,
                 remote_tp_size,
@@ -352,7 +355,8 @@ class MooncakePullRecvingThread(threading.Thread):
             local_dcp_size = self.dcp_size
             local_num_kv_heads = remote_num_kv_heads = 1
             fixed_total_num_kv_heads = 1
-        # For FA or SWA with kv_heads > 1, must use HND kv_cache layout.
+        # Registration publishes HND-shaped metadata, including byte-equivalent
+        # single-head NHD. Multi-head FA/SWA still requires physical HND.
         elif isinstance(spec, SlidingWindowSpec):
             local_dcp_size = remote_dcp_size = 1
             local_num_kv_heads = self.block_shapes[local_layer_index][0][0]
@@ -897,7 +901,7 @@ class MooncakePullRecvingThread(threading.Thread):
             remote_start_block_idx = num_computed_tokens // kernel_block_size
             remote_kernel_block_ids = remote_kernel_block_ids[remote_start_block_idx:]
         elif isinstance(spec, MambaSpec):
-            local_kernel_block_ids = [local_group_block_ids[-self.num_speculative_tokens - 1]]
+            local_kernel_block_ids = [local_group_block_ids[-spec.num_speculative_blocks - 1]]
             remote_kernel_block_ids = [remote_group_block_ids[-1]]
         else:
             raise NotImplementedError(f"Mooncake block ID expansion does not support {type(spec).__name__}")
@@ -928,7 +932,8 @@ class MooncakePullRecvingThread(threading.Thread):
         dst_list: list[int],
         length_list: list[int],
     ) -> None:
-        """Append Mamba conv/SSM slices for one producer PCP/TP head shard."""
+        """Append a replicated Mamba state or one producer PCP/TP head shard."""
+        tp_replicated = getattr(spec, "tp_replicated", False)
         remote_tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
         local_rank = self.tp_rank * self.pcp_size + self.pcp_rank
         local_size = self.pcp_size * self.tp_size
@@ -936,12 +941,14 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_size = len(remote_metadata.metadata_by_pcp_rank) * remote_tp_size
         larger_tp_size = max(local_size, remote_size)
         smaller_tp_size = min(local_size, remote_size)
-        if smaller_tp_size <= 0 or larger_tp_size % smaller_tp_size != 0:
+        if smaller_tp_size <= 0 or (not tp_replicated and larger_tp_size % smaller_tp_size != 0):
             raise ValueError(
                 f"Mooncake Mamba TP sizes must have an integer ratio, got local={local_size}, remote={remote_size}"
             )
         tp_ratio = larger_tp_size // smaller_tp_size
-        if remote_size >= local_size:
+        if tp_replicated:
+            rank_offset = 0
+        elif remote_size >= local_size:
             rank_offset = remote_rank % tp_ratio
             if remote_rank // tp_ratio != local_rank:
                 raise ValueError(f"Mooncake Mamba remote TP {remote_rank} does not belong to local TP {local_rank}")
@@ -975,7 +982,14 @@ class MooncakePullRecvingThread(threading.Thread):
                 remote_shape = remote_shapes[cache_index]
 
                 address_slices: list[tuple[int, int, int]]
-                if local_size == remote_size:
+                if tp_replicated:
+                    if local_shape != remote_shape or local_block_len != remote_block_len:
+                        raise ValueError(
+                            f"Mooncake replicated Mamba metadata mismatch for layer "
+                            f"{self.layer_names[local_layer_index]!r}, cache {cache_index}"
+                        )
+                    address_slices = [(0, 0, local_block_len)]
+                elif local_size == remote_size:
                     if remote_rank != local_rank or local_block_len != remote_block_len:
                         raise ValueError(
                             f"Mooncake Mamba equal-TP metadata mismatch for layer "

@@ -1,7 +1,7 @@
 name: Recipes
 
-# Validate Huawei-scoped overlays with the upstream renderer workflow.
-# PR #1160 supplies the source registration and staged cutover support.
+# Validate Huawei-scoped overlays with the upstream renderer workflow and
+# renderer code from main, matching the renderer that publishes recipes.vllm.ai.
 
 on:
   pull_request:
@@ -24,6 +24,3 @@ jobs:
     with:
       source: vllm-ascend
       path: recipes
-      # Temporary preview pin from recipes PR #1160. Remove once main
-      # registers the official Ascend source and supports identical entries.
-      renderer-ref: 9ffe8f5da08b1f2ae862464805ebc487529c34d4

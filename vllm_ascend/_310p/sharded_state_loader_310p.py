@@ -23,8 +23,6 @@ from vllm.config.load import LoadConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.model_loader import ShardedStateLoader
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class ShardedStateLoader310(ShardedStateLoader):
     def __init__(self, load_config: LoadConfig):
@@ -47,9 +45,7 @@ class ShardedStateLoader310(ShardedStateLoader):
         # vLLM main split DEFAULT_PATTERN into separate TP-only and PP+TP spellings.
         # The release lane still declares the combined default. Bind a fresh
         # local: `pattern` is the `str | None` parameter and keeps that type.
-        shard_pattern = (
-            ShardedStateLoader.DEFAULT_PATTERN if vllm_version_is("0.31.0") else ShardedStateLoader.TP_ONLY_PATTERN
-        )
+        shard_pattern = ShardedStateLoader.TP_ONLY_PATTERN
         filename = shard_pattern.format(rank=rank, part=part_idx)
         save_file(
             state_dict,

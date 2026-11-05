@@ -2,7 +2,7 @@ import math
 from contextlib import contextmanager
 from copy import copy
 from dataclasses import replace
-from typing import Literal, get_args
+from typing import Any, Literal, get_args
 
 import vllm.config.speculative as speculative_config
 from transformers import DeepseekV2Config, PretrainedConfig
@@ -10,7 +10,7 @@ from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
-from vllm_ascend.utils import is_deepseek_v41, is_gqa_pcp_dcp_config
+from vllm_ascend.utils import is_deepseek_v41, is_gqa_pcp_dcp_config, vllm_version_is
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
@@ -83,7 +83,16 @@ def _normalize_kimi_dflash_rope(hf_config: PretrainedConfig) -> None:
     setattr(hf_config, rope_field, {**rope_params, "attention_factor": legacy_attention_factor})
 
 
-def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> PretrainedConfig:
+def _normalize_legacy_qwen3_dspark_config(
+    hf_config: PretrainedConfig,
+    transformers_mtp_overrides: dict[str, Any] | None = None,
+) -> PretrainedConfig:
+    if not vllm_version_is("0.32.0") and transformers_mtp_overrides is not None:
+        # The Transformers MTP draft is built from the target config: upstream
+        # applies the overrides and none of the checkpoint rewrites below apply.
+        return _orig_hf_config_override(  # type: ignore[call-arg]
+            hf_config, transformers_mtp_overrides
+        )
     hf_config = _orig_hf_config_override(hf_config)
     _normalize_kimi_dflash_rope(hf_config)
     architectures = hf_config.architectures or ()

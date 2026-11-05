@@ -1,0 +1,6 @@
+pr: 20134
+entries:
+  - category: feature
+    text: Added experimental GLM KDA RecoverSSM support on Ascend Model Runner V2, enabled with --use-replayssm alongside speculative decoding.
+    model: glm-5.3-flash
+    hardware: [A3, A5]

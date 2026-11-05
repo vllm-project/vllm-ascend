@@ -7,7 +7,7 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.mamba.postprocess import (
+from vllm_ascend.ops.triton.v1.mamba.postprocess import (
     _copy_temporal_state,
     postprocess_mamba_fused_kernel,
 )
