@@ -41,10 +41,11 @@ import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_bind_kv_cache  # noqa
 import vllm_ascend.patch.worker.patch_step3p5  # noqa
 
-# MRv1-only patches. Every module imported below targets a symbol that is only
-# reachable through the V1 Model Runner, so deleting the `patch_v1` package
-# removes all V1 patch support in one step.
-import vllm_ascend.patch.worker.patch_v1  # noqa
+# MRv1-only patches (V1 cudagraph dispatcher and V1 Mamba prefix copies).
+# 310P does not import them: ACL graph, W8A8, and prefix cache run on
+# NPUModelRunner310V2. Standard devices keep the package until it is deleted.
+if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+    import vllm_ascend.patch.worker.patch_v1  # noqa
 
 if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa

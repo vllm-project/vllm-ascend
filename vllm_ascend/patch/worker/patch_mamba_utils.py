@@ -3,7 +3,6 @@
 from vllm.v1.worker import mamba_utils
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.triton.v1.mamba.postprocess import postprocess_mamba_fused_kernel
 
 # Upstream uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
 # exposes 138 independent state programs per request, while Triton-Ascend
@@ -25,4 +24,9 @@ def _can_launch_triton_batch_memcpy() -> bool:
 
 
 if _can_launch_triton_batch_memcpy():
+    # 310P has no Triton batch memcpy and uses the MRV2 CPU Mamba postprocess.
+    # Import the V1 kernel only on devices that install it, so deleting
+    # ``ops/triton/v1`` does not break 310P worker startup.
+    from vllm_ascend.ops.triton.v1.mamba.postprocess import postprocess_mamba_fused_kernel
+
     mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel
