@@ -1900,8 +1900,10 @@ class TestNPUWorker(TestBase):
         with (
             patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
             patch.object(kw_module, "kernel_warmup") as mock_kernel_warmup,
+            patch("vllm_ascend.worker.worker.warmup_kernels") as mock_warmup_kernels,
         ):
             worker = NPUWorker()
+            worker.use_v2_model_runner = True
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.model_config = MagicMock()
@@ -1936,6 +1938,7 @@ class TestNPUWorker(TestBase):
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()
             mock_kernel_warmup.assert_called_once_with(worker)
+            mock_warmup_kernels.assert_called_once_with(worker.model_runner, worker.execute_model, worker.sample_tokens)
 
     @patch("vllm_ascend.worker.worker.set_random_seed")
     @patch("vllm_ascend.worker.worker.get_current_hardware_profile")
@@ -1966,8 +1969,10 @@ class TestNPUWorker(TestBase):
         with (
             patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
             patch.object(kw_module, "kernel_warmup") as mock_kernel_warmup,
+            patch("vllm_ascend.worker.worker.warmup_kernels") as mock_warmup_kernels,
         ):
             worker = NPUWorker()
+            worker.use_v2_model_runner = True
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.model_config = MagicMock()
@@ -1996,6 +2001,7 @@ class TestNPUWorker(TestBase):
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()
             mock_kernel_warmup.assert_called_once_with(worker)
+            mock_warmup_kernels.assert_called_once_with(worker.model_runner, worker.execute_model, worker.sample_tokens)
 
     def test_compile_or_warm_up_model_saves_startup_plan_after_graph_capture(self):
         """The persisted budget must include the measured NPU graph memory."""
@@ -2016,6 +2022,7 @@ class TestNPUWorker(TestBase):
         with (
             patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
             patch.object(kw_module, "kernel_warmup") as mock_kernel_warmup,
+            patch("vllm_ascend.worker.worker.warmup_kernels") as mock_warmup_kernels,
             patch("vllm_ascend.worker.worker.maybe_save_startup_plan") as mock_save_startup_plan,
             patch("vllm_ascend.worker.worker.get_ascend_config") as mock_get_ascend_config,
             patch("vllm_ascend.worker.worker.get_current_hardware_profile") as mock_get_hardware_profile,
@@ -2028,6 +2035,7 @@ class TestNPUWorker(TestBase):
             mock_get_hardware_profile.return_value.supports.return_value = False
 
             worker = NPUWorker()
+            worker.use_v2_model_runner = True
             worker.model_runner = MagicMock()
             worker.model_runner.model_memory_usage = model_memory
             worker.model_runner.capture_model.return_value = npugraph_memory
@@ -2046,6 +2054,7 @@ class TestNPUWorker(TestBase):
             worker.compile_or_warm_up_model()
 
             mock_kernel_warmup.assert_called_once_with(worker)
+            mock_warmup_kernels.assert_called_once_with(worker.model_runner, worker.execute_model, worker.sample_tokens)
             worker.model_runner.capture_model.assert_called_once()
             mock_save_startup_plan.assert_called_once_with(worker, expected_kv_cache_memory)
 
