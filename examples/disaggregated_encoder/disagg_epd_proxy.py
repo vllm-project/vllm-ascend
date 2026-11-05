@@ -73,9 +73,20 @@ def _record_encode_failure(url: str) -> None:
 
 
 def _stage_timeout(stage: str) -> aiohttp.ClientTimeout | None:
-    """Return the per-stage client timeout, or None for the legacy shared one."""
+    """Return the configured per-stage timeout; None means keep the session default.
+
+    aiohttp treats an explicit timeout=None as ClientTimeout(total=None) and
+    disables the session total timeout, so callers must omit the keyword
+    entirely when this returns None.
+    """
     seconds = getattr(app.state, "stage_timeouts", {}).get(stage, 0.0)
     return aiohttp.ClientTimeout(total=seconds) if seconds and seconds > 0 else None
+
+
+def _stage_timeout_kwargs(stage: str) -> dict:
+    """Return request kwargs carrying the stage timeout only when it is configured."""
+    timeout = _stage_timeout(stage)
+    return {"timeout": timeout} if timeout is not None else {}
 
 
 def _classify_outbound_error(stage: str, url: str, exc: BaseException) -> HTTPException:
@@ -96,7 +107,7 @@ def _classify_outbound_error(stage: str, url: str, exc: BaseException) -> HTTPEx
 
 
 def _downstream_status_error(stage: str, url: str, status: int, body: bytes) -> HTTPException:
-    """Map a non-200 downstream status: keep 4xx, collapse other failures to 502."""
+    """Map a non-2xx downstream status: keep 4xx, collapse other failures to 502."""
     message = body.decode("utf-8", errors="replace")[:500]
     if 400 <= status < 500:
         return HTTPException(
@@ -127,7 +138,7 @@ async def _post_stage(
     if session is None:
         raise HTTPException(status_code=500, detail=f"{stage} session not initialized")
     try:
-        async with session.post(url, json=payload, headers=headers, timeout=_stage_timeout(stage)) as resp:
+        async with session.post(url, json=payload, headers=headers, **_stage_timeout_kwargs(stage)) as resp:
             status = resp.status
             body = await resp.read()
     except HTTPException:
@@ -213,7 +224,7 @@ async def _encode_fanout(
             failures.append((idx, target_urls[idx], result))
             continue
         status, body = result
-        if status != 200:
+        if not (200 <= status < 300):
             _record_encode_failure(target_urls[idx])
             error = _downstream_status_error("encode", f"{target_urls[idx]}/v1/chat/completions", status, body)
             failures.append((idx, target_urls[idx], error))
@@ -265,7 +276,7 @@ async def _encode_single_request(
     url = f"{e_url}/v1/chat/completions"
     try:
         status, body = await _post_stage(encode_session, url, request_data, headers, "encode", req_id)
-        if status != 200:
+        if not (200 <= status < 300):
             raise _downstream_status_error("encode", url, status, body)
     except Exception:
         _record_encode_failure(e_url)
@@ -344,7 +355,7 @@ async def process_prefill_stage(
     headers = {"x-request-id": req_id}
     url = f"{p_url}/v1/chat/completions"
     status, body = await _post_stage(prefill_session, url, prefill_request, headers, "prefill", req_id)
-    if status != 200:
+    if not (200 <= status < 300):
         logger.error("[%s] Prefill request failed with status %d", req_id, status)
         raise _downstream_status_error("prefill", url, status, body)
     try:
@@ -474,7 +485,7 @@ async def forward_non_stream(req_data: dict, req_id: str, p_url: str, d_url: str
                 raise HTTPException(status_code=500, detail="Decode session not initialized")
 
             status, body = await _post_stage(decode_session, url, req_data, headers, "decode", req_id)
-            if status != 200:
+            if not (200 <= status < 300):
                 raise _downstream_status_error("decode", url, status, body)
             try:
                 return json.loads(body)
@@ -567,9 +578,9 @@ async def forward_stream(req_data: dict, req_id: str, p_url: str, d_url: str) ->
                     url,
                     json=req_data,
                     headers=headers,
-                    timeout=_stage_timeout("decode"),
+                    **_stage_timeout_kwargs("decode"),
                 ) as resp:
-                    if resp.status != 200:
+                    if not (200 <= resp.status < 300):
                         body = await resp.read()
                         raise _downstream_status_error("decode", url, resp.status, body)
                     async for chunk in resp.content.iter_chunked(1024):

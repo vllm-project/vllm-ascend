@@ -79,8 +79,8 @@ class FakeSession:
         self.responses = list(responses)
         self.calls = []
 
-    def post(self, url, json=None, headers=None, timeout=None):
-        self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+    def post(self, url, json=None, headers=None, **kwargs):
+        self.calls.append({"url": url, "json": json, "headers": headers, "kwargs": kwargs})
         if not self.responses:
             raise AssertionError(f"unexpected POST to {url}")
         return self.responses.pop(0)
@@ -154,7 +154,7 @@ def test_encoder_single_routes_one_request_with_parent_id(monkeypatch):
     assert call["headers"] == {"x-request-id": "parent-1"}
     assert call["json"]["max_tokens"] == 1
     assert call["json"]["stream"] is False
-    assert call["timeout"] is None
+    assert "timeout" not in call["kwargs"]
 
 
 def test_encoder_fanout_one_request_per_item_with_child_ids(monkeypatch):
@@ -170,6 +170,7 @@ def test_encoder_fanout_one_request_per_item_with_child_ids(monkeypatch):
         "http://e1/v1/chat/completions",
         "http://e2/v1/chat/completions",
     ]
+    assert all("timeout" not in call["kwargs"] for call in session.calls)
 
 
 # --------------------------------------------------------------------------- #
@@ -211,6 +212,23 @@ def test_encode_downstream_5xx_maps_to_502(monkeypatch):
     assert error.status_code == 502
     assert error.detail["stage"] == "encode"
     assert error.detail["status"] == 500
+
+
+def test_encode_downstream_redirect_maps_to_502(monkeypatch):
+    error, _ = _run_single_encode(monkeypatch, FakeResponse(307, b"redirect"))
+    assert error.status_code == 502
+    assert error.detail["stage"] == "encode"
+    assert error.detail["status"] == 307
+
+
+def test_encoder_single_accepts_any_2xx(monkeypatch):
+    session = FakeSession([FakeResponse(204, b"")])
+    monkeypatch.setattr(proxy, "encode_session", session, raising=False)
+
+    asyncio.run(proxy._encode_single_request(_image_request(), ENCODE_URL, "req-1"))
+
+    assert len(session.calls) == 1
+    assert proxy.app.state.encode_failures == {}
 
 
 # --------------------------------------------------------------------------- #
@@ -283,18 +301,22 @@ def test_stream_retry_retries_before_first_chunk():
 # --------------------------------------------------------------------------- #
 # Stage timeouts and response release
 # --------------------------------------------------------------------------- #
-def test_stage_timeout_disabled_passes_none(monkeypatch):
+def test_stage_timeout_disabled_omits_timeout_kwarg(monkeypatch):
+    assert proxy._stage_timeout("encode") is None
     session = FakeSession([FakeResponse(200, b"{}")])
     status, body = asyncio.run(proxy._post_stage(session, f"{ENCODE_URL}/v1/chat/completions", {}, {}, "encode", "id"))
     assert (status, body) == (200, b"{}")
-    assert session.calls[0]["timeout"] is None
+    # Omitting the keyword keeps the session default total timeout alive; passing
+    # timeout=None would disable it, so it must not be present at all.
+    assert "timeout" not in session.calls[0]["kwargs"]
+    assert proxy._stage_timeout_kwargs("encode") == {}
 
 
 def test_stage_timeout_enabled_passes_client_timeout(monkeypatch):
     _set_timeouts(monkeypatch, encode=12.5)
     session = FakeSession([FakeResponse(200, b"{}")])
     asyncio.run(proxy._post_stage(session, f"{ENCODE_URL}/v1/chat/completions", {}, {}, "encode", "id"))
-    timeout = session.calls[0]["timeout"]
+    timeout = session.calls[0]["kwargs"]["timeout"]
     assert isinstance(timeout, aiohttp.ClientTimeout)
     assert timeout.total == 12.5
 
@@ -304,6 +326,33 @@ def test_post_stage_releases_response(monkeypatch):
     session = FakeSession([response])
     asyncio.run(proxy._post_stage(session, f"{ENCODE_URL}/v1/chat/completions", {}, {}, "encode", "id"))
     assert response.released is True
+
+
+def test_stream_decode_omits_timeout_kwarg_by_default(monkeypatch):
+    session = FakeSession([FakeResponse(200, b"", chunks=[b"chunk-1"])])
+    monkeypatch.setattr(proxy, "decode_session", session, raising=False)
+    req_data = {"model": "m", "messages": [{"role": "user", "content": "hello"}], "stream": True}
+
+    async def collect():
+        return [chunk async for chunk in proxy.forward_stream(req_data, "req-1", None, DECODE_URL)]
+
+    assert asyncio.run(collect()) == ["chunk-1"]
+    assert "timeout" not in session.calls[0]["kwargs"]
+
+
+def test_stream_decode_passes_timeout_when_configured(monkeypatch):
+    _set_timeouts(monkeypatch, decode=5.0)
+    session = FakeSession([FakeResponse(200, b"", chunks=[b"chunk-1"])])
+    monkeypatch.setattr(proxy, "decode_session", session, raising=False)
+    req_data = {"model": "m", "messages": [{"role": "user", "content": "hello"}], "stream": True}
+
+    async def collect():
+        return [chunk async for chunk in proxy.forward_stream(req_data, "req-1", None, DECODE_URL)]
+
+    assert asyncio.run(collect()) == ["chunk-1"]
+    timeout = session.calls[0]["kwargs"]["timeout"]
+    assert isinstance(timeout, aiohttp.ClientTimeout)
+    assert timeout.total == 5.0
 
 
 # --------------------------------------------------------------------------- #
@@ -344,7 +393,16 @@ def test_forward_non_stream_returns_decode_json(monkeypatch):
 
     result = asyncio.run(proxy.forward_non_stream(req_data, "req-1", None, DECODE_URL))
     assert result == {"choices": [{"message": {"content": "hi"}}]}
-    assert session.calls[0]["timeout"] is None
+    assert "timeout" not in session.calls[0]["kwargs"]
+
+
+def test_forward_non_stream_accepts_201(monkeypatch):
+    session = FakeSession([FakeResponse(201, b'{"choices": []}')])
+    monkeypatch.setattr(proxy, "decode_session", session, raising=False)
+    req_data = {"model": "m", "messages": [{"role": "user", "content": "hello"}], "stream": False}
+
+    result = asyncio.run(proxy.forward_non_stream(req_data, "req-1", None, DECODE_URL))
+    assert result == {"choices": []}
 
 
 def test_forward_non_stream_decode_4xx_propagates_without_retry(monkeypatch):
