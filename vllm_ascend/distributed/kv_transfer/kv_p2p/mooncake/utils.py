@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import queue
 import struct
+import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterator
@@ -47,12 +48,44 @@ class MooncakeMetaserverClient:
                 connect=envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT,
             )
         )
+        # Each D DP engine has its own pool: at most 32 metaserver POSTs can
+        # run concurrently, and each occupies a thread until P finishes.
+        # TODO: decouple metadata acceptance from P completion. A multi-prompt
+        # batch can exhaust this pool while the proxy waits for its remaining
+        # queued metadata, causing all involved POSTs to wait until timeout.
         self.executor = ThreadPoolExecutor(max_workers=32, thread_name_prefix="MooncakeMetaserver")
         self._results: queue.SimpleQueue = queue.SimpleQueue()
 
-    def submit(self, request_id: str, url: str, message: dict[str, Any]) -> None:
-        future = self.executor.submit(self._access_metaserver, url, message)
-        future.add_done_callback(lambda result: self._on_done(request_id, result))
+    def submit(self, request_id: str, url: str | None, message: dict[str, Any]) -> None:
+        try:
+            if not isinstance(url, str):
+                raise ValueError("Metaserver URL is missing or is not a string")
+            parsed_url = httpx.URL(url)
+            if parsed_url.scheme not in ("http", "https") or not parsed_url.host:
+                raise ValueError("Metaserver requires an absolute HTTP(S) URL")
+        except (TypeError, ValueError, httpx.InvalidURL) as error:
+            self._results.put((request_id, error, True))
+            return
+
+        # submit() can enqueue work before starting a thread raises. Gate the
+        # HTTP call so a rejected submission can never publish D block addresses.
+        submitted = threading.Event()
+        accepted = False
+
+        def send() -> None:
+            submitted.wait()
+            if accepted:
+                self._access_metaserver(url, message)
+
+        try:
+            future = self.executor.submit(send)
+        except RuntimeError as error:
+            self._results.put((request_id, error, True))
+        else:
+            accepted = True
+            future.add_done_callback(lambda result: self._on_done(request_id, result))
+        finally:
+            submitted.set()
 
     def _access_metaserver(self, url: str, message: dict[str, Any]) -> None:
         # Only connection establishment is retried: a lost response may follow
@@ -68,19 +101,26 @@ class MooncakeMetaserverClient:
 
     def _on_done(self, request_id: str, future: Future) -> None:
         if not future.cancelled() and (error := future.exception()) is not None:
-            self._results.put((request_id, error))
+            not_dispatched = isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout))
+            self._results.put((request_id, error, not_dispatched))
 
-    def check_errors(self) -> None:
-        try:
-            request_id, error = self._results.get_nowait()
-        except queue.Empty:
-            return
-        # A response failure cannot certify that P never received the blocks.
-        raise RuntimeError(f"Mooncake metaserver dispatch failed for {request_id}") from error
+    def get_failed_requests(self) -> dict[str, bool]:
+        """Return failed D requests and whether P dispatch can be ruled out."""
+        failed_requests = {}
+        while True:
+            try:
+                request_id, error, not_dispatched = self._results.get_nowait()
+            except queue.Empty:
+                return failed_requests
+            logger.error("Mooncake metaserver dispatch failed for %s: %s", request_id, error)
+            # Preserve uncertainty if more than one failure was recorded.
+            failed_requests[request_id] = failed_requests.get(request_id, True) and not_dispatched
 
     def shutdown(self) -> None:
-        self.executor.shutdown(wait=True, cancel_futures=True)
-        self.client.close()
+        try:
+            self.executor.shutdown(wait=True, cancel_futures=True)
+        finally:
+            self.client.close()
 
 
 @contextlib.contextmanager

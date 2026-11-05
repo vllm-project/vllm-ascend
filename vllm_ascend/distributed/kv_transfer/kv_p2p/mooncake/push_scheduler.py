@@ -11,6 +11,7 @@ import msgspec
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
+from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.request import RequestStatus
 
@@ -57,6 +58,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self._metadata_thread: MooncakePushMetadataThread | None = None
         self._reqs_pending_recv: dict[str, tuple[Request, BlockIds, int]] = {}
+        self._reqs_failed_recv: set[str] = set()
         self._reqs_need_send_layerwise: dict[str, tuple[Request, BlockIds]] = {}
         self._reqs_sent_to_worker: set[str] = set()
         self._reqs_need_send: dict[str, float] = {}
@@ -67,17 +69,19 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         self.metaserver_client = MooncakeMetaserverClient() if self.kv_transfer_config.is_kv_consumer else None
 
     def shutdown(self) -> None:
-        if self.metaserver_client is not None:
-            self.metaserver_client.shutdown()
+        try:
+            if self.metaserver_client is not None:
+                self.metaserver_client.shutdown()
+        finally:
             self.metaserver_client = None
-        if self._metadata_thread is not None:
-            self._metadata_thread.shutdown()
-            self._metadata_thread = None
+            if self._metadata_thread is not None:
+                try:
+                    self._metadata_thread.shutdown()
+                finally:
+                    self._metadata_thread = None
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int) -> None:
         """Track P source allocations or queue D receives for worker metadata."""
-        if self.metaserver_client is not None:
-            self.metaserver_client.check_errors()
         params = request.kv_transfer_params
         if self.kv_transfer_config.is_kv_producer:
             if not params or not params.get("do_remote_decode"):
@@ -96,15 +100,21 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
             if not params or not params.get("do_remote_prefill"):
                 return
             if num_external_tokens > 0:
-                if self._metadata_thread is None:
-                    raise RuntimeError("D scheduler metadata service is not ready")
                 self._reqs_pending_recv[request.request_id] = (
                     request,
                     tuple(list(group) for group in blocks.get_block_ids()),
                     num_external_tokens,
                 )
             params["do_remote_prefill"] = False
-            assert self.metaserver_client is not None
+            if num_external_tokens > 0 and (self._metadata_thread is None or self._metadata_thread.error is not None):
+                # No addresses have been published for this request yet.
+                self._reqs_failed_recv.add(request.request_id)
+                logger.error("D metadata service is unavailable for request %s", request.request_id)
+                return
+            if self.metaserver_client is None:
+                self._reqs_failed_recv.add(request.request_id)
+                logger.error("Metaserver client is unavailable for request %s", request.request_id)
+                return
             # The proxy matches external IDs; workers retain the full D ID.
             external_request_id = request.request_id[:-9]
             message = dict(
@@ -129,11 +139,9 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                 remote_num_external_tokens=num_external_tokens,
                 remote_worker_addresses=self._remote_worker_addresses,
             )
-            self.metaserver_client.submit(request.request_id, params["metaserver"], message)
+            self.metaserver_client.submit(request.request_id, params.get("metaserver"), message)
 
     def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> MooncakeConnectorMetadata:
-        if self.metaserver_client is not None:
-            self.metaserver_client.check_errors()
         meta = MooncakeConnectorMetadata()
         if self.kv_transfer_config.is_kv_producer:
             # Core can recycle preempted blocks before the worker receives this
@@ -185,6 +193,12 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                 scheduler_output.has_sync_kv_loads = True
 
         else:
+            # Poll without waiting, including connector-only steps. Workers
+            # decide when failed receives are safe to release.
+            meta.push_failed_requests = dict.fromkeys(self._reqs_failed_recv, True)
+            self._reqs_failed_recv.clear()
+            if self.metaserver_client is not None:
+                meta.push_failed_requests.update(self.metaserver_client.get_failed_requests())
             for req_id, (req, block_ids, num_external_tokens) in self._reqs_pending_recv.items():
                 assert req.kv_transfer_params is not None
                 meta.add_new_push_req(
@@ -221,8 +235,6 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         return True, None
 
     def update_connector_output(self, connector_output: "KVConnectorOutput") -> None:
-        if self.metaserver_client is not None:
-            self.metaserver_client.check_errors()
         if not self.kv_transfer_config.is_kv_producer:
             return
         finished_sending: set[str] = set()
