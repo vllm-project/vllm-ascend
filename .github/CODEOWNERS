@@ -38,6 +38,7 @@
 # docs
 /docs @liqian79
 /docs/source/getting_started @MrZ20
+/docs/source/user_guide/feature_guide/rfork.md @yangsonglin13
 /.readthedocs.yaml @liqian79 @MrZ20
 /README* @liqian79
 /mkdocs.yml @MrZ20
@@ -45,6 +46,7 @@
 # examples
 /examples/ @MrZ20
 /examples/eplb/ @freyfwt
+/examples/rfork/ @yangsonglin13
 
 # c++ source code
 /cmake @zzzzwwjj @ZT-AIA
@@ -192,6 +194,11 @@
 # /vllm_ascend/observability
 /vllm_ascend/observability/ms_metrics/config/eplb_metrics.yaml @freyfwt
 /vllm_ascend/observability/ms_metrics/handlers/eplb.py @freyfwt
+
+# Model loader
+# TODO(owner): /vllm_ascend/model_loader
+# /vllm_ascend/model_loader
+/vllm_ascend/model_loader/rfork/ @yangsonglin13
 
 # vllm_ascend module directories (subdirs broken out one level)
 # TODO(owner): /vllm_ascend/ec_manager
