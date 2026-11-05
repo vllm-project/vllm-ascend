@@ -1,3 +1,6 @@
+# See https://help.github.com/articles/about-codeowners/
+# for more info about CODEOWNERS file
+
 # Infra, CI
 /.gemini @wangxiyuan
 /.github @zhangxinyuehfad
@@ -47,36 +50,95 @@
 
 # attention
 /vllm_ascend/attention @weijinqian0
+
 # compilation
-/vllm_ascend/compilation @yiz-liu
+/vllm_ascend/compilation @yiz-liu @wxsIcey
+
 # device / device_allocator
 /vllm_ascend/device @weijinqian0 @zzzzwwjj
 /vllm_ascend/device_allocator @weijinqian0
+
 # distributed (kv_offload is a more specific sub-assignment)
 /vllm_ascend/distributed @LCAIZJ
 /vllm_ascend/distributed/kv_transfer/kv_pool/kv_offload @nalinaly
+
 # lora
 /vllm_ascend/lora @paulyu12
+
 # ops
 /vllm_ascend/ops @zzzzwwjj @realliujiaxu
+
 # quantization
-/vllm_ascend/quantization @kunpengW-code
+/vllm_ascend/quantization @kunpengW-code @menogrey
+
 # sample
 /vllm_ascend/sample @realliujiaxu
 
-# ==================== 2. Pending owners (inactive, TODO) ====================
-#
-# vllm_ascend core framework
-# TODO(owner): /vllm_ascend/*.py
-# /vllm_ascend/*.py
+# spec decode
+/vllm_ascend/worker/v2/spec_decode @wxsIcey
+
+# scheduler
+/vllm_ascend/core/batch_job_aware_scheduler.py
+/vllm_ascend/core/dyntra_lb_scheduler.py
+/vllm_ascend/core/recompute_scheduler.py
+/vllm_ascend/core/scheduler_profiling_chunk.py
+/vllm_ascend/core/short_request_first_scheduler.py
+
+# kv cache
+/vllm_ascend/core/kv_cache_config_builder.py @yzeyu71
+/vllm_ascend/core/kv_cache_interface.py @yzeyu71
+/vllm_ascend/core/kv_cache_placement.py @yzeyu71
+/vllm_ascend/core/single_type_kv_cache_manager.py @yzeyu71
+
+# Core framework
+/vllm_ascend/ascend_config.py 
+/vllm_ascend/ascend_forward_context.py
+/vllm_ascend/batch_invariant.py
+/vllm_ascend/config_utils.py
+/vllm_ascend/cpu_binding.py
+/vllm_ascend/envs.py
+/vllm_ascend/logger.py
+/vllm_ascend/meta_registration.py
+/vllm_ascend/mrv2_utils.py @yzeyu71
+/vllm_ascend/platform.py @wxsIcey
+/vllm_ascend/profiling_config.py
+/vllm_ascend/utils.py
+
+# Patch
+/vllm_ascend/patch @wxsIcey
+
+# Worker base
+# /vllm_ascend/worker/dcp_utils.py
+# /vllm_ascend/worker/device_metadata.py
+# /vllm_ascend/worker/dspark_utils.py @wxsIcey
+# /vllm_ascend/worker/encoder_acl_graph.py
+# /vllm_ascend/worker/kvpp_cache.py
+# /vllm_ascend/worker/npu_input_batch.py
+# /vllm_ascend/worker/spec_decode_utils.py
+# /vllm_ascend/worker/utils.py
+/vllm_ascend/worker/worker.py @wxsIcey
+
+# Worker V2
+/vllm_ascend/worker/v2/model_states
+/vllm_ascend/worker/v2/sample
+/vllm_ascend/worker/v2/aclgraph_utils.py
+/vllm_ascend/worker/v2/attn_utils.py
+/vllm_ascend/worker/v2/block_table.py
+/vllm_ascend/worker/v2/eplb.py
+/vllm_ascend/worker/v2/input_batch.py
+/vllm_ascend/worker/v2/kv_connector.py @yzeyu71
+/vllm_ascend/worker/v2/kvpp.py
+/vllm_ascend/worker/v2/model_runner.py
+/vllm_ascend/worker/v2/pcp_manager.py
+/vllm_ascend/worker/v2/pp_transport.py
+/vllm_ascend/worker/v2/states.py
+/vllm_ascend/worker/v2/utils.py
 
 # vllm_ascend module directories (subdirs broken out one level)
 # TODO(owner): /vllm_ascend/_310p
 # /vllm_ascend/_310p
 # TODO(owner): /vllm_ascend/_cann_ops_custom
 # /vllm_ascend/_cann_ops_custom
-# TODO(owner): /vllm_ascend/core
-# /vllm_ascend/core
 # TODO(owner): /vllm_ascend/ec_manager
 # /vllm_ascend/ec_manager
 # TODO(owner): /vllm_ascend/eplb
@@ -89,22 +151,10 @@
 # /vllm_ascend/models
 # TODO(owner): /vllm_ascend/observability
 # /vllm_ascend/observability
-# TODO(owner): /vllm_ascend/patch/platform
-# /vllm_ascend/patch/platform
-# TODO(owner): /vllm_ascend/patch/worker
-# /vllm_ascend/patch/worker
-# TODO(owner): /vllm_ascend/patch/*.py
-# /vllm_ascend/patch/*.py
 # TODO(owner): /vllm_ascend/profiler
 # /vllm_ascend/profiler
 # TODO(owner): /vllm_ascend/weight_switch
 # /vllm_ascend/weight_switch
-# TODO(owner): /vllm_ascend/worker/*.py
-# /vllm_ascend/worker/*.py
-# TODO(owner): /vllm_ascend/worker/v1
-# /vllm_ascend/worker/v1
-# TODO(owner): /vllm_ascend/worker/v2
-# /vllm_ascend/worker/v2
 # TODO(owner): /vllm_ascend/xlite
 # /vllm_ascend/xlite
 
