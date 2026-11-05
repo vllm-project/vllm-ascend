@@ -43,6 +43,19 @@ class TestKVPoolWorkerConstruction(unittest.TestCase):
                 self.assertIs(connector.create_kv_pool_worker(config, layerwise, cache), worker.return_value)
                 worker.assert_called_once_with(config, layerwise, cache)
 
+    def test_factory_selects_ced_worker_and_keeps_default_compatible(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import ascend_store_connector as connector
+
+        config, cache = MagicMock(), MagicMock()
+        with patch.object(connector, "CEDSaveWorker", autospec=True) as worker:
+            self.assertIs(
+                connector.create_kv_pool_worker(config, False, cache, ced_layerwise=True), worker.return_value
+            )
+            worker.assert_called_once_with(config, False, cache)
+        with patch.object(connector, "KVPoolWorker", autospec=True) as worker:
+            self.assertIs(connector.create_kv_pool_worker(config, False, cache), worker.return_value)
+            worker.assert_called_once_with(config, False, cache)
+
     def test_layerwise_constructor_matches_base_signature(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker

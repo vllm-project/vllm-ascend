@@ -35,6 +35,10 @@ from vllm.v1.worker import mamba_utils
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_incremental_save import (
+    CEDSaveWorker,
+    resolve_ced_layerwise,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import (
     LayerwiseKVPoolScheduler,
@@ -71,8 +75,14 @@ def create_kv_pool_worker(
     vllm_config: VllmConfig,
     use_layerwise: bool,
     kv_cache_config: KVCacheConfig | None = None,
+    ced_layerwise: bool = False,
 ) -> KVPoolWorker:
-    worker_class = LayerwiseKVPoolWorker if use_layerwise else KVPoolWorker
+    if use_layerwise:
+        worker_class = LayerwiseKVPoolWorker
+    elif ced_layerwise:
+        worker_class = CEDSaveWorker
+    else:
+        worker_class = KVPoolWorker
     return worker_class(
         vllm_config,
         use_layerwise,
@@ -134,6 +144,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
+        # CED (DeepSeek-V4.1) per-source-slice session save + dependency-unit
+        # load on the bulk path; rejected with use_layerwise, ignored on
+        # non-V4.1 models.
+        self.ced_layerwise = resolve_ced_layerwise(vllm_config)
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
@@ -182,6 +196,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_config,
                 self.use_layerwise,
                 kv_cache_config,
+                ced_layerwise=self.ced_layerwise,
             )
             assert self.connector_worker is not None
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
@@ -449,6 +464,18 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
         assert self.connector_worker is not None
         cast(LayerwiseKVPoolWorker, self.connector_worker).save_kv_layer(self._get_connector_metadata())
+
+    def save_kv_group(self, trigger_layer: int) -> None:
+        """Dispatch a CED per-slice save trigger raised at a V4.1 layer boundary.
+
+        No-op unless ``CED_layerwise`` is enabled on a DeepSeek-V4.1 bulk
+        deployment, so the hook is free to call this unconditionally.
+        """
+        if not self.ced_layerwise or not self.can_put:
+            return
+        worker = self.connector_worker
+        if isinstance(worker, CEDSaveWorker):
+            worker.on_ced_save_trigger(trigger_layer)
 
     def wait_for_save(self):
         if not self.can_put:
