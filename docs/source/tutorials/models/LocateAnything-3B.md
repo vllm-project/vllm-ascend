@@ -19,9 +19,9 @@ That MTP decoder is model-specific and is **not** implemented in vLLM. This tuto
 +-----------------------------+          +------------------------------------+
 ```
 
-Because MTP is bypassed, decoding falls back to plain autoregressive generation. Accuracy is preserved (see [Chapter 7](#7-accuracy-evaluation)); single-request latency is higher than the native implementation, while throughput scales through continuous batching (see [Chapter 8](#8-performance-evaluation)).
+Because MTP is bypassed, decoding falls back to plain autoregressive generation. Accuracy is preserved (see [Chapter 7](#7-accuracy-evaluation)). In the default `PIECEWISE` graph mode single-request latency is higher than the native implementation; enabling `FULL_DECODE_ONLY` (see [Section 9.2](#92-tuning-guidelines)) brings it below the native path. Throughput scales through continuous batching (see [Chapter 8](#8-performance-evaluation)).
 
-The measurements in this tutorial were taken on Atlas 800 A2 (64GB x 8) with vLLM Ascend v0.18.0rc1. The commands below use the version placeholder configured by the documentation build system; re-verify the numbers after upgrading to a later release.
+The two processes can share one NPU (single-card deployment; about 22 GB of HBM in total) or use separate NPUs for lower latency and higher throughput. The measurements in this tutorial were taken on Atlas 800 A2 (64GB x 8) with vLLM Ascend v0.18.0rc1. The commands below use the version placeholder configured by the documentation build system; re-verify the numbers after upgrading to a later release.
 
 ## 2 Supported Features
 
@@ -33,10 +33,10 @@ The table below describes which parts of the model are served by vLLM Ascend in 
 | `--enable-prompt-embeds` | ✅ | Verified on Ascend; embeddings are accepted per request |
 | BF16 weights | ✅ | `torch_dtype=bfloat16` |
 | Automatic prefix cache | ✅ | About +10% throughput when requests repeat |
-| Chunked prefill | 🟡 | Not specifically validated for `prompt_embeds`; keep `--max-num-batched-tokens` below `--max-model-len` |
+| Chunked prefill | ✅ | Enabled by default (`max_num_batched_tokens=2048`) and validated with `prompt_embeds`; raising it to 4096 gave no measurable gain |
 | Vision tower inside vLLM | ❌ | Runs in the client process; not a vLLM multimodal model |
 | MTP / multi-token prediction | ❌ | Custom rule-based decoder, not implemented upstream |
-| Speculative decoding | ❌ | No draft model or MTP support for this architecture |
+| Speculative decoding | 🟡 | `ngram` works (about +30% at concurrency 8 on `PIECEWISE`) but must **not** be combined with `FULL_DECODE_ONLY`; no EAGLE/MTP draft model exists for this architecture |
 
 Refer to [Supported Features List](../../user_guide/support_matrix/supported_features.md) for the generic feature matrix and to [Feature Guide](../../user_guide/feature_guide/index.md) for configuration details.
 
@@ -46,14 +46,14 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_fea
 
 | Weight Version | Hardware Requirements | Download Links |
 | -------------- | --------------------- | -------------- |
-| `LocateAnything-3B` (BF16) | 2 NPUs: 1 for the vision client, 1 for the LM server | [AtomGit](https://atomgit.com/Ascend-SACT/LocateAnything-3B) |
+| `LocateAnything-3B` (BF16) | 1 NPU (client + LM server co-located) or 2 NPUs (recommended for latency/throughput) | [AtomGit](https://atomgit.com/Ascend-SACT/LocateAnything-3B) |
 
 The original weights ship as a single checkpoint that contains both the vision tower and the language model. They must be split before serving; see [Section 5.1](#51-split-the-checkpoint).
 
 ### 3.2 Environment
 
 - The client process needs `transformers`, `torch_npu`, `pillow`, `safetensors` and `openai` (all present in the vLLM Ascend image).
-- The client and the server can run in the same container on different NPUs, or in two containers on different nodes. In both cases the client talks to the server over the OpenAI-compatible HTTP API.
+- The client and the server can run in the same container on the same NPU (single-card), on different NPUs, or in two containers on different nodes. In all cases the client talks to the server over the OpenAI-compatible HTTP API.
 
 ## 4 Installation
 
@@ -85,8 +85,12 @@ The original weights ship as a single checkpoint that contains both the vision t
     Install the client-side dependency if the image does not ship it:
 
     ```bash
-    pip install -q peft==0.19.1
+    pip install -q peft
     ```
+
+    For a single-NPU deployment, map only `--device /dev/davinci0` and run both the
+    server and the client with `ASCEND_RT_VISIBLE_DEVICES=0`; see
+    [Section 8.2](#82-single-npu-and-full-graph-decode).
 
 ## 5 Decoupled Service Deployment
 
@@ -129,9 +133,10 @@ After splitting, `/models/split/locate_qwen2_model` contains a plain `Qwen2ForCa
 
 ### 5.2 Start the language model server
 
-The LM server only hosts the text model. `--enable-prompt-embeds` is required; `--max-model-len` only needs to cover visual tokens (about 1.5k at 512 px) plus the output (about 16 tokens).
+The LM server only hosts the text model. `--enable-prompt-embeds` is required; `--max-model-len` only needs to cover visual tokens (about 1.5k at 512 px) plus the output (about 16 tokens). Add `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` to capture the whole decode step; it cuts TPOT from about 32 ms to about 10 ms (see [Section 9.2](#92-tuning-guidelines)).
 
 ```bash
+# Use ASCEND_RT_VISIBLE_DEVICES=0 instead when the client shares this NPU.
 export ASCEND_RT_VISIBLE_DEVICES=1
 
 vllm serve /models/split/locate_qwen2_model \
@@ -140,9 +145,12 @@ vllm serve /models/split/locate_qwen2_model \
   --max-model-len 8192 \
   --max-num-seqs 32 \
   --gpu-memory-utilization 0.5 \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --host 0.0.0.0 \
   --port 33333
 ```
+
+`--gpu-memory-utilization 0.5` assumes the server has a dedicated NPU. If the vision client shares the same NPU, lower it to `0.30` so both processes fit (about 22 GB in total).
 
 Startup takes about 90–100 s on A2 because ACLGraph compilation is included. When it is ready, `curl -s http://localhost:33333/health` returns `200`, and the engine logs report the KV cache size, for example `24.5 GiB / 713,600 tokens` with `--gpu-memory-utilization 0.5`.
 
@@ -262,6 +270,8 @@ The pure autoregressive path is at least as accurate as the native MTP path (94.
 
 ## 8 Performance Evaluation
 
+### 8.1 Default configuration (PIECEWISE, two NPUs)
+
 Measured on one Atlas 800 A2 node (910B3, 64GB), `max-size 512`, 10 demo images, 100 requests, 0 errors.
 
 Single request, with the two stages broken down:
@@ -290,14 +300,37 @@ Scaling the vision stage horizontally (4 client processes, one NPU each, sharing
 | 1 | 2 | 8.08–9.64 img/s |
 | 4 | 5 | **22.9 img/s** |
 
+### 8.2 Single NPU and full-graph decode
+
+Both processes can share one NPU (about 22 GB of HBM in total: about 19 GB for the LM server at
+`--gpu-memory-utilization 0.30` and about 3 GB for the client). Starting the server with
+`--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` captures the whole decode step in one
+ACL graph and drops TPOT from about 32 ms to about 10 ms, so single-request latency becomes lower than
+the native implementation instead of higher.
+
+The numbers below use a benchmark client that additionally applies the `sdpa_nomask` vision fast path
+and moves preprocessing outside the vision lock; the server-side `FULL_DECODE_ONLY` alone accounts for
+the TPOT change. Measured with 100 requests per concurrency, 0 errors:
+
+| Concurrency | Throughput | E2E p50 | IoU mean / min |
+| ----------- | ---------- | ------- | -------------- |
+| 1 | **3.15 img/s** | **311 ms** | 96.24% / 92.74% |
+| 8 | **10.45 img/s** | 776 ms | 96.26% / 92.74% |
+| 32 | **12.87 img/s** | 2296 ms | 96.27% / 92.74% |
+
+For reference, the same client with the default `PIECEWISE` server reaches 1.50 / 7.84 / 12.26 img/s
+at concurrency 1 / 8 / 32, so `FULL_DECODE_ONLY` adds about +110% / +33% / +5% on top of the
+preprocessing change. Do **not** combine `FULL_DECODE_ONLY` with `ngram` speculative decoding:
+the combination regresses to 1.01 / 6.69 / 11.97 img/s.
+
 ## 9 Performance Tuning
 
 ### 9.1 Recommended Configurations
 
 | Scenario | NPUs | Key settings | Main consideration |
 | -------- | ---- | ------------ | ------------------ |
-| Low concurrency, lowest latency | 2 | `--max-num-seqs 8`, `max-size 512` | Single-stream latency dominates; MTP is unavailable, so expect about 690 ms per image |
-| Online serving, medium concurrency | 2–3 | `--max-num-seqs 32`, `max-size 512` | 8–9.6 img/s per client process |
+| Low concurrency, lowest latency | 1–2 | `FULL_DECODE_ONLY`, `--max-num-seqs 8`, `max-size 512` | Single-stream about 311 ms with the client fast path; decode is no longer the bottleneck |
+| Online serving, medium concurrency | 1–2 | `FULL_DECODE_ONLY`, `--max-num-seqs 32`, `max-size 512` | 10–13 img/s per client process on a single NPU |
 | Offline high throughput | 5+ | `--max-num-seqs 32`, 4 client processes | Near-linear scaling with client processes |
 
 ### 9.2 Tuning Guidelines
@@ -306,15 +339,15 @@ Tune in this order; each step was measured on the configuration above.
 
 1. **Input resolution (`max-size` in the client).** This is the dominant knob because it changes the number of vision tokens. Going from 768 to 512 gives +9% throughput at concurrency 8 and +38% at concurrency 32, with slightly better IoU. Do not go below 512 on this model: at 384 the IoU collapses to 87.2%.
 2. **Client concurrency.** End-to-end throughput saturates around concurrency 8–32 per client process. Beyond that, queueing grows faster than throughput.
-3. **Number of client processes.** The vision stage is serialized per process, and the image processor holds the GIL, so a single process caps at about 7–9 img/s. Adding one client process per NPU scales throughput nearly linearly.
-4. **Server knobs.** `--max-num-seqs` beyond 32 does not help (21.06 req/s at 32 vs 22.62 at 64). Keep the default prefix cache: disabling it costs about 10%.
-5. **Graph mode.** ACLGraph is enabled by default (`enable_npugraph_ex`); no extra flags were needed for this workload.
+3. **Number of client processes.** The vision stage is serialized per process, and the image processor holds the GIL. With the default graph a single process caps at about 7–9 img/s; with `FULL_DECODE_ONLY` and preprocessing moved outside the vision lock it reaches about 10–13 img/s. Adding one client process per NPU scales throughput nearly linearly.
+4. **Server knobs.** `--max-num-seqs` beyond 32 does not help (21.06 req/s at 32 vs 22.62 at 64). Keep the default prefix cache: disabling it costs about 10%. `--max-num-batched-tokens` 4096 showed no gain over the default 2048.
+5. **Graph mode.** The default is `PIECEWISE`. Enable `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: it captures the whole decode step, cuts TPOT from about 32 ms to about 10 ms, and lifts single-request throughput from about 1.5 to 3.15 img/s. It is marked experimental upstream, so fall back to `PIECEWISE` if you hit OOM/hangs. Do **not** combine it with `ngram`.
 
 ### 9.3 Model-Specific Optimizations
 
 - **The vision tower must be serialized inside a client process.** Running MoonViT concurrently on one NPU produces silently wrong boxes (IoU drops from 96% to 82.7%, with some samples at 0.0) rather than raising an error. Guard `extract_feature` with a lock, or use one process per NPU.
 - **Do not batch images through the vision tower on Ascend.** Batching 8 images into one `extract_feature` call is about 5x slower per image than running them one by one (516 ms/img vs 104 ms/img), and processor-level batching with variable shapes returns the wrong number of feature tokens. Feed one image per call.
-- **The image processor has no fast implementation.** `AutoProcessor(..., use_fast=True)` falls back to the slow path, so preprocessing costs about 35 ms per image at concurrency 1 and about 140 ms under GIL contention at concurrency 32. That is the practical ceiling of a single client process.
+- **The image processor has no fast implementation.** `AutoProcessor(..., use_fast=True)` falls back to the slow path, so preprocessing costs about 35 ms per image at concurrency 1 and about 140 ms under GIL contention at concurrency 32. That is the practical ceiling of a single client process. Moving the processor build outside the vision lock (so CPU preprocessing overlaps the serialized NPU encode) raises concurrency-32 throughput by about 11% (11.05 → 12.26 img/s) with no accuracy change.
 - **Pre-compute embeddings when the same image is queried repeatedly** (for example many prompts on one image). The vision stage then disappears from the critical path, and the server-only ceiling of 21–22 req/s applies.
 
 ## 10 FAQ
@@ -323,13 +356,13 @@ Tune in this order; each step was measured on the configuration above.
 
 Yes. It is validated with this model on A2/A3: the engine accepts per-request `prompt_embeds` and the scheduler handles them like ordinary prefill tokens. Comments in older example scripts that claim the feature needs confirmation are outdated.
 
-### Q2: Why is one request slower than the native implementation?
+### Q2: How does single-request latency compare with the native implementation?
 
-Because MTP is not available. The native decoder needs about 3.9 forward steps for 15.6 tokens, while plain autoregressive decoding needs about 14.8 steps. Each step is faster in vLLM (32.2 ms vs 79.7 ms), but not enough to compensate (686 ms vs 538 ms end to end).
+In the default `PIECEWISE` graph mode the native MTP decoder is faster (about 538 ms vs 686 ms), because MTP needs about 3.9 forward steps for 15.6 tokens while plain autoregressive decoding needs about 14.8. Each step is faster in vLLM (32.2 ms vs 79.7 ms), but not enough to compensate. Enabling `FULL_DECODE_ONLY` cuts the vLLM step to about 10 ms and brings end-to-end latency to about 311 ms, below the native path. See [Section 8.2](#82-single-npu-and-full-graph-decode).
 
-### Q3: Throughput stays at about 8–9 img/s no matter how high I set the concurrency. Why?
+### Q3: Throughput saturates around 8–13 img/s no matter how high I set the concurrency. Why?
 
-The limit is the client, not the server. Measure the server alone by sending cached `prompt_embeds`; it reaches 21–22 req/s. To exceed that, add client processes (one NPU each).
+The limit is the client, not the server. Measure the server alone by sending cached `prompt_embeds`; it reaches 21–22 req/s. To exceed the client ceiling, add client processes (one NPU each). `FULL_DECODE_ONLY` plus moving preprocessing outside the vision lock raises the single-process ceiling to about 10–13 img/s.
 
 ### Q4: Can I batch several images in one `extract_feature` call?
 
@@ -341,4 +374,4 @@ Greedy decoding is not bit-wise reproducible under batching; near-tie tokens fli
 
 ### Q6: The server reports OOM during startup. What should I check?
 
-This LM is small (about 3 GB in BF16), so OOM usually comes from `--gpu-memory-utilization` being shared with the client process on the same NPU. Give the vision client and the server separate NPUs, or lower `--gpu-memory-utilization`.
+This LM is 3.09B parameters, about **6.2 GB** in BF16 (not 3 GB), so OOM usually comes from `--gpu-memory-utilization` being shared with the client process on the same NPU. For a single-card deployment use `--gpu-memory-utilization 0.30` (about 19 GB for the server plus about 3 GB for the client); otherwise give the vision client and the server separate NPUs.
