@@ -1358,7 +1358,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_swiglu_group_quant_outp
     at::Tensor scale = at::empty_symint(scale_size, x.options().dtype(scale_type));
     // Match the Native output contract, including the unrequested MX origin.
     at::Tensor y_origin = quant_mode == MX_QUANT && !output_origin
-        ? at::empty_symint(c10::SymDimVector{0}, x.options())
+        ? at::empty_symint(c10::SymDimVector{c10::SymInt(0)}, x.options())
         : at::empty_symint(y_size, x.options());
 
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, scale, y_origin);
