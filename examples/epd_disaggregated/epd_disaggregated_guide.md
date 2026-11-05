@@ -2,7 +2,21 @@
 
 ## run
 
-The EPD disaggregated technology accelerates model inference by decoupling the visual encoding computation and LLM computation stages. Currently, the EPD separation feature can achieve different data transmissions between E and P/PD nodes by configuring different connector backends. Vllm-ascend currently supports the ECExampleConnector backend implemented on vllm, and will support Mooncake as well as shared memory(SHM) backend transmission methods in the future.
+The EPD disaggregated technology accelerates model inference by decoupling the visual encoding computation and LLM computation stages. The EPD separation feature transfers encoder cache (EC) entries between E and P/PD nodes through the connector configured in `--ec-transfer-config`; vllm-ascend supports `ECExampleConnector`, `ECMooncakeConnector`, `ECCPUConnector`, and `ECMemcacheConnector`. For the connector matrix and the deployment overview, see the [Disaggregated Encoder user guide](../../docs/source/user_guide/feature_guide/epd_disaggregation.md).
+
+Before running the commands below, export the paths used by every instance and run the commands from this directory:
+
+- `MODEL_PATH`: local Qwen3-VL-8B-Instruct directory, identical on every E/P/D node.
+- `EC_SHARED_STORAGE_PATH`: directory that the E node and the P/PD nodes can read and write; with `ECExampleConnector` it must be the same absolute path on all nodes.
+
+```bash
+export MODEL_PATH=/path/to/Qwen3-VL-8B-Instruct
+export EC_SHARED_STORAGE_PATH=/path/visible/to/all/nodes/ec_cache
+```
+
+## Model Runner support
+
+EPD runs on Model Runner V2 by default; set `VLLM_USE_V2_MODEL_RUNNER=0` to force Model Runner V1. The VL encoder graph (`--compilation-config '{"cudagraph_mm_encoder": true}'`) is not supported on Model Runner V2 and falls back to Model Runner V1 automatically.
 
 ### ECexample-connector deployment guide
 
@@ -24,12 +38,12 @@ unset https_proxy
 unset http_proxy
 
 EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/data/ec_cache}"
-rm /data/ec_cache -rf
-mkdir -p /data/ec_cache
+rm -rf "${EC_SHARED_STORAGE_PATH}"
+mkdir -p "${EC_SHARED_STORAGE_PATH}"
 
 export ASCEND_RT_VISIBLE_DEVICES=0
 
-vllm serve "/your/local/model/path/Qwen3-VL-8B-Instruct" \
+vllm serve "${MODEL_PATH}" \
     --gpu-memory-utilization 0.01 \
     --port "23001" \
     --enforce-eager \
@@ -68,7 +82,7 @@ EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/data/ec_cache}"
 
 export ASCEND_RT_VISIBLE_DEVICES=1
 
-vllm serve "/your/local/model/path/Qwen3-VL-8B-Instruct" \
+vllm serve "${MODEL_PATH}" \
     --gpu-memory-utilization 0.7 \
     --port "33005" \
     --enforce-eager \
@@ -146,12 +160,12 @@ unset https_proxy
 unset http_proxy
 
 EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/data/ec_cache}"
-rm /data/ec_cache -rf
-mkdir -p /data/ec_cache
+rm -rf "${EC_SHARED_STORAGE_PATH}"
+mkdir -p "${EC_SHARED_STORAGE_PATH}"
 
 export ASCEND_RT_VISIBLE_DEVICES=0
 
-vllm serve "/home/p00929506/Qwen3-VL-8B-Instruct" \
+vllm serve "${MODEL_PATH}" \
     --gpu-memory-utilization 0.01 \
     --port "23001" \
     --enforce-eager \
@@ -187,7 +201,7 @@ EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/data/ec_cache}"
 
 export ASCEND_RT_VISIBLE_DEVICES=1
 
-vllm serve "/home/p00929506/Qwen3-VL-8B-Instruct" \
+vllm serve "${MODEL_PATH}" \
     --gpu-memory-utilization 0.7 \
     --port "33003" \
     --enforce-eager \
@@ -235,7 +249,7 @@ unset http_proxy
 
 export ASCEND_RT_VISIBLE_DEVICES=4
 
-vllm serve "/your/local/model/path/Qwen3-VL-8B-Instruct" \
+vllm serve "${MODEL_PATH}" \
     --gpu-memory-utilization 0.7 \
     --port "33006" \
     --enforce-eager \
@@ -302,3 +316,40 @@ curl http://localhost:8001/v1/chat/completions \
     ]
     }'
 ```
+
+## Health checks and graceful shutdown
+
+Every instance exposes `GET /health`, which returns HTTP 200 once the engine
+is ready. Wait for the instance health endpoint before starting the next stage;
+the startup order in this guide is E, then P and D, then the proxy.
+
+```bash
+curl -s http://127.0.0.1:23001/health   # encoder (E)
+curl -s http://127.0.0.1:33003/health   # prefill (P, 1E1P1D)
+curl -s http://127.0.0.1:33006/health   # decode (D, 1E1P1D)
+curl -s http://127.0.0.1:33005/health   # prefill+decode (PD, 1E1PD)
+curl -s http://127.0.0.1:8001/health    # proxy
+```
+
+The proxy health endpoint aggregates the configured E/P/D clusters: it returns
+200 when all of them are healthy and 503 otherwise.
+
+To stop the deployment, stop the proxy first so that no new request is
+admitted, then stop the D and P instances, and stop the E instance last. Send
+SIGTERM to each process (Ctrl+C in its terminal, or `kill <pid>`) and wait for
+it to exit. The `ECExampleConnector` cache is not removed automatically; remove
+it when it should not be reused:
+
+```bash
+rm -rf "${EC_SHARED_STORAGE_PATH}"
+```
+
+## Relationship to the E+PD quick start
+
+This guide is the complete 1E1P1D example: it uses three vLLM instances with
+`ECExampleConnector` encoder-cache transfer, `MooncakeLayerwiseConnector` KV
+transfer between P and D, and the layerwise proxy. The two-instance E+PD quick
+start uses `examples/disaggregated_encoder/disagg_1e1pd_example.sh` with
+`examples/disaggregated_encoder/disagg_epd_proxy.py` (E+PD topology,
+ExampleConnector only). The two examples are complementary and do not
+duplicate each other.

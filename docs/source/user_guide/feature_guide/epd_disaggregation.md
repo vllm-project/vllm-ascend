@@ -11,6 +11,49 @@ transport setups. Choose the setup for your hardware, start a single-host
 **1E + 1PD** service, then add shared caching and a second Encoder. The serving
 commands use the `ascend` Mooncake protocol in both setups.
 
+
+## Roles and topologies
+
+Disaggregated Encoder (EPD) splits the multimodal path of a vision-language
+model into up to three stages, each running in its own vLLM instance group:
+
+- **E (encoder)** runs only the multimodal encoder (for example the ViT of
+  Qwen3-VL) and writes the encoder cache (EC) to a shared backend. An E
+  instance is encoder-only: it is marked `mm_encoder_only` by the
+  `ec_role: ec_producer` configuration, runs the encoder and the EC save path,
+  and does not allocate a KV cache.
+- **P (prefill)** is optional. It consumes the encoder cache, computes the
+  prompt KV cache, and transfers that KV cache to D through a prefill-decode
+  connection such as `MooncakeLayerwiseConnector`.
+- **PD / D (decode)** generates tokens. In the E+PD topology the PD instance
+  also runs prefill and is the encoder-cache consumer; in E+P+D the P instance
+  is the encoder-cache consumer and D only consumes the KV cache.
+
+A load-balancing proxy in front of the instances routes every request to one
+encoder instance, optionally to one prefill instance, and finally to one decode
+instance. A text-only request skips the encoder stage entirely, so decoding does
+not wait for vision encoding.
+
+| Topology | Instances | EC consumer | Notes |
+| --- | --- | --- | --- |
+| E + PD | 2 | PD | Two cards are enough; the Ascend example is `examples/disaggregated_encoder/disagg_1e1pd_example.sh`. |
+| E + P + D | 3+ | P | P and D are also connected by a prefill-decode KV connector; see [Separate prefill and decode](#separate-prefill-and-decode). |
+| Encoder-only pooling models | 1 | none | Not EPD: `--runner pooling` models have no stage split; see [Model Runner support](#model-runner-support). |
+
+Running the stages in separate processes gives three practical benefits:
+
+- **Independent scaling**: encoders are small compared with the language model,
+  so E instances can be added or removed without touching the P/D fleet.
+- **Lower time-to-first-token (TTFT)**: the encoder no longer competes with
+  prefill and decode for the same device, and the result can be produced ahead
+  of the prompt.
+- **Cross-process encoder-cache reuse**: a request whose image was already
+  encoded on any E instance can load the embedding from the shared cache
+  instead of running the vision encoder again.
+
+For the architecture, data/control plane, and interface specification, see the
+[design document](../../developer_guide/Design_Documents/epd_disaggregation.md).
+
 ## Deployment overview
 
 ```text
@@ -108,6 +151,68 @@ The connector leaves `HCCL_INTRA_PCIE_ENABLE`, `HCCL_INTRA_ROCE_ENABLE`,
 Configure them before starting each process; restarting a service is required
 when changing transport. Do not change selectors between EC and Store engine
 creation inside a running worker.
+
+## Model Runner support
+
+EPD runs on **Model Runner V2 (MRV2) by default**. MRV2 gained EPD and
+encoder-only support in the encoder-cache and model-runner work that removed
+`ec_transfer_config` and `mm_encoder_only` from the V2 blacklist, so no extra
+flag is needed on the Ascend side. To force the legacy Model Runner V1, export:
+
+```bash
+export VLLM_USE_V2_MODEL_RUNNER=0
+```
+
+The selection logic lives in `vllm_ascend/mrv2_utils.py`:
+
+- **MRV2 (default)**: E nodes use the upstream `MMEncoderModelRunner` for the
+  encoder-only instance; P/D nodes use the Ascend V2 model runner and the
+  upstream encoder-cache contract.
+- **MRV1**: EPD is served by the V1 Ascend model runner, which contains the
+  complete encoder-cache implementation.
+
+Some features still force V1 even when MRV2 is the default. In particular,
+**the VL encoder graph is not supported on MRV2**: setting
+`--compilation-config '{"cudagraph_mm_encoder": true}'` makes the runner fall
+back to MRV1 with a warning. Other V2 blacklist entries (draft-window and
+several speculative-decoding modes) behave the same way. Do not combine the VL
+encoder graph with EPD if MRV2 behavior is required.
+
+### Encoder-only pooling models are a different entry point
+
+Models such as BERT, BGE, and SigLIP2 are served as **encoder-only pooling
+models** with `--runner pooling` and the Ascend encoder-only model state. They
+are not EPD deployments: there is no separate E/P/D split, no
+`--ec-transfer-config`, and no encoder-cache transfer between instances. In
+particular, SigLIP2 is a pooling embedding model and does not support PD
+separation; see [SigLIP2](../../tutorials/models/SigLIP2.md#5-online-service-deployment).
+
+## Encoder-cache connectors
+
+Producer and consumer instances must use the same connector and the same
+connector configuration. The EC data plane is selected by the connector in
+`--ec-transfer-config`; Ascend-specific connectors are registered in
+`vllm_ascend/distributed/ec_transfer/__init__.py`.
+
+| Connector | Data plane | Extra configuration keys | When to use |
+| --- | --- | --- | --- |
+| `ECExampleConnector` | Shared filesystem, one safetensors file per `mm_hash` | `shared_storage_path` | E and P/D instances can see the same directory; simplest reference setup |
+| `ECMooncakeConnector` | Mooncake with Ascend direct transfer and a bounce arena | `mooncake_protocol` (must be `ascend` when set; defaults to it), `ascend_mooncake_bounce_arena_size` | A Mooncake cluster with shared storage is deployed; multi-node EC reuse |
+| `ECCPUConnector` | Pinned CPU mmap under `/dev/shm` | `ec_cpu_bytes` | Single host, repeated multimodal inputs; no cross-node transfer |
+| `ECMemcacheConnector` | MemCache cluster through `memcache_hybrid` | `ec_connector_module_path`, `recv_buffer_tokens` | A MemCache deployment is available and EC entries must survive across hosts |
+
+Notes:
+
+- `ECExampleConnector` and `ECMooncakeConnector` are the cross-process
+  connectors for EPD. The E instance acts as producer and P/D as consumer.
+- `ECCPUConnector` is a single-host cache, supports `ec_both` only, and does
+  not perform cross-node transfer; see
+  [Encoder Cache CPU Offload](encoder_cache_cpu_offload.md).
+- `ECMemcacheConnector` is configured with an explicit
+  `ec_connector_module_path` (the upstream factory cannot find it otherwise)
+  and requires the `memcache_hybrid` package plus `MMC_LOCAL_CONFIG_PATH`.
+- The Mooncake connector requires a working Mooncake deployment; see
+  [Install Mooncake](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#install-mooncake).
 
 ## 1. Prepare the serving environment
 
@@ -738,6 +843,106 @@ For Ascend P-to-D deployment, use the
 and [Ascend EPD example](https://github.com/vllm-project/vllm-ascend/tree/main/examples/epd_disaggregated).
 Those examples are separate deployment paths; do not assume their proxy flags
 implement this guide's Mooncake EC routing contract.
+
+## Ascend reference proxy: health, shutdown, and retries
+
+The walkthrough above uses the upstream proxy. The Ascend repository also ships
+a standalone reference proxy, `examples/disaggregated_encoder/disagg_epd_proxy.py`,
+which speaks the same OpenAI-compatible front end with its own E/P/D URL groups.
+The notes below describe that script; `--ec-consumer-zmq-addrs` is not one of
+its options.
+
+### Health checks and startup order
+
+Every vLLM instance exposes `GET /health`, which returns HTTP 200 once the
+engine is ready. The reference proxy aggregates the three groups:
+
+```bash
+curl -s http://localhost:10001/health
+```
+
+The response is a JSON object with `proxy`, `encode_cluster`,
+`prefill_cluster`, and `decode_cluster` fields. Each cluster field is
+`healthy`, `unhealthy`, or `empty` (no instance configured); the endpoint
+returns 200 when no cluster is unhealthy and 503 otherwise.
+
+Start the services in this order and wait for each instance's `/health` before
+starting the next stage:
+
+1. E instance(s).
+2. P and D instance(s) (in E+P+D, P before D).
+3. The proxy.
+4. Wait for `GET /health` on the proxy before sending traffic.
+
+The E+PD example script implements this wait with `curl -sf <url>/health` and a
+timeout. On the NPU side, `npu-smi info -i <rank> -t health` can be used to
+check device health while the service is starting.
+
+### Graceful shutdown and cleanup
+
+The current proxy has no request-drain window. Stop in this order:
+
+1. Stop the proxy so that no new request is admitted and close its client
+   sessions (the reference proxy does this in its shutdown hook).
+2. Stop the P and D instances with SIGTERM, then the E instance(s). On SIGTERM
+   the worker calls `ensure_kv_transfer_shutdown()` and then
+   `ensure_ec_transfer_shutdown()`, which calls the connector `shutdown()`
+   (see `vllm_ascend/worker/worker.py`).
+3. Clean the encoder-cache backend:
+   - `ECExampleConnector`: files under `shared_storage_path` are not removed
+     automatically; remove them explicitly when the cache should not be reused.
+   - `ECCPUConnector`: the mmap under `/dev/shm` is unregistered and unlinked
+     during shutdown.
+   - `ECMooncakeConnector`: the Mooncake deployment owns the storage
+     lifecycle; follow the Mooncake guide for cleanup.
+
+### Failure and retry semantics
+
+- **E stage failure**: the proxy retries the encoder request at most three
+  times; if all attempts fail, the client receives HTTP 500. A P failure
+  likewise returns 500 and D is not started, so no partial output is produced.
+- **D stage**: non-streaming requests are retried at most three times.
+  Streaming requests are retried only before the first chunk is forwarded;
+  once streaming has started, an error is surfaced to the client instead of
+  being retried.
+- **Retryable errors**: 5xx responses, connection errors, and timeouts are
+  retried. Errors that the proxy classifies as client errors (HTTP 4xx) are
+  not retried.
+- **Encoder-cache miss on the consumer**: behavior depends on the connector.
+  `ECMemcacheConnector` falls back to local encoding and logs an
+  `EC LOAD miss` warning. The shared-filesystem (`ECExampleConnector`) load
+  path requires the EC entry to exist; if it is missing, the request fails with
+  an error, so make sure the E instance and the P/D instances use the same
+  `shared_storage_path`.
+- **Timeouts**: the reference proxy currently applies one overall client
+  timeout (`total=100_000`) to all stages. Per-stage timeouts are not
+  configurable yet.
+
+## Limitations
+
+- **VL encoder graph**: `--compilation-config '{"cudagraph_mm_encoder": true}'`
+  is not supported on MRV2 and falls back to MRV1. EPD with the encoder graph
+  should be treated as a V1 deployment.
+- **Encoder-only pooling models** (`--runner pooling`) are not EPD; they have
+  no PD/EPD split. SigLIP2 does not support PD separation.
+- **EC + Pipeline Parallel** is not verified. Treat the combination as unknown
+  until coverage exists.
+- **ECCPUConnector** works on a single host only (pinned `/dev/shm` mapping).
+- **ECMooncakeConnector** requires a Mooncake cluster and shared storage, which
+  must be provisioned before starting EPD.
+- **ECExampleConnector** requires the same `shared_storage_path` on the
+  encoder and consumer instances; a mismatch shows up as missing cache entries.
+- **Encoder-cache keys are content hashes**: the key of an image is
+  `mm_hash` (the multimodal feature identifier). The same image with different
+  preprocessing or resolution can produce a different key, so cross-preprocessing
+  reuse is not guaranteed. Duplicate images inside one request are deduplicated.
+- **Processor cache**: setting `--mm-processor-cache-gb 0` disables the
+  multimodal processor cache, so processed multimodal inputs are not reused.
+  This cache is independent of the encoder-cache transfer described here.
+- **310P**: multi-process EPD is not committed on 310P.
+- **E+P+D** is documented as a supported deployment design, but end-to-end
+  validation currently covers E+PD only; MRV1 EPD and E+P+D end-to-end tests are
+  still being added.
 
 ## Related guides
 
