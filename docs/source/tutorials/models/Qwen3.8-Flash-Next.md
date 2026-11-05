@@ -900,7 +900,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
 
     This alternative single-host deployment uses TP2 × PP2 × DP1 for prefill on devices 0–3 and TP2 × DP2 for decode on devices 4–7. Both roles use a maximum context length of 143360 tokens, 64 active sequences, and a batch token budget of 8192.
 
-    Use the same dedicated W4A8-MXFP checkpoint shown below for both roles. The path refers to the supplied QSA-RouterOnly-O-BF16 checkpoint; replace it with the location of that checkpoint on the host. Initialize the environment as described in Section 4 and run each role in a separate terminal.
+    Use the same dedicated QSA-RouterOnly-O-BF16 W4A8-MXFP checkpoint for both roles. For Docker deployment, add `-v /mnt/share/weight:/mnt/share/weight:ro` to the Ascend 950 DT Docker command in [Section 4.1](#41-docker-image-installation) before starting the container. If the checkpoint is stored elsewhere, update the mount and both model paths so that they point to the checkpoint inside the container. Initialize the environment as described in [Section 4](#4-installation) and run each role in a separate terminal.
 
     **Prefill:**
 
@@ -1233,7 +1233,7 @@ For supported Qwen3.8-Flash-Next attention implementations, Model Runner V2 redu
 
 After KV cache initialization, the model checks whether the target and MTP draft attention implementations support this optimization. If supported, it skips copying corrected token counts from the device to the host and the CPU wait for that copy. Exact positions, accepted token counts, KV cache slots, and recurrent state continue to use device-side values. KV-transfer connector behavior is unchanged.
 
-The same capability covers text and ordinary non-realtime multimodal requests. Completed prompts use the existing encoder gather fast path; there are no extra media certificates or PD observers.
+This optimization also applies to text and ordinary non-realtime multimodal requests.
 
 Unknown target/draft consumers, context parallelism, sparse KV offload and realtime media retain exact CPU synchronization. The runner's existing PP exact-count protection still applies. There is no extra TP8, DP1, PP1, SP-off, prefix-cache-off, PLE weight-offload, FULL-graph or fixed-K requirement. Underlying model/runtime restrictions still apply.
 
