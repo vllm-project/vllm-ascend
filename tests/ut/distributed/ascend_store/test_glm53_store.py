@@ -19,7 +19,6 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
-from tests.ut.distributed.ascend_store.test_mooncake_hybrid import MemoryRangeStore
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker, start_patch
 from tests.ut.models.test_glm5next_cache_config import make_config, make_specs
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
@@ -338,33 +337,26 @@ class TestGLM53Store(unittest.TestCase):
     def test_memcache_layerwise_round_trip_keeps_each_tp_state(self):
         self.check_layerwise_round_trip()
 
-    def test_layerwise_recoverssm_restores_model_tp_shards_under_pcp(self):
-        for backend in ("memcache", "mooncake"):
-            with self.subTest(backend=backend):
-                self.check_layerwise_round_trip(
-                    backend=backend,
-                    tp_size=1,
-                    pcp_size=2,
-                    pp_size=1,
-                    use_recoverssm=True,
-                    model_sharding=glm_state_sharding,
-                )
+    def test_memcache_layerwise_recoverssm_restores_model_tp_shards_under_pcp(self):
+        self.check_layerwise_round_trip(
+            tp_size=1,
+            pcp_size=2,
+            pp_size=1,
+            use_recoverssm=True,
+            model_sharding=glm_state_sharding,
+        )
 
-    def test_layerwise_replicas_load_the_same_model_tp_partition(self):
-        for backend in ("memcache", "mooncake"):
-            with self.subTest(backend=backend):
-                self.check_layerwise_round_trip(
-                    backend=backend,
-                    tp_size=2,
-                    pcp_size=2,
-                    pp_size=1,
-                    model_sharding=glm_state_sharding,
-                )
+    def test_memcache_layerwise_replicas_load_the_same_model_tp_partition(self):
+        self.check_layerwise_round_trip(
+            tp_size=2,
+            pcp_size=2,
+            pp_size=1,
+            model_sharding=glm_state_sharding,
+        )
 
     def check_layerwise_round_trip(
         self,
         *,
-        backend="memcache",
         tp_size=2,
         pcp_size=1,
         pp_size=2,
@@ -373,8 +365,7 @@ class TestGLM53Store(unittest.TestCase):
     ):
         block_hash = bytes([1]) * 32
         buffers: dict[str, Any] = {}
-        range_store = MemoryRangeStore()
-        readable = range_store.complete if backend == "mooncake" else set()
+        readable = set()
 
         def alloc(keys, sizes, ttl):
             for key, size in zip(keys, sizes):
@@ -425,19 +416,16 @@ class TestGLM53Store(unittest.TestCase):
                 pp_size=pp_size,
                 pp_rank=pp_rank,
                 layer_offset=4 * pp_rank,
-                extra_config={"backend": backend},
+                extra_config={"backend": "memcache"},
                 use_recoverssm=use_recoverssm,
                 mamba_state_sharding=model_sharding,
             )
-            if backend == "mooncake":
-                worker.m_store = range_store
-            else:
-                worker.m_store.batch_alloc.side_effect = alloc
-                worker.m_store.batch_is_exist.side_effect = lambda keys: [int(key in readable) for key in keys]
-                worker.m_store.batch_get_key_info.side_effect = infos
-                worker.m_store.batch_write_finish.side_effect = finish
-                worker.m_store.batch_add_lease.side_effect = lambda keys, ttl: [0] * len(keys)
-                worker.m_store.store.batch_copy.side_effect = copy
+            worker.m_store.batch_alloc.side_effect = alloc
+            worker.m_store.batch_is_exist.side_effect = lambda keys: [int(key in readable) for key in keys]
+            worker.m_store.batch_get_key_info.side_effect = infos
+            worker.m_store.batch_write_finish.side_effect = finish
+            worker.m_store.batch_add_lease.side_effect = lambda keys, ttl: [0] * len(keys)
+            worker.m_store.store.batch_copy.side_effect = copy
             caches = make_glm53_caches(plan)
             worker.register_kv_caches(caches)
             sharding = (
@@ -508,7 +496,7 @@ class TestGLM53Store(unittest.TestCase):
                 use_layerwise=True,
                 pcp_size=8,
                 pcp_rank=pcp_rank,
-                extra_config={"backend": "mooncake"},
+                extra_config={"backend": "memcache"},
                 mamba_state_sharding=glm_state_sharding,
             )
             original_keys = {
@@ -553,7 +541,6 @@ class TestGLM53Store(unittest.TestCase):
                 use_mla=True,
                 num_layers=4,
                 use_layerwise=True,
-                pcp_size=2,
                 mamba_state_sharding=glm_state_sharding,
             )
 

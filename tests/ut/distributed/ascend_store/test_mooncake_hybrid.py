@@ -49,9 +49,6 @@ class MemoryRangeStore:
         self.complete = set()
         self.open_reads = set()
 
-    def set_device(self):
-        pass
-
     def register_buffer(self, ptrs, lengths):
         assert all(length > 0 for length in lengths)
 
