@@ -820,7 +820,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
         for group_id in req_meta.kv_cache_group_ids or [0]:
-            local_group_layers = self.token_database.group_num_layers.get("kv", {}).get(group_id, 0)
+            layer_counts = self.token_database.group_num_layers.get("kv", {})
+            if group_id in layer_counts:
+                local_group_layers = layer_counts[group_id]
+            else:
+                # Older/custom token databases may not publish layer counts.
+                # Preserve their descriptor-backed groups while still treating
+                # a group with no local addresses or sizes as PP-local empty.
+                group_addrs = self.token_database.group_kv_caches_base_addr.get(group_id, [])
+                group_sizes = self.token_database.group_block_len.get(group_id, [])
+                local_group_layers = 1 if group_addrs and group_sizes else 0
             if local_group_layers <= 0:
                 pp_rank = (
                     self.token_database.metadata[group_id].pp_rank
