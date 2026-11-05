@@ -172,3 +172,21 @@ def test_sending_thread_stop_sets_event_and_is_idempotent():
     assert thread._stop_event.is_set()
     thread.stop()
     assert thread._stop_event.is_set()
+
+
+def test_shutdown_defaults_work_for_subclass_without_super_init():
+    # Mirrors the d2rh facade, which overrides __init__ without super().__init__()
+    # and therefore does not initialize the shutdown flag itself.
+    class _D2RHStyleFacade(MooncakeConnector):
+        def __init__(self):
+            self.connector_worker = MagicMock()
+            self.connector_scheduler = None
+
+    facade = _D2RHStyleFacade.__new__(_D2RHStyleFacade)
+    _D2RHStyleFacade.__init__(facade)
+
+    assert facade._shutdown_complete is False
+    facade.shutdown()
+    facade.shutdown()
+
+    assert facade.connector_worker.shutdown.call_count == 1

@@ -1498,6 +1498,8 @@ class KVCacheRecvingThread(threading.Thread):
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
+    _shutdown_complete: bool = False
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return True
