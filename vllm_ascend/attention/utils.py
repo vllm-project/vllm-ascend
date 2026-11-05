@@ -357,6 +357,8 @@ def is_suffix_fia_cache_enabled(vllm_config: VllmConfig, impl) -> bool:
         cache = vllm_config.cache_config
         ascend = get_ascend_config()
         hf_config = getattr(model, "hf_text_config", None) or getattr(model, "hf_config", None)
+        if hf_config is None:
+            return False
         return (
             hf_config.model_type == "qwen3"
             and model.runner_type == "generate"
