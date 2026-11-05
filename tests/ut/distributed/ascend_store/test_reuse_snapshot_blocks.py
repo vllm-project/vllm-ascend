@@ -39,6 +39,7 @@ def worker():
     w = module.LayerwiseKVPoolWorker.__new__(module.LayerwiseKVPoolWorker)
     w.use_layerwise = w.use_layerwise_transfer = w.layerwise_offload = True
     w.use_block_key_layerwise = False
+    w.use_eagle = False
     w.tp_size = 16
     w.kv_role, w.consumer_is_to_put = "kv_producer", False
     w.can_put = True

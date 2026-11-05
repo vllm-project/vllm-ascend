@@ -294,21 +294,36 @@ class TestMooncakeHybrid(unittest.TestCase):
             self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (32, False))
             load = scheduler.load_specs[request.request_id]
             self.assertEqual(load.kvpool_cached_tokens, 32)
-            self.assertEqual(load.kvpool_store_skip_tokens, 64 if eagle else 32)
-        # The full hit is a write-skip extent, not the recurrent resume point.
+            self.assertEqual(load.kvpool_store_skip_tokens, 64)
+        # Resume from 32, skip the already stored 64-token prefix, and save
+        # the new checkpoint after the request continues to 96 tokens.
         worker.use_eagle = False
+        worker.token_database.load_mask.side_effect = scheduler.cache_coordinator.load_mask
         request = ReqMeta(
             "load",
-            token_len_chunk=64,
-            block_ids_by_group=[[1, 2, 3, 4], [1, 2], [1, 2, 3, 4], [7]],
-            block_hashes=[b"h0", b"h1", b"h2", b"h3"],
-            load_spec=LoadSpec(0, 32, True, 64),
+            token_len_chunk=96,
+            block_ids_by_group=[[1, 2, 3, 4, 5, 6], [1, 2, 3], [1, 2, 3, 4, 5, 6], [7]],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5"],
+            load_spec=load,
+            can_save=True,
         )
+        request.store_masks = scheduler.cache_coordinator.store_mask(96)
         with patch.object(worker, "_open_layerwise_get_sessions") as open_get:
             views = mooncake_layerwise.prepare_group_sessions(worker, [request])
         worker.token_database.load_mask.assert_called_with(request.block_hashes, 32)
         self.assertFalse(views[3])
-        self.assertTrue(all(slot < 2 for _, _, _, slot in open_get.call_args.args[0]))
+        loaded_keys = [key for _, key, _, _ in open_get.call_args.args[0]]
+        resume_key = worker._make_layerwise_full_key(2, request.block_hashes[1].hex())
+        self.assertIn(resume_key, loaded_keys)
+        for group, block_size in enumerate(worker.grouped_block_size[:3]):
+            view = views[group][0]
+            self.assertLessEqual(len(view.load_block_keys) * block_size, 32)
+            self.assertEqual(view.save_key_block_offset, 64 // block_size)
+            self.assertTrue(any(key is not None for key in view.save_block_keys))
+        state = views[2][0]
+        checkpoint_key = worker._make_layerwise_full_key(2, request.block_hashes[5].hex())
+        self.assertEqual(state.save_block_keys[-1], checkpoint_key)
+        self.assertIn(checkpoint_key, worker.m_store.objects)
 
     def _roundtrip(self, private_tail=False):
         worker, store, arrays, jobs, errors = self.make_hybrid(private_tail=private_tail)
