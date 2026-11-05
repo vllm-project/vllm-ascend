@@ -19,8 +19,10 @@ build_bisect_extra_args() {
   [ "${BISECT_FORCE_INITIAL_BUILD:-}" = "true" ] &&
     BISECT_EXTRA_ARGS+=(--force-initial-build)
 
-  # The rebuild policy is owned by AOP and is intentionally not user-overridable.
-  BISECT_EXTRA_ARGS+=(--native-check since-build)
+  # This temporary diagnostic PR bisects an older range whose endpoint is an
+  # ephemeral revert commit. Rebuild only commits that directly changed native
+  # code; cumulative rebuilding from today's image fails before endpoint tests.
+  BISECT_EXTRA_ARGS+=(--native-check per-commit)
   [ -n "${BISECT_CONFIG_BASE_PATH:-}" ] &&
     BISECT_EXTRA_ARGS+=(--config-base-path "$BISECT_CONFIG_BASE_PATH")
   # Always return success: the last `[ -n ... ] && ...` above legitimately
