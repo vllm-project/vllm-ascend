@@ -880,9 +880,10 @@ def test_generic_mooncake_mtp_cache_is_not_folded_into_target_ring():
 def test_v2_shared_buffer_config_requires_a_layerwise_completion_transport(mode):
     store = _make_vllm_config(8, 1).kv_transfer_config.kv_connector_extra_config
     store["backend"] = "mooncake"
-    peer = {"kv_connector": "MooncakeConnectorV2", "kv_connector_extra_config": {}}
+    peer_extra: dict[str, str] = {}
+    peer = {"kv_connector": "MooncakeConnectorV2", "kv_connector_extra_config": peer_extra}
     if mode is not None:
-        peer["kv_connector_extra_config"]["transfer_mode"] = mode
+        peer_extra["transfer_mode"] = mode
     config = SimpleNamespace(
         kv_connector="MultiConnector",
         kv_role="kv_producer",

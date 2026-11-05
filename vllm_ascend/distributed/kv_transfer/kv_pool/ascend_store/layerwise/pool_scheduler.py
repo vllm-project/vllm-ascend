@@ -61,7 +61,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         if self.use_layerwise_transfer or get_layerwise_reuse_config(vllm_config.kv_transfer_config) is not None:
             self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
-        self.layerwise_head_sharded_groups = (
+        self.layerwise_head_sharded_groups: frozenset[int] = (
             getattr(kv_cache_config, "layerwise_head_sharded_groups", frozenset())
             if self.use_layerwise_transfer
             else frozenset()

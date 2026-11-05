@@ -442,7 +442,7 @@ def _fold_main_packs(
     for slot_index in range(ring_count):
         slot = tuple(layer for pack in ring_packs[slot_index::ring_count] for layer in pack)
         buffer_slots.append(slot)
-        previous_by_group = {}
+        previous_by_group: dict[int, int] = {}
         for layer in slot:
             group = groups[layer_cache_specs[layer].main.layer_name]
             if group in previous_by_group:
@@ -576,6 +576,7 @@ def apply_layerwise_kv_cache_plan(
     if seen_layers != set(layer_specs):
         raise ValueError("Layerwise KV cache descriptors must cover every cache spec.")
 
+    new_tensors: list[KVCacheTensor] = []
     if topology is not None:
         ring_names = {
             reuse_layout.layer_cache_specs[layer].main.layer_name
@@ -585,7 +586,6 @@ def apply_layerwise_kv_cache_plan(
         }
         # Preserve the original safe packing of resident target/draft views
         # and all indexer/tail descriptors. Only remove main ring owners.
-        new_tensors = []
         for tensor in old_tensors:
             if tensor.offset or tensor.layer_stride:
                 raise NotImplementedError("Main-pack reuse requires ordinary unpacked descriptors")
@@ -665,7 +665,6 @@ def apply_layerwise_kv_cache_plan(
             )
         )
 
-    new_tensors: list[KVCacheTensor] = []
     for slot in reuse_layout.buffer_slots:
         _merge_specs([reuse_layout.layer_cache_specs[layer].main for layer in slot])
         indexer_specs: list[NamedKVCacheSpec] = []

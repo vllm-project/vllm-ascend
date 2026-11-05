@@ -793,14 +793,15 @@ class LoadSpec:
 class RequestTracker:
     # Request id
     req_id: str
-    # Namespace for request-scoped snapshots; renewed after preemption/reuse.
-    layerwise_request_id: str | None = None
 
     token_len: int
 
     # The block ids that has been allocated so far, grouped by KV cache group.
     # NOTE: allocated blocks could be more than the number of tokens.
     allocated_block_ids_by_group: list[list[int]]
+
+    # Namespace for request-scoped snapshots; renewed after preemption/reuse.
+    layerwise_request_id: str | None = None
 
     # The number of tokens that has been savd
     num_saved_tokens: int = 0
@@ -930,7 +931,6 @@ class RequestTracker:
 class ReqMeta:
     # Request id
     req_id: str
-    layerwise_request_id: str | None = None
     # End token for full-block KV save.
     save_end_token: int
     # Token length after this scheduled step finishes.
@@ -938,6 +938,8 @@ class ReqMeta:
     block_ids_by_group: list[list[int]]
 
     block_hashes: list[BlockHash]
+
+    layerwise_request_id: str | None = None
 
     # First token that has not been saved before this metadata was built.
     save_start_token: int = 0

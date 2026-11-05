@@ -84,10 +84,16 @@ independently, supports P TP8 to D TP1, and retains each side's block-group IDs.
 Its current constraints are PP=1, D PCP=1, P DCP=1 or P DCP=PCP, and TP/PCP
 cannot both exceed one for recurrent state. Start validation with PCP=DCP=1.
 
-Example configurations are provided in
-[`prefill_kv_transfer.json`](../../../../examples/disaggregated_prefill_v1/glm53_mooncake_offload/prefill_kv_transfer.json)
-and
-[`decode_kv_transfer.json`](../../../../examples/disaggregated_prefill_v1/glm53_mooncake_offload/decode_kv_transfer.json).
+The P configuration is available at
+`examples/disaggregated_prefill_v1/glm53_mooncake_offload/prefill_kv_transfer.json`:
+
+{{ include_code("examples/disaggregated_prefill_v1/glm53_mooncake_offload/prefill_kv_transfer.json", language="json") }}
+
+The D configuration is available at
+`examples/disaggregated_prefill_v1/glm53_mooncake_offload/decode_kv_transfer.json`:
+
+{{ include_code("examples/disaggregated_prefill_v1/glm53_mooncake_offload/decode_kv_transfer.json", language="json") }}
+
 Keep your existing model, quantization, parsing and device settings; pass the
 corresponding file contents to each server's `--kv-transfer-config`. On P, retain
 TP8/EP8, native `deepseek_mtp`, chunked prefill and aligned Mamba state. D can

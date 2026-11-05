@@ -139,7 +139,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             and len(self.cacheable_group_ids) != len(self.original_block_size)
         ):
             raise ValueError("AscendStore private KV state requires Mooncake block-key or non-layerwise transfer")
-        self.layerwise_head_sharded_groups = (
+        self.layerwise_head_sharded_groups: frozenset[int] = (
             getattr(kv_cache_config, "layerwise_head_sharded_groups", frozenset())
             if self.use_layerwise_transfer
             else frozenset()
@@ -2183,7 +2183,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             return masks
         # Preserve other groups' reachability masks. An aligned recurrent page
         # represents one endpoint; unaligned state uses the partial GVA path.
-        result = list(masks) if masks is not None else [None] * self.num_kv_cache_groups
+        result: list[Sequence[bool] | None] = list(masks) if masks is not None else [None] * self.num_kv_cache_groups
         for group_id in reused_state_groups:
             size = self.grouped_block_size[group_id]
             result[group_id] = [

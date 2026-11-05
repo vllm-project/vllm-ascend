@@ -125,7 +125,7 @@ def _save_entries(worker, request, view, group, hashes):
 def _open_puts(worker, slots):
     # One metadata RPC per batch across requests and groups, with each group's
     # own object size. Deduplication also prevents duplicate concurrent writers.
-    sizes = {}
+    sizes: dict[str, int] = {}
     for _, key, _, size in slots:
         if key in sizes and sizes[key] != size:
             raise ValueError("Mooncake offload key has inconsistent object sizes")
@@ -164,7 +164,7 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
     worker._current_layerwise_last_chunk_req_ids = {request.req_id for request in requests if request.is_last_chunk}
     groups: dict[int, list[ReqMeta]] = {group: [] for group in worker.cacheable_group_ids}
     get_slots = []
-    put_slots = []
+    put_slots: list[tuple[ReqMeta, str, int | None, int]] = []
     for request in requests:
         cached = request.load_spec.kvpool_cached_tokens if request.load_spec is not None else 0
         masks = worker._compute_reachable_load_masks(request, cached)
