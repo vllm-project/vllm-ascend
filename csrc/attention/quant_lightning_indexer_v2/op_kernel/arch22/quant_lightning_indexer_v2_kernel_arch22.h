@@ -650,8 +650,7 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::CalcS2LoopParams(uint32_t bN2LoopId
     tempLoopInfo.maxCandLen = 0U;
     tempLoopInfo.maxCandTiles = 0U;
     tempLoopInfo.candDriven = false;
-    if (constInfo.candidateMode == CANDIDATE_MODE_CONSUMER && hasCandidateBlockLength_ &&
-        !tempLoopInfo.isNeedLD) {
+    if (constInfo.candidateMode == CANDIDATE_MODE_CONSUMER && hasCandidateBlockLength_) {
         uint32_t taskTokens = tempLoopInfo.actMBaseSize / static_cast<uint32_t>(constInfo.gSize);
         uint32_t rowBase = tempLoopInfo.actS1RowBase + tempLoopInfo.gS1Idx * constInfo.s1BaseSize;
         uint32_t maxL = 0U;
@@ -669,6 +668,15 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::CalcS2LoopParams(uint32_t bN2LoopId
             (maxL * constInfo.candidateBlockSize + QLIV2_CAND_TILE_TOKENS - 1U) / QLIV2_CAND_TILE_TOKENS;
         // maxL=0 的任务仍需一次输出初始化（空行 -1），D3 用 maxCandTiles==0 的特殊分支处理。
         tempLoopInfo.candDriven = true;
+        // v16：候选 × FD —— 候选模式下 s2 轴语义改为"候选 tile 索引"
+        // （QSLI metadata 按 max(L)×8 的候选 tile 数切分）。覆盖上面按全量扫块数算的
+        // s2LoopEnd/isNeedLD：分片任务的循环上界 = metadata 给的 s2End（候选 tile 数），
+        // 是否分片 = 区间不覆盖整行 tile 范围。maxCandTiles 恒为**整行** tile 数（寻址基准）。
+        tempLoopInfo.s2LoopEnd = (isEnd && constInfo.s2End != 0) ? constInfo.s2End : tempLoopInfo.maxCandTiles;
+        if (tempLoopInfo.s2LoopEnd > tempLoopInfo.maxCandTiles) {
+            tempLoopInfo.s2LoopEnd = tempLoopInfo.maxCandTiles;
+        }
+        tempLoopInfo.isNeedLD = (constInfo.s2Start > 0 || tempLoopInfo.s2LoopEnd < tempLoopInfo.maxCandTiles);
     }
 }
 
@@ -899,6 +907,13 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessMain()
                     static_cast<uint64_t>(gS1LoopIdx) * constInfo.mBaseSize * constInfo.headDim;
                 candRun.tensorWeightsOffset = static_cast<uint64_t>(tempLoopInfo.actS1RowBase) * constInfo.qHeadNum +
                                               static_cast<uint64_t>(tempLoopInfo.n2Idx) * constInfo.gSize;
+                // v16：候选 × FD —— 本任务负责的候选 tile 区间与溢写参数。
+                // 地址口径不变式：score/候选索引恒为绝对行级（maxCandTiles 整行），
+                // 分片只限定本任务计算的 tile 范围 [tileBegin, tileEnd)。
+                const uint32_t candTileBegin = static_cast<uint32_t>(constInfo.s2Start);
+                const uint32_t candTileEnd = tempLoopInfo.s2LoopEnd;
+                const bool candNeedSpill = tempLoopInfo.isNeedLD;
+                const uint32_t candWsBase = ldInfo.saveWorkSpaceIdx;
                 if ASCEND_IS_AIV {
                     // 跳过全量扫前，先排空上一任务延迟的 ProcessVec1（否则它的最终输出会丢失）。
                     // 延迟槽 = 上一次 ProcessBaseBlock 的槽位 = (gloop-1)%2。
@@ -929,16 +944,23 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessMain()
                     vectorService.RunCandTask(
                         tempLoopInfo.bIdx, tempLoopInfo.n2Idx, rowBase, taskTokens, tempLoopInfo.maxCandTiles,
                         candRun.loop, s1RowBase, tempLoopInfo.actS1Size, tempLoopInfo.actS2Size,
-                        tempLoopInfo.actS2SizeOrig, indiceOutOffset, outputIdxOffsetBase);
+                        tempLoopInfo.actS2SizeOrig, indiceOutOffset, outputIdxOffsetBase,
+                        candTileBegin, candTileEnd, candNeedSpill, candWsBase);
                 } else {
                     // B1+B2+B3+B4：等 W 就绪后，按 per-token M=32 从 staging 读 K 算 QK
                     CrossCoreWaitFlag(QLIV2Common::CAND_WREADY_FLAG);
-                    matmulService.ComputeMm1Candidate(candRun, taskTokens, tempLoopInfo.maxCandTiles);
+                    matmulService.ComputeMm1Candidate(candRun, taskTokens, tempLoopInfo.maxCandTiles,
+                                                      candTileBegin, candTileEnd);
                     // v4: 本任务的 W 槽读完后回收（AIV 最多领先 2 个任务，不会覆盖正在读的槽）
                     CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(
                         QLIV2Common::CAND_WFREE_FLAG);
                 }
-                // 候选任务跳过全量扫（结果已由候选路径写出）
+                // v16：分片任务消耗一个 LD 工作区槽位（与全量扫 CalcRunInfo 同款记账，
+                // 槽位序列须与 metadata 的分片分配顺序一致）
+                if (candNeedSpill) {
+                    ldInfo.saveWorkSpaceIdx++;
+                }
+                // 候选任务跳过全量扫（结果已由候选路径写出/溢写）
                 constInfo.s2Start = 0;
                 continue;
             }

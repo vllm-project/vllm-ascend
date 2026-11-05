@@ -410,10 +410,23 @@ void QuantSparseLightningIndexerMetadataCpuKernel::CalcSplitInfo(SplitContext &s
             splitInfo.isKvSeqAllZero = false;
         }
     }
-    // V1（2026-11-02）：QSLI 候选模式暂不启用 FD 分片 —— 主算子的"候选 × FD 归并"路径尚未
-    // 通过正确性验证（见 scripts/prof_output/qli_v2_caseopt/RESULT_candidate_driven.md §8）。
-    // 当前按整行调度 + 直出，保证正确性；待归并路径修复后再按 max(L)×8 的 cost 切分候选 tile。
-    supportFd_ = false;
+    // V2（2026-11-05）：QSLI 候选 × FD 分片开启（主算子 v16 已适配 tile 区间 + partial 溢写，
+    // 见 scripts/prof_output/qli_v2_caseopt/RESULT_candidate_driven.md §27）。
+    // 判定沿用 QLI metadata 的结构、单位换成候选语义：maxS2Size_ 此时是 max(L)×8 的候选 token 数，
+    // "块" = CandidateTileTokens()（512 token = 64 候选块）——max(L) > 5×64=320 块才开 FD；
+    // maxS2Size_ < topk 时不开（每个分片须能凑满 topk 才能归约）。
+    if (maxS2Size_ < static_cast<uint32_t>(topk_)) {
+        supportFd_ = false;
+        return;
+    }
+    // V2.1：仅当行级并行度不足时才切分 —— gS1 块数 ≥ AIC 核数时整行调度已能喂满核，
+    // 候选 tile 分片的溢写/归约/流水线暖机开销只增不减（decode 16 块/20 核实测 FD −9%；
+    // 行数饱和形状不切分时与 v15 背靠背持平）。
+    uint32_t totalS1GBlocks = 0;
+    for (uint32_t bIdx = 0; bIdx < static_cast<uint32_t>(batchSize_); bIdx++) {
+        totalS1GBlocks += splitInfo.s1GBaseNum[bIdx];
+    }
+    supportFd_ = (totalS1GBlocks < aicCoreNum_) && (maxS2Size_ > fdToleranceRatio * CandidateTileTokens());
 }
 
 int64_t QuantSparseLightningIndexerMetadataCpuKernel::CalcPreTokenLeftUp(uint32_t s1Size, uint64_t s2Size) const

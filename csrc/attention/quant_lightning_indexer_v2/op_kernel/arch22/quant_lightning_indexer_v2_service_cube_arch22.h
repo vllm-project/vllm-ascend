@@ -51,7 +51,7 @@ public:
     __aicore__ inline void InitCandMm1Tensor(const GlobalTensor<int8_t>& stagingKeyGm,
                                              const GlobalTensor<float>& candScoreGm);
     __aicore__ inline void ComputeMm1Candidate(const QLIV2Common::RunInfo& runInfo, uint32_t taskTokens,
-                                               uint32_t maxTiles);
+                                               uint32_t maxTiles, uint32_t tileBegin, uint32_t tileEnd);
 
     static constexpr IsResetLoad3dConfig LOAD3DV2_CONFIG = {true, true}; // isSetFMatrix isSetPadding;
     static constexpr uint64_t DOUBLE_BUF_NUM = 2;
@@ -433,29 +433,34 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::InitCandMm1Tensor(const GlobalTensor
 // 时间（与 DSL "先发 tile k、再算 tile k-1" 同构，规避 910B GM 写后立即读不可见）。
 template <typename QLIV2T>
 __aicore__ inline void QLIV2Matmul<QLIV2T>::ComputeMm1Candidate(const QLIV2Common::RunInfo& runInfo,
-                                                                uint32_t taskTokens, uint32_t maxTiles)
+                                                                uint32_t taskTokens, uint32_t maxTiles,
+                                                                uint32_t tileBegin, uint32_t tileEnd)
 {
-    if (maxTiles == 0U || taskTokens == 0U) {
+    if (tileEnd <= tileBegin || taskTokens == 0U) {
         return;
     }
-    constexpr uint32_t CAND_TILE_TOKENS = QLIV2Common::CAND_TILE_TOKENS; // 32 块 × 8 token = 256
+    constexpr uint32_t CAND_TILE_TOKENS = QLIV2Common::CAND_TILE_TOKENS; // 64 块 × 8 token = 512
     const uint64_t tokenQueryStride =
         static_cast<uint64_t>(constInfo_.gSize) * static_cast<uint64_t>(constInfo_.headDim);
     candMode_ = true;
     QLIV2Common::RunInfo candInfo = runInfo;
     candInfo.actMBaseSize = static_cast<uint32_t>(constInfo_.gSize);           // M = 32 头
-    candInfo.actualSingleProcessSInnerSize = CAND_TILE_TOKENS;                 // N = 256
+    candInfo.actualSingleProcessSInnerSize = CAND_TILE_TOKENS;                 // N = 512
     candInfo.actualSingleProcessSInnerSizeAlign = CAND_TILE_TOKENS;
-    const uint32_t tileCount = taskTokens * maxTiles;
+    // v16：候选 × FD —— 本任务只算 tile 区间 [tileBegin, tileEnd)（分片）；
+    // 地址口径不变式：分数写地址恒为绝对行级 (t×maxTiles + absTile)×512，maxTiles 为整行 tile 数。
+    const uint32_t sliceTiles = tileEnd - tileBegin;
+    const uint32_t tileCount = taskTokens * sliceTiles;
     // 错一拍：先领一个令牌（tile0 的 READY），之后每消费一个 tile 前再 wait 一个令牌
     AscendC::CrossCoreWaitFlag(QLIV2Common::CAND_READY_FLAG);
     for (uint32_t k = 0U; k < tileCount; k++) {
         AscendC::CrossCoreWaitFlag(QLIV2Common::CAND_READY_FLAG);
-        const uint32_t t = k / maxTiles;
-        const uint32_t tile = k % maxTiles;
+        const uint32_t t = k / sliceTiles;
+        const uint32_t relTile = k % sliceTiles;
+        const uint32_t absTile = tileBegin + relTile;
         candInfo.tensorQueryOffset = runInfo.tensorQueryOffset + static_cast<uint64_t>(t) * tokenQueryStride;
-        candInfo.isFirstS2InnerLoop = (tile == 0U);
-        candInfo.isLastS2InnerLoop = (tile == maxTiles - 1U);
+        candInfo.isFirstS2InnerLoop = (relTile == 0U);
+        candInfo.isLastS2InnerLoop = (relTile + 1U == sliceTiles);
         // vec0Out 每 token 行 = 32 头 × 16 lane = 512 half
         weightRowOffset_ = static_cast<uint64_t>(t) * BLOCK_CUBE * constInfo_.gSize;
         const uint32_t slot = candConsTileSeq_ % QLIV2Common::CAND_RING_SLOTS;
@@ -466,14 +471,15 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::ComputeMm1Candidate(const QLIV2Commo
         // AIV 跨任务延迟消费上一任务最后一个 token 的分数时，本任务的写不会覆盖它。
         const uint64_t scoreSlotBase = static_cast<uint64_t>(runInfo.loop & 1U) *
                                        QLIV2Common::CAND_SCORE_TILES_PER_TASK * CAND_TILE_TOKENS;
-        candOutBase_ = scoreSlotBase + static_cast<uint64_t>(k) * CAND_TILE_TOKENS;
+        candOutBase_ = scoreSlotBase +
+                       (static_cast<uint64_t>(t) * maxTiles + absTile) * CAND_TILE_TOKENS;
         ComputeMm1(candInfo);
         // 消费完成：一次 set 广播给两个 AIV，各放一个空槽令牌
         AscendC::CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(
             QLIV2Common::CAND_FREE_FLAG);
-        // 本 token 的全部候选 tile 已算完 → 放行 AIV 消费该 token 的分数
+        // 本 token 的分片内全部候选 tile 已算完 → 放行 AIV 消费该 token 的分数
         // （AIV 侧对任务最后一个 token 另有 ≥3 个任务的延迟消费队列，不依赖此处时序）
-        if (tile + 1U == maxTiles) {
+        if (relTile + 1U == sliceTiles) {
             AscendC::CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(
                 QLIV2Common::CAND_SCORE_READY_FLAG);
         }
