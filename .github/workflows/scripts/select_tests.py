@@ -109,14 +109,11 @@ CPU_UT_BATCH_PATH = "tests/ut"
 # Full-suite mode roots scanned by --all-tests.
 _ALL_TESTS_ROOTS = ("tests/ut", "tests/e2e/pull_request")
 
-# Operator tests collected with the scheduled full-suite coverage run.
-# The same files are executed on both cards; each test skips itself when the
-# device does not match. These partitions stay on the requested labels and are
-# not moved onto the 560T pool with the generic A3 groups.
-# 115 files at the 600s default need several groups to finish inside the
-# 180-minute selected-tests job.
+# Operator tests collected by the coverage schedule. The same files run on
+# both cards; each test skips itself when the device does not match. Each
+# card uses one runner and keeps its requested label instead of the 560T pool.
 _SINGLECARD_OPS_ROOT = "tests/e2e/nightly/single_node/ops/singlecard_ops"
-_SINGLECARD_OPS_GROUP_COUNT = 8
+_SINGLECARD_OPS_GROUP_COUNT = 1
 _SINGLECARD_OPS_PARTITIONS = (
     ("singlecard-ops-a3-2", "linux-aarch64-a3-2"),
     ("singlecard-ops-a5-1", "linux-aarch64-a5-1"),
