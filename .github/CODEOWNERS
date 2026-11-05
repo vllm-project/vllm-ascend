@@ -49,30 +49,36 @@
 /CMakeLists.txt @zzzzwwjj @ZT-AIA
 
 # attention
-/vllm_ascend/attention @weijinqian0
+/vllm_ascend/attention/context_parallel @weiguihua2
+/vllm_ascend/attention/dsa*.py @weijinqian0 
+/vllm_ascend/attention/indexer.py @weijinqian0
+/vllm_ascend/attention/indexer_kpool.py @weijinqian0
 
 # compilation
 /vllm_ascend/compilation @yiz-liu @wxsIcey
 
 # device / device_allocator
-/vllm_ascend/device @weijinqian0 @zzzzwwjj
+/vllm_ascend/device @zzzzwwjj
 /vllm_ascend/device_allocator @weijinqian0
 
-# distributed (kv_offload is a more specific sub-assignment)
+# distributed
 /vllm_ascend/distributed @LCAIZJ
-/vllm_ascend/distributed/kv_transfer/kv_pool/kv_offload @nalinaly
+/vllm_ascend/distributed/kv_transfer/kv_pool @weijinqian0
+/vllm_ascend/distributed/kv_transfer/sparse_kv_offload @weiguihua2
 
 # lora
 /vllm_ascend/lora @paulyu12
 
 # ops
-/vllm_ascend/ops @zzzzwwjj @realliujiaxu
+/vllm_ascend/ops @zzzzwwjj
+/vllm_ascend/ops/fused_moe @weijinqian0
 
 # quantization
 /vllm_ascend/quantization @kunpengW-code @menogrey
 
 # sample
 /vllm_ascend/sample @realliujiaxu
+/vllm_ascend/worker/v2/sample @realliujiaxu
 
 # spec decode
 /vllm_ascend/worker/v2/spec_decode @wxsIcey
@@ -108,7 +114,7 @@
 /vllm_ascend/patch @wxsIcey
 
 # Worker base
-# /vllm_ascend/worker/dcp_utils.py
+/vllm_ascend/worker/dcp_utils.py @weiguihua2
 # /vllm_ascend/worker/device_metadata.py
 # /vllm_ascend/worker/dspark_utils.py @wxsIcey
 # /vllm_ascend/worker/encoder_acl_graph.py
@@ -120,7 +126,6 @@
 
 # Worker V2
 /vllm_ascend/worker/v2/model_states
-/vllm_ascend/worker/v2/sample
 /vllm_ascend/worker/v2/aclgraph_utils.py
 /vllm_ascend/worker/v2/attn_utils.py
 /vllm_ascend/worker/v2/block_table.py
@@ -129,14 +134,22 @@
 /vllm_ascend/worker/v2/kv_connector.py @yzeyu71
 /vllm_ascend/worker/v2/kvpp.py
 /vllm_ascend/worker/v2/model_runner.py
-/vllm_ascend/worker/v2/pcp_manager.py
+/vllm_ascend/worker/v2/pcp_manager.py @weiguihua2
 /vllm_ascend/worker/v2/pp_transport.py
 /vllm_ascend/worker/v2/states.py
 /vllm_ascend/worker/v2/utils.py
 
+# Models
+/vllm_ascend/models/minimax_m3 @realliujiaxu
+/vllm_ascend/models
+/vllm_ascend/models
+/vllm_ascend/models
+/vllm_ascend/models
+
+# 310P
+/vllm_ascend/_310p @Tflowers-0129
+
 # vllm_ascend module directories (subdirs broken out one level)
-# TODO(owner): /vllm_ascend/_310p
-# /vllm_ascend/_310p
 # TODO(owner): /vllm_ascend/_cann_ops_custom
 # /vllm_ascend/_cann_ops_custom
 # TODO(owner): /vllm_ascend/ec_manager
@@ -147,8 +160,6 @@
 # /vllm_ascend/model_executor
 # TODO(owner): /vllm_ascend/model_loader
 # /vllm_ascend/model_loader
-# TODO(owner): /vllm_ascend/models
-# /vllm_ascend/models
 # TODO(owner): /vllm_ascend/observability
 # /vllm_ascend/observability
 # TODO(owner): /vllm_ascend/profiler
