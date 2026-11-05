@@ -198,6 +198,71 @@ def test_index_selection_publishes_shared_output(monkeypatch, empty_cache):
     assert out is not None and out.shape == (TOKENS, TOPK)
 
 
+@pytest.mark.parametrize("ratio", [1, 2])
+@pytest.mark.parametrize("c2_group", [None, 0])
+def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio, c2_group):
+    hidden_states = torch.zeros(TOKENS, 8, dtype=torch.bfloat16)
+    latent = torch.zeros(TOKENS, 8, dtype=torch.bfloat16)
+    positions = torch.arange(TOKENS)
+    cos, sin = torch.ones(TOKENS, 4), torch.zeros(TOKENS, 4)
+    calls = []
+    original_float = torch.Tensor.float
+
+    def cast(value, *args, **kwargs):
+        result = original_float(value, *args, **kwargs)
+        if value is hidden_states:
+            calls.append("input_cast")
+        return result
+
+    def project_kv(value):
+        calls.append("wkv")
+        assert value.dtype == (torch.float32 if ratio == 2 else torch.bfloat16)
+        return latent
+
+    monkeypatch.setattr(torch.Tensor, "float", cast)
+    monkeypatch.setattr(AscendDSAV41Impl, "_quantize_indexer_query", lambda *args: calls.append("query_quantization"))
+    metadata_waits = []
+    monkeypatch.setattr(dsa_v41, "wait_for_device_metadata", lambda *args: metadata_waits.append(args))
+    monkeypatch.setattr(dsa_v41, "scatter_cache_sk", lambda *args: None)
+    monkeypatch.setattr(AscendDSAV41Impl, "_apply_rotary", lambda *args, **kwargs: None)
+    cache = SimpleNamespace(slot_mapping=positions)
+    metadata = SimpleNamespace(
+        indexer=SimpleNamespace(cache=cache),
+        compressor=SimpleNamespace(
+            cache=cache,
+            state=SimpleNamespace(c2_metadata_group_id=c2_group, c2_source_cos=cos, c2_source_sin=sin),
+        ),
+    )
+
+    class Compressor:
+        use_native_compressor = False
+
+        def __call__(self, value):
+            return project_kv(value)
+
+        wkv = staticmethod(project_kv)
+        wgate = staticmethod(lambda value: torch.zeros_like(value[:, :8]))
+        pool_projected = staticmethod(lambda *args: latent)
+
+    attn = SimpleNamespace(
+        compressor=Compressor(),
+        indexer=SimpleNamespace(update_keys=lambda *args: None),
+        long_kv_cache=SimpleNamespace(kv_cache=[None]),
+        head_dim=8,
+        nope_head_dim=4,
+    )
+    impl = _impl(SimpleNamespace(compress_ratio=ratio))
+    impl._write_compressed_source(attn, hidden_states, positions, cos, sin, metadata, prepared_indexer=object())
+
+    assert calls.count("query_quantization") == calls.count("wkv") == 1
+    assert calls.index("query_quantization") < calls.index("wkv")
+    if ratio == 2:
+        assert calls.index("input_cast") < calls.index("query_quantization")
+    assert metadata_waits == (
+        [(dsa_v41.DeviceMetadataStage.COMPRESSOR, c2_group)] if ratio == 2 and c2_group is not None else []
+    )
+
+
 @pytest.mark.parametrize("ratio,use_native", [(1, True), (1, False), (2, True), (2, False)])
 @pytest.mark.parametrize("c2_group", [None, 0])
 def test_query_quantization_overlaps_compressor(monkeypatch, ratio, use_native, c2_group):

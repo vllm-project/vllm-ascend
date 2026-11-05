@@ -1198,12 +1198,13 @@ def test_actual_attention_parameter_ownership(config, runtime):
 
 @pytest.mark.parametrize("chunks", [(1, 1, 1, 2, 2), (3, 4), (2, 2, 3), (7,)])
 @torch.inference_mode()
-def test_compressor_chunk_boundary_matches_vector_reference(config, chunks):
+def test_compressor_chunk_boundary_matches_vector_reference(config, chunks, compressor_profile):
+    compressor_profile(AscendDeviceType.A5)
     torch.manual_seed(7)
     compressor = DeepseekV41Compressor(config, 2)
     x = torch.randn(7, 16, dtype=torch.bfloat16)
-    kv = torch.nn.functional.linear(x.float(), compressor.wkv.weight.float())[:6].reshape(3, 2, 8)
-    gate = torch.nn.functional.linear(x.float(), compressor.wgate.weight.float())[:6].reshape(3, 2, 8)
+    kv = compressor.wkv(x.float())[:6].reshape(3, 2, 8)
+    gate = compressor.wgate(x.float())[:6].reshape(3, 2, 8)
     expected = compressor.norm((kv * gate.softmax(dim=1)).sum(dim=1).to(x.dtype))
     state = torch.full((6, 32, 16), float("nan"), dtype=torch.float32)
     block_table = [4]
@@ -1213,9 +1214,7 @@ def test_compressor_chunk_boundary_matches_vector_reference(config, chunks):
         actual.append(compressor_ratio2_reference(compressor, x[start : start + size], start, state, block_table))
         start += size
     torch.testing.assert_close(torch.cat(actual), expected)
-    torch.testing.assert_close(
-        state[4, 6, :8], torch.nn.functional.linear(x[-1:].float(), compressor.wkv.weight.float())[0]
-    )
+    torch.testing.assert_close(state[4, 6, :8], compressor.wkv(x[-1:].float())[0])
 
 
 @pytest.mark.parametrize("use_native", [False, True])
@@ -1257,8 +1256,11 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
     def pool_projected(kv, scores, metadata):
         assert not use_native and metadata is state
         assert kv.dtype == scores.dtype == torch.float32
-        torch.testing.assert_close(kv, hidden_states.float())
-        torch.testing.assert_close(scores, hidden_states.float())
+        # Both identity projections must reuse the same FP32 input.
+        assert kv is scores
+        torch.testing.assert_close(kv, hidden_states.float(), rtol=0, atol=0)
+        if dtype == torch.float32:
+            assert kv is hidden_states
         events.append("pool")
         return kv.to(torch.bfloat16)
 
@@ -1388,6 +1390,35 @@ def test_unsupported_hardware_does_not_fall_back_to_triton(config, compressor_pr
     triton_compressor._cube_core_num.assert_not_called()
 
 
+def test_projected_model_entry_keeps_fp32_state_and_existing_norm(
+    config, monkeypatch, compressor_profile, triton_compressor
+):
+    compressor_profile(AscendDeviceType.A5)
+    compressor = DeepseekV41Compressor(config, 2)
+    compressor.register_buffer("_ring_pooled", torch.empty(4, 8, dtype=torch.bfloat16), persistent=False)
+    compressor._ring_num_cores = 1
+    state = torch.zeros(3, 32, 1, 16, dtype=torch.float32)
+    compressor.state_cache = SimpleNamespace(kv_cache=[state])
+    metadata = SimpleNamespace(c2_ring_metadata=torch.zeros(5, 1, dtype=torch.int32), max_query_len=2)
+    pooled = torch.randn(2, 8, dtype=torch.bfloat16)
+    expected = compressor.norm(pooled).clone()
+    pointer = compressor._ring_pooled.data_ptr()
+
+    def kernel(kv, scores, state_view, controls, out, **kwargs):
+        assert kv.dtype == scores.dtype == state_view.dtype == torch.float32
+        assert state_view.data_ptr() == state.data_ptr()
+        assert controls is metadata.c2_ring_metadata
+        assert out.data_ptr() == pointer and out.dtype == torch.bfloat16
+        out.copy_(pooled)
+        return out
+
+    monkeypatch.setattr(triton_compressor, "compressor_from_projected", kernel)
+    hidden = torch.randn(2, 16, dtype=torch.bfloat16)
+    actual = compressor.pool_projected(compressor.wkv(hidden.float()), compressor.wgate(hidden.float()), metadata)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert compressor.wkv.weight.dtype == compressor.wgate.weight.dtype == torch.float32
+
+
 def test_a5_pool_projected_preserves_adapter_contract(config, compressor_profile, triton_compressor):
     compressor_profile(AscendDeviceType.A5)
     compressor = DeepseekV41Compressor(config, 2)
@@ -1460,7 +1491,8 @@ def test_native_compressor_empty_input_skips_operator(config, compressor_profile
 
 
 @torch.inference_mode()
-def test_compressor_rejects_missing_previous_state_page(config):
+def test_compressor_rejects_missing_previous_state_page(config, compressor_profile):
+    compressor_profile(AscendDeviceType.A5)
     compressor = DeepseekV41Compressor(config, 2)
     state = torch.full((3, 32, 16), float("nan"), dtype=torch.float32)
     with pytest.raises(ValueError, match="absent/null"):
@@ -1474,7 +1506,8 @@ def test_compressor_rejects_missing_previous_state_page(config):
 
 
 @torch.inference_mode()
-def test_state_page_reuse_does_not_require_request_reset(config):
+def test_state_page_reuse_does_not_require_request_reset(config, compressor_profile):
+    compressor_profile(AscendDeviceType.A5)
     compressor = DeepseekV41Compressor(config, 2)
     state = torch.full((3, 32, 16), float("nan"), dtype=torch.float32)
     x = torch.randn(2, 16, dtype=torch.bfloat16)
@@ -1497,7 +1530,8 @@ def test_state_registers_circular_manager():
 
 
 @torch.inference_mode()
-def test_interleaved_request_state_isolation(config):
+def test_interleaved_request_state_isolation(config, compressor_profile):
+    compressor_profile(AscendDeviceType.A5)
     compressor = DeepseekV41Compressor(config, 2)
     state = torch.full((3, 32, 16), float("nan"), dtype=torch.float32)
     first = torch.randn(2, 16, dtype=torch.bfloat16)

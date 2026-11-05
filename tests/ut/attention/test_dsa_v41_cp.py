@@ -9,6 +9,7 @@ tests check persistent addresses and state controls, not NPU graph replay.
 """
 
 import importlib
+import sys
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -856,7 +857,7 @@ class TestPCPBatchLifecycle:
         compressor.use_native_compressor = not packed
         compressor.wkv, compressor.wgate, compressor.norm = _linear(4, 2), _linear(4, 2), torch.nn.Identity()
         compressor.state_cache = SimpleNamespace(kv_cache=[torch.zeros(256, 2)])
-        compressor._ring_pooled = torch.empty(64, 2)
+        compressor._ring_pooled, compressor._ring_num_cores = torch.empty(64, 2), 1
         attn.compressor = compressor
         state.context.no_compile_layers = {PREFIXES["long_kv"]: attn.long_kv_cache}
         ring_steps, stores = [], []
@@ -866,11 +867,12 @@ class TestPCPBatchLifecycle:
             ring_steps.append(int(metadata.c2_ring_metadata[1].sum()))
             return compressor.wkv(x)
 
-        def triton_pool(kv, scores, metadata):
+        def triton_pool(kv, scores, cache, metadata, output, **kwargs):
             assert packed
             assert kv.dtype == scores.dtype == torch.float32
-            ring_steps.append(int(metadata.c2_ring_metadata[1].sum()))
-            return kv
+            ring_steps.append(int(metadata[1].sum()))
+            output.copy_(kv)
+            return output
 
         def scatter(cache, slots, values):
             block_size = 8 if cache.data_ptr() == attn.dsa_attn.swa_cache_layer.kv_cache[0].data_ptr() else 4
@@ -903,7 +905,12 @@ class TestPCPBatchLifecycle:
             attn.window_size = 4
 
         monkeypatch.setattr(compressor, "compress_native", native_pool)
-        monkeypatch.setattr(compressor, "pool_projected", triton_pool)
+        # Keep the real A5 adapter and its persistent output-buffer write.
+        monkeypatch.setitem(
+            sys.modules,
+            "vllm_ascend.ops.triton.compressor.compressor_triton",
+            SimpleNamespace(compressor_from_projected=triton_pool),
+        )
         monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", scatter)
         monkeypatch.setattr(
             dsa_cp.dsa_v1.torch_npu,
