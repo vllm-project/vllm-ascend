@@ -44,6 +44,7 @@ env_common: &env_common
   VLLM_SERVER_DEV_MODE: "1"
   LD_LIBRARY_PATH: "/usr/local/lib/:$LD_LIBRARY_PATH"
   VLLM_USE_MODELSCOPE: "true"
+  SERVER_PORT: "${PORT}"
 
 env_prefill: &env_prefill
   <<: *env_common
