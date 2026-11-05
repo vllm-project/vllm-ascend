@@ -366,7 +366,8 @@ class HiSparseNPUOps:
                 raise ValueError("HiSparse attention block stride must cover a physical block")
         if rows == 0:
             return
-        gather_rows_kernel[(rows, topk)](
+        parallel_columns = min(topk, 128) if counts is not None and attention is None else 0
+        gather_rows_kernel[(rows, parallel_columns or topk)](
             self.host_mapping.address_of(host_cache),
             hot_cache.view(torch.uint8),
             source,
@@ -386,6 +387,7 @@ class HiSparseNPUOps:
             HAS_ATTENTION=attention is not None,
             HAS_STATE=state is not None,
             BLOCK=min(1024, triton.next_power_of_2(row_bytes)),
+            PARALLEL_COLUMNS=parallel_columns,
             multibuffer=False,
         )
 

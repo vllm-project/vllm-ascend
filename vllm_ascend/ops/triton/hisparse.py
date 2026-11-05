@@ -29,33 +29,57 @@ def gather_rows_kernel(
     HAS_ATTENTION: tl.constexpr,
     HAS_STATE: tl.constexpr,
     BLOCK: tl.constexpr,
+    PARALLEL_COLUMNS: tl.constexpr = 0,
 ):
     row = tl.program_id(0)
-    col = tl.program_id(1)
     offset = tl.arange(0, BLOCK)
-    index = row * TOP_K + col
-    dst = tl.load(destination + index)
     padding = tl.load(state + row) < 0 if HAS_STATE else False
-    if HAS_ATTENTION:
-        value = tl.where((dst >= 0) & ~padding, dst // HOT_BLOCK * ATTENTION_BLOCK + dst % HOT_BLOCK, -1)
-        tl.store(attention + index, value)
-    if COMPACT:
-        copy = col < tl.minimum(TOP_K, tl.maximum(tl.load(counts + row), 0))
+    if PARALLEL_COLUMNS > 0:
+        tl.static_assert(COMPACT and not HAS_ATTENTION)
+        count = tl.minimum(TOP_K, tl.maximum(tl.load(counts + row), 0))
+        # Empty compact plans do not inspect stale source/destination entries.
+        # Keep enough independent programs for small misses and retain the
+        # original contiguous byte-copy shape instead of a wide 2-D payload.
+        if ~padding:
+            for col in range(tl.program_id(1), count, PARALLEL_COLUMNS):
+                index = row * TOP_K + col
+                src = tl.load(source + index)
+                dst = tl.load(destination + index)
+                valid = (src >= 0) & (dst >= 0) & (dst < HOT_ROWS)
+                if valid:
+                    host = host_address.to(tl.pointer_type(tl.uint8))
+                    destination_offset = dst.to(tl.int64) // HOT_BLOCK * HOT_STRIDE_BYTES + dst % HOT_BLOCK * ROW_BYTES
+                    for start in range(0, ROW_BYTES, BLOCK):
+                        payload = tl.load(
+                            host + src.to(tl.int64) * ROW_BYTES + start + offset,
+                            mask=(src < HOST_ROWS) & (start + offset < ROW_BYTES),
+                            other=0,
+                        )
+                        tl.store(hot + destination_offset + start + offset, payload, mask=start + offset < ROW_BYTES)
     else:
-        copy = tl.load(mask_ptr + index) != 0
-    if copy & ~padding:
-        src = tl.load(source + index)
-        valid = (src >= 0) & (dst >= 0) & (dst < HOT_ROWS)
-        if valid:
-            host = host_address.to(tl.pointer_type(tl.uint8))
-            destination_offset = dst.to(tl.int64) // HOT_BLOCK * HOT_STRIDE_BYTES + dst % HOT_BLOCK * ROW_BYTES
-            for start in range(0, ROW_BYTES, BLOCK):
-                payload = tl.load(
-                    host + src.to(tl.int64) * ROW_BYTES + start + offset,
-                    mask=(src < HOST_ROWS) & (start + offset < ROW_BYTES),
-                    other=0,
-                )
-                tl.store(hot + destination_offset + start + offset, payload, mask=start + offset < ROW_BYTES)
+        col = tl.program_id(1)
+        index = row * TOP_K + col
+        dst = tl.load(destination + index)
+        if HAS_ATTENTION:
+            value = tl.where((dst >= 0) & ~padding, dst // HOT_BLOCK * ATTENTION_BLOCK + dst % HOT_BLOCK, -1)
+            tl.store(attention + index, value)
+        if COMPACT:
+            copy = col < tl.minimum(TOP_K, tl.maximum(tl.load(counts + row), 0))
+        else:
+            copy = tl.load(mask_ptr + index) != 0
+        if copy & ~padding:
+            src = tl.load(source + index)
+            valid = (src >= 0) & (dst >= 0) & (dst < HOT_ROWS)
+            if valid:
+                host = host_address.to(tl.pointer_type(tl.uint8))
+                destination_offset = dst.to(tl.int64) // HOT_BLOCK * HOT_STRIDE_BYTES + dst % HOT_BLOCK * ROW_BYTES
+                for start in range(0, ROW_BYTES, BLOCK):
+                    payload = tl.load(
+                        host + src.to(tl.int64) * ROW_BYTES + start + offset,
+                        mask=(src < HOST_ROWS) & (start + offset < ROW_BYTES),
+                        other=0,
+                    )
+                    tl.store(hot + destination_offset + start + offset, payload, mask=start + offset < ROW_BYTES)
 
 
 @triton.jit

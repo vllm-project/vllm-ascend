@@ -101,16 +101,17 @@ In the current GLM-5.2 C4 comparison (32768 input and 8192 output tokens,
 TP8/DP1, MTP3, Model Runner V2, prefix caching off and explicit
 `weight_nz_mode=0`), both arms completed two rounds with 65536 actual output
 token IDs per arm. ON's settled reported miss/H2D deltas were zero. Mean TPOT was
-11.96 ms OFF and 13.89 ms ON: an observed increase of 16.09%. Outputs and MTP
+12.30 ms OFF and 13.78 ms ON: an observed increase of 12.03%. Outputs and MTP
 work differed between these arms, so this mean is not an isolated measure of
 backend overhead. A preceding paired round with identical outputs and MTP work
 still showed an 18.11% increase.
 
-Against the preceding direct-index ON cohort, removing redundant C8 output
-masking and Decode length writes reduced observed mean ON TPOT from 14.20 to
-13.89 ms (2.19%). Complete input/output-sequence multisets and aggregate MTP
-work matched across those two ON cohorts. Two rounds do not establish
-statistical significance or acceptable performance for other workloads.
+In separate ON comparisons with identical inputs, outputs and MTP work, native C8 output and
+length reuse reduced observed mean TPOT by 2.19% across two rounds. Bounding
+compact-refill programs reduced TPOT by 1.93% in one matching round. These gains
+are not additive and do not establish statistical significance or acceptable
+performance for other workloads. Compact refill retains current device counts,
+page-strided byte copies and the existing completion dependencies.
 
 Dataset accuracy, the full-model miss path and a TPOT regression within 3%
 remain unqualified. Profiling requests are separate from formal performance
