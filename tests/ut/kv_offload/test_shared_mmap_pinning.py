@@ -180,22 +180,20 @@ def test_worker_constructor_and_shutdown_release_in_order(monkeypatch, pin_ops, 
         assert events == ["pin", "handler", "handler", "sync", "unpin", "cleanup"]
 
 
+@pytest.mark.parametrize("replicated", [False, True])
 @pytest.mark.parametrize(
-    "replicated,extra,expected",
+    "extra,pin_enabled",
     [
-        (False, {}, (True, True)),
-        (True, {}, (True, False)),
-        (False, {"pin_shared_mmap": False}, (False, True)),
-        (False, {"pin_shared_mmap": "false", "pin_worker_slot_only": "no"}, (False, False)),
-        (False, {"pin_shared_mmap": "0", "pin_worker_slot_only": "0"}, (False, False)),
-        (False, {"pin_shared_mmap": "NO", "pin_worker_slot_only": False}, (False, False)),
-        (False, {"pin_shared_mmap": "true", "pin_worker_slot_only": "yes"}, (True, True)),
-        (False, {"pin_worker_slot_only": None}, (True, True)),
-        (True, {"pin_worker_slot_only": True}, (True, False)),
-        (True, {"pin_worker_slot_only": "true"}, (True, False)),
+        ({}, True),
+        ({"pin_shared_mmap": False}, False),
+        ({"pin_shared_mmap": True}, True),
+        ({"pin_shared_mmap": "false"}, False),
+        ({"pin_shared_mmap": "0"}, False),
+        ({"pin_shared_mmap": "NO"}, False),
+        ({"pin_shared_mmap": "true"}, True),
     ],
 )
-def test_tiering_pinning_options_respect_layout(monkeypatch, replicated, extra, expected):
+def test_tiering_chooses_pinning_scope_from_layout(monkeypatch, replicated, extra, pin_enabled):
     monkeypatch.setattr(torch, "npu", SimpleNamespace(current_device=lambda: 3), raising=False)
     region = object()
     worker_factory = Mock(return_value=object())
@@ -212,7 +210,8 @@ def test_tiering_pinning_options_respect_layout(monkeypatch, replicated, extra, 
     spec.blocks_per_chunk = 2
     spec.create_worker(object())
     kwargs = worker_factory.call_args.kwargs
-    assert (kwargs["pin_shared_mmap"], kwargs["worker_slot_only"]) == expected
+    assert kwargs["pin_shared_mmap"] is pin_enabled
+    assert kwargs["worker_slot_only"] is (not replicated)
     assert kwargs["mmap_region"] is region
 
 
