@@ -460,7 +460,7 @@ def test_packed_chunks_reorg_covers_each_history_once(dcp_size, interleave, use_
         meta = builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=len(histories)))
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.kv_lora_rank = impl.qk_rope_head_dim = 1
-    seen = [[] for _ in histories]
+    seen: list[list[float]] = [[] for _ in histories]
     for chunk, counts in enumerate(meta.padded_local_chunk_seq_lens):
         senders = []
         for physical_rank in range(dcp_size):
