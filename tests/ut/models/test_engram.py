@@ -30,6 +30,64 @@ from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgr
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
 
 
+@pytest.mark.parametrize(
+    "cpu_offload,dp_shared_memory",
+    [(False, False), (True, False), (True, True)],
+)
+@pytest.mark.parametrize(
+    "storage_dtype,scale_dtype",
+    [
+        (torch.bfloat16, None),
+        (torch.int8, torch.float32),
+        (torch.float8_e4m3fn, torch.uint8),
+    ],
+)
+def test_engram_meta_initialization_does_not_allocate_storage(
+    monkeypatch, cpu_offload, dp_shared_memory, storage_dtype, scale_dtype
+):
+    """Encoder-only language-model placeholders must stay on meta."""
+    group = SimpleNamespace(cpu_group=object(), world_size=2, rank_in_group=0) if dp_shared_memory else None
+    monkeypatch.setattr(embedding_mod, "get_tp_group", lambda: SimpleNamespace(cpu_group=object()))
+    monkeypatch.setattr(embedding_mod, "get_engram_dp_group", lambda: group)
+    monkeypatch.setattr(embedding_mod, "get_engram_dp_size", lambda: 1)
+    monkeypatch.setattr(embedding_mod, "in_the_same_node_as", lambda group: [True])
+    monkeypatch.setattr(embedding_mod, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(embedding_mod, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        embedding_mod,
+        "HostUvaBuffer",
+        Mock(side_effect=AssertionError("host allocation during meta initialization")),
+    )
+    monkeypatch.setattr(
+        embedding_mod,
+        "SharedUvaBuffer",
+        Mock(side_effect=AssertionError("shared allocation during meta initialization")),
+    )
+
+    with torch.device("meta"):
+        table = embedding_mod.AscendParallelEngramEmbedding(
+            36,
+            64,
+            (17, 19),
+            0,
+            cpu_offload=cpu_offload,
+            dp_shared_memory=dp_shared_memory,
+            storage_dtype=storage_dtype,
+        )
+
+    assert table.weight.is_meta
+    assert table.weight.shape == (36, 64)
+    assert table.weight.dtype == storage_dtype
+    assert not hasattr(table.weight, "dummy_weight_value")
+    if scale_dtype is None:
+        assert table.weight_scale_inv is None
+    else:
+        assert table.weight_scale_inv is not None
+        assert table.weight_scale_inv.is_meta
+        assert table.weight_scale_inv.shape == (36, 2)
+        assert table.weight_scale_inv.dtype == scale_dtype
+
+
 @pytest.mark.parametrize("tp", [1, 2, 4])
 @pytest.mark.parametrize("dp", [1, 2])
 @pytest.mark.parametrize("tokens", [0, 3])
