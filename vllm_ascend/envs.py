@@ -22,6 +22,36 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+_BOOL_TRUE = frozenset({"1", "true", "yes", "on"})
+_BOOL_FALSE = frozenset({"0", "false", "no", "off"})
+
+# Boolean environment variables parsed through _bool_env(). Kept as a module
+# constant (not part of env_variables) so tests and docs can enumerate them
+# without affecting __dir__().
+BOOLEAN_ENV_VARS: tuple[str, ...] = ("COMPILE_CUSTOM_KERNELS", "VERBOSE")
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    """Parse a boolean environment variable with clear diagnostics.
+
+    Accepts 1/0, true/false, yes/no and on/off (case-insensitive, surrounding
+    whitespace ignored). Unset or empty values fall back to ``default``.
+    Any other value raises ValueError naming the variable and valid options.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in _BOOL_TRUE:
+        return True
+    if value in _BOOL_FALSE:
+        return False
+    raise ValueError(
+        f"Invalid value for environment variable {name}: {raw!r}. "
+        f"Expected one of {sorted(_BOOL_TRUE | _BOOL_FALSE)} (case-insensitive)."
+    )
+
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
@@ -41,7 +71,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # This configuration option should only be set to False when running UT
     # scenarios in an environment without an NPU. Do not set it to False in
     # other scenarios.
-    "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
+    "COMPILE_CUSTOM_KERNELS": lambda: _bool_env("COMPILE_CUSTOM_KERNELS", True),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER": lambda: os.getenv("CXX_COMPILER", None),
@@ -53,7 +83,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Please make sure that the version is correct.
     "SOC_VERSION": lambda: os.getenv("SOC_VERSION", None),
     # If set, vllm-ascend will print verbose logs during compilation
-    "VERBOSE": lambda: bool(int(os.getenv("VERBOSE", "0"))),
+    "VERBOSE": lambda: _bool_env("VERBOSE", False),
     # The home path for CANN toolkit. If not set, the default value is
     # /usr/local/Ascend/ascend-toolkit/latest
     "ASCEND_HOME_PATH": lambda: os.getenv("ASCEND_HOME_PATH", None),
