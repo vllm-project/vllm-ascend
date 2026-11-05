@@ -20,6 +20,7 @@
 Run "pytest tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dspark.py".
 """
 
+import math
 import os
 from copy import deepcopy
 from unittest.mock import patch
@@ -29,7 +30,12 @@ from vllm import SamplingParams
 from vllm.config import CompilationConfig
 
 from tests.e2e.conftest import VllmRunner
-from tests.e2e.pull_request.utils import SPEC_DECODE_PROMPTS, _check_decode_token, _run_speculative_decoding
+from tests.e2e.pull_request.utils import (
+    SPEC_DECODE_PROMPTS,
+    _check_decode_token,
+    _check_prefill_token,
+    _run_speculative_decoding,
+)
 
 QWEN36_DENSE_MODEL = os.getenv("PR20361_TARGET_MODEL", "Qwen/Qwen3.6-27B")
 QWEN36_DSPARK_DRAFT_MODEL = os.getenv("PR20361_DRAFT_MODEL", "rainney/Qwen3.6-27B-DSpark")
@@ -39,6 +45,33 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 MAX_MODEL_LEN = 72320
 MAX_NUM_BATCHED_TOKENS = 16384
 GPU_MEMORY_UTILIZATION = 0.95
+# Match compare_logprobs(): decode permits twice the prefill tolerance when
+# different BF16 execution/query shapes are compared. Keep prefill stricter.
+_GDN_PREFILL_LOGPROB_ATOL = 0.0689
+_GDN_DECODE_LOGPROB_ATOL = 2 * _GDN_PREFILL_LOGPROB_ATOL
+
+
+def _check_gdn_verification_logprobs(base_seq, comp_seq, prompt_idx):
+    for name, seq in (("baseline", base_seq), ("comparison", comp_seq)):
+        assert seq.logprobs is not None, f"{name}: missing logprobs for prompt {prompt_idx}"
+        assert len(seq.logprobs) == len(seq.token_ids), f"{name}: incomplete logprobs for prompt {prompt_idx}"
+        # Check the entire sequence even if a permitted near-tie later makes
+        # the contexts diverge and ends the distribution comparison.
+        for token_idx, token_id in enumerate(seq.token_ids):
+            assert token_id in seq.logprobs[token_idx], (
+                f"{name}: missing sampled-token logprob at prompt {prompt_idx}, token {token_idx}"
+            )
+            assert math.isfinite(seq.logprobs[token_idx][token_id].logprob), (
+                f"{name}: non-finite logprob at prompt {prompt_idx}, token {token_idx}"
+            )
+
+    _check_prefill_token(base_seq, comp_seq, prompt_idx, atol=_GDN_PREFILL_LOGPROB_ATOL)
+    for token_idx in range(1, len(base_seq.token_ids)):
+        _check_decode_token(base_seq, comp_seq, token_idx, prompt_idx, decode_atol=_GDN_DECODE_LOGPROB_ATOL)
+        if base_seq.token_ids[token_idx] != comp_seq.token_ids[token_idx]:
+            # A permitted near-tie changes subsequent contexts. Compare
+            # distributions only while both runs share the same prefix.
+            break
 
 
 @pytest.mark.parametrize("model_name", MODELS)
@@ -288,14 +321,7 @@ def test_qwen36_dspark_adaptive_gdn_full_to_zero_graph_replay():
         for prompt_idx, (baseline, trimmed) in enumerate(zip(reference_outputs, comparison, strict=True)):
             base_seq, trimmed_seq = baseline.outputs[0], trimmed.outputs[0]
             assert len(base_seq.token_ids) == len(trimmed_seq.token_ids) == sampling.max_tokens
-            for token_idx, (base_id, trimmed_id) in enumerate(
-                zip(base_seq.token_ids, trimmed_seq.token_ids, strict=True)
-            ):
-                try:
-                    _check_decode_token(base_seq, trimmed_seq, token_idx, prompt_idx, decode_atol=0.0689)
-                except AssertionError as exc:
-                    pytest.fail(f"{comparison_name}: {exc}")
-                if base_id != trimmed_id:
-                    # A permitted near-tie changes subsequent contexts. Compare
-                    # distributions only while both runs share the same prefix.
-                    break
+            try:
+                _check_gdn_verification_logprobs(base_seq, trimmed_seq, prompt_idx)
+            except AssertionError as exc:
+                pytest.fail(f"{comparison_name}: {exc}")
