@@ -382,7 +382,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             key_quant_mode=2,
             value_quant_mode=2,
             rope_head_dim=64,
-            return_softmax_lse=True,
+            return_softmax_lse=False,
         )
         if isinstance(result, tuple):
             result = result[0]
