@@ -28,11 +28,7 @@ configuration and a two-node A3 Prefill-Decode (PD) disaggregated
 configuration. It also supports a two-node hybrid A2 configuration and a
 four-node A2 PD disaggregated configuration.
 
-This guide follows **vLLM Ascend main** and recommends W4A8 for performance.
-
-Use the matching upstream vLLM revision for the selected vLLM Ascend version.
-For source builds from main, use the exact upstream vLLM commit recorded in
-`.github/vllm-main-verified.commit` at the selected vLLM Ascend revision.
+This guide uses **vLLM Ascend v0.32.0** and recommends W4A8 for performance.
 
 ## 2 Supported Features
 
@@ -178,9 +174,10 @@ absolute path inside and outside every container.
 ### 4.2 Source Code Installation
 
 To build from source, follow the
-[software environment installation guide](../../getting_started/installation.md#installation-software-environment)
-and check out the **main** branch of vLLM Ascend. Use the matching upstream
-vLLM commit recorded in `.github/vllm-main-verified.commit` at that revision.
+[software environment installation guide](../../getting_started/installation.md#installation-software-environment).
+
+For multi-node deployment, install the same version of vLLM and vLLM Ascend
+on each node.
 
 ## 5 Online Service Deployment
 
