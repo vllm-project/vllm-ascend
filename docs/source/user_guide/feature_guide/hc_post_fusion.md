@@ -25,6 +25,11 @@ final BF16 cast. Its input/output contract is:
 - This initial kernel is limited to at most 128 local tokens; larger
   prefill batches use the native operators until benchmarked separately.
 
+Column tiles follow the hidden size, with power-of-two widths bounded by
+256 and 2048. At hidden size 5120, each token uses three masked column
+tiles instead of twenty 256-column tiles. This changes the launch grid,
+while retaining the same arithmetic order and rounding points.
+
 Scaling, routed transforms and shared-expert stream waits remain before the
 fusion. The runtime custom op retains the original path when the combined
 output still needs a TP collective, zero-expert addition, width truncation,
@@ -55,6 +60,8 @@ verify graph replay:
 ```bash
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_hc_post_add.py
 python benchmarks/hc_post_add.py --device 0 --tokens 10 12 --banks 40
+python benchmarks/hc_post_add.py --device 0 --tokens 10 12 --dim 5120 \
+  --banks 40 --blocks 256 512 1024 2048
 ```
 
 The benchmark alternates baseline/candidate measurement order and uses
