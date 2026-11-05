@@ -32,7 +32,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
-from vllm_ascend.device.device_config import is_950
+from vllm_ascend.device.device_config import is_310p, is_950
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 
 if TYPE_CHECKING:
@@ -444,6 +444,8 @@ class AscendConfig:
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": true,
             "enable_pcp_embedding_lmhead_weight_sharding": true,
+            "draft_window_size": null,
+            "draft_kv_window": null,
             "mix_placement": false,
             "pa_shape_list": [],
             "mega_moe_max_tokens": 65536,
@@ -587,6 +589,19 @@ class AscendConfig:
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
+    draft_window_size: int | None = None
+    # Sliding-window size (in tokens) for the DRAFT model's KV cache, for the
+    # MRV2 target-dependent AR speculator (EAGLE/EAGLE3 and GQA MTP drafts).
+    # Unlike the V1-only ``draft_window_size`` (an attention-view crop that
+    # does not shrink KV allocation), this converts the draft attention
+    # layers' KV cache spec to upstream ``SlidingWindowSpec``, so the draft KV
+    # pool drops from O(max_model_len) to O(draft_kv_window) blocks per
+    # request. Verification still uses the target model's full KV cache; only
+    # the draft context and acceptance rate are affected. None (default) keeps
+    # the draft KV cache full-length, i.e. the exact current behavior.
+    # Prefix caching remains enabled. Compact target/draft KV groups keep CANN
+    # FIA paged block IDs below its 32768-block wraparound limit.
+    draft_kv_window: int | None = None
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
     # value (e.g. 4 = MXFP float8_e4m3 communication quantization) regardless of the
@@ -934,6 +949,9 @@ class AscendConfig:
 
         # sparse KV offload vs packed SFA main cache mutex
         self._validate_sparse_packed_kv_offload_compatibility()
+
+        # draft KV sliding window vs speculative method / runner / parallelism
+        self._validate_draft_kv_window(vc)
         return self
 
     @property
@@ -980,6 +998,56 @@ class AscendConfig:
             raise NotImplementedError(
                 "Sparse KV offload does not support packed SFA main caches (C8 or TQ4). "
                 "Sparse LI C8 is supported because the indexer cache remains device-resident."
+            )
+
+    def _validate_draft_kv_window(self, vllm_config: VllmConfig) -> None:
+        """Validate the draft KV sliding-window switch (MRV2 spec decode only).
+
+        ``draft_kv_window`` bounds the draft model's KV cache to the most
+        recent W tokens by converting the draft attention layers' KV cache
+        spec to upstream ``SlidingWindowSpec``. It is deliberately separate
+        from the V1-only ``draft_window_size``, which crops the draft
+        attention view without shrinking KV allocation.
+        """
+        window = self.draft_kv_window
+        if window is None:
+            return
+        if is_310p():
+            raise ValueError("draft_kv_window is not supported on the 310P platform.")
+        if window <= 0:
+            raise ValueError(f"draft_kv_window must be a positive integer, got {window}.")
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        if speculative_config is None:
+            raise ValueError(
+                "draft_kv_window requires speculative decoding; enable it with a speculative_config "
+                "using the eagle, eagle3 or mtp method."
+            )
+        method = str(getattr(speculative_config, "method", "") or "")
+        if method not in ("eagle", "eagle3", "mtp"):
+            raise ValueError(
+                "draft_kv_window is only supported for EAGLE/EAGLE3/MTP drafts on the "
+                f"target-dependent AR speculator, got speculative method {method!r}. "
+                "In particular, DSpark/Kimi-K3 mixed target+draft KV grouping and DFlash "
+                "do not support draft KV windowing yet."
+            )
+        for predicate in ("use_step3p5_mtp", "use_multi_module_mtp", "use_gemma4_mtp"):
+            checker = getattr(speculative_config, predicate, None)
+            if callable(checker) and checker():
+                raise ValueError(f"draft_kv_window does not support {predicate}() drafts yet.")
+        num_speculative_tokens = getattr(speculative_config, "num_speculative_tokens", None) or 0
+        if window < num_speculative_tokens:
+            raise ValueError(
+                f"draft_kv_window ({window}) must be >= num_speculative_tokens "
+                f"({num_speculative_tokens}); one speculative step must fit in the window."
+            )
+        if not getattr(vllm_config, "use_v2_model_runner", False):
+            raise ValueError(
+                "draft_kv_window requires the V2 model runner (MRV2); on the V1 runner use draft_window_size instead."
+            )
+        if vllm_config.parallel_config.decode_context_parallel_size > 1:
+            raise ValueError(
+                "draft_kv_window does not support decode context parallelism (DCP) yet: "
+                "upstream SlidingWindowSpec rejects DCP-sharded sliding-window caches."
             )
 
     @classmethod
