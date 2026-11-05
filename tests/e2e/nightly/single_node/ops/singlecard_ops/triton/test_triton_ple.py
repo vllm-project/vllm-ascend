@@ -45,18 +45,19 @@ def test_output_accuracy_uses_mixed_tolerance(dtype, max_abs_limit):
         _check_output_accuracy(expected, actual)
 
 
-def test_model_dispatch_uses_ascend_decode_and_upstream_spec(monkeypatch):
+def test_model_dispatch_uses_ascend_prefill_decode_and_spec(monkeypatch):
     from vllm.models.qwen4_exp.amd import ple_layer
 
     patch_upstream_ple_short_conv()
     assert ple_layer.ple_conv is _ple_conv_ascend
     calls = []
-    monkeypatch.setattr(ple_adapter, "ple_conv_prefill", lambda *args, **kwargs: calls.append("ascend_prefill"))
+    monkeypatch.setattr(ple_adapter, "ple_conv_prefill", lambda *args, **kwargs: calls.append("prefill"))
     monkeypatch.setattr(ple_adapter, "ple_conv_decode", lambda *args, **kwargs: calls.append("decode"))
+    monkeypatch.setattr(ple_adapter, "ple_conv_spec", lambda *args, **kwargs: calls.append("spec"))
     monkeypatch.setattr(ple_adapter, "upstream_ple_conv", lambda *args, **kwargs: calls.append(kwargs["mode"]))
     for mode in ("prefill", "decode", "spec"):
         ple_layer.ple_conv(mode=mode)
-    assert calls == ["ascend_prefill", "decode", "spec"]
+    assert calls == ["prefill", "decode", "spec"]
 
 
 def test_decode_batch_sizes():
@@ -147,6 +148,54 @@ def test_modes_and_token_mapping():
                     flush=True,
                 )
                 assert state_exact
+
+
+def test_spec_channel_contiguous_state():
+    """Match the default serving cache layout and the MTP3 decode shape."""
+    torch.manual_seed(73)
+    requests, spec_len = 12, 4
+    tokens, channels, state_width = requests * spec_len, 10240, 12
+    for dtype in (torch.bfloat16, torch.float16):
+        inputs = torch.randn(tokens, channels, device="npu", dtype=dtype)
+        weights = torch.randn(channels, 4, device="npu", dtype=dtype)
+        # Serving allocates SD and transposes it to logical [slot, channel, window].
+        state = torch.randn(
+            requests + 1,
+            state_width,
+            channels,
+            device="npu",
+            dtype=dtype,
+        ).transpose(1, 2)
+        residual = torch.randn_like(inputs)
+        outer_residual = torch.randn_like(inputs)
+        state_indices = torch.arange(1, requests + 1, device="npu", dtype=torch.int32)
+        state_indices[-1] = NULL_BLOCK_ID
+        query_start_loc = torch.arange(0, tokens + 1, spec_len, device="npu", dtype=torch.int32)
+        num_accepted_tokens = torch.tensor(
+            [request % spec_len + 1 for request in range(requests)],
+            device="npu",
+            dtype=torch.int32,
+        )
+        token_indices = torch.arange(tokens - 1, -1, -1, device="npu", dtype=torch.int32)
+        kwargs = dict(
+            inputs=inputs,
+            conv_weights=weights,
+            state_indices=state_indices,
+            outer_residual=outer_residual,
+            mode="spec",
+            dilation=3,
+            query_start_loc=query_start_loc,
+            num_accepted_tokens=num_accepted_tokens,
+            spec_query_len=spec_len,
+            token_indices=token_indices,
+        )
+        expected, actual = residual.clone(), residual.clone()
+        expected_state, actual_state = state.clone(), state.clone()
+        upstream_ple_conv(**kwargs, residual=expected, conv_state=expected_state)
+        _ple_conv_ascend(**kwargs, residual=actual, conv_state=actual_state)
+        torch.npu.synchronize()
+        assert torch.equal(expected, actual)
+        assert torch.equal(expected_state, actual_state)
 
 
 def test_prefill_one_request():
