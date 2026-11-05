@@ -237,6 +237,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.tp_group_context = nullcontext()
 
         self.use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
+        # Persistent target_positions buffer for the draft graph (stable addresses).
+        self._draft_target_positions = None
         self._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
 
         # GLM series models: speculative decoding does not yet support running
@@ -1010,6 +1012,41 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
+    def _stage_target_positions(self, target_positions: torch.Tensor) -> torch.Tensor:
+        """Copy target_positions into the persistent buffer and return its slice.
+
+        The draft ACL graph is replayed by ACLGraphWrapper.replay(), which does not
+        run this Python code again, so every captured tensor address must stay
+        stable. target_positions is freshly allocated per step (_get_positions
+        via advanced indexing), so its address drifts and the graph reads stale
+        data.
+        """
+        if target_positions.dim() != 1:
+            return target_positions
+        capacity = getattr(self, "max_num_tokens", None)
+        if capacity is None:
+            return target_positions
+        num_tokens = target_positions.shape[0]
+        buffer = getattr(self, "_draft_target_positions", None)
+        if buffer is None:
+            buffer = torch.zeros(
+                capacity,
+                dtype=target_positions.dtype,
+                device=target_positions.device,
+            )
+            self._draft_target_positions = buffer
+            logger.info(
+                "[draft-graph] persistent draft_target_positions buffer created (%d, %s)",
+                capacity,
+                target_positions.dtype,
+            )
+        if buffer.dtype != target_positions.dtype or buffer.device != target_positions.device:
+            raise RuntimeError("[draft-graph] dtype/device changed; refusing to replace the persistent buffer")
+        if num_tokens > buffer.shape[0]:
+            raise ValueError("[draft-graph] target_positions exceed the persistent buffer capacity")
+        buffer[:num_tokens].copy_(target_positions)
+        return buffer[:num_tokens]
+
     def _propose(
         self,
         num_speculative_tokens: int,
@@ -1068,6 +1105,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             target_hidden_states = cast(_HiddenStateDrafter, model).combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
+        # Address stability: draft-graph replay skips Python, so tensor addresses stay fixed.
+        if self.method == "dspark":
+            target_positions = self._stage_target_positions(target_positions)
         num_tokens, token_indices_to_sample, common_attn_metadata, long_seq_args = self.set_inputs_first_pass(
             target_token_ids=target_token_ids,
             next_token_ids=next_token_ids,
@@ -1089,10 +1129,32 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         uniform_decode = target_model_batch_desc.uniform
+        graph_contract = self.method == "dspark"
+        use_draft_graph = self.use_cuda_graph
+        if graph_contract:
+            # Capture contains a bounded decode context, not arbitrary prefill.
+            # Other parallel layouts need their own shape/synchronization proof.
+            use_draft_graph = use_draft_graph and bool(uniform_decode) and num_prefill_reqs == 0
+            use_draft_graph = use_draft_graph and self.runner.dp_size == 1 and self.dcp_size == 1
+            use_draft_graph = use_draft_graph and self.vllm_config.parallel_config.prefill_context_parallel_size == 1
 
-        if self.use_cuda_graph:
+        # The draft consumes num_query_per_req (=5) tokens per request, while the
+        # dispatcher buckets by uniform_decode_query_len (=6); with more requests it
+        # picks a bucket with too few rows (40 -> 42 gives 7 < 8, 35 -> 36 gives 6 < 7),
+        # and model_runner_v1._pad_query_start_loc_for_fia trips its assertion
+        # `assert num_reqs <= num_reqs_padded` (always at C=32, never at C<=16).
+        # Fix: convert the dispatch input to the equivalent token count using uniform_decode_query_len per request.
+        _dispatch_num_tokens = num_tokens
+        if graph_contract and use_draft_graph and uniform_decode:
+            _udql = int(getattr(self.runner.cudagraph_dispatcher, "uniform_decode_query_len", 0) or 0)
+            _nqr = int(getattr(self, "num_query_per_req", 0) or 0)
+            _nreq = int(getattr(common_attn_metadata, "num_reqs", 0) or 0)
+            if _udql > 0 and _nqr > 0 and _udql != _nqr and _nreq > 0 and num_tokens == _nreq * _nqr:
+                _dispatch_num_tokens = _nreq * _udql
+
+        if use_draft_graph:
             _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
-                num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
+                num_tokens=_dispatch_num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
             num_input_tokens = batch_descriptor.num_tokens
         else:
@@ -1104,7 +1166,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             _,
         ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
 
-        if self.use_cuda_graph:
+        if use_draft_graph:
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
@@ -1113,7 +1175,37 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
 
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+        if graph_contract:
+            padded_reqs = getattr(batch_descriptor, "num_reqs", None)
+            num_spec = getattr(self, "num_speculative_tokens", None)
+            if num_spec is None:
+                num_spec = num_speculative_tokens
+            context_capacity = (padded_reqs or 0) * (1 + num_spec)
+            if (
+                aclgraph_runtime_mode == CUDAGraphMode.FULL
+                and padded_reqs is not None
+                and common_attn_metadata.num_reqs <= padded_reqs <= self.max_batch_size
+                and getattr(self, "_dflash_num_context", 0) <= context_capacity <= self.max_num_tokens
+            ):
+                # Keep the target descriptor as the graph cache key, but use
+                # the same draft query shape as dummy_run (B_padded * q).
+                num_input_tokens = padded_reqs * self.num_query_per_req
+                assert num_input_tokens <= self.max_query_tokens
+                assert num_tokens_across_dp is None  # guarded to DP=1 above
+            else:
+                aclgraph_runtime_mode = CUDAGraphMode.NONE
+                batch_descriptor = None
+                num_input_tokens = num_tokens
+                # Non-graph multi-DP execution still uses its synchronized size.
+                if num_tokens_across_dp is not None:
+                    if num_tokens_across_dp.dim() == 0:
+                        num_input_tokens = int(num_tokens_across_dp)
+                    else:
+                        num_input_tokens = int(num_tokens_across_dp[getattr(self.runner, "dp_rank", 0)])
+
+        if graph_contract and aclgraph_runtime_mode == CUDAGraphMode.FULL and hasattr(self, "_pad_uniform_draft"):
+            num_reqs_padded = self._pad_uniform_draft(common_attn_metadata, batch_descriptor.num_reqs)
+        elif aclgraph_runtime_mode == CUDAGraphMode.FULL:
             # TODO: Due to the inconsistency between the proposer `dispatcher` and model runner, this padding
             # should have been done in model runner but not. For example, at prefill stage, target model
             # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
@@ -1349,7 +1441,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
         active_device_metadata_executor = (
-            getattr(self.runner, "device_metadata_executor", None) if self.method == "dspark" else None
+            getattr(self.runner, "device_metadata_executor", None)
+            if self.method == "dspark"
+            and not (getattr(self, "use_cuda_graph", False) and getattr(self, "_draft_metadata_current_stream", False))
+            else None
         )
         if active_device_metadata_executor is not None and not active_device_metadata_executor.submission_in_flight:
             active_device_metadata_executor = None
@@ -1386,7 +1481,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             }
             runnable = cast(Callable[..., Any], self._runnable)
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
-
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
                 draft_token_ids = run_draft()
@@ -1395,6 +1489,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
         if active_device_metadata_executor is not None:
             active_device_metadata_executor.release()
+        if graph_contract:
+            # Graph outputs retain padded request rows; never return them as
+            # proposals for active requests.
+            return draft_token_ids[:batch_size]
         return draft_token_ids
 
     def _sample_draft_from_logits(
@@ -2643,7 +2741,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
         if device_metadata_executor is not None and device_metadata_tasks:
-            device_metadata_executor.submit(device_metadata_tasks)
+            if getattr(self, "_draft_metadata_current_stream", False) and getattr(self, "use_cuda_graph", False):
+                # The captured draft does not replay Python consumer waits.
+                # Enqueue producers on the consumer stream before graph replay;
+                # this is device stream ordering, not a host synchronize.
+                for task in sorted(device_metadata_tasks, key=lambda item: item.stage):
+                    task.run()
+            else:
+                device_metadata_executor.submit(device_metadata_tasks)
         multi_steps_attn_metadata = [per_layer_attn_metadata]
         # Copy the old attn_metadata and update
         primary_group = self._get_primary_draft_attn_group()
@@ -2666,7 +2771,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         for buf in getattr(self, "_per_group_query_slot_mapping_buffers", {}).values():
             buf[num_actual_tokens:num_input_tokens].fill_(-1)
         for buf in getattr(self, "_per_group_context_slot_mapping_buffers", {}).values():
-            buf[self._dflash_num_context :].fill_(-1)
+            buf[getattr(self, "_dflash_num_context", num_actual_tokens) :].fill_(-1)
 
 
 # draft_embed_mm_kwargs: text-only MTP heads such as Glm5NextMTP expose
