@@ -1,5 +1,4 @@
-# See https://help.github.com/articles/about-codeowners/
-# for more info about CODEOWNERS file
+# See https://help.github.com/articles/about-codeowners/ for more info about CODEOWNERS file
 
 # Infra, CI
 /.gemini @wangxiyuan
@@ -43,16 +42,23 @@
 /README* @liqian79
 /mkdocs.yml @MrZ20
 
+# examples
+/examples/  @MrZ20
+
 # c++ source code
 /cmake @zzzzwwjj @ZT-AIA
 /csrc @zzzzwwjj @ZT-AIA
 /CMakeLists.txt @zzzzwwjj @ZT-AIA
 
 # attention
+/vllm_ascend/attention/
 /vllm_ascend/attention/context_parallel @weiguihua2
 /vllm_ascend/attention/dsa*.py @weijinqian0 
 /vllm_ascend/attention/indexer.py @weijinqian0
 /vllm_ascend/attention/indexer_kpool.py @weijinqian0
+
+
+
 
 # compilation
 /vllm_ascend/compilation @yiz-liu @wxsIcey
@@ -149,6 +155,15 @@
 # 310P
 /vllm_ascend/_310p @Tflowers-0129
 
+# release_notes
+/release_notes/ @wangxiyuan
+
+# recipes
+/recipes/ @SOMEONEUNSEEN
+
+# tests
+/tests/
+
 # vllm_ascend module directories (subdirs broken out one level)
 # TODO(owner): /vllm_ascend/_cann_ops_custom
 # /vllm_ascend/_cann_ops_custom
@@ -183,14 +198,11 @@
 # TODO(owner): /tests/ut/
 # /tests/ut/
 
-# examples / benchmarks / recipes / release notes
-# TODO(owner): /examples/
-# /examples/
+
+
 # TODO(owner): /benchmarks/
 # /benchmarks/
-# TODO(owner): /recipes/
-# /recipes/
-# TODO(owner): /release_notes/
-# /release_notes/
+
+
 
 
