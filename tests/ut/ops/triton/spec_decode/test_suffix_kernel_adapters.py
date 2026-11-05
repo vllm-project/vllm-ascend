@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from vllm_ascend.ops.triton.spec_decode import suffix as ops
-from vllm_ascend.worker.v2.spec_decode.suffix.kernel_adapters import (
+from vllm_ascend.ops.triton.spec_decode.suffix import (
     ascend_suffix_ingestion,
     ascend_suffix_proposal,
 )
