@@ -142,7 +142,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
-      - '{"enable_dsa_cp": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'
+      - '{"enable_fused_mc2": 1, "enable_flashcomm1": true}'
       - --speculative-config
       - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
       - --kv-transfer-config
@@ -197,7 +197,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
-      - '{"enable_dsa_cp": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'
+      - '{"enable_fused_mc2": 1, "enable_flashcomm1": true}'
       - --speculative-config
       - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
       - --kv-transfer-config
@@ -336,28 +336,28 @@ benchmarks:
     request_rate: 0
     baseline: 0
     threshold: 0.97
-#  perf_warmup:
-#    case_type: performance
-#    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_GLM5_3_w8a8c8_warm_prefix_num16
-#    request_conf: vllm_api_stream_chat
-#    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-#    num_prompts: 1
-#    max_out_len: 1
-#    batch_size: 1
-#    request_rate: 0
-#    baseline: 0
-#    threshold: 0.97
-#  perf_2:
-#    case_type: performance
-#    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_GLM5_3_w8a8c8_prefix_num16
-#    request_conf: vllm_api_stream_chat
-#    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-#    num_prompts: 256
-#    max_out_len: 1
-#    batch_size: 64
-#    request_rate: 0
-#    baseline: 0
-#    threshold: 0.97
+  perf_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_GLM5_3_w8a8c8_warm_prefix_num16
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 1
+    max_out_len: 1
+    batch_size: 1
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
+  perf_2:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_GLM5_3_w8a8c8_prefix_num16
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 256
+    max_out_len: 1
+    batch_size: 64
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
 #  acc_aime2025:
 #    case_type: accuracy
 #    dataset_path: vllm-ascend/aime2025
