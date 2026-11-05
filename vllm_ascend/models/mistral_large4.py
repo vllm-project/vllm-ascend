@@ -50,15 +50,13 @@ import torch
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_ep_group
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.models.mistral.amd.attention import MistralMLAAttention
 from vllm.models.mistral.mistral_large4.amd.model import (
     MistralLarge4ForCausalLM,
 )
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
-
-logger = init_logger(__name__)
 
 __all__ = [
     "AscendMistralIndexerBackend",
