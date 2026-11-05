@@ -369,6 +369,12 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
 
 We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented.
 
+When a `MooncakeHybridConnector` request reaches the D scheduler but finishes
+before its KV receive is dispatched, D sends a completion notification through
+an empty receive so P can release the retained blocks. Requests cancelled
+before reaching the engine, or completion notifications that cannot reach P,
+still rely on `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT` for cleanup.
+
 ### QoS Configuration
 
 Set `qos_priority` in the transfer initiator's `kv_connector_extra_config`.
