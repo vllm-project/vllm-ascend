@@ -16,9 +16,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     buffer_alloc_bytes,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
-    ShardedRDTWeightTransferEngine as _UpstreamEngine,
-)
-from vllm.distributed.weight_transfer.sharded_rdt_engine import (
+    ShardedRDTWeightTransferEngine,
     ShardedRDTWeightTransferInitInfo,
     _Chunk,
     _PendingPull,
@@ -33,7 +31,7 @@ from vllm.logger import logger
 from vllm_ascend.distributed.weight_transfer.hixl_session import HixlSession
 
 
-class ShardedRDTWeightTransferEngine(_UpstreamEngine):
+class ShardedRDTHixlWeightTransferEngine(ShardedRDTWeightTransferEngine):
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Configure the ring, bind the producers, bake the replay plan, and
         pre-register every HIXL buffer -- in that order, because each step depends
