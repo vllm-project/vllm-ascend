@@ -1,0 +1,9 @@
+pr: 21066
+entries:
+  - category: bugfix
+    text: >-
+      Fixed topo-affinity CPU binding placing a TP worker on the next NUMA node
+      when several NPUs share one affinity node. Shared affinity pools are now
+      split before any CPUs are borrowed, so every worker keeps its threads and
+      migrated memory on its own home NUMA node.
+    hardware: [A2]
