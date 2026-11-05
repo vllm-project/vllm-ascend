@@ -947,6 +947,23 @@ class KVPoolWorker:
             block_id_list: list[int] = []
             load_masks = self.token_database.load_mask(request.block_hashes, token_len)
             for group_id in load_group_ids:
+                layer_counts = self.token_database.group_num_layers.get("kv", {})
+                if group_id in layer_counts:
+                    local_group_layers = layer_counts[group_id]
+                else:
+                    # Older/custom databases may not publish layer counts.
+                    # Preserve descriptor-backed groups while treating groups
+                    # with no local buffers as empty on this PP stage.
+                    group_addrs = self.token_database.group_kv_caches_base_addr.get(group_id, [])
+                    group_sizes = self.token_database.group_block_len.get(group_id, [])
+                    local_group_layers = 1 if group_addrs and group_sizes else 0
+                if local_group_layers <= 0:
+                    logger.debug(
+                        "Skipping KV pool get for PP-local empty group: request=%s group=%d",
+                        request.req_id,
+                        group_id,
+                    )
+                    continue
                 if group_id >= len(request.block_ids_by_group):
                     continue
                 block_ids = request.block_ids_by_group[group_id]
@@ -979,6 +996,15 @@ class KVPoolWorker:
                         kv_cache_group_id=group_id,
                         block_id=block_id,
                     )
+                    if not addr or not size or len(addr) != len(size):
+                        logger.warning(
+                            "Skipping KV pool get key without valid local descriptors: "
+                            "request=%s group=%d key=%s",
+                            request.req_id,
+                            group_id,
+                            key,
+                        )
+                        continue
                     key_list.append(key)
                     addr_list.append(addr)
                     size_list.append(size)

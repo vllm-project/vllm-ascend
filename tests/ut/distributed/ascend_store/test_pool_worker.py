@@ -1398,6 +1398,33 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(stats.data["load_get_keys"], 1)
         self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
 
+    def test_start_load_kv_sync_skips_pp_local_empty_group(self):
+        worker = self._make_worker(extra_config={"load_async": False})
+        worker.grouped_block_size = [16, 16]
+        worker.m_store.get = MagicMock(return_value=[0])
+        worker.token_database.set_group_buffers(
+            {0: [1000], 1: []},
+            {0: [160], 1: []},
+            group_num_layers={0: 1, 1: 0},
+        )
+        req = ReqMeta(
+            req_id="pp-local-empty",
+            token_len_chunk=16,
+            block_ids_by_group=[[0], [0]],
+            block_hashes=["h0"],
+            kv_cache_group_ids=[0, 1],
+            load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+        )
+        meta = AscendConnectorMetadata(set())
+        meta.add_request(req)
+
+        worker.start_load_kv(meta)
+
+        keys, addrs, sizes = worker.m_store.get.call_args.args
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(addrs, [[1000]])
+        self.assertEqual(sizes, [[160]])
+
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
         autospec=True,
