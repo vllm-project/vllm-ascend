@@ -23,7 +23,6 @@ The upstream model package is not in a vLLM release yet
 import abc
 import importlib.util
 from types import SimpleNamespace
-from typing import Generic, TypeVar
 
 import pytest
 import torch
@@ -34,8 +33,6 @@ pytest.importorskip(
 )
 
 from vllm_ascend.models import mistral_large4 as ml4  # noqa: E402
-
-_T = TypeVar("_T")
 
 
 def _spec(layer_idx: int, kv_source_layer: int, has_indexer: bool = True):
@@ -51,15 +48,21 @@ def _spec(layer_idx: int, kv_source_layer: int, has_indexer: bool = True):
     )
 
 
-class _Impl(abc.ABC, Generic[_T]):
+# B024: an ABC with no abstract methods is the point. The stand-in has to
+# inherit from abc.ABC to get the layout AscendSFAImpl has -- a metaclass=
+# ABCMeta class does not reproduce it, and neither does a plain class -- and
+# it has to be instantiable.
+class _Impl(abc.ABC):  # noqa: B024
     """Stand-in for AscendSFAImpl, with its object layout.
 
-    The bases matter. ``AscendSFAImpl`` descends from ``MLAAttentionImpl`` and
-    ``AttentionImplBase(ABC, Generic[T])``, none of which declare ``__slots__``,
-    so ``AttentionImplBase`` is the class that adds the instance dict. Putting
-    a mixin in front of that layout is refused by CPython, which is why the
-    write skip is installed on the instance instead. A plain stand-in would
-    accept the class switch and let that regression back in.
+    The base matters. ``AscendSFAImpl`` descends from ``MLAAttentionImpl`` and
+    ``AttentionImplBase(ABC, Generic[T])``, none of which declare
+    ``__slots__``, so ``AttentionImplBase`` is the class that adds the instance
+    dict. Putting a mixin in front of that layout is refused by CPython, which
+    is why the write skip is installed on the instance instead. A stand-in
+    without the ABC accepts the class switch and would let that regression
+    back in; ``Generic`` is left out because it declares empty slots and so
+    does not change the layout.
     """
 
     def _get_sfa_kv_slot_mapping(self, attn_metadata):
