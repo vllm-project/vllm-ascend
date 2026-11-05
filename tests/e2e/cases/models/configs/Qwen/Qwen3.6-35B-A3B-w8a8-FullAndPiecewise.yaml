@@ -15,6 +15,7 @@
         OPENBLAS_NUM_THREADS: "1"
         TASK_QUEUE_ENABLE: "1"
         HCCL_BUFFSIZE: "1024"
+        VLLM_USE_FASTOKENS: "1"
         SERVER_PORT: "DEFAULT_PORT"
       server_cmd:
         - "--host"
