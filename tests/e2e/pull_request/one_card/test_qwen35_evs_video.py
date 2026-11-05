@@ -17,6 +17,7 @@
 #
 
 import huggingface_hub
+import regex as re
 from huggingface_hub import snapshot_download as hf_snapshot_download
 from vllm import SamplingParams
 from vllm.assets.video import VideoAsset
@@ -31,13 +32,14 @@ def test_qwen35_evs_reduces_video_prompt_tokens():
     videos = [(video.np_ndarrays, video.metadata)]
     prompts = [
         prompt.replace("<|image_pad|>", "<|video_pad|>")
-        for prompt in qwen_prompt(["Describe this video in one sentence."])
+        for prompt in qwen_prompt(["What object is the baby holding and reading? Answer briefly."])
     ]
     model_path = hf_snapshot_download(
         "Qwen/Qwen3.5-2B",
         local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
     )
     prompt_token_counts = []
+    visual_token_counts = []
     for pruning_rate in (0.0, 0.75):
         with VllmRunner(
             model_path,
@@ -52,6 +54,7 @@ def test_qwen35_evs_reduces_video_prompt_tokens():
         ) as runner:
             # RequestOutput exposes prompt_token_ids separately from generated
             # tokens, so the assertion measures pruning independently of EOS.
+            video_token_id = runner.model.llm_engine.vllm_config.model_config.hf_config.video_token_id
             outputs = runner.model.generate(
                 runner.get_inputs(prompts, videos=videos),
                 sampling_params=SamplingParams(max_tokens=32, temperature=0.0),
@@ -62,8 +65,26 @@ def test_qwen35_evs_reduces_video_prompt_tokens():
                 assert output.outputs, "Generation should return a completion."
                 assert output.outputs[0].text.strip(), "Generated output should not be empty."
                 assert output.prompt_token_ids, "Video prompt should not be empty."
+                # This standard asset shows a baby holding and reading a book.
+                assert re.search(r"\bbook\b", output.outputs[0].text, flags=re.IGNORECASE), (
+                    f"Expected the visible book to be identified, got: {output.outputs[0].text!r}"
+                )
             prompt_token_counts.append(len(outputs[0].prompt_token_ids))
+            visual_token_counts.append(outputs[0].prompt_token_ids.count(video_token_id))
 
     assert prompt_token_counts[1] < prompt_token_counts[0], (
         f"EVS should reduce prompt tokens: baseline={prompt_token_counts[0]}, pruned={prompt_token_counts[1]}"
     )
+
+    assert visual_token_counts[0] > 0, "Baseline should contain video tokens."
+    # A 75% EVS rate on this eight-frame asset should remove at least half
+    # the visual tokens, allowing for the first-frame retention floor.
+    assert 0 < visual_token_counts[1] <= visual_token_counts[0] // 2, (
+        f"Expected substantial visual-token pruning: baseline={visual_token_counts[0]}, pruned={visual_token_counts[1]}"
+    )
+    # The EVS processor also replaces the two outer video wrapper markers.
+    # All remaining nonvisual prompt tokens must be preserved.
+    nonvisual_reduction = (prompt_token_counts[0] - prompt_token_counts[1]) - (
+        visual_token_counts[0] - visual_token_counts[1]
+    )
+    assert 0 <= nonvisual_reduction <= 2, "Unexpected removal of nonvisual prompt tokens."

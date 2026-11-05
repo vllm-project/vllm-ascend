@@ -575,3 +575,62 @@ def test_normalization_through_upstream_vision(monkeypatch, path, enabled):
     assert model.visual.seen.dtype == model.visual.dtype
     if enabled:
         assert model.input_norm.calls == 1
+
+
+@pytest.mark.parametrize("pruning_spec", [("evs", 0.25), ("evs", 0.75), ("vidcom2", 0.5)])
+def test_video_pruning_replaces_full_placeholder(pruning_spec, monkeypatch):
+    processor = object.__new__(AscendQwen3_5VLProcessor)
+    processor.info = SimpleNamespace(
+        ctx=SimpleNamespace(get_mm_config=lambda: SimpleNamespace(get_video_pruning_spec=lambda: pruning_spec))
+    )
+    upstream_calls = []
+    monkeypatch.setattr(
+        Qwen3VLMultiModalProcessor,
+        "_expands_only_video_token",
+        staticmethod(lambda hf_processor: upstream_calls.append(hf_processor) or True),
+    )
+
+    assert processor._expands_only_video_token(object()) is False
+    assert not upstream_calls
+
+
+@pytest.mark.parametrize("upstream_result", [False, True])
+def test_disabled_video_pruning_preserves_upstream_placeholder(upstream_result, monkeypatch):
+    processor = object.__new__(AscendQwen3_5VLProcessor)
+    processor.info = SimpleNamespace(
+        ctx=SimpleNamespace(get_mm_config=lambda: SimpleNamespace(get_video_pruning_spec=lambda: None))
+    )
+    hf_processor = object()
+    upstream_calls = []
+    monkeypatch.setattr(
+        Qwen3VLMultiModalProcessor,
+        "_expands_only_video_token",
+        staticmethod(lambda value: upstream_calls.append(value) or upstream_result),
+    )
+
+    assert processor._expands_only_video_token(hf_processor) is upstream_result
+    assert upstream_calls == [hf_processor]
+
+
+@pytest.mark.parametrize(
+    "pruning_spec, expected_method", [(None, None), (("evs", 0.75), "evs"), (("vidcom2", 0.5), "vidcom2")]
+)
+def test_video_pruning_method_initialized_through_mixin(pruning_spec, expected_method, monkeypatch):
+    class ModelBase:
+        def __init__(self, *, vllm_config, prefix):
+            self.multimodal_config = SimpleNamespace(get_video_pruning_spec=lambda: pruning_spec)
+            self.model_config = SimpleNamespace()
+            self.config = SimpleNamespace(
+                vision_config=SimpleNamespace(
+                    in_channels=C, patch_size=PS, temporal_patch_size=TPS, spatial_merge_size=MS
+                )
+            )
+            self.visual = SimpleNamespace(input_norm=object())
+
+    class Model(_AscendVLPreprocessMixin, ModelBase):
+        pass
+
+    monkeypatch.setattr(qwen3_5_vl, "build_mm_input_norm", lambda config: IdentityInputNorm())
+    model = Model(vllm_config=None, prefix="model")
+
+    assert model.video_pruning_method == expected_method
