@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tensor-only native resolver dispatch; no address-keyed launch ownership."""
 
-from pathlib import Path
-
 import torch
 
 
@@ -28,16 +26,11 @@ def scratch_layout(hot, max_union_rows, capacity=None):
 
 
 def _load_resolver():
-    library = Path(__file__).with_name("torch_binding.so")
-    if not library.is_file():
-        raise RuntimeError("HiSparse requires its compiled AscendC resolver. Build csrc/hisparse_runtime first.")
-    if str(library) not in torch.ops.loaded_libraries:
-        torch.ops.load_library(str(library))
-    namespace = torch.ops.hisparse_fused60103
-    if not all(hasattr(namespace, name) for name in ("scratch_capacity", "resolve_tensors", "supports_budgeted_hash")):
-        raise RuntimeError("Rebuild the HiSparse native extension for the budget-aware Tensor resolver ABI")
-    if not namespace.supports_budgeted_hash():
-        raise RuntimeError("HiSparse requires a native resolver with budget-aware hash support")
+    namespace = torch.ops._C_ascend
+    if not all(
+        hasattr(namespace, name) for name in ("hisparse_resolver_scratch_capacity", "hisparse_resolve_residency")
+    ):
+        raise RuntimeError("HiSparse requires its compiled AscendC resolver. Rebuild vllm-ascend for this target.")
     return namespace
 
 
@@ -48,7 +41,7 @@ def resolve_tensors(native, arguments, resolved_scratch, errors):
     Callers must destroy graphs before releasing or rebinding those owners.
     """
     a = arguments
-    native.resolve_tensors(
+    native.hisparse_resolve_residency(
         a["global_indices"],
         a["request_ids"],
         a["request_state_indices"],

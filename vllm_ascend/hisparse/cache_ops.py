@@ -122,7 +122,7 @@ class ResolverWorkspace:
         from vllm_ascend.hisparse.resolver import _load_resolver, scratch_layout
 
         self.native = _load_resolver()
-        scratch_layout(hot_size, max_union_rows, self.native.scratch_capacity())
+        scratch_layout(hot_size, max_union_rows, self.native.hisparse_resolver_scratch_capacity())
         self.first_refs = torch.empty(max_rows * hot_size, dtype=torch.int32, device=device)
         self.errors = torch.zeros((max_rows, 8), dtype=torch.int32, device=device)
 

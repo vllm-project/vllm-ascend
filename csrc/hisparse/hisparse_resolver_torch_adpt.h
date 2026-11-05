@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#pragma once
 // Tensor metadata is decoded here; launches keep TorchNPU queue ordering.
 #include <ATen/ATen.h>
 #include <torch/library.h>
@@ -13,15 +14,15 @@
 #include <vector>
 #include <utility>
 
-extern "C" void launch_hisparse_union_resolve60103(void**, uint64_t*, int, void*);
+extern "C" void launch_hisparse_resolve_residency(void**, uint64_t*, int, void*);
 extern "C" uint64_t hisparse_resolver_scratch_capacity();
 
-namespace {
+namespace vllm_ascend::hisparse {
 at::Tensor tensor_or_undefined(const std::optional<at::Tensor>& tensor) {
     return tensor.value_or(at::Tensor());
 }
 
-void resolve_tensors(
+void resolve_residency(
     const at::Tensor& logical,
     const std::optional<at::Tensor>& requests,
     const std::optional<at::Tensor>& states,
@@ -173,14 +174,14 @@ void resolve_tensors(
     command.SetCustomHandler([pointers, sizes, stream, owners = std::move(owners)]() mutable -> int {
         // Release queued tensor owners after submission, not on queue-slot reuse.
         auto submission_owners = std::move(owners);
-        launch_hisparse_union_resolve60103(pointers.data(), sizes.data(), int(sizes[0]), stream);
+        launch_hisparse_resolve_residency(pointers.data(), sizes.data(), int(sizes[0]), stream);
         return 0;
     });
     command.Run();
 }
 
 // The operator mutates caller-owned tensors and returns no new tensors.
-void resolve_meta(
+void resolve_residency_meta(
     const at::Tensor&, const std::optional<at::Tensor>&, const std::optional<at::Tensor>&,
     const std::optional<at::Tensor>&, const std::optional<at::Tensor>&, const at::Tensor&,
     const at::Tensor&, const at::Tensor&, const at::Tensor&, const std::optional<at::Tensor>&,
@@ -188,18 +189,4 @@ void resolve_meta(
     const std::optional<at::Tensor>&, const std::optional<at::Tensor>&, const std::optional<at::Tensor>&,
     const std::optional<at::Tensor>&, const at::Tensor&, const std::optional<at::Tensor>&,
     int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}
-}  // namespace
-
-TORCH_LIBRARY(hisparse_fused60103, m) {
-    m.def("resolve_tensors(Tensor logical, Tensor? requests, Tensor? states, Tensor? source, Tensor? resident, "
-          "Tensor hot_table, Tensor(a!) dgi, Tensor(a!) lru, Tensor(a!) output, Tensor(a!)? attention, "
-          "Tensor(a!) resolved, Tensor(a!)? counts, Tensor(a!)? swap_host, Tensor(a!)? swap_device, "
-          "Tensor(a!)? swap_counts, Tensor(a!)? miss_mask, Tensor(a!)? stats, Tensor(a!) errors, Tensor? valid_rows, "
-          "int host_rows, int hot_block_size, int source_block_size, int resident_block_size, int resident_null_block, "
-          "int attention_block_stride, int union_rows, int attention_capacity=0) -> ()");
-    m.def("scratch_capacity() -> int", []() -> int64_t { return hisparse_resolver_scratch_capacity(); });
-    m.def("supports_attention_compaction() -> bool", []() -> bool { return true; });
-    m.def("supports_budgeted_hash() -> bool", []() -> bool { return true; });
-}
-TORCH_LIBRARY_IMPL(hisparse_fused60103, PrivateUse1, m) { m.impl("resolve_tensors", TORCH_FN(resolve_tensors)); }
-TORCH_LIBRARY_IMPL(hisparse_fused60103, Meta, m) { m.impl("resolve_tensors", TORCH_FN(resolve_meta)); }
+}  // namespace vllm_ascend::hisparse

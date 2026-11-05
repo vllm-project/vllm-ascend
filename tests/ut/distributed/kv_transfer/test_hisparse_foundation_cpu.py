@@ -132,7 +132,7 @@ def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups
 
     # Loading a device extension is the only mocked boundary; the group-owned
     # tensors below are real CPU storage, not a replacement resolver algorithm.
-    native = NS(scratch_capacity=lambda: 175616)
+    native = NS(hisparse_resolver_scratch_capacity=lambda: 175616)
     monkeypatch.setattr(resolver, "_load_resolver", lambda: native)
     backend = AscendHiSparseBackend()
 
@@ -188,7 +188,7 @@ def test_native_resolver_uses_available_ub_without_truncating_the_union():
 def test_missing_native_resolver_raises_instead_of_falling_back(monkeypatch):
     from vllm_ascend.hisparse import resolver
 
-    monkeypatch.setattr(resolver.Path, "is_file", lambda path: False)
+    monkeypatch.setattr(resolver.torch.ops, "_C_ascend", NS())
     with pytest.raises(RuntimeError, match="requires its compiled AscendC resolver"):
         resolver._load_resolver()
 
