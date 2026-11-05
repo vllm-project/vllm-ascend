@@ -338,6 +338,42 @@ def test_c8_storage_mapping_preserves_shared_slab_offsets(stride_rows):
     assert backing[offset + 2 * stride_rows * width + 1] == 123
 
 
+@pytest.mark.parametrize("pages,stride_rows,max_rows", [(2, 128, 9), (3, 136, 37)])
+def test_c8_decode_lengths_follow_binding_geometry_and_survive_rebind(monkeypatch, pages, stride_rows, max_rows):
+    from vllm_ascend.hisparse import resolver
+
+    monkeypatch.setattr(resolver, "_load_resolver", lambda: NS(hisparse_resolver_scratch_capacity=lambda: 175616))
+    backend = AscendHiSparseBackend()
+    group = NS(copy_stream=NS(device=torch.device("cpu")))
+    runtime = NS(
+        index_group=group,
+        max_swap_rows=max_rows,
+        region_stride=128,
+        max_union_rows=64,
+        device=torch.device("cpu"),
+        kv_dtype=torch.float8_e4m3fn,
+        registered_host_pool=NS(_hisparse_registration=object()),
+    )
+    group.leader = runtime
+
+    def bind(num_pages):
+        backing = torch.empty(num_pages * stride_rows * 656, dtype=torch.float8_e4m3fn)
+        cache = backing.as_strided((num_pages, 128, 656), (stride_rows * 656, 656, 1))
+        runtime.hot = NS(cache=cache, attention_cache=cache, block_size=128)
+        return backend.create_cache_ops(runtime)
+
+    first = bind(pages)
+    query, key = first.attention_lengths
+    for rows in (1, max_rows, 3, 1):
+        torch.testing.assert_close(query[rows : rows + 1], torch.tensor([rows], dtype=torch.int32))
+    expected = (pages - 1) * stride_rows + 128
+    torch.testing.assert_close(key, torch.tensor([expected], dtype=torch.int32))
+    second = bind(pages + 1)
+    torch.testing.assert_close(second.attention_lengths[1], torch.tensor([expected + stride_rows], dtype=torch.int32))
+    torch.testing.assert_close(key, torch.tensor([expected], dtype=torch.int32))
+    assert key.data_ptr() != second.attention_lengths[1].data_ptr()
+
+
 def test_c8_compaction_preserves_duplicate_order_and_empty_rows():
     indices = torch.tensor([[7, -1, 2, 7, -1, 0], [-1, -1, -1, -1, -1, -1]], dtype=torch.int32)
     expected = torch.tensor([[7, 2, 7, 0, -1, -1], [-1, -1, -1, -1, -1, -1]], dtype=torch.int32)

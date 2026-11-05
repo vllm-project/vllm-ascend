@@ -114,6 +114,7 @@ class AscendHiSparseBackend(HiSparseBackend):
         mapping = runtime.registered_host_pool._hisparse_registration
         attention_capacity = 0
         attention_block_stride = None
+        attention_lengths = None
         if runtime.kv_dtype == torch.float8_e4m3fn:
             from vllm_ascend.hisparse.c8 import c8_storage_view
 
@@ -130,8 +131,20 @@ class AscendHiSparseBackend(HiSparseBackend):
                 or attention_block_stride != group.leader.cache_ops.attention_block_stride
             ):
                 raise ValueError("Shared HiSparse C8 indices require matching per-layer page geometry")
+            # Decode query shapes are bounded by the resolver workspace. These
+            # values describe immutable geometry, not the current valid rows.
+            # Prepare them before capture and retain them with this binding;
+            # a rebind gets its own table and current physical KV span.
+            attention_lengths = (
+                torch.arange(workspace.max_rows + 1, dtype=torch.int32, device=runtime.device),
+                torch.full((1,), attention_view.shape[0], dtype=torch.int32, device=runtime.device),
+            )
         return HiSparseNPUOps(
-            mapping, workspace, attention_capacity=attention_capacity, attention_block_stride=attention_block_stride
+            mapping,
+            workspace,
+            attention_capacity=attention_capacity,
+            attention_block_stride=attention_block_stride,
+            attention_lengths=attention_lengths,
         )
 
     def validate_kv_cache_config(self, kv_cache_config: KVCacheConfig) -> None:

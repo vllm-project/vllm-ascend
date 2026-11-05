@@ -111,7 +111,7 @@ def test_sparse_attention_reference(num_queries, strided, capture):
 
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("strided", [False, True])
-@pytest.mark.parametrize("index_mode", ["virtual", "mapped", "mapped_counts"])
+@pytest.mark.parametrize("index_mode", ["virtual", "mapped", "mapped_counts", "mapped_lengths"])
 def test_c8_attention_uses_existing_native_operator(strided, capture, index_mode):
     from vllm_ascend.device.device_config import is_950
 
@@ -119,7 +119,7 @@ def test_c8_attention_uses_existing_native_operator(strided, capture, index_mode
         pytest.skip("This case uses the native A5 E4M3FN C8 payload; A2/A3 use an INT8 format")
     from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
     from vllm_ascend.attention.sfa_v1 import custom_kv_rmsnorm_rope
-    from vllm_ascend.hisparse.c8 import pack_c8_components
+    from vllm_ascend.hisparse.c8 import c8_storage_view, pack_c8_components
 
     torch.manual_seed(71)
     rows, heads, blocks, block, topk = 3, 8, 2, 128, 128
@@ -154,7 +154,19 @@ def test_c8_attention_uses_existing_native_operator(strided, capture, index_mode
         return output
 
     selected = selection().to(device)
-    valid_counts = (indices >= 0).sum(dim=-1, dtype=torch.int32).to(device) if index_mode == "mapped_counts" else None
+    valid_counts = (
+        (indices >= 0).sum(dim=-1, dtype=torch.int32).to(device)
+        if index_mode in ("mapped_counts", "mapped_lengths")
+        else None
+    )
+    lengths = (
+        (
+            torch.arange(rows + 1, dtype=torch.int32, device=device)[rows:],
+            torch.full((1,), c8_storage_view(cache)[0].shape[0], dtype=torch.int32, device=device),
+        )
+        if index_mode == "mapped_lengths"
+        else None
+    )
     query_end, key_length = (torch.empty(1, dtype=torch.int32, device=device) for _ in range(2))
     impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
     impl.enable_sparse_sfa_c8 = True
@@ -164,7 +176,7 @@ def test_c8_attention_uses_existing_native_operator(strided, capture, index_mode
 
     def forward():
         return impl._attention_physical(
-            q, qr, cache, selected, indices_are_mapped=indices_are_mapped, valid_counts=valid_counts
+            q, qr, cache, selected, indices_are_mapped=indices_are_mapped, valid_counts=valid_counts, lengths=lengths
         )
 
     graph = None

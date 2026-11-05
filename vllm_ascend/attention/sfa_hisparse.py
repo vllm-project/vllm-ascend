@@ -328,16 +328,18 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # which would duplicate the write and can overwrite unrelated slab rows.
         return k_pe, k_nope
 
-    def _c8_physical_attention(self, query, query_rope, cache, indices, *, indices_are_mapped=False, valid_counts=None):
+    def _c8_physical_attention(
+        self, query, query_rope, cache, indices, *, indices_are_mapped=False, valid_counts=None, lengths=None
+    ):
         """Adapt native packed rows to the existing quantized SFA operation.
 
-        Keep compaction stable, including duplicates. The two current lengths are
-        device writes captured on the consumer stream; no Host read or stream/event
-        policy is introduced here.
+        Keep compaction stable, including duplicates. Decode lengths describe
+        binding/graph geometry; Prefill retains current device writes. Neither
+        path introduces a Host read or a new stream/event policy.
         """
         from vllm_ascend.hisparse.c8 import c8_storage_view, compact_c8_indices, map_c8_physical_indices
 
-        query_ends, key_length = self._c8_length_workspace()
+        query_ends, key_length = self._c8_length_workspace() if lengths is None else lengths
         scale = self.scale
         view, block, stride_rows, capacity = c8_storage_view(cache)
         rows = query.shape[0]
@@ -371,8 +373,9 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # Read the resolver's current counts on this consumer stream before
         # later groups can reuse their scratch. Keep the empty-row output guard.
         has_keys = valid_counts > 0 if valid_counts is not None else (mapped >= 0).any(dim=-1)
-        query_ends.fill_(rows)
-        key_length.fill_(view.shape[0])
+        if lengths is None:
+            query_ends.fill_(rows)
+            key_length.fill_(view.shape[0])
         result = torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
             query=packed_query,
             key=view,
@@ -398,7 +401,15 @@ class AscendHiSparseImpl(AscendSFAImpl):
         return torch.where(has_keys[:, None, None], result, 0)
 
     def _attention_physical(
-        self, query, query_rope, packed_cache, physical_topk, *, indices_are_mapped=False, valid_counts=None
+        self,
+        query,
+        query_rope,
+        packed_cache,
+        physical_topk,
+        *,
+        indices_are_mapped=False,
+        valid_counts=None,
+        lengths=None,
     ):
         if self.enable_sparse_sfa_c8:
             return self._c8_physical_attention(
@@ -408,6 +419,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 physical_topk,
                 indices_are_mapped=indices_are_mapped,
                 valid_counts=valid_counts,
+                lengths=lengths,
             )
         from vllm_ascend.hisparse.cache_ops import pack_attention_rows
 
@@ -490,8 +502,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 return_valid_counts=self.enable_sparse_sfa_c8,
             )
             valid_counts = None
+            lengths = None
             if self.enable_sparse_sfa_c8:
                 physical, valid_counts = physical
+                query_lengths, key_length = cache.runtime.cache_ops.attention_lengths
+                lengths = query_lengths[num_decode : num_decode + 1], key_length
             outputs.append(
                 self._attention_physical(
                     ql_nope[:num_decode],
@@ -500,6 +515,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
                     physical,
                     indices_are_mapped=cache.runtime.cache_ops.attention_capacity > 0,
                     valid_counts=valid_counts,
+                    lengths=lengths,
                 )
             )
         if metadata.num_prefills:
