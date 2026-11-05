@@ -268,9 +268,7 @@ def _wrap_ple_short_conv(original: Callable[..., Any]) -> Callable[..., Any]:
                 if outer_residual is not None:
                     residual.add_(outer_residual)
                 return None
-            if not isinstance(
-                layer_attn_metadata, PleShortConvAttentionMetadata
-            ):
+            if not isinstance(layer_attn_metadata, PleShortConvAttentionMetadata):
                 raise TypeError(
                     "Expected PleShortConvAttentionMetadata for layer "
                     f"'{self.prefix}', got "
