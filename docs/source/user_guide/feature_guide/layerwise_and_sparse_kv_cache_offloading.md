@@ -162,6 +162,85 @@ starting from `kv_port`.
 
 Note that users might encounter an error like "Sparse KV offload offload.initialize failed.". This is mainly because the contiguous host memory required by memfabric is not enough to allocate. Please refer to [memfabric-prerequisite-checks](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_pool_ascend_store.html#step-1-prerequisite-checks) for preparing the host memory. Or you can consider to use lower DP size to reduce the required host memory.
 
+### Prefill DCP with MemFabric direct host transfer
+
+`SfaRemoteD2HConnector` can reconstruct a DCP-sharded Prefill main KV cache
+in the Decode TP-shared host pool. Main KV travels directly from P NPU to D
+DRAM through MemFabric; replicated indexer KV and its quantization scales
+are transferred to each Decode TP rank's NPU. This does not enable main-cache C8.
+
+Use the same connector revision on both sides. DCP uses protocol version 2
+with exact token intervals; non-DCP peers retain protocol version 1.
+An older consumer cannot accept DCP transfers.
+
+The supported layout requires:
+
+- Prefill DCP equals TP, with PCP=1 and PP=1.
+- Decode PCP=DCP=PP=1; Decode TP divides Prefill TP and is no larger.
+- Physical main and indexer block sizes match between P and D, and equal
+  Prefill `cp_kv_cache_interleave_size`.
+- Decode uses `use_fused_overlap: true`. The default Copy-SFA path, which
+  also requires populating a device circular-tail cache, is not supported
+  by this DCP transfer implementation. DSpark is also unsupported.
+
+For example, add these parallel/cache options to a Prefill command for a
+supported SFA model:
+
+```bash
+--tensor-parallel-size 4 \
+--decode-context-parallel-size 4 \
+--cp-kv-cache-interleave-size 128 \
+--block-size 128 \
+--enable-prefix-caching \
+--kv-transfer-config '{
+    "kv_connector": "SfaRemoteD2HConnector",
+    "kv_role": "kv_producer",
+    "kv_port": 20050,
+    "kv_connector_extra_config": {
+        "transfer_backend": "memfabric",
+        "memfabric_transfer_protocol": "sdma"
+    }
+}'
+```
+
+On Decode, use TP=1 or TP=2 for that Prefill example, and configure:
+
+```bash
+--block-size 128 \
+--additional-config '{
+    "sparse_kv_offload_config": {
+        "enabled": true,
+        "use_fused_overlap": true,
+        "dram_size_per_dp_GB": 128
+    }
+}' \
+--kv-transfer-config '{
+    "kv_connector": "SfaRemoteD2HConnector",
+    "kv_role": "kv_consumer",
+    "kv_port": 20050,
+    "kv_connector_extra_config": {
+        "transfer_backend": "memfabric",
+        "memfabric_transfer_protocol": "sdma"
+    }
+}'
+```
+
+These are configuration fragments, not complete model launch commands.
+The SDMA transport requires compatible MemFabric runtime, device connectivity,
+and registered host memory on the deployment machines. Size the host pool
+and maximum context for the model and workload; the example does not guarantee
+a particular context length or concurrency.
+
+Prefix cache hits on P do not imply that D already has those tokens. Each read
+carries the precise token interval still needed by D, including partial blocks
+and chunk boundaries. Source buffers are released only after synchronous
+MemFabric read completion. A failed read must not be acknowledged as successful.
+
+Before production use, validate uncached and cached-prefix requests against
+an independent baseline, partial-block lengths, chunked prefill, concurrent
+requests, request aborts, and peer restarts on the target NPUs. MTP and graph
+execution also need end-to-end validation with the selected model.
+
 ## 4. Start the P/D Proxy
 
 Start Prefill and Decode with the configurations above. After both nodes are
