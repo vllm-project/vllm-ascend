@@ -5,7 +5,7 @@ meta:
   provider: "Qwen"
   description: "Historical, single-NPU Qwen3-Reranker-0.6B pooling deployment on Atlas 800 A3, pinned to vLLM Ascend v0.23.0rc1."
   date_added: "2026-11-04"
-  date_updated: "2026-11-04"
+  date_updated: "2026-11-05"
   tasks:
     - embedding
   related_recipes: []
@@ -46,53 +46,6 @@ model:
     OMP_NUM_THREADS: "1"
     PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
 
-client:
-  endpoint: /v1/rerank
-  request_body:
-    query: '<|im_start|>system
-
-      Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>
-
-      <|im_start|>user
-
-      <Instruct>: Given a web search query, retrieve relevant passages that answer the query
-
-      <Query>: What is the capital of China?
-
-      '
-    documents:
-    - '<Document>: The capital of China is Beijing.<|im_end|>
-
-      <|im_start|>assistant
-
-      <think>
-
-
-      </think>
-
-
-      '
-    - '<Document>: Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.<|im_end|>
-
-      <|im_start|>assistant
-
-      <think>
-
-
-      </think>
-
-
-      '
-  benchmark:
-    backend: vllm-rerank
-    dataset_name: random-rerank
-    args:
-    - --random-input
-    - '200'
-    - --save-result
-    - --result-dir
-    - ./
-
 features: {}
 
 opt_in_features: []
@@ -132,9 +85,9 @@ notes:
     when:
       hardware: [ascend_910c]
     body: |-
-      This is a reranking model, not a chat-generation service. Use the
-      Verify and Bench controls for the configured `/v1/rerank` endpoint;
-      the Guide also provides a Python client with response assertions.
+      Use the Python verification and rerank benchmark in the Guide below
+      for this pooling model. The command builder's generic Verify and
+      Bench examples target text-generation services.
 
 guide: |-
   ## Overview
@@ -177,12 +130,16 @@ guide: |-
 
   ## Client usage
 
-  After the pooling server is ready, use the builder's Verify control for
-  a JSON POST to `/v1/rerank` or its Bench control for `vllm-rerank` with
-  `random-rerank` input. The selected model and endpoint controls supply
-  both client targets. Alternatively, install `requests` in the client
-  environment and run this example. The query and document formatting is
-  required for the intended instruction-aware reranking behavior.
+  After the pooling server is ready, install `requests` in the client
+  environment and run the Python example below. It sends a JSON POST to
+  `/v1/rerank` with the instruction, query, document and assistant suffix
+  required by this model. Use this example for rerank verification; the
+  command builder's generic Verify example targets chat completions.
+
+  The examples use port 8000 on the same host as the server. If the server
+  runs on another host or port, update the Python request URL and the
+  benchmark `--host` / `--port` arguments accordingly. Changes to the
+  builder's endpoint controls do not update these Guide examples.
 
   ```python
   import math
@@ -229,12 +186,27 @@ guide: |-
 
   ## Evaluation and performance
 
-  The historical tutorial includes MTEB `MultiLongDocReranking` evaluation
-  and a `vllm-rerank` / `random-rerank` serving benchmark. Use the
+  Run this serving benchmark in the same historical vLLM environment as
+  the pooling server. It targets `/v1/rerank` with the `vllm-rerank` backend
+  and synthetic `random-rerank` input. The command builder's generic Bench
+  example targets text generation; use this rerank command instead.
+
+  ```bash
+  vllm bench serve \
+    --model Qwen/Qwen3-Reranker-0.6B \
+    --host localhost \
+    --port 8000 \
+    --backend vllm-rerank \
+    --dataset-name random-rerank \
+    --endpoint /v1/rerank \
+    --random-input 200 --save-result --result-dir ./
+  ```
+
+  This is a synthetic serving benchmark, not a dataset accuracy test. For
+  MTEB `MultiLongDocReranking`, follow the
   [historical instructions](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Qwen3-Reranker.html)
-  with a matching vLLM environment. Generic text-generation benchmarks do
-  not exercise the reranking endpoint. This proposal does not supply new
-  benchmark scores or claim to reproduce model-card quality results.
+  with a matching vLLM environment. This recipe does not claim to reproduce
+  model-card quality results.
 
   ## References
 
