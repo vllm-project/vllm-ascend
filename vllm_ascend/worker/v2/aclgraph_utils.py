@@ -16,7 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from contextlib import contextmanager
 from typing import Any
 
@@ -80,7 +80,17 @@ def _get_graph_update_backend(
     raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
 
 
-class ModelAclGraphManager(ModelCudaGraphManager):
+class AscendGraphManagerMixin:
+    vllm_config: VllmConfig
+    breakable_cg_runner: BreakableACLGraphWrapper | None
+    static_kernel_warmup_enabled: bool = True
+
+    def init_breakable_cg_runner(self, model: nn.Module, key_fn: Callable[..., Hashable] | None = None) -> None:
+        if self.breakable_cg_runner is None:
+            self.breakable_cg_runner = BreakableACLGraphWrapper(model, self.vllm_config, key_fn=key_fn)
+
+
+class ModelAclGraphManager(AscendGraphManagerMixin, ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
     def __init__(
@@ -111,10 +121,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
-
-    def init_breakable_cg_runner(self, model: nn.Module) -> None:
-        if self.breakable_cg_runner is None:
-            self.breakable_cg_runner = BreakableACLGraphWrapper(model, self.vllm_config)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""

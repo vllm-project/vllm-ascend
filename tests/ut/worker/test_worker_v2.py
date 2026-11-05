@@ -135,6 +135,7 @@ class TestNPUWorkerV2(TestBase):
         with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
             worker = NPUWorker()
         worker.use_v2_model_runner = True
+        worker._static_kernel_runtime_initialized = False
         worker.model_runner = MagicMock()
         worker.vllm_config = MagicMock()
         worker.vllm_config.model_config.enable_sleep_mode = False
@@ -161,6 +162,14 @@ class TestNPUWorkerV2(TestBase):
         with (
             patch.object(NPUWorker, "__init__", lambda self, **kwargs: None),
             patch.object(NPUWorker, "_init_device", return_value=device),
+            patch(
+                "vllm_ascend.worker.worker.get_ascend_config",
+                return_value=SimpleNamespace(
+                    ascend_compilation_config=SimpleNamespace(
+                        enable_static_kernel=False, enable_super_kernel=False, enable_npugraph_ex=False
+                    )
+                ),
+            ),
             patch("vllm_ascend.worker.worker.init_workspace_manager"),
             patch("vllm_ascend.worker.worker.report_usage_stats") as report_usage_stats,
             patch(

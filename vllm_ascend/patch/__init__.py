@@ -1747,6 +1747,14 @@
 #       Remove this patch once upstream `IndexerKVDType` includes `"int8"` (or once
 #       the indexer kv dtype is pluggable like the fp8 kv-cache-dtype mechanism).
 #
+# ** File: worker/patch_v2_static_kernel.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Targets: CudaGraphManager.capture and BreakableCUDAGraphCapture._end_segment.
+# Why: upstream has no device callback for capture warmup or segment optimization.
+# How: wrap the existing warmup input factory and optimize completed graph segments.
+# Related PR: none; the device extension points are still a local design proposal.
+# Future Plan: remove when upstream exposes device warmup and segment-finalization hooks.
+#
 # ** 35. File: platform/patch_parallel_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.parallel.ParallelConfig._validate_parallel_config`

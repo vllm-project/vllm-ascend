@@ -864,7 +864,7 @@ class TestAscendConfig(TestBase):
         warning_messages = [call.args[0] for call in mock_warning.call_args_list]
         self.assertIn("npugraph_ex is not supported by the current hardware profile. Disabling it.", warning_messages)
         self.assertIn(
-            "static kernel requires npugraph_ex, which is not supported by the current hardware profile. Disabling it.",
+            "Static kernels are not supported by the current hardware profile. Disabling them.",
             warning_messages,
         )
         self.assertIn(

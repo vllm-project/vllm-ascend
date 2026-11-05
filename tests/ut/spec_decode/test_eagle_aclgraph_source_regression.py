@@ -22,8 +22,7 @@ def test_eagle_aclgraph_uses_verified_main_speculator_contract() -> None:
     tree = ast.parse(ACLGRAPH.read_text())
     cls = _class(tree, "AutoRegressiveAclGraphManager")
 
-    assert isinstance(cls.bases[0], ast.Name)
-    assert cls.bases[0].id == "SpeculatorCudaGraphManager"
+    assert any(isinstance(base, ast.Name) and base.id == "SpeculatorCudaGraphManager" for base in cls.bases)
 
     source = ACLGRAPH.read_text()
     assert "AttentionStatePair" not in source

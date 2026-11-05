@@ -25,11 +25,15 @@ from vllm_ascend.compilation.updatable_graph import (
     UpdatableGraph,
 )
 from vllm_ascend.utils import use_updatable_graph
-from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
+from vllm_ascend.worker.v2.aclgraph_utils import (
+    AscendGraphManagerMixin,
+    collect_sorted_captured_token_sizes,
+    model_capture_wrapper,
+)
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
-class DFlashAclGraphManager(DFlashCudaGraphManager):
+class DFlashAclGraphManager(AscendGraphManagerMixin, DFlashCudaGraphManager):
     def __init__(
         self,
         vllm_config: VllmConfig,
