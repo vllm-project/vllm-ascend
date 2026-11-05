@@ -1,0 +1,97 @@
+# This is a docker build check and publish job:
+# 1. PR Triggered docker image build check
+#   - 'image-build' label should be added
+#   - is for image build check
+#   - Enable on main/releases branches
+#   - push: ${{ github.event_name != 'pull_request' }} ==> false
+# 2. manual dispatch builds the selected branch
+#   - publishes nightly-<branch>[-suffix]
+# 3. tags push trigger image publish
+#   - is for final release image
+#   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3 / vllm-ascend:v1.2.3rc1
+# Note: single-arch images are built and pushed to swr.cn-north-12, merged into a
+# multi-arch manifest and pushed to swr.cn-north-12 (same repo path as quay.io);
+# the sync tool then mirrors swr.cn-north-12 -> quay.io.
+#
+# All dependency versions (CANN, torch-npu, triton-ascend, memcache, memfabric,
+# vLLM) are pinned in the root Dockerfiles. This workflow only selects the source
+# branch and does not accept or pass any version overrides.
+name: Image Build and Push
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - 'main'
+      - 'releases/*'
+    types: [ labeled ]
+  workflow_dispatch:
+    inputs:
+      docker_ref:
+        description: 'Branch to build (main or releases/*).'
+        default: "main"
+        required: false
+        type: choice
+        options:
+          - 'main'
+          - 'releases/v0.30.0'
+          - 'releases/v0.29.0rc'
+          - 'releases/v0.28.0rc'
+          - 'releases/v0.27.1rc'
+          - 'releases/v0.26.0rc'
+          - 'releases/v0.25.1rc'
+          - 'releases/v0.24.0rc'
+          - 'releases/v0.23.0'
+          - 'releases/v0.22.1rc'
+          - 'releases/v0.21.0rc'
+          - 'releases/v0.20.2rc'
+          - 'releases/v0.18.0'
+
+permissions:
+  packages: write
+  contents: read
+
+jobs:
+  setup-matrix:
+    runs-on: linux-amd64-cpu-2-hk
+    if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'image-build' }}
+    outputs:
+      build_meta: ${{ steps.matrix.outputs.build_meta }}
+    steps:
+      - name: Build image matrix
+        id: matrix
+        run: |
+          MATRIX=$(jq -nc '[
+            {name: "A2 Ubuntu",      dockerfile: "Dockerfile",               suffix: "",              soc: "910b"},
+            {name: "A3 Ubuntu",      dockerfile: "Dockerfile.a3",            suffix: "a3",            soc: "a3"},
+            {name: "310P Ubuntu",    dockerfile: "Dockerfile.310p",          suffix: "310p",          soc: "310p"},
+            {name: "A5 Ubuntu",      dockerfile: "Dockerfile.a5",            suffix: "a5",            soc: "950"},
+            {name: "A2 openeuler",   dockerfile: "Dockerfile.openEuler",     suffix: "openeuler",     soc: "910b"},
+            {name: "A3 openEuler",   dockerfile: "Dockerfile.a3.openEuler",  suffix: "a3-openeuler",  soc: "a3"},
+            {name: "310P openEuler", dockerfile: "Dockerfile.310p.openEuler",suffix: "310p-openeuler",soc: "310p"},
+            {name: "A5 openEuler",   dockerfile: "Dockerfile.a5.openEuler",  suffix: "a5-openeuler",  soc: "950"}
+          ]')
+          echo "build_meta=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  image_build:
+    name: ${{ matrix.build_meta.name }}
+    needs: setup-matrix
+    if: ${{ !(github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'image-build')) }}
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        build_meta: ${{ fromJSON(needs.setup-matrix.outputs.build_meta) }}
+    uses: ./.github/workflows/_schedule_image_build.yaml
+    with:
+      dockerfile: ${{ matrix.build_meta.dockerfile }}
+      suffix: ${{ matrix.build_meta.suffix }}
+      soc: ${{ matrix.build_meta.soc }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      branch_ref: ${{ inputs.docker_ref }}
+      schedule_tag_pattern: 'main'
+    secrets:
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}

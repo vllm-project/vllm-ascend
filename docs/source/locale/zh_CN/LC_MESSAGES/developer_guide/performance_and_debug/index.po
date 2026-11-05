@@ -1,0 +1,39 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.17.0\n"
+
+msgid "# Performance and Debug"
+msgstr "# 性能与调试"
+
+msgid ""
+"This section provides guides for benchmarking, performance tuning, "
+"profiling, and debugging vLLM Ascend."
+msgstr "本节提供关于 vLLM Ascend 的基准测试、性能调优、性能分析和调试的指南。"
+
+msgid ""
+"- **[Performance Benchmark](performance_benchmark.md)** — Benchmarking guide\n"
+"- **[Optimization and Tuning](optimization_and_tuning.md)** — Performance optimization\n"
+"- **[Service Profiling Guide](service_profiling_guide.md)** — Service profiling\n"
+"- **[msprobe Guide](msprobe_guide.md)** — Debugging with msprobe"
+msgstr ""
+"- **[性能基准测试](performance_benchmark.md)** — 基准测试指南\n"
+"- **[优化与调优](optimization_and_tuning.md)** — 性能优化\n"
+"- **[服务性能分析指南](service_profiling_guide.md)** — 服务性能分析\n"
+"- **[msprobe 指南](msprobe_guide.md)** — 使用 msprobe 进行调试"

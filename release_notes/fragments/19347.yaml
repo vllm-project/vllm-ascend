@@ -1,0 +1,4 @@
+pr: 19347
+entries:
+  - category: bugfix
+    text: Fixed Model Runner V1 pipeline-parallel buffer sizing and token truncation when internal MoE sequence parallelism is enabled but PP intermediates use the full token layout.

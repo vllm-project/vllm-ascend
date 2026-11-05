@@ -1,0 +1,7 @@
+pr: 19240
+entries:
+  - category: bugfix
+    text: >-
+      Unified DeepSeek V4 tensor parallel limits across hardware, including A5:
+      V4 Flash and V4.1 Flash support TP up to 8, and V4 Pro supports TP up to 16.
+      The existing Model Runner V1 DSA-CP exception is preserved.

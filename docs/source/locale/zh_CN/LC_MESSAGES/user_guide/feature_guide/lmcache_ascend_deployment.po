@@ -1,0 +1,83 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-08 14:01+0000\n"
+"PO-Revision-Date: 2026-07-08 14:01+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# LMCache-Ascend Deployment Guide"
+msgstr "# LMCache-Ascend 部署指南"
+
+msgid "## Overview"
+msgstr "## 概述"
+
+msgid ""
+"LMCache-Ascend is a community maintained plugin for running LMCache on the "
+"Ascend NPU."
+msgstr "LMCache-Ascend 是一个社区维护的插件，用于在昇腾NPU上运行LMCache。"
+
+msgid ""
+"We provide a simple deployment guide here. For further info about deployment"
+" notes, please refer to [LMCache-Ascend "
+"doc](https://github.com/LMCache/LMCache-Ascend/blob/main/README.md)"
+msgstr ""
+"我们在此提供简单的部署指南。关于部署说明的更多信息，请参考 [LMCache-Ascend "
+"文档](https://github.com/LMCache/LMCache-Ascend/blob/main/README.md)"
+
+msgid "## Getting Started"
+msgstr "## 快速开始"
+
+msgid "### Clone LMCache-Ascend Repo"
+msgstr "### 克隆 LMCache-Ascend 仓库"
+
+msgid ""
+"Our repo contains a kvcache ops submodule for ease of maintenance, therefore"
+" we recommend cloning the repo with submodules."
+msgstr "我们的仓库包含一个 kvcache ops 子模块以便于维护，因此建议使用子模块方式克隆仓库。"
+
+msgid "### Docker"
+msgstr "### Docker"
+
+msgid "Once that is built, run it with the following cmd"
+msgstr "构建完成后，使用以下命令运行"
+
+msgid "### Manual Installation"
+msgstr "### 手动安装"
+
+msgid "1. Install LMCache Repo"
+msgstr "1. 安装 LMCache 仓库"
+
+msgid "2. Install LMCache-Ascend Repo"
+msgstr "2. 安装 LMCache-Ascend 仓库"
+
+msgid "### Usage"
+msgstr "### 使用方法"
+
+msgid ""
+"`LMCacheAscendConnector` is no longer registered by vllm-ascend. Use the "
+"connector registration and runtime configuration provided by the LMCache-"
+"Ascend package instead. For the current configuration examples, refer to the "
+"[LMCache-Ascend documentation](https://github.com/LMCache/LMCache-"
+"Ascend/blob/main/README.md)."
+msgstr ""
+"`LMCacheAscendConnector` 不再由 vllm-ascend 注册。请改用 LMCache-Ascend 包提供的 "
+"connector 注册和运行时配置。当前配置示例请参考 [LMCache-Ascend 文档]"
+"(https://github.com/LMCache/LMCache-Ascend/blob/main/README.md)。"
+
+msgid ""
+"Assuming your working directory is `/workspace` and vllm/vllm-ascend have "
+"already been installed."
+msgstr "假设您的工作目录是 `/workspace`，并且已经安装了 vllm/vllm-ascend。"

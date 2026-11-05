@@ -1,0 +1,232 @@
+/* vLLM Ascend docs custom styles */
+
+/* Center the logo on the home page */
+.md-typeset .figure {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Theme-aware logo swap. The .md-logo wrapper in main.css forces
+   .md-logo img to display:block, so the two <img> elements would
+   stack vertically and overlap visually if neither were hidden.
+   Material's [src$="#only-dark"]{display:none} only covers one half
+   of the swap, so we add explicit class-based rules here for both
+   halves. The class selectors win on specificity (.class > [attr])
+   and don't depend on URL fragment matching. */
+[data-md-color-scheme="default"] .md-logo__img--dark,
+[data-md-color-scheme="default"] .home-hero img[src$="#only-dark"] {
+  display: none !important;
+}
+[data-md-color-scheme="slate"] .md-logo__img--light,
+[data-md-color-scheme="slate"] .home-hero img[src$="#only-light"] {
+  display: none !important;
+}
+
+/* Centered hero logo on the home page. The previous .md-typeset .figure
+   rule didn't match the <p> wrapper mkdocs emits for markdown images,
+   so the logo rendered left-aligned and visually overlapped the header
+   logo. Use a dedicated class with explicit centering and spacing. */
+.home-hero {
+  text-align: center;
+  margin: 2rem 0 2.5rem;
+}
+.home-hero img {
+  display: block;
+  margin: 0 auto;
+  max-width: 720px;
+  width: 100%;
+  height: auto;
+}
+
+/* Make tables more compact */
+.md-typeset table:not([class]) th,
+.md-typeset table:not([class]) td {
+  padding: 0.5rem 0.75rem;
+}
+
+/* Custom code admonition, matching the upstream vLLM documentation. */
+:root {
+  --md-admonition-icon--code: url('data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="m11.28 3.22 4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.275-.326.75.75 0 0 1 .215-.734L13.94 8l-3.72-3.72a.749.749 0 0 1 .326-1.275.75.75 0 0 1 .734.215m-6.56 0a.75.75 0 0 1 1.042.018.75.75 0 0 1 .018 1.042L2.06 8l3.72 3.72a.749.749 0 0 1-.326 1.275.75.75 0 0 1-.734-.215L.47 8.53a.75.75 0 0 1 0-1.06Z"/></svg>');
+}
+
+.md-typeset .admonition.code,
+.md-typeset details.code {
+  border-color: #64dd17;
+}
+
+.md-typeset .code > .admonition-title,
+.md-typeset .code > summary {
+  background-color: #64dd171a;
+}
+
+.md-typeset .code > .admonition-title::before,
+.md-typeset .code > summary::before {
+  background-color: #64dd17;
+  -webkit-mask-image: var(--md-admonition-icon--code);
+  mask-image: var(--md-admonition-icon--code);
+}
+
+/* Outline for content tabs, matching the upstream vLLM documentation. */
+.md-typeset .tabbed-set {
+  border: 0.075rem solid var(--md-default-fg-color);
+  border-radius: 0.2rem;
+}
+
+.md-typeset .tabbed-content {
+  padding: 0 0.6em;
+}
+
+/* Keep table scroll regions inside bordered content tabs. */
+.md-typeset .tabbed-content .md-typeset__scrollwrap {
+  margin-inline: 0;
+}
+
+.md-typeset .tabbed-content .md-typeset__table {
+  padding-inline: 0;
+}
+
+/* GitHub button styling */
+.github-button {
+  margin: 0 4px;
+}
+
+/* Table fullscreen controls do not change the table's normal scroll container. */
+.table-fullscreen-button {
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.table-fullscreen-button:not([hidden]) {
+  display: flex;
+}
+
+.table-fullscreen-button:focus-visible,
+.table-fullscreen-scroll:focus-visible {
+  outline: 0.1rem solid var(--md-accent-fg-color);
+  outline-offset: -0.1rem;
+}
+
+.table-fullscreen-button svg {
+  width: 1.125rem;
+  height: 1.125rem;
+  fill: currentColor;
+}
+
+.table-fullscreen-wrapper {
+  position: relative;
+}
+
+/* Match Material's clipboard action: always visible, with quiet theme colors. */
+.table-fullscreen-open {
+  position: absolute;
+  top: -0.2rem;
+  right: -0.2rem;
+  z-index: 1;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 0.1rem;
+  color: var(--md-default-fg-color--lightest);
+  transition: color 0.25s;
+}
+
+.table-fullscreen-wrapper:hover > .table-fullscreen-open {
+  color: var(--md-default-fg-color--light);
+}
+
+.table-fullscreen-wrapper > .table-fullscreen-open:hover,
+.table-fullscreen-wrapper > .table-fullscreen-open:focus {
+  color: var(--md-accent-fg-color);
+}
+
+html.table-fullscreen-active,
+html.table-fullscreen-active body {
+  overflow: hidden;
+}
+
+.table-fullscreen-dialog {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: var(--md-default-bg-color);
+  color: var(--md-default-fg-color);
+}
+
+.table-fullscreen-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.table-fullscreen-toolbar {
+  display: flex;
+  flex: none;
+  justify-content: flex-end;
+  padding: 0.4rem;
+  border-bottom: 0.05rem solid var(--md-typeset-table-color);
+}
+
+.table-fullscreen-toolbar > .table-fullscreen-button {
+  width: 2rem;
+  height: 2rem;
+  padding: 0.3rem;
+  border: 0.05rem solid var(--md-default-fg-color--lighter);
+  border-radius: 0.2rem;
+  background: var(--md-default-bg-color);
+  color: var(--md-default-fg-color);
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+.table-fullscreen-toolbar > .table-fullscreen-button:hover {
+  color: var(--md-accent-fg-color);
+  border-color: var(--md-accent-fg-color);
+}
+
+.table-fullscreen-scroll {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.table-fullscreen-dialog.md-typeset table {
+  display: table;
+  max-width: none;
+  margin: 0;
+  overflow: visible;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.table-fullscreen-dialog thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.table-fullscreen-dialog thead th,
+.table-fullscreen-dialog .table-fullscreen-first-column {
+  background: var(--md-default-bg-color);
+}
+
+.table-fullscreen-dialog .table-fullscreen-first-column {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  box-shadow: 0.05rem 0 0 var(--md-typeset-table-color);
+}
+
+@media print {
+  .table-fullscreen-button,
+  .table-fullscreen-dialog {
+    display: none !important;
+  }
+}

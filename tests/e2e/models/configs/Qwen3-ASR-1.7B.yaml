@@ -1,0 +1,21 @@
+model_name: "Qwen/Qwen3-ASR-1.7B"
+model_type: "vllm-asr"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: auto
+  max_model_len: 4096
+  gpu_memory_utilization: 0.8
+  trust_remote_code: false
+
+tasks:
+  - name: "librispeech_test_clean"
+    dataset: "openslr/librispeech_asr"
+    split: "test"
+    dataset_config: "clean"
+    metrics:
+      - name: "wer"
+        value: 0.035
+
+limit: 500

@@ -1,0 +1,120 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+_envs: &envs
+  OMP_NUM_THREADS: "10"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_BUFFSIZE: "2048"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  SERVER_PORT: "DEFAULT_PORT"
+server_cmd: &server_cmd
+  - "--max-model-len"
+  - "1048576"
+  - "--max-num-batched-tokens"
+  - "10240"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--max-num-seqs"
+  - "64"
+  - "--data-parallel-size"
+  - "8"
+  - "--tensor-parallel-size"
+  - "1"
+  - "--enable-expert-parallel"
+  - "--tokenizer-mode"
+  - "deepseek_v4"
+  - "--tool-call-parser"
+  - "deepseek_v4"
+  - "--enable-auto-tool-choice"
+  - "--reasoning-parser"
+  - "deepseek_v4"
+  - "--model-loader-extra-config"
+  - '{"enable_multithread_load": true, "num_threads": 128}'
+  - "--quantization"
+  - "ascend"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--block-size"
+  - "32"
+  - "--attention_config.indexer_kv_dtype"
+  - "fp8"
+  - "--kv-cache-dtype"
+  - "fp8"
+  - "--compilation-config"
+  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+  - "--additional-config"
+  - '{
+    "ascend_compilation_config": {
+        "enable_npugraph_ex": true,
+        "enable_static_kernel": false
+    },
+    "enable_cpu_binding": true,
+    "multistream_overlap_shared_expert": true}'
+
+test_cases:
+  - name: "DeepSeek-V4-Flash-DSpark-Static"
+    model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash-0731"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--speculative-config"
+      - '{"method":"dspark","num_speculative_tokens":15,"enforce_eager":false}'
+    test_content:
+      - chat_completion
+    prompts:
+      - seed: "x "
+        target_tokens: 200
+    api_keyword_args:
+      max_tokens: 200
+      temperature: 0.0
+    expected_response:
+      completion_tokens: 200
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/DeepSeek-V4-Flash_input_3500_lines_128
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 128
+        max_out_len: 1500
+        batch_size: 32
+        request_rate: 0
+        baseline: 2241.98294
+        threshold: 0.95
+        temperature: 0
+        ignore_eos: True
+  - name: "DeepSeek-V4-Flash-DSpark-AdaptiveVerification"
+    model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash-0731"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--speculative-config"
+      - '{"method":"dspark","num_speculative_tokens":15,"enforce_eager":false,"enable_adaptive_verification": true}'
+    test_content:
+      - chat_completion
+    prompts:
+      - seed: "x "
+        target_tokens: 200
+    api_keyword_args:
+      max_tokens: 200
+      temperature: 0.0
+    expected_response:
+      completion_tokens: 200
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/DeepSeek-V4-Flash_input_3500_lines_128
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 128
+        max_out_len: 1500
+        batch_size: 32
+        request_rate: 0
+        baseline: 2414.56025
+        threshold: 0.95
+        temperature: 0
+        ignore_eos: True

@@ -1,0 +1,166 @@
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/block_table.py
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+import torch
+from vllm.triton_utils import triton
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.worker.gpu.block_table import BlockTables
+
+from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
+    _compute_slot_mappings_kernel,
+)
+
+
+class AscendBlockTables(BlockTables):
+    """Block table for Ascend NPUs."""
+
+    # TODO: Refactor this path to follow vLLM #57169: keep block tables at
+    # manager-block granularity and move the kernel-block mapping into
+    # AttentionGroup (kernel_block_table / map_to_kernel_block_table). This class
+    # should then stop expanding rows in __init__/append_block_ids, and the
+    # Ascend slot-mapping kernel should consume the mapped block table.
+
+    block_sizes_tensor: torch.Tensor
+    kernel_block_sizes_tensor: torch.Tensor
+
+    def __init__(
+        self,
+        block_sizes: list[int],
+        max_num_reqs: int,
+        max_num_batched_tokens: int,
+        max_num_blocks_per_group: list[int],
+        device: torch.device,
+        kernel_block_sizes: list[int] | None = None,
+        cp_size: int = 1,
+        cp_rank: int = 0,
+        cp_interleave: int = 1,
+        slot_mapping_enabled: list[bool] | None = None,
+        dcp_sharded: list[bool] | None = None,
+    ):
+        if kernel_block_sizes is None:
+            kernel_block_sizes = block_sizes
+        # vLLM #57169 dropped `kernel_block_sizes`/`blocks_per_kv_block` from
+        # `BlockTables` on main and stopped expanding the block tables. The
+        # Ascend triton slot-mapping kernel still addresses kernel blocks, so
+        # restore that layout locally: expose the kernel block sizes, expand
+        # the block-table rows by `blocks_per_kv_block`, and keep a tensor of
+        # the kernel block sizes for the kernel.
+        self.kernel_block_sizes = kernel_block_sizes
+        self.blocks_per_kv_block = [
+            block_size // kernel_block_size for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes)
+        ]
+        expanded_num_blocks_per_group = [
+            max_num_blocks * blocks_per_kv_block
+            for max_num_blocks, blocks_per_kv_block in zip(max_num_blocks_per_group, self.blocks_per_kv_block)
+        ]
+        # vLLM main added a per-group ``dcp_sharded`` flag to BlockTables;
+        # older releases have no such parameter, so only forward it
+        # when the caller supplies it.
+        super_kwargs: dict[str, list[bool]] = {}
+        if dcp_sharded is not None:
+            super_kwargs["dcp_sharded"] = dcp_sharded
+        # vLLM main's `BlockTables.__init__` has no `kernel_block_sizes`
+        # parameter, so it is not forwarded; the kernel-block layout is
+        # maintained here instead.
+        super().__init__(
+            block_sizes,
+            max_num_reqs,
+            max_num_batched_tokens,
+            expanded_num_blocks_per_group,
+            device,
+            cp_size=cp_size,
+            cp_rank=cp_rank,
+            cp_interleave=cp_interleave,
+            slot_mapping_enabled=slot_mapping_enabled,
+            **super_kwargs,
+        )
+        self.kernel_block_sizes_tensor = torch.tensor(kernel_block_sizes, dtype=torch.int32, device=self.device)
+        self._triton_block_size = 1024
+        # kernel_block_sizes determine the number of block-table entries
+        # touched by one token tile. Use the smallest kernel block size to
+        # form one safe constexpr window for all groups, without staging a
+        # whole row.
+        if kernel_block_sizes:
+            min_kernel_block_size = min(kernel_block_sizes)
+            window_size = (self._triton_block_size + min_kernel_block_size - 1) // min_kernel_block_size + 1
+            self._block_table_window_size = triton.next_power_of_2(window_size)
+        else:
+            # Encoder-only producers do not allocate decoder KV-cache groups.
+            self._block_table_window_size = 1
+        # because we will override these attribute, delete these attribute to
+        # make sure it's collected by python gc immediately.
+        del self.slot_mappings
+        # vllm-ascend' reshape_and_cache function requires slot_mappings to be int32.
+        # so we need to redefine slot_mappings to be int32.
+        self.slot_mappings: torch.Tensor = torch.zeros(  # type: ignore[no-redef]
+            self.num_kv_cache_groups,
+            self.max_num_batched_tokens,
+            dtype=torch.int32,
+            device=self.device,
+        )
+
+    def append_block_ids(
+        self,
+        req_index: int,
+        new_block_ids: tuple[list[int], ...],
+        overwrite: bool,
+    ) -> None:
+        # vLLM #57169 stopped expanding block ids by `blocks_per_kv_block`
+        # in both supported lanes; Ascend block tables are kernel-block addressed,
+        # so restore the expansion before calling the upstream implementation.
+        expanded_block_ids = tuple(
+            [block_id * blocks_per_kv_block + k for block_id in ids for k in range(blocks_per_kv_block)]
+            for ids, blocks_per_kv_block in zip(new_block_ids, self.blocks_per_kv_block)
+        )
+        return super().append_block_ids(req_index, expanded_block_ids, overwrite)
+
+    def compute_slot_mappings(
+        self,
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+        num_tokens_padded: int,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        num_reqs = idx_mapping.shape[0]
+        num_groups = self.num_kv_cache_groups
+        slot_mappings = self.slot_mappings if out is None else out
+        if num_groups == 0:
+            return slot_mappings[:, :num_tokens_padded]
+        slot_mapping_enabled = self.slot_mapping_enabled
+        _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
+            slot_mappings.shape[1],
+            idx_mapping,
+            query_start_loc,
+            positions,
+            self.block_table_ptrs,
+            self.block_table_strides,
+            self.block_sizes_tensor,
+            self.kernel_block_sizes_tensor,
+            slot_mappings,
+            slot_mappings.stride(0),
+            self.cp_rank,
+            CP_SIZE=self.cp_size,
+            CP_INTERLEAVE=self.cp_interleave,
+            PAD_ID=PAD_SLOT_ID,
+            TRITON_BLOCK_SIZE=self._triton_block_size,
+            BLOCK_TABLE_WINDOW_SIZE=self._block_table_window_size,
+            slot_mapping_enabled=slot_mapping_enabled,
+            HAS_SLOT_MAPPING_ENABLED=True,
+        )
+        return slot_mappings[:, :num_tokens_padded]

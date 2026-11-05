@@ -1,0 +1,223 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-01 04:17+0000\n"
+"PO-Revision-Date: 2026-08-01 04:17+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# Batch-Job-Aware Scheduler"
+msgstr "# 批处理作业感知调度器"
+
+msgid ""
+"Batch-Job-Aware Scheduler is a specialized scheduler designed for **offline "
+"batch inference** scenarios where throughput and hardware utilisation are "
+"the primary goals. It is particularly effective when processing multiple "
+"batch jobs concurrently, each with a distinct set of requests."
+msgstr ""
+"批处理作业感知调度器是一种专为**离线批处理推理**场景设计的专用调度器，其首要目标是吞吐量和硬件利用率。在同时处理多个批处理作业（每个作业包含一组不同的请求）时，该调度器尤为有效。"
+
+msgid ""
+"> **Note:** This scheduler **does not implement starvation prevention**. It "
+"is intended solely for **batch processing scenarios** or **online inference "
+"scenarios where request waiting time is not a concern**. If requests have "
+"strict latency or fairness requirements, this scheduler may not be suitable."
+msgstr ""
+"> **注意：** "
+"该调度器**不实现防饥饿机制**。它仅适用于**批处理场景**或**不关心请求等待时间的在线推理场景**。如果请求有严格的延迟或公平性要求，此调度器可能不适用。"
+
+msgid "## Overview"
+msgstr "## 概述"
+
+msgid "The scheduler implements three key strategies to improve throughput:"
+msgstr "该调度器通过三种关键策略来提升吞吐量："
+
+msgid ""
+"1. **LPT (Longest Processing Time first) scheduling**: Prioritises longer "
+"tasks first and schedules shorter ones to fill gaps, particularly during the"
+" decode step. This improves the average number of tokens computed per "
+"scheduling round."
+msgstr ""
+"1. **LPT（最长处理时间优先）调度**：优先调度耗时较长的任务，并利用较短任务填补空隙，尤其是在解码阶段。这提高了每轮调度中计算的平均 token"
+" 数量。"
+
+msgid ""
+"2. **KV cache reservation**: Estimates and reserves KV cache budget in "
+"advance for running requests, reducing preemption overhead."
+msgstr "2. **KV 缓存预留**：提前为运行中的请求估算并预留 KV 缓存预算，从而减少抢占开销。"
+
+msgid ""
+"3. **Job-aware request grouping**: Groups requests by **job name** (extracted from the request ID), assigns each job its own request bucket, and dynamically adjusts job scheduling order based on KV cache availability:\n"
+"   - When available tokens > threshold (default 4096): prioritise long decode jobs\n"
+"   - When available tokens ≤ threshold: prioritise short decode jobs"
+msgstr ""
+"3. **作业感知的请求分组**：根据**作业名称**（从请求 ID 中提取）对请求进行分组，为每个作业分配独立的请求桶，并根据 KV 缓存可用性动态调整作业调度顺序：\n"
+"   - 当可用 token 数 > 阈值（默认 4096）时：优先调度长解码作业\n"
+"   - 当可用 token 数 ≤ 阈值时：优先调度短解码作业"
+
+msgid ""
+"The scheduler is implemented by extending the **waiting queue** with "
+"**dynamic priority scheduling**, while inheriting most features from the "
+"original scheduler class, including chunked prefill, async scheduling, and "
+"more."
+msgstr "该调度器通过扩展**等待队列**并引入**动态优先级调度**来实现，同时继承了原始调度器类的大部分功能，包括分块预填充、异步调度等。"
+
+msgid "## How It Works"
+msgstr "## 工作原理"
+
+msgid "### Job Name Extraction"
+msgstr "### 作业名称提取"
+
+msgid ""
+"The scheduler identifies which job a request belongs to via a "
+"`#job_name[${JOB_NAME}]#` tag embedded in the request ID. For example:"
+msgstr "调度器通过请求 ID 中嵌入的 `#job_name[${JOB_NAME}]#` 标签来识别请求所属的作业。例如："
+
+msgid ""
+"Requests without a job name tag are grouped under the `__default__` job."
+msgstr "没有作业名称标签的请求会被归入 `__default__` 作业。"
+
+msgid "### Decode Length Estimation"
+msgstr "### 解码长度估算"
+
+msgid ""
+"Each job's decode length is predicted using a pure **EWMA (Exponentially "
+"Weighted Moving Average)** estimator:"
+msgstr "每个作业的解码长度通过纯 **EWMA（指数加权移动平均）** 估计器进行预测："
+
+msgid ""
+"- **No samples yet**: Returns a cold-start default value (128 tokens).\n"
+"- **First observation**: EWMA is initialised to the observed decode length.\n"
+"- **Subsequent observations**: EWMA is updated incrementally, giving more weight to recent data while smoothing out fluctuations."
+msgstr ""
+"- **尚无样本**：返回冷启动默认值（128 个 token）。\n"
+"- **首次观测**：EWMA 初始化为观测到的解码长度。\n"
+"- **后续观测**：EWMA 增量更新，赋予近期数据更高权重，同时平滑波动。"
+
+msgid ""
+"This approach is simple, responsive, and avoids the complexity of multi-"
+"phase estimation while producing stable predictions even with limited data."
+msgstr "这种方法简单、响应迅速，避免了多阶段估算的复杂性，即使在数据有限的情况下也能产生稳定的预测。"
+
+msgid ""
+"This enables the scheduler to distinguish between \"long decode\" jobs "
+"(which benefit from being scheduled first when resources are abundant) and "
+"\"short decode\" jobs (which are prioritised when resources are scarce)."
+msgstr "这使得调度器能够区分\"长解码\"作业（在资源充足时优先调度可获益）和\"短解码\"作业（在资源紧张时优先调度）。"
+
+msgid "## Getting Started"
+msgstr "## 快速开始"
+
+msgid "### Prerequisites"
+msgstr "### 前提条件"
+
+msgid ""
+"- **vLLM v1 engine** is required (the batch-job-aware scheduler is built on the v1 scheduling framework).\n"
+"- **Ascend NPU** with sufficient memory for the target model(s)."
+msgstr ""
+"- 需要 **vLLM v1 引擎**（批处理作业感知调度器基于 v1 调度框架构建）。\n"
+"- **Ascend NPU** 具有足够的内存来运行目标模型。"
+
+msgid "### Enabling the Feature"
+msgstr "### 启用功能"
+
+msgid ""
+"The batch-job-aware scheduler is enabled via the `additional_config` "
+"parameter. It is currently only supported in **offline batch** mode."
+msgstr "批处理作业感知调度器通过 `additional_config` 参数启用。目前仅在**离线批处理**模式下支持。"
+
+msgid "### Request ID Format"
+msgstr "### 请求 ID 格式"
+
+msgid ""
+"To take advantage of job-aware scheduling, embed the `#job_name[...]#` tag "
+"into the request ID inside your batch input file:"
+msgstr "要利用作业感知调度，请在批处理输入文件的请求 ID 中嵌入 `#job_name[...]#` 标签："
+
+msgid ""
+"Requests without a job name tag will be grouped under the default job and "
+"still benefit from the scheduler's KV cache reservation and LPT scheduling."
+msgstr "没有作业名称标签的请求将被归入默认作业，并且仍然受益于调度器的 KV 缓存预留和 LPT 调度。"
+
+msgid "## Configuration Parameters"
+msgstr "## 配置参数"
+
+msgid ""
+"All parameters are nested under `batch_job_sched_config` in the "
+"`additional_config: {\"scheduler_config\":: {}}`."
+msgstr ""
+"所有参数都嵌套在 `additional_config: {\"scheduler_config\":: {}}` 中的 "
+"`batch_job_sched_config` 下。"
+
+msgid "| Parameter | Type | Default | Description |"
+msgstr "| 参数 | 类型 | 默认值 | 描述 |"
+
+msgid "| `enabled` | bool | `false` | Enable the batch-job-aware scheduler |"
+msgstr "| `enabled` | bool | `false` | 启用批处理作业感知调度器 |"
+
+msgid "| `max_jobs` | int | `20` | Maximum number of tracked jobs |"
+msgstr "| `max_jobs` | int | `20` | 最大跟踪作业数 |"
+
+msgid ""
+"| `reserve_margin_blocks` | int | `2` | Extra block margin added to the KV "
+"cache reserve as safety buffer |"
+msgstr "| `reserve_margin_blocks` | int | `2` | 添加到 KV 缓存预留中的额外块余量，作为安全缓冲 |"
+
+msgid ""
+"| `reserve_max_blocks` | int | `8` | Maximum number of blocks that can be "
+"reserved |"
+msgstr "| `reserve_max_blocks` | int | `8` | 可预留的最大块数 |"
+
+msgid ""
+"| `low_available_tokens_threshold` | int | `4096` | Threshold for "
+"prioritising long vs short decode jobs |"
+msgstr ""
+"| `low_available_tokens_threshold` | int | `4096` | 用于优先调度长解码与短解码作业的阈值 |"
+
+msgid ""
+"| `short_decode_token_threshold` | int | `32` | Threshold for classifying a "
+"job as \"short decode\" |"
+msgstr "| `short_decode_token_threshold` | int | `32` | 将作业分类为\"短解码\"的阈值 |"
+
+msgid "## Usage"
+msgstr "## 使用方法"
+
+msgid "### Basic Offline Batch"
+msgstr "### 基本离线批处理"
+
+msgid "### Offline Batch with Custom Configuration"
+msgstr "### 自定义配置的离线批处理"
+
+msgid "### Using via Python API"
+msgstr "### 通过 Python API 使用"
+
+msgid "## Best Practices"
+msgstr "## 最佳实践"
+
+msgid ""
+"1. **Encode job names in request IDs**: Use the `#job_name[${JOB_NAME}]#` "
+"prefix in your request IDs to help the scheduler group and prioritise "
+"requests effectively."
+msgstr ""
+"1. **在请求 ID 中编码作业名称**：在请求 ID 中使用 `#job_name[${JOB_NAME}]#` "
+"前缀，帮助调度器有效地分组和优先处理请求。"
+
+msgid ""
+"2. **Adjust `low_available_tokens_threshold`**: If your workload is "
+"consistently long-decode-heavy, consider lowering this threshold to keep "
+"long jobs prioritised. For mixed workloads, keep the default."
+msgstr ""
+"2. **调整 "
+"`low_available_tokens_threshold`**：如果您的负载以长解码为主，请考虑降低此阈值以保持长作业优先。对于混合负载，请保持默认值。"

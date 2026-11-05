@@ -1,0 +1,265 @@
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+from vllm.config import ParallelConfig
+
+from vllm_ascend.distributed.parallel_state import (
+    _LMTP,
+    _MC2,
+    _OTP,
+    _P_TP,
+    destroy_ascend_model_parallel,
+    get_global_rank,
+    get_lmhead_tp_group,
+    get_mc2_group,
+    get_otp_group,
+    get_p_tp_group,
+    init_ascend_model_parallel,
+)
+
+
+@pytest.fixture
+def parallel_config():
+    return ParallelConfig(
+        data_parallel_size=2,
+        tensor_parallel_size=4,
+        pipeline_parallel_size=2,
+    )
+
+
+@pytest.fixture
+def mock_distributed():
+    with (
+        patch("torch.distributed.is_initialized", return_value=True),
+        patch("torch.distributed.get_world_size", return_value=16),
+        patch("torch.distributed.get_backend", return_value="nccl"),
+        patch("vllm_ascend.distributed.parallel_state.get_world_group") as mock_group,
+    ):
+        mock_group.return_value.local_rank = 0
+        mock_group.return_value.device_group = MagicMock()
+        yield
+
+
+@pytest.mark.parametrize("otp_size", [0, 1, 2])
+def test_init_ascend_model_parallel(mock_distributed, parallel_config, otp_size):
+    mock_ascend_config = MagicMock()
+    mock_ascend_config.kvpp_config.size = 1
+    mock_ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size = 2
+    mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = otp_size
+    mock_ascend_config.finegrained_tp_config.embedding_tensor_parallel_size = 2
+    mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 2
+    mock_ascend_config.pd_tp_ratio = 2
+    mock_ascend_config.num_head_replica = 0
+    mock_ascend_config.pd_head_ratio = 2
+    mock_ascend_config.enable_context_parallel = False
+    mock_vllm_config = MagicMock()
+    mock_vllm_config.kv_transfer_config.is_kv_producer = True
+    with (
+        patch("vllm_ascend.distributed.parallel_state.model_parallel_initialized", return_value=False),
+        patch("vllm_ascend.distributed.parallel_state.init_model_parallel_group"),
+        patch("vllm_ascend.distributed.parallel_state.get_current_vllm_config", return_value=mock_vllm_config),
+        patch("vllm_ascend.distributed.parallel_state.get_ascend_config", return_value=mock_ascend_config),
+        patch("vllm_ascend.utils.get_ascend_config", return_value=mock_ascend_config),
+    ):
+        init_ascend_model_parallel(parallel_config)
+
+        mc2_group = get_mc2_group()
+        lmheadtp_group = get_lmhead_tp_group()
+        if otp_size > 1:
+            assert get_otp_group() is not None
+        else:
+            with pytest.raises(AssertionError, match="output tensor parallel group is not initialized"):
+                get_otp_group()
+        p_tp_group = get_p_tp_group()
+        assert mc2_group is not None
+        assert lmheadtp_group is not None
+        assert p_tp_group is not None
+
+        destroy_ascend_model_parallel()
+        assert _MC2 is None
+        assert _LMTP is None
+        assert _OTP is None
+        assert _P_TP is None
+
+
+def _build_parallel_config(
+    tensor_parallel_size=1,
+    pipeline_parallel_size=1,
+    prefill_context_parallel_size=1,
+    data_parallel_index=0,
+):
+    return SimpleNamespace(
+        tensor_parallel_size=tensor_parallel_size,
+        pipeline_parallel_size=pipeline_parallel_size,
+        prefill_context_parallel_size=prefill_context_parallel_size,
+        data_parallel_index=data_parallel_index,
+    )
+
+
+@pytest.mark.parametrize(
+    "parallel_config_kwargs, rank_in_group, expected",
+    [
+        # No parallelism at all (single card): replica_size == 1.
+        (dict(tensor_parallel_size=1), 0, 0),
+        # TP only: rank_in_group is the local rank within the single replica.
+        (dict(tensor_parallel_size=4), 0, 0),
+        (dict(tensor_parallel_size=4), 3, 3),
+        # Dense DP: world group spans one replica, rank_in_group is local and
+        # data_parallel_index supplies the DP offset.
+        (dict(tensor_parallel_size=4, data_parallel_index=0), 2, 2),
+        (dict(tensor_parallel_size=4, data_parallel_index=1), 2, 6),
+        # MoE DP / external_launcher: world group spans all DP ranks, so
+        # rank_in_group is already global; the modulo strips the DP offset and
+        # data_parallel_index re-adds it (result equals rank_in_group).
+        (dict(tensor_parallel_size=4, data_parallel_index=1), 6, 6),
+        (dict(tensor_parallel_size=4, data_parallel_index=1), 7, 7),
+        # TP * PP * prefill-CP all contribute to replica_size; DCP/EP do not.
+        (dict(tensor_parallel_size=2, pipeline_parallel_size=2, data_parallel_index=1), 1, 5),
+        (
+            dict(
+                tensor_parallel_size=2, pipeline_parallel_size=2, prefill_context_parallel_size=2, data_parallel_index=1
+            ),
+            3,
+            11,
+        ),
+    ],
+)
+def test_get_global_rank(parallel_config_kwargs, rank_in_group, expected):
+    parallel_config = _build_parallel_config(**parallel_config_kwargs)
+    with patch("vllm_ascend.distributed.parallel_state.get_world_group") as mock_group:
+        mock_group.return_value.rank_in_group = rank_in_group
+        assert get_global_rank(parallel_config) == expected
+
+
+def test_get_global_rank_defaults_to_current_config():
+    parallel_config = _build_parallel_config(tensor_parallel_size=4, data_parallel_index=1)
+    mock_vllm_config = MagicMock()
+    mock_vllm_config.parallel_config = parallel_config
+    with (
+        patch(
+            "vllm_ascend.distributed.parallel_state.get_current_vllm_config",
+            return_value=mock_vllm_config,
+        ),
+        patch("vllm_ascend.distributed.parallel_state.get_world_group") as mock_group,
+    ):
+        mock_group.return_value.rank_in_group = 3
+        # data_parallel_index(1) * replica_size(4) + 3 == 7
+        assert get_global_rank() == 7
+
+
+@pytest.mark.parametrize("size", [1, 4])
+@pytest.mark.parametrize("pcp_size", [1, 2])
+def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size, pcp_size):
+    from vllm_ascend.distributed import parallel_state
+
+    for name in ("_KVPP", "_MC2", "_P_TP", "_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP", "_DYNAMIC_EPLB"):
+        monkeypatch.setattr(parallel_state, name, None)
+    config = SimpleNamespace(
+        kvpp_config=SimpleNamespace(size=size),
+        pd_tp_ratio=1,
+        pd_head_ratio=1,
+        eplb_config=SimpleNamespace(dynamic_eplb=False),
+        finegrained_tp_config=SimpleNamespace(
+            oproj_tensor_parallel_size=0,
+            lmhead_tensor_parallel_size=0,
+            embedding_tensor_parallel_size=0,
+            mlp_tensor_parallel_size=0,
+        ),
+    )
+    calls, groups = {}, {}
+
+    def init_group(ranks, local_rank, backend, *, group_name):
+        calls[group_name] = (ranks, local_rank, backend)
+        groups[group_name] = MagicMock()
+        return groups[group_name]
+
+    monkeypatch.setattr(parallel_state.torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_world_size", lambda: 8)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_backend", lambda _: "hccl")
+    monkeypatch.setattr(parallel_state, "get_world_group", lambda: SimpleNamespace(local_rank=4, device_group=object()))
+    monkeypatch.setattr(parallel_state, "get_ascend_config", lambda: config)
+    monkeypatch.setattr(parallel_state, "init_model_parallel_group", init_group)
+    parallel_state.init_ascend_model_parallel(
+        SimpleNamespace(
+            tensor_parallel_size=4 // pcp_size,
+            pipeline_parallel_size=2,
+            data_parallel_size=1,
+            prefill_context_parallel_size=pcp_size,
+        )
+    )
+    if size == 1:
+        assert "kvpp" not in calls
+        assert parallel_state._KVPP is None
+    else:
+        assert calls["kvpp"] == ([[0, 1, 2, 3], [4, 5, 6, 7]], 4, "hccl")
+        assert parallel_state.get_kvpp_group() is groups["kvpp"]
+        assert groups["kvpp"] is not groups["mc2"]
+    parallel_state.destroy_ascend_model_parallel()
+    if size > 1:
+        groups["kvpp"].destroy.assert_called_once_with()
+    assert parallel_state._KVPP is None
+
+
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("shard_size", [1, 4])
+def test_engram_dp_pcp_group_reuses_upstream_node_partition(monkeypatch, shared, shard_size):
+    from vllm_ascend.distributed import parallel_state
+
+    for name in ("_KVPP", "_MC2", "_P_TP", "_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP", "_DYNAMIC_EPLB"):
+        monkeypatch.setattr(parallel_state, name, None)
+    config = SimpleNamespace(
+        kvpp_config=SimpleNamespace(size=1),
+        pd_tp_ratio=1,
+        pd_head_ratio=1,
+        eplb_config=SimpleNamespace(dynamic_eplb=False),
+        finegrained_tp_config=SimpleNamespace(
+            oproj_tensor_parallel_size=0,
+            lmhead_tensor_parallel_size=0,
+            embedding_tensor_parallel_size=0,
+            mlp_tensor_parallel_size=0,
+        ),
+    )
+    upstream = parallel_state.vllm_parallel_state
+    for name in ("_ENGRAM_DP", "_TP", "_ETP", "_DCP", "_PCP", "_PP", "_DP", "_EP", "_EPLB"):
+        monkeypatch.setattr(upstream, name, None)
+    node_partition = MagicMock(return_value=shard_size)
+    monkeypatch.setattr(upstream, "_engram_dp_shard_size", node_partition)
+    init_group = MagicMock(side_effect=lambda *args, **kwargs: MagicMock())
+    monkeypatch.setattr(parallel_state.torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_world_size", lambda: 8)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_backend", lambda _: "hccl")
+    monkeypatch.setattr(parallel_state, "get_world_group", lambda: SimpleNamespace(local_rank=0, device_group=object()))
+    monkeypatch.setattr(parallel_state, "get_ascend_config", lambda: config)
+    monkeypatch.setattr(parallel_state, "init_model_parallel_group", init_group)
+    topology = SimpleNamespace(
+        tensor_parallel_size=2,
+        pipeline_parallel_size=1,
+        data_parallel_size=2,
+        prefill_context_parallel_size=2,
+    )
+    engram = SimpleNamespace(dp_shared_memory=shared)
+    parallel_state.init_ascend_model_parallel(topology, engram)
+    node_partition.assert_called_once_with(8, 4, 2)
+    group = upstream.get_engram_dp_group()
+    if shard_size > 1:
+        assert init_group.call_args_list[0].args == ([[0, 2, 4, 6], [1, 3, 5, 7]], 0, "gloo" if shared else "hccl")
+        assert init_group.call_args_list[0].kwargs == {"group_name": "edp", "use_device_communicator": not shared}
+        assert group is not None
+    else:
+        assert upstream.get_engram_dp_group() is None
+        assert all(call.kwargs["group_name"] != "edp" for call in init_group.call_args_list)
+    parallel_state.destroy_ascend_model_parallel()
+    assert upstream.get_engram_dp_group() is group
+    if group is not None:
+        group.destroy.assert_not_called()
+    upstream.destroy_model_parallel()
+    assert upstream.get_engram_dp_group() is None
+    if group is not None:
+        group.destroy.assert_called_once_with()
+    parallel_state.init_ascend_model_parallel(topology, engram)
+    if shard_size > 1:
+        assert upstream.get_engram_dp_group() is not None
+        assert upstream.get_engram_dp_group() is not group
+    parallel_state.destroy_ascend_model_parallel()
+    upstream.destroy_model_parallel()

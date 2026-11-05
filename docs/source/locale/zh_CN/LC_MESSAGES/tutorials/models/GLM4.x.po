@@ -1,0 +1,51 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-08 14:01+0000\n"
+"PO-Revision-Date: 2026-10-21 00:00+0800\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# GLM-4.5/4.6/4.7"
+msgstr "# GLM-4.5/4.6/4.7"
+
+msgid ""
+"This model has been discontinued since vLLM Ascend v0.30.0 and will no "
+"longer receive support or fixes in subsequent versions. For deployment, "
+"please refer to the [historical version "
+"documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM4.x.html)."
+msgstr ""
+"该模型自 vLLM Ascend v0.30.0 "
+"起已停止维护，后续版本将不再提供支持或修复。如需部署，请参考[历史版本文档](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM4.x.html)。"
+
+msgid "=== \"A3 series\""
+msgstr "=== \"A3 系列\""
+
+msgid "=== \"A2 series\""
+msgstr "=== \"A2 系列\""
+
+msgid "Before you start, please"
+msgstr "开始前，请"
+
+msgid ""
+"| dataset | version | metric | mode | vllm-api-general-chat | note |\n"
+"|----- | ----- | ----- | ----- | -----| ----- |\n"
+"| GPQA | - | accuracy | gen | 84.85 | 1 Atlas 800 A3 (64GB × 16) |\n"
+"| MATH500 | - | accuracy | gen | 98.8 | 1 Atlas 800 A3 (64GB × 16) |"
+msgstr ""
+"|数据集|版本|指标|模式|vllm-api-general-chat|说明|\n"
+"|-----|-----|-----|-----|-----|-----|\n"
+"|GPQA|-|准确率|生成|84.85|1 个 Atlas 800 A3（64GB × 16）节点|\n"
+"|MATH500|-|准确率|生成|98.8|1 个 Atlas 800 A3（64GB × 16）节点|"

@@ -1,0 +1,296 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
+
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+import vllm_ascend.ops.fused_moe.routed_experts as routed_experts_module
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, EplbExpertTensorList
+
+
+class _FakeNpuTensor:
+    """Minimal NPU tensor stub for CPU-only unit tests."""
+
+    def __init__(
+        self,
+        shape,
+        npu_format,
+        *,
+        dtype=torch.float16,
+        storage_offset=0,
+        stride=None,
+    ):
+        self.shape = torch.Size(shape)
+        self.dtype = dtype
+        self.layout = torch.strided
+        self.device = torch.device("npu")
+        self.npu_format = npu_format
+        self._storage_offset = storage_offset
+        self._stride = stride or torch.empty(shape).stride()
+
+    def size(self):
+        return self.shape
+
+    def storage_offset(self):
+        return self._storage_offset
+
+    def stride(self):
+        return self._stride
+
+
+def _routed_experts(weight_views):
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    routed_experts.local_num_experts = 2
+    routed_experts.quant_method = SimpleNamespace(
+        get_eplb_weight_views=lambda layer: weight_views,
+    )
+    return routed_experts
+
+
+def test_get_expert_weights_flattens_layout_aware_views():
+    weights = [torch.randn(2, 3, 4), torch.randn(2, 5)]
+
+    views = list(_routed_experts(weights).get_expert_weights())
+
+    assert [view.shape for view in views] == [torch.Size([2, 12]), torch.Size([2, 5])]
+    assert views[0].untyped_storage().data_ptr() == weights[0].untyped_storage().data_ptr()
+
+
+def test_get_expert_weights_preserves_independent_expert_tensors():
+    expert_tensors = [torch.randn(3, 4), torch.randn(3, 4)]
+
+    views = list(_routed_experts([expert_tensors]).get_expert_weights())
+
+    assert len(views) == 1
+    assert isinstance(views[0], EplbExpertTensorList)
+    assert views[0].shape == torch.Size([2, 3, 4])
+    assert all(actual is expected for actual, expected in zip(views[0], expert_tensors))
+
+    buffer = torch.empty_like(views[0])
+    assert isinstance(buffer, EplbExpertTensorList)
+    assert buffer.shape == views[0].shape
+    assert all(tensor.storage_offset() == 0 for tensor in buffer)
+
+
+def test_eplb_expert_tensor_list_supports_upstream_uint8_contract():
+    # vLLM main registers expert weights via
+    # `w.view(torch.uint8) if w.element_size() == 1 else w` (interfaces.py,
+    # #61786); the per-expert container must satisfy that contract.
+    expert_tensors = [
+        torch.ones(3, 4, dtype=torch.int8),
+        torch.ones(3, 4, dtype=torch.int8),
+    ]
+    weights = EplbExpertTensorList(expert_tensors)
+
+    assert weights.element_size() == 1
+
+    viewed = weights.view(torch.uint8)
+    assert isinstance(viewed, EplbExpertTensorList)
+    assert all(tensor.dtype == torch.uint8 for tensor in viewed)
+    assert all(
+        actual.untyped_storage().data_ptr() == expected.untyped_storage().data_ptr()
+        for actual, expected in zip(viewed, expert_tensors)
+    )
+
+    registered = [w.view(torch.uint8) if w.element_size() == 1 else w for w in [weights, torch.randn(2, 5)]]
+    assert isinstance(registered[0], EplbExpertTensorList)
+    assert all(tensor.dtype == torch.uint8 for tensor in registered[0])
+    assert registered[1].dtype == torch.float32
+
+    buffer = torch.empty_like(registered[0])
+    assert isinstance(buffer, EplbExpertTensorList)
+    assert all(tensor.dtype == torch.uint8 for tensor in buffer)
+
+
+@pytest.mark.parametrize(
+    "dtype,npu_formats",
+    [
+        pytest.param(torch.float16, (29, 50), id="nz-float-weight"),
+        pytest.param(torch.float16, (2, 2), id="nd-float-weight"),
+        pytest.param(torch.int8, (29, 50), id="nz-int8-weight"),
+        pytest.param(torch.int32, (29, 50), id="nz-packed-weight"),
+        pytest.param(torch.int64, (2, 2), id="nd-integer-scale"),
+    ],
+)
+def test_eplb_expert_buffers_preserve_each_source_npu_format(monkeypatch, dtype, npu_formats):
+    sources = EplbExpertTensorList(_FakeNpuTensor((3, 4), fmt, dtype=dtype) for fmt in npu_formats)
+    format_queries = []
+    allocations = []
+
+    def fake_get_npu_format(tensor):
+        format_queries.append(tensor)
+        return tensor.npu_format
+
+    def fake_empty_with_format(**kwargs):
+        allocations.append(kwargs)
+        # The CPU tensor stands in for the allocated NPU tensor.
+        return torch.empty(kwargs["size"], dtype=kwargs["dtype"])
+
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "get_npu_format",
+        fake_get_npu_format,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "empty_with_format",
+        fake_empty_with_format,
+        raising=False,
+    )
+
+    buffers = torch.empty_like(sources)
+
+    assert isinstance(buffers, EplbExpertTensorList)
+    assert [buffer.shape for buffer in buffers] == [
+        torch.Size((3, 4)),
+        torch.Size((3, 4)),
+    ]
+    assert all(buffer.dtype == dtype and not buffer.requires_grad for buffer in buffers)
+    assert format_queries == list(sources)
+    assert allocations == [
+        {
+            "size": torch.Size((3, 4)),
+            "dtype": dtype,
+            "layout": torch.strided,
+            "device": torch.device("npu"),
+            "acl_format": fmt,
+        }
+        for fmt in npu_formats
+    ]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"dtype": torch.float32}, id="changed-dtype"),
+        pytest.param({"device": 0}, id="changed-device"),
+        pytest.param(
+            {"memory_format": torch.contiguous_format},
+            id="changed-memory-format",
+        ),
+        pytest.param({"requires_grad": True}, id="requires-grad"),
+    ],
+)
+def test_eplb_expert_buffer_rejects_property_overrides(kwargs):
+    sources = EplbExpertTensorList([_FakeNpuTensor((3, 4), 50)])
+
+    with pytest.raises(TypeError):
+        torch.empty_like(sources, **kwargs)
+
+
+def test_eplb_expert_buffer_rejects_nonzero_storage_offset(monkeypatch):
+    source = _FakeNpuTensor((3, 4), 50, storage_offset=1)
+
+    def fail_empty_with_format(**kwargs):
+        raise AssertionError("empty_with_format must not be called")
+
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "empty_with_format",
+        fail_empty_with_format,
+        raising=False,
+    )
+
+    with pytest.raises(AssertionError, match="storage_offset=1"):
+        routed_experts_module._empty_like_preserving_npu_format(
+            source,
+        )
+
+
+def test_eplb_expert_buffer_rejects_stride_mismatch(monkeypatch):
+    source = _FakeNpuTensor((3, 4), 50)
+
+    def fake_get_npu_format(tensor):
+        return tensor.npu_format
+
+    def fake_empty_with_format(**kwargs):
+        del kwargs
+        return torch.empty((4, 3)).t()
+
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "get_npu_format",
+        fake_get_npu_format,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routed_experts_module.torch_npu,
+        "empty_with_format",
+        fake_empty_with_format,
+        raising=False,
+    )
+
+    with pytest.raises(AssertionError, match="source=.*buffer="):
+        routed_experts_module._empty_like_preserving_npu_format(
+            source,
+        )
+
+
+def test_get_expert_weights_rejects_unsupported_quantization():
+    with pytest.raises(NotImplementedError, match="weight views are not defined"):
+        list(_routed_experts([]).get_expert_weights())
+
+
+def test_get_expert_weights_rejects_missing_weight_view_contract():
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    routed_experts.local_num_experts = 2
+    routed_experts.quant_method = SimpleNamespace()
+
+    with pytest.raises(NotImplementedError, match="must implement get_eplb_weight_views"):
+        list(routed_experts.get_expert_weights())
+
+
+def test_get_expert_weights_rejects_non_expert_first_dimension():
+    with pytest.raises(ValueError, match="first dimension"):
+        list(_routed_experts([torch.randn(3, 4)]).get_expert_weights())
+
+
+def test_get_expert_weights_rejects_wrong_expert_tensor_list_length():
+    with pytest.raises(ValueError, match="must contain local_num_experts"):
+        list(_routed_experts([[torch.randn(3, 4)]]).get_expert_weights())
+
+
+def test_get_expert_weights_rejects_non_contiguous_view():
+    with pytest.raises(ValueError, match="flattenable without a copy"):
+        list(_routed_experts([torch.randn(2, 3, 4).transpose(1, 2)]).get_expert_weights())
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+def test_ascend_expert_map_follows_model_runner(use_v2_model_runner):
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    legacy_map = torch.tensor([1, 0], dtype=torch.int32)
+    upstream_map = torch.tensor([0, 1], dtype=torch.int32)
+    object.__setattr__(routed_experts, "_use_v2_model_runner", use_v2_model_runner)
+    # Both v0.28.0 and main read quant_method in RoutedExperts.expert_map.
+    routed_experts.quant_method = SimpleNamespace(moe_kernel=None)
+    routed_experts.ascend_expert_map = legacy_map
+    object.__setattr__(routed_experts, "_expert_map", upstream_map)
+    object.__setattr__(routed_experts, "rocm_aiter_fmoe_enabled", False)
+
+    expected = upstream_map if use_v2_model_runner else legacy_map
+    assert routed_experts.ascend_expert_map is expected
+
+
+def test_update_expert_map_preserves_upstream_and_legacy_contracts(monkeypatch):
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    parent_update_calls = []
+
+    def parent_update(instance):
+        parent_update_calls.append(instance)
+
+    monkeypatch.setattr(type(routed_experts).__mro__[1], "update_expert_map", parent_update)
+    expert_map_manager = SimpleNamespace(_expert_map=None)
+    object.__setattr__(routed_experts, "expert_map_manager", expert_map_manager)
+
+    routed_experts.update_expert_map()
+
+    assert parent_update_calls == [routed_experts]
+
+    legacy_map = torch.tensor([1, 0], dtype=torch.int32)
+    routed_experts.update_expert_map(legacy_map)
+
+    assert routed_experts.ascend_expert_map is legacy_map
+    assert expert_map_manager._expert_map is legacy_map

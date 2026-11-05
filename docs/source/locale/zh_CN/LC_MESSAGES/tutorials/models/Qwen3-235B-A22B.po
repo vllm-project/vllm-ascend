@@ -1,0 +1,31 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-08 14:01+0000\n"
+"PO-Revision-Date: 2026-07-08 14:01+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# Qwen3-235B-A22B"
+msgstr "# Qwen3-235B-A22B"
+
+msgid ""
+"This model has been discontinued since vLLM Ascend v0.30.0 and will no "
+"longer receive support or fixes in subsequent versions. For deployment, "
+"please refer to the [historical version "
+"documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Qwen3-235B-A22B.html)."
+msgstr ""
+"该模型自 vLLM Ascend v0.30.0 "
+"起已停止维护，后续版本将不再提供支持或修复。如需部署，请参考[历史版本文档](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Qwen3-235B-A22B.html)。"

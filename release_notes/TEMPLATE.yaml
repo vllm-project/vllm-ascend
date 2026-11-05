@@ -1,0 +1,17 @@
+# Release note fragment template.
+#
+# Copy this file to release_notes/fragments/<PR number>.yaml and fill it in.
+# Add a fragment in the same PR that introduces a user-facing change.
+# See release_notes/README.md for when a fragment is needed and the field rules.
+pr: 12345
+entries:
+  # category: feature | hardware | performance | dependency | breaking | config | documentation | bugfix | other
+  - category: feature
+    # One or two English sentences from the user's point of view.
+    # Do not append the PR link; the release tooling adds it automatically.
+    text: Added support for ...
+    # Optional: mark as a candidate for the release Highlights section.
+    # highlight: true
+    # Optional: metadata used when building the hardware support matrix.
+    # model: model-name
+    # hardware: [A2, A3]

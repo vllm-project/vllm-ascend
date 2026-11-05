@@ -1,0 +1,569 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+"""Utility functions for xlite."""
+
+import threading
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from logging import Logger
+from typing import Any, Literal, TypedDict, cast
+
+import torch
+import torch.nn as nn
+import torch_npu
+from vllm.logger import logger
+from xlite._C import Model, ModelConfig
+
+from vllm_ascend.attention.attention_v1 import AscendMetadata
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.attention.sfa_v1 import AscendSFAMetadata
+
+_MISSING = object()
+"""Unique sentinel for missing attributes in this module."""
+_DUMMY_TENSOR = torch.empty(0)
+"""Placeholder tensor for padding missing attributes in :meth:`get_layer_weights`."""
+
+
+def set_dummy_tensor(tensor: torch.Tensor) -> None:
+    """Rebind the module-level :data:`_DUMMY_TENSOR` placeholder.
+
+    :func:`get_layer_weights` reads :data:`_DUMMY_TENSOR` as a bare name, which resolves against this module's globals
+    at call time. Rebinding must therefore mutate *this* module's namespace: a ``from ... import _DUMMY_TENSOR``
+    followed by a plain reassignment in another module only rebinds that module's local copy and
+    leaves the placeholder here unchanged.
+
+    Args:
+        tensor (torch.Tensor): The new placeholder tensor, typically a zero-element tensor allocated on the target
+            device and in the model dtype.
+    """
+    global _DUMMY_TENSOR
+    _DUMMY_TENSOR = tensor
+
+
+class _TensorRepr:
+    """
+    A simple class to provide a string representation of a tensor or an iterable of tensors.
+
+    Attributes:
+        value (Any): The tensor or iterable of tensors to represent, or any other object. If the value is not a tensor
+            or iterable of tensors, its standard representation is used.
+        max_it (int | None): The maximum number of items to show in the representation for iterables. If the iterable
+            has more items than `max_it`, an ellipsis ("...") is used as padding. If `max_it <= 0`, all items are shown.
+    """
+
+    def __init__(self, value: Any, /, *, max_it: int | None = 3) -> None:
+        self.value: Any = value
+        self.max_it: int = max_it if isinstance(max_it, int) else 0
+
+    def _prune_list_repr(self, repr_list: list[str], /) -> list[str]:
+        """Prune a list of string representations to a maximum number of items, adding an ellipsis if pruned."""
+        repr_set: set[str] = set()
+        pruned_repr_list: list[str] = []
+        last_item_is_ellipsis = False
+        for i, s in enumerate(repr_list):
+            if i >= self.max_it and self.max_it > 0:
+                if not last_item_is_ellipsis:
+                    last_item_is_ellipsis = True
+                    pruned_repr_list.append("...")
+                break
+            if s in repr_set:
+                if not last_item_is_ellipsis:
+                    last_item_is_ellipsis = True
+                    pruned_repr_list.append("...")
+                continue
+            last_item_is_ellipsis = False
+            pruned_repr_list.append(s)
+            repr_set.add(s)
+        return pruned_repr_list
+
+    def _single_tensor_repr(self, tensor: torch.Tensor, /) -> str:
+        tensor_info: list[str] = [f"shape={tuple(tensor.shape)}"]
+        if not tensor.is_contiguous():
+            tensor_info.append(f"stride={tensor.stride()}")
+        tensor_info.append(f"dtype={str(tensor.dtype).strip().lstrip('torch.')}")
+        if tensor.device.type == "npu" and (tensor_format := torch_npu.get_npu_format(tensor)) != torch_npu.Format.ND:
+            tensor_info.append(f"format={str(tensor_format)}")
+        return f"Tensor({', '.join(tensor_info)})"
+
+    def _iterable_tensor_repr(self, iterable: torch.Tensor | Sequence[torch.Tensor], /) -> str:
+        if isinstance(iterable, torch.Tensor):
+            return self._single_tensor_repr(iterable)
+        if len(iterable) == 0:
+            return "TensorList(len=0)"
+        tensor_repr_list = self._prune_list_repr([self._single_tensor_repr(t) for t in iterable])
+        return f"TensorList(len={len(iterable)}, items=[{', '.join(tensor_repr_list)}])"
+
+    def _iterable_tensor_2d_repr(
+        self, iterable: torch.Tensor | Sequence[torch.Tensor] | Sequence[Sequence[torch.Tensor]], /
+    ) -> str:
+        if isinstance(iterable, torch.Tensor):
+            return self._single_tensor_repr(iterable)
+        if all(isinstance(t, torch.Tensor) for t in iterable):
+            iterable = cast(Sequence[torch.Tensor], iterable)
+            return self._iterable_tensor_repr(iterable)
+        iterable = cast(Sequence[Sequence[torch.Tensor]], iterable)
+        if len(iterable) == 0:
+            return "TensorList2D(len=0)"
+        iterable_repr_list = self._prune_list_repr([self._iterable_tensor_repr(t) for t in iterable])
+        return f"TensorList2D(len={len(iterable)}, items=[{', '.join(iterable_repr_list)}])"
+
+    def __bool__(self) -> bool:
+        """False only when the value is a tensor or iterable of tensors and all tensors are empty (numel() == 0).
+        Otherwise, True. This is used to determine whether to include the attribute in the string representation.
+        """
+        value: Any = self.value
+        if isinstance(value, torch.Tensor):
+            return value.numel() > 0
+        if isinstance(value, Sequence) and all(isinstance(t, torch.Tensor) for t in value):
+            return any(t.numel() > 0 for t in cast(Sequence[torch.Tensor], value))
+        if isinstance(value, Sequence) and all(
+            isinstance(t, Sequence) and all(isinstance(tt, torch.Tensor) for tt in t) for t in value
+        ):
+            return any(any(tt.numel() > 0 for tt in t) for t in cast(Sequence[Sequence[torch.Tensor]], value))
+        return True
+
+    def __repr__(self) -> str:
+        value = self.value
+        if isinstance(value, torch.Tensor):
+            return self._single_tensor_repr(value)
+        if isinstance(value, Sequence) and all(isinstance(t, torch.Tensor) for t in value):
+            return self._iterable_tensor_repr(value)
+        if isinstance(value, Sequence) and all(
+            isinstance(t, Sequence) and all(isinstance(tt, torch.Tensor) for tt in t) for t in value
+        ):
+            return self._iterable_tensor_2d_repr(value)
+        return repr(value)
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+
+class AttributeSetterMixin:
+    """A mixin that allows setting attributes safely without raising AttributeError for missing attributes. This is
+    useful for handling C++ extension objects that may not have all attributes defined in all versions. The class will
+    simply ignore attempts to set attributes that do not exist, while allowing setting existing attributes as usual.
+
+    Additionally, a context manager interface is provided for checking the incoming value before setting the attribute.
+    The value is only set if the attribute exists and the optional `match_condition` is satisfied.
+
+    Good for backwards compatibility. For subclasses, :mod:`AttributeSetterMixin` must be the first parent class in the
+    inheritance chain to work properly (i.e., the second object in the method resolution order (MRO)).
+
+    **Notes**: Only works for classes with pure class attributes or `__slots__` defined.
+
+    Example usage::
+
+        class Model:
+            __slots__ = ["some_existing_attr"]  # or set as a class attribute explicitly if not using __slots__
+
+
+        class MyModel(AttributeSetterMixin, Model):
+            _on_missing_attr = "ignore"  # silently ignore missing attributes
+
+
+        model = MyModel()
+        model.some_existing_attr = 42  # sets the attribute as usual
+        model.some_missing_attr = "hello"  # does nothing, no error raised
+
+        with model.condition(lambda v: isinstance(v, int) and v > 0):
+            model.some_existing_attr = 100  # sets because condition is met
+            model.some_existing_attr = -1  # does not set because condition is not met
+
+        print(model.some_existing_attr)  # prints 100, because the -1 assignment was ignored
+    """
+
+    _on_missing_attr: Literal["raise", "warn", "ignore"] = "warn"
+    """Behavior when attempting to set a missing attribute. If `warn`, a logger must be provided to log a warning."""
+    _logger: Logger | None = logger
+    """Optional logger for warning about missing attributes. If None, no warnings will be logged."""
+    _repr_item: int = 3
+    """Maximum number of items to show in the string representation of iterable attributes."""
+
+    def __init_subclass__(cls) -> None:
+        if cls.__mro__[1] is not AttributeSetterMixin:
+            raise TypeError(
+                f"{cls.__name__} inherits from AttributeSetterMixin but does not have AttributeSetterMixin as the first"
+                f" parent class. Use `class {cls.__name__}(AttributeSetterMixin, ...)` to define the subclass, instead."
+            )
+
+    def _get_thread_local(self) -> threading.local:
+        """Lazily initialize a per-instance, per-thread local storage without going through __setattr__."""
+        try:
+            return object.__getattribute__(self, "_thread_local")
+        except AttributeError:
+            local = threading.local()
+            object.__setattr__(self, "_thread_local", local)
+            return local
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if not (hasattr(type(self), name) or name in self.__dict__):
+            if self._on_missing_attr == "raise":
+                raise AttributeError(f"{type(self).__name__} has no attribute {name}.")
+            elif self._on_missing_attr == "warn" and self._logger:
+                self._logger.warning(
+                    "%s has no attribute %s. Your `xlite` version might be incompatible.", type(self).__name__, name
+                )
+            return
+        match_conditions: list[Callable[..., bool]] = getattr(self._get_thread_local(), "match_conditions", [])
+        if not all(condition(value) for condition in match_conditions):
+            return
+        super().__setattr__(name, value)
+
+    @contextmanager
+    def condition(self, match_condition: Callable[..., bool], /) -> Generator["AttributeSetterMixin", None, None]:
+        """Context manager that gates attribute setting on `match_condition`. Supports nested conditions, which are
+        combined with logical AND.
+
+        Args:
+            match_condition (Callable[..., bool]): A callable that takes the value to be set and returns a boolean
+                indicating whether the value should be set to the instance attribute.
+
+        Usage::
+
+            with obj.condition(lambda v: v > 0):
+                obj.some_attr = 42  # only set if 42 > 0
+                obj.some_attr = -1  # will not set because -1 > 0 is False
+
+            print(obj.some_attr)  # prints 42, because the second assignment was ignored
+        """
+        local = self._get_thread_local()
+        previous = getattr(local, "match_conditions", [])
+        local.match_conditions = previous + [match_condition]
+        try:
+            yield self
+        finally:
+            local.match_conditions = previous  # always restore, even on exception
+
+    def __repr__(self) -> str:
+        repr_list = [
+            f"{attr}={val_repr!r}"
+            for attr in dir(self)
+            if not attr.startswith("_")
+            and not callable(value := getattr(self, attr))
+            and (val_repr := _TensorRepr(value, max_it=self._repr_item))
+        ]
+        return f"{type(self).__name__}({', '.join(repr_list)})"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+
+class XModel(AttributeSetterMixin, Model):
+    """:mod:`xlite._C.Model` subclass with safe attribute setting for better backwards compatibility."""
+
+
+class XModelConfig(AttributeSetterMixin, ModelConfig):
+    """:mod:`xlite._C.ModelConfig` subclass with safe attribute setting for better backwards compatibility."""
+
+
+@dataclass
+class AttnMetadataRouter:
+    """A router for attention metadata objects of different types. This is used to handle the differences in attention
+    metadata across different model architectures and vLLM/vLLM-ascend versions in a more robust way.
+
+    The router provides unified access to commonly used attention metadata attributes (e.g., actual sequence lengths for
+    query and block tables) via properties.
+
+    Currently included metadata types:
+
+    - `AscendMetadata`
+    - `AscendMLAMetadata`
+    - `AscendSFAMetadata`
+
+    Typically, the attention metadata has the following notations::
+
+        |---------- N-1 iteration --------|
+        |---------------- N iteration ---------------------|
+        |- tokenA -|......................|-- newTokens ---|
+        |---------- context_len ----------|
+        |-------------------- seq_len ---------------------|
+                                          |-- query_len ---|
+    """
+
+    attn_metadata: Any
+    """The attention metadata object to route, e.g., an instance of `AscendMetadata` or `AscendSFAMetadata`."""
+    device: str | torch.device | int | None = "cpu"
+    """Device specification for the returned tensors. If None, the tensors will be on the same device as the original
+    metadata tensors. The current implementation assumes `cpu` device for minimal data transfer."""
+
+    @contextmanager
+    def on_device(self, device: str | torch.device | int | None) -> Generator["AttnMetadataRouter", None, None]:
+        """Context manager to temporarily set the device for the router. This is useful for cases where we want to
+        access multiple properties on the same device without repeatedly specifying the device.
+
+        Usage::
+
+            with router.on_device("cpu"):
+                query_lens = router.cu_query_lens  # on cpu
+                block_tables = router.block_tables  # also on cpu
+        """
+        original_device = self.device
+        self.device = device
+        try:
+            yield self
+        finally:
+            self.device = original_device
+
+    def __getattr__(self, name: str) -> Any:
+        """Route attribute access to the appropriate handler method based on the attribute name."""
+        if (value := getattr(self.attn_metadata, name, _MISSING)) is not _MISSING:
+            return value
+
+        raise AttributeError(f"{type(self.attn_metadata).__name__} has no attribute {name}.")
+
+    @property
+    def cu_query_lens(self) -> torch.Tensor:
+        """Get the cumulative query lengths from the attention metadata, if available."""
+        if isinstance(self.attn_metadata, (AscendMetadata, AscendMLAMetadata)):
+            return torch.as_tensor(self.attn_metadata.query_start_loc, device=self.device)
+
+        if isinstance(self.attn_metadata, AscendSFAMetadata):
+            return torch.as_tensor(self.attn_metadata.cum_query_lens, device=self.device)
+
+        for candidate in ["query_start_loc", "cum_query_lens", "actual_seq_lengths_q"]:
+            if (lengths := getattr(self.attn_metadata, candidate, None)) is not None:
+                return torch.as_tensor(lengths, device=self.device)
+
+        raise ValueError(
+            f"Cannot find actual sequence lengths for query in attention metadata of type {type(self.attn_metadata)}."
+        )
+
+    @property
+    def block_tables(self) -> torch.Tensor:
+        """Get the block tables from the attention metadata, if available."""
+        if isinstance(self.attn_metadata, AscendMetadata):
+            return torch.as_tensor(self.attn_metadata.block_tables, device=self.device)
+
+        if isinstance(self.attn_metadata, AscendSFAMetadata):
+            return torch.as_tensor(self.attn_metadata.block_table, device=self.device)
+
+        if isinstance(self.attn_metadata, AscendMLAMetadata):
+            # AscendMLAMetadataBuilder.build_decode_metadata breaks `AscendMLAMetadata.block_tables`
+            # thus we may need to patch together block tables from prefill and decode metadata if available
+            block_tables = []
+            if self.attn_metadata.decode is not None:
+                block_tables.append(torch.as_tensor(self.attn_metadata.decode.block_table, device=self.device))
+            if self.attn_metadata.prefill is not None:
+                block_tables.append(torch.as_tensor(self.attn_metadata.prefill.block_table, device=self.device))
+            if block_tables:
+                return torch.concat(block_tables, dim=0)
+            return torch.as_tensor(self.attn_metadata.block_tables, device=self.device)
+
+        for candidate in ["block_tables", "block_table"]:
+            if (tables := getattr(self.attn_metadata, candidate)) is not None:
+                return torch.as_tensor(tables, device=self.device)
+
+        raise ValueError(f"Cannot find block tables in attention metadata of type {type(self.attn_metadata)}.")
+
+    @property
+    def seq_lens(self) -> torch.Tensor:
+        """Return the per-sequence `seq_lens` tensor in a device-safe torch.Tensor form."""
+        if isinstance(self.attn_metadata, (AscendMetadata, AscendSFAMetadata)):
+            return torch.as_tensor(self.attn_metadata.seq_lens_cpu, device=self.device)
+
+        if isinstance(self.attn_metadata, AscendMLAMetadata):
+            # AscendMLAMetadataBuilder.build_decode_metadata breaks `AscendMLAMetadata.seq_lens`
+            # thus prefill metadata's seq_lens is preferentially used if available
+            if self.attn_metadata.prefill is not None:
+                return torch.as_tensor(self.attn_metadata.prefill.seq_lens, device=self.device)
+            return torch.as_tensor(self.attn_metadata.seq_lens_cpu, device=self.device)
+
+        for candidate in ["seq_lens_cpu", "seq_lens"]:
+            if (s := getattr(self.attn_metadata, candidate)) is not None:
+                return torch.as_tensor(s, device=self.device)
+
+        raise ValueError(f"Cannot find seq_lens in attention metadata of type {type(self.attn_metadata)}.")
+
+    @property
+    def num_prefills(self) -> int:
+        for candidate in ["num_prefills"]:
+            if (num_prefills := getattr(self.attn_metadata, candidate)) is not None:
+                return int(num_prefills)
+        return 0
+
+    @property
+    def num_decodes(self) -> int:
+        for candidate in ["num_decodes"]:
+            if (num_decodes := getattr(self.attn_metadata, candidate)) is not None:
+                return int(num_decodes)
+        return 0
+
+    @property
+    def num_decode_tokens(self) -> int:
+        for candidate in ["num_decode_tokens"]:
+            if (num_decode_tokens := getattr(self.attn_metadata, candidate, None)) is not None:
+                return int(num_decode_tokens)
+        return 0
+
+    @property
+    def num_actual_tokens(self) -> int:
+        """Return the number of actual tokens (excluding padding)."""
+        for candidate in ["num_actual_tokens"]:
+            if (num_actual_tokens := getattr(self.attn_metadata, candidate)) is not None:
+                return int(num_actual_tokens)
+        raise ValueError(f"Cannot find num_actual_tokens in attention metadata of type {type(self.attn_metadata)}.")
+
+
+def get_nested_attr(obj: Any, /, *attrs: str, default: Any = None, raises: bool = False) -> Any:
+    """Get/collect a nested attribute from an object.
+
+    The attribute path is specified as a sequence of attribute names. If any attribute in the path is missing, the
+    function returns the specified default value (which is None by default).
+
+    Args:
+        obj (Any): Root object.
+        *attrs (str): Sequence of attribute names to traverse.
+        default (Any, keyword-only, default=None): Default value to return if any attribute is missing.
+        raises (bool, keyword-only, default=False): Whether to raise an error if any attribute is missing.
+
+    Returns:
+        Any: The resolved nested attribute.
+    """
+    current = obj
+    for attr in attrs:
+        if (current := getattr(current, attr, _MISSING)) is _MISSING:
+            if raises:
+                raise AttributeError(f"{type(obj).__name__} has no attribute {'.'.join(attrs)} (failed at {attr}).")
+            return default
+    return current
+
+
+def get_dotted_attr(obj: Any, dotted_attr: str, /, *, default: Any = None, raises: bool = False) -> Any:
+    """Get a nested attribute from an object using a dotted attribute string.
+
+    This is a convenience wrapper around :meth:`_get_nested_attr` that allows specifying the attribute path as a single
+    dotted string.
+
+    Args:
+        obj (Any): Root object.
+        dotted_attr (str): Dotted attribute string, e.g., "foo.bar.baz" to access `obj.foo.bar.baz`.
+        default (Any, keyword-only, default=None): Default value to return if any attribute is missing.
+        raises (bool, keyword-only, default=False): Whether to raise an error if any attribute is missing.
+
+    Returns:
+        Any: The resolved nested attribute.
+    """
+    return get_nested_attr(obj, *dotted_attr.split("."), default=default, raises=raises)
+
+
+class WeightGetterConfig(TypedDict, total=False):
+    """Configuration dictionary for layer weight extraction in :meth:`get_layer_weights`.
+
+    This class is written as a TypedDict for better type checking with `mypy` in the `xlite` module.
+    """
+
+    mask: Sequence[bool] | None
+    secondary_flattening: str | slice | None
+    post_processor: Callable[[torch.Tensor], torch.Tensor] | None
+    check_is_contiguous: bool
+
+
+def get_layer_weights(
+    layers: Sequence[nn.Module],
+    /,
+    *layer_attrs: str,
+    mask: Sequence[bool] | None = None,
+    secondary_flattening: str | slice | None = None,
+    post_processor: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    check_is_contiguous: bool = True,
+    **kwargs: Any,
+) -> list[torch.Tensor]:
+    """Extract specified weights from a sequence of layers with optional secondary flattening and post-processing.
+
+    This function retrieves the specified attribute (e.g., "self_attn.q_proj.weight") from each layer in the provided
+    sequence. If `secondary_flattening` is specified, it will further expand the retrieved attribute as a list and
+    collect all items from these lists across layers. An optional `post_processor` can be applied to each retrieved
+    tensor before returning the final list of weights.
+
+    Args:
+        layers (Sequence[nn.Module]): Sequence of layers to retrieve weights from.
+        *layer_attrs (str): Dotted attribute string(s) specifying the layer attribute candidate(s) to check and
+            retrieve (`layers[i].[layer_attr]`), e.g., "self_attn.q_norm.weight".
+
+            For a list of string candidates, the first one returning a non-empty list of weights is used.
+        mask (Sequence[bool] | None, optional): Per layer mask. If specified, a boolean mask indicating which layers to
+            include in the weight retrieval; mask must be a list of booleans with the same length as `layers`.
+
+            When `mask` is specified, the returned list of weights will have the same length as `layers`, with
+            missing weights replaced by a placeholder tensor (:data:`_DUMMY_TENSOR`).
+
+            Cannot be specified at the same time as `secondary_flattening`.
+        secondary_flattening (str | slice | None, optional): If specified, indicates that the retrieved layer attribute
+            is a list of tensors and we need to further flatten it. The expansion can be specified as:
+
+            - `str`: A dotted attribute string such that `layers[i].[secondary_flattening]` gives the number of items
+              to flatten for that layer.
+            - `slice`: A slice specifying how to slice `layers[i].[layer_attr]` and then flatten the sliced part.
+            - `None`: No secondary flattening; `layers[i].[layer_attr]` is directly collected.
+
+            Cannot be specified at the same time as `mask`.
+        post_processor (Callable[[torch.Tensor], torch.Tensor] | None, optional): An optional function to apply to
+            each retrieved tensor before returning the final list of weights.
+        check_is_contiguous (bool, optional): If True, checks that each retrieved tensor is contiguous in memory. If
+            any tensor is not contiguous, a ValueError is raised. Default is True.
+        **kwargs: Additional keyword arguments for future extensions.
+
+    Returns:
+        list[torch.Tensor]: List of retrieved weights.
+    """
+    if mask is not None:
+        if secondary_flattening is not None:
+            raise ValueError("Cannot specify both `mask` and `secondary_flattening` at the same time.")
+        if len(mask) != len(layers) or not all(isinstance(m, bool) for m in mask):
+            raise ValueError("`mask` must be a list of booleans with the same length as `layers`.")
+
+    for layer_attr in layer_attrs:
+        if not isinstance(layer_attr, str):
+            raise TypeError(f"layer_attr must be a string or list of strings, got {type(layer_attr)}.")
+        if not secondary_flattening and mask is not None:
+            weights = [
+                weight
+                if wt_mask and (weight := get_dotted_attr(layer, layer_attr, default=None)) is not None
+                else _DUMMY_TENSOR
+                for layer, wt_mask in zip(layers, mask)
+            ]
+        elif not secondary_flattening:  # and mask is None
+            weights = [
+                weight for layer in layers if (weight := get_dotted_attr(layer, layer_attr, default=None)) is not None
+            ]
+        elif isinstance(secondary_flattening, str):
+            weights = [
+                weight
+                for layer in layers
+                if (weight_lst := get_dotted_attr(layer, layer_attr, default=[])) is not None
+                for weight in weight_lst[: get_dotted_attr(layer, secondary_flattening, default=0)]
+            ]
+        elif isinstance(secondary_flattening, slice):
+            weights = [
+                weight
+                for layer in layers
+                if (weight_lst := get_dotted_attr(layer, layer_attr, default=[])) is not None
+                for weight in weight_lst[secondary_flattening]
+            ]
+        else:
+            raise ValueError(
+                f"Invalid type for secondary_flattening: {type(secondary_flattening)}. Expected str, slice, or None."
+            )
+
+        if post_processor:
+            weights = [post_processor(weight) for weight in weights]
+        if check_is_contiguous and not all(weight.is_contiguous() for weight in weights):
+            raise ValueError("xlite: Found non-contiguous tensor in the retrieved weights.")
+
+        if weights:
+            return weights
+    return []

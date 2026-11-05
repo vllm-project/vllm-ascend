@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<block name="OpsTransformerInc" copy_type="delivery" src_path="" dst_path="" install_path="" install_own="$username:$usergroup" install_mod="550"
+       install_type="all" pkg_feature="opp_binary">
+    <file_info copy_type="delivery" src_path=""
+        dst_path="built-in/op_impl/aicpu/"
+        install_path="opp/built-in/op_impl/aicpu/" install_type="all" optional="true">
+        <file value="config" install_mod="755"/>
+        <file value="kernel" install_mod="755"/>
+    </file_info>
+    <file_info copy_type="delivery" src_path=""
+        dst_path="built-in/op_graph/inc"
+        install_path="opp/built-in/op_graph/inc" install_type="all">
+        <file value="ops_proto_transformer.h" install_mod="550"/>
+    </file_info>
+    <file_info value="opgraph_transformer_lib" copy_type="delivery" src_path=""
+        dst_path="built-in/op_graph/lib/linux/$(ARCH)/"
+        install_path="opp/built-in/op_graph/lib/linux/$(ARCH)">
+        <file value="libopgraph_transformer.so" install_mod="550"/>
+    </file_info>
+    <file_info copy_type="delivery" src_path=""
+        dst_path="built-in/op_impl/ai_core/tbe"
+        install_path="opp/built-in/op_impl/ai_core/tbe" install_type="all">
+        <file value="config" install_mod="550"/>
+    </file_info>
+    <file_info copy_type="delivery" src_path=""
+        dst_path="built-in/op_impl/ai_core/tbe"
+        install_path="opp/built-in/op_impl/ai_core/tbe" install_type="all">
+        <file value="impl" install_mod="550"/>
+    </file_info>
+    <file_info copy_type="delivery" src_path=""
+        dst_path="built-in/op_impl/ai_core/tbe"
+        install_path="opp/built-in/op_impl/ai_core/tbe" install_type="all">
+        <file value="kernel" optional="true" install_mod="550"/>
+    </file_info>
+    <file_info copy_type="delivery" src_path=""
+        dst_path="built-in/op_impl/ai_core/tbe"
+        install_path="opp/built-in/op_impl/ai_core/tbe" install_type="all">
+        <file value="op_tiling_device" optional="true" install_mod="550"/>
+    </file_info>
+    <file_info value="ophost_transformer_lib" copy_type="delivery" src_path=""
+        dst_path="built-in/op_impl/ai_core/tbe/op_host/lib/linux/$(ARCH)/"
+        install_path="opp/built-in/op_impl/ai_core/tbe/op_host/lib/linux/$(ARCH)/">
+        <file value="libophost_transformer.so" install_mod="550"/>
+    </file_info>
+    <file_info value="op_transformer_onnx_plugin_lib" copy_type="delivery" src_path=""
+        dst_path="built-in/framework/onnx/" install_path="opp/built-in/framework/onnx">
+        <file value="libop_transformer_onnx_plugin.so" install_mod="550"/>
+    </file_info>
+</block>

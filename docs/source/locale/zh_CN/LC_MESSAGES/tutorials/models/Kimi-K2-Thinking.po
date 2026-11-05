@@ -1,0 +1,32 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-02 07:02+0000\n"
+"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+msgid "# Kimi-K2-Thinking"
+msgstr "# Kimi-K2-Thinking"
+
+msgid ""
+"This model has been discontinued since vLLM Ascend v0.30.0 and will no "
+"longer receive support or fixes in subsequent versions. For deployment, "
+"please refer to the [historical version "
+"documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Kimi-K2-Thinking.html)."
+msgstr ""
+"该模型自 vLLM Ascend v0.30.0 "
+"起已停止支持，后续版本将不再提供支持或修复。如需部署，请参考[历史版本文档](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Kimi-K2-Thinking.html)。"
