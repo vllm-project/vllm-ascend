@@ -1584,13 +1584,22 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ConsumeCandScoreToken(
         const float tileMax = maxSlot.GetValue(0);
         const float curTail = globalTopkUb_.GetValue(inner * topkPairWidth_ + 2 * (topkWidth_ - 1));
         SetWaitFlag<HardEvent::S_V>(HardEvent::S_V);
-        if (!(tileMax < curTail)) { // NaN 安全：tileMax/curTail 任一为 NaN 都归并（不剪）
-            QLIV2ServiceVec::SortAll(curScore, sortTmp, CAND_TILE_TOKENS);
-            PipeBarrier<PIPE_V>();
-            QLIV2ServiceVec::MergeSort(globalTopkUb_[inner * topkPairWidth_], topkWidth_, curScore,
-                                       CAND_TILE_TOKENS, sortTmp);
-            PipeBarrier<PIPE_V>();
+        // v15: 行级提前退出 —— 候选表按块分降序（source 侧 SortAll 对同一分数的块内 amax 降序，
+        // pin 块 +inf 置顶、pad 块 -inf 沉底）⇒ tileMax 跨 tile 单调不增；curTail 单调不减。
+        // 首次 tileMax < curTail 后所有后续 tile 必被 v10 剪掉，直接结束本行，与逐 tile 剪枝
+        // 逐位等价；NaN 安全语义不变（NaN 比较为 false → 不退出、照常归并）。
+        // 安全依据：① 分数缓冲是整行 maxTiles 完整区域（非环形），AIC/生产侧不依赖消费侧排空；
+        // ② 被丢弃的预取 DMA 与下一行 tile0 写入同走 MTE2 FIFO，顺序覆盖无竞态。
+        // 数据依据：case C 真实候选表 96/96 行模拟验证剪枝后永不复活
+        // （scripts/qliv2_debug/analyze_survivor_dist.py）。
+        if (tileMax < curTail) {
+            break;
         }
+        QLIV2ServiceVec::SortAll(curScore, sortTmp, CAND_TILE_TOKENS);
+        PipeBarrier<PIPE_V>();
+        QLIV2ServiceVec::MergeSort(globalTopkUb_[inner * topkPairWidth_], topkWidth_, curScore,
+                                   CAND_TILE_TOKENS, sortTmp);
+        PipeBarrier<PIPE_V>();
     }
     LocalTensor<uint32_t> idxULocal = outQueue_.AllocTensor<uint32_t>();
     QLIV2ServiceVec::ExtractIndex(idxULocal,
