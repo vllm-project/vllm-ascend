@@ -111,8 +111,9 @@ def test_sparse_attention_reference(num_queries, strided, capture):
 
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("strided", [False, True])
-@pytest.mark.parametrize("index_mode", ["virtual", "mapped", "mapped_counts", "mapped_lengths"])
-def test_c8_attention_uses_existing_native_operator(strided, capture, index_mode):
+@pytest.mark.parametrize("index_mode", ["virtual", "mapped", "mapped_lengths"])
+@pytest.mark.parametrize("empty_batch", [False, True])
+def test_c8_attention_uses_existing_native_operator(strided, capture, index_mode, empty_batch):
     from vllm_ascend.device.device_config import is_950
 
     if not is_950():
@@ -154,11 +155,6 @@ def test_c8_attention_uses_existing_native_operator(strided, capture, index_mode
         return output
 
     selected = selection().to(device)
-    valid_counts = (
-        (indices >= 0).sum(dim=-1, dtype=torch.int32).to(device)
-        if index_mode in ("mapped_counts", "mapped_lengths")
-        else None
-    )
     lengths = (
         (
             torch.arange(rows + 1, dtype=torch.int32, device=device)[rows:],
@@ -175,9 +171,7 @@ def test_c8_attention_uses_existing_native_operator(strided, capture, index_mode
     impl._c8_length_workspace = lambda: (query_end, key_length)
 
     def forward():
-        return impl._attention_physical(
-            q, qr, cache, selected, indices_are_mapped=indices_are_mapped, valid_counts=valid_counts, lengths=lengths
-        )
+        return impl._attention_physical(q, qr, cache, selected, indices_are_mapped=indices_are_mapped, lengths=lengths)
 
     graph = None
     try:
@@ -188,14 +182,19 @@ def test_c8_attention_uses_existing_native_operator(strided, capture, index_mode
             graph = torch.npu.NPUGraph()
             with torch.npu.graph(graph):
                 output = forward()
-            indices[0, :4] = torch.tensor([9, 2, 9, 0], dtype=torch.int32)
+            if empty_batch:
+                indices.fill_(-1)
+            else:
+                indices[0, :4] = torch.tensor([9, 2, 9, 0], dtype=torch.int32)
             selected.copy_(selection())
-            if valid_counts is not None:
-                valid_counts.copy_((indices >= 0).sum(dim=-1, dtype=torch.int32))
             q.neg_()
             graph.replay()
         else:
             output = forward()
+            if empty_batch:
+                indices.fill_(-1)
+                selected.copy_(selection())
+                output = forward()
         torch.npu.synchronize()
         scale = scales.contiguous().view(torch.float32).cpu().reshape(-1, 4).repeat_interleave(128, dim=-1)
         latent = nope.float().cpu().reshape(-1, 512) * scale
@@ -210,6 +209,8 @@ def test_c8_attention_uses_existing_native_operator(strided, capture, index_mode
         expected = torch.einsum("thk,tkd->thd", probability, keys)
         torch.testing.assert_close(output.float().cpu(), expected, atol=0.01, rtol=0.05)
         assert torch.count_nonzero(output[-1].cpu()) == 0
+        if empty_batch:
+            assert torch.count_nonzero(output.cpu()) == 0
     finally:
         torch.npu.synchronize()
         if graph is not None:
