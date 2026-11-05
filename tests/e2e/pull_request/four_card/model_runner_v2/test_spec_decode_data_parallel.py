@@ -40,11 +40,13 @@ PROMPTS = [
 ]
 
 DATA_PARALLEL_SIZE = 2
-# 16,388 tokens = 128 full blocks plus a 4-token tail at block_size=128.
-POOL_PROMPT_TOKENS = 16388
+# 16,388 = lcm(16,384) + 4; DSpark trims the final lcm block, so 16,384 is a
+# guaranteed 0-hit workload. See expected_hit_token_count().
+POOL_LCM_BLOCK_SIZE = 16384
+POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
+POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
 # Chunked prefill cap: 4096 = 32 blocks of 128, keeps the activation peak low.
 POOL_BATCHED_TOKENS = 4096
-POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
 
 POOL_KV_TRANSFER_CONFIG = {
     "kv_connector": "AscendStoreConnector",
@@ -127,6 +129,7 @@ def test_deepseek_v4_dspark_spec_decoding_dp4_full_graph() -> None:
                 "cudagraph_capture_sizes": [6, 12],
             },
             additional_config={
+                "enable_dsa_cp": False,
                 "enable_fused_mc2": 0,
             },
         ) as vllm_model,
@@ -140,5 +143,6 @@ def test_deepseek_v4_dspark_spec_decoding_dp4_full_graph() -> None:
             block_size=128,
             prompt_tokens=POOL_PROMPT_TOKENS,
             replicas=DATA_PARALLEL_SIZE,
+            lcm_block_size=POOL_LCM_BLOCK_SIZE,
             tag="dsv4-dp2-memcache",
         )

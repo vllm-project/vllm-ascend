@@ -27,8 +27,8 @@ from vllm import SamplingParams
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.metrics.reader import Counter, Vector
 
-from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
-from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMooncakeManager
+from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
+from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.kv_pool_watch import run_pool_hit_sequence
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
@@ -64,9 +64,10 @@ MTP_MIN_ACCEPTANCE_RATES = [0.85, 0.65, 0.35]
 DSPARK_MIN_ACCEPTANCE_RATES = [0.73, 0.64, 0.55, 0.49, 0.42]
 ACCEPTANCE_RATE_TOLERANCE = 0.03
 
-# KV pool watch load. 16,388 tokens = 128 full blocks plus a 4-token tail at
-# block_size=128; only whole blocks can hit.
-POOL_PROMPT_TOKENS = 16388
+# 16,388 = lcm(16,384) + 4. MTP / DSpark trim the final lcm block, so a
+# 16,384-token prompt would hit 0; the 4-token tail keeps 16,384 hit tokens.
+POOL_LCM_BLOCK_SIZE = 16384
+POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
 # Chunked prefill cap: 4096 = 32 blocks of 128, keeps the activation peak low.
 POOL_BATCHED_TOKENS = 4096
 # max_model_len needs headroom for output tokens
@@ -76,25 +77,26 @@ POOL_KV_TRANSFER_CONFIG = {
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_both",
     "kv_connector_extra_config": {
-        "backend": "mooncake",
+        "backend": "memcache",
         "lookup_rpc_port": "1",
         "use_layerwise": False,
     },
 }
 
 
-def _build_mooncake_pool_config() -> MooncakeKVPoolConfig:
-    return MooncakeKVPoolConfig(
+def _build_memcache_pool_config() -> MemcacheKVPoolConfig:
+    return MemcacheKVPoolConfig(
+        meta_service_port=get_open_port(),
+        config_store_port=get_open_port(),
         config={
-            "metadata_server": "P2PHANDSHAKE",
-            "protocol": "ascend",
-            "global_segment_size": "5GB",
-            "local_buffer_size": "5GB",
-            "preferred_segment": False,
-            "prefer_alloc_in_same_node": True,
+            "meta": {"ock.mmc.log_level": "error"},
+            "local": {
+                "ock.mmc.log_level": "error",
+                "ock.mmc.local_service.world_size": 256,
+                "ock.mmc.local_service.protocol": "device_sdma",
+                "ock.mmc.local_service.dram.size": "10GB",
+            },
         },
-        master_port=get_open_port(),
-        metrics_port=get_open_port(),
     )
 
 
@@ -106,9 +108,9 @@ def _run_test(
     expected_output_prefixes: dict[str, str],
 ) -> None:
     sampling_params = SamplingParams(max_tokens=MAX_TOKENS, temperature=0.0, seed=0)
-    pool_config = _build_mooncake_pool_config()
+    pool_config = _build_memcache_pool_config()
     with (
-        SingleNodeMooncakeManager(pool_config, "dsv4_cp_pool_watch") as pool,
+        SingleNodeMemcacheManager(pool_config, "dsv4_cp_pool_watch") as pool,
         patch.dict(os.environ, pool.server_envs),
         VllmRunner(
             model,
@@ -133,6 +135,7 @@ def _run_test(
             attention_config={"indexer_kv_dtype": "int8"},
             kv_transfer_config=POOL_KV_TRANSFER_CONFIG,
             additional_config={
+                "enable_dsa_cp": False,
                 "enable_prefill_mc2": True,
                 # TODO: Re-enable after PCP decode sharding lands; DSV4 results are unstable.
                 "enable_pcp_o_proj_weight_sharding": False,
@@ -147,7 +150,11 @@ def _run_test(
         # KV pool hit watch: R1 cold -> R2/R3 hit -> R4 disjoint miss.
         # Original assertions stay untouched; this only appends a hit sequence.
         run_pool_hit_sequence(
-            runner, block_size=128, prompt_tokens=POOL_PROMPT_TOKENS, tag=f"dsv4-cp-{model.split('/')[-1]}"
+            runner,
+            block_size=128,
+            prompt_tokens=POOL_PROMPT_TOKENS,
+            lcm_block_size=POOL_LCM_BLOCK_SIZE,
+            tag=f"dsv4-cp-{model.split('/')[-1]}",
         )
 
     assert len(outputs) == len(PROMPTS_SHORT), f"Expected {len(PROMPTS_SHORT)} outputs, got {len(outputs)}"
