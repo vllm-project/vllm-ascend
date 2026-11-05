@@ -113,9 +113,10 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     |Qwen3.6-27B      |✅        |       |✅    | 950DT Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144|| [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
     |Qwen3.6-35B-A3B  |✅        |       |✅    | 950DT Products |✅|✅|✅||✅ | ✅ | ✅ |  | ✅ | ✅ | ❌ | ✅ | ✅ | 135168 | | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
     |Kimi-K3          |✅        |W4A8; DSpark; FULL_DECODE_ONLY; KV Cache Pool||950DT Products|||✅||✅||✅||✅|✅|✅||✅|131072||[Kimi-K3](../../tutorials/models/Kimi-K3.md)|
+    | Kimi-K3.1-Pro | 🔵 |  |  | 950DT Products |  |  | ✅ |  | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ |  | ✅ | 1048576 |  | [Kimi-K3.1-Pro](../../tutorials/models/Kimi-K3.1-Pro.md) |
     |MiniMax-M3       |✅        |MXFP8; text/image/video||950DT Products||✅|✅||✅|✅|✅|✅|✅|✅|✅|🟡|✅|1M|| [MiniMax-M3](../../tutorials/models/MiniMax-M3.md) |
     |Step-5-Preview       |🔵 | Experimental || 950DT Products |✅|✅|✅||✅|✅|✅|✅|✅|✅|||✅|1M|| [Step-5-Preview](../../tutorials/models/Step-5-Preview.md) |
-    | MiniMax-M3.1-Flash | 🔵 | Experimental |  | 950DT products | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | 1M |  | [MiniMax-M3.1-Flash](../../tutorials/models/MiniMax-M3.1-Flash.md) |
+    | MiniMax-M3.1-Flash | ✅ | Supported on main and v0.32.0rc |  | 950DT products | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | 1M |  | [MiniMax-M3.1-Flash](../../tutorials/models/MiniMax-M3.1-Flash.md) |
 
 === "A2/A3"
 
@@ -134,8 +135,9 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Kimi-K2.5            | 🔴      |      |      | A2/A3              |  | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md) |
     | Kimi-K2.6                 | ✅      |      |      | A2/A3              |  | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md) |
     | Kimi-K3 | ✅ | W4A8; DSpark; FULL_DECODE_ONLY; KV Cache Pool |  | A3 |  |  | ✅ |  | ✅ |  | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | 131072 | [Kimi-K3](../../tutorials/models/Kimi-K3.md) |
+    | Kimi-K3.1-Pro | 🔵 |  |  | A3 |  |  | ✅ |  | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ |  | ✅ | 1048576 | [Kimi-K3.1-Pro](../../tutorials/models/Kimi-K3.1-Pro.md) |
     | MiniMax-M3                          | ✅      | Text, image, video, and ViT DP | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | 1M | [MiniMax-M3](../../tutorials/models/MiniMax-M3.md) |
-    | MiniMax-M3.1-Flash | 🔵 | Experimental |  | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | 1M | [MiniMax-M3.1-Flash](../../tutorials/models/MiniMax-M3.1-Flash.md) |
+    | MiniMax-M3.1-Flash | ✅ | Supported on main and v0.32.0rc |  | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | 1M | [MiniMax-M3.1-Flash](../../tutorials/models/MiniMax-M3.1-Flash.md) |
     | Cohere Transcribe                  | 🔵      | 2B Conformer encoder-decoder ASR, 14 languages (03-2026 & arabic-07-2026) | ✅ | A2/A3 | ❌ |  |  | ❌ | ❌ |  | 🟡 |  |  |  | ❌ | 🟡 | 🟡 |  | [Cohere-Transcribe](../../tutorials/models/Cohere-Transcribe.md) |
     | PaddleOCR-VL | 🔴 |  |  | A2/A3 |  |  |  |  |  |  |  |  |  |  |  |  |  |  | [PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md) |
 

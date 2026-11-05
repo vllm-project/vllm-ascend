@@ -335,10 +335,9 @@ class TestAscendStoreConnector(unittest.TestCase):
             role=KVConnectorRole.SCHEDULER,
             kv_cache_config=MagicMock(),
         )
-        stats = MagicMock()
-        mock_scheduler_cls.return_value.get_stats.return_value = stats
         mock_scheduler_cls.assert_called_once()
-        self.assertIs(connector.get_kv_connector_stats(), stats)
+        self.assertIsNone(connector.get_kv_connector_stats())
+        mock_scheduler_cls.return_value.get_stats.assert_not_called()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
@@ -467,22 +466,23 @@ class TestAscendStoreConnector(unittest.TestCase):
         done_s, done_r = connector.get_finished({"r1"})
         self.assertEqual(done_s, {"r1"})
 
-    def test_handle_preemptions_fences_only_released_requests(self):
+    def test_handle_preemptions_waits_before_retiring_old_requests(self):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
         connector.connector_worker = MagicMock()
         meta = AscendConnectorMetadata(preempted_req_ids={"p1"})
         connector.handle_preemptions(meta)
-        connector.connector_worker.handle_released_saves.assert_called_once_with({"p1"})
+        connector.connector_worker.wait_for_previous_save.assert_called_once_with()
         self.assertEqual(
             connector.connector_worker.mock_calls,
-            [call.handle_released_saves({"p1"}), call.retire_preempted_requests({"p1"})],
+            [call.wait_for_previous_save(), call.retire_preempted_requests({"p1"})],
         )
 
     def test_handle_preemptions_tolerates_metadata_without_released_ids(self):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
         connector.connector_worker = MagicMock()
         connector.handle_preemptions(types.SimpleNamespace())
-        connector.connector_worker.handle_released_saves.assert_called_once_with(None)
+        connector.connector_worker.wait_for_previous_save.assert_called_once_with()
+        connector.connector_worker.retire_preempted_requests.assert_called_once_with(None)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_worker")
@@ -837,6 +837,56 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
 
             self.assertEqual(call_order, ["load", "copy:layers.0.linear_attn"])
             self.assertIsNone(connector._mamba_state)
+
+    def _make_shared_layer_connector(self, mamba_state=True):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+            get_physical_layer_index,
+        )
+
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.use_layerwise = True
+        connector._mamba_copy_bufs = None
+        connector._mamba_state = MagicMock()
+        connector._loaded_layer = None
+        connector.connector_worker = MagicMock()
+        connector.connector_worker._extract_physical_layer_index.side_effect = lambda name: get_physical_layer_index(
+            name, 4
+        )
+        if not mamba_state:
+            connector._mamba_state = None
+        return connector
+
+    def test_ple_and_attention_share_one_load_but_copy_each_owner(self):
+        connector = self._make_shared_layer_connector()
+        worker = connector.connector_worker
+        order = []
+        worker.wait_for_layer_load.side_effect = lambda: order.append("load")
+        connector._mamba_state.do_mamba_copy_for_layer.side_effect = lambda name: order.append(name)
+        connector.wait_for_layer_load("layers.1.ple")
+        connector.wait_for_layer_load("layers.1.linear_attn")
+        self.assertEqual(order, ["load", "layers.1.ple", "layers.1.linear_attn"])
+        self.assertEqual(worker.wait_for_layer_load.call_count, 1)
+        connector.wait_for_layer_load("layers.2.linear_attn")
+        self.assertEqual(worker.wait_for_layer_load.call_count, 2)
+        connector.bind_connector_metadata(AscendConnectorMetadata(set()))
+        connector.wait_for_layer_load("layers.2.linear_attn")
+        self.assertEqual(worker.wait_for_layer_load.call_count, 3)
+
+    def test_layer_index_fallback_is_reused_for_deduplication(self):
+        connector = self._make_shared_layer_connector()
+        worker = connector.connector_worker
+        for name in ("model.layers.0.ple", "attention", "model.layers.0.linear_attn"):
+            connector.wait_for_layer_load(name)
+        self.assertEqual(worker.wait_for_layer_load.call_count, 1)
+        self.assertEqual(connector._mamba_state.do_mamba_copy_for_layer.call_count, 3)
+        self.assertEqual(connector._loaded_layer, 0)
+
+    def test_single_owner_layers_each_wait_once(self):
+        connector = self._make_shared_layer_connector(mamba_state=False)
+        worker = connector.connector_worker
+        for layer in range(3):
+            connector.wait_for_layer_load(f"model.layers.{layer}.self_attn")
+        self.assertEqual(worker.wait_for_layer_load.call_count, 3)
 
     def test_mamba_state_copy_not_deferred_after_finish(self):
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole

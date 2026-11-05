@@ -26,12 +26,17 @@ class _IndexFillMode(TorchFunctionMode):
         return func(*args, **kwargs)
 
 
-_original_assign_draft_token_budget = adaptive_verification._assign_draft_token_budget
+_original_assign_draft_token_budget = getattr(adaptive_verification, "_assign_draft_token_budget", None)
 
 
 def _assign_draft_token_budget_ascend(*args, **kwargs):
+    original_assign_draft_token_budget = _original_assign_draft_token_budget
+    assert original_assign_draft_token_budget is not None
     with _IndexFillMode():
-        return _original_assign_draft_token_budget(*args, **kwargs)
+        return original_assign_draft_token_budget(*args, **kwargs)
 
 
-adaptive_verification._assign_draft_token_budget_compiled = _assign_draft_token_budget_ascend
+# Newer vLLM uses a Triton allocator directly. Reuse it without installing
+# the workaround for the legacy torch.compile/index_fill_ implementation.
+if _original_assign_draft_token_budget is not None:
+    adaptive_verification._assign_draft_token_budget_compiled = _assign_draft_token_budget_ascend

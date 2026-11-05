@@ -1,0 +1,5 @@
+pr: 20369
+entries:
+  - category: feature
+    text: Enabled prefix caching for experimental GLM KDA RecoverSSM with block-aligned recurrent checkpoints.
+    model: glm-5.3-flash

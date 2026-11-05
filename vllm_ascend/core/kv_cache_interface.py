@@ -196,6 +196,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     separate :class:`AscendSFAIndexerCacheSpec`.
     """
 
+    # TP ranks hold the full latent vector, including quantization scales.
+    max_tp_shards: int | None = 1
+
     # Per-rank query heads used by FlashMLA layout selection. Auxiliary MLA
     # caches without query heads use the one-latent-head cache contract.
     num_heads: int = 1
@@ -300,6 +303,8 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     model runner still allocates it as an independent physical cache tensor.
     """
 
+    # Indexer keys and their scales are replicated across TP ranks.
+    max_tp_shards: int | None = 1
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
     cache_sparse_li_c8: bool = False
@@ -327,6 +332,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         dtype_set = set(spec.dtype for spec in specs)
+        max_tp_shards_set = {spec.max_tp_shards for spec in specs}
         scale_dim_set = set(spec.scale_dim for spec in specs)
         scale_dtype_set = set(spec.scale_dtype for spec in specs)
         cache_sparse_li_c8_set = set(spec.cache_sparse_li_c8 for spec in specs)
@@ -335,6 +341,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         assert (
             len(cache_dtype_str_set) == 1
             and len(dtype_set) == 1
+            and len(max_tp_shards_set) == 1
             and len(scale_dim_set) == 1
             and len(scale_dtype_set) == 1
             and len(cache_sparse_li_c8_set) == 1
@@ -350,6 +357,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             dtype=dtype_set.pop(),
+            max_tp_shards=max_tp_shards_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
             scale_dim=scale_dim_set.pop(),
             scale_dtype=scale_dtype_set.pop(),

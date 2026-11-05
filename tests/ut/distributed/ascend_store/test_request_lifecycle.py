@@ -33,7 +33,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import assert_scheduler_empty, create_model_runner_output, create_vllm_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec, is_prefix_cacheable
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_scheduler, pool_worker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import backend_map
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
@@ -169,8 +169,7 @@ def devices_and_store(monkeypatch):
     monkeypatch.setattr(MemoryBackend, "payloads", {})
     monkeypatch.setitem(backend_map, "cpu", {"path": __name__, "name": "MemoryBackend"})
     # The mock-dependency bootstrap may reload the registry during collection.
-    for module in (pool_scheduler, pool_worker):
-        monkeypatch.setitem(module.backend_map, "cpu", {"path": __name__, "name": "MemoryBackend"})
+    monkeypatch.setitem(pool_worker.backend_map, "cpu", {"path": __name__, "name": "MemoryBackend"})
     monkeypatch.setattr(pool_worker, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(pool_worker, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(pool_worker, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
@@ -398,7 +397,7 @@ def test_preempted_request_restores_bytes_into_new_blocks_before_appending(
     request = session.new_request("byte-resume", list(range(384)))
     session.scheduler.add_request(request)
     session.execute(session.scheduler.schedule(), request)
-    session.pool.handle_released_saves({request.request_id})
+    session.pool.wait_for_previous_save()
     previous_blocks = list(session.block_ids(request))
     assert session.scheduler.reset_prefix_cache(reset_running_requests=True)
     if not same_step_resume:
@@ -551,7 +550,7 @@ def test_resumed_save_survives_post_forward_completion_poll(byte_pooling_session
     request = session.new_request("resume-pending-save", list(range(384)))
     session.scheduler.add_request(request)
     session.execute(session.scheduler.schedule(), request)
-    session.pool.handle_released_saves({request.request_id})
+    session.pool.wait_for_previous_save()
     assert session.scheduler.reset_prefix_cache(reset_running_requests=True)
     # A pool miss makes the resumed generation save immediately instead of load.
     session.backend.payloads.clear()
@@ -582,7 +581,7 @@ def test_resumed_save_survives_post_forward_completion_poll(byte_pooling_session
 
         def wait_for_release():
             fence_entered.set()
-            session.pool.handle_released_saves({request.request_id})
+            session.pool.wait_for_previous_save()
             fence_returned.set()
 
         waiter = threading.Thread(target=wait_for_release, daemon=True)
@@ -742,9 +741,7 @@ def test_raw_sequence_lifecycle(
                         if bid and start < (index + 1) * 128 <= end:
                             tensor[bid].fill_(payload_value(input_tokens, (index + 1) * 128, name, plane))
             worker.wait_for_save()
-            # Same fence the connector applies at the start of the next step:
-            # drain the saves of requests whose blocks this output released.
-            pool.handle_released_saves(meta.released_req_ids)
+            pool.wait_for_previous_save()
             sending, recving = worker.get_finished(output.finished_req_ids)
             result = create_model_runner_output([request] if scheduled else [])
             if scheduled and request.num_computed_tokens < len(tokens):
@@ -779,9 +776,6 @@ def test_raw_sequence_lifecycle(
             if req_id not in scheduler.requests:
                 # Consume the finished-ID notification and release Store references.
                 output = scheduler.schedule()
-                # The connector fences this output like any other: drain the
-                # finished request's final saves before its blocks are reused.
-                worker.handle_preemptions(output.kv_connector_metadata)
                 worker.bind_connector_metadata(output.kv_connector_metadata)
                 worker.get_finished(output.finished_req_ids)
                 worker.clear_connector_metadata()
@@ -848,7 +842,13 @@ def test_raw_sequence_lifecycle(
         seed_length = 256 if speculative_method else 128
         seed_hit = 128 if speculative_method else (0 if has_private_state else 127)
         run_request("local-prefix", producer_tokens[:seed_length], seed_hit)
-        run_request("mixed-local-remote", list(range(513)), 512, expected_local=128)
+        # vLLM main caches speculative blocks in the base Scheduler; only the
+        # pure full-attention dspark layout sees the doubled local prefix hit.
+        only_full_attention = isinstance(plan.kv_cache_groups[0].kv_cache_spec, FullAttentionSpec)
+        mixed_local = 128
+        if not vllm_version_is("0.32.0") and speculative_method == "dspark" and only_full_attention:
+            mixed_local = 256
+        run_request("mixed-local-remote", list(range(513)), 512, expected_local=mixed_local)
         assert scheduler.reset_prefix_cache()
         missing_group = len(plan.kv_cache_groups) - 1
         MemoryBackend.payloads = {key: value for key, value in saved.items() if f"@group:{missing_group}@" not in key}

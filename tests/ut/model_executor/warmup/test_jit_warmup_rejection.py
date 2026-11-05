@@ -11,7 +11,7 @@ from tests.ut.model_executor.warmup.helpers import (
     make_mock_vllm_config,
     make_registry,
 )
-from vllm_ascend.ops.triton import reject_sample as rs
+from vllm_ascend.ops.triton.v1 import reject_sample as rs
 
 
 def _context(config):

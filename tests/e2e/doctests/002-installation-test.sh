@@ -24,59 +24,26 @@ DOCTEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCTEST_HELPER_PATH="${DOCTEST_DIR}/scripts/doctest_helper.py"
 source "${DOCTEST_DIR}/scripts/common.sh"
 
-CACHE_HOST="cache-service.nginx-pypi-cache.svc.cluster.local"
-
 WORK_DIR=""
 
-# Route system package downloads through the package cache available to CI runners.
-function configure_system_package_mirror() {
-  local os_name="$1"
-  case "${os_name}" in
-    ubuntu)
-      if [[ -f /etc/apt/sources.list ]]; then
-        sed -Ei \
-          's@(ports|archive).ubuntu.com@'"${CACHE_HOST}"':8081@g' \
-          /etc/apt/sources.list
-      fi
-      ;;
-    openeuler)
-      if [[ -d /etc/yum.repos.d ]]; then
-        find /etc/yum.repos.d/ -name "*.repo" -exec \
-          sed -Ei \
-          's@https?://[^/]+/(openeuler|centos|fedora)@http://'"${CACHE_HOST}"':8081/\1@g' \
-          {} +
-      fi
-      ;;
-  esac
-}
-
-# Configure network endpoints and retry limits used only by Installation CI.
+# Configure retry limits used only by Installation CI.
 function configure_ci_environment() {
-  local os_name="$1"
-
   export PIP_DEFAULT_TIMEOUT=300
   export PIP_RETRIES=5
-  export PIP_TRUSTED_HOST="${CACHE_HOST}"
 
   export UV_HTTP_TIMEOUT=120
   export UV_HTTP_RETRIES=3
   export UV_NO_CACHE=1
   export UV_SYSTEM_PYTHON=1
-  export UV_INSECURE_HOST="${CACHE_HOST}"
 
   git config --global http.version HTTP/1.1
-  configure_system_package_mirror "${os_name}"
 }
 
-# Rewrite documented package sources and clone commands for CI.
+# Rewrite documented clone commands so they go through the CI retry wrapper.
 function rewrite_ci_block() {
   local block="${1//git clone /ci_git_clone }"
 
-  sed \
-    -e "s|https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple|http://${CACHE_HOST}/pypi/simple|g" \
-    -e "s|https://download.pytorch.org/whl/cpu/|http://${CACHE_HOST}/whl/cpu/|g" \
-    -e "s|https://mirrors.huaweicloud.com/ascend/repos/pypi|http://${CACHE_HOST}/ascend/repos/pypi|g" \
-    <<<"${block}"
+  printf '%s\n' "${block}"
 }
 
 # Retry GitHub clones after removing any incomplete destination directory.
@@ -176,7 +143,7 @@ function run_installation() {
   trap cleanup_installation EXIT
 
   os_name="$(detect_os)"
-  configure_ci_environment "${os_name}"
+  configure_ci_environment
   run_shell_block "installation-common-prerequisites-${os_name}"
 
   python3 -c 'import yaml' 2>/dev/null || python3 -m pip install PyYAML

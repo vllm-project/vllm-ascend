@@ -26,13 +26,21 @@ def validate_glm_recoverssm(vllm_config: VllmConfig) -> None:
     # TODO: FP16 KV cache with RecoverSSM has not been validated.
     if vllm_config.mamba_config.enable_stochastic_rounding:
         raise ValueError("GLM RecoverSSM does not support stochastic rounding")
-    if cache.mamba_cache_mode != "none" or cache.enable_prefix_caching:
-        raise ValueError("GLM RecoverSSM currently requires Mamba cache mode none and prefix caching disabled")
+    expected_cache_mode = "align" if cache.enable_prefix_caching else "none"
+    if cache.mamba_cache_mode != expected_cache_mode:
+        raise ValueError(
+            f"GLM RecoverSSM requires Mamba cache mode {expected_cache_mode} with this prefix caching setting"
+        )
     parallel = vllm_config.parallel_config
-    if parallel.pipeline_parallel_size != 1 or parallel.prefill_context_parallel_size != 1:
-        raise ValueError("GLM RecoverSSM currently requires PP=1 and PCP=1")
+    if parallel.pipeline_parallel_size != 1:
+        raise ValueError("GLM RecoverSSM currently requires PP=1")
     if parallel.decode_context_parallel_size != 1:
         raise ValueError("GLM RecoverSSM currently requires DCP=1")
     transfer = vllm_config.kv_transfer_config
     if transfer is not None and transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector"):
         raise ValueError("GLM RecoverSSM KV transfer requires MooncakeConnectorV2 or MooncakePullConnector")
+    if parallel.prefill_context_parallel_size > 1:
+        if parallel.tensor_parallel_size != 1:
+            raise ValueError("GLM RecoverSSM PCP requires TP=1")
+        if transfer is None or transfer.kv_role != "kv_producer":
+            raise ValueError("GLM RecoverSSM PCP requires a Mooncake KV producer")
