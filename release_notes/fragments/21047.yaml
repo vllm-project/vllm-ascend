@@ -1,0 +1,6 @@
+pr: 21047
+entries:
+  - category: bugfix
+    text: Fixed the MiniMax-M3 ViT mRoPE 16-token setup patch being bypassed when the Ascend vision tower was loaded before worker initialization.
+    model: minimax-m3
+    hardware: [A5]
