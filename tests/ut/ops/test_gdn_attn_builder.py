@@ -515,6 +515,37 @@ def test_host_builder_exposes_host_descriptors_without_device_chunks(has_pcp_con
     assert attn_metadata.chunk_offsets is None
 
 
+@pytest.mark.parametrize("creates_checkpoint", [False, True])
+def test_host_builder_materializes_device_chunks_only_for_internal_checkpoint(monkeypatch, creates_checkpoint):
+    from vllm_ascend.ops import gdn_checkpoint
+
+    _patch_missing_runtime_cdiv(monkeypatch)
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=0,
+        builder_cls=AscendGDNHostMetadataBuilder,
+    )
+    builder._ascend_gdn_checkpoints = True
+    checkpoint = object() if creates_checkpoint else None
+    monkeypatch.setattr(gdn_checkpoint, "build_gdn_checkpoints", lambda *args: checkpoint)
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[130], query_lens=[130]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    metadata = builder.build(0, common, num_actual_reqs=1)
+    chunk = metadata.non_spec_prefill_metadata.chunk
+    for field in (
+        "chunk_indices_chunk64",
+        "chunk_offsets_chunk64",
+        "chunk_indices_large_block",
+        "block_indices_cumsum",
+    ):
+        assert (getattr(chunk, field) is not None) == creates_checkpoint
+    assert getattr(metadata, "ascend_checkpoint", None) is checkpoint
+
+
 def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
     builder = _make_builder(
         device=torch.device("cpu"),

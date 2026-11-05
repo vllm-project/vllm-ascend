@@ -55,6 +55,7 @@ def ensure_gdn_checkpoint_workspace(layer, tensor):
             workspace = getattr(candidate, "_ascend_checkpoint_workspace", None)
             if (
                 workspace is not None
+                and getattr(candidate, "vllm_config", None) is layer.vllm_config
                 and tuple(workspace.shape) == shape
                 and workspace.dtype == torch.float32
                 and workspace.device == tensor.device
@@ -62,7 +63,6 @@ def ensure_gdn_checkpoint_workspace(layer, tensor):
                 layer._ascend_checkpoint_workspace = workspace
                 return
         layer._ascend_checkpoint_workspace = tensor.new_empty(shape, dtype=torch.float32)
-
 
 
 def build_gdn_checkpoints(builder, common, spec_masks_cpu, num_decodes):

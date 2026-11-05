@@ -9,7 +9,7 @@ community PR has NOT been established. Recheck before submission.
 Enable with `--additional-config '{"gdn_internal_prefill_checkpoints": true}'`
 and prefix caching in align mode. Requires vLLM with #60050. The option is
 experimental and disabled by default. Eligible GDN layers require BF16,
-K=V=128 and PCP=1. The upstream all-layer capability check preserves split
+K=V=128, PCP=1 and no ubatching. The upstream all-layer capability check preserves split
 prefill when another recurrent layer cannot export checkpoints.
 
 Checkpoint-bearing prefill uses the existing Triton recurrence instead of the
@@ -17,8 +17,9 @@ AscendC FwdH implementation to export only selected FP32 chunk-start states.
 Convolution history and recurrent state are written through the shared upstream
 checkpoint exporter. Decode is unchanged. This backend change needs numerical
 and performance qualification; skipping a model forward does not guarantee a
-net speedup. A persistent FP32 buffer is allocated during profiling, of size
-`max_num_seqs * local_value_heads * 128 * 128 * 4` bytes per eligible layer.
+net speedup. A persistent FP32 scratch buffer is allocated during profiling, of size
+`max_num_seqs * local_value_heads * 128 * 128 * 4` bytes. Eligible layers
+with the same VllmConfig, device and state shape share it; ubatching is excluded.
 A raw pre-convolution copy is also needed during checkpoint-bearing prefill.
 Small prefix match units can increase checkpoint traffic.
 
@@ -30,6 +31,7 @@ lowering, NPU numerical accuracy or serving performance.
 
 ```bash
 .venv/bin/python tests/ut/ops/test_gdn_checkpoint_plan.py
+.venv/bin/python tests/ut/ops/test_gdn_checkpoint_dispatch.py
 ```
 
 Focused Ruff lint/format checks, Python syntax checks and `git diff --check`

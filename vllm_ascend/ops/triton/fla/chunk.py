@@ -282,6 +282,14 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
 def chunk_gated_delta_rule_checkpoint(
     q, k, v, g, beta, initial_state, cu_seqlens, prebuilt_meta, checkpoint_output, checkpoint_offsets
 ):
+    required_fields = (
+        "chunk_indices_chunk64",
+        "chunk_offsets_chunk64",
+        "chunk_indices_large_block",
+        "block_indices_cumsum",
+    )
+    if prebuilt_meta is None or any(getattr(prebuilt_meta, field, None) is None for field in required_fields):
+        raise ValueError("GDN checkpoints require prebuilt device chunk metadata; host-only fallback is unsupported")
     q = l2norm_fwd(q)
     k = l2norm_fwd(k)
     _, output, _, final_state, _, _, _ = chunk_gated_delta_rule_fwd(
