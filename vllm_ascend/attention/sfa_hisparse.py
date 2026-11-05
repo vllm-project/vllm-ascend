@@ -139,7 +139,14 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # writes owned staging below; the HiSparse handle retains the final
         # Resident destination, row mapping and Host-mirror completion policy.
         if self.enable_sparse_sfa_c8:
-            return super()._fused_preprocess_type()
+            from vllm_ascend.quantization.methods import AscendW8A8MXFP8DynamicLinearMethod
+
+            # Native Prolog ties its C8 payload dtype to the weight scheme.
+            # INT8 weights cannot write this bridge's E4M3FN cache; retain the
+            # existing native projection/quantizer path for that combination.
+            method = self._get_layer_quant_method(self.fused_qkv_a_proj)
+            if type(method) is AscendW8A8MXFP8DynamicLinearMethod:
+                return super()._fused_preprocess_type()
         return None
 
     def _compose_sfa_kv_cache(self, kv_cache):

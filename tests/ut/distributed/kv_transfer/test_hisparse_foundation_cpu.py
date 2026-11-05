@@ -11,7 +11,11 @@ import torch
 from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec, MLAAttentionSpec, SparseCacheRole
 
 from vllm_ascend.attention.indexer import AscendHiSparseIndexerBackend
-from vllm_ascend.attention.sfa_hisparse import AscendHiSparseMetadataBuilder, finish_hisparse_kv_update
+from vllm_ascend.attention.sfa_hisparse import (
+    AscendHiSparseImpl,
+    AscendHiSparseMetadataBuilder,
+    finish_hisparse_kv_update,
+)
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.device_op import DeviceOperator
@@ -28,6 +32,25 @@ from vllm_ascend.hisparse.c8 import (
     map_c8_physical_indices,
     pack_c8_components,
 )
+
+
+@pytest.mark.parametrize("mxfp8", [False, True])
+def test_c8_prolog_requires_matching_fp8_weight_scheme(mxfp8):
+    from vllm_ascend.attention.utils import PreprocessType
+    from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8MXFP8DynamicLinearMethod
+
+    method = AscendW8A8MXFP8DynamicLinearMethod if mxfp8 else AscendW8A8DynamicLinearMethod
+    impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
+    impl.enable_sparse_sfa_c8 = True
+    impl.fused_qkv_a_proj = NS(quant_method=NS(quant_method=method.__new__(method)))
+    impl.is_kv_consumer, impl.has_indexer = False, False
+    impl.dcp_group = None
+    impl.qk_rope_head_dim = 64
+    impl.q_a_layernorm = impl.kv_a_layernorm = NS()
+    impl.q_proj = NS(_chunk_size=0)
+    impl.enable_sparse_sfa_turboquant = False
+    expected = PreprocessType.PROLOG_V3 if mxfp8 else None
+    assert impl._fused_preprocess_type() is expected
 
 
 @pytest.mark.parametrize("hisparse", [False, True])
