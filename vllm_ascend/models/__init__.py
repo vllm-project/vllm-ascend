@@ -13,6 +13,21 @@ def register_model():
         "IQuestQ1ForCausalLM",
         "vllm_ascend.models.iquest_q1.model:IQuestQ1ForCausalLM",
     )
+    # The `iquest_q1` reasoning / tool parsers are ported from the upstream
+    # plugin `IQuestLab/vllm-iquest-q1`; registered lazily like the model.
+    from vllm.reasoning import ReasoningParserManager
+    from vllm.tool_parsers import ToolParserManager
+
+    ReasoningParserManager.register_lazy_module(
+        "iquest_q1",
+        "vllm_ascend.models.iquest_q1.reasoning_parser",
+        "IQuestQ1ReasoningParser",
+    )
+    ToolParserManager.register_lazy_module(
+        "iquest_q1",
+        "vllm_ascend.models.iquest_q1.tool_parser",
+        "IQuestQ1ToolParser",
+    )
     ModelRegistry.register_model(
         "Gemma4ForConditionalGeneration",
         "vllm_ascend.models.gemma4_mm:AscendGemma4ForConditionalGeneration",

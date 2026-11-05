@@ -10,6 +10,7 @@ Upstream vLLM does not ship this architecture.
 | `configs.py` | Ported verbatim from the upstream plugin `IQuestLab/vllm-iquest-q1` |
 | `model.py` | Ported from the same plugin; only the attention layer was re-pointed |
 | `attention.py` | **New** — Ascend learned-key sink attention (replaces the plugin's CUDA FA backend) |
+| `reasoning_parser.py`, `tool_parser.py` | Ported verbatim from the same plugin (`--reasoning-parser iquest_q1` / `--tool-call-parser iquest_q1`) |
 | `__init__.py`, `README.md` | New |
 
 ## How the sink works here
@@ -41,7 +42,6 @@ No custom Ascend kernel is needed at this stage. A Triton-ascend fusion of
   layer goes through FIA. Expect decode to be slower than a native GQA model.
 - No MTP / speculative decoding (the checkpoint ships an `mtp/` recursive draft).
 - No quantization (bf16 only), no LoRA weights, no context parallelism.
-- No reasoning / tool parser registered (upstream ships `iquest_q1` parsers).
 
 ## Running
 
@@ -52,6 +52,9 @@ vllm serve "$MODEL_ROOT" \
   --served-model-name IQuest-Q1 \
   --tensor-parallel-size 8 \
   --enforce-eager \
+  --reasoning-parser iquest_q1 \
+  --enable-auto-tool-choice \
+  --tool-call-parser iquest_q1 \
   --max-model-len 8192        # start small; 512K needs real KV budget planning
 ```
 
