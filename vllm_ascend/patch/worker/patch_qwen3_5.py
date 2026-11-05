@@ -20,6 +20,7 @@
 from functools import wraps
 
 import torch
+import vllm_ascend.envs as envs_ascend
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
@@ -224,3 +225,27 @@ else:
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention._forward_core
     _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels
+
+
+
+    # Splitting the fused `in_proj_qkvz` into `in_proj_qkv` + `in_proj_z` is
+    # opt-in via VLLM_ASCEND_ENABLE_GDN_QKV_SPLIT=1. By default the upstream fused
+    # layout, its weight loading and its packed module mapping are all left
+    # untouched. `AscendGatedDeltaNetAttention.forward` picks the matching branch
+    # by probing for the `in_proj_qkv` attribute.
+    if envs_ascend.VLLM_ASCEND_ENABLE_GDN_QKV_SPLIT:
+        from vllm.model_executor.models.qwen3_next import Qwen3NextModel
+        from vllm.model_executor.models.utils import WeightsMapper
+        from vllm.model_executor.models.qwen3_5 import Qwen3_5Model as _QwenCls
+        _QwenCls.hf_to_vllm_mapper = Qwen3NextModel.hf_to_vllm_mapper | WeightsMapper(
+            orig_to_new_stacked={
+                ".in_proj_b": (".in_proj_ba", 0),
+                ".in_proj_a": (".in_proj_ba", 1),
+            }
+        )
+        from vllm.model_executor.models.qwen3_5 import Qwen3_5ForCausalLM as _QwenCausal
+        _QwenCausal.packed_modules_mapping.pop(
+        "in_proj_qkvz", None
+        )
+
+        from vllm_ascend.patch.worker import patch_qwen3_5_gdn_split
