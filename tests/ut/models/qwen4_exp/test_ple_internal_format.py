@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -242,7 +243,7 @@ def test_ple_wrap_dispatches_sd_state(monkeypatch: pytest.MonkeyPatch) -> None:
     wait = Mock()
     monkeypatch.setattr(ple, "wait_for_kv_layer_from_connector", wait)
     original = Mock()
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
     # SD layout: [slots, window, channels]. The trailing capacity is kept.
     state = torch.randn(3, 14, 4)
     layer = _make_ple_layer(state, lambda **kwargs: calls.append(kwargs))
@@ -274,7 +275,7 @@ def test_ple_wrap_transposes_dim_first_state(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(ple, "_get_allow_internal_format", lambda: True)
     monkeypatch.setattr(ple, "_set_allow_internal_format", lambda _enabled: None)
     monkeypatch.setattr(ple, "wait_for_kv_layer_from_connector", Mock())
-    calls: list[dict[str, object]] = []
+    calls: list[dict[str, Any]] = []
     # DS layout: [slots, channels, window].
     state = torch.randn(3, 4, 14)
     layer = _make_ple_layer(state, lambda **kwargs: calls.append(kwargs))
