@@ -133,6 +133,10 @@ a3:
         config_file_path: GLM-5.3-Flash-W8A8-130k-PD.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
         size: 2
+      - name: GLM-5.3-Flash-W8A8-A3-PD-Static-2Sizes
+        config_file_path: GLM-5.3-Flash-W8A8-A3-PD-Static-2Sizes.yaml
+        config_base_path: tests/e2e/cases/models/configs/GLM
+        size: 2
       - name: multi-node-GLM-5.2-w8a8-A3
         config_file_path: GLM5_2-W8A8-A3-dual-nodes.yaml
         config_base_path: tests/e2e/cases/models/configs/GLM
