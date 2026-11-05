@@ -1505,45 +1505,15 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     This KV Cache Pool example uses DP2/TP1/PCP8 Prefill and DP8/TP2 Decode,
     using Model Runner V2 and native KDA. Prepare separate `run_p.sh` and
     `run_d.sh` files for this scenario from the [A3 PD scripts](#glm53-flash-5-3-a3).
-    In both files, keep `VLLM_USE_V2_MODEL_RUNNER=1`. Replace
-    `export ASCEND_RT_VISIBLE_DEVICES="$1"` with the serving option
-    `--device-ids "$1"` for this pooling example. Add
-    `--enable-prefix-caching`, remove
-    `--use-replayssm`, `--mamba-ssm-cache-dtype`, and
-    `--attention-config.indexer_kv_dtype`, and restore
-    `--limit-mm-per-prompt '{"image":1,"video":0}'`.
-
-    In the Prefill script, keep `--prefill-context-parallel-size "$8"` and
-    remove `--enable-eplb`, `--eplb-config`, and `--enforce-eager`. Replace the
-    corresponding options with the following values, retaining the other
-    network, model and serving settings:
-
-    ```shell
-      --max-num-seqs 64 \
-      --max-num-batched-tokens 4096 \
-      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
-      --additional-config '{
-        "enable_fused_mc2": 1,
-        "multistream_overlap_shared_expert": false
-      }' \
-    ```
-
-    In the Decode script, replace the corresponding options with:
-
-    ```shell
-      --max-num-seqs 32 \
-      --max-num-batched-tokens 192 \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-      --additional-config '{
-        "multistream_overlap_shared_expert": true,
-        "recompute_scheduler_enable": true,
-        "enable_shared_expert_dp": true,
-        "enable_flashcomm1": true
-      }' \
-    ```
-
-    Keep MTP3 with `enforce_eager: false` on Decode. Use the pooling
-    connectors and the scenario-specific launch commands below.
+    Keep the ordinary PD serving parameters on both roles, including
+    `ASCEND_RT_VISIBLE_DEVICES="$1"`, INT8 main and indexer KV caches,
+    BF16 SSM state, MTP3, and the role-specific scheduling and tuning options.
+    Prefill uses 32 sequences and 16384 batched tokens; Decode uses 40
+    sequences and 240 batched tokens. Both roles limit image input to one image.
+    Add `--enable-prefix-caching` and remove `--use-replayssm`: this pooling
+    example uses native KDA because ReplaySSM does not accept `MultiConnector`.
+    Add the Memcache environment settings and replace the connectors as
+    described below. Reuse the ordinary PD launch commands and proxy mapping.
 
     ##### Prepare the Memcache Backend
 
@@ -1643,8 +1613,8 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     Replace the final `--kv-transfer-config` argument in `run_p.sh` with the
     following fragment. Apart from the prefix-caching change above, keep
-    the remaining A3 series Prefill flags restored above, including
-    `--max-num-seqs 64`.
+    the remaining A3 series Prefill flags from ordinary PD, including
+    `--max-num-seqs 32`.
 
     ```shell
       --kv-transfer-config \
@@ -1675,7 +1645,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     Replace the final `--kv-transfer-config` argument in `run_d.sh` with the
     following fragment. Apart from the prefix-caching change above, keep
-    the remaining A3 series Decode flags restored above, including
+    the remaining A3 series Decode flags from ordinary PD, including
     `FULL_DECODE_ONLY` graph mode and the MTP configuration.
 
     ```shell
