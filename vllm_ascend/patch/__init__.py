@@ -419,6 +419,21 @@
 #          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
 #
+#   2. `vllm.v1.core.single_type_kv_cache_manager.MambaManager._cache_partial_tail_block`
+#    Why:
+#       vLLM v0.32.0 re-registers an unchanged cached tail and marks it as a
+#       newly produced state, serializing sibling warm-prefix requests.
+#    How:
+#       Skip only an already-keyed, non-null tail at the same token boundary
+#       without a reserved checkpoint. Delegate all other paths to upstream,
+#       retaining same-step new-state deferral and copy-on-write bookkeeping.
+#    Related PR (if no, explain why):
+#       The verified vLLM main 24420b7a341af37a9bc3186e6fc6062512e0aa58
+#       already includes the guard; the supported v0.32.0 tag does not.
+#    Future Plan:
+#       Remove this override when all supported vLLM versions include the
+#       unchanged-tail guard; keep the regression test for release compatibility.
+#
 # ** 14. File: platform/patch_minimax_m2_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig._verify_quantization`

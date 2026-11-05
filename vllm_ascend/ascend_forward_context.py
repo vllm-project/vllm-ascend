@@ -378,10 +378,15 @@ def _select_capacity_and_world_size_moe_comm_method(
         "num_experts_per_tok",
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
-    world_size = vllm_config.parallel_config.world_size_across_dp
-    if not skip_draft_mc2 and (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
+    # The EP group spans DP x PCP x TP ranks and never includes PP (each PP
+    # stage owns different layers), so divide out pipeline_parallel_size to get
+    # the real EP group size.
+    ep_world_size = (
+        vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+    )
+    if not skip_draft_mc2 and (num_tokens is None or num_tokens <= mc2_tokens_capacity) and ep_world_size > 1:
         return MoECommType.MC2
-    if world_size <= num_experts_per_tok:
+    if ep_world_size <= num_experts_per_tok:
         return MoECommType.ALLGATHER
     return MoECommType.ALLTOALL
 
@@ -413,6 +418,11 @@ def select_moe_comm_method(
     """
     if not is_moe_model(vllm_config):
         return None
+
+    if get_ascend_config().deepgemm_mega_moe:
+        # DeepGEMM owns EP dispatch/combine. Keep local tokens through the
+        # existing TP1 prepare/finalize path; never all-gather them first.
+        return MoECommType.ALLTOALL
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     moe_comm_policy = get_current_hardware_profile().moe_comm_policy

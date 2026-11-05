@@ -1,0 +1,6 @@
+pr: 20518
+entries:
+  - category: bugfix
+    text: Build A5 mixed-quant MLA plans from initialized visibility lengths on the metadata producer stream, sharing plans by compression ratio instead of planning in each attention layer.
+    model: deepseek-v4.1
+    hardware: [A5]
