@@ -15,12 +15,14 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as speculator_module
 from vllm_ascend.ascend_forward_context import get_mrv2_in_profile_run
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
+from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
-from vllm_ascend.device.device_op import BaseDeviceAdaptor
+from vllm_ascend.device.device_op import BaseDeviceAdaptor, DeviceOperator
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
 _NATIVE_TORCH_SUM = torch.sum
@@ -42,6 +44,73 @@ _NATIVE_TORCH_SUM = torch.sum
 def test_adaptive_verification_cudagraph_support(builder_cls, speculative_config, expected):
     config = SimpleNamespace(speculative_config=speculative_config)
     assert builder_cls.get_cudagraph_support(config, Mock()) is expected
+
+
+@pytest.mark.parametrize(
+    ("runner_v2", "method", "adaptive", "pcp", "dcp", "pp", "packed_cache", "expected"),
+    [
+        (True, "dspark", True, 1, 1, 1, False, 6),
+        (False, "dspark", True, 1, 1, 1, False, None),
+        (True, "dspark", False, 1, 1, 1, False, None),
+        (True, "eagle", True, 1, 1, 1, False, None),
+        (True, "dspark", True, 2, 1, 1, False, None),
+        (True, "dspark", True, 1, 2, 1, False, None),
+        (True, "dspark", True, 1, 1, 2, False, None),
+        (True, "dspark", True, 1, 1, 1, True, None),
+    ],
+)
+def test_v41_adaptive_verification_graph_bound(
+    monkeypatch, runner_v2, method, adaptive, pcp, dcp, pp, packed_cache, expected
+):
+    monkeypatch.setattr(DeviceOperator, "get_dsv41_packed_cache_ops", lambda: object() if packed_cache else None)
+    config = SimpleNamespace(
+        use_v2_model_runner=runner_v2,
+        speculative_config=SimpleNamespace(
+            method=method, enable_adaptive_verification=adaptive, num_speculative_tokens=5, parallel_drafting=True
+        ),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp, pipeline_parallel_size=pp
+        ),
+    )
+    builder = AscendDSAV41MetadataBuilder
+    assert builder.get_varlen_cudagraph_max_query_len(config, Mock()) == expected
+    assert builder.get_cudagraph_support(config, Mock()) is AttentionCGSupport.UNIFORM_BATCH
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "model_type", "adaptive", "for_capture", "expected"),
+    [
+        (8, "deepseek_v41", True, True, 6),
+        (2, "deepseek_v41", True, True, 2),
+        (8, "deepseek_v41", True, False, 1),
+        (8, "deepseek_v41", False, True, 1),
+        (8, "deepseek_v4", True, True, 1),
+    ],
+)
+def test_v41_adaptive_verification_capture_metadata(
+    monkeypatch, num_tokens, model_type, adaptive, for_capture, expected
+):
+    state = AscendModelState.__new__(AscendModelState)
+    state.vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(method="dspark", enable_adaptive_verification=adaptive),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type)),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+    )
+    state.kvpp_runtime = state.pcp_manager = state.decoder_replay = None
+    state.max_model_len = 128
+    buffers = AscendInputBuffers(8, 8, torch.device("cpu"))
+    with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
+        batch = AscendInputBatch.make_dummy(num_tokens, num_tokens, buffers, max_query_len=6)
+    assert batch.num_scheduled_tokens.max() == 1
+    build_metadata = Mock(return_value={})
+    monkeypatch.setattr("vllm_ascend.worker.v2.model_states.default.build_attn_metadata", build_metadata)
+
+    # Upstream uses runtime mode NONE with for_capture=True for full capture.
+    mode = CUDAGraphMode.NONE if for_capture else CUDAGraphMode.FULL
+    state.prepare_attn(batch, mode, (), None, [], None, for_capture=for_capture)
+
+    assert build_metadata.call_args.kwargs["max_query_len"] == expected
+    assert build_metadata.call_args.kwargs["query_start_loc_gpu"] is batch.query_start_loc
 
 
 @pytest.mark.parametrize(

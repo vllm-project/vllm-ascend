@@ -25,6 +25,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadata,
     AttentionMetadataBuilder,
+    max_decode_query_len,
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
@@ -929,6 +930,27 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         kv_cache_spec,
     ) -> AttentionCGSupport:
         return AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec,
+    ) -> int | None:
+        spec = vllm_config.speculative_config
+        parallel = vllm_config.parallel_config
+        if (
+            not vllm_config.use_v2_model_runner
+            or spec is None
+            or spec.method != "dspark"
+            or not spec.enable_adaptive_verification
+            or parallel.prefill_context_parallel_size > 1
+            or parallel.decode_context_parallel_size > 1
+            or parallel.pipeline_parallel_size > 1
+            or DeviceOperator.get_dsv41_packed_cache_ops() is not None
+        ):
+            return None
+        return max_decode_query_len(vllm_config)
 
     def build_for_cudagraph_capture(
         self,
