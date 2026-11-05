@@ -57,6 +57,7 @@ env_common: &env_common
   OMP_NUM_THREADS: "1"
   PYTHONUNBUFFERED: "1"
   PYTHONDONTWRITEBYTECODE: "1"
+  SERVER_PORT: "${PORT}"
   VLLM_USE_MODELSCOPE: "true"
 
 env_prefill: &env_prefill
