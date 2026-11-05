@@ -1,0 +1,6 @@
+pr: 20417
+entries:
+  - category: performance
+    text: Use the AscendC DeepSeek V4.1 C2 compressor on A2/A3 while retaining FP32 projections and Triton pooling on A5.
+    model: deepseek-v4.1
+    hardware: [A2, A3, A5]

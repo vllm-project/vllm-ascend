@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E402
 
+import sys
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, Mock
@@ -46,6 +47,10 @@ from vllm_ascend.core.kv_cache_interface import (
     declared_kwarg,
     get_storage_block_size,
 )
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.models.deepseek_v41 import cache_config as cache_config_module
+from vllm_ascend.models.deepseek_v41 import compressor as compressor_module
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -110,6 +115,25 @@ def mock_npu_rms_norm(monkeypatch):
 
 
 @pytest.fixture
+def compressor_profile(monkeypatch):
+    def select(device_type):
+        profile = get_hardware_profile(device_type)
+        monkeypatch.setattr(compressor_module, "get_current_hardware_profile", lambda: profile)
+        monkeypatch.setattr(cache_config_module, "get_current_hardware_profile", lambda: profile)
+        return profile
+
+    return select
+
+
+@pytest.fixture
+def triton_compressor(monkeypatch):
+    # The adapter UTs must not import or launch device-specific Triton kernels.
+    backend = SimpleNamespace(_cube_core_num=Mock(return_value=24), compressor_from_projected=Mock())
+    monkeypatch.setitem(sys.modules, "vllm_ascend.ops.triton.compressor.compressor_triton", backend)
+    return backend
+
+
+@pytest.fixture
 def config():
     # Deliberately small parameter dimensions; source topology matches the backbone.
     return SimpleNamespace(
@@ -167,11 +191,12 @@ def collect_specs(runtime, prefix="model"):
     return build_v41_cache_specs(runtime.model_config.hf_text_config, runtime, prefix)
 
 
-@pytest.mark.parametrize("packed", [False, True])
-def test_compressor_registers_state_cache_and_preserves_norm_weights(config, runtime, monkeypatch, packed):
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+def test_compressor_registers_state_cache_and_preserves_norm_weights(config, runtime, compressor_profile, device_type):
     from vllm_ascend.core.kv_cache_interface import AscendCircularBufferSpec
 
-    monkeypatch.setattr("vllm_ascend.models.deepseek_v41.compressor.uses_a5_packed_cache", lambda: packed)
+    compressor_profile(device_type)
+    packed = device_type == AscendDeviceType.A5
     runtime.scheduler_config.max_num_batched_tokens = 8
     compressor = DeepseekV41Compressor(config, 2, runtime, prefix="compressor")
     state = compressor.state_cache
@@ -182,7 +207,11 @@ def test_compressor_registers_state_cache_and_preserves_norm_weights(config, run
     assert spec.block_size == 32
     assert spec.head_size == 2 * config.head_dim
     assert type(spec) is (AscendCircularBufferSpec if packed else CircularBufferSpec)
-    assert compressor.norm.weight.dtype == torch.bfloat16
+    assert compressor.use_native_compressor is not packed
+    expected_dtype = torch.float32 if packed else torch.bfloat16
+    assert compressor.wkv.weight.dtype == compressor.wgate.weight.dtype == expected_dtype
+    assert compressor._ring_pooled.shape == (8, config.head_dim)
+    assert compressor._ring_pooled.dtype == compressor.norm.weight.dtype == torch.bfloat16
     assert set(compressor.state_dict()) == {"wkv.weight", "wgate.weight", "norm.weight"}
 
 
@@ -1189,6 +1218,7 @@ def test_compressor_chunk_boundary_matches_vector_reference(config, chunks):
     )
 
 
+@pytest.mark.parametrize("use_native", [False, True])
 @pytest.mark.parametrize(
     "num_tokens,start,dtype",
     [
@@ -1199,7 +1229,7 @@ def test_compressor_chunk_boundary_matches_vector_reference(config, chunks):
         (5, 0, torch.bfloat16),
     ],
 )
-def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, start, dtype):
+def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, start, dtype, use_native):
     from vllm_ascend.attention import dsa_v41
 
     positions = torch.arange(start, start + num_tokens)
@@ -1219,10 +1249,18 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
     original_hidden_states = hidden_states.clone()
 
     def pool(x, metadata):
-        assert x is hidden_states
+        assert use_native and x is hidden_states
         assert metadata is state
         events.append("pool")
         return x.to(torch.bfloat16)
+
+    def pool_projected(kv, scores, metadata):
+        assert not use_native and metadata is state
+        assert kv.dtype == scores.dtype == torch.float32
+        torch.testing.assert_close(kv, hidden_states.float())
+        torch.testing.assert_close(scores, hidden_states.float())
+        events.append("pool")
+        return kv.to(torch.bfloat16)
 
     expected = slots.clone()
 
@@ -1240,7 +1278,13 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
     monkeypatch.setattr(dsa_v41, "scatter_cache_sk", store)
     monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *args, **kwargs: None, raising=False)
     attn = SimpleNamespace(
-        compressor=SimpleNamespace(compress_native=pool),
+        compressor=SimpleNamespace(
+            use_native_compressor=use_native,
+            compress_native=pool,
+            wkv=lambda value: value,
+            wgate=lambda value: value,
+            pool_projected=pool_projected,
+        ),
         indexer=SimpleNamespace(update_keys=update_keys),
         long_kv_cache=SimpleNamespace(kv_cache=[torch.empty(0)]),
         head_dim=8,
@@ -1279,30 +1323,104 @@ def test_state_uses_one_ring_page_and_block_table_entry(config, runtime):
     assert spec.max_memory_usage_bytes(runtime) == spec.page_size_bytes
 
 
-def test_native_compressor_uses_bf16_weights(config, runtime, monkeypatch):
-    from vllm_ascend.models.deepseek_v41 import compressor as compressor_module
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+def test_c1_keeps_bf16_projection(config, compressor_profile, device_type):
+    compressor_profile(device_type)
+    compressor = DeepseekV41Compressor(config, 1)
+    assert compressor.wkv.weight.dtype == torch.bfloat16
+    assert not hasattr(compressor, "wgate")
+    assert not hasattr(compressor, "state_cache")
+    x = torch.randn(3, config.hidden_size, dtype=torch.bfloat16)
+    actual = compressor(x)
+    assert actual.shape == (3, config.head_dim) and actual.dtype == torch.bfloat16
 
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3])
+def test_native_compressor_preparation(config, compressor_profile, triton_compressor, monkeypatch, device_type):
+    compressor_profile(device_type)
     config.hidden_size, config.head_dim = 1024, 128
-    monkeypatch.setattr(compressor_module, "DeepseekV41CacheLayer", lambda *args: SimpleNamespace())
-    monkeypatch.setattr(
-        compressor_module, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda capability: True)
-    )
-    native = DeepseekV41Compressor(config, 2, runtime)
-    assert native.wkv.weight.dtype == native.wgate.weight.dtype == torch.bfloat16
-    monkeypatch.setattr(torch.ops._C_ascend, "compressor_v2", lambda *args: None, raising=False)
+    native = DeepseekV41Compressor(config, 2)
+    op = Mock()
+    ops = SimpleNamespace(_C_ascend=SimpleNamespace(compressor_v2=op))
+    monkeypatch.setattr(compressor_module, "torch", SimpleNamespace(ops=ops))
     native.prepare_ring_compressor(4096, "cpu")
-    monkeypatch.setattr(
-        compressor_module, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda capability: False)
-    )
-    with pytest.raises(ValueError, match="A2/A3"):
-        native.prepare_ring_compressor(4096, "cpu")
-    config.head_dim = 8
+    assert native.use_native_compressor
+    op.assert_not_called()
+    triton_compressor._cube_core_num.assert_not_called()
+    assert not hasattr(native, "_ring_num_cores")
+
+
+@pytest.mark.parametrize("hidden,width", [(1024, 8), (512, 128), (10752, 128), (1537, 128)])
+def test_native_compressor_rejects_unsupported_shape(config, compressor_profile, hidden, width):
+    compressor_profile(AscendDeviceType.A2)
+    config.hidden_size, config.head_dim = hidden, width
+    native = DeepseekV41Compressor(config, 2)
     with pytest.raises(ValueError, match="D=128/512"):
-        DeepseekV41Compressor(config, 2, runtime).prepare_ring_compressor(4096, "cpu")
+        native.prepare_ring_compressor(4096, "cpu")
+
+
+def test_native_compressor_requires_registered_operator(config, compressor_profile, monkeypatch):
+    compressor_profile(AscendDeviceType.A2)
+    config.hidden_size, config.head_dim = 1024, 128
+    native = DeepseekV41Compressor(config, 2)
+    monkeypatch.setattr(compressor_module, "torch", SimpleNamespace(ops=SimpleNamespace(_C_ascend=SimpleNamespace())))
+    with pytest.raises(RuntimeError, match="Rebuild"):
+        native.prepare_ring_compressor(4096, "cpu")
+
+
+def test_a5_prepares_triton_without_native_operator(config, compressor_profile, triton_compressor, monkeypatch):
+    compressor_profile(AscendDeviceType.A5)
+    # These tiny dimensions intentionally do not satisfy the native shape limits.
+    compressor = DeepseekV41Compressor(config, 2)
+    monkeypatch.setattr(compressor_module, "torch", SimpleNamespace(ops=SimpleNamespace(_C_ascend=SimpleNamespace())))
+    compressor.prepare_ring_compressor(4096, "cpu")
+    assert not compressor.use_native_compressor
+    assert compressor.wkv.weight.dtype == compressor.wgate.weight.dtype == torch.float32
+    assert compressor._ring_num_cores == 24
+    triton_compressor._cube_core_num.assert_called_once_with()
+
+
+def test_unsupported_hardware_does_not_fall_back_to_triton(config, compressor_profile, triton_compressor):
+    compressor_profile(AscendDeviceType._310P)
+    compressor = DeepseekV41Compressor(config, 2)
+    with pytest.raises(ValueError, match="A5 only"):
+        compressor.prepare_ring_compressor(4096, "cpu")
+    triton_compressor._cube_core_num.assert_not_called()
+
+
+def test_a5_pool_projected_preserves_adapter_contract(config, compressor_profile, triton_compressor):
+    compressor_profile(AscendDeviceType.A5)
+    compressor = DeepseekV41Compressor(config, 2)
+    compressor.prepare_ring_compressor(4096, "cpu")
+    state = torch.zeros(3, 32, 1, 2 * config.head_dim)
+    compressor.state_cache = SimpleNamespace(kv_cache=[state])
+    compressor.register_buffer("_ring_pooled", torch.empty(8, config.head_dim, dtype=torch.bfloat16), persistent=False)
+    kv, scores = torch.randn(3, config.head_dim), torch.randn(3, config.head_dim)
+    ring = torch.tensor([[0], [3], [0], [0], [1]], dtype=torch.int32)
+    metadata = SimpleNamespace(c2_ring_metadata=ring, max_query_len=3)
+    pooled = torch.randn(3, config.head_dim, dtype=torch.bfloat16)
+
+    def pool(actual_kv, actual_scores, cache, controls, out, *, max_query_len, num_cores):
+        assert actual_kv is kv and actual_scores is scores
+        assert actual_kv.dtype == actual_scores.dtype == cache.dtype == torch.float32
+        assert cache.shape == (3, 32, 2 * config.head_dim)
+        assert cache.data_ptr() == state.data_ptr()
+        assert controls is ring
+        assert max_query_len == 3 and num_cores == 24
+        assert out.data_ptr() == compressor._ring_pooled.data_ptr()
+        assert out.shape == pooled.shape and out.dtype == torch.bfloat16
+        out.copy_(pooled)
+        return out
+
+    triton_compressor.compressor_from_projected.side_effect = pool
+    actual = compressor.pool_projected(kv, scores, metadata)
+    triton_compressor.compressor_from_projected.assert_called_once()
+    torch.testing.assert_close(actual, compressor.norm(pooled), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("complete", [[False, True, True, False, True], [False] * 5])
-def test_native_compressor_restores_token_rows(config, monkeypatch, complete):
+def test_native_compressor_restores_token_rows(config, monkeypatch, compressor_profile, complete):
+    compressor_profile(AscendDeviceType.A2)
     compressor = DeepseekV41Compressor(config, 2)
     compressor.register_buffer("_ring_pooled", torch.empty(5, 8, dtype=torch.bfloat16), persistent=False)
     state = torch.zeros(3, 32, 1, 16, dtype=torch.float32)
@@ -1327,6 +1445,18 @@ def test_native_compressor_restores_token_rows(config, monkeypatch, complete):
     actual = compressor.compress_native(torch.randn(5, 16, dtype=torch.bfloat16), metadata)
     torch.testing.assert_close(actual, compressor.norm(expected), rtol=0, atol=0)
     assert torch.isfinite(actual).all()
+
+
+def test_native_compressor_empty_input_skips_operator(config, compressor_profile, monkeypatch):
+    compressor_profile(AscendDeviceType.A2)
+    compressor = DeepseekV41Compressor(config, 2)
+    compressor.register_buffer("_ring_pooled", torch.empty(5, config.head_dim, dtype=torch.bfloat16), persistent=False)
+    op = Mock(side_effect=AssertionError("empty input must not launch CompressorV2"))
+    monkeypatch.setattr(torch.ops._C_ascend, "compressor_v2", op, raising=False)
+    # No metadata or state cache is needed for the zero-token fast path.
+    actual = compressor.compress_native(torch.empty(0, config.hidden_size, dtype=torch.bfloat16), None)
+    assert actual.shape == (0, config.head_dim) and actual.dtype == torch.bfloat16
+    op.assert_not_called()
 
 
 @torch.inference_mode()

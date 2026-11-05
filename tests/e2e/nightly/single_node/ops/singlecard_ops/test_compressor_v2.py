@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CompressorV2 numerical and mutation checks; run on Ascend A2/A3."""
+"""V4.1 C2 numerical checks for AscendC on A2/A3 and the Triton fallback on A5."""
 
 import importlib
 from types import SimpleNamespace
@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from vllm.config import VllmConfig, set_current_vllm_config
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import bootstrap_custom_op_env
@@ -172,3 +173,50 @@ def test_compressor_v2_meta_and_schema():
     assert schema.arguments[3].alias_info.is_write
     with pytest.raises(RuntimeError, match="positive"):
         torch.ops._C_ascend.compressor_v2(x, weights, weights, state, None, offsets, None, None, 0)
+
+
+@torch.inference_mode()
+def test_a5_compressor_prefill_decode_ring_state():
+    if not get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE):
+        pytest.skip("FP32 Linear/Triton fallback targets A5")
+    from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
+
+    torch.manual_seed(17)
+    hidden, width = 5120, 512
+    lengths = (31, 1, 1, 1, 33, 0, 2)
+    config = SimpleNamespace(hidden_size=hidden, head_dim=width, rms_norm_eps=1e-6)
+    with set_current_vllm_config(VllmConfig()):
+        compressor = DeepseekV41Compressor(config, 2).npu()
+        assert not compressor.use_native_compressor
+        assert compressor.wkv.weight.dtype == compressor.wgate.weight.dtype == torch.float32
+        compressor.wkv.weight.normal_(std=0.02)
+        compressor.wgate.weight.normal_(std=0.02)
+        compressor.register_buffer(
+            "_ring_pooled",
+            torch.empty(max(lengths), width, dtype=torch.bfloat16, device="npu"),
+            persistent=False,
+        )
+        state = torch.randn(3, 32, 2 * width, device="npu") * 0.1
+        initial_state = state.cpu()
+        expected_state = initial_state.clone()
+        compressor.state_cache = SimpleNamespace(kv_cache=[state.unsqueeze(-2)])
+        compressor.prepare_ring_compressor(max(lengths), torch.device("npu"))
+        wkv, wgate = compressor.wkv.weight.cpu(), compressor.wgate.weight.cpu()
+        start = 0
+        for count in lengths:
+            x = torch.randn(count, hidden, dtype=torch.bfloat16, device="npu") * 0.1
+            ring = torch.tensor([[start], [count], [0], [0], [1]], dtype=torch.int32, device="npu")
+            metadata = SimpleNamespace(c2_ring_metadata=ring, max_query_len=count)
+            expected = _reference(x.cpu(), wkv, wgate, expected_state, [1], [0], [count], [start])
+            fp32_input = x.float()
+            actual = compressor.pool_projected(compressor.wkv(fp32_input), compressor.wgate(fp32_input), metadata)
+            complete = (torch.arange(start, start + count) % 2) == 1
+            if expected.shape[0]:
+                expected = compressor.norm(expected.npu()).cpu()
+                torch.testing.assert_close(actual.cpu()[complete], expected, rtol=0.02, atol=0.002)
+            assert actual.shape == (count, width) and actual.dtype == torch.bfloat16
+            assert torch.count_nonzero(actual.cpu()[~complete]) == 0
+            torch.testing.assert_close(state.cpu(), expected_state, rtol=1e-4, atol=1e-5)
+            torch.testing.assert_close(state[0].cpu(), initial_state[0], rtol=0, atol=0)
+            torch.testing.assert_close(state[2].cpu(), initial_state[2], rtol=0, atol=0)
+            start += count

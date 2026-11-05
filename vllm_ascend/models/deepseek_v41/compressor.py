@@ -58,6 +58,8 @@ class DeepseekV41Compressor(nn.Module):
         max_tokens and device are retained for the model runner interface.
         """
         if not self.use_native_compressor:
+            if not uses_a5_packed_cache():
+                raise ValueError("V4.1 C2 compression supports AscendC on A2/A3 and Triton on A5 only")
             from vllm_ascend.ops.triton.compressor.compressor_triton import _cube_core_num
 
             self._ring_num_cores = _cube_core_num()
