@@ -14,8 +14,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorWorkerMetadata,
     SupportsHMA,
 )
+from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
+
+logger = init_logger(__name__)
 
 # isort: off
 if TYPE_CHECKING:
@@ -90,6 +93,31 @@ class UCMConnectorV1(KVConnectorBase_V1, SupportsHMA):
             kv_caches: A dictionary mapping layer names to KV cache tensors.
         """
         self._ucm_engine.register_kv_caches(kv_caches)
+        self._maybe_start_prefetch_server()  # UCM store is ready; start serving
+
+    def prefetch(self, block_ids: list[bytes]) -> None:
+        """Forward to the UCM store's prefetch_data."""
+        self._ucm_engine.prefetch_data(block_ids)
+
+    def _maybe_start_prefetch_server(self) -> None:
+        cfg = getattr(self._ucm_engine, "launch_config", None) or {}
+        cfg = cfg.get("prefetch_http") or {}
+        if not cfg.get("enable"):
+            return
+        if self._role != KVConnectorRole.WORKER:  # workers own the cache buffer
+            return
+        host = cfg.get("host", "0.0.0.0")  # listen address, reached via node IP
+        base_port = int(cfg.get("base_port", 6997))
+        token = cfg.get("token") or None
+        inner = getattr(self._ucm_engine, "connector", None)
+        local_rank = getattr(inner, "local_rank", 0)
+        port = base_port + max(local_rank, 0)  # one port per rank
+        try:
+            from ucm.integration.vllm.prefetch_server import UcmPrefetchServer
+
+            self._prefetch_server = UcmPrefetchServer(self.prefetch, host, port, token).start()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("UCM prefetch HTTP failed to start: %s", e)
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp) -> None:
         self._call_ucm_reserved_hook("set_host_xfer_buffer_ops", copy_operation)

@@ -859,6 +859,25 @@
 #    Future Plan:
 #       Remove with the V1 runner compatibility patch when Ascend uses V2 only.
 #
+# ** 24. File: platform/patch_kv_transfer_params_streaming.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat.chat_completion_stream_generator`
+#    Why:
+#       Upstream vLLM only sets `kv_transfer_params` on the non-streaming
+#       `ChatCompletionResponse`. The streaming path never emits it, so clients
+#       that read chunks incrementally (e.g. the UCM decode-side prefetch handle
+#       consumed by RAM-A) cannot see it, while the non-streaming response can.
+#    How:
+#       Wrap `chat_completion_stream_generator`: track the `RequestOutput` stream
+#       to capture the final `kv_transfer_params`, then inject it into the last
+#       SSE `data:` chunk (the one right before `data: [DONE]`). Only one chunk is
+#       buffered, so token-by-token streaming is preserved.
+#    Related PR (if no, explain why):
+#       No. Upstream only exposes the field on the non-streaming response schema.
+#    Future Plan:
+#       Remove this patch once upstream vLLM emits `kv_transfer_params` on the
+#       final streaming chunk as well.
+#
 # * Worker Patch:
 # ========#
 # Entries are listed in alphabetical order by file name.

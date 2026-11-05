@@ -2066,6 +2066,12 @@ class MooncakeConnectorScheduler:
             return False, None
 
         if not params.get("do_remote_decode") or request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
+            # Forward the connector-provided hash keys to the final response on
+            # the decode node. `do_remote_prefill` is cleared in
+            # update_state_after_alloc(), so non-empty `hash_keys` mark a
+            # proxied remote-prefill request.
+            if params.get("hash_keys"):
+                return False, {"hash_keys": params["hash_keys"]}
             return False, None
 
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
