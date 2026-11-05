@@ -819,6 +819,18 @@ class AscendConfig:
         else:
             logger.info_once("FlashComm1 is enabled.")
 
+        # quantized_all_reduce_config and FlashComm1/SP are mutually exclusive:
+        # SP replaces TP all-reduce with all-gather/reduce-scatter, so the
+        # quantized all-reduce wrapper would never be invoked.
+        sp_active = effective_flashcomm and vc.parallel_config.use_sequence_parallel_moe
+        if sp_active and self.quantized_all_reduce_config.enable:
+            logger.warning_once(
+                "additional_config.quantized_all_reduce_config is enabled together "
+                "with FlashComm1/SP. Sequence parallelism replaces TP all-reduce "
+                "with all-gather/reduce-scatter, so the int8 quantized all-reduce "
+                "would never be used. Disabling quantized_all_reduce_config."
+            )
+            self.quantized_all_reduce_config = dataclasses.replace(self.quantized_all_reduce_config, enable=False)
         # Sequence-parallel max_num_batched_tokens divisibility writeback
         if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):
             tp_pcp_size = vc.parallel_config.tensor_parallel_size * vc.parallel_config.prefill_context_parallel_size
