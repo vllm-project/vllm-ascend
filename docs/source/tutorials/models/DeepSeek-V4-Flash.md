@@ -1002,7 +1002,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     | Profile | P token budget / prefix cache | D draft / max-num-seqs | Proxy workers |
     |---|---|---|---:|
-    | Standard | 4096 / on | 5 / 42 | 4 |
+    | Standard | 8192 / on | 5 / 42 | 4 |
     | PC90 pooling scenario | 8192 / on | 5 / 42 | 4 |
     | Cold PD | 4096 / off | 5 / 42 | 4 |
 
@@ -1035,7 +1035,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     unset https_proxy
     unset http_proxy
-    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/lib/"
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
@@ -1118,7 +1118,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     unset https_proxy
     unset http_proxy
-    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/lib/"
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
