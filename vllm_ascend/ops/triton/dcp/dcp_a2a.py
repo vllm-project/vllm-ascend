@@ -461,9 +461,7 @@ def fused_dcp_lse_combine(
             num_heads,
             total_rows,
             DCP_SIZE=dcp_size,
-            BLOCK_RANKS=triton.next_power_of_2(dcp_size),
             HAS_LOCAL=local_output is not None,
-            COALESCED_LSE=True,
             RANK_UNROLL=rank_unroll,
             BLOCK_D=block_d,
             BLOCK_ROWS=block_rows,
@@ -518,7 +516,7 @@ def dcp_a2a_fused_combine(
     ):
         if scatter_group is None:
             raise ValueError("SFA output scatter requires an explicit All2All group.")
-        return exchange(partial_output, softmax_lse, scatter_group).to(partial_output.dtype)
+        return exchange(partial_output, softmax_lse, scatter_group, softmax_sum=softmax_sum).to(partial_output.dtype)
 
     send = pack_dcp_output_lse(
         partial_output,

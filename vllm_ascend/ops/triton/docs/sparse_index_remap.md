@@ -2,7 +2,7 @@
 
 ## Description
 
-- **Function**: Remaps replicated-view sparse-attention indices to DCP-local positions, retaining this rank’s entries in top-k order and padding the tail with `-1`. For power-of-two DCP and interleave, A5 uses a position-sort kernel for INT32 with K<=4096; other inputs use two chunked kernels. Other layouts use exact INT64 Torch arithmetic and order-preserving compaction. Kimi local-output merge incorporates this operation and skips a second remap.
+- **Function**: Remaps replicated-view sparse-attention indices to DCP-local positions, retaining this rank’s entries in top-k order and padding the tail with `-1`. For power-of-two DCP and interleave, both A3 and A5 use the same position-sort kernel for INT32 K<=4096 or INT64 K<=2048; larger K uses two chunked kernels. The INT64 tile limit fits the 192 KiB UB on A3. Other layouts use exact INT64 Torch arithmetic and order-preserving compaction. Kimi local-output merge incorporates this operation and skips a second remap.
 - **Formula** (per row, all integer arithmetic; `idx >= 0` marks valid lanes):
     - `block_idx = idx // interleave_size`
     - `owner = block_idx % dcp_size`
@@ -13,7 +13,7 @@
 - **Algorithm flow** (processed per row, chunked for parallelism):
   1. Fused kernel, grid `(num_chunks, rows)`: each program loads `BLOCK = min(128, next_power_of_2(topk_count))` indices, uses exact bit shifts/masks for the owner and local index, then serial-compacts valid entries to its `chunk_out` slot with scalar `get_element`, records the count and pre-fills its output region with `-1`. Input integer width is retained.
   2. Gather kernel, grid `(rows,)`: per row, iterates over the chunks and masked-copies `chunk_out[:cnt]` to the row front in chunk order, restoring top-k order across chunks.
-- **Supported modes**: NPU eager execution and ACLGraph capture/replay. Integer-boundary and graph tests have Atlas A3 execution evidence; the A5 position-sort path requires hardware regression validation for the exact-integer changes.
+- **Supported modes**: NPU eager execution and ACLGraph capture/replay. The same integer-boundary and changed-input graph cases run on each validated hardware generation; results are reported in the PR.
 
 ## Parameters
 
@@ -31,7 +31,7 @@
 - Index values are logical KV positions, not bounded by top-k count. Nonnegative values within the input dtype’s range must retain exact integer boundaries, including above `2**24` and INT64 values above `2**31`. Do not use FP32 division as an oracle or a fallback.
 - For power-of-two DCP and interleave, let `b = log2(interleave_size)` and `r = log2(dcp_size)`: `owner = (idx >> b) & (dcp_size - 1)` and `local = ((idx >> (b + r)) << b) + (idx & (interleave_size - 1))`. Both bit counts are static configuration.
 - Other layouts use INT64 quotient/remainder and unique order keys for compaction; integer argsort may use AICPU.
-- The chunked implementation requires two kernels to preserve cross-chunk order. A5 sorts unique row-position keys and gathers INT32 payload bits; INT64 uses the chunked implementation.
+- The chunked implementation requires two kernels to preserve cross-chunk order. The shared sort kernel sorts unique row-position keys and gathers the original integer payload, including INT64 values.
 - Inference only (decode path). Both INT32 and INT64 input/output are preserved.
 
 ## Origin and Differences
@@ -43,7 +43,7 @@
 
 ## Test Cases
 
-The current integer-repair tests cover top-k2048, rows1/6/12, every logical DCP2/4/8 rank, INT32/INT64, interleaves1/64/128/256, large integer boundaries, all-invalid rows and changing-input graph replay. Strided tensors, arbitrary leading dimensions and other DCP/interleave configurations are checked against an independent CPU integer oracle. As an index-only operator, the precision requirement is bit-exact (`rtol=0, atol=0`). Historical FP32-reference timing is not evidence for the corrected large-index implementation.
+The tests cover representative combinations of top-k2048, rows1/6/12, DCP2/4/8 owners, INT32/INT64, interleaves1/64/128/256, large integer boundaries, all-invalid rows and changing-input graph replay. Tile-boundary K4096/4097, strided tensors, arbitrary leading dimensions and other DCP/interleave configurations are checked against an independent CPU integer oracle. As an index-only operator, the precision requirement is bit-exact (`rtol=0, atol=0`). Historical FP32-reference timing is not evidence for the corrected large-index implementation.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_dcp.py -k remap

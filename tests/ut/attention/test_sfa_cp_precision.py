@@ -28,8 +28,8 @@ def _make_impl(rank: int, interleave_size: int = 2) -> AscendSFADCPImpl:
 
 @pytest.mark.parametrize("restore_perm", [None, (1, 0, 2)])
 @pytest.mark.parametrize("force_tmajor", [False, True])
-@pytest.mark.parametrize("is_a5,dtype", [(False, torch.int8), (True, torch.int8), (True, torch.float8_e4m3fn)])
-def test_quantized_dcp_passes_packed_query_without_split(restore_perm, force_tmajor, is_a5, dtype):
+@pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
+def test_quantized_dcp_passes_packed_query_without_split(restore_perm, force_tmajor, dtype):
     from vllm_ascend.attention.context_parallel import sfa_cp
 
     impl = _make_impl(0)
@@ -46,7 +46,6 @@ def test_quantized_dcp_passes_packed_query_without_split(restore_perm, force_tma
     with (
         patch.object(impl, "_has_prefill", return_value=False),
         patch.object(sfa_cp, "enable_sfa_dcp_force_tmajor_restore", return_value=force_tmajor),
-        patch.object(sfa_cp, "is_950", return_value=is_a5),
         patch.object(
             sfa_cp.DeviceOperator,
             "execute_sparse_flash_attention_process",
@@ -149,7 +148,6 @@ def test_sfa_consumes_shared_local_topk_without_second_remap(local_output):
             "execute_sparse_flash_attention_process",
             return_value=(output, torch.zeros(2, 1, 1), torch.ones(2, 1, 1)),
         ) as execute,
-        patch.object(sfa_cp, "is_950", return_value=False),
         patch.object(sfa_cp, "enable_sfa_dcp_force_tmajor_restore", return_value=False),
         patch.object(impl, "_merge_dcp_outputs", return_value=output),
     ):
@@ -342,6 +340,9 @@ def test_nope_dcp_executes_single_cache_attention_with_existing_device_helper(im
     impl.scale = 0.25
     impl.dcp_size = 2
     impl.dcp_rank = 0
+    impl._local_topk = False
+    impl._sharded_indexer = False
+    impl.is_kimi_k31 = False
     events = []
     query = torch.randn(2, 2, 8, dtype=torch.bfloat16)
     cache = torch.zeros(2, 256, 1, 8, dtype=dtype)
@@ -388,10 +389,11 @@ def test_nope_dcp_executes_single_cache_attention_with_existing_device_helper(im
             assert kwargs["query_rope"] is None
         return kernel_output, softmax_max, softmax_sum
 
-    def merge_output(output, lse):
+    def merge_output(output, lse, *, softmax_sum):
         events.append("merge")
         torch.testing.assert_close(output, expected)
         assert torch.isfinite(lse).all()
+        assert torch.isfinite(softmax_sum).all()
         return output
 
     op_name = "npu_kv_quant_sparse_flash_attention_vllm" if dtype == torch.int8 else "npu_sparse_flash_attention"

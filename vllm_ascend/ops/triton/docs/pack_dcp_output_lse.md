@@ -10,9 +10,9 @@
   1. Validate the NPU input shapes, dtype, scatter axis, and divisibility by `dcp_size`; allocate the contiguous payload `[P, local_scatter_size, replicated_size, D + lse_pack_dim]`.
   2. Flatten `(token, head)` into `total_rows = T * H` and launch `min(total_rows, get_vectorcore_num())` Triton programs. Each program walks its rows with a grid-stride loop.
   3. Read output and LSE through their explicit strides, calculate the destination rank and local scatter index, encode the LSE, and write one packed row. The feature tail beyond `D` is masked.
-  4. On eligible A5 BF16 head-scatter shapes, process 32 rows per tile for `D=512` and eight otherwise in `_pack_dcp_output_lse_batched_kernel`; `row_mask` protects the last partial tile.
-  5. For A5 BF16 head scatter with `D=512` and `T>=128`, each tile stays inside one head and traverses its tokens in destination order. This preserves affine copy strides and avoids per-row vector division, including strided input features. Output copy, LSE computation and encoding stay in one kernel without an intermediate concatenation or transpose.
-- **Supported modes**: Atlas A2 and A3 use the scalar-row kernel. A5 uses the scalar or batched Triton kernel according to shape. The wrapper participates in eager execution and the registered `dcp_a2a_fused` custom op's FakeTensor shape propagation. Head-aligned packing is covered by A5 device tests and eager/graph benchmarks.
+  4. On eligible BF16 head-scatter shapes, process 32 rows per tile for contiguous-feature `D=512, T>=128` and eight otherwise in `_pack_dcp_output_lse_batched_kernel`; `row_mask` protects the last partial tile.
+  5. For BF16 head scatter with `D=512` and `T>=128`, each tile stays inside one head and traverses its tokens in destination order. This preserves affine copy strides and avoids per-row vector division, including strided input features. Output copy, LSE computation and encoding stay in one kernel without an intermediate concatenation or transpose.
+- **Supported modes**: A3 and A5 share scalar and batched kernels selected by dtype, shape and strides. The wrapper participates in eager execution and the registered `dcp_a2a_fused` custom op's FakeTensor shape propagation. Head-aligned packing is covered by the shared NPU operator tests.
 
 ## Parameters
 
@@ -29,19 +29,19 @@
 
 - `T`, `H`, and `D` must be positive. The selected scatter dimension must be divisible by `dcp_size`. `lse_pack_dim` is one for FP32 output and four for BF16/FP16 output.
 - The BF16/FP16 encoding uses integer fields exactly representable in both dtypes. The combine operator reconstructs finite LSE values; NaN and infinities are marked invalid rather than preserved as payload values.
-- The A5 batched path requires BF16, `scatter_dim=1`, `D <= 2048`, `T * H >= 8 * get_vectorcore_num()`, and unit feature stride or `D=512, T>=128`. Other valid shapes use the scalar-row Triton kernel. `BLOCK_D = next_power_of_2(D)` and `BLOCK_ROWS` (32 for `D=512`, eight otherwise) are compile-time tile sizes. `OUTPUT_HEAD_MAJOR` selects destination-order traversal for `D=512, T>=128`.
+- The shared batched path requires BF16, `scatter_dim=1`, `D <= 2048`, `T * H >= 8 * get_vectorcore_num()`, and unit feature stride or `D=512, T>=128`. Other valid shapes use the scalar-row Triton kernel. `BLOCK_D = next_power_of_2(D)` and `BLOCK_ROWS` (32 for contiguous-feature `D=512, T>=128`, eight otherwise) are compile-time tile sizes. `OUTPUT_HEAD_MAJOR` selects destination-order traversal for `D=512`.
 - The operator is for inference on NPU. The wrapper is called before the HCCL exchange; it does not execute a collective itself.
 
 ## Origin and Differences
 
 - **Origin**: Developed for the vllm-ascend DCP All-to-All path; it packs the partial output and LSE consumed by [`fused_dcp_lse_combine`](fused_dcp_lse_combine.md).
 - **Differences**:
-    - NPU adaptation for performance: the A5 path batches independent rows per program and writes large `D=512` batches directly in communication order. The scalar Triton path covers A2/A3 and smaller or other shapes.
+    - NPU adaptation for performance: the shared path batches independent rows per program and writes large `D=512` batches directly in communication order. The scalar Triton path covers smaller or other shapes on both A3 and A5.
     - Modified for vllm-ascend DCP: the scatter axis determines the rank-major HCCL layout, and four exactly representable fields carry FP32 LSE inside a BF16/FP16 payload.
 
 ## Test Cases
 
-The single-card nightly test compares packed output bit-exactly with the expected rank permutation and checks decoded LSE against FP32 input. It covers both scatter axes, non-contiguous inputs, BF16/FP16/FP32 payloads, A5 dispatch boundaries, and a partial eight-row tile. The multi-card A3 test exercises the payload through HCCL All-to-All. The output-data comparison uses `atol=0, rtol=0`; decoded LSE uses the tolerances in the test.
+The single-card nightly test compares packed output bit-exactly with the expected rank permutation and checks decoded LSE against FP32 input. It covers both scatter axes, non-contiguous inputs, BF16/FP16/FP32 payloads, shared dispatch boundaries, and a partial eight-row tile. The multi-card test exercises the payload through HCCL All-to-All. The output-data comparison uses `atol=0, rtol=0`; decoded LSE uses the tolerances in the test.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py

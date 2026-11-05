@@ -20,14 +20,13 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
-from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.triton.triton_utils import _resolve_triton_ascend_op, get_element
 
-_a5_sort = _resolve_triton_ascend_op("sort")
+_sort = _resolve_triton_ascend_op("sort")
 
 
 @triton.jit
-def _remap_sort_a5(
+def _remap_sort(
     indices,
     output,
     K: tl.constexpr,
@@ -43,10 +42,10 @@ def _remap_sort_a5(
     valid = (offsets < K) & (idx >= 0) & (owner == RANK)
     local = ((idx >> (INTERLEAVE_BITS + DCP_BITS)) << INTERLEAVE_BITS) + (idx & ((1 << INTERLEAVE_BITS) - 1))
     # Unique FP32 position keys preserve top-k order, including duplicate IDs.
-    # Only positions are converted numerically; index payloads travel as bits.
-    order = _a5_sort(tl.where(valid, offsets.to(tl.float32), float("inf")), descending=False)
+    # Only positions are converted numerically; integer payloads stay exact.
+    order = _sort(tl.where(valid, offsets.to(tl.float32), float("inf")), descending=False)
     lookup = tl.minimum(order, BLOCK - 1).to(tl.int32)
-    selected = tl.gather(local.to(tl.float32, bitcast=True), lookup, 0).to(tl.int32, bitcast=True)
+    selected = tl.gather(local, lookup, 0)
     result = tl.where(order < float("inf"), selected, -1)
     tl.store(output + row * K + offsets, result, offsets < K)
 
@@ -176,13 +175,16 @@ def remap_sparse_indices_triton(
     """
     if topk_indices.numel() == 0:
         return topk_indices
-    if dcp_size <= 0 or dcp_size & (dcp_size - 1) or interleave_size <= 0 or interleave_size & (interleave_size - 1):
+    if topk_indices.dtype not in (torch.int32, torch.int64):
+        raise TypeError("DCP sparse indices must be INT32 or INT64")
+    if dcp_size <= 0 or interleave_size <= 0 or not 0 <= dcp_rank < dcp_size:
+        raise ValueError("DCP size/interleave must be positive and rank must belong to the group")
+    if dcp_size & (dcp_size - 1) or interleave_size & (interleave_size - 1):
         return _remap_sparse_indices_integer(topk_indices, dcp_size, dcp_rank, interleave_size)
-    orig_dtype = topk_indices.dtype
     orig_shape = topk_indices.shape
     if not topk_indices.is_contiguous():
         topk_indices = topk_indices.contiguous()
-    indices = topk_indices if topk_indices.dtype in (torch.int32, torch.int64) else topk_indices.to(torch.int32)
+    indices = topk_indices
     topk_count = indices.shape[-1]
     rows = indices.numel() // topk_count
     # The torch implementation operates per-row on the last dim, so arbitrary
@@ -190,11 +192,12 @@ def remap_sparse_indices_triton(
     # be flattened to a 2D view and restored afterwards.
     indices = indices.view(rows, topk_count)
 
-    # A5 uses vector FP32 position sorting instead of scalar-lowered scans.
-    # The original two-pass implementation remains available on A2/A3.
-    if is_950() and indices.dtype == torch.int32 and topk_count <= 4096:
+    # INT64 K4096 exceeds 192 KiB UB on A3. Keep one dtype/shape policy
+    # across devices; larger rows use bounded chunk buffers below.
+    sort_limit = 4096 if indices.dtype == torch.int32 else 2048
+    if topk_count <= sort_limit:
         out = torch.empty_like(indices)
-        _remap_sort_a5[(rows,)](
+        _remap_sort[(rows,)](
             indices,
             out,
             topk_count,
@@ -204,7 +207,7 @@ def remap_sparse_indices_triton(
             next_power_of_2(topk_count),
         )
         out = out.view(orig_shape)
-        return out if orig_dtype == torch.int32 else out.to(orig_dtype)
+        return out
 
     block = min(128, next_power_of_2(topk_count))
     num_chunks = triton.cdiv(topk_count, block)
@@ -235,4 +238,4 @@ def remap_sparse_indices_triton(
         multibuffer=False,
     )
     out = out.view(orig_shape)
-    return out if orig_dtype == torch.int32 else out.to(orig_dtype)
+    return out
