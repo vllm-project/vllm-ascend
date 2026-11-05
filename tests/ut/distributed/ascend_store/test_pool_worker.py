@@ -19,7 +19,7 @@ import queue
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 
@@ -1315,7 +1315,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         kwargs["invalid_block_ids"].add(7)
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
-    def test_wait_for_save_submits_batch_without_joining_queue(self):
+    def test_wait_for_save_submits_batch_then_drains_queue(self):
         worker = self._make_worker()
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
 
@@ -1337,7 +1337,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         with patch(f"{module}.torch.npu", create=True):
             worker.wait_for_save(meta)
         worker.kv_send_thread.add_save_batch.assert_called_once_with([req])
-        worker.kv_send_thread.request_queue.join.assert_not_called()
+        worker.kv_send_thread.request_queue.join.assert_called_once_with()
+        worker.kv_send_thread.assert_has_calls([call.add_save_batch([req]), call.request_queue.join()])
         self.assertIs(worker._previous_save_batch, save_batch)
 
     def test_wait_for_save_skip_non_save(self):
