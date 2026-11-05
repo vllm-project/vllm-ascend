@@ -3,8 +3,9 @@
 """Standalone MXFP8 AllToAll/AllGather all-reduce benchmark for Atlas A5.
 
 The candidate path uses only ordinary HCCL collectives:
-BF16 -> local MXFP8 -> packed AllToAll -> FP32 dequantize and local SUM ->
-BF16 AllGather. Run with torchrun; no vLLM or ops-transformer import is needed.
+BF16 -> local MXFP8 -> packed AllToAll -> BF16 dequantize and local SUM ->
+BF16 AllGather. Use --dequant-dtype fp32 for the original FP32 staging path.
+Run with torchrun; no vLLM or ops-transformer import is needed.
 """
 
 import argparse
@@ -30,6 +31,7 @@ _SCALE_PAIR = 2
 _HIDDEN_ALIGNMENT = _MX_BLOCK * _SCALE_PAIR
 _MIB = 1024 * 1024
 _SANITY_TOKENS_PER_RANK = 2
+_BFLOAT16_TYPE = 15
 _FLOAT32_TYPE = 6
 _FLOAT8_E4M3FN_TYPE = 292
 _BF16_RTOL = 2**-7
@@ -47,15 +49,20 @@ class Mxfp8AllToAllAllReduce:
         quantize_op: Callable,
         dequantize_op: Callable,
         group: Any = None,
+        *,
+        dequant_dtype: torch.dtype = torch.bfloat16,
     ) -> None:
         if world_size not in _SUPPORTED_WORLD_SIZES:
             raise ValueError("Use TP=2, 4 or 8 for this benchmark.")
         if not callable(quantize_op) or not callable(dequantize_op):
             raise RuntimeError("Both npu_dynamic_mx_quant and npu_anti_mx_quant must be callable.")
+        if dequant_dtype not in (torch.bfloat16, torch.float32):
+            raise ValueError("Dequantization dtype must be torch.bfloat16 or torch.float32.")
         self.world_size = world_size
         self.quantize_op = quantize_op
         self.dequantize_op = dequantize_op
         self.group = group
+        self.dequant_dtype = dequant_dtype
 
     def quantize(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         values, scales = self.quantize_op(
@@ -86,7 +93,7 @@ class Mxfp8AllToAllAllReduce:
             values,
             paired_scales,
             axis=-1,
-            dst_type=_FLOAT32_TYPE,
+            dst_type=_BFLOAT16_TYPE if self.dequant_dtype == torch.bfloat16 else _FLOAT32_TYPE,
             src_type=_FLOAT8_E4M3FN_TYPE,
         )
 
@@ -121,7 +128,14 @@ class Mxfp8AllToAllAllReduce:
         received_scales = received[:, hidden:].contiguous().view(scale_dtype)
         dequantized = self.dequantize(received_values, received_scales)
         shard_rows = rows // self.world_size
-        partial = dequantized.reshape(self.world_size, shard_rows, hidden).sum(dim=0).to(torch.bfloat16)
+        # Keep the sum's output in the selected staging dtype. In BF16 mode,
+        # do not explicitly cast the full received payload back to FP32.
+        # Internal accumulation precision/workspace remains backend-defined.
+        partial = (
+            dequantized.reshape(self.world_size, shard_rows, hidden)
+            .sum(dim=0, dtype=self.dequant_dtype)
+            .to(torch.bfloat16)
+        )
         del received, received_values, received_scales, dequantized
         if markers is not None:
             markers[4].record()
@@ -262,7 +276,7 @@ def _check(pipeline: Mxfp8AllToAllAllReduce, source: torch.Tensor, *, exact: boo
         npu_decoded,
         decoded,
         decoded.abs(),
-        torch.float32,
+        pipeline.dequant_dtype,
         "npu_anti_mx_quant",
         exact=exact,
     )
@@ -303,7 +317,7 @@ def _check(pipeline: Mxfp8AllToAllAllReduce, source: torch.Tensor, *, exact: boo
         source.device,
     )
     return {
-        "dequant_fp32": local_accuracy,
+        "dequantization": local_accuracy,
         "same_payload_collective": collective_accuracy,
         "full_path": full_path_accuracy,
         "mxfp8_relative_l2_vs_fp32": metrics[0],
@@ -448,6 +462,8 @@ def format_report(report: dict, breakdown: bool = False) -> str:
     lines = [
         "",
         f"MXFP8 AllToAll/AllGather {mode}结果 | TP={report['world_size']} | device={report['device']}",
+        f"反量化类型={report.get('dequant_dtype', 'fp32')} | "
+        f"求和输出类型={report.get('sum_output_dtype', report.get('dequant_dtype', 'fp32'))} | AllGather=bf16",
     ]
     has_performance = bool(report["cases"]) and all("mxfp8_alltoall" in case for case in report["cases"])
     if has_performance:
@@ -500,9 +516,11 @@ def format_report(report: dict, breakdown: bool = False) -> str:
         correctness_rows = []
         for case in cases:
             accuracy = case["accuracy"]
+            # Reports produced before --dequant-dtype always used FP32.
+            dequant_accuracy = accuracy.get("dequantization", accuracy.get("dequant_fp32"))
             row = [
                 str(case["shape"][0]),
-                f"{accuracy['dequant_fp32']['max_abs_vs_dequantized_sum']:.6f}",
+                f"{dequant_accuracy['max_abs_vs_dequantized_sum']:.6f}",
                 f"{accuracy['same_payload_collective']['max_abs_vs_dequantized_sum']:.6f}",
                 f"{accuracy['full_path']['max_abs_vs_dequantized_sum']:.6f}",
             ]
@@ -534,6 +552,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tokens", nargs="+", type=int, default=[512, 2048, 8192, 16384])
     parser.add_argument("--hidden-sizes", nargs="+", type=int, default=[2048, 5120])
+    parser.add_argument(
+        "--dequant-dtype",
+        choices=("bf16", "fp32"),
+        default="bf16",
+        help="Dequantization and local SUM output dtype; bf16 reduces staging memory, fp32 restores the original path.",
+    )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--rounds", type=int, default=3)
@@ -580,7 +604,8 @@ def main() -> None:
     try:
         rank = dist.get_rank()
         device = torch.device("npu", torch.npu.current_device())
-        pipeline = Mxfp8AllToAllAllReduce(world_size, quantize_op, dequantize_op)
+        dequant_dtype = torch.bfloat16 if args.dequant_dtype == "bf16" else torch.float32
+        pipeline = Mxfp8AllToAllAllReduce(world_size, quantize_op, dequantize_op, dequant_dtype=dequant_dtype)
         report = {
             "torch": torch.__version__,
             "torch_npu": torch_npu.__version__,
@@ -590,7 +615,12 @@ def main() -> None:
             "mode": "correctness_only" if args.check_only else "benchmark",
             "quantize_module": getattr(quantize_op, "__module__", None),
             "dequantize_module": getattr(dequantize_op, "__module__", None),
-            "pipeline": "dynamic_mx_quant -> packed all_to_all_single -> FP32 anti-quant/SUM -> BF16 all_gather",
+            "dequant_dtype": args.dequant_dtype,
+            "sum_output_dtype": args.dequant_dtype,
+            "pipeline": (
+                "dynamic_mx_quant -> packed all_to_all_single -> "
+                f"{args.dequant_dtype.upper()} anti-quant/SUM output -> BF16 all_gather"
+            ),
             "warmup": args.warmup,
             "iterations_per_round": args.iterations,
             "rounds": args.rounds,
@@ -606,6 +636,7 @@ def main() -> None:
                 f"device={report['device']} | TP={world_size} | mode={report['mode']}\n"
                 f"torch={report['torch']} | torch_npu={report['torch_npu']}\n"
                 f"quantize={report['quantize_module']} | dequantize={report['dequantize_module']}\n"
+                f"dequant_dtype={args.dequant_dtype} | sum_output_dtype={args.dequant_dtype}\n"
                 f"warmup={args.warmup} | iterations={args.iterations} | rounds={args.rounds}",
                 flush=True,
             )
