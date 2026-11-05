@@ -58,7 +58,9 @@ class TestEnvVariables(TestBase):
             with self.subTest(var=var_name):
                 getattr(envs_ascend, var_name)
 
-    def test_boolean_env_rejects_invalid_values(self):
+    def test_boolean_env_parsing_and_invalid_values(self):
+        truthy = ["1", "true", "yes", "on", "  True  ", "YES"]
+        falsy = ["0", "false", "no", "off", "  False  ", "Off"]
         for var_name in envs_ascend.BOOLEAN_ENV_VARS:
             with self.subTest(var=var_name):
                 original_val = os.environ.get(var_name)
@@ -70,13 +72,22 @@ class TestEnvVariables(TestBase):
                         getattr(envs_ascend, var_name)
                     self.assertIn(var_name, str(ctx.exception))
 
-                    # Empty value (common with `export VAR=`) falls back to default.
+                    # Unset value yields the documented default; an empty value
+                    # (common with `export VAR=`) must fall back to exactly that
+                    # same default, so a variable whose default is True cannot
+                    # silently degrade to False.
+                    os.environ.pop(var_name, None)
+                    default_val = getattr(envs_ascend, var_name)
                     os.environ[var_name] = ""
-                    self.assertIsInstance(getattr(envs_ascend, var_name), bool)
+                    self.assertIs(getattr(envs_ascend, var_name), default_val)
 
-                    # Surrounding whitespace and mixed case are tolerated.
-                    os.environ[var_name] = "  True  "
-                    self.assertIs(getattr(envs_ascend, var_name), True)
+                    # Every supported spelling maps to the expected boolean.
+                    for val in truthy:
+                        os.environ[var_name] = val
+                        self.assertIs(getattr(envs_ascend, var_name), True)
+                    for val in falsy:
+                        os.environ[var_name] = val
+                        self.assertIs(getattr(envs_ascend, var_name), False)
                 finally:
                     if original_val is None:
                         os.environ.pop(var_name, None)
