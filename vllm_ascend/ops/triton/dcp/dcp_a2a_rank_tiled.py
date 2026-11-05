@@ -3,7 +3,7 @@
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit(do_not_specialize=["NUM_HEADS", "NUM_TOKENS"])
+@triton.jit(do_not_specialize=["num_heads", "num_tokens"])
 def _fused_dcp_lse_combine_rank_tiled_kernel(
     recv_ptr,
     output_ptr,
@@ -14,8 +14,8 @@ def _fused_dcp_lse_combine_rank_tiled_kernel(
     local_stride_d,
     local_lse_stride_t,
     local_lse_stride_h,
-    NUM_HEADS,
-    NUM_TOKENS,
+    num_heads,
+    num_tokens,
     DCP_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_R: tl.constexpr,
@@ -30,13 +30,13 @@ def _fused_dcp_lse_combine_rank_tiled_kernel(
     features = tl.arange(0, BLOCK_D)
     tiles_per_head = tl.cdiv(HEAD_DIM, BLOCK_D)
     rank_mask = ranks < DCP_SIZE
-    for job in range(tl.program_id(0), NUM_TOKENS * NUM_HEADS * tiles_per_head, tl.num_programs(0)):
+    for job in range(tl.program_id(0), num_tokens * num_heads * tiles_per_head, tl.num_programs(0)):
         row = job // tiles_per_head
         tile = job % tiles_per_head
-        token = row // NUM_HEADS
-        head = row % NUM_HEADS
+        token = row // num_heads
+        head = row % num_heads
         # Receive layout: [source ranks, local heads, tokens, D + four LSE lanes].
-        base = ((ranks * NUM_HEADS + head) * NUM_TOKENS + token) * (HEAD_DIM + 4)
+        base = ((ranks * num_heads + head) * num_tokens + token) * (HEAD_DIM + 4)
         exponent_code = tl.load(recv_ptr + base + HEAD_DIM, mask=rank_mask, other=0.0).to(tl.float32)
         significand_hi = tl.load(recv_ptr + base + HEAD_DIM + 1, mask=rank_mask, other=0.0).to(tl.float32)
         significand_mid = tl.load(recv_ptr + base + HEAD_DIM + 2, mask=rank_mask, other=0.0).to(tl.float32)
