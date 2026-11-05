@@ -75,16 +75,16 @@ contribute tokens beyond the scheduler's final stop point; ingestion follows
 upstream device-visible lengths.
 
 The Ascend speculator inherits upstream `SuffixSpeculator` initialization,
-slot bookkeeping and reset behavior. Proposal and finished-response ingestion
-call `super()`; NPU launch wrappers in `ops/triton/spec_decode/suffix.py` own
-stride, grid and compilation-parameter handling. The parent currently calls
-module-level kernels without overridable launch hooks, so only those entry
-points are replaced for the duration of each parent call and restored in
-`finally`. A process-local reentrant lock serializes Ascend proposal and
-ingestion while bindings are replaced. Direct upstream suffix calls in the
-same process must not execute concurrently. Restoring Python bindings does not
-wait for device completion. These scoped replacements can be removed when
-upstream exposes launch hooks or a device kernel provider.
+slot bookkeeping, reset and finished-response ingestion. Its proposal wrapper
+only guards empty batches before calling `super()`. NPU launch wrappers in
+`ops/triton/spec_decode/suffix.py` own stride, grid and compilation-parameter
+handling. The worker's `patch_triton.py` installs the four launch adapters at
+startup; they remain bound for that worker process, including direct upstream
+suffix calls. Per-call replacement, restoration and locking are unnecessary.
+Older runtimes without the suffix module skip registration; selecting MRV2
+suffix still requires its complete upstream protocol. Tests that directly
+instantiate the speculator install the same worker bindings explicitly.
+Remove these rebinds when upstream supports device kernel dispatch.
 
 ## Model Runner V1 deployment and benchmarks
 
