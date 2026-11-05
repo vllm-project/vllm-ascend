@@ -1,6 +1,0 @@
-pr: 21015
-entries:
-  - category: performance
-    text: >-
-      Reduced unnecessary CPU-NPU token transfers during Model Runner V2 decoding
-      on Ascend 310P while preserving CPU history for sampling penalties and MTP.
