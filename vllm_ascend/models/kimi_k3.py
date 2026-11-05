@@ -16,7 +16,7 @@ from typing import Any, TypeVar, cast
 import torch
 import vllm.envs as envs
 from torch import nn
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -39,6 +40,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.kimi_k25_vit import (
     KimiK25MultiModalProjector,
@@ -90,6 +92,8 @@ from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
+from vllm_ascend.quantization.methods.base import PreparedLinearInput
+from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import get_rotation_path, is_950, vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import (
@@ -100,6 +104,80 @@ from vllm_ascend.worker.v2.pp_transport import (
 from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
+
+
+class AscendKimiK3RoutedLinear(ReplicatedLinear):
+    """Dispatch eager Kimi K3 MXFP8 projections through single-group GMM."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # MXFP8 NZ weights need a leading single-group dimension before the
+        # format cast so GroupedMatmulWeightNz receives its 5-D contract.
+        self._single_group_gmm_nz = True
+
+    @staticmethod
+    def apply_projection(
+        layer: nn.Module,
+        x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Select GMM for eager Kimi K3 QKV and routed down/up projections.
+
+        This normally covers prefill; graph-mode decode keeps the existing
+        quantization apply path. Eager decode uses the same eligibility check.
+        MRV2 captures FULL graphs with runtime mode NONE, so also check the
+        device stream before selecting an eager-only operator.
+        Compiled projections use QMM without tracing the NPU capture query.
+        """
+        quant_method = layer.quant_method
+        inner_method = getattr(quant_method, "quant_method", quant_method)
+        if isinstance(x, PreparedLinearInput):
+            can_use_gmm = x.quantized.ndim == 2 and x.scale is not None
+        elif isinstance(x, tuple):
+            can_use_gmm = x[0].ndim == 2
+        else:
+            can_use_gmm = x.ndim == 2
+        if (
+            bias is None
+            and isinstance(inner_method, AscendW8A8MXFP8DynamicLinearMethod)
+            and is_forward_context_available()
+            and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE
+            and not torch.compiler.is_compiling()
+            and not torch.npu.is_current_stream_capturing()
+            and can_use_gmm
+        ):
+            return inner_method.apply_single_group_gmm(layer, x)
+        output = quant_method.apply(layer, x, bias=bias)
+        if getattr(layer, "_mxfp8_gmm_nz_layout", False) and can_use_gmm and output.dim() == 3 and output.shape[0] == 1:
+            output = output.squeeze(0)
+        return output
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, nn.Parameter | None]:
+        bias = self.bias if not self.skip_bias_add else None
+        output = self.apply_projection(self, x, bias)
+        if not self.return_bias:
+            return output
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+
+
+class AscendKimiK3DeltaAttention(AscendKimiK3DeltaAttentionBase):
+    """Select the Kimi K3 projection path around the Ascend KDA backend."""
+
+    def __init__(self, config, vllm_config, prefix: str = "") -> None:
+        super().__init__(config, vllm_config, prefix)
+        if self.uses_mixed_projection:
+            # Set before weight loading so fused QKV uses the same NZ GMM
+            # layout as the routed projections.
+            self.in_proj_qkvgfab._single_group_gmm_nz = True
+
+    def _matmul_fused_qkv(
+        self,
+        qkv_input: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        if self.in_proj_qkvgfab.quant_method is None:
+            raise RuntimeError("KDA fused QKV quantization method is not initialized")
+        return AscendKimiK3RoutedLinear.apply_projection(self.in_proj_qkvgfab, qkv_input)
 
 
 def _use_attn_res_prefill_cache() -> bool:
@@ -120,13 +198,18 @@ def _use_attn_res_prefill_cache() -> bool:
 
 
 class AscendKimiRoutedOutputTransform(KimiRoutedOutputTransform):
-    """Fuse the latent RMSNorm and MXFP8 activation quantization on A5."""
+    """Fuse latent RMSNorm with A5 MXFP8 or A3 per-token INT8 quantization."""
 
     def __init__(self, norm: RMSNorm | None, up_proj: ReplicatedLinear) -> None:
         super().__init__(norm, up_proj)
         self._supports_mx_norm_fusion = get_current_hardware_profile().supports(
             HardwareCapability.DYNAMIC_MX_QUANT_FUSION
         ) and hasattr(torch.ops.npu, "npu_rms_norm_dynamic_mx_quant")
+        self._supports_int8_norm_fusion = (
+            get_current_hardware_profile().supports(HardwareCapability.RMS_NORM_DYNAMIC_QUANT)
+            and hasattr(torch.ops._C_ascend, "npu_rms_norm_dynamic_quant")
+            and get_current_vllm_config().lora_config is None
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         scheme = getattr(getattr(self.up_proj, "quant_method", None), "quant_method", None)
@@ -137,7 +220,10 @@ class AscendKimiRoutedOutputTransform(KimiRoutedOutputTransform):
             and scheme.group_size == 32
             and hidden_states.dtype == torch.bfloat16
             and hidden_states.shape[-1] % 64 == 0
-            and getattr(self.norm, "bias", None) is None
+            # AscendRMSNorm reserves bias for every layer when any checkpoint
+            # norm has one (e.g. the K3.1 indexer's LayerNorm). Its native
+            # forward only adds that parameter after the bias loader ran.
+            and (getattr(self.norm, "bias", None) is None or not getattr(self.norm, "bias_loaded", True))
         ):
             quantized, scale, _ = torch.ops.npu.npu_rms_norm_dynamic_mx_quant(
                 hidden_states,
@@ -148,11 +234,32 @@ class AscendKimiRoutedOutputTransform(KimiRoutedOutputTransform):
             )
             hidden_states, _ = self.up_proj((quantized, scale))
             return hidden_states
+        if (
+            self.norm is not None
+            and self._supports_int8_norm_fusion
+            and type(scheme) is AscendW8A8DynamicLinearMethod
+            and scheme.act_quant_type == torch.int8
+            and hidden_states.dtype in (torch.bfloat16, torch.float16)
+            and self.norm.weight.dtype == hidden_states.dtype
+            and hidden_states.ndim == 2
+            and hidden_states.numel() > 0
+            and (getattr(self.norm, "bias", None) is None or not getattr(self.norm, "bias_loaded", True))
+        ):
+            # The existing INT8 kernel quantizes the FP32 norm result without
+            # the split path's intermediate BF16/FP16 rounding.
+            quantized, scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
+                hidden_states, self.norm.weight, epsilon=self.norm.variance_epsilon
+            )
+            hidden_states, _ = self.up_proj(PreparedLinearInput(quantized, scale, hidden_states.dtype))
+            return hidden_states
         return super().forward(hidden_states)
 
 
 class AscendKimiMLP(KimiMLP):
     """Keep TP-sharded dense weights compatible with sequence-sharded tokens."""
+
+    SITU_MX_DST_TYPE_E4M3FN = 36
+    MX_GROUP_SIZE = 32
 
     def __init__(
         self,
@@ -177,13 +284,57 @@ class AscendKimiMLP(KimiMLP):
             activation_situ_linear_beta=activation_situ_linear_beta,
         )
         self.use_sequence_parallel = use_sequence_parallel
+        self._fuse_situ_mx_quant = False
+        self._fuse_situ_int8_quant = False
+        if hidden_act != "situ" or get_current_vllm_config().lora_config is not None:
+            return
+        self._situ_beta = self.act_fn.beta
+        self._situ_linear_beta = self.act_fn.linear_beta or 0.0
+        profile = get_current_hardware_profile()
+        scheme = getattr(getattr(self.down_proj, "quant_method", None), "quant_method", None)
+        self._fuse_situ_mx_quant = (
+            profile.supports(HardwareCapability.SITU_MX_QUANT)
+            and type(scheme) is AscendW8A8MXFP8DynamicLinearMethod
+            and scheme.group_size == self.MX_GROUP_SIZE
+            and scheme.dynamic_mx_quant_scale_alg == 0
+        )
+        self._fuse_situ_int8_quant = (
+            profile.supports(HardwareCapability.DEQUANT_SITU_QUANT) and type(scheme) is AscendW8A8DynamicLinearMethod
+        )
+
+    def _prepare_down_input(self, gate_up: torch.Tensor) -> torch.Tensor | PreparedLinearInput:
+        if self._fuse_situ_mx_quant:
+            quantized, scale = torch.ops._C_ascend.situ_mx_quant(
+                gate_up,
+                beta=self._situ_beta,
+                linear_beta=self._situ_linear_beta,
+                activate_left=True,
+                dst_type=self.SITU_MX_DST_TYPE_E4M3FN,
+            )
+            return PreparedLinearInput(quantized, scale, gate_up.dtype)
+        if self._fuse_situ_int8_quant:
+            # BF16 input is already dequantized; all dequant inputs stay
+            # absent. This kernel quantizes the FP32 SiTU result directly.
+            quantized, scale = torch.ops._C_ascend.dequant_situ_quant(
+                gate_up,
+                beta=self._situ_beta,
+                linear_beta=self._situ_linear_beta,
+                activate_left=True,
+                quant_mode="dynamic",
+            )
+            return PreparedLinearInput(quantized, scale, gate_up.dtype)
+        return self.act_fn(gate_up)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.use_sequence_parallel:
             # All weight shards must operate on the same tokens. Reducing
             # different sequence shards would mix live and padding rows.
             x = sp_all_gather(x)
-        x = super().forward(x)
+        if self._fuse_situ_mx_quant or self._fuse_situ_int8_quant:
+            gate_up, _ = self.gate_up_proj(x)
+            x, _ = self.down_proj(self._prepare_down_input(gate_up))
+        else:
+            x = super().forward(x)
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
         return x
@@ -501,6 +652,40 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         return self.mla_attn(positions, hidden_states)
 
 
+class AscendKimiDSAAttention(AscendKimiMLAAttention):
+    """Kimi projections and output gate on the shared GLM/DeepSeek SFA stack."""
+
+    def __init__(self, config, vllm_config: VllmConfig, prefix: str, topk_indices_buffer) -> None:
+        # This constructor is patched by Ascend: it builds the same indexer,
+        # cache layers, MLA wrapper, and sparse backend used by GLM DSA.
+        DeepseekV2MLAAttention.__init__(
+            self,
+            vllm_config=vllm_config,
+            config=copy(config),
+            hidden_size=config.hidden_size,
+            num_heads=config.num_attention_heads,
+            qk_nope_head_dim=config.qk_nope_head_dim,
+            qk_rope_head_dim=config.qk_rope_head_dim,
+            v_head_dim=config.v_head_dim,
+            q_lora_rank=config.q_lora_rank,
+            kv_lora_rank=config.kv_lora_rank,
+            max_position_embeddings=config.max_position_embeddings,
+            cache_config=vllm_config.cache_config,
+            quant_config=vllm_config.quant_config,
+            prefix=prefix,
+            topk_indices_buffer=topk_indices_buffer,
+        )
+        if config.mla_use_output_gate:
+            self.g_proj = ColumnParallelLinear(
+                config.hidden_size,
+                config.num_attention_heads * config.v_head_dim,
+                bias=False,
+                quant_config=vllm_config.quant_config,
+                prefix=f"{prefix}.g_proj",
+            )
+            self.impl.g_proj = self.g_proj
+
+
 class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
     """Upstream Kimi decoder structure with Ascend attention backends."""
 
@@ -510,6 +695,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         vllm_config: VllmConfig,
         prefix: str = "",
         use_sequence_parallel: bool = False,
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         """Select KDA or no-RoPE MLA and configure the layer residual path."""
         nn.Module.__init__(self)
@@ -527,6 +713,8 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
                 vllm_config,
                 prefix=f"{prefix}.self_attn",
             )
+        elif getattr(config, "dsa_config", None) is not None and config.is_dsa_layer(layer_idx):
+            self.self_attn = AscendKimiDSAAttention(config, vllm_config, f"{prefix}.self_attn", topk_indices_buffer)
         else:
             qk_nope_head_dim = config.qk_nope_head_dim
             qk_rope_head_dim = config.qk_rope_head_dim
@@ -773,6 +961,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         "f_a_proj",
         "g_proj",
     ]
+    packed_modules_mapping["wk_weights_proj"] = ["wk", "weights_proj"]
     # Legacy Qwen3 GQA DSpark checkpoints consume the materialized input
     # to each selected Kimi layer. MLA DSpark checkpoints consume the raw
     # prefix-sum stream used by upstream vLLM, so keep that as the default.
@@ -815,12 +1004,24 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         else:
             self.embed_tokens = PPMissingLayer()
 
+        topk_indices_buffer = (
+            torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                config.index_topk,
+                dtype=torch.int32,
+                device=current_platform.device_type,
+            )
+            if getattr(config, "dsa_config", None) is not None
+            else None
+        )
+
         def get_layer(prefix: str):
             return AscendKimiDecoderLayer(
                 config,
                 vllm_config,
                 prefix,
                 use_sequence_parallel=self.use_sequence_parallel,
+                topk_indices_buffer=topk_indices_buffer,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -891,6 +1092,8 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         """Reuse upstream loading with Ascend KDA gates and EPLB replicas."""
         params_dict = dict(self.named_parameters())
         gate_mapping = (
+            (".indexer.wk.", ".indexer.wk_weights_proj.", 0),
+            (".indexer.weights_proj.", ".indexer.wk_weights_proj.", 1),
             (".b_proj.weight", ".fused_bfg_proj.weight", 0),
             (".f_a_proj.weight", ".fused_bfg_proj.f_a_weight", None),
             (".f_b_proj.weight", ".fused_bfg_proj.f_b_weight", None),
