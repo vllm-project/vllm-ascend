@@ -6,6 +6,7 @@ import sys
 import threading
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -16,6 +17,7 @@ ALIGNMENT = 2 << 20
 
 def load_file(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -45,7 +47,7 @@ class Tensor:
 
 @pytest.fixture
 def session(monkeypatch):
-    calls = []
+    calls: list[tuple[Any, ...]] = []
 
     class Engine:
         state = 1
@@ -224,8 +226,8 @@ def test_producer_shutdown_releases_ipc_only_after_safe_close(close_fails):
     tree = ast.parse((MODULE_DIR / "sharded_rdt_trainer.py").read_text(encoding="utf-8"))
     server = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "_HixlProducerServer")
     names = {"hixl_add_consumer", "hixl_remove_consumer", "shutdown"}
-    body = [node for node in server.body if isinstance(node, ast.FunctionDef) and node.name in names]
-    namespace = {}
+    body: list[ast.stmt] = [node for node in server.body if isinstance(node, ast.FunctionDef) and node.name in names]
+    namespace: dict[str, Any] = {}
     exec(compile(ast.Module(body=body, type_ignores=[]), "producer_lifecycle", "exec"), namespace)
     producer_type = type("Producer", (), {name: namespace[name] for name in names})
     producer = producer_type()
@@ -273,7 +275,7 @@ def test_ipc_export_resolves_current_npu_reducer(active):
     )
     rebuild = object()
     reductions = SimpleNamespace(reduce_tensor=lambda tensor: (object(), ()))
-    namespace = {
+    namespace: dict[str, Any] = {
         "torch": SimpleNamespace(multiprocessing=SimpleNamespace(reductions=reductions)),
         "rebuild_npu_tensor": rebuild,
     }
@@ -305,7 +307,7 @@ def test_worker_shutdown_rpc_preserves_update_guard_and_propagates_failure(activ
         for node in worker_class.body
         if isinstance(node, ast.FunctionDef) and node.name == "shutdown_weight_transfer_engine"
     )
-    namespace = {}
+    namespace: dict[str, Any] = {}
     exec(compile(ast.Module(body=[method], type_ignores=[]), "worker_shutdown", "exec"), namespace)
     calls = []
 
@@ -332,7 +334,8 @@ def test_worker_shutdown_rpc_preserves_update_guard_and_propagates_failure(activ
 
 @pytest.mark.parametrize("platform", ["cuda", "npu"])
 def test_public_backend_name_dispatches_both_factories(session, monkeypatch, platform):
-    worker, trainer = type("WorkerFactory", (), {}), type("TrainerFactory", (), {})
+    worker: Any = type("WorkerFactory", (), {})
+    trainer: Any = type("TrainerFactory", (), {})
     original_worker, original_trainer = object(), object()
     worker._registry = {"sharded_rdt": lambda: original_worker}
     trainer._registry = {"sharded_rdt": lambda: original_trainer}
