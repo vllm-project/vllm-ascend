@@ -419,14 +419,10 @@ void QuantSparseLightningIndexerMetadataCpuKernel::CalcSplitInfo(SplitContext &s
         supportFd_ = false;
         return;
     }
-    // V2.1：仅当行级并行度不足时才切分 —— gS1 块数 ≥ AIC 核数时整行调度已能喂满核，
-    // 候选 tile 分片的溢写/归约/流水线暖机开销只增不减（decode 16 块/20 核实测 FD −9%；
-    // 行数饱和形状不切分时与 v15 背靠背持平）。
-    uint32_t totalS1GBlocks = 0;
-    for (uint32_t bIdx = 0; bIdx < static_cast<uint32_t>(batchSize_); bIdx++) {
-        totalS1GBlocks += splitInfo.s1GBaseNum[bIdx];
-    }
-    supportFd_ = (totalS1GBlocks < aicCoreNum_) && (maxS2Size_ > fdToleranceRatio * CandidateTileTokens());
+    // V2.1（2026-11-05 晚修正）：不设"行数饱和就不切"的门槛 —— 交替背靠背实测
+    // case C（32 块/20 核，整行调度下 12 核扛 2 块）开 FD 反而 −2.3%~−3.2%：
+    // 分片的负载再平衡收益 > 溢写/归约/暖机开销。仅保留代价阈值（L > 5×64=320 块）。
+    supportFd_ = (maxS2Size_ > fdToleranceRatio * CandidateTileTokens());
 }
 
 int64_t QuantSparseLightningIndexerMetadataCpuKernel::CalcPreTokenLeftUp(uint32_t s1Size, uint64_t s2Size) const
