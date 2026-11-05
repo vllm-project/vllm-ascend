@@ -42,8 +42,6 @@ def test_loading_decode_prefill_and_capacity_fallback(expert_factory, manager_fa
             )
     assert addresses == {name: value.data_ptr() for name, value in binding.resident.items()}
     assert map_addresses == (binding.mapping.host_map.data_ptr(), binding.mapping.device_map.data_ptr())
-    manager.close()
-    assert not manager.bindings and not binding.resident and not binding.host_store.tensors
 
 
 def test_prefill_pool_is_shared_between_layers(expert_factory, manager_factory):
@@ -60,4 +58,3 @@ def test_prefill_pool_is_shared_between_layers(expert_factory, manager_factory):
         for name in binding.adapter.output_names:
             torch.testing.assert_close(getattr(view, name)[physical.long()].reshape_as(expected[name]), expected[name])
         assert addresses == {name: value.data_ptr() for name, value in manager.prefill_pool.tensors.items()}
-    manager.close()

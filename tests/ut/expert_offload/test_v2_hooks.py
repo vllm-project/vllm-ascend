@@ -16,7 +16,7 @@ from vllm import config as vllm_config
 
 from vllm_ascend.expert_offload.config import ExpertOffloadConfig
 from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
-from vllm_ascend.expert_offload.quantization import expert_adapter_type, maybe_offload_quant_method
+from vllm_ascend.expert_offload.quantization import expert_adapter_type, expert_offload_quant_method
 from vllm_ascend.expert_offload.utils import finalize_expert_offload_loading
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -118,9 +118,10 @@ def test_load_preserves_parent_contract_and_accounts_pool_memory(load_hook_class
     manager.finalize_loading.assert_called_once_with(runner.model)
     assert runner.model_memory_usage == 1064
     assert runner.pd_dspark_aux_layer_ids == [9]
-    manager.close.side_effect = lambda: events.append("offload_close")
+    manager.unsubscribe_graph_streams.side_effect = lambda: events.append("unsubscribe_reports")
     runner.shutdown()
-    assert events[-2:] == ["offload_close", "parent_shutdown"]
+    assert events[-2:] == ["unsubscribe_reports", "parent_shutdown"]
+    assert runner.expert_offload_manager is None
 
 
 @pytest.mark.parametrize("load_dummy_weights", [False, True])
@@ -228,7 +229,7 @@ def quant_methods(monkeypatch, load_hook_class):
         {"_get_quant_method"},
         OwnerParent,
         {
-            "maybe_offload_quant_method": maybe_offload_quant_method,
+            "expert_offload_quant_method": expert_offload_quant_method,
             "get_current_vllm_config_or_none": lambda: vllm_config.get_current_vllm_config_or_none(),
             "get_ascend_config": lambda: config_module.get_ascend_config(),
         },

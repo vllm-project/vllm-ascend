@@ -114,9 +114,11 @@ def native_runtime(monkeypatch):
     stream = Mock(npu_stream=123, synchronize=lambda: calls.append("sync"))
     npu = SimpleNamespace(
         current_stream=lambda _: stream,
+        Stream=Mock(return_value=stream),
+        synchronize=lambda: calls.append("sync"),
         set_device=lambda _: None,
         stream=lambda _: nullcontext(),
-        _launch_host_func=lambda stream, callback, arg: callback(arg),
+        _launch_host_func=Mock(side_effect=lambda stream, callback, arg: callback(arg)),
         _subscribe_report=Mock(),
         _unsubscribe_report=Mock(),
     )

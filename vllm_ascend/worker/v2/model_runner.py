@@ -603,7 +603,8 @@ class NPUModelRunner(GPUModelRunner):
 
     def shutdown(self) -> None:
         if self.expert_offload_manager is not None:
-            self.expert_offload_manager.close()
+            self.expert_offload_manager.unsubscribe_graph_streams()
+            self.expert_offload_manager = None
 
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.

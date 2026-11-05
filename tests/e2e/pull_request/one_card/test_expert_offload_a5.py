@@ -17,13 +17,12 @@ from vllm.config import VllmConfig, set_current_vllm_config
 
 from vllm_ascend.expert_offload.expert_offload_manager import (
     ExpertOffloadManager,
-    GraphExpertStaging,
     HostExpertStore,
     LayerOffloadBinding,
 )
 from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter
 from vllm_ascend.expert_offload.residency import ExpertResidency
-from vllm_ascend.expert_offload.transfer import TorchExpertTransfer
+from vllm_ascend.expert_offload.utils import ExpertMapBuffer
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDSDynamicFusedMoEMethod,
     maybe_normalize_mxfp_scale_layout,
@@ -96,11 +95,12 @@ def _gemm(x, weight, scale, counts):
 
 
 @torch.inference_mode()
-def test_acl_graph_replay_updates_nz_slots_and_rejects_callback_failure(expert_bundle, monkeypatch):
+def test_acl_graph_replay_updates_nz_slots(expert_bundle, monkeypatch):
     adapter, store = expert_bundle
     device = torch.device("npu:0")
     torch.npu.set_device(device)
     manager = ExpertOffloadManager()
+    manager.device = device
     manager.graph_load_stream = torch.npu.Stream(device=device)
     resident = adapter.materialize(store, [0, 1], device)
     binding = object.__new__(LayerOffloadBinding)
@@ -111,12 +111,13 @@ def test_acl_graph_replay_updates_nz_slots_and_rejects_callback_failure(expert_b
         resident=resident,
         residency=ExpertResidency(NUM_EXPERTS, 2),
         num_experts=NUM_EXPERTS,
+        num_slots=2,
         device=device,
-        close=lambda: None,
+        ids_cpu=torch.empty(2, dtype=torch.int32, device="cpu", pin_memory=True),
+        mapping=ExpertMapBuffer(NUM_EXPERTS, device),
     )
     binding.residency.commit(binding.residency.plan([0, 1]))
     manager.bindings["test"] = binding
-    staging = GraphExpertStaging(binding, (1, 1), torch.int32)
     ids = torch.zeros((1, 1), dtype=torch.int32, device=device)
     x = torch.randn(1, HIDDEN_SIZE, generator=torch.Generator().manual_seed(7)).to(device, dtype=torch.bfloat16)
     full = adapter.materialize(store, range(NUM_EXPERTS), device)
@@ -128,7 +129,8 @@ def test_acl_graph_replay_updates_nz_slots_and_rejects_callback_failure(expert_b
     monkeypatch.setattr(adapter.scheme, "process_weights_after_loading", forbidden_conversion)
     pointers = {name: tensor.data_ptr() for name, tensor in resident.items()}
     capture_stream = torch.npu.Stream(device=device)
-    manager.subscribe_graph_stream(capture_stream)
+    with torch.npu.stream(capture_stream):
+        manager.capture_stream(None)
 
     def forward(weights, scale, hidden, counts):
         quantized, token_scale = torch_npu.npu_dynamic_mx_quant(hidden, dst_type=torch.float8_e4m3fn)
@@ -153,8 +155,8 @@ def test_acl_graph_replay_updates_nz_slots_and_rejects_callback_failure(expert_b
         _gemm(x, resident["w13_weight"], resident["w13_weight_scale"], [1, 1])
         torch.npu.synchronize()
         graph = torch.npu.NPUGraph()
-        with manager.graph_capture(), torch.npu.graph(graph, stream=capture_stream):
-            physical = staging.prepare(ids)
+        with torch.npu.graph(graph, stream=capture_stream):
+            physical = binding.prepare_graph(ids)
             counts = (torch.arange(2, device=device) >= physical.reshape(-1)[0]).to(torch.int64)
             gate, up = forward(resident["w13_weight"], resident["w13_weight_scale"], x, counts).chunk(2, -1)
             hidden = torch.nn.functional.silu(gate) * up
@@ -163,7 +165,6 @@ def test_acl_graph_replay_updates_nz_slots_and_rejects_callback_failure(expert_b
             ids.fill_(expert_id)
             graph.replay()  # Replay on the default stream, not capture_stream.
             torch.npu.current_stream().synchronize()
-            manager.check_graph_errors()
             expected_counts = [int(i >= expert_id) for i in range(NUM_EXPERTS)]
             gate, up = _gemm(x, full["w13_weight"], full["w13_weight_scale"], expected_counts).chunk(2, -1)
             expected = _gemm(
@@ -171,20 +172,8 @@ def test_acl_graph_replay_updates_nz_slots_and_rejects_callback_failure(expert_b
             )
             torch.testing.assert_close(output, expected, rtol=0, atol=0)
             assert {name: tensor.data_ptr() for name, tensor in resident.items()} == pointers
-        before = binding.residency.logical_to_physical()
-
-        def fail_copy(*_args, **_kwargs):
-            raise RuntimeError("injected graph transfer failure")
-
-        monkeypatch.setattr(TorchExpertTransfer, "copy_experts", fail_copy)
-        ids.fill_(0)
-        graph.replay()
-        torch.npu.current_stream().synchronize()
-        with pytest.raises(RuntimeError, match="rejecting execution output"):
-            manager.check_graph_errors()
-        assert binding.residency.logical_to_physical() == before
     finally:
-        manager.close()
+        manager.unsubscribe_graph_streams()
 
 
 class _ExpertOffloadAudit(TypedDict):
@@ -240,11 +229,7 @@ class ExpertOffloadAuditWorker:
         }
         if action == "close":
             runner.shutdown()
-            snapshot["released"] = (
-                not manager.bindings
-                and not manager.prefill_pool.tensors
-                and all(not binding.resident and not binding.graph_staging for binding in bindings)
-            )
+            snapshot["released"] = runner.expert_offload_manager is None and runner.cudagraph_manager is None
         return snapshot
 
 
@@ -341,7 +326,7 @@ def _generate_batches(llm, batches):
 def test_checkpoint_prefill_graph_decode_capacity_fallback_and_cleanup(tiny_checkpoint):
     """A different model name must pass the same loader/layout contract end to end."""
     prompts = [[2 + (offset + index) % 200 for index in range(40)] for offset in range(3)]
-    batches = [[prompts[0]], prompts, [prompts[1]]]
+    batches = [[prompts[0]], prompts[:2], prompts, [prompts[1]]]
     common = dict(
         model=tiny_checkpoint,
         skip_tokenizer_init=True,

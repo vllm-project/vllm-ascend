@@ -6,7 +6,7 @@ import torch
 from vllm_ascend.quantization.quant_type import QuantType
 
 
-def maybe_offload_quant_method(layer, method, config):
+def expert_offload_quant_method(layer, method, config):
     from vllm.compilation import backends
 
     # Native draft loaders switch away from the target's default backbone tag.

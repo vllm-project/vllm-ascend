@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import replace
+from functools import partial
 from typing import cast
 
 import torch
@@ -45,8 +45,6 @@ class HostExpertStore:
         prepared = {}
         for expert_id in range(self.num_experts):
             bundle = adapter.materialize(self, (expert_id,), device)
-            if set(bundle) != set(adapter.output_names) or set(destination) != set(adapter.output_names):
-                raise RuntimeError("incomplete expert preparation bundle")
             # Loading only: complete format conversion before reading its storage.
             torch.npu.current_stream(device).synchronize()
             for name, tensor in bundle.items():
@@ -66,16 +64,9 @@ class HostExpertStore:
                     )
                     prepared[name] = PreparedExpertTensor(
                         data=chunks[0],
-                        shape=tuple(tensor.shape[1:]),
-                        stride=tuple(tensor.stride()),
-                        dtype=tensor.dtype,
-                        device=tensor.device,
-                        npu_format=torch_npu.get_npu_format(tensor),
                         expert_bytes=size,
                         extra_data=chunks[1:],
                     )
-                elif size != prepared[name].expert_bytes:
-                    raise ValueError("expert physical layout changed during preparation")
                 # ACL reads the storage as bytes, never interpreting NZ as ND.
                 chunk, row = prepared[name].source_chunk(expert_id)
                 error = acl.rt.memcpy(
@@ -93,11 +84,6 @@ class HostExpertStore:
         self.prototypes = {name: tensor[:1].clone() for name, tensor in self.tensors.items()}
         self.prepared = prepared
         self.tensors.clear()
-
-    def close(self) -> None:
-        self.tensors.clear()
-        self.prepared.clear()
-        self.prototypes.clear()
 
 
 class LayerOffloadBinding:
@@ -121,49 +107,40 @@ class LayerOffloadBinding:
         self.manager: ExpertOffloadManager | None = None
         self.resident: dict[str, torch.Tensor] = {}
         self.mapping: ExpertMapBuffer | None = None
-        self.graph_staging = {}
+        self.ids_cpu: torch.Tensor
 
     def process_weights_after_loading(self, layer) -> None:
-        try:
-            self.host_store.finalize(layer, pin_memory=self.device.type == "npu")
-            self.resident = self.adapter.materialize(self.host_store, range(self.num_slots), self.device)
-            if self.device.type == "npu":
-                torch.npu.current_stream(self.device).synchronize()
-                self.host_store.prepare_native(self.adapter, self.resident, self.device)
-            self.mapping = ExpertMapBuffer(self.num_experts, self.device)
-            # Preserve Parameter metadata/loaders, and allocate no full device layer here.
-            for name in self.adapter.tensor_names:
-                if name not in self.resident:
-                    delattr(layer, name)
-            for name, tensor in self.resident.items():
-                if isinstance(getattr(layer, name, None), torch.nn.Parameter):
-                    getattr(layer, name).data = tensor
-                else:
-                    setattr(layer, name, tensor)
-            self.residency.commit(self.residency.plan(range(self.num_slots)))
-        except Exception:
-            self.close()
-            raise
+        self.host_store.finalize(layer, pin_memory=self.device.type == "npu")
+        self.resident = self.adapter.materialize(self.host_store, range(self.num_slots), self.device)
+        if self.device.type == "npu":
+            torch.npu.current_stream(self.device).synchronize()
+            self.host_store.prepare_native(self.adapter, self.resident, self.device)
+        self.mapping = ExpertMapBuffer(self.num_experts, self.device)
+        # Capturable descriptors bound route entries by the resident capacity.
+        self.ids_cpu = torch.empty(
+            self.num_slots, dtype=torch.int32, device="cpu", pin_memory=self.device.type == "npu"
+        )
+        # Preserve Parameter metadata/loaders, and allocate no full device layer here.
+        for name in self.adapter.tensor_names:
+            if name not in self.resident:
+                delattr(layer, name)
+        for name, tensor in self.resident.items():
+            if isinstance(getattr(layer, name, None), torch.nn.Parameter):
+                getattr(layer, name).data = tensor
+            else:
+                setattr(layer, name, tensor)
+        self.residency.commit(self.residency.plan(range(self.num_slots)))
 
     def prepare(self, layer, selected_ids):
         # Loading attaches the manager and creates the map before any forward.
         manager = cast(ExpertOffloadManager, self.manager)
         mapping = cast(ExpertMapBuffer, self.mapping)
         if self.device.type == "npu" and torch.npu.is_current_stream_capturing():
-            key = (tuple(selected_ids.shape), selected_ids.dtype)
-            staging: GraphExpertStaging = self.graph_staging[key]
-            physical_ids = staging.prepare(selected_ids)
             return (
                 ExpertWeightView(layer, self.resident),
-                physical_ids,
+                self.prepare_graph(selected_ids),
                 manager.get_comm(self, layer.moe_config, self.num_slots),
             )
-        if manager.capturing_graphs:
-            if selected_ids.numel() > self.num_slots:
-                raise RuntimeError("expert graph shape exceeds resident capacity")
-            key = (tuple(selected_ids.shape), selected_ids.dtype)
-            if key not in self.graph_staging:
-                self.graph_staging[key] = GraphExpertStaging(self, selected_ids.shape, selected_ids.dtype)
         # One batched synchronization. No scalar device .item() loop.
         logical_ids = selected_ids.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist()
         plan = self.residency.plan(logical_ids)
@@ -187,53 +164,22 @@ class LayerOffloadBinding:
         self.residency.commit(plan)
         mapping.update(self.residency)
 
-    def close(self) -> None:
-        self.host_store.close()
-        self.resident.clear()
-        self.mapping = None
-        self.graph_staging.clear()
-        self.manager = None
-
-
-class GraphExpertStaging:
-    """Stable, layer-owned route/map storage for one serialized graph shape.
-
-    The captured stream orders D2H -> callback -> H2D mapping -> GEMMs.
-    The callback only synchronizes the independent load stream, never the
-    executing graph stream. The runner fences replay and checks failures before
-    consuming hidden states. Owner lifetimes extend past every graph consumer.
-    """
-
-    def __init__(self, binding, shape, dtype):
-        self.binding = binding
-        self.ids = torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True)
-        self.mapping = ExpertMapBuffer(binding.num_experts, binding.device)
-
     @torch.inference_mode()
-    def update(self, _unused=None) -> None:
-        manager = self.binding.manager
-        try:
-            if manager.graph_error is not None:
-                return
-            plan = self.binding.residency.plan(self.ids.reshape(-1).tolist())
-            if plan.use_full_pool:
-                raise RuntimeError("expert graph exceeded its prevalidated resident capacity")
-            # Report threads have their own current device/stream state.
-            torch.npu.set_device(self.binding.device)
-            with torch.npu.stream(manager.graph_load_stream):
-                self.binding.load_resident(plan, self.mapping)
-        except Exception as error:
-            # Exceptions on report threads cannot be propagated by raising here.
-            # Replay may finish, but its output must be rejected by the runner.
-            if manager.graph_error is None:
-                manager.graph_error = error
-            self.mapping.host_map.zero_()
+    def update_graph(self, n) -> None:
+        manager = cast(ExpertOffloadManager, self.manager)
+        # Each graph supplies its own fixed length; unused tail entries are stale.
+        plan = self.residency.plan(self.ids_cpu[:n].tolist())
+        # Report threads have their own current device/stream state.
+        torch.npu.set_device(self.device)
+        with torch.npu.stream(manager.graph_load_stream):
+            self.load_resident(plan, cast(ExpertMapBuffer, self.mapping))
 
-    def prepare(self, selected_ids):
-        stream = torch.npu.current_stream(self.binding.device)
-        self.ids.copy_(selected_ids, non_blocking=True)
-        torch.npu._launch_host_func(stream, self.update, None)
-        return self.mapping.remap(selected_ids)
+    def prepare_graph(self, selected_ids):
+        n = selected_ids.numel()
+        # Convert on the device so D2H writes directly into pinned storage.
+        self.ids_cpu[:n].copy_(selected_ids.reshape(-1).to(self.ids_cpu.dtype), non_blocking=True)
+        torch.npu._launch_host_func(torch.npu.current_stream(self.device), self.update_graph, n)
+        return cast(ExpertMapBuffer, self.mapping).remap(selected_ids)
 
 
 class PrefillExpertPool:
@@ -256,9 +202,6 @@ class PrefillExpertPool:
         )
         return self.tensors
 
-    def close(self) -> None:
-        self.tensors.clear()
-
 
 class ExpertOffloadManager:
     """Own expert storage and transfers for serialized MRV2 eager/graph execution."""
@@ -268,19 +211,22 @@ class ExpertOffloadManager:
         self.prefill_pool = PrefillExpertPool()
         self.comm_methods = {}
         self.has_prefill = True
-        self.capturing_graphs = False
-        self.graph_error: Exception | None = None
         self.graph_load_stream = None
         self.graph_streams = set()
 
-    def subscribe_graph_stream(self, stream) -> None:
+    def capture_stream(self, _desc):
+        # Use the actual NPU stream rather than torch_cuda_wrapper's CUDA cache.
+        stream = torch.npu.current_stream(self.device)
         if stream not in self.graph_streams:
             torch.npu._subscribe_report(stream)
             self.graph_streams.add(stream)
+        return stream
 
-    def check_graph_errors(self) -> None:
-        if self.graph_error is not None:
-            raise RuntimeError("expert graph callback failed; rejecting execution output") from self.graph_error
+    def unsubscribe_graph_streams(self) -> None:
+        torch.npu.synchronize()
+        for stream in self.graph_streams:
+            torch.npu._unsubscribe_report(stream)
+        self.graph_streams.clear()
 
     def _supports_graph_descriptor(self, desc) -> bool:
         """Bound distinct routes by the padded size, including dummy/padding rows."""
@@ -302,20 +248,15 @@ class ExpertOffloadManager:
             key: [desc for desc in descs if self._supports_graph_descriptor(desc)]
             for key, descs in graph_manager._candidates.items()
         }
-        if self.graph_load_stream is None and needs_capture():
+        if needs_capture():
+            self.device = graph_manager.device
             self.graph_load_stream = torch.npu.Stream(device=graph_manager.device)
+            graph_manager._capture_stream = self.capture_stream
+            graph_manager.capture = partial(self.capture, graph_manager.capture)
 
-    @contextmanager
-    def graph_capture(self):
+    def capture(self, capture, *args, **kwargs):
         self.has_prefill = False
-        self.capturing_graphs = True
-        try:
-            yield
-            for device in {binding.device for binding in self.bindings.values()}:
-                torch.npu.current_stream(device).synchronize()
-            self.check_graph_errors()
-        finally:
-            self.capturing_graphs = False
+        return capture(*args, **kwargs)
 
     def finalize_loading(self, model) -> None:
         self.bindings = {
@@ -323,13 +264,9 @@ class ExpertOffloadManager:
             for layer in model.modules()
             if (binding := getattr(layer, "_expert_offload_binding", None)) is not None
         }
-        try:
-            for binding in self.bindings.values():
-                binding.manager = self
-            self.prefill_pool.initialize(next(iter(self.bindings.values())))
-        except Exception:
-            self.close()
-            raise
+        for binding in self.bindings.values():
+            binding.manager = self
+        self.prefill_pool.initialize(next(iter(self.bindings.values())))
 
     def get_comm(self, binding, moe_config, count):
         # Lazy import avoids an initialization cycle with quantization and routed experts.
@@ -340,21 +277,3 @@ class ExpertOffloadManager:
             config = replace(moe_config, num_experts=count, num_local_experts=count)
             self.comm_methods[key] = AllGatherCommImpl(config)
         return self.comm_methods[key]
-
-    def close(self) -> None:
-        try:
-            for device in {binding.device for binding in self.bindings.values()}:
-                if device.type == "npu":
-                    torch.npu.current_stream(device).synchronize()
-            if self.graph_load_stream is not None:
-                self.graph_load_stream.synchronize()
-            for stream in self.graph_streams:
-                torch.npu._unsubscribe_report(stream)
-        finally:
-            self.graph_streams.clear()
-            self.graph_load_stream = None
-            for binding in self.bindings.values():
-                binding.close()
-            self.bindings.clear()
-            self.comm_methods.clear()
-            self.prefill_pool.close()

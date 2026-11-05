@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 from types import SimpleNamespace
+from unittest.mock import Mock
 
+import pytest
 import torch
 
-from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager, GraphExpertStaging
+from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
 
 
 def test_graph_capacity_includes_speculative_and_padding_rows():
@@ -19,30 +21,46 @@ def test_graph_capacity_includes_speculative_and_padding_rows():
     assert graph._candidates[(3, 0)] == []
 
 
-def test_graph_replay_refreshes_experts_and_reuses_storage(expert_factory, manager_factory, native_runtime):
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_graph_replay_refreshes_experts_and_reuses_storage(expert_factory, manager_factory, native_runtime, dtype):
     layer, _ = expert_factory()
     manager = manager_factory(layer)
     binding = layer._expert_offload_binding
     reference = {name: tensor.clone() for name, tensor in manager.prefill_pool.tensors.items()}
     binding.host_store.prepare_native(binding.adapter, binding.resident, "cpu")
-    staging = GraphExpertStaging(binding, (1, 2), torch.int32)
-    addresses = (staging.ids.data_ptr(), staging.mapping.host_map.data_ptr(), staging.mapping.device_map.data_ptr())
-    manager.subscribe_graph_stream(native_runtime.stream)
-    manager.subscribe_graph_stream(native_runtime.stream)
-    with manager.graph_capture():
-        assert manager.capturing_graphs and not manager.has_prefill
-        for logical in ([[4, 5]], [[1, 4]], [[2, 2]]):
-            ids = torch.tensor(logical, dtype=torch.int32)
-            physical = staging.prepare(ids)
-            manager.check_graph_errors()
-            for name in binding.adapter.output_names:
-                torch.testing.assert_close(binding.resident[name][physical.long()], reference[name][ids.long()])
-            assert addresses == (
-                staging.ids.data_ptr(),
-                staging.mapping.host_map.data_ptr(),
-                staging.mapping.device_map.data_ptr(),
-            )
-    assert not manager.capturing_graphs
-    manager.close()
+    addresses = (binding.ids_cpu.data_ptr(), binding.mapping.host_map.data_ptr(), binding.mapping.device_map.data_ptr())
+    desc = SimpleNamespace(num_tokens=1, uniform_token_count=1)
+    capture = Mock(side_effect=lambda *a, **k: not manager.has_prefill)
+    graph = SimpleNamespace(device=binding.device, _capture_descs={"full": [desc]}, _candidates={}, capture=capture)
+    manager.prepare_graph_capture(graph, lambda: True)
+    assert graph.capture("model", progress_bar_desc="test") is True
+    capture.assert_called_once_with("model", progress_bar_desc="test")
+    assert graph._capture_stream(desc) is native_runtime.stream
+    assert graph._capture_stream(desc) is native_runtime.stream
+    for graph_mode, logical in (
+        (True, [[4, 5]]),
+        (True, [[1]]),
+        (False, [[2, 3]]),
+        (True, [[4]]),
+        (True, [[0, 1]]),
+        (True, [[2], [2]]),
+    ):
+        ids = torch.tensor(logical, dtype=dtype)
+        plan = binding.residency.plan(ids.reshape(-1).tolist())
+        if graph_mode:
+            physical = binding.prepare_graph(ids)
+            assert native_runtime.npu._launch_host_func.call_args.args[-1] == ids.numel()
+        else:
+            _, physical, _ = binding.prepare(layer, ids)
+        assert binding.residency.slot_to_expert == plan.slot_to_expert
+        for name in binding.adapter.output_names:
+            torch.testing.assert_close(binding.resident[name][physical.long()], reference[name][ids.long()])
+        assert binding.mapping.host_map.tolist() == list(binding.residency.logical_to_physical())
+        assert addresses == (
+            binding.ids_cpu.data_ptr(),
+            binding.mapping.host_map.data_ptr(),
+            binding.mapping.device_map.data_ptr(),
+        )
+    manager.unsubscribe_graph_streams()
     native_runtime.npu._subscribe_report.assert_called_once_with(native_runtime.stream)
     native_runtime.npu._unsubscribe_report.assert_called_once_with(native_runtime.stream)

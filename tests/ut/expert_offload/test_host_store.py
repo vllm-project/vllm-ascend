@@ -37,8 +37,6 @@ def test_native_storage_chunking_transfer_and_prefill(expert_factory, manager_fa
         for name, tensor in actual.items():
             torch.testing.assert_close(tensor.float(), expected[name].float())
             assert tensor.data_ptr() == addresses[name]
-    manager.close()
-    assert not store.prepared and not store.prototypes
 
 
 def test_nz_transfer_counts_physical_padding_and_slot_offset():

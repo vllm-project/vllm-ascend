@@ -38,11 +38,6 @@ class PreparedExpertTensor:
     """Pinned physical bytes plus the native tensor layout they encode."""
 
     data: torch.Tensor
-    shape: tuple[int, ...]
-    stride: tuple[int, ...]
-    dtype: torch.dtype
-    device: torch.device
-    npu_format: int
     expert_bytes: int
     extra_data: tuple[torch.Tensor, ...] = ()
 
