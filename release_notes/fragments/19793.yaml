@@ -1,0 +1,4 @@
+pr: 19793
+entries:
+  - category: bugfix
+    text: Fixed adaptive MiniMax M3.1 reasoning state and multi-turn assistant boundaries.
