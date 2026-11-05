@@ -40,6 +40,10 @@ class KimiKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
 
     def _attach_pcp(self, metadata, context):
         if context is None:
+            # Current runners carry PCP through CommonAttentionMetadata;
+            # the GDN builder forwards it to the returned metadata object.
+            context = getattr(metadata, "pcp_context", None)
+        if context is None:
             return metadata
         local_tokens = context.local_num_tokens
         if local_tokens is None:
