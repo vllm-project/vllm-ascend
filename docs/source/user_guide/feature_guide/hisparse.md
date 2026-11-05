@@ -73,6 +73,13 @@ Native C8 main rows contain 512 E4M3FN bytes, 64 BF16 RoPE values and four FP32
 scales (656 bytes total). Indexer rows contain 128 E4M3FN keys and one FP32 scale.
 Views preserve the shared-slab page strides and layer offsets. The existing
 quantizer and Attention operations are reused; payloads are copied as bytes.
+With MXFP8 projection weights, C8 reuses SFA's existing Prolog V3 preprocessing
+and publishes its staged rows through the HiSparse Resident mapping. Other
+supported projection schemes retain the native preprocessing path.
+
+C8 Decode consumes the resolver's mapped, stably compacted indices directly.
+The refill plan retains separate virtual page-row IDs. Prefill keeps its existing
+layout bridge, including stable ordering and duplicate selections.
 
 Keep completion-before-unregister and graph allocation ownership intact.
 Overwriting KV still invalidates any old Hot copy. Equal batch shapes do not
@@ -81,10 +88,20 @@ or unmerged Core PR is required.
 
 ## Validation and performance
 
-The previous Triton-based foundation passed its CPU/NPU component suites and a
-TP8/MTP3 full-model smoke. That evidence does not qualify this native-resolver
-integration. The fused kernel is reused from the optimized implementation;
-this foundation's integration and full-model results are recorded separately.
+The native foundation has actual Ascend 950 eager/Graph component and TP8/MTP3
+full-model evidence. The C8 preprocessing and direct-index changes also passed
+focused device checks and a fresh full-model ON/OFF comparison. See the PR for
+the exact source pins, commands and qualification boundaries.
 
-Dataset accuracy and same-workload ON/OFF performance are not yet qualified for
-this foundation. No throughput, TTFT or TPOT improvement is claimed here.
+In the current GLM-5.2 C4 comparison (32768 input and 8192 output tokens,
+TP8/DP1, MTP3, Model Runner V2, prefix caching off and explicit
+`weight_nz_mode=0`), both arms completed two rounds with 65536 actual output
+token IDs per arm. ON's settled reported miss/H2D deltas were zero. Mean TPOT was
+12.21 ms OFF and 14.20 ms ON: an observed increase of 16.29%. The second round
+had identical output tokens and MTP acceptance, with an 18.11% TPOT increase;
+the first round had different outputs/acceptance. These measurements do not
+establish statistical significance or acceptable performance for other workloads.
+
+Dataset accuracy, the full-model miss path and a TPOT regression within 3%
+remain unqualified. Profiling requests are separate from formal performance
+timing; reported zero-miss counters do not prove the absence of device DMA.
