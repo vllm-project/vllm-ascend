@@ -13,6 +13,8 @@ variants:
     extra_args:
       - '--data-parallel-size'
       - '4'
+      - '--tensor-parallel-size'
+      - '4'
       - '--enable-expert-parallel'
       - '--quantization'
       - ascend
@@ -50,8 +52,11 @@ variants:
     hardware_overrides:
       ascend_910c:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc2-a3
+        docker_serve_command: vllm serve
         install:
           pip: false
+        extra_env:
+          ASCEND_RT_VISIBLE_DEVICES: '0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15'
   default:
     hardware_overrides:
       ascend_950pr_8x:
@@ -103,7 +108,7 @@ hardware_notes:
       href: '#huawei-ascend-950pr-8x'
   ascend_910c:
     title: vLLM Ascend A3 image required
-    body: Single-node DP4+TP4 with expert parallelism on all 16 NPUs of one Atlas 800T A3 node, using the ModelSlim W8A8 checkpoint from Eco-Tech. TP4 shards the weights across 4 dies per DP rank, and the int8 Lightning Indexer KV cache keeps the 1M context within 64 GB per die. Pin quay.io/ascend/vllm-ascend:v0.30.0rc2-a3 with vLLM 0.30.0 — the NVIDIA pip wheel cannot run here. Set HCCL_BUFFSIZE=1024 and VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096 before launch, and use --block-size 32 with --attention_config.indexer_kv_dtype int8. Verified on Atlas 800T A3 — MTP k=1 reaches GSM8K 96.44 and DSpark k=7 reaches 96.59 (AISBench, 1319 prompts). The A3 path uses ModelScope to download the W8A8 weights (pip install modelscope). Multi-node PD separation is also available; see the vllm-ascend tutorial.
+    body: Single-node DP4+TP4 with expert parallelism on all 16 NPUs of one Atlas 800T A3 node, using the ModelSlim W8A8 checkpoint from Eco-Tech. TP4 shards the weights across 4 dies per DP rank, and the int8 Lightning Indexer KV cache keeps the 1M context within 64 GB per die. Pin quay.io/ascend/vllm-ascend:v0.30.0rc2-a3 with vLLM 0.30.0 — the NVIDIA pip wheel cannot run here. Set HCCL_BUFFSIZE=1024 and VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096 before launch, and use --block-size 32 with --attention_config.indexer_kv_dtype int8. Verified on Atlas 800T A3 — MTP k=1 reaches GSM8K 96.44 (AISBench, 1319 prompts). DSpark k=7 reaches 96.59 with Eco-Tech/DeepSeek-V4-Flash-0731-w8a8, but DSpark is not offered for ascend_w8a8 until the core recipe lists it in modes.dspark.variants (Ref #20563). The single_node_dep strategy also renders a vLLM Router companion that the Ascend tutorial does not use — start only the vllm serve command; it listens on port 8100. The A3 path uses ModelScope to download the W8A8 weights (pip install modelscope). Multi-node PD separation is also available; see the vllm-ascend tutorial.
     link:
       label: Ascend 910C A3 reference
       href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Flash.html
@@ -120,13 +125,7 @@ strategy_hardware:
 strategy_overrides:
   single_node_dep:
     hardware_overrides:
-      npu:
-        extra_env:
-          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
-          OMP_PROC_BIND: 'false'
-          OMP_NUM_THREADS: '10'
-          HCCL_BUFFSIZE: '1024'
-          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3
+      ascend_950dt_8x:
         extra_args:
           - '--block-size'
           - '32'
@@ -147,6 +146,33 @@ strategy_overrides:
           - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
           - '--additional-config'
           - '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true}'
+      ascend_950pr_8x:
+        extra_args:
+          - '--block-size'
+          - '32'
+          - '--kv-cache-dtype'
+          - auto
+          - '--safetensors-load-strategy'
+          - prefetch
+          - '--async-scheduling'
+          - '--max-num-seqs'
+          - '64'
+          - '--max-num-batched-tokens'
+          - '4096'
+          - '--gpu-memory-utilization'
+          - '0.9'
+          - '--api-server-count'
+          - '1'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          - '--additional-config'
+          - '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true}'
+      ascend_910c:
+        extra_env:
+          ASCEND_RT_VISIBLE_DEVICES: '0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15'
+        extra_args:
+          - '--kv-cache-dtype'
+          - auto
 features:
   spec_decoding:
     modes:
