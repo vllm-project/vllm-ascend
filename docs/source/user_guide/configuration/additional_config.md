@@ -397,7 +397,8 @@ Only BF16 plain unquantized QKVZ and BA projections, PCP=1, no LoRA/DBO,
 no output gather or custom communication op, and ACLGraph capture outside
 Dynamo tracing are eligible. Other paths remain serial. Quantized projections
 and the split QKV/Z LoRA path are excluded. Both known upstream and Ascend
-unquantized linear methods are accepted. Weight tensors are not repacked.
+unquantized linear methods are accepted. Weight tensors are not repacked. Eligible layers share one model-owned stream
+per NPU device, with separate events for each layer.
 
 For whole-model evaluation, use MRV2 with an eager forward captured into a
 full decode ACLGraph, for example

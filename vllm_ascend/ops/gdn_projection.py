@@ -34,7 +34,19 @@ def initialize_gdn_projection_overlap(layer) -> None:
             or getattr(projection, "custom_op", None) is not None
         ):
             return
-    layer._ascend_ba_stream = torch.npu.Stream()
+    # Model-owned, device-local sharing avoids one extra stream per GDN layer.
+    # Events stay per layer so each captured fork/join has distinct ownership.
+    device = torch.npu.current_device()
+    context = getattr(getattr(config, "compilation_config", None), "static_forward_context", {})
+    for candidate in context.values():
+        if getattr(candidate, "_ascend_ba_device", None) == device:
+            stream = getattr(candidate, "_ascend_ba_stream", None)
+            if stream is not None:
+                layer._ascend_ba_stream = stream
+                break
+    if layer._ascend_ba_stream is None:
+        layer._ascend_ba_stream = torch.npu.Stream()
+    layer._ascend_ba_device = device
     layer._ascend_ba_events = (torch.npu.Event(), torch.npu.Event())
 
 

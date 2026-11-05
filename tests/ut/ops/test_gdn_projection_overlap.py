@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Test stream dependencies without importing the NPU runtime."""
 
+import copy
 import importlib.util
 import sys
 import unittest
@@ -47,6 +48,7 @@ class GDNProjectionTest(unittest.TestCase):
             compiler=SimpleNamespace(is_compiling=lambda: False),
             npu=SimpleNamespace(
                 Stream=Stream,
+                current_device=lambda: 0,
                 Event=Event,
                 stream=lambda stream: stream,
                 current_stream=lambda: self.main,
@@ -127,6 +129,21 @@ class GDNProjectionTest(unittest.TestCase):
             self.layer.in_proj_ba.quant_method = method
             self.module.initialize_gdn_projection_overlap(self.layer)
             self.assertIsNone(self.layer._ascend_ba_stream)
+
+    def test_layers_share_device_stream_but_keep_separate_events(self):
+        context = {"first": self.layer}
+        self.layer.vllm_config.compilation_config = SimpleNamespace(static_forward_context=context)
+        self.module.initialize_gdn_projection_overlap(self.layer)
+        second = copy.copy(self.layer)
+        self.module.initialize_gdn_projection_overlap(second)
+        context["second"] = second
+        self.assertIs(second._ascend_ba_stream, self.layer._ascend_ba_stream)
+        for first_event, second_event in zip(self.layer._ascend_ba_events, second._ascend_ba_events):
+            self.assertIsNot(first_event, second_event)
+        self.torch.npu.current_device = lambda: 1
+        third = copy.copy(self.layer)
+        self.module.initialize_gdn_projection_overlap(third)
+        self.assertIsNot(third._ascend_ba_stream, self.layer._ascend_ba_stream)
 
     def test_negative_limit_fails_before_creating_stream(self):
         self.config.gdn_projection_overlap_max_tokens = -1
