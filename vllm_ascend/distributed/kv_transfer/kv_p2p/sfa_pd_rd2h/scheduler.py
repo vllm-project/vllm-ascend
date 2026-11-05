@@ -298,6 +298,9 @@ class SFAPDRD2HScheduler:
         # req_ids awaiting their first build_connector_meta seed (so the worker
         # can build request_map for get_finished even while async-waiting KV).
         self._reqs_need_recv: set[str] = set()
+        self.prefix_cache_enabled = False
+        self.prefix_cache_tokens: dict[str, int] = {}
+        self._prefix_pending_recv: set[str] = set()
         self._dspark_pending_recv: set[str] = set()
         self._deferred_finished_req_ids: set[str] = set()
         self.executor = ThreadPoolExecutor(32)
@@ -414,9 +417,15 @@ class SFAPDRD2HScheduler:
             )
             self._dspark_pending_recv.add(request.request_id)
         self._reqs_need_recv.add(request.request_id)
+        if self.prefix_cache_enabled:
+            self._prefix_pending_recv.add(request.request_id)
         allocator = getattr(self, "_copy_sfa_slot_allocator", None)
         if allocator is not None:
             kv_tokens = request.num_computed_tokens + num_external_tokens
+            if self.prefix_cache_enabled:
+                # Core has not yet copied the newly adopted local hit into
+                # request.num_computed_tokens. PD always covers the full prompt.
+                kv_tokens = len(request.prompt_token_ids)
             if kv_tokens <= 0:
                 prompt_token_ids = getattr(request, "prompt_token_ids", None) or []
                 kv_tokens = len(prompt_token_ids)
@@ -449,7 +458,7 @@ class SFAPDRD2HScheduler:
             remote_tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             remote_pcp_size=self.vllm_config.parallel_config.prefill_context_parallel_size,
             remote_dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
-            remote_cached_tokens=request.num_computed_tokens,
+            remote_cached_tokens=self.prefix_cache_tokens.get(request.request_id, request.num_computed_tokens),
         )
         if dspark_context_descriptor is not None:
             kv_transfer_params["dspark_context_generation"] = dspark_context_descriptor.generation
@@ -493,6 +502,7 @@ class SFAPDRD2HScheduler:
                     req_id,
                     main_block_ids,
                     indexer_block_ids,
+                    cached_prefix_tokens=self.prefix_cache_tokens.get(req_id, 0),
                     dspark_context_descriptor=descriptor,
                     dspark_draft_group_ids=self._dspark_context_groups if descriptor is not None else (),
                     dspark_draft_block_ids_by_group=draft_ids if descriptor is not None else None,
@@ -508,6 +518,7 @@ class SFAPDRD2HScheduler:
                     tail_block_index=tail_block_index,
                     kv_tokens=kv_tokens,
                     dense=dense,
+                    cached_prefix_tokens=self.prefix_cache_tokens.get(req_id, 0),
                     dspark_context_descriptor=context_requests.get(req_id, (None, {}))[0],
                     dspark_draft_group_ids=(self._dspark_context_groups if req_id in context_requests else ()),
                     dspark_draft_block_ids_by_group=context_requests.get(req_id, (None, None))[1],
@@ -523,7 +534,7 @@ class SFAPDRD2HScheduler:
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        if request.request_id in self._dspark_pending_recv:
+        if request.request_id in self._dspark_pending_recv or request.request_id in self._prefix_pending_recv:
             # Let the existing rendezvous and reads drain naturally. vLLM
             # retains the KV blocks; retain the connector's destinations too.
             self._deferred_finished_req_ids.add(request.request_id)
@@ -534,12 +545,15 @@ class SFAPDRD2HScheduler:
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         completed = set(connector_output.finished_recving or ())
         self._dspark_pending_recv.difference_update(completed)
+        self._prefix_pending_recv.difference_update(completed)
         for request_id in completed & self._deferred_finished_req_ids:
             self._cleanup_finished_request(request_id)
 
     def _cleanup_finished_request(self, request_id: str) -> None:
         # vLLM owns the block lifecycle; the connector only drops its lookup.
         self._request_trackers.pop(request_id, None)
+        self.prefix_cache_tokens.pop(request_id, None)
+        self._prefix_pending_recv.discard(request_id)
         getattr(self, "_dspark_context_requests", {}).pop(request_id, None)
         self._reqs_need_recv.discard(request_id)
         self._dspark_pending_recv.discard(request_id)
