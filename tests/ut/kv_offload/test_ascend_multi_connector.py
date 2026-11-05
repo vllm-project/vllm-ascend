@@ -385,3 +385,48 @@ def test_mamba_state_copy_skipped_without_deferral():
     connector.wait_for_layer_load("model.layers.7.linear_attn")
 
     first.wait_for_layer_load.assert_called_once_with("model.layers.7.linear_attn")
+
+
+def _make_multi_connector(*children: SimpleNamespace) -> AscendMultiConnector:
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector._connectors = list(children)
+    connector._all_support_hma = True
+    connector._extra_async_saves = {}
+    connector._requests_to_connector = {}
+    return connector
+
+
+def _make_hma_connector(async_save: bool, params: dict | None) -> SimpleNamespace:
+    return SimpleNamespace(request_finished_all_groups=MagicMock(return_value=(async_save, params)))
+
+
+def test_request_finished_all_groups_merges_params_from_every_connector():
+    request = SimpleNamespace(request_id="req-1")
+    connector = _make_multi_connector(
+        _make_hma_connector(False, {"hash_keys": ["ab"]}),
+        _make_hma_connector(True, {"connector_b": 3}),
+    )
+
+    async_save, params = connector.request_finished_all_groups(request, ([0], [1]))
+
+    assert async_save is True
+    assert params == {"hash_keys": ["ab"], "connector_b": 3}
+    assert connector._extra_async_saves == {}
+
+
+def test_request_finished_all_groups_raises_on_param_key_clash():
+    request = SimpleNamespace(request_id="req-1")
+    connector = _make_multi_connector(
+        _make_hma_connector(False, {"hash_keys": ["ab"]}),
+        _make_hma_connector(False, {"hash_keys": ["cd"]}),
+    )
+
+    with pytest.raises(RuntimeError, match="Key clash"):
+        connector.request_finished_all_groups(request, ([0], [1]))
+
+
+def test_request_finished_all_groups_without_params_returns_none():
+    request = SimpleNamespace(request_id="req-1")
+    connector = _make_multi_connector(_make_hma_connector(False, None), _make_hma_connector(False, None))
+
+    assert connector.request_finished_all_groups(request, ([0], [1])) == (False, None)
