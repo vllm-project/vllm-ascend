@@ -29,13 +29,13 @@ def test_loading_decode_prefill_and_capacity_fallback(expert_factory, manager_fa
     ):
         manager.has_prefill = prefill
         ids = torch.tensor(logical, dtype=torch.int32)
-        before = binding.residency.logical_to_physical()
+        before = binding.slot_to_expert
         view, physical, _ = binding.prepare(layer, ids)
         full_pool = prefill or ids.unique().numel() > binding.num_slots
         assert manager.get_comm.call_args.args[-1] == (binding.num_experts if full_pool else binding.num_slots)
         if full_pool:
             assert torch.equal(physical, ids)
-            assert binding.residency.logical_to_physical() == before
+            assert binding.slot_to_expert == before
         for name in binding.adapter.output_names:
             torch.testing.assert_close(
                 getattr(view, name)[physical.long()].float(), getattr(reference, name)[ids.long()].float()

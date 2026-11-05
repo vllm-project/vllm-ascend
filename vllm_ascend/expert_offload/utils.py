@@ -6,8 +6,6 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from .residency import ExpertResidency
-
 if TYPE_CHECKING:
     from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -22,11 +20,10 @@ class ExpertMapBuffer:
         self._host_array = self.host_map.numpy()
         self.device_map = torch.empty(num_experts, dtype=torch.long, device=device)
 
-    def update(self, residency: ExpertResidency) -> None:
+    def update(self, slot_to_expert: tuple[int, ...]) -> None:
         self._host_array.fill(-1)
-        for slot, expert_id in enumerate(residency.slot_to_expert):
-            if expert_id is not None:
-                self._host_array[expert_id] = slot
+        for slot, expert_id in enumerate(slot_to_expert):
+            self._host_array[expert_id] = slot
 
     def remap(self, selected_ids: torch.Tensor) -> torch.Tensor:
         self.device_map.copy_(self.host_map, non_blocking=True)

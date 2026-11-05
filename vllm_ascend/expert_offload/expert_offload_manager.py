@@ -7,7 +7,6 @@ from typing import cast
 
 import torch
 
-from .residency import ExpertResidency
 from .transfer import TorchExpertTransfer
 from .utils import ExpertMapBuffer, ExpertWeightView, PreparedExpertTensor
 
@@ -148,7 +147,7 @@ class LayerOffloadBinding:
         self.device = torch.device(layer.moe_config.device)
         self.adapter = MXFPExpertAdapter(layer, scheme)
         self.host_store = HostExpertStore(layer, self.adapter.tensor_names)
-        self.residency = ExpertResidency(self.num_experts, self.num_slots)
+        self.slot_to_expert: tuple[int, ...]
         self.manager: ExpertOffloadManager | None = None
         self.resident: dict[str, torch.Tensor] = {}
         self.mapping: ExpertMapBuffer | None = None
@@ -165,16 +164,10 @@ class LayerOffloadBinding:
         self.ids_cpu = torch.empty(
             self.num_slots, dtype=torch.int32, device="cpu", pin_memory=self.device.type == "npu"
         )
-        # Preserve Parameter metadata/loaders, and allocate no full device layer here.
-        for name in self.adapter.tensor_names:
-            if name not in self.resident:
-                delattr(layer, name)
+        # Preserve Parameter objects and their loader metadata.
         for name, tensor in self.resident.items():
-            if isinstance(getattr(layer, name, None), torch.nn.Parameter):
-                getattr(layer, name).data = tensor
-            else:
-                setattr(layer, name, tensor)
-        self.residency.commit(self.residency.plan(range(self.num_slots)))
+            getattr(layer, name).data = tensor
+        self.slot_to_expert = tuple(range(self.num_slots))
 
     def prepare(self, layer, selected_ids):
         # Loading attaches the manager and creates the map before any forward.
@@ -187,37 +180,47 @@ class LayerOffloadBinding:
                 manager.get_comm(self, layer.moe_config, self.num_slots),
             )
         # One batched synchronization. No scalar device .item() loop.
-        logical_ids = selected_ids.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist()
-        plan = self.residency.plan(logical_ids)
-        full_pool = manager.has_prefill or plan.use_full_pool
+        selected = set(selected_ids.detach().to(device="cpu", dtype=torch.long).reshape(-1).tolist())
+        full_pool = manager.has_prefill or len(selected) > self.num_slots
         if full_pool:
             tensors = manager.prefill_pool.fill(self)
             physical_ids = selected_ids
             count = self.num_experts
         else:
             # The blocking route D2H above also fences the previous use of this host map.
-            self.load_resident(plan, mapping)
+            slots, loads = self.plan_expert_loads(selected)
+            self.load_resident(slots, loads)
             physical_ids = mapping.remap(selected_ids)
             tensors = self.resident
             count = self.num_slots
         # A private comm instance avoids mutating the cached full-layer dispatcher.
         return ExpertWeightView(layer, tensors), physical_ids, manager.get_comm(self, layer.moe_config, count)
 
-    def load_resident(self, plan, mapping) -> None:
-        """Publish residency and its map after every weight/scale copy completes."""
-        TorchExpertTransfer.copy_experts(self.adapter, self.host_store, self.resident, plan.loads, self.device)
-        self.residency.commit(plan)
-        mapping.update(self.residency)
+    def plan_expert_loads(self, selected: set[int]) -> tuple[tuple[int, ...], tuple[tuple[int, int], ...]]:
+        slots = list(self.slot_to_expert)
+        missing = sorted(selected - set(slots))
+        # Keep hits and replace unneeded experts in slot order.
+        victims = [slot for slot, expert_id in enumerate(slots) if expert_id not in selected]
+        loads = tuple(zip(missing, victims))
+        for expert_id, slot in loads:
+            slots[slot] = expert_id
+        return tuple(slots), loads
+
+    def load_resident(self, slots, loads) -> None:
+        """Update slots and their map after every weight/scale copy completes."""
+        TorchExpertTransfer.copy_experts(self.adapter, self.host_store, self.resident, loads, self.device)
+        self.slot_to_expert = slots
+        cast(ExpertMapBuffer, self.mapping).update(slots)
 
     @torch.inference_mode()
     def update_graph(self, n) -> None:
         manager = cast(ExpertOffloadManager, self.manager)
         # Each graph supplies its own fixed length; unused tail entries are stale.
-        plan = self.residency.plan(self.ids_cpu[:n].tolist())
+        slots, loads = self.plan_expert_loads(set(self.ids_cpu[:n].tolist()))
         # Report threads have their own current device/stream state.
         torch.npu.set_device(self.device)
         with torch.npu.stream(manager.graph_load_stream):
-            self.load_resident(plan, cast(ExpertMapBuffer, self.mapping))
+            self.load_resident(slots, loads)
 
     def prepare_graph(self, selected_ids):
         n = selected_ids.numel()

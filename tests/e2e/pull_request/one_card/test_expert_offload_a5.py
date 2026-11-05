@@ -21,7 +21,6 @@ from vllm_ascend.expert_offload.expert_offload_manager import (
     LayerOffloadBinding,
     MXFPExpertAdapter,
 )
-from vllm_ascend.expert_offload.residency import ExpertResidency
 from vllm_ascend.expert_offload.utils import ExpertMapBuffer
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDSDynamicFusedMoEMethod,
@@ -109,14 +108,13 @@ def test_acl_graph_replay_updates_nz_slots(expert_bundle, monkeypatch):
         adapter=adapter,
         host_store=store,
         resident=resident,
-        residency=ExpertResidency(NUM_EXPERTS, 2),
+        slot_to_expert=(0, 1),
         num_experts=NUM_EXPERTS,
         num_slots=2,
         device=device,
         ids_cpu=torch.empty(2, dtype=torch.int32, device="cpu", pin_memory=True),
         mapping=ExpertMapBuffer(NUM_EXPERTS, device),
     )
-    binding.residency.commit(binding.residency.plan([0, 1]))
     manager.bindings["test"] = binding
     ids = torch.zeros((1, 1), dtype=torch.int32, device=device)
     x = torch.randn(1, HIDDEN_SIZE, generator=torch.Generator().manual_seed(7)).to(device, dtype=torch.bfloat16)

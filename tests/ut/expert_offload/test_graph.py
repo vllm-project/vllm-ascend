@@ -46,16 +46,19 @@ def test_graph_replay_refreshes_experts_and_reuses_storage(expert_factory, manag
         (True, [[2], [2]]),
     ):
         ids = torch.tensor(logical, dtype=dtype)
-        plan = binding.residency.plan(ids.reshape(-1).tolist())
+        expected_slots, _ = binding.plan_expert_loads(set(ids.reshape(-1).tolist()))
         if graph_mode:
             physical = binding.prepare_graph(ids)
             assert native_runtime.npu._launch_host_func.call_args.args[-1] == ids.numel()
         else:
             _, physical, _ = binding.prepare(layer, ids)
-        assert binding.residency.slot_to_expert == plan.slot_to_expert
+        assert binding.slot_to_expert == expected_slots
         for name in binding.adapter.output_names:
             torch.testing.assert_close(binding.resident[name][physical.long()], reference[name][ids.long()])
-        assert binding.mapping.host_map.tolist() == list(binding.residency.logical_to_physical())
+        slots = binding.slot_to_expert
+        assert binding.mapping.host_map.tolist() == [
+            slots.index(eid) if eid in slots else -1 for eid in range(binding.num_experts)
+        ]
         assert addresses == (
             binding.ids_cpu.data_ptr(),
             binding.mapping.host_map.data_ptr(),
