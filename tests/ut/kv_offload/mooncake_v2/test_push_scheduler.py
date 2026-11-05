@@ -6,6 +6,7 @@ import threading
 import time
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import httpx
 import msgspec
@@ -13,7 +14,7 @@ import pytest
 import zmq
 from vllm.v1.request import RequestStatus
 
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import bootstrap_server, push_scheduler
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_scheduler, utils
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadata,
@@ -25,6 +26,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
     MooncakeSchedulerSendingThread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_scheduler import MooncakePushConnectorScheduler
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import MooncakeMetaserverClient
 
 
 def workers():
@@ -62,8 +64,12 @@ def scheduler():
     obj.side_channel_host = "127.0.0.1"
     obj.side_channel_port = 0
     obj._metadata_thread = None
-    obj.bootstrap_server = None
-    obj._registered_worker_metadata = None
+    obj.metaserver_client = None
+    obj._remote_worker_addresses = ()
+    obj.group_block_size = [16, 16]
+    obj.group_unique_specs = [[Mock(spec=base_scheduler.FullAttentionSpec, is_circular=False)] for _ in range(2)]
+    obj.num_speculative_tokens = 0
+    obj._reqs_pending_recv = {}
     obj._reqs_need_send_layerwise = {}
     obj._reqs_sent_to_worker = set()
     obj._reqs_need_send = {}
@@ -73,6 +79,16 @@ def scheduler():
     obj.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_index=2))
     yield obj
     obj.shutdown()
+
+
+@pytest.fixture
+def metaserver(monkeypatch):
+    def create(handler):
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr(utils.httpx, "Client", lambda **kwargs: client)
+        return MooncakeMetaserverClient()
+
+    return create
 
 
 def query(thread, message):
@@ -125,14 +141,11 @@ def test_missing_or_foreign_metadata_does_not_start_thread(scheduler):
     assert scheduler._metadata_thread is None
 
 
-def test_p_does_not_start_metadata_service(scheduler, monkeypatch):
+def test_p_does_not_start_metadata_service(scheduler):
     scheduler.kv_transfer_config.is_kv_producer = True
-    registered = []
-    monkeypatch.setattr(push_scheduler, "get_mooncake_bootstrap_addr", lambda config: ("bootstrap", 8998))
-    monkeypatch.setattr(push_scheduler, "register_workers_with_bootstrap", lambda **kwargs: registered.append(kwargs))
     scheduler.set_xfer_handshake_metadata_from_workers(workers())
-    assert len(registered) == 1
     assert scheduler._metadata_thread is None
+    assert not scheduler._remote_worker_addresses
 
 
 def test_bind_failure_is_reported_and_thread_is_cleaned_up(scheduler):
@@ -178,7 +191,17 @@ def prefill_request(request_id="p-request"):
     return SimpleNamespace(
         request_id=request_id,
         num_prompt_tokens=48,
-        kv_transfer_params={"do_remote_decode": True, "transfer_id": "xfer-123"},
+        kv_transfer_params={
+            "do_remote_decode": True,
+            "remote_request_id": "d-request-123",
+            "remote_engine_id": "d",
+            "remote_host": "127.0.0.1",
+            "remote_port": 9000,
+            "remote_block_ids": [[10, 11, 12], [20, 21, 22]],
+            "remote_num_computed_tokens": 0,
+            "remote_num_external_tokens": 48,
+            "remote_worker_addresses": [[0, 0, 0, "tcp://127.0.0.1:9001"]],
+        },
         status=RequestStatus.FINISHED_LENGTH_CAPPED,
     )
 
@@ -200,6 +223,7 @@ def step(request, blocks=None, computed=0, scheduled=16, *, resumed=False):
         scheduled_cached_reqs=cached,
         num_scheduled_tokens={request.request_id: scheduled},
         preempted_req_ids=set(),
+        has_sync_kv_loads=False,
     )
 
 
@@ -218,7 +242,7 @@ def test_producer_snapshots_new_and_cached_prefill_chunks(producer_scheduler):
     chunk = second.push_send_requests[request.request_id]
     assert chunk.local_block_ids == ((1, 2), (11, 12))
     assert (chunk.num_computed_tokens, chunk.num_scheduled_tokens, chunk.num_prompt_tokens) == (16, 16, 48)
-    assert chunk.transfer_id == "xfer-123"
+    assert chunk.request_id == "d-request-123"
     assert not second.push_requests
     third = scheduler.build_connector_meta(step(request, ([3], [13]), computed=32, scheduled=20))
     assert third.push_send_requests[request.request_id].num_scheduled_tokens == 16
@@ -248,7 +272,7 @@ def test_producer_retains_blocks_until_worker_finishes(producer_scheduler, abort
     terminal_step = step(request, None, computed=16, scheduled=0)
     meta = scheduler.build_connector_meta(terminal_step)
     assert set(meta.requests_to_send) == {request.request_id}
-    assert meta.push_aborted_requests == ({request.request_id: "xfer-123"} if aborted else {})
+    assert meta.push_aborted_requests == ({request.request_id: "d-request-123"} if aborted else {})
     assert not meta.push_send_requests
     assert not scheduler.build_connector_meta(terminal_step).requests_to_send
     output = SimpleNamespace(finished_sending={request.request_id}, finished_recving=None)
@@ -282,13 +306,13 @@ def test_abort_before_dispatch_does_not_pin_blocks(producer_scheduler):
     assert producer_scheduler.request_finished(request, ([1], [11])) == (False, None)
     assert not producer_scheduler._reqs_need_send_layerwise
     meta = producer_scheduler.build_connector_meta(step(request, None, computed=16, scheduled=0))
-    assert meta.push_aborted_requests == {request.request_id: "xfer-123"}
+    assert meta.push_aborted_requests == {request.request_id: "d-request-123"}
 
 
-def test_missing_transfer_id_is_rejected_before_dispatch(producer_scheduler):
+def test_missing_remote_request_id_is_rejected_before_dispatch(producer_scheduler):
     request = prefill_request()
-    del request.kv_transfer_params["transfer_id"]
-    with pytest.raises(ValueError, match="transfer_id"):
+    del request.kv_transfer_params["remote_request_id"]
+    with pytest.raises(ValueError, match="remote_request_id"):
         allocate(producer_scheduler, request)
     assert not producer_scheduler._reqs_need_send_layerwise
 
@@ -305,94 +329,166 @@ def test_preemption_of_published_source_is_rejected(producer_scheduler):
         allocate(producer_scheduler, request)
 
 
-def test_register_all_workers_from_scheduler_once(producer_scheduler, monkeypatch):
-    scheduler = producer_scheduler
-    calls = []
-    factory = httpx.Client
-
-    def handle(request):
-        calls.append((str(request.url), json.loads(request.content)))
-        return httpx.Response(200, json={"status": "ok"})
-
-    monkeypatch.setattr(push_scheduler, "get_mooncake_bootstrap_addr", lambda config: ("bootstrap", 8998))
-    monkeypatch.setattr(
-        bootstrap_server.httpx, "Client", lambda **kwargs: factory(transport=httpx.MockTransport(handle))
-    )
-    scheduler.set_xfer_handshake_metadata_from_workers(workers())
-    scheduler.set_xfer_handshake_metadata_from_workers(workers())
-    assert len(calls) == 8
-    assert {url for url, _ in calls} == {"http://bootstrap:8998/register"}
-    for _, payload in calls:
-        key = (payload["pp_rank"], payload["pcp_rank"], payload["tp_rank"])
-        worker = workers()[key]
-        assert payload["addr"] == f"tcp://{worker.local_ip}:{worker.handshake_port}"
-        assert payload["dp_rank"] == 2
-        assert (payload["pp_size"], payload["pcp_size"], payload["tp_size"], payload["dcp_size"]) == (2, 2, 2, 4)
-    changed = workers()
-    changed[(0, 0, 0)] = replace(changed[(0, 0, 0)], handshake_port=9999)
-    with pytest.raises(RuntimeError, match="Replacing"):
-        scheduler.set_xfer_handshake_metadata_from_workers(changed)
-    assert len(calls) == 8
-    assert scheduler._metadata_thread is None
-
-
-def test_registration_error_does_not_retry_or_mark_complete(producer_scheduler, monkeypatch):
-    factory = httpx.Client
-    calls = []
-
-    def handle(request):
-        calls.append(request)
-        return httpx.Response(500)
-
-    monkeypatch.setattr(push_scheduler, "get_mooncake_bootstrap_addr", lambda config: ("bootstrap", 8998))
-    monkeypatch.setattr(
-        bootstrap_server.httpx, "Client", lambda **kwargs: factory(transport=httpx.MockTransport(handle))
-    )
-    with pytest.raises(httpx.HTTPStatusError):
-        producer_scheduler.set_xfer_handshake_metadata_from_workers(workers())
-    assert len(calls) == 1
-    assert producer_scheduler._registered_worker_metadata is None
-
-
-def test_validate_every_worker_before_registration(producer_scheduler, monkeypatch):
-    def unexpected_client(**kwargs):
-        pytest.fail("Must validate the full handshake before any HTTP registration")
-
-    monkeypatch.setattr(push_scheduler, "get_mooncake_bootstrap_addr", lambda config: ("bootstrap", 8998))
-    monkeypatch.setattr(bootstrap_server.httpx, "Client", unexpected_client)
-    invalid = workers()
-    invalid[(1, 1, 1)] = replace(invalid[(1, 1, 1)], handshake_port=0)
-    with pytest.raises(ValueError, match="listener address"):
-        producer_scheduler.set_xfer_handshake_metadata_from_workers(invalid)
-
-
-def test_abort_before_allocation_notifies_worker_by_transfer_id(producer_scheduler):
+def test_abort_before_allocation_notifies_worker_by_request_id(producer_scheduler):
     request = prefill_request()
     request.status = RequestStatus.FINISHED_ABORTED
     assert producer_scheduler.request_finished(request, ([], [])) == (False, None)
     meta = producer_scheduler.build_connector_meta(step(request, None, computed=16, scheduled=0))
-    assert meta.push_aborted_requests == {request.request_id: "xfer-123"}
+    assert meta.push_aborted_requests == {request.request_id: "d-request-123"}
     assert not meta.push_send_requests
 
 
-def test_scheduler_registration_is_queryable_over_http(producer_scheduler, monkeypatch):
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        port = listener.getsockname()[1]
-    server = push_scheduler.AscendMooncakeBootstrapServer("127.0.0.1", port)
-    server.start()
+@pytest.mark.parametrize("external_tokens", [0, 16])
+def test_metaserver_dispatch_is_concurrent_and_snapshots_blocks(scheduler, external_tokens, metaserver):
+    scheduler.dcp_size = 1
+    scheduler.set_xfer_handshake_metadata_from_workers(workers())
+    entered = [threading.Event(), threading.Event()]
+    release = threading.Event()
+    messages = []
+
+    def handle(http_request):
+        message = json.loads(http_request.content)
+        messages.append(message)
+        entered[int(message["request_id"].rsplit("-", 1)[1])].set()
+        assert release.wait(3)
+        return httpx.Response(200, json={"status": "ok"})
+
+    scheduler.metaserver_client = metaserver(handle)
     try:
-        monkeypatch.setattr(push_scheduler, "get_mooncake_bootstrap_addr", lambda config: ("127.0.0.1", port))
-        producer_scheduler.set_xfer_handshake_metadata_from_workers(workers())
-        with httpx.Client(timeout=3) as client:
-            response = client.get(f"http://127.0.0.1:{port}/query")
-            response.raise_for_status()
-        entry = response.json()["2"]
-        assert entry["engine_id"] == producer_scheduler.engine_id
-        assert (entry["tp_size"], entry["pp_size"], entry["pcp_size"], entry["dcp_size"]) == (2, 2, 2, 4)
-        for (pp, pcp, tp), worker in workers().items():
-            assert (
-                entry["worker_addr"][str(pcp)][str(tp)][str(pp)] == f"tcp://{worker.local_ip}:{worker.handshake_port}"
+        for i in range(2):
+            request = SimpleNamespace(
+                request_id=f"cmpl-parent-{i}-12345678",
+                num_prompt_tokens=32,
+                kv_transfer_params={
+                    "do_remote_prefill": True,
+                    "metaserver": "http://proxy/v1/metaserver",
+                    "num_computed_tokens": 16,
+                },
             )
+            blocks = ([1, 2], [3, 4])
+            scheduler.update_state_after_alloc(
+                request, SimpleNamespace(get_block_ids=lambda blocks=blocks: blocks), external_tokens
+            )
+            blocks[0][0] = 99
+        assert all(event.wait(3) for event in entered)
+        # Both HTTP calls are blocked, while scheduler metadata can still progress.
+        output = SimpleNamespace()
+        meta = scheduler.build_connector_meta(output)
+        assert len(meta.push_requests) == (2 if external_tokens else 0)
+        assert {message["request_id"] for message in messages} == {"cmpl-parent-0", "cmpl-parent-1"}
+        for message in messages:
+            assert message["remote_block_ids"] == [[1, 2], [3, 4]]
+            assert message["remote_request_id"] == message["request_id"] + "-12345678"
+            assert len(message["remote_worker_addresses"]) == 8
+            assert message["remote_num_external_tokens"] == external_tokens
+            assert message["remote_num_computed_tokens"] == 16
     finally:
-        server.shutdown()
+        release.set()
+        scheduler.metaserver_client.shutdown()
+    assert scheduler.metaserver_client.client.is_closed
+    scheduler.metaserver_client.check_errors()
+
+
+@pytest.mark.parametrize("failure", ["connect", "response", "read_timeout"])
+def test_metaserver_failure_is_propagated_without_redispatch(scheduler, failure, metaserver):
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        if failure == "connect":
+            raise httpx.ConnectError("unreachable", request=request)
+        if failure == "read_timeout":
+            raise httpx.ReadTimeout("P may already be running", request=request)
+        return httpx.Response(502)
+
+    scheduler.metaserver_client = metaserver(handle)
+    scheduler.metaserver_client.submit("request", "http://proxy/v1/metaserver", {})
+    scheduler.metaserver_client.executor.shutdown(wait=True)
+    assert len(calls) == (3 if failure == "connect" else 1)
+    with pytest.raises(RuntimeError, match="metaserver dispatch failed"):
+        scheduler.build_connector_meta(SimpleNamespace())
+
+
+def test_d_full_prefix_hit_needs_no_p_transfer(producer_scheduler):
+    request = prefill_request()
+    request.kv_transfer_params["remote_num_external_tokens"] = 0
+    allocate(producer_scheduler, request)
+    assert not producer_scheduler.build_connector_meta(step(request)).push_send_requests
+    assert producer_scheduler.request_finished(request, ([1],)) == (False, None)
+
+
+@pytest.mark.parametrize("initial_flag", [False, True])
+def test_push_load_order_covers_chunks_pending_sends_and_idle(producer_scheduler, initial_flag):
+    scheduler = producer_scheduler
+    request = prefill_request()
+    idle = step(request, scheduled=0)
+    idle.scheduled_new_reqs = []
+    idle.num_scheduled_tokens = {}
+    idle.has_sync_kv_loads = initial_flag
+    scheduler.build_connector_meta(idle)
+    assert idle.has_sync_kv_loads is initial_flag
+
+    allocate(scheduler, request)
+    for computed in (0, 16):
+        output = step(request, computed=computed)
+        scheduler.build_connector_meta(output)
+        assert output.has_sync_kv_loads
+
+    assert scheduler.request_finished(request, ([1], [11]))[0]
+    for _ in range(2):
+        idle.has_sync_kv_loads = False
+        scheduler.build_connector_meta(idle)
+        assert idle.has_sync_kv_loads  # Includes steps after the finish notice was consumed.
+
+    scheduler.update_connector_output(SimpleNamespace(finished_sending={request.request_id}))
+    idle.has_sync_kv_loads = False
+    scheduler.build_connector_meta(idle)
+    assert not idle.has_sync_kv_loads
+
+
+def test_abort_before_dispatch_starts_control_before_forward(producer_scheduler):
+    request = prefill_request()
+    request.status = RequestStatus.FINISHED_ABORTED
+    producer_scheduler.request_finished(request, ())
+    output = step(request, scheduled=0)
+    output.num_scheduled_tokens = {}
+    meta = producer_scheduler.build_connector_meta(output)
+    assert meta.push_aborted_requests
+    assert output.has_sync_kv_loads
+
+
+@pytest.mark.parametrize("use_replayssm", [False, True])
+def test_metaserver_mamba_blocks_exclude_only_speculative_tail(scheduler, use_replayssm, metaserver):
+    # MambaSpec derives this count from use_replayssm at model registration.
+    num_speculative_blocks = 0 if use_replayssm else 2
+    scheduler.group_unique_specs[1] = [
+        Mock(spec=base_scheduler.MambaSpec, num_speculative_blocks=num_speculative_blocks, is_circular=False)
+    ]
+    scheduler.dcp_size = 1
+    scheduler._metadata_thread = Mock()
+    messages = []
+
+    def handle(request):
+        messages.append(json.loads(request.content))
+        return httpx.Response(200)
+
+    scheduler.metaserver_client = metaserver(handle)
+    request = SimpleNamespace(
+        request_id="cmpl-test-12345678",
+        num_prompt_tokens=32,
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "num_computed_tokens": 0,
+            "metaserver": "http://proxy/v1/metaserver",
+        },
+    )
+    blocks = ([1, 2], [10, 11, 12])
+    scheduler.update_state_after_alloc(request, SimpleNamespace(get_block_ids=lambda: blocks), 32)
+    scheduler.metaserver_client.executor.shutdown(wait=True)
+    assert messages[0]["remote_block_ids"] == [[1, 2], [10, 11, 12] if use_replayssm else [10]]
+    assert "remote_num_speculative_tokens" not in messages[0]
+    assert blocks == ([1, 2], [10, 11, 12])
+    assert scheduler.build_connector_meta(None).push_requests[request.request_id].local_block_ids == (
+        (1, 2),
+        (10, 11, 12),
+    )

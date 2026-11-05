@@ -62,6 +62,36 @@ For FP8 main and indexer caches, configure both P and D with `--kv-cache-dtype f
 
 This transfer path still requires end-to-end validation on Ascend hardware, including configurations that combine it with `AscendStoreConnector` through `MultiConnector`.
 
+#### Mooncake V2 Layerwise Push Connector
+
+Set `kv_connector` to `MooncakePushConnector` on P and D, with `kv_role` set to
+`kv_producer` and `kv_consumer`, respectively. Use
+`examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py`
+as the proxy. This experimental path supports PCP/TP routing and PP layer
+lookup; workers currently require DCP=1 and do not support KVPP.
+
+The proxy sends the request to D first. After allocating blocks, D's scheduler
+submits an immutable destination snapshot to a 32-worker HTTP thread pool,
+which posts to the proxy's `/v1/metaserver`. The scheduler continues scheduling
+without waiting for HTTP. The proxy forwards the destination parameters to P;
+no Mooncake bootstrap server or worker Ready handshake is used.
+
+While P has outstanding transfers, its scheduler sets `has_sync_kv_loads=True`
+so that `start_load_kv()` prepares request state before forward and layer hooks.
+P queries D's scheduler metadata service for cache layouts. Its transfer
+pool writes each layer and sends completion to D workers. D waits for all P
+ranks, including ranks with no data to send, before reporting receive completion.
+Completions that arrive before D's worker allocation metadata are buffered.
+P retains its WRITE barriers and delayed block release until sends finish.
+
+The existing metaserver responds after P finishes. Consequently, outstanding
+HTTP requests occupy pool threads for that duration. A multi-prompt request
+must fit within both D's concurrent allocation capacity and the HTTP pool;
+otherwise waiting sibling notifications can exhaust the pool. Connection
+establishment failures are retried up to three attempts; response failures are
+not replayed because P may already have been dispatched. Background HTTP
+failures propagate to the scheduler instead of silently abandoning D's blocks.
+
 #### Mooncake D2RH Connector
 
 D2RH (device-to-remote-host) splits KV cache transfer into two stages:

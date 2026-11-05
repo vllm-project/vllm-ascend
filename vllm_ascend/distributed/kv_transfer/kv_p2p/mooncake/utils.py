@@ -4,17 +4,21 @@
 
 import contextlib
 import hashlib
+import queue
 import struct
 import time
 from collections import OrderedDict
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
+import httpx
 import numpy as np
 import numpy.typing as npt
 import torch
 import zmq
+from vllm import envs
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 
@@ -29,6 +33,54 @@ if TYPE_CHECKING:
 
 
 KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
+
+
+class MooncakeMetaserverClient:
+    """Submit D metadata in the background and surface failures to the scheduler."""
+
+    def __init__(self) -> None:
+        # The metaserver responds after P finishes, not when it accepts D's
+        # metadata. Allow the request lifetime for that response.
+        self.client = httpx.Client(
+            timeout=httpx.Timeout(
+                envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                connect=envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT,
+            )
+        )
+        self.executor = ThreadPoolExecutor(max_workers=32, thread_name_prefix="MooncakeMetaserver")
+        self._results: queue.SimpleQueue = queue.SimpleQueue()
+
+    def submit(self, request_id: str, url: str, message: dict[str, Any]) -> None:
+        future = self.executor.submit(self._access_metaserver, url, message)
+        future.add_done_callback(lambda result: self._on_done(request_id, result))
+
+    def _access_metaserver(self, url: str, message: dict[str, Any]) -> None:
+        # Only connection establishment is retried: a lost response may follow
+        # a successful P dispatch, so do not replay the request after a timeout.
+        for attempt in range(3):
+            try:
+                response = self.client.post(url, json=message)
+                response.raise_for_status()
+                return
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                if attempt == 2:
+                    raise
+
+    def _on_done(self, request_id: str, future: Future) -> None:
+        if not future.cancelled() and (error := future.exception()) is not None:
+            self._results.put((request_id, error))
+
+    def check_errors(self) -> None:
+        try:
+            request_id, error = self._results.get_nowait()
+        except queue.Empty:
+            return
+        # A response failure cannot certify that P never received the blocks.
+        raise RuntimeError(f"Mooncake metaserver dispatch failed for {request_id}") from error
+
+    def shutdown(self) -> None:
+        self.executor.shutdown(wait=True, cancel_futures=True)
+        self.client.close()
 
 
 @contextlib.contextmanager
