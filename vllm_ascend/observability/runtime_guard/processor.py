@@ -620,7 +620,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
 
         Sampled ids stay on device. The v35 kernels read the stashed logits by
         stride. Output rank only. Pair copy is issued later on the rare-pair
-        wait queue (or inline when ``VLLM_ASCEND_RARE_PAIR_SYNC=1``).
+        wait queue.
         """
         from vllm_ascend.observability.runtime_guard.hooks import is_async_output_rank
 
@@ -715,9 +715,8 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
     def consume_rare_pairs(self, output: Any) -> None:
         """After token-id ``get_output``: issue pair D2H and feed rc4.
 
-        Default: submit collect-wait + D2H + pack + feed to
-        :class:`RarePairWaitQueue` so this path does not touch the copy stream.
-        Set ``VLLM_ASCEND_RARE_PAIR_SYNC=1`` to materialize and feed inline (debug).
+        Submit collect-wait + D2H + pack + feed to :class:`RarePairWaitQueue`
+        so this path does not touch the copy stream on the inference thread.
         """
         pending = getattr(self, "_pending_rare_pair", None)
         self._pending_rare_pair = None
@@ -730,23 +729,13 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         n_req = len(req_ids)
         sampled = getattr(output, "sampled_token_ids", None)
 
-        from vllm_ascend import envs as _envs
-
         if n_req <= 0:
             if collect_event is not None:
                 collect_event.synchronize()
             del hold
             return
 
-        if _envs.VLLM_ASCEND_RARE_PAIR_SYNC:
-            cpu = self._materialize_rare_pair_cpu(hold, collect_event)
-            del hold
-            if cpu is None:
-                return
-            self._rare_pair_pack_and_feed(cpu, sampled, req_ids, n_req)
-            return
-
-        # Async default: pin before submit; finish_rare_chars deferred to reap.
+        # Pin before submit; finish_rare_chars deferred to reap.
         self._enable_rare_chars_finish_on_reap()
         pinned = tuple(rid for rid in req_ids[:n_req] if rid)
         store = RequestGuardStore.get()
