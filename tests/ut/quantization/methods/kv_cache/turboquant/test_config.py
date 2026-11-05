@@ -135,12 +135,14 @@ def test_sfa_model_is_validated_against_the_sfa_dims(runtime):
         config.validate_turboquant(runtime)
 
 
-def test_sfa_model_allows_context_parallelism(runtime):
-    # Only the compressed-cache path forbids DCP/PCP; the packed SFA cache works
-    # with context parallelism.
-    _as_sfa_model(runtime).parallel_config.decode_context_parallel_size = 2
+@pytest.mark.parametrize("field", ["decode_context_parallel_size", "prefill_context_parallel_size"])
+def test_sfa_model_rejects_context_parallelism(runtime, field):
+    # The packed SFA main cache does not support context parallelism either, so
+    # DCP/PCP is refused instead of accepted as it used to be.
+    setattr(_as_sfa_model(runtime).parallel_config, field, 2)
 
-    config.validate_turboquant(runtime)
+    with pytest.raises(ValueError, match="context parallelism"):
+        config.validate_turboquant(runtime)
 
 
 def test_sfa_cache_accepts_the_v1_model_runner(runtime):
