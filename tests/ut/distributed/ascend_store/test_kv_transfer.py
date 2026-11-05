@@ -1310,6 +1310,44 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         self.assertEqual(len(keys), 1)
         self.assertEqual(t._invalid_block_ids, set())
 
+    def test_handle_request_skips_pp_local_empty_group(self):
+        store = FakeStore()
+        db = FakeTokenDatabase()
+        db.set_group_buffers(
+            {0: [1000], 1: []},
+            {0: [16], 1: []},
+            {0: [1], 1: []},
+            group_num_layers={0: 1, 1: 0},
+        )
+        t = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True, token_len=16)
+        req = ReqMeta(
+            req_id="r-pp",
+            token_len_chunk=16,
+            block_ids_by_group=[[0], [0]],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+            load_spec=load_spec,
+            kv_cache_group_ids=[0, 1],
+        )
+
+        t.request_queue.put(req)
+        t._handle_request(req)
+
+        self.assertEqual(len(store.get_calls), 1)
+        keys, addrs, sizes = store.get_calls[0]
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(len(addrs), 1)
+        self.assertEqual(len(sizes), 1)
+
 
 class TestLayerBatchBuilder(unittest.TestCase):
     def _make_builder(self):
