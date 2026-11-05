@@ -18,7 +18,7 @@ def load_sparse_wrapper(adaptor_name="BaseDeviceAdaptor"):
     adaptor = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == "BaseDeviceAdaptor")
     methods = {"execute_sparse_flash_attention_process", "_execute_kv_quant_sparse_flash_attention_vllm"}
     adaptor.body = [n for n in adaptor.body if isinstance(n, ast.FunctionDef) and n.name in methods]
-    classes = [adaptor]
+    classes: list[ast.stmt] = [adaptor]
     if adaptor_name != "BaseDeviceAdaptor":
         a5 = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == adaptor_name)
         a5.body = [n for n in a5.body if isinstance(n, ast.FunctionDef) and n.name in methods] or [ast.Pass()]
