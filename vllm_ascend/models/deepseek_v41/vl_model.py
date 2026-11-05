@@ -14,7 +14,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 
 # Upstream #56741 normalized the V4.1 model package name from deepseek_v4_1
 # to deepseek_v41.
@@ -114,6 +114,21 @@ class AscendDeepseekV41ForCausalLM(
         self.requires_uncompiled_fallback = self.language_model.requires_uncompiled_fallback
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
         self.moe_comm_methods = self.language_model.moe_comm_methods
+        # Adapters are trained against the HF text backbone, so their keys start
+        # at ``model.layers.``. After multimodal wrapping the same modules live
+        # under ``language_model.``, so the LoRA loader needs this re-rooting
+        # rule to reach them. It is set on the instance on purpose: the
+        # class-level attribute is also read by ``configure_quant_config`` and
+        # the base weight loader, which must keep seeing raw checkpoint names.
+        self.hf_to_vllm_mapper = WeightsMapper(
+            orig_to_new_prefix={
+                "model.layers.": "language_model.model.layers.",
+                "layers.": "language_model.model.layers.",
+                "model.hc_head": "language_model.model.hc_head",
+                "hc_head": "language_model.model.hc_head",
+                "lm_head.": "language_model.lm_head.",
+            },
+        )
 
     def _parse_and_validate_image_input(self, **kwargs: object) -> dict | None:
         patches = kwargs.pop("patches", None)

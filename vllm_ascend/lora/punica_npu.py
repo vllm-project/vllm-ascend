@@ -112,7 +112,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         )
         # PunicaWrapperBase computes this only for prefill. Decode must also
         # choose between the active-LoRA and base-only quantized MoE paths.
-        self.no_lora = not any(lora_id > 0 for lora_id in mapping.index_mapping)
+        # vLLM 0.32 marks base-only tokens with -1 and the first adapter with
+        # slot 0, so "has an adapter" is ``>= 0``. Testing ``> 0`` made a
+        # single-adapter batch look LoRA-free and sent decode down the
+        # base-only quantized MoE path.
+        self.no_lora = not any(lora_id >= 0 for lora_id in mapping.index_mapping)
 
     def _shrink_prefill(
         self,
