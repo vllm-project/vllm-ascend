@@ -1,0 +1,4 @@
+pr: 2
+entries:
+  - category: config
+    text: Mooncake Mamba schedulers no longer reject configurations with both PCP and TP greater than one during initialization.
