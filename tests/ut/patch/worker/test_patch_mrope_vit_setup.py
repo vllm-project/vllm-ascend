@@ -19,12 +19,12 @@ class TestVitMropeSetupPatch(unittest.TestCase):
         preloaded = {name: types.ModuleType(name) for name in models}
         original = object()
         for module in preloaded.values():
-            module.vit_mrope_setup = original
+            vars(module)["vit_mrope_setup"] = original
         with patch.dict(sys.modules, preloaded):
             self.test_launch_grid_matches_block_size()
             for name, module in preloaded.items():
                 self.assertIs(sys.modules[name], module)
-                self.assertIs(module.vit_mrope_setup, original)
+                self.assertIs(vars(module)["vit_mrope_setup"], original)
 
     def test_launch_grid_matches_block_size(self):
         target = "vllm.model_executor.layers.rotary_embedding.mrope_vit_setup"
