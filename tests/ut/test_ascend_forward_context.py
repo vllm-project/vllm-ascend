@@ -16,6 +16,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 @pytest.fixture(autouse=True)
 def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(afc, "_mc2_tokens_capacity", None)
+    monkeypatch.setattr(afc, "_dispatch_v2_tokens_capacity", None)
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
@@ -554,3 +555,176 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_
             assert forward_context.moe_comm_method is (expected if model_owned else legacy_method)
 
     assert seen["inside"] is False
+
+
+def _patch_zercmoe_config_gate(monkeypatch):
+    config = _make_vllm_config(tensor_parallel_size=8, max_num_batched_tokens=65536)
+    config.model_config.dtype = torch.bfloat16
+    config.model_config.is_quantized = False
+    config.model_config.hf_text_config.moe_intermediate_size = 1536
+    config.parallel_config.data_parallel_size = 1
+    config.use_v2_model_runner = False
+    config.speculative_config = None
+    ascend_config = SimpleNamespace(
+        enable_zerc_moe=1,
+        enable_fused_mc2=1,
+        enable_prefill_mc2=False,
+        eplb_config=SimpleNamespace(dynamic_eplb=False),
+    )
+    monkeypatch.setattr(afc, "get_ascend_config", lambda: ascend_config)
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(afc, "enable_sp", lambda _: False)
+    monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A2))
+    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=8))
+    return config, ascend_config
+
+
+def test_zercmoe_config_gate_does_not_access_worker_group_or_wheel(monkeypatch):
+    config, _ = _patch_zercmoe_config_gate(monkeypatch)
+    monkeypatch.setattr(afc, "get_ep_group", MagicMock(side_effect=AssertionError("worker group accessed")))
+
+    assert afc.is_zercmoe_active_by_config(config)
+
+
+@pytest.mark.parametrize(
+    ("owner", "field", "value"),
+    [
+        ("ascend", "enable_zerc_moe", 0),
+        ("ascend", "enable_fused_mc2", 0),
+        ("parallel", "enable_expert_parallel", False),
+        ("parallel", "enable_eplb", True),
+        ("parallel", "pipeline_parallel_size", 2),
+        ("parallel", "data_parallel_size", 2),
+        ("parallel", "tensor_parallel_size", 1),
+        ("parallel", "tensor_parallel_size", 65),
+        ("parallel", "prefill_context_parallel_size", 2),
+        ("parallel", "decode_context_parallel_size", 2),
+        ("model", "dtype", torch.float16),
+        ("model", "is_quantized", True),
+        ("model", "enable_sleep_mode", True),
+        ("root", "weight_transfer_config", object()),
+        ("root", "lora_config", object()),
+        ("hf", "moe_intermediate_size", 1537),
+        ("eplb", "dynamic_eplb", True),
+    ],
+)
+def test_zercmoe_config_gate_rejects_unsupported_configs(monkeypatch, owner, field, value):
+    config, ascend_config = _patch_zercmoe_config_gate(monkeypatch)
+    objects = {
+        "ascend": ascend_config,
+        "parallel": config.parallel_config,
+        "model": config.model_config,
+        "root": config,
+        "hf": config.model_config.hf_text_config,
+        "eplb": ascend_config.eplb_config,
+    }
+    setattr(objects[owner], field, value)
+
+    assert not afc.is_zercmoe_active_by_config(config)
+
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A3, AscendDeviceType.A5, AscendDeviceType._310P])
+def test_zercmoe_config_gate_requires_a2(monkeypatch, device_type):
+    config, _ = _patch_zercmoe_config_gate(monkeypatch)
+    monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
+
+    assert not afc.is_zercmoe_active_by_config(config)
+
+
+def test_zercmoe_config_gate_excludes_sequence_parallel(monkeypatch):
+    config, _ = _patch_zercmoe_config_gate(monkeypatch)
+    monkeypatch.setattr(afc, "enable_sp", lambda _: True)
+
+    assert not afc.is_zercmoe_active_by_config(config)
+
+
+def test_zercmoe_config_gate_excludes_v2_speculative_decoding(monkeypatch):
+    config, _ = _patch_zercmoe_config_gate(monkeypatch)
+    config.use_v2_model_runner = True
+    config.speculative_config = object()
+
+    assert not afc.is_zercmoe_active_by_config(config)
+
+
+@pytest.mark.parametrize(
+    ("ep_size", "wheel_available", "expected"),
+    [(8, True, True), (8, False, False), (1, True, False), (65, True, False)],
+)
+def test_zercmoe_runtime_gate_checks_wheel_and_ep_group(monkeypatch, ep_size, wheel_available, expected):
+    from vllm_ascend.ops.fused_moe import moe_utils
+
+    config, _ = _patch_zercmoe_config_gate(monkeypatch)
+    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_size))
+    monkeypatch.setattr(moe_utils, "zercmoe_lib_available", lambda: wheel_available)
+
+    assert afc.use_cann_zercmoe(config) is expected
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "is_decode", "with_prefill", "is_draft_model", "available", "expected"),
+    [
+        (64, False, True, False, True, MoECommType.ALLGATHER),
+        (65, False, True, False, True, MoECommType.ZERC_MOE),
+        (4096, False, True, False, True, MoECommType.ZERC_MOE),
+        (4097, False, True, False, True, MoECommType.ALLGATHER),
+        (None, False, True, False, True, MoECommType.ZERC_MOE),
+        (128, False, None, False, True, MoECommType.ZERC_MOE),
+        (128, False, False, False, True, MoECommType.ALLGATHER),
+        (128, True, True, False, True, MoECommType.ALLGATHER),
+        (128, False, True, True, True, MoECommType.ALLGATHER),
+        (128, False, True, False, False, MoECommType.ALLGATHER),
+    ],
+)
+def test_zercmoe_selection_respects_prefill_graph_draft_and_capacity(
+    monkeypatch, num_tokens, is_decode, with_prefill, is_draft_model, available, expected
+):
+    _patch_select_moe_comm_method_deps(monkeypatch, device_type=AscendDeviceType.A2, capacity=4096)
+    monkeypatch.setattr(afc, "use_cann_zercmoe", lambda _: available)
+
+    assert (
+        afc.select_moe_comm_method(
+            num_tokens,
+            _make_vllm_config(),
+            is_draft_model=is_draft_model,
+            is_decode=is_decode,
+            with_prefill=with_prefill,
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(("capture_size", "expected_dispatch_capacity"), [(257, 264), (8192, 4096)])
+def test_zercmoe_capacity_preserves_separate_dispatch_v2_limit(monkeypatch, capture_size, expected_dispatch_capacity):
+    config, _ = _patch_zercmoe_config_gate(monkeypatch)
+    config.compilation_config.cudagraph_capture_sizes = [capture_size]
+    config.compilation_config.max_cudagraph_capture_size = capture_size
+    monkeypatch.setattr(afc, "use_cann_zercmoe", lambda _: True)
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: False)
+
+    afc.set_mc2_tokens_capacity(config, max_num_reqs=16, uniform_decode_query_len=1)
+
+    assert afc.get_mc2_tokens_capacity() == 4096 * 8
+    assert afc.get_dispatch_v2_tokens_capacity() == expected_dispatch_capacity
+
+
+def test_zercmoe_dispatch_capacity_without_graph_uses_decode_requests(monkeypatch):
+    config, _ = _patch_zercmoe_config_gate(monkeypatch)
+    monkeypatch.setattr(afc, "use_cann_zercmoe", lambda _: True)
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: False)
+
+    afc.set_mc2_tokens_capacity(config, max_num_reqs=200, uniform_decode_query_len=3)
+
+    assert afc.get_mc2_tokens_capacity() == 4096 * 8
+    assert afc.get_dispatch_v2_tokens_capacity() == 600
+
+
+@pytest.mark.parametrize("num_tokens,expected", [(1024, MoECommType.MC2), (1025, MoECommType.ALLGATHER)])
+def test_zercmoe_decode_fallback_uses_dispatch_capacity(monkeypatch, num_tokens, expected):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch, device_type=AscendDeviceType.A2, capacity=65536, ep_world_size=16, enable_fused_mc2=1
+    )
+    monkeypatch.setattr(afc, "use_cann_zercmoe", lambda _: True)
+    monkeypatch.setattr(afc, "get_dispatch_v2_tokens_capacity", lambda: 1024)
+    config = _make_vllm_config(world_size=16, tensor_parallel_size=16, num_experts=128)
+
+    assert afc.select_moe_comm_method(num_tokens, config, is_decode=True, with_prefill=False) == expected

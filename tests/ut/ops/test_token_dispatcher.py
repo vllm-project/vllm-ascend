@@ -106,6 +106,10 @@ class TestTokenDispatcherWithMC2(TestBase):
             return_value=self.mc2_tokens_capacity,
         )
         self.mock_get_mc2_tokens_capacity = self.mc2_capacity_patch.start()
+        self.dispatch_v2_capacity_patch = patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_dispatch_v2_tokens_capacity", return_value=0
+        )
+        self.mock_get_dispatch_v2_tokens_capacity = self.dispatch_v2_capacity_patch.start()
 
         self.mc2_group = MagicMock()
         self.mc2_group.device_group.return_value._get_backend.return_value.get_hccl_comm_name.return_value = "hccl_123"
@@ -159,6 +163,7 @@ class TestTokenDispatcherWithMC2(TestBase):
     def tearDown(self):
         self.config_patcher.stop()
         self.mc2_capacity_patch.stop()
+        self.dispatch_v2_capacity_patch.stop()
         self.mc2_group_patch.stop()
         self.rank_group_patch.stop()
         self.forward_context_patch.stop()
@@ -180,6 +185,20 @@ class TestTokenDispatcherWithMC2(TestBase):
         dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=8, num_experts=128)
 
         self.assertEqual(dispatcher.global_bs, 256)
+
+    def test_zercmoe_capacity_does_not_inflate_staged_dispatch_buffers(self):
+        self.mock_get_mc2_tokens_capacity.return_value = 4096
+        self.mock_get_dispatch_v2_tokens_capacity.return_value = 512
+        self.mock_get_config.return_value.parallel_config.tensor_parallel_size = 4
+        self.mock_skip_allreduce.return_value = True
+
+        staged = TokenDispatcherWithMC2()
+        fused = TokenDispatcherWithMC2(is_fused_mc2=True)
+
+        self.assertEqual(staged.max_num_tokens_per_rank, 128)
+        self.assertEqual(staged.global_bs, 1024)
+        self.assertEqual(fused.max_num_tokens_per_rank, 1024)
+        self.assertEqual(fused.global_bs, 8192)
 
     def test_get_dispatch_mc2_kwargs_with_skip_allreduce_omits_mc2_mask(self):
         self.mock_get_config.return_value.parallel_config.tensor_parallel_size = 4

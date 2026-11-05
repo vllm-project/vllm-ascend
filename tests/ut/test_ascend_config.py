@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import PropertyMock, patch
 
+import pytest
 from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -51,6 +52,7 @@ from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
     is_mega_moe_supported,
+    is_zercmoe_supported_by_config,
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -2159,3 +2161,91 @@ class TestEngramSharedMemoryDefaults(TestBase):
         config.engram_config = None
         AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig()).derive_and_validate(config)
         self.assertIsNone(config.engram_config)
+
+
+def _zercmoe_shape_config(hidden_size=2048, intermediate_size=1536):
+    return SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(hidden_size=hidden_size, moe_intermediate_size=intermediate_size),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("hidden_size", "intermediate_size", "expected"),
+    [
+        (1024, 512, True),
+        (8192, 3072, True),
+        (2064, 1552, True),
+        (1008, 1536, False),
+        (8208, 1536, False),
+        (2049, 1536, False),
+        (2048, 496, False),
+        (2048, 3088, False),
+        (2048, 1537, False),
+        (None, 1536, False),
+        (2048, None, False),
+    ],
+)
+def test_zercmoe_shape_contract(hidden_size, intermediate_size, expected):
+    assert is_zercmoe_supported_by_config(_zercmoe_shape_config(hidden_size, intermediate_size)) is expected
+
+
+def test_zercmoe_shape_contract_uses_model_hidden_size_fallback():
+    config = _zercmoe_shape_config(hidden_size=None)
+    config.model_config.get_hidden_size = lambda: 2048
+
+    assert is_zercmoe_supported_by_config(config)
+    assert not is_zercmoe_supported_by_config(SimpleNamespace(model_config=None))
+
+
+def test_zercmoe_config_defaults_and_explicit_values(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_ZERC_MOE", "0")
+    default = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False))
+    explicit = AscendConfig(
+        sparse_kv_offload_config=SimpleNamespace(enabled=False),
+        enable_zerc_moe=1,
+        zercmoe_ipport="tcp://127.0.0.1:19091",
+        zercmoe_shmem_mb=512,
+    )
+
+    assert default.enable_zerc_moe == 0
+    assert default.zercmoe_ipport is None
+    assert default.zercmoe_shmem_mb is None
+    assert explicit.enable_zerc_moe == 1
+    assert explicit.zercmoe_ipport == "tcp://127.0.0.1:19091"
+    assert explicit.zercmoe_shmem_mb == 512
+
+
+def test_zercmoe_env_default_and_additional_config_override(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_ZERC_MOE", "1")
+
+    assert AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False)).enable_zerc_moe == 1
+    assert AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False), enable_zerc_moe=0).enable_zerc_moe == 0
+
+
+@pytest.mark.parametrize("value", [-1, 2, "enabled"])
+def test_zercmoe_config_rejects_invalid_enable_switch(value):
+    with pytest.raises(ValueError):
+        AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False), enable_zerc_moe=value)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "512"])
+def test_zercmoe_config_requires_positive_integer_shmem(value):
+    with pytest.raises(ValueError, match="zercmoe_shmem_mb"):
+        AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False), zercmoe_shmem_mb=value)
+
+
+@pytest.mark.parametrize("value", ["2", "true", "-1"])
+def test_zercmoe_env_rejects_invalid_switch(monkeypatch, value):
+    from vllm_ascend import envs
+
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_ZERC_MOE", value)
+    with pytest.raises(ValueError, match="VLLM_ASCEND_ENABLE_ZERC_MOE"):
+        _ = envs.VLLM_ASCEND_ENABLE_ZERC_MOE
+
+
+def test_zercmoe_explicit_config_overrides_invalid_env_default(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_ZERC_MOE", "invalid")
+
+    assert AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False), enable_zerc_moe=0).enable_zerc_moe == 0

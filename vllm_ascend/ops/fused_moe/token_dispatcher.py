@@ -29,7 +29,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
+from vllm_ascend.ascend_forward_context import get_dispatch_v2_tokens_capacity, get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -129,6 +129,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         vllm_config = get_current_vllm_config()
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         mc2_tokens_capacity = get_mc2_tokens_capacity()
+        if not kwargs.get("is_fused_mc2", False):
+            # Staged dispatch V2 needs only its own decode capacity. A larger
+            # ZercMoE prefill limit must not inflate its communication buffers.
+            mc2_tokens_capacity = get_dispatch_v2_tokens_capacity() or mc2_tokens_capacity
         num_tokens_per_tp_rank = mc2_tokens_capacity // tp_size
         # Surface the per-rank capacity for CANN MegaMoe's get_symm_buffer
         # sizing (used by FusedMC2CommImpl._get_cann_symm_buffer). Without

@@ -11,7 +11,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported, is_zercmoe_supported_by_config
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     MoECommPolicy,
@@ -19,6 +19,7 @@ from vllm_ascend.device.hardware_profile import (
 )
 from vllm_ascend.quantization.quant_type import A5_SUPPORT_MEGA_MOE_QUANT_TYPES, QuantType
 from vllm_ascend.utils import (
+    enable_sp,
     has_layer_idx,
     is_moe_model,
 )
@@ -29,12 +30,15 @@ class MoECommType(Enum):
     MC2 = 1
     ALLTOALL = 2
     FUSED_MC2 = 3
+    ZERC_MOE = 4
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
 
 
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 16384
+_ZERC_MOE_TOKENS_PER_RANK_LIMIT = 4096
+_ZERC_MOE_MIN_TOKENS = 64
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
 
@@ -97,6 +101,47 @@ def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     )
 
 
+def is_zercmoe_active_by_config(vllm_config: VllmConfig) -> bool:
+    """Check the ZercMoE contract without importing its worker-only libraries."""
+    config = get_ascend_config()
+    if getattr(config, "enable_zerc_moe", 0) != 1 or config.enable_fused_mc2 != 1 or vllm_config is None:
+        return False
+    parallel = vllm_config.parallel_config
+    model = vllm_config.model_config
+    return (
+        get_current_hardware_profile().supports(HardwareCapability.ZERCMOE)
+        and model is not None
+        and is_moe_model(vllm_config)
+        and parallel.enable_expert_parallel
+        and parallel.pipeline_parallel_size == 1
+        and parallel.data_parallel_size == 1
+        and 1 < parallel.tensor_parallel_size <= 64
+        and getattr(parallel, "prefill_context_parallel_size", 1) == 1
+        and getattr(parallel, "decode_context_parallel_size", 1) == 1
+        and model.dtype == torch.bfloat16
+        and not model.is_quantized
+        and not getattr(model, "enable_sleep_mode", False)
+        and getattr(vllm_config, "weight_transfer_config", None) is None
+        and getattr(vllm_config, "lora_config", None) is None
+        and not enable_sp(vllm_config)
+        and not config.eplb_config.dynamic_eplb
+        and not getattr(parallel, "enable_eplb", False)
+        # MRv2's platform hook cannot identify a drafter invocation yet.
+        and not (
+            getattr(vllm_config, "use_v2_model_runner", False)
+            and getattr(vllm_config, "speculative_config", None) is not None
+        )
+        and is_zercmoe_supported_by_config(vllm_config)
+    )
+
+
+def use_cann_zercmoe(vllm_config: VllmConfig) -> bool:
+    """Resolve the wheel only in a worker after the config contract passes."""
+    from vllm_ascend.ops.fused_moe.moe_utils import zercmoe_lib_available
+
+    return is_zercmoe_active_by_config(vllm_config) and 1 < get_ep_group().world_size <= 64 and zercmoe_lib_available()
+
+
 @contextmanager
 def set_ascend_forward_context(
     attn_metadata: Any,
@@ -115,6 +160,7 @@ def set_ascend_forward_context(
     device_metadata_executor=None,
     has_sinks=False,
     eplb_heat_collection_status: bool = False,
+    with_prefill: bool | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -154,6 +200,8 @@ def set_ascend_forward_context(
             vllm_config,
             is_draft_model=is_draft_model,
             draft_moe_quant_type=draft_moe_quant_type,
+            is_decode=aclgraph_runtime_mode != CUDAGraphMode.NONE,
+            with_prefill=with_prefill,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -166,6 +214,7 @@ def set_ascend_forward_context(
         )
         forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
         forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
+        forward_context.use_zerc_moe = use_cann_zercmoe(vllm_config)
         forward_context.draft_moe_quant_type = draft_moe_quant_type
 
         tp_world_size = get_tensor_model_parallel_world_size()
@@ -238,6 +287,7 @@ def set_ascend_forward_context(
 
 _mc2_tokens_capacity: int | None = None
 _reserved_mc2_mask: torch.Tensor | None = None
+_dispatch_v2_tokens_capacity: int | None = None
 
 
 def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len):
@@ -247,11 +297,12 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
 
     ascend_config = get_ascend_config()
     use_mega_moe = use_cann_megamoe(vllm_config)
+    use_zerc_moe = use_cann_zercmoe(vllm_config)
 
     # Cap for fused MC2 / MegaMoe: regular MC2 (gated by enable_prefill_mc2) uses
     # HCCL comm buffer (HCCL_BUFFSIZE); MegaMoe (use_mega_moe, non-decode-only)
     # uses the symm buffer (separate torch alloc, not HCCL_BUFFSIZE).
-    if ascend_config.enable_prefill_mc2 or (use_mega_moe and not _is_decode_only_node(vllm_config)):
+    if ascend_config.enable_prefill_mc2 or ((use_mega_moe or use_zerc_moe) and not _is_decode_only_node(vllm_config)):
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
@@ -263,10 +314,22 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
     # keep the num_tokens_per_tp_rank less than fused_mc2 (mega_moe) tokens per rank limit
     if ascend_config.enable_fused_mc2:
-        if use_mega_moe:
+        if use_zerc_moe:
+            num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _ZERC_MOE_TOKENS_PER_RANK_LIMIT)
+        elif use_mega_moe:
             num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MEGA_MOE_TOKENS_PER_RANK_LIMIT)
         else:
             num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT)
+        # Normal dispatch-v2 still uses the decode-sized HCCL workspace.
+        # Its capacity must not grow with the fused ZercMoE/MegaMoE heap.
+        global _dispatch_v2_tokens_capacity
+        if use_zerc_moe:
+            if vllm_config.compilation_config.cudagraph_capture_sizes:
+                dispatch_max_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
+            else:
+                dispatch_max_tokens = max_num_reqs * uniform_decode_query_len
+            dispatch_tokens_per_rank = (dispatch_max_tokens + tp_size - 1) // tp_size
+            _dispatch_v2_tokens_capacity = min(dispatch_tokens_per_rank, _MC2_TOKENS_PER_RANK_LIMIT) * tp_size
 
     # keep the num_tokens_per_tp_rank less than mc2 tokens per rank limit
     else:
@@ -276,6 +339,10 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
 
 def get_mc2_tokens_capacity():
     return _mc2_tokens_capacity
+
+
+def get_dispatch_v2_tokens_capacity():
+    return _dispatch_v2_tokens_capacity
 
 
 def set_mc2_mask(vllm_config, device):
@@ -375,6 +442,8 @@ def select_moe_comm_method(
     vllm_config: VllmConfig,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    is_decode: bool = False,
+    with_prefill: bool | None = None,
 ) -> MoECommType | None:
     """Select the MoE communication method from the active hardware policy,
     parallel settings, and token count.
@@ -385,6 +454,9 @@ def select_moe_comm_method(
         is_draft_model (bool): Whether the model runs in MTP mode.
         draft_moe_quant_type (QuantType): The draft model's MoE quantization
             type, used on A5 to decide whether the draft can use mega moe.
+        is_decode (bool): Whether this invocation runs inside an ACL graph.
+        with_prefill (bool | None): Runtime prefill marker. False also excludes
+            eager decode; None preserves config-time token-based selection.
     Returns:
         MoECommType | None: The selected MoE communication method.
     """
@@ -402,13 +474,22 @@ def select_moe_comm_method(
         # is a single fused C++ op. This covers both normal model
         # forward and _dummy_run during profile_run.
         moe_comm_type = MoECommType.ALLTOALL
+    elif (
+        not is_decode
+        and not is_draft_model
+        and with_prefill is not False
+        and use_cann_zercmoe(vllm_config)
+        and (num_tokens is None or num_tokens > _ZERC_MOE_MIN_TOKENS)
+        and (num_tokens is None or (mc2_tokens_capacity is not None and num_tokens <= mc2_tokens_capacity))
+    ):
+        moe_comm_type = MoECommType.ZERC_MOE
     elif moe_comm_policy is MoECommPolicy.ALLGATHER:
         moe_comm_type = MoECommType.ALLGATHER
     else:
         moe_comm_type = _MOE_COMM_SELECTORS[moe_comm_policy](
             num_tokens,
             vllm_config,
-            mc2_tokens_capacity,
+            get_dispatch_v2_tokens_capacity() or mc2_tokens_capacity,
             is_draft_model,
             draft_moe_quant_type,
         )
@@ -434,6 +515,7 @@ class _ExtraForwardContextProxy:
         "moe_comm_method",
         "is_decode_only_node",
         "use_mega_moe",
+        "use_zerc_moe",
         "mmrs_fusion",
         "num_tokens",
         "padded_length",

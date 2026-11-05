@@ -53,7 +53,7 @@ _STANDARD_CAPABILITIES = frozenset(
 )
 
 _EXPECTED_CAPABILITIES = {
-    AscendDeviceType.A2: _STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P},
+    AscendDeviceType.A2: _STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P, HardwareCapability.ZERCMOE},
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.CANN_MEGAMOE,
@@ -242,3 +242,10 @@ def test_unknown_device_type_is_rejected() -> None:
 def test_every_device_type_has_a_profile() -> None:
     for device_type in AscendDeviceType:
         assert get_hardware_profile(device_type)._device_type is device_type
+
+
+@pytest.mark.parametrize("device_type", list(AscendDeviceType))
+def test_zercmoe_capability_is_a2_only(device_type):
+    assert get_hardware_profile(device_type).supports(HardwareCapability.ZERCMOE) is (
+        device_type == AscendDeviceType.A2
+    )

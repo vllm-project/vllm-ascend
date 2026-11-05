@@ -30,11 +30,12 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe, use_cann_zercmoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
+from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
@@ -47,6 +48,11 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+
+
+# Rank-wide zN scratch shared by every ZercMoE layer of this process:
+# keys are (w13_shape, w2_shape, dtype, device).
+_ZERCMOE_ZN_SCRATCH: dict = {}
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -117,7 +123,17 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # npu_format_cast. At that point, the operator should be able to handle weights
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if enable_fused_mc2:
+        use_zercmoe = enable_fused_mc2 and use_cann_zercmoe(get_current_vllm_config())
+        if use_zercmoe:
+            moe_utils.validate_zercmoe_layer(layer, self.moe)
+            # Keep only the ND weights: ALLGATHER decode consumes them as-is,
+            # and fused ZercMoE prefill packs zN on demand into a shared
+            # per-call scratch (see get_zercmoe_weights). A resident zN copy
+            # would double MoE weight memory (~30 GiB/rank at TP2) and OOM.
+            # npu_grouped_matmul reads ND byte order and materializes NZ from
+            # it internally, so zN bytes can NOT be shared with the decode GMM
+            # via format flags; on-demand packing is the single-copy scheme.
+        elif enable_fused_mc2:
             use_megamoe = use_cann_megamoe(get_current_vllm_config())
             if not use_megamoe:
                 layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
@@ -206,6 +222,41 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w1_scale_bias=w1_scale_bias,
             w2_scale_bias=w2_scale_bias,
         )
+
+    def get_zercmoe_weights(self, layer):
+        """Pack ND weights into zN bytes on demand.
+
+        All MoE layers of a rank share one rank-wide scratch (identical
+        shapes, ~384 MiB at TP2/EP2 for Qwen3.5-35B): fused_experts packs
+        this layer's weights into it and the ZercMoE operator consumes the
+        bytes synchronously on the same stream before the next layer packs.
+        Packing costs ~1 ms per layer pair on A2, ~40 ms per prefill step
+        for 40 layers - the price for halving resident MoE weights.
+        """
+        w13_param, w2_param = layer.w13_weight, layer.w2_weight
+        scratch = self._get_zercmoe_zn_scratch(w13_param.shape, w2_param.shape, w13_param.dtype, w13_param.device)
+        w13_buf, w2_buf = scratch
+        # Vectorized equivalent of zercmoe.pack_weights: per-expert zN
+        # flatten ([k, n] -> [n/16, k, 16]) batched over experts.
+        e, k, n = w13_param.shape
+        w13_buf.view(e, n // 16, k, 16).copy_(w13_param.view(e, k, n // 16, 16).permute(0, 2, 1, 3))
+        e2, i, k2 = w2_param.shape
+        w2_buf.view(e2, k2 // 16, i, 16).copy_(w2_param.view(e2, i, k2 // 16, 16).permute(0, 2, 1, 3))
+        return MoEWeights(w1=w13_buf, w2=w2_buf)
+
+    def _get_zercmoe_zn_scratch(self, w13_shape, w2_shape, dtype, device):
+        global _ZERCMOE_ZN_SCRATCH
+        key = (w13_shape, w2_shape, dtype, device)
+        scratch = _ZERCMOE_ZN_SCRATCH.get(key)
+        if scratch is None:
+            e, k, n2 = w13_shape
+            i = w2_shape[1]
+            scratch = (
+                torch.empty(e * k * n2, dtype=dtype, device=device),
+                torch.empty(e * i * k, dtype=dtype, device=device),
+            )
+            _ZERCMOE_ZN_SCRATCH[key] = scratch
+        return scratch
 
     def get_mlp_weights(self, layer):
         w13_weight_list = getattr(layer, "w13_weight_list", None)
