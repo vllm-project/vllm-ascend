@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm_ascend.attention.context_parallel import dcp_metadata
 from vllm_ascend.attention.utils import AscendDCPMetadata
 from vllm_ascend.worker.dcp_utils import DCPManager
 
@@ -363,3 +364,59 @@ def test_update_spec_decode_drafting_metadata_prioritizes_sfa_dcp() -> None:
         manager._get_dcp_local_seq_lens.call_args.args[0],
         torch.tensor([9, 13], dtype=torch.int32),
     )
+
+
+def test_dcp_manager_metadata_methods_delegate_to_attention_helpers() -> None:
+    manager = _make_dcp_manager(dcp_world_size=2, dcp_rank=1, interleave_size=1)
+    seq_lens = torch.tensor([1, 2, 128, 129], dtype=torch.int32)
+
+    torch.testing.assert_close(
+        manager._get_dcp_local_seq_lens(seq_lens),
+        dcp_metadata.dcp_local_seq_lens(seq_lens, dcp_size=2, cp_kv_cache_interleave_size=1),
+    )
+    torch.testing.assert_close(
+        manager.prepare_dcp_local_seq_lens_cpu(seq_lens),
+        dcp_metadata.dcp_local_seq_lens(seq_lens, dcp_size=2, cp_kv_cache_interleave_size=1, dcp_rank=1),
+    )
+
+    manager.num_reqs = 2
+    manager.num_decode_reqs = 2
+    manager.query_lens_full = SimpleNamespace(cpu=torch.tensor([4, 2], dtype=torch.int32))
+    input_batch = SimpleNamespace(num_computed_tokens_cpu=np.array([5, 10], dtype=np.int32))
+    block_table = torch.zeros((2, 1), dtype=torch.int32)
+    num_scheduled_tokens = np.array([4, 2], dtype=np.int32)
+    metadata, actual_block_table = manager.generate_dcp_metadata(
+        6,
+        torch.tensor([4, 2]),
+        input_batch,
+        num_scheduled_tokens,
+        block_table,
+        2,
+        2,
+    )
+
+    context_lens = np.concatenate(
+        [
+            input_batch.num_computed_tokens_cpu[:2] + num_scheduled_tokens[:2],
+            input_batch.num_computed_tokens_cpu[2:],
+        ]
+    )
+    expected_local_seq_lens = dcp_metadata.dcp_local_seq_lens(
+        torch.tensor(context_lens),
+        dcp_size=2,
+        cp_kv_cache_interleave_size=1,
+    )
+    expected_metadata = dcp_metadata.build_dcp_metadata(
+        expected_local_seq_lens,
+        manager.query_lens_full.cpu[:2],
+        4,
+    )
+    np.testing.assert_array_equal(
+        metadata.num_computed_tokens_of_dcp,
+        expected_metadata.num_computed_tokens_of_dcp,
+    )
+    torch.testing.assert_close(metadata.query_lens_cpu, expected_metadata.query_lens_cpu)
+    assert metadata.max_query_len == expected_metadata.max_query_len == 4
+    assert metadata.dcp_mtp_attn_mask is None
+    assert actual_block_table is block_table
+    assert manager.long_seq_metadata is metadata
