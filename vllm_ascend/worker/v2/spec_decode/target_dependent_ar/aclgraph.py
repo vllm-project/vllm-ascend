@@ -31,6 +31,7 @@ from vllm_ascend.compilation.updatable_graph import (
 )
 from vllm_ascend.utils import is_drafter_moe_model, use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import (
+    AscendGraphManagerMixin,
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
 )
@@ -60,7 +61,7 @@ def get_draft_prefill_cudagraph_mode(vllm_config: VllmConfig, cudagraph_mode: CU
     return CUDAGraphMode.PIECEWISE if cudagraph_mode.has_piecewise_cudagraphs() else CUDAGraphMode.NONE
 
 
-class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
+class AutoRegressiveAclGraphManager(AscendGraphManagerMixin, SpeculatorCudaGraphManager):
     """ACL graph manager for autoregressive speculative decoding."""
 
     def __init__(

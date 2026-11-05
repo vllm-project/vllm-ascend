@@ -49,7 +49,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group, get_world_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader.weight_checksum import compute_tensor_digests, zero_weights
@@ -86,6 +86,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.compilation.static_kernel import initialize_static_kernel_runtime, release_static_kernels
 from vllm_ascend.core import kv_cache_dtype_handlers  # noqa: F401
 from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
@@ -266,6 +267,7 @@ class NPUWorker(GPUWorker):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
+        self._static_kernel_runtime_initialized = False
         self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
@@ -601,6 +603,11 @@ class NPUWorker(GPUWorker):
             shutdown_fn = getattr(model_runner, "shutdown", None)
             if callable(shutdown_fn):
                 shutdown_fn()
+        if self._static_kernel_runtime_initialized:
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier(group=get_world_group().cpu_group)
+            release_static_kernels()
+            self._static_kernel_runtime_initialized = False
         if engram_error is not None:
             raise engram_error
 
@@ -727,6 +734,18 @@ class NPUWorker(GPUWorker):
         # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
         # for more details
         self.device = self._init_device()
+        compilation = get_ascend_config().ascend_compilation_config
+        static_kernel_compilation = "disabled"
+        if compilation.enable_static_kernel:
+            static_kernel_compilation = (
+                "enabled through model compilation" if compilation.enable_npugraph_ex else "enabled during graph warmup"
+            )
+        logger.info_once(
+            "Static kernel compilation is %s. SuperKernel is %s.",
+            static_kernel_compilation,
+            "enabled" if compilation.enable_super_kernel else "disabled",
+            scope="global",
+        )
         # FLA import-time capability queries must run on the selected worker
         # device, and registration must finish before any model is constructed.
         # TODO: Drop this separate call when supported vLLM FLA or Triton Ascend
@@ -747,6 +766,9 @@ class NPUWorker(GPUWorker):
             from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
+            if compilation.enable_static_kernel and not compilation.enable_npugraph_ex:
+                initialize_static_kernel_runtime(self.vllm_config, capture=True)
+                self._static_kernel_runtime_initialized = True
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.

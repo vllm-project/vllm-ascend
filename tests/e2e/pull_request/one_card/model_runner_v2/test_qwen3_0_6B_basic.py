@@ -16,6 +16,7 @@
 #
 
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -67,9 +68,14 @@ def test_qwen3_dense_eager_mode(
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
 @pytest.mark.parametrize(
-    "compilation_config",
+    ("compilation_config", "enable_static_kernel"),
     [
-        pytest.param({}, id="default_full_and_piecewise"),
+        pytest.param({}, False, id="default_full_and_piecewise"),
+        pytest.param(
+            {"cudagraph_capture_sizes": [1, 4, 32]},
+            True,
+            id="static_kernel_full_and_piecewise",
+        ),
     ],
 )
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
@@ -79,7 +85,16 @@ def test_qwen3_dense_graph_mode(
     max_tokens: int,
     enforce_eager: bool,
     compilation_config: dict,
+    enable_static_kernel: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    additional_config = {}
+    if enable_static_kernel:
+        monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+        monkeypatch.chdir(tmp_path)
+        additional_config = {"ascend_compilation_config": {"enable_static_kernel": True, "enable_super_kernel": True}}
+
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -93,8 +108,13 @@ def test_qwen3_dense_graph_mode(
         max_model_len=1024,
         enforce_eager=enforce_eager,
         compilation_config=compilation_config,
+        additional_config=additional_config,
     ) as runner:
         outputs = runner.model.generate(prompts, sampling_params)
+
+    assert len(outputs) == len(prompts)
+    if enable_static_kernel:
+        assert list((tmp_path / "static_kernel_compile_outputs").glob("*/*.run")), "No static kernels were compiled"
 
     expected_outputs = [
         " Lina. I'm a 22-year-old student from China.",

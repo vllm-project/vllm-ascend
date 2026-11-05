@@ -695,6 +695,7 @@ def test_worker_retires_reader_before_network_shutdown(monkeypatch):
 
     order = []
     worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
+    worker._static_kernel_runtime_initialized = False
     worker.model_runner = SimpleNamespace(
         model=SimpleNamespace(close_shared_engram=lambda: order.append("reader")),
         shutdown=lambda: order.append("runner"),
@@ -724,6 +725,7 @@ def test_worker_continues_cleanup_when_reader_close_fails(rdma):
     }
     exec(compile(ast.Module(body=[shutdown], type_ignores=[]), str(worker_file), "exec"), namespace)
     worker = SimpleNamespace(
+        _static_kernel_runtime_initialized=False,
         model_runner=SimpleNamespace(
             model=SimpleNamespace(close_shared_engram=fail_close), shutdown=lambda: events.append("runner")
         ),
