@@ -17,6 +17,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import math
 from typing import Any, cast
 
 import torch
@@ -100,6 +101,10 @@ def _probabilistic_rejection_kernel(
     # [num_logits, num_blocks], same layout as target_local_sumexp
     entropy_partials_ptr,
     vocab_num_blocks,
+    vocab_size,
+    fly_entropy_ptr,
+    fly_entropy_threshold,
+    FLY_WINDOW_SIZE: tl.constexpr,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
@@ -123,8 +128,14 @@ def _probabilistic_rejection_kernel(
     target_lse = 0.0
     draft_lse = 0.0
     accepted = True
+    pending_rejection = tl.full((), -1, tl.int64)
+    rejected_argmax = tl.full((), -1, tl.int64)
     for i in range(num_tokens - 1):
         if accepted:
+            previous_target_lse = target_lse
+            previous_draft_lse = draft_lse
+            can_defer = False
+            target_argmax = tl.full((), -1, tl.int64)
             logit_idx = start_idx + i
             draft_sampled = tl.load(draft_sampled_ptr + logit_idx + 1)
             if temp == 0.0:
@@ -161,6 +172,14 @@ def _probabilistic_rejection_kernel(
                     tl.store(sampled_ptr + req_idx * sampled_stride + i, token)
                 else:
                     accepted &= target_argmax == draft_sampled
+                    if FLY_WINDOW_SIZE > 0:
+                        valid = (draft_sampled >= 0) & (draft_sampled < vocab_size)
+                        draft_score = tl.load(
+                            target_logits_ptr + logit_idx * target_logits_stride + draft_sampled,
+                            mask=valid,
+                            other=float("-inf"),
+                        )
+                        can_defer = valid & (draft_score > float("-inf"))
                     tl.store(sampled_ptr + req_idx * sampled_stride + i, target_argmax)
             elif USE_BLOCK_VERIFICATION:
                 accepted = draft_sampled >= 0
@@ -201,9 +220,9 @@ def _probabilistic_rejection_kernel(
             else:
                 # -1 is used for placeholder draft token ids that should be
                 # rejected.
-                is_valid_draft = draft_sampled >= 0
+                is_valid_draft = (draft_sampled >= 0) & (draft_sampled < vocab_size)
                 # Avoid possible OOB ptr access.
-                draft_sampled = tl.maximum(0, draft_sampled)
+                draft_sampled = tl.minimum(vocab_size - 1, tl.maximum(0, draft_sampled))
                 target_logit = tl.load(target_logits_ptr + logit_idx * target_logits_stride + draft_sampled).to(
                     tl.float32
                 )
@@ -275,9 +294,35 @@ def _probabilistic_rejection_kernel(
                     accepted &= target_log_prob > tl.log(u) + draft_log_prob
                 # -1 placeholder draft tokens can never be accepted.
                 accepted &= is_valid_draft
+                if FLY_WINDOW_SIZE > 0:
+                    can_defer = is_valid_draft & (target_log_prob > float("-inf")) & (draft_log_prob > float("-inf"))
                 tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
-            if not USE_BLOCK_VERIFICATION or temp == 0.0:
+            if FLY_WINDOW_SIZE > 0:
+                if pending_rejection >= 0:
+                    # Keep the original rejection's normalization statistics
+                    # until all W subsequent native decisions have succeeded.
+                    target_lse = previous_target_lse
+                    draft_lse = previous_draft_lse
+                    if accepted and i - pending_rejection == FLY_WINDOW_SIZE:
+                        rejected_step = i + 1
+                        pending_rejection = tl.full((), -1, tl.int64)
+                elif accepted:
+                    rejected_step = i + 1
+                else:
+                    if temp == 0.0:
+                        rejected_argmax = target_argmax
+                    accepted = (
+                        can_defer
+                        and i + FLY_WINDOW_SIZE < num_tokens - 1
+                        and tl.load(fly_entropy_ptr + logit_idx) >= fly_entropy_threshold
+                    )
+                    if accepted:
+                        pending_rejection = i
+                tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
+            elif not USE_BLOCK_VERIFICATION or temp == 0.0:
                 rejected_step += accepted
+    if FLY_WINDOW_SIZE > 0 and temp == 0.0 and rejected_step < num_tokens - 1:
+        tl.store(sampled_ptr + req_idx * sampled_stride + rejected_step, rejected_argmax)
     tl.store(rejected_steps_ptr + req_idx, rejected_step)
     if USE_BLOCK_VERIFICATION and (temp != 0.0 and rejected_step < num_tokens - 1):
         rejected_idx = start_idx + rejected_step
@@ -336,9 +381,7 @@ def rejection_sample(
     watermarking: torch.Tensor | None = None,
     watermarking_skip_mask: torch.Tensor | None = None,
     watermark_key: int | None = None,
-    # vLLM main (#53987) added FLy, an ROCm-only entropy-gated verification
-    # mode. Accept the kwargs so the shared call site keeps working, but reject
-    # the mode itself.
+    # FLy is opt-in and changes the target distribution.
     fly_window_size: int = 0,
     fly_entropy_threshold: float = 0.3,
     fly_entropy_top_k: int = 3,
@@ -374,8 +417,6 @@ def rejection_sample(
             draft_logits_row_mapping = draft_logits_cache.row_mapping
         if draft_logits_row_mapping is not None:
             raise NotImplementedError("Batch-sharded draft logits are not supported on NPU.")
-    if fly_window_size > 0:
-        raise NotImplementedError("FLy rejection sampling is not supported on NPU.")
     if (
         contexts is not None
         or watermarking is not None
@@ -399,6 +440,18 @@ def rejection_sample(
     if use_entropy_verify and (not (0 < posterior_threshold <= 1) or not (posterior_alpha >= 0)):
         raise ValueError("posterior_threshold must be in (0, 1] and posterior_alpha must be >= 0.")
 
+    if fly_window_size < 0 or fly_entropy_top_k < 1:
+        raise ValueError("FLy requires a non-negative window and positive entropy top-k")
+    if not math.isfinite(fly_entropy_threshold) or fly_entropy_threshold < 0:
+        raise ValueError("fly_entropy_threshold must be finite and non-negative")
+    if fly_window_size and (
+        fly_window_size >= num_speculative_steps
+        or use_block_verification
+        or use_entropy_verify
+        or synthetic_conditional_rates is not None
+    ):
+        raise ValueError("FLy requires window < K and cannot be combined with block, entropy or synthetic verification")
+
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
     has_draft_logits = draft_logits is not None
@@ -421,6 +474,14 @@ def rejection_sample(
         # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
         # vocab size is larger than the draft's due to padding.
         vocab_size = min(vocab_size, draft_logits.size(-1))
+
+    fly_entropy = None
+    if fly_window_size:
+        # Use upstream's top-k (without subset renormalization) entropy
+        # contract. Torch topk/logsumexp execute on the NPU; no host readback.
+        from vllm.v1.spec_decode.fly import compute_fly_entropy
+
+        fly_entropy = compute_fly_entropy(target_logits[:, :vocab_size], fly_entropy_top_k, from_logits=True)
 
     # Compute the block-level logits stats, such as target argmax
     # (for greedy requests), and target max + softmax exponential
@@ -671,6 +732,10 @@ def rejection_sample(
         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
         entropy_partials,
         vocab_num_blocks,
+        vocab_size,
+        fly_entropy,
+        fly_entropy_threshold,
+        FLY_WINDOW_SIZE=fly_window_size,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
