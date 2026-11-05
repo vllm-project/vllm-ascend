@@ -730,6 +730,8 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
                     query.dtype
                 )  # type: ignore
 
+            rotary_mode = "half" if self.is_neox_style else "interleave"
+
             query, key = torch_npu.npu_mrope(
                 positions.contiguous(),
                 query.contiguous(),
@@ -737,7 +739,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
                 self.cos_sin_cache.contiguous(),
                 self.head_size,
                 mrope_section=mrope_section,
-                rotary_mode="half",
+                rotary_mode=rotary_mode,
             )
 
         # Upstream DFlash/DSpark assumes RoPE is in-place and discards the
