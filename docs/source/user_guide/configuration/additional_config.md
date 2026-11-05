@@ -407,3 +407,22 @@ convolution allocates its output separately.
 Small prefix match units can increase checkpoint traffic.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.
+
+## GDN input projection overlap
+
+Enable with `--additional-config '{"gdn_projection_overlap_max_tokens": 64}'`.
+The default is 0 (disabled); 64 is a trial setting, not a measured 910C threshold.
+Only BF16 plain unquantized QKVZ and BA projections, PCP=1, no LoRA/DBO,
+no output gather or custom communication op, and ACLGraph capture outside
+Dynamo tracing are eligible. Other paths remain serial. Quantized projections
+and the split QKV/Z LoRA path are excluded. Both known upstream and Ascend
+unquantized linear methods are accepted. Weight tensors are not repacked.
+
+For whole-model evaluation, use MRV2 with an eager forward captured into a
+full decode ACLGraph, for example
+`--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}'`.
+`--enforce-eager` disables graph capture and therefore does not enable overlap.
+Dynamo-compiled forward regions stay serial; confirm the chosen serving path
+with a trace rather than assuming that the configuration flag proves overlap.
+
+Validate correctness, quality and performance on the deployment hardware before enabling in production.

@@ -39,6 +39,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
 from vllm_ascend.ops.gdn_checkpoint import initialize_gdn_checkpoints
+from vllm_ascend.ops.gdn_projection import initialize_gdn_projection_overlap
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
@@ -390,6 +391,7 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PA
         _GDN_ORIGINAL_INIT(self, *args, **kwargs)
         initialize_packed_conv_weight(self)
         initialize_gdn_checkpoints(self)
+        initialize_gdn_projection_overlap(self)
 
     _GDN_PATCH_TARGET.__init__ = _gdn_init_with_packed_weight
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward

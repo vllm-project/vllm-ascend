@@ -1693,6 +1693,11 @@
 # Why: Ascend replaces the upstream GDN forward/backend.
 # How: initialize the capability-gated per-layer NPU adaptation after upstream init.
 # Related PR: vllm-project/vllm#60050.
+
+# worker/patch_qwen3_5.py: GDN input projection overlap.
+# Why: Ascend replaces the upstream GDN forward/backend.
+# How: initialize the opt-in per-layer NPU adaptation after upstream init.
+# Related PR: vllm-project/vllm#64425.
 # Future Plan: remove this initialization hook when a shared backend extension supports it.
 
 # ** 36. File: worker/patch_staged_writes.py**
