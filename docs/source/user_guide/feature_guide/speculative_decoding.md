@@ -387,6 +387,14 @@ A few important things to consider when using DFlash2 draft models:
 5. The selector parameters (`selector_top_k`, `selector_rank`, ...) come from
    the draft checkpoint's `dflash_config` and need no user configuration.
 
+6. **Fused candidate scoring**: With Triton available, FP16/BF16 selectors
+   with contiguous codebooks, `selector_top_k <= 32`, and `selector_rank <= 256`
+   use an Ascend Triton kernel to gather codebook rows, score candidate pairs,
+   and add unary logits. Scores accumulate and are returned in FP32, following upstream
+   vLLM #64916. Other layouts, dtypes, and larger tiles use the PyTorch
+   reference. No extra configuration is required. Near-tied candidate paths
+   may change because edge sums are no longer rounded to the input dtype.
+
 ## Speculating using LiLiCorr
 
 LiLiCorr is a DFlash variant that reranks the per-position top-k candidate
