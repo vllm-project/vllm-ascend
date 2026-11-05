@@ -11,6 +11,21 @@ from unittest.mock import MagicMock, patch
 
 
 class TestVitMropeSetupPatch(unittest.TestCase):
+    def test_preloaded_modules_are_restored(self):
+        models = (
+            "vllm.models.minimax_m3.common.vision_tower",
+            "vllm_ascend.models._vllm_minimax_m3_common_vision_tower",
+        )
+        preloaded = {name: types.ModuleType(name) for name in models}
+        original = object()
+        for module in preloaded.values():
+            module.vit_mrope_setup = original
+        with patch.dict(sys.modules, preloaded):
+            self.test_launch_grid_matches_block_size()
+            for name, module in preloaded.items():
+                self.assertIs(sys.modules[name], module)
+                self.assertIs(module.vit_mrope_setup, original)
+
     def test_launch_grid_matches_block_size(self):
         target = "vllm.model_executor.layers.rotary_embedding.mrope_vit_setup"
         models = (
@@ -55,6 +70,12 @@ class TestVitMropeSetupPatch(unittest.TestCase):
                     assert spec is not None and spec.loader is not None
                     module = importlib.util.module_from_spec(spec)
                     with patch.dict(sys.modules, {**modules, **dict.fromkeys(blocked_models)}):
+                        # Full-suite collection may have imported these aliases.
+                        # Remove absent cases inside the restoring context so the
+                        # patch cannot mutate modules owned by other tests.
+                        for model, state in zip(models, states):
+                            if state == "absent":
+                                sys.modules.pop(model, None)
                         spec.loader.exec_module(module)
                         self.assertIs(upstream.vit_mrope_setup, module.vit_mrope_setup)
                         self.assertIs(upstream._vit_mrope_setup_kernel, kernel)
