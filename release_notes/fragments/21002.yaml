@@ -1,4 +1,0 @@
-pr: 21002
-entries:
-  - category: bugfix
-    text: Restored per-cycle predicted imbalance and expert-transfer summaries in Model Runner V2 asynchronous EPLB logs.
