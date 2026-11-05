@@ -188,11 +188,13 @@ class HiSparseNPUOps:
         *,
         attention_capacity: int = 0,
         attention_block_stride: int | None = None,
+        attention_lengths: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
         self.host_mapping = host_mapping
         self.workspace = workspace
         self.attention_capacity = attention_capacity
         self.attention_block_stride = attention_block_stride
+        self.attention_lengths = attention_lengths
 
     def hisparse_resolve_residency(
         self,
