@@ -16,6 +16,11 @@ from vllm_ascend.models.glm5next.model import Glm5NextForCausalLM
 
 @pytest.fixture
 def parallel_groups(monkeypatch):
+    monkeypatch.setattr(
+        model_kda,
+        "get_ascend_config",
+        lambda: SimpleNamespace(finegrained_tp_config=SimpleNamespace(qkv_iproj_tensor_parallel_size=1)),
+    )
     # Exercise inherited vLLM loaders without Ascend's OOT class replacement.
     for name in ("ColumnParallelLinear", "RowParallelLinear"):
         monkeypatch.delitem(custom_op.op_registry_oot, name, raising=False)
@@ -103,7 +108,10 @@ def test_pcp_output_projection_loads_input_heads_and_reduces_over_pcp(
         parallel_groups.all_reduce.assert_not_called()
 
 
-@pytest.mark.parametrize(("tp_size", "pcp_size"), [(1, 1), (1, 2), (1, 4), (2, 1), (2, 4), (4, 2)])
+@pytest.mark.parametrize(
+    ("tp_size", "pcp_size", "input_proj_tp_size"),
+    [(1, 1, 1), (1, 2, 1), (1, 4, 1), (2, 1, 1), (2, 4, 1), (4, 2, 1), (1, 1, 2), (1, 1, 4), (1, 1, 8)],
+)
 @pytest.mark.parametrize(
     ("cudagraph_mode", "needs_output_buffer"),
     [
@@ -114,8 +122,16 @@ def test_pcp_output_projection_loads_input_heads_and_reduces_over_pcp(
         (CUDAGraphMode.FULL_AND_PIECEWISE, True),
     ],
 )
+@pytest.mark.parametrize("static_output_bias", [False, True])
 def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
-    monkeypatch, parallel_groups, tp_size, pcp_size, cudagraph_mode, needs_output_buffer
+    monkeypatch,
+    parallel_groups,
+    tp_size,
+    pcp_size,
+    input_proj_tp_size,
+    cudagraph_mode,
+    needs_output_buffer,
+    static_output_bias,
 ):
     # Construct the complete KDA layer to catch mismatched projection, gate,
     # convolution, and cache dimensions, including the TP>1 fallback.
@@ -123,6 +139,15 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
     monkeypatch.setattr(linear, "get_tensor_model_parallel_rank", lambda: tp_size - 1)
     parallel_groups.world_size = pcp_size
     parallel_groups.rank_in_group = pcp_size - 1
+    input_proj_tp_group = SimpleNamespace(world_size=input_proj_tp_size, rank_in_group=input_proj_tp_size - 1)
+    monkeypatch.setattr(model_kda, "get_qkv_iproj_tp_group", lambda: input_proj_tp_group)
+    monkeypatch.setattr(
+        model_kda,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            finegrained_tp_config=SimpleNamespace(qkv_iproj_tensor_parallel_size=input_proj_tp_size)
+        ),
+    )
     config = SimpleNamespace(
         model_type="glm5_next",
         hidden_size=16,
@@ -153,6 +178,16 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
     monkeypatch.setattr(
         "vllm.third_party.flash_linear_attention.ops.kda.FusedRMSNormGated", lambda *args, **kwargs: torch.nn.Identity()
     )
+    if static_output_bias:
+        row_init = model_kda.RowParallelLinear.__init__
+
+        def init_static_row(self, *args, **kwargs):
+            row_init(self, *args, **kwargs)
+            self.register_parameter(
+                "quant_bias", torch.nn.Parameter(torch.zeros(self.output_size), requires_grad=False)
+            )
+
+        monkeypatch.setattr(model_kda.RowParallelLinear, "__init__", init_static_row)
     layer = model_kda.Glm5NextLinearAttention(config, vllm_config, prefix="model.layers.0.linear_attn")
     assert layer._needs_output_buffer is needs_output_buffer
     assert layer.pcp_group is parallel_groups
@@ -164,17 +199,19 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
     assert layer.local_num_heads == 8 // size
     assert layer.local_projection_size == 1024 // size
     assert layer.use_pcp_head_sharding == (tp_size == 1 and pcp_size > 1)
-    assert (
-        isinstance(layer.in_proj_qkvbfg_a, model_kda.PCPGlm5NextMergedColumnParallelLinear)
-        == layer.use_pcp_head_sharding
+    assert isinstance(layer.in_proj_qkvbfg_a, model_kda.PCPGlm5NextMergedColumnParallelLinear) == (
+        layer.use_pcp_head_sharding or input_proj_tp_size > 1
     )
     assert isinstance(layer.o_proj, model_kda.PCPRowParallelLinear) == layer.use_pcp_head_sharding
     for name in ("f_b_proj", "g_b_proj", "q_conv1d", "k_conv1d", "v_conv1d"):
         projection = getattr(layer, name)
         assert isinstance(projection, model_kda.PCPColumnParallelLinear) == layer.use_pcp_head_sharding
         assert projection.weight.shape[0] == 1024 // size
-    assert layer.in_proj_qkvbfg_a.weight.shape[0] == 3 * 1024 // size + 8 // size + 2 * 128
+    projection_size = input_proj_tp_size if input_proj_tp_size > 1 else size
+    assert layer.in_proj_qkvbfg_a.weight.shape[0] == 3 * 1024 // projection_size + 8 // projection_size + 2 * 128
     assert layer.o_proj.weight.shape == (16, 1024 // size)
+    if static_output_bias:
+        assert layer.o_proj.quant_bias.shape == (16,)
     assert layer.get_state_shape() == Glm5NextForCausalLM.get_mamba_state_shape_from_config(vllm_config)
     assert layer.get_state_shape()[1] == (8 // size, 128, 128)
 
