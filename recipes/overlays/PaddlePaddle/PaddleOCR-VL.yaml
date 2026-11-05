@@ -151,6 +151,9 @@ guide_sections:
     Transformers 5.19.0 and CANN 9.2.1. Original weights and sample assertions
     are unchanged. The separate layout client retains PaddleOCR 3.3.2 and its
     CANN 9.2.0-compiled OM; these are separate processes, not a mixed install.
+    Its tracked source trees are clean at vLLM
+    `5df63a7203cdb9328d824a27b682e77c7b9928be` and Ascend
+    `0f85ed44bbbbdc0f0447f83ce62a82a8ad55afb3`.
 
     No Docker engine was available in the development container. The verified
     complete image ran its original entrypoint under PRoot 5.5.0 with device and
@@ -163,6 +166,14 @@ guide_sections:
     completed requests. The functional result does not satisfy a clean-log
     acceptance requirement or validate future main images. The pinned RC
     builder configuration and its original 32-request evidence remain separate.
+
+    The exact document command below also passed with the official remote PNG
+    URL: 31 blocks, checked content/bounds, JSON/Markdown and normal ACL cleanup.
+    A separate experiment added only `--shutdown-timeout 30` to the main graph
+    serving command. All four recognition tasks and that URL document passed;
+    the server exited with code 0 after 31.30 seconds without a forced kill, but
+    the same shutdown `EngineDeadError` remained. This ineffective flag is not
+    added to the recipe and the failed hypothesis does not waive the log check.
 
     ### Historical tested source environment
 
@@ -529,6 +540,34 @@ guide_sections:
     leaves warmup, concurrency and input/output limits unspecified. Record PDF versus
     image inputs and those settings before claiming performance equivalence.
     Four-task API sample timing and a nonempty document are separate from full-dataset accuracy.
+
+    On the complete latest-main 310P image identified above, graph-mode prediction
+    of all 1355 unchanged original v1.5 page images completed with 25958 HTTP 200
+    responses: 25946 stop and 12 length-limited outputs, all retained. Prediction
+    and Markdown/image saving took 8498.969869 seconds, or 6.27230249 seconds per
+    original input image. Pipeline initialization and cleanup were excluded.
+    Page batch 16, preprocessing queues disabled, layout batch 8, VLRec batch
+    4096, temperature 0 and output cap 4096 were used, with no external warmup.
+    The server restarted after the pilot; compiler/filesystem caches may persist.
+    The API audit adds a local HTTP hop and progress reporting is included.
+
+    The clean official evaluator commit above, with fresh render caches and two
+    CDM workers, exited normally: text edit distance 0.04452286562, table TEDS
+    0.90351564714, formula CDM 0.91115845138, Overall 92.33837443%. Applying the
+    frozen ModelZoo script's component rounding gives 92.32266667%. All 1058
+    formula pairs, including 14 zero scores, remain; five ground-truth and two
+    prediction render failures and five tokenizer failure records are preserved.
+    Evaluation used a 2 GiB/no-swap/two-CPU limit, recorded cgroup peak 1220284416
+    bytes and zero OOM events. This is a graph-mode result for the recorded image,
+    not a full-dataset eager/A2 result or matched-reference acceptance claim.
+    Both Overall values are below the published 92.43% reference; numeric
+    tolerance and matching input/batching/timing conditions remain unconfirmed.
+
+    The prediction cgroup reached its 32 GiB limit including image-preparation
+    file cache; limit-hit count increased by 93957, with zero OOM kills. Its
+    sampled peak was 34359734272 bytes, not pure inference RSS. Sampled NPU
+    memory reached 25466 reported MB, but successful sampling began after
+    prediction started and does not cover the startup peak.
 
     ### A2 source-tutorial scenarios
 
