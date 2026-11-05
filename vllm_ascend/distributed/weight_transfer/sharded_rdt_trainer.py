@@ -330,6 +330,7 @@ class _HixlProducerServer(_RDTProducerServer):
         self._hixl.close()
         with self._cache_cond:
             self._cache.clear()
+            self._base_cache.clear()
         with self._cache_cond:
             # Generations hold blob views into the rings, so they go first.
             self._gens.clear()
