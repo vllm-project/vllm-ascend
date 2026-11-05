@@ -19,13 +19,20 @@ def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
     hidden = torch.zeros(1, 8)
     output = torch.empty_like(hidden)
     impl = Mock()
-    attn = SimpleNamespace(v41_impl=impl)
+    projector = Mock()
+    attn = SimpleNamespace(
+        v41_impl=impl,
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=projector)),
+    )
     monkeypatch.setattr(
         dsa_v41,
         "get_forward_context",
         lambda: SimpleNamespace(no_compile_layers={"layer": attn}),
     )
     dsa_v41.dsa_v41_forward(hidden, output, "layer")
+    # LoRA swaps the linears after the impl is built; the custom op must hand
+    # the live modules back before the projection runs.
+    projector.sync_projection_layers.assert_called_once_with(attn)
     impl.forward.assert_called_once_with(attn, None, hidden, output)
 
 
