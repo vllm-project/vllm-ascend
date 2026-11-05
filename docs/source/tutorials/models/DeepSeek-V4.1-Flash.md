@@ -259,10 +259,14 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         runner V2 on Ascend.
     - `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
         Engram table in host memory and lets local DP ranks share the host-memory
-        allocation. This is required on A3 because the model's 24 Engram heads
-        cannot be evenly divided across 16 logical devices. It also reduces
-        duplicate host-memory copies. The A3 container example uses `--ipc=host` so
-        all four local DP ranks share the host IPC namespace.
+        allocation, reducing duplicate host-memory copies. With
+        `dp_shared_memory=false`, Ascend instead selects the largest divisor of
+        the node-local EDP candidate for which `TP * EDP` divides the model's
+        hash-head count. For example, 24 heads with TP1 and an EDP candidate of
+        16 use EDP8. Each subgroup stores a complete table across its ranks,
+        so smaller subgroups can increase total table memory. The A3 container
+        example uses `--ipc=host` so all four local DP ranks share the host IPC
+        namespace.
     - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` captures the
         Decode path while Prefill remains outside the captured graph.
     - `--safetensors-load-strategy lazy` avoids eagerly materializing the whole
@@ -584,9 +588,11 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
       draft model.
     - `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'` keeps the
       Engram table in host memory and lets local DP ranks share the host-memory
-      allocation. `dp_shared_memory` is required on A3 because the model's 24
-      Engram heads cannot be evenly divided across 16 logical devices. Both A3
-      containers use `--ipc=host` so the local DP ranks can share the allocation.
+      allocation. Non-shared tables select head-compatible EDP subgroups as
+      described above; this does not change the model's TP, DP or EP sizes and
+      also applies to DP x PCP groups. Shared-memory groups retain the upstream
+      node-local size. Both A3 containers use `--ipc=host` so the local DP ranks
+      can share the allocation.
     - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` captures the
       Decode path while Prefill remains outside the captured graph.
     - Prefix caching is enabled only on Prefill. Decode disables it and enables

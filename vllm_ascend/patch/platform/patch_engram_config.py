@@ -14,13 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Allow Engram on Ascend and host table sharing across PCP replicas."""
+"""Allow Engram on Ascend with compatible node-local table groups."""
 
 import importlib.util
+from functools import wraps
+from math import gcd
 
 # Older vLLM builds have no Engram config to patch.
 if importlib.util.find_spec("vllm.config.engram") is not None:
+    from vllm.config import get_current_vllm_config
     from vllm.config.engram import EngramConfig, model_has_engram_layers
+    from vllm.distributed import parallel_state
 
     def verify_model_config(self, model_config) -> None:
         # Keep upstream's model/layer checks; only its CUDA requirement is lifted.
@@ -43,3 +47,30 @@ if importlib.util.find_spec("vllm.config.engram") is not None:
 
     EngramConfig.verify_model_config = verify_model_config
     EngramConfig.verify_parallel_config = verify_parallel_config
+
+    _original_engram_dp_shard_size = parallel_state._engram_dp_shard_size
+
+    @wraps(_original_engram_dp_shard_size)
+    def _engram_dp_shard_size(world_size: int, data_parallel_size: int, replica_size: int) -> int:
+        # Keep upstream's node/replica checks, including its EDP=1 fallback.
+        shard_size = _original_engram_dp_shard_size(world_size, data_parallel_size, replica_size)
+        config = get_current_vllm_config()
+        engram = config.engram_config
+        model = config.model_config
+        if engram is None or engram.dp_shared_memory or model is None or model.architecture != "DeepseekV41ForCausalLM":
+            return shard_size
+
+        # Ascend uses uniform TP x EDP head shards. A shared host table only
+        # shards heads over TP, so its sharing group must not be reduced here.
+        text_config = model.hf_text_config
+        num_heads = text_config.engram_n_heads * (text_config.engram_max_ngram_size - 1)
+        tp_size = config.parallel_config.tensor_parallel_size
+        if num_heads <= 0 or num_heads % tp_size:
+            raise ValueError(
+                f"Engram requires a positive hash-head count divisible by TP: {num_heads} heads, TP={tp_size}."
+            )
+        # This is the largest divisor of the node-local candidate that also
+        # divides the heads remaining after TP. Never enlarge the node domain.
+        return gcd(shard_size, num_heads // tp_size)
+
+    parallel_state._engram_dp_shard_size = _engram_dp_shard_size
