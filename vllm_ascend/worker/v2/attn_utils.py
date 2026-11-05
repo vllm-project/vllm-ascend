@@ -1563,9 +1563,7 @@ def _allocate_kv_cache(
                     (backend is None or not backend.is_sparse())
                     and not use_dcp
                     and not requires_contiguous_pa_kv_cache(layer, vllm_config, layer_spec)
-                    and not (
-                        not shared_layers and requires_contiguous_suffix_kv_cache(layer, vllm_config, layer_spec)
-                    )
+                    and not (not shared_layers and requires_contiguous_suffix_kv_cache(layer, vllm_config, layer_spec))
                 ):
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
                     continue

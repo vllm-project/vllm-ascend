@@ -35,11 +35,7 @@ def _validate_suffix_runtime(speculative_config) -> None:
         "suffix_decoding_corpus_tokens",
         "enable_adaptive_verification",
     )
-    missing = [
-        f"SpeculativeConfig.{name}"
-        for name in required_fields
-        if not hasattr(speculative_config, name)
-    ]
+    missing = [f"SpeculativeConfig.{name}" for name in required_fields if not hasattr(speculative_config, name)]
     try:
         from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
     except ImportError as exc:

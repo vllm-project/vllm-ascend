@@ -310,9 +310,7 @@ def _cache_plan(domain, monkeypatch):
         ],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
     )
-    group = AttentionGroup(
-        backend=AscendAttentionBackend, layer_names=names, kv_cache_spec=spec, kv_cache_group_id=0
-    )
+    group = AttentionGroup(backend=AscendAttentionBackend, layer_names=names, kv_cache_spec=spec, kv_cache_group_id=0)
     return config, group
 
 

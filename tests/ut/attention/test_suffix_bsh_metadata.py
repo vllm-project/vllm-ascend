@@ -76,9 +76,7 @@ def test_geometry_returns_only_real_lengths_and_original_table(bsh_module, seque
 
 
 @pytest.mark.parametrize("extra_table_row", [False, True], ids=["exact-table", "extra-row"])
-def test_full_capacity_preserves_lengths_and_uses_only_real_table_rows(
-    bsh_module, extra_table_row
-):
+def test_full_capacity_preserves_lengths_and_uses_only_real_table_rows(bsh_module, extra_table_row):
     rows = [[11, 12], [21, 22]]
     if extra_table_row:
         rows.append([91, 92])
@@ -105,28 +103,23 @@ def test_full_capacity_preserves_lengths_and_uses_only_real_table_rows(
 @pytest.mark.parametrize(
     "boundaries,lengths,rows",
     [
+        pytest.param([5, 10], [7, 129], [[11, 12], [21, 22]], id="unpadded-input"),
+        pytest.param([5, 10, 25], [7, 129, 999], [[11, 12], [21, 22], [91, 92]], id="combined-synthetic-tail"),
         pytest.param(
-            [5, 10], [7, 129], [[11, 12], [21, 22]], id="unpadded-input"
-        ),
-        pytest.param(
-            [5, 10, 25], [7, 129, 999],
-            [[11, 12], [21, 22], [91, 92]], id="combined-synthetic-tail"
-        ),
-        pytest.param(
-            [5, 10, 15, 20, 25], [7, 129, 0, -99, True],
+            [5, 10, 15, 20, 25],
+            [7, 129, 0, -99, True],
             [[11, 12], [21, 22], [91, 92], [81, 82], [71, 72]],
-            id="distributed-padding"
+            id="distributed-padding",
         ),
         pytest.param(
-            [5, 10, 10, 10, 25], [7, 129, 0, -99, True],
+            [5, 10, 10, 10, 25],
+            [7, 129, 0, -99, True],
             [[11, 12], [21, 22], [91, 92], [81, 82], [71, 72]],
-            id="empty-padded-segments"
+            id="empty-padded-segments",
         ),
     ],
 )
-def test_partial_capacity_gives_each_dummy_its_own_length_and_zero_row(
-    bsh_module, boundaries, lengths, rows
-):
+def test_partial_capacity_gives_each_dummy_its_own_length_and_zero_row(bsh_module, boundaries, lengths, rows):
     metadata = _metadata(
         actual_seq_lengths_q=boundaries.copy(),
         seq_lens_list=lengths.copy(),
@@ -172,44 +165,44 @@ def test_valid_kv_length_boundaries(bsh_module, length, max_model_len, columns):
         seq_lens_list=[length],
         block_tables=_table(rows),
     )
-    real_rows, real_lengths, original_table = bsh_module._metadata_geometry(
-        metadata, 1, 5, max_model_len
-    )
+    real_rows, real_lengths, original_table = bsh_module._metadata_geometry(metadata, 1, 5, max_model_len)
     assert real_rows == 1
     assert real_lengths == [length]
     assert original_table is metadata.block_tables
-    output_lengths, output_table = bsh_module.prepare_metadata(
-        metadata, 1, 5, max_model_len=max_model_len
-    )
+    output_lengths, output_table = bsh_module.prepare_metadata(metadata, 1, 5, max_model_len=max_model_len)
     assert output_lengths == [length]
     _assert_table(output_table, rows)
 
 
 @pytest.mark.parametrize("layer_name", ["decoder.0", None], ids=["named-layer", "anonymous-layer"])
-def test_provider_fresh_snapshots_never_reuse_previous_lengths_or_tables(
-    bsh_module, layer_name
-):
+def test_provider_fresh_snapshots_never_reuse_previous_lengths_or_tables(bsh_module, layer_name):
     provider = bsh_module.BSHParamProvider(layer_name, 4, 5, 256, 2)
     snapshots = [
         (_metadata(), [7, 129, 5, 5], [[11, 12], [21, 22], [0, 0], [0, 0]]),
         (
             _metadata(seq_lens_list=[9, 197], block_tables=_table([[31, 32], [41, 42]])),
-            [9, 197, 5, 5], [[31, 32], [41, 42], [0, 0], [0, 0]],
+            [9, 197, 5, 5],
+            [[31, 32], [41, 42], [0, 0], [0, 0]],
         ),
         (
             _metadata(
-                num_actual_tokens=5, actual_seq_lengths_q=[5, 20],
-                seq_lens_list=[12, 999], block_tables=_table([[51, 52], [91, 92]]),
+                num_actual_tokens=5,
+                actual_seq_lengths_q=[5, 20],
+                seq_lens_list=[12, 999],
+                block_tables=_table([[51, 52], [91, 92]]),
             ),
-            [12, 5, 5, 5], [[51, 52], [0, 0], [0, 0], [0, 0]],
+            [12, 5, 5, 5],
+            [[51, 52], [0, 0], [0, 0], [0, 0]],
         ),
         (
             _metadata(
-                num_actual_tokens=20, actual_seq_lengths_q=[5, 10, 15, 20],
+                num_actual_tokens=20,
+                actual_seq_lengths_q=[5, 10, 15, 20],
                 seq_lens_list=[5, 64, 128, 200],
                 block_tables=_table([[61, 62], [71, 72], [81, 82], [91, 92]]),
             ),
-            [5, 64, 128, 200], [[61, 62], [71, 72], [81, 82], [91, 92]],
+            [5, 64, 128, 200],
+            [[61, 62], [71, 72], [81, 82], [91, 92]],
         ),
     ]
     retained = []
@@ -322,8 +315,7 @@ def test_cpu_tensor_does_not_replace_required_python_sequence(bsh_module, field)
         pytest.param(lambda: _table([[11, 12], [21, 22]]).to(torch.float32), id="float-table"),
         pytest.param(lambda: _table([[11, 12], [21, 22]]).to(torch.bool), id="boolean-table"),
         pytest.param(
-            lambda: torch.arange(8, dtype=torch.int32, device="cpu").reshape(2, 4)[:, ::2],
-            id="noncontiguous-table"
+            lambda: torch.arange(8, dtype=torch.int32, device="cpu").reshape(2, 4)[:, ::2], id="noncontiguous-table"
         ),
     ],
 )
@@ -340,9 +332,7 @@ def test_malformed_block_tables_are_rejected(bsh_module, table_factory):
         pytest.param(257, 512, id="table-limit-with-spare-model-capacity"),
     ],
 )
-def test_model_and_block_table_length_limits_are_independent(
-    bsh_module, length, max_model_len
-):
+def test_model_and_block_table_length_limits_are_independent(bsh_module, length, max_model_len):
     metadata = _metadata(seq_lens_list=[7, length])
     with pytest.raises(ValueError):
         bsh_module.prepare_metadata(metadata, 4, 5, max_model_len=max_model_len)
@@ -381,7 +371,9 @@ def test_provider_rejects_column_geometry_drift_on_fresh_metadata(bsh_module, ro
 )
 def test_cached_valid_metadata_cannot_bypass_argument_type_checks(bsh_module, changes):
     metadata = _metadata(
-        num_actual_tokens=5, actual_seq_lengths_q=[5], seq_lens_list=[5],
+        num_actual_tokens=5,
+        actual_seq_lengths_q=[5],
+        seq_lens_list=[5],
         block_tables=_table([[11, 12]]),
     )
     options = {"capacity": 1, "width": 5, "max_model_len": 5}

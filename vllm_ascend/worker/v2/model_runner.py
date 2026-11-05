@@ -227,8 +227,7 @@ class NPUModelRunner(GPUModelRunner):
             device=self.device,
             use_dense_all_token_ids=(
                 self.speculative_config is not None
-                and self.speculative_config.method
-                in ("ngram", "ngram_gpu", "suffix")
+                and self.speculative_config.method in ("ngram", "ngram_gpu", "suffix")
             ),
         )
         # The upstream speculator was constructed with the discarded upstream

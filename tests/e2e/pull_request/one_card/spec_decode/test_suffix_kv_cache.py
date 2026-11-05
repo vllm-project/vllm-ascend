@@ -31,9 +31,7 @@ def _values(shape, offset):
 def _input_tensor(values, step):
     if step == 1:
         return values.to("npu")
-    backing = torch.full(
-        tuple(size * step for size in values.shape), -91, dtype=torch.bfloat16, device="npu"
-    )
+    backing = torch.full(tuple(size * step for size in values.shape), -91, dtype=torch.bfloat16, device="npu")
     view = backing[::step, ::step, ::step]
     view.copy_(values.to("npu"))
     assert not view.is_contiguous()
@@ -75,9 +73,7 @@ def _assert_scatter_matches_cpu(scatter, inputs):
 
     assert scatter(**inputs) is None
     torch.npu.synchronize()
-    torch.testing.assert_close(
-        _logical_cache(inputs["key_cache"], inputs["head_major"]), expected_key, rtol=0, atol=0
-    )
+    torch.testing.assert_close(_logical_cache(inputs["key_cache"], inputs["head_major"]), expected_key, rtol=0, atol=0)
     torch.testing.assert_close(
         _logical_cache(inputs["value_cache"], inputs["head_major"]), expected_value, rtol=0, atol=0
     )

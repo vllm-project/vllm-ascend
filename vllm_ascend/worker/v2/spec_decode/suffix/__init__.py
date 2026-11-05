@@ -13,6 +13,7 @@ Requires the complete upstream #60339 configuration and request-lifecycle
 integration. Model Runner V2 remains an explicit opt-in on Ascend. Optional
 adaptive verification retains the known CANN 9.1 observe-kernel compiler gap.
 """
+
 from vllm_ascend.worker.v2.spec_decode.suffix.speculator import (
     SuffixSpeculator,
 )
