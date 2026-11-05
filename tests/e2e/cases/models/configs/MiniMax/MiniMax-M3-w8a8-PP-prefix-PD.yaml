@@ -298,4 +298,3 @@ benchmarks:
     request_rate: 0
     baseline: 0
     threshold: 0.97
-    summarizer: stable_stage
