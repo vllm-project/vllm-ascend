@@ -418,15 +418,43 @@ def test_adaptive_verification_confidences():
     assert stats[3] == [0, 0]
 
 
-def test_propose_signature_matches_base_speculator():
-    """The runner passes propose() arguments by keyword."""
-    import inspect
+@pytest.mark.parametrize("batch_as_keyword", [False, True])
+def test_propose_forwards_arguments_to_parent(monkeypatch, batch_as_keyword):
+    """Preserve argument objects and the parent result for either caller style."""
+    from vllm.v1.worker.gpu.spec_decode.suffix.speculator import SuffixSpeculator as ParentSuffixSpeculator
 
-    from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
+    calls = []
+    expected = object()
 
-    base = inspect.signature(BaseSpeculator.propose).parameters
-    ours = inspect.signature(SuffixSpeculator.propose).parameters
-    assert list(ours) == list(base)
+    def parent_propose(self, input_batch, *args, **kwargs):
+        calls.append((self, input_batch, args, kwargs))
+        return expected
+
+    monkeypatch.setattr(ParentSuffixSpeculator, "propose", parent_propose)
+    spec = object.__new__(SuffixSpeculator)
+    batch = SimpleNamespace(num_reqs=1)
+    kwargs = dict(temperature=object(), num_speculative_tokens=3, future_option=object())
+    if batch_as_keyword:
+        args = ()
+        kwargs["attn_metadata"] = object()
+        result = spec.propose(input_batch=batch, **kwargs)
+    else:
+        args = (object(), object())
+        result = spec.propose(batch, *args, **kwargs)
+    assert result is expected
+    assert calls == [(spec, batch, args, kwargs)]
+
+
+def test_empty_batch_does_not_call_parent(monkeypatch):
+    from vllm.v1.worker.gpu.spec_decode.suffix.speculator import SuffixSpeculator as ParentSuffixSpeculator
+
+    def unexpected_propose(*args, **kwargs):
+        pytest.fail("An empty batch must not reach the parent kernel launches")
+
+    monkeypatch.setattr(ParentSuffixSpeculator, "propose", unexpected_propose)
+    spec = object.__new__(SuffixSpeculator)
+    spec.drafts = torch.empty(2, 3)
+    assert spec.propose(input_batch=SimpleNamespace(num_reqs=0)).shape == (0, 3)
 
 
 _HASH_MUL = 0x9E3779B97F4A7C15 - (1 << 64)
