@@ -1438,7 +1438,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
         active_device_metadata_executor = (
-            getattr(self.runner, "device_metadata_executor", None) if self.method == "dspark" else None
+            getattr(self.runner, "device_metadata_executor", None)
+            if self.method == "dspark"
+            and not (getattr(self, "use_cuda_graph", False) and getattr(self, "_draft_metadata_current_stream", False))
+            else None
         )
         if active_device_metadata_executor is not None and not active_device_metadata_executor.submission_in_flight:
             active_device_metadata_executor = None
@@ -1483,6 +1486,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
         if active_device_metadata_executor is not None:
             active_device_metadata_executor.release()
+        if graph_contract:
+            # Graph outputs retain padded request rows; never return them as
+            # proposals for active requests.
+            return draft_token_ids[:batch_size]
         return draft_token_ids
 
     def _sample_draft_from_logits(
@@ -2725,7 +2732,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
         if device_metadata_executor is not None and device_metadata_tasks:
-            device_metadata_executor.submit(device_metadata_tasks)
+            if getattr(self, "_draft_metadata_current_stream", False) and getattr(self, "use_cuda_graph", False):
+                # The captured draft does not replay Python consumer waits.
+                # Enqueue producers on the consumer stream before graph replay;
+                # this is device stream ordering, not a host synchronize.
+                for task in sorted(device_metadata_tasks, key=lambda item: item.stage):
+                    task.run()
+            else:
+                device_metadata_executor.submit(device_metadata_tasks)
         multi_steps_attn_metadata = [per_layer_attn_metadata]
         # Copy the old attn_metadata and update
         primary_group = self._get_primary_draft_attn_group()
