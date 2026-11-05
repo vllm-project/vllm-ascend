@@ -19,20 +19,19 @@ The model introduces Compressed Sparse Attention 2 (CSA2), FP4 main KV cache,
 SWA Bounded Replay, Single-Pass mHC, Engram conditional memory, and DSpark
 speculative decoding. These designs reduce the global KV cache footprint to
 890 bytes per token and the persistent KV cache footprint to approximately
-one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports a
-continuously adjustable reasoning effort from 1 to 100.
+one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports
+a continuously adjustable reasoning effort from 1 to 100.
 
-For 950DT products (A5), this guide covers single-node deployment, ordinary
-1P1D with SWA bounded replay on Prefill, and 1P1D with a Memcache DRAM pool.
-Section 5.2 also covers experimental PCP8 Prefill and multi-node EP16 Decode.
+This guide uses **vLLM Ascend v0.32.0** and covers A2, A3, and 950DT products
+(A5). The A2/A3 examples use Ascend W4A8 weights, with W8A8 alternatives;
+the 950DT examples use the original MXFP checkpoint.
 
-vLLM Ascend supports W4A8 and W8A8 deployment on A2 products, A3 products,
-and 950DT products. This guide provides a single-node colocated A3
-configuration and a two-node A3 Prefill-Decode (PD) disaggregated
-configuration. It also supports a two-node hybrid A2 configuration and a
-four-node A2 PD disaggregated configuration.
-
-This guide uses **vLLM Ascend v0.32.0** and recommends W4A8 for performance.
+- **A2**: two-node colocated deployment and four-node Prefill-Decode (PD)
+  disaggregated deployment.
+- **A3**: single-node colocated deployment and two-node PD deployment.
+- **950DT (A5)**: single-node colocated deployment, two-node PD deployment,
+  and PD with a Memcache DRAM pool. Section 5.2 also covers experimental
+  PCP8 Prefill and multi-node EP16 Decode.
 
 Use the matching upstream vLLM revision for the selected vLLM Ascend version.
 For source builds, use the upstream vLLM tag recorded in
@@ -45,15 +44,19 @@ for the complete support matrix and the
 [Feature Guide](../../user_guide/feature_guide/index.md) for feature
 configuration.
 
-The A3 configurations in this guide use W4A8 weights, INT8 Engram storage,
-and model runner V2. The single-node colocated configuration uses DP4/TP4.
-The PD configuration uses DP4/PCP4/TP1 on the Prefill node, DP16/TP1 on the
-Decode node, SWA bounded replay and MegaMoE on Prefill, DSpark speculative
-decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode.
+The following table summarizes the configurations in this guide.
 
-For 950DT products, the examples use model runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`)
-and the original MXFP checkpoint. Single-node deployment and both roles in
-ordinary 1P1D use DP8/TP1/EP8.
+| Hardware | Weights and model runner | Colocated deployment | PD deployment and features |
+| --- | --- | --- | --- |
+| A2 | Ascend W4A8 or W8A8; model runner V1 | Two nodes, DP2/TP8 | Four nodes: Prefill DP4/TP4 and Decode DP8/TP2; DSpark and `FULL_DECODE_ONLY` on Decode. |
+| A3 | Ascend W4A8, INT8 Engram storage; model runner V2 | One node, DP4/TP4 | Two nodes: Prefill DP4/PCP4/TP1 and Decode DP16/TP1; SWA bounded replay and MegaMoE on Prefill, DSpark and `FULL_DECODE_ONLY` on Decode. |
+| 950DT (A5) | Original MXFP checkpoint; model runner V2 | One node, DP8/TP1/EP8 | Two nodes, DP8/TP1/EP8 per role; SWA bounded replay on ordinary Prefill, DSpark and `FULL_DECODE_ONLY` on Decode, and optional Memcache pooling. |
+
+The 950DT single-node example also uses DSpark and `FULL_DECODE_ONLY`.
+In ordinary 950DT PD, Prefill enables local prefix caching and Decode
+disables it. The Memcache example disables local prefix caching on both
+roles so that external pool hits can be checked. Optional PCP8 Prefill
+and EP16 Decode layouts are described in [A5 Deployment Extensions](#a5-deployment-extensions).
 
 ## 3 Prerequisites
 
@@ -63,7 +66,7 @@ The official DeepSeek-V4.1-Flash-1017 checkpoint is available from
 [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) and
 [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4.1-Flash-1017).
 
-Download the quantized checkpoint from ModelScope for the hardware shown below.
+Download the checkpoint for the hardware shown below.
 
 | Checkpoint | Hardware | Deployment | Download | Notes |
 | --- | --- | --- | --- | --- |
@@ -71,6 +74,7 @@ Download the quantized checkpoint from ModelScope for the hardware shown below.
 | `DeepSeek-V4.1-Flash-1017-w8a8` | A3 series (64GB × 16) | 1 node for single-node deployment; 2 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8) | Also supported. For PD, use Prefill DP4/TP4 and Decode DP8/TP2. |
 | `DeepSeek-V4.1-Flash-1017-w4a8` | A2 series (64GB × 8 per node) | 2 nodes for colocated deployment; 4 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8) | / |
 | `DeepSeek-V4.1-Flash-1017-w8a8` | A2 series (64GB × 8 per node) | 2 nodes for colocated deployment; 4 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8) | / |
+| `DeepSeek-V4.1-Flash` (original MXFP) | 950DT products (96 GiB × 8 per node) | 1 node for colocated deployment; 2 nodes for PD | [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash), [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4.1-Flash) | Includes DSpark parameters and Engram tables. Use `--quantization deepseek_v4_fp8`. |
 
 For 950DT products, use the original MXFP checkpoint, including the DSpark
 parameters and Engram tables. Set `<YOUR_MODEL_PATH>` to its local directory
@@ -82,31 +86,13 @@ prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
 Download the selected checkpoint to the same absolute path on every server,
 for example `/data/weights/DeepSeek-V4.1-Flash-1017-w4a8` or
 `/data/weights/DeepSeek-V4.1-Flash-1017-w8a8`. Set `MODEL_PATH` in each serving
-command to that checkpoint directory. The examples below use W4A8; to use
-W8A8, set `MODEL_PATH` to the W8A8 directory instead. For A3 PD deployment
+command to that checkpoint directory. The A2/A3 examples below use W4A8;
+to use W8A8, set `MODEL_PATH` to the W8A8 directory instead. For A3 PD deployment
 with W8A8 weights, use Prefill DP4/TP4 and Decode DP8/TP2, as described in
 Section 5.2.
 
-For 950DT products, use the original DeepSeek-V4.1-Flash MXFP checkpoint
-with `--quantization deepseek_v4_fp8`, including its DSpark parameters and
-Engram tables. Use its actual local directory as `<YOUR_MODEL_PATH>`; the
-ModelSlim W8A8 checkpoint above is for the A2/A3 examples.
-
-Use one of the following hardware configurations:
-
-- **A5 single-node colocated** uses one server with eight Ascend950DT NPUs
-  and 96 GiB of HBM per NPU (DP8/TP1/EP8).
-- **A5 1P1D** uses two such servers, one per role. Memcache pooling also
-  needs host DRAM alongside Engram offload.
-- **A3 single-node colocated**: one Atlas 800I A3 server with 8 NPUs and 128GB
-  memory per NPU. The server exposes 16 logical devices to the container.
-- **A3 1P1D**: two Atlas 800I A3 servers with the same device configuration.
-- **A2 series**: two Atlas 800I A2 servers. Each server has 8 NPUs with 64GB
-  memory per NPU and exposes 8 devices to the container.
-- **A2 1P1D**: four Atlas 800I A2 servers with the same device configuration.
-
-Store the checkpoint in a shared directory or copy it to the same absolute
-path on every server.
+For 950DT, Memcache pooling also needs host DRAM alongside Engram offload.
+The optional EP16 Decode configuration uses a second Decode server.
 
 ### 3.2 Verify Multi-node Communication
 
@@ -119,7 +105,7 @@ interfaces, and the service ports must not be blocked.
 
 ### 4.1 Docker Image Installation
 
-Select the tab for the target hardware. A2 products and A3 products use
+Select the tab for the target hardware. A2, A3, and 950DT products use
 separate images from the v0.32.0 release branch.
 
 === "A3 series"
@@ -207,11 +193,11 @@ separate images from the v0.32.0 release branch.
 
 === "950DT products"
 
-    On each participating server, pull the A5 Ubuntu image for the
-    `releases/v0.32.0rc` branch. Set `MODEL_ROOT` to the parent directory of the checkpoint.
+    On each participating server, pull the A5 Ubuntu release image. Set
+    `MODEL_ROOT` to the parent directory of the checkpoint.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:nightly-releases-v0.32.0rc-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export MODEL_ROOT="/data/weights"
     export NPU_SMI="$(command -v npu-smi)"
 
@@ -276,7 +262,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     ```bash
     #!/usr/bin/env bash
 
-    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weights-and-hardware).
+    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weight).
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -309,12 +295,9 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         --enable-auto-tool-choice \
         --trust-remote-code \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":false}' \
+        --speculative-config '{"method":"dspark","num_speculative_tokens":5}' \
         --additional-config '{
-            "enable_cpu_binding": true,
-            "multistream_engram_overlap": true,
             "multistream_overlap_shared_expert": true,
-            "multistream_dsv4_dsa_overlap": true,
             "combine_quant_mode": 4
         }'
     ```
@@ -420,6 +403,13 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
     Use the 950DT runtime from [Section 4.1](#41-docker-image-installation)
     on both nodes. Prefill requires native SWA bounded replay with the PD connector.
+
+    Both roles use DSpark with five speculative tokens and enable shared-expert
+    multistream overlap. Prefill runs the target and draft models in eager mode
+    and sets `multistream_engram_overlap: false`. Decode uses
+    `FULL_DECODE_ONLY` for the target model and the default draft graph execution,
+    with `combine_quant_mode: 4` and the recompute scheduler. The examples use
+    the A5 defaults for CPU binding, DSA overlap, and Decode Engram overlap.
 
     Prefill and Decode form separate DP groups on different servers, so both
     can use RPC port `12321`. Within each group, all ranks must use the same
@@ -535,7 +525,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
     nic_name="<NETWORK_INTERFACE>"
     local_ip="<LOCAL_IP>"
-    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weights-and-hardware).
+    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weight).
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -581,12 +571,9 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         --no-enable-prefix-caching \
         --no-swa-bounded-replay \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":false}' \
+        --speculative-config '{"method":"dspark","num_speculative_tokens":5}' \
         --additional-config '{
-            "enable_cpu_binding": true,
-            "multistream_engram_overlap": true,
             "multistream_overlap_shared_expert": true,
-            "multistream_dsv4_dsa_overlap": true,
             "combine_quant_mode": 4,
             "scheduler_config": {
                 "recompute_scheduler_enable": true
@@ -651,7 +638,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
     nic_name="<NETWORK_INTERFACE>"
     local_ip="<LOCAL_IP>"
-    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weights-and-hardware).
+    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weight).
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -699,10 +686,8 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         --enforce-eager \
         --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
         --additional-config '{
-            "enable_cpu_binding": true,
             "multistream_engram_overlap": false,
-            "multistream_overlap_shared_expert": true,
-            "multistream_dsv4_dsa_overlap": true
+            "multistream_overlap_shared_expert": true
         }' \
         --kv-transfer-config '{
             "kv_connector": "MooncakeHybridConnector",
@@ -793,7 +778,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
       `scheduler_config.recompute_scheduler_enable` to `true`. The recompute
       scheduler cannot perform bounded replay, so use `--no-swa-bounded-replay`.
     - Set `--max-num-batched-tokens` to `5120` on Prefill and `1024` on Decode.
-      See [950DT recommended configurations](#950dt-recommended-configurations) for the sequence limits,
+      See [950DT recommended configurations](#91-recommended-configurations) for the sequence limits,
       memory utilization, and execution mode for each role.
     - Each launcher child starts one local DP engine. The templates therefore
       pass `--data-parallel-size-local 1`, while the launcher starts eight
@@ -2100,7 +2085,7 @@ containing this node's `mmc-local.conf`.
 
 nic_name="<NETWORK_INTERFACE>"
 local_ip="<LOCAL_IP>"
-# Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weights-and-hardware).
+# Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weight).
 MODEL_PATH="<YOUR_MODEL_PATH>"
 
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -2150,12 +2135,9 @@ exec vllm serve "$MODEL_PATH" \
     --trust-remote-code \
     --no-enable-prefix-caching \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":false}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":5}' \
     --additional-config '{
-        "enable_cpu_binding": true,
-        "multistream_engram_overlap": true,
         "multistream_overlap_shared_expert": true,
-        "multistream_dsv4_dsa_overlap": true,
         "combine_quant_mode": 4,
         "scheduler_config": {
             "recompute_scheduler_enable": true
@@ -2239,7 +2221,7 @@ MetaService endpoint in `mmc-local.conf`.
 
 nic_name="<NETWORK_INTERFACE>"
 local_ip="<LOCAL_IP>"
-# Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weights-and-hardware).
+# Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weight).
 MODEL_PATH="<YOUR_MODEL_PATH>"
 
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -2291,10 +2273,8 @@ exec vllm serve "$MODEL_PATH" \
     --enforce-eager \
     --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
     --additional-config '{
-        "enable_cpu_binding": true,
         "multistream_engram_overlap": false,
-        "multistream_overlap_shared_expert": true,
-        "multistream_dsv4_dsa_overlap": true
+        "multistream_overlap_shared_expert": true
     }' \
     --kv-transfer-config '{
         "kv_connector": "MultiConnector",
@@ -2846,6 +2826,10 @@ parameters used for each dataset.
 | GPQA | A3 series | 89.9 | `temperature=1.0, top_p=1.0, max_tokens=131072` |
 | MMMU-PRO | A3 series | 81.3 | `temperature=1.0, top_p=0.95, max_tokens=131072` |
 
+These scores apply to the A3 W4A8 checkpoint. Accuracy results for the
+950DT MXFP configurations are not yet provided; evaluate the selected
+configuration with AISBench before using it as an accuracy baseline.
+
 ## 8 Performance Evaluation
 
 Refer to the
@@ -2886,7 +2870,7 @@ uses `4096` batch tokens on Prefill with local prefix caching disabled to
 measure external hits. In both examples, Decode uses `1024` batch tokens
 and disables local prefix caching.
 
-#### Workload-Specific Tuning
+### 9.2 Workload-Specific Tuning
 
 When the workload changes, evaluate configurations with the tools in
 [Section 8](#8-performance-evaluation). Keep input and output lengths,
