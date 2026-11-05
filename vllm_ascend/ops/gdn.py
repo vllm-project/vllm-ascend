@@ -45,6 +45,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
+from vllm_ascend.ops.gdn_checkpoint import ensure_gdn_checkpoint_workspace, run_gdn_checkpoint_prefill
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -472,6 +473,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         forward_context = get_forward_context()
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
 
+        if getattr(self, "_ascend_internal_checkpoint_enabled", False):
+            ensure_gdn_checkpoint_workspace(self, mixed_qkv)
+            if attn_metadata is None:
+                # Include the transient raw-convolution copy in peak profiling.
+                mixed_qkv.clone()
+
         if attn_metadata is None:
             # V1 profile run
             return
@@ -512,6 +519,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_spec = None
             mixed_qkv_non_spec = mixed_qkv
+
+        checkpoint = getattr(attn_metadata, "ascend_checkpoint", None)
+        raw_prefill_qkv = None
+        if checkpoint is not None:
+            # Preserve the pre-convolution history used by the exporter.
+            raw_prefill_qkv = mixed_qkv_non_spec[attn_metadata.num_decode_tokens :].clone()
 
         # FLA's head-first convolution requires one common Q/K/V head width.
         # Other models retain the existing flat-output path.
@@ -804,7 +817,22 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 and AscendGatedDeltaNetAttention._probe_fused_chunk()
                 and get_pcp_group().world_size == 1
             )
-            if fla_gdn_prefill_op is not None:
+            if checkpoint is not None:
+                initial_state = gather_ssm_states(ssm_state, prefill_state_indices, prefill_has_initial_state)
+                core_attn_out_non_spec, last_recurrent_state = run_gdn_checkpoint_prefill(
+                    self,
+                    attn_metadata,
+                    raw_prefill_qkv,
+                    query_non_spec,
+                    key_non_spec,
+                    value_non_spec,
+                    g_non_spec,
+                    beta_non_spec,
+                    initial_state,
+                    prefill_query_start_loc,
+                )
+                scatter_ssm_states_(ssm_state, prefill_state_indices, last_recurrent_state.to(ssm_state.dtype))
+            elif fla_gdn_prefill_op is not None:
                 initial_state = gather_ssm_states(
                     ssm_state,
                     prefill_state_indices,

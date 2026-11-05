@@ -388,3 +388,23 @@ KVPP supports non-hybrid MLA/SFA models with eager execution or `PIECEWISE` grap
 KVPP can be combined with `MooncakeConnectorV2` for P/D disaggregation and `AscendStoreConnector` for KV pooling under the connector-specific restrictions in the [KVPP guide](../feature_guide/kvpp.md#kv-transfer-configuration). Enable KVPP only on the prefill node for P/D disaggregation. `MultiConnector` can combine these connectors; each child must satisfy its own type and role requirements.
 
 PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-forward cache contents before attention; the broadcast decision uses the global scheduled batch rather than PCP-local segment offsets.
+
+## GDN internal prefill checkpoints
+
+Enable with `--additional-config '{"gdn_internal_prefill_checkpoints": true}'`
+and prefix caching in align mode. Requires vLLM with #60050. The option is
+experimental and disabled by default. Eligible GDN layers require BF16,
+K=V=128 and PCP=1. The upstream all-layer capability check preserves split
+prefill when another recurrent layer cannot export checkpoints.
+
+Checkpoint-bearing prefill uses the existing Triton recurrence instead of the
+AscendC FwdH implementation to export only selected FP32 chunk-start states.
+Convolution history and recurrent state are written through the shared upstream
+checkpoint exporter. Decode is unchanged. This backend change needs numerical
+and performance qualification; skipping a model forward does not guarantee a
+net speedup. A persistent FP32 buffer is allocated during profiling, of size
+`max_num_seqs * local_value_heads * 128 * 128 * 4` bytes per eligible layer.
+A raw pre-convolution copy is also needed during checkpoint-bearing prefill.
+Small prefix match units can increase checkpoint traffic.
+
+Validate correctness, quality and performance on the deployment hardware before enabling in production.

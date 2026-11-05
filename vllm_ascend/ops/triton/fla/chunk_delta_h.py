@@ -39,6 +39,8 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     cu_seqlens,
     chunk_offsets,
     h_update,
+    checkpoint_output,
+    checkpoint_offsets,
     T,
     H,
     Hg,
@@ -50,6 +52,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    HAS_CHECKPOINTS: tl.constexpr,
 ):
     i_nh = tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
@@ -96,6 +99,16 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     # main recurrence
     for i_t in range(NT):
         h_base = h + (boh + i_t) * H * K * V + i_h * K * V
+
+        if HAS_CHECKPOINTS:
+            checkpoint_offset = tl.load(checkpoint_offsets + i_n)
+            if checkpoint_offset > 0 and i_t * BT == checkpoint_offset:
+                # The cache uses [N,H,V,K], while accumulators are [K,V].
+                base = checkpoint_output + i_nh * K * V
+                first = tl.make_block_ptr(base, (K, V), (1, K), (0, 0), (128, 64), (0, 1))
+                second = tl.make_block_ptr(base, (K, V), (1, K), (0, 64), (128, 64), (0, 1))
+                tl.store(first, b_h1_bv1, boundary_check=(0, 1))
+                tl.store(second, b_h1_bv2, boundary_check=(0, 1))
 
         p_h1_bv1 = tl.make_block_ptr(h_base, (K, V), (V, 1), (0, v_start1), (128, 64), (1, 0))
         tl.store(p_h1_bv1, b_h1_bv1.to(p_h1_bv1.dtype.element_ty), boundary_check=(0, 1))
@@ -188,6 +201,8 @@ def chunk_gated_delta_rule_fwd_h(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
+    checkpoint_output: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
@@ -211,7 +226,7 @@ def chunk_gated_delta_rule_fwd_h(
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     h = k.new_empty(B, NT, H, K, V)
-    h_update = k.new_empty(B, NT, H, K, K)
+    h_update = None if checkpoint_output is not None else k.new_empty(B, NT, H, K, K)
     final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
 
     v_new = torch.empty_like(u) if save_new_value else None
@@ -231,6 +246,9 @@ def chunk_gated_delta_rule_fwd_h(
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         h_update=h_update,
+        checkpoint_output=checkpoint_output,
+        checkpoint_offsets=checkpoint_offsets,
+        HAS_CHECKPOINTS=checkpoint_output is not None,
         T=T,
         H=H,
         Hg=Hg,

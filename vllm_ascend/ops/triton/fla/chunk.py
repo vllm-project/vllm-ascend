@@ -38,6 +38,8 @@ def chunk_gated_delta_rule_fwd(
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
     prebuilt_meta=None,
+    checkpoint_output=None,
+    checkpoint_offsets=None,
 ):
     forward_context = get_forward_context()
     num_decodes = 0
@@ -112,22 +114,43 @@ def chunk_gated_delta_rule_fwd(
     else:
         cu_seqlens_kern, initial_state_kern = cu_seqlens_host, initial_state
         keep_meta = None
-    h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
-        k_ascendc,
-        w_ascendc,
-        u_ascendc,
-        g=g_transpose,
-        gk=None,
-        initial_state=initial_state_kern,
-        output_final_state=True,
-        chunk_size=64,
-        save_new_value=True,
-        cu_seqlens=cu_seqlens_kern,
-        chunk_indices=chunk_indices_chunk64_host,
-        use_exp2=False,
-        transpose_state_layout=False,
-    )
-    if keep_meta is not None:
+    if checkpoint_output is not None:
+        if get_pcp_group().world_size != 1:
+            raise ValueError("GDN internal checkpoints require PCP=1")
+        # Keep FP32 snapshots of the recurrence before each 64-token chunk.
+        # The AscendC H output is BF16 and cannot represent an FP32 SSM cache.
+        h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
+            k=k,
+            w=w,
+            u=u,
+            g=g_transpose,
+            initial_state=initial_state,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices_chunk64,
+            chunk_offsets=chunk_offsets_chunk64,
+            checkpoint_output=checkpoint_output,
+            checkpoint_offsets=checkpoint_offsets,
+        )
+        h = h.transpose(1, 2).contiguous()
+        v_new = v_new.transpose(1, 2).contiguous()
+    else:
+        h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
+            k_ascendc,
+            w_ascendc,
+            u_ascendc,
+            g=g_transpose,
+            gk=None,
+            initial_state=initial_state_kern,
+            output_final_state=True,
+            chunk_size=64,
+            save_new_value=True,
+            cu_seqlens=cu_seqlens_kern,
+            chunk_indices=chunk_indices_chunk64_host,
+            use_exp2=False,
+            transpose_state_layout=False,
+        )
+    if keep_meta is not None and checkpoint_output is None:
         # Scatter the compacted final_state back to the original [N, H, K, V]
         # layout the PCP state recursion expects; empty segments keep their
         # initial state.
@@ -253,6 +276,29 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
+
+
+@torch.compiler.disable
+def chunk_gated_delta_rule_checkpoint(
+    q, k, v, g, beta, initial_state, cu_seqlens, prebuilt_meta, checkpoint_output, checkpoint_offsets
+):
+    q = l2norm_fwd(q)
+    k = l2norm_fwd(k)
+    _, output, _, final_state, _, _, _ = chunk_gated_delta_rule_fwd(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        k.shape[-1] ** -0.5,
+        initial_state,
+        True,
+        cu_seqlens=cu_seqlens,
+        prebuilt_meta=prebuilt_meta,
+        checkpoint_output=checkpoint_output,
+        checkpoint_offsets=checkpoint_offsets,
+    )
+    return output, final_state
 
 
 @torch.compiler.disable

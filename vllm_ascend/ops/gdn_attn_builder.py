@@ -370,6 +370,17 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        context = vllm_config.compilation_config.static_forward_context
+        self._ascend_gdn_checkpoints = (
+            bool(layer_names)
+            and all(getattr(context.get(name), "_ascend_internal_checkpoint_enabled", False) for name in layer_names)
+            and bool(getattr(kv_cache_spec, "num_prefill_checkpoint_blocks", 0))
+        )
+        if getattr(kv_cache_spec, "num_prefill_checkpoint_blocks", 0) and not self._ascend_gdn_checkpoints:
+            from vllm_ascend.ascend_config import get_ascend_config
+
+            if get_ascend_config().gdn_internal_prefill_checkpoints:
+                raise ValueError("Internal GDN checkpoint specs require Ascend-owned checkpoint-capable layers")
         sequence_index_capacity = max(
             self.vllm_config.scheduler_config.max_num_seqs,
             self.decode_cudagraph_max_bs,
@@ -778,7 +789,12 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             num_spec_decode_tokens,
             non_spec_query_start_loc_cpu,
         ) = batch
-        if runtime_batch and num_actual_reqs > 0:
+        ascend_checkpoint = None
+        if num_prefills and self._ascend_gdn_checkpoints:
+            from vllm_ascend.ops.gdn_checkpoint import build_gdn_checkpoints
+
+            ascend_checkpoint = build_gdn_checkpoints(self, m, spec_sequence_masks_cpu, num_decodes)
+        if runtime_batch and num_actual_reqs > 0 and ascend_checkpoint is None:
             fused = self._build_fused_metadata(
                 m, num_accepted_tokens, spec_sequence_masks_cpu, num_spec_decodes, graph_request_count, batch
             )
@@ -948,7 +964,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     self,
                     prefill_query_start_loc_cpu,
                     query_start_loc.device,
-                    build_device_metadata=self.build_device_chunk_metadata,
+                    build_device_metadata=self.build_device_chunk_metadata or ascend_checkpoint is not None,
                 )
                 # Common GDN/KDA callers also consume the upstream chunk fields.
                 chunk_indices = non_spec_chunked_prefill_metadata.chunk_indices_chunk64
@@ -1014,6 +1030,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         self._attach_spec_decode_metadata(attn_metadata)
         self._attach_non_spec_decode_metadata(attn_metadata, non_spec_conv1d_cache_indices)
+        if ascend_checkpoint is not None:
+            attn_metadata.ascend_checkpoint = ascend_checkpoint
         return self._finalize_metadata(attn_metadata)
 
     def _finalize_metadata(self, metadata: GDNAttentionMetadata, fused: bool = False) -> GDNAttentionMetadata:
