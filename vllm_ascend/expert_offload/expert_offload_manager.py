@@ -7,13 +7,59 @@ from typing import cast
 
 import torch
 
-from .quantization import expert_adapter_type
 from .residency import ExpertResidency
 from .transfer import TorchExpertTransfer
 from .utils import ExpertMapBuffer, ExpertWeightView, PreparedExpertTensor
 
 ACL_MEMCPY_DEVICE_TO_HOST = 2
 EXPERTS_PER_HOST_CHUNK = 32
+
+
+def expert_offload_quant_method(layer, method, config):
+    from vllm.compilation import backends
+
+    # Native draft loaders switch away from the target's default backbone tag.
+    if backends.model_tag != "backbone":
+        return method
+
+    from .method import ExpertOffloadMoEMethod
+
+    return ExpertOffloadMoEMethod(method, layer.moe_config, config)
+
+
+class MXFPExpertAdapter:
+    """Reuse native MXFP post-processing for bounded expert chunks."""
+
+    tensor_names: tuple[str, ...] = ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
+    output_names: tuple[str, ...] = tensor_names
+
+    def __init__(self, layer, scheme):
+        self.scheme = scheme
+        self.activation = layer.activation
+
+    def materialize(self, host_store, expert_ids, device) -> dict[str, torch.Tensor]:
+        indices = torch.tensor(expert_ids, dtype=torch.long, device="cpu")
+        view = torch.nn.Module()
+        view.activation = self.activation
+        for name in self.tensor_names:
+            # One bounded chunk, never all layers' experts on the NPU.
+            raw = host_store.tensors[name].index_select(0, indices).to(device)
+            setattr(view, name, torch.nn.Parameter(raw, requires_grad=False))
+        self.scheme.process_weights_after_loading(view)
+        return {name: getattr(view, name).detach() for name in self.output_names}
+
+    def allocate_pool(self, host_store, count, device) -> dict[str, torch.Tensor]:
+        """Allocate once through the native scheme using a bounded raw prototype."""
+        if not host_store.prepared:
+            return self.materialize(host_store, range(count), device)
+        view = torch.nn.Module()
+        view.activation = self.activation
+        for name in self.tensor_names:
+            prototype = host_store.prototypes[name]
+            raw = prototype.expand(count, *prototype.shape[1:]).contiguous().to(device)
+            setattr(view, name, torch.nn.Parameter(raw, requires_grad=False))
+        self.scheme.process_weights_after_loading(view)
+        return {name: getattr(view, name).detach() for name in self.output_names}
 
 
 class HostExpertStore:
@@ -100,8 +146,7 @@ class LayerOffloadBinding:
         self.num_slots = config.num_device_experts
         self.top_k = layer.top_k
         self.device = torch.device(layer.moe_config.device)
-        self.adapter = expert_adapter_type(scheme)(layer, scheme)
-        self.adapter.validate_layer(layer)
+        self.adapter = MXFPExpertAdapter(layer, scheme)
         self.host_store = HostExpertStore(layer, self.adapter.tensor_names)
         self.residency = ExpertResidency(self.num_experts, self.num_slots)
         self.manager: ExpertOffloadManager | None = None

@@ -15,8 +15,7 @@ import torch
 from vllm import config as vllm_config
 
 from vllm_ascend.expert_offload.config import ExpertOffloadConfig
-from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
-from vllm_ascend.expert_offload.quantization import expert_adapter_type, expert_offload_quant_method
+from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager, expert_offload_quant_method
 from vllm_ascend.expert_offload.utils import finalize_expert_offload_loading
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -157,8 +156,8 @@ def test_execute_preserves_dummy_pool_and_restores_decode_phase(load_hook_class)
         assert events[-1] == ("parent_execute", dummy, profile)
 
 
-@pytest.fixture
-def quant_methods(monkeypatch, load_hook_class):
+@pytest.fixture(params=[QuantType.W4A8MXFP, QuantType.W8A8MXFP])
+def quant_methods(monkeypatch, load_hook_class, request):
     class Parent:
         requires_device_loading = True
 
@@ -172,7 +171,7 @@ def quant_methods(monkeypatch, load_hook_class):
             setattr(param, key, value)
 
     scheme = SimpleNamespace(
-        quant_type=QuantType.W4A8MXFP,
+        quant_type=request.param,
         group_size=32,
         get_weight=lambda *args: {"w13_weight": torch.empty(6, 4, 3), "w2_weight": torch.empty(6, 4, 3)},
         get_dynamic_quant_param=lambda *args: {
@@ -204,7 +203,6 @@ def quant_methods(monkeypatch, load_hook_class):
             "AscendFusedMoEMethod": native_cls,
             "torch": torch,
             "LayerOffloadBinding": binding_factory,
-            "expert_adapter_type": expert_adapter_type,
         },
     )
     state = SimpleNamespace(config=None)

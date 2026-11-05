@@ -13,8 +13,11 @@ import pytest
 import torch
 
 from vllm_ascend.expert_offload.config import ExpertOffloadConfig
-from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager, LayerOffloadBinding
-from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter
+from vllm_ascend.expert_offload.expert_offload_manager import (
+    ExpertOffloadManager,
+    LayerOffloadBinding,
+    MXFPExpertAdapter,
+)
 from vllm_ascend.quantization.quant_type import QuantType
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -76,7 +79,7 @@ def expert_factory(load_hook_class):
         layer = torch.nn.Module()
         layer.layer_name, layer.local_num_experts, layer.top_k, layer.activation = layer_name, experts, 2, "silu"
         layer.moe_config = SimpleNamespace(device="cpu", is_sequence_parallel=False, has_bias=False)
-        for name in MXFP4ExpertAdapter.tensor_names:
+        for name in MXFPExpertAdapter.tensor_names:
             output = 128 if name.startswith("w13") else 64
             width = 2 if name.endswith("_scale") else (64 if is_fp8 else 32)
             dtype = torch.float8_e4m3fn if is_fp8 and name.endswith("_weight") else torch.uint8

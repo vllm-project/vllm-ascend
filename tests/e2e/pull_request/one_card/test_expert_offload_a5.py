@@ -19,8 +19,8 @@ from vllm_ascend.expert_offload.expert_offload_manager import (
     ExpertOffloadManager,
     HostExpertStore,
     LayerOffloadBinding,
+    MXFPExpertAdapter,
 )
-from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter
 from vllm_ascend.expert_offload.residency import ExpertResidency
 from vllm_ascend.expert_offload.utils import ExpertMapBuffer
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
@@ -62,7 +62,7 @@ def expert_bundle(monkeypatch):
         weight_loader=lambda *args, **kwargs: True,
         **{name: torch.nn.Parameter(tensor, requires_grad=False) for name, tensor in tensors.items()},
     )
-    store = HostExpertStore(layer, MXFP4ExpertAdapter.tensor_names)
+    store = HostExpertStore(layer, MXFPExpertAdapter.tensor_names)
     store.finalize(layer)
     # These standalone grouped GEMMs do not initialize the distributed MegaMoE runtime.
     monkeypatch.setattr("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", lambda _config: False)
@@ -71,7 +71,7 @@ def expert_bundle(monkeypatch):
     scheme.group_size = GROUP_SIZE
     scheme.use_expert_weight_list = False
     with set_current_vllm_config(VllmConfig()):
-        yield MXFP4ExpertAdapter(SimpleNamespace(activation="silu"), scheme), store
+        yield MXFPExpertAdapter(SimpleNamespace(activation="silu"), scheme), store
 
 
 def _gemm(x, weight, scale, counts):

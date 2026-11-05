@@ -8,7 +8,6 @@ from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod
 
 from .config import ExpertOffloadConfig
 from .expert_offload_manager import LayerOffloadBinding
-from .quantization import expert_adapter_type
 
 
 class ExpertOffloadMoEMethod(AscendFusedMoEMethod):
@@ -23,7 +22,6 @@ class ExpertOffloadMoEMethod(AscendFusedMoEMethod):
                 "selected quantization method does not support expert offload; "
                 "a supported Ascend quantized routed-expert scheme is required"
             )
-        expert_adapter_type(method.quant_method).validate_scheme(method.quant_method)
         super().__init__(method.quant_method, moe_config, tid2eid=method.tid2eid)
         self.expert_offload_config = config
 
