@@ -1,0 +1,8 @@
+pr: 21116
+entries:
+  - category: feature
+    text: >-
+      Added experimental CED_layerwise dependency-unit prefetch for DeepSeek-V4.1
+      KV pool loads. Memcache 1.3 retains atomic bulk saves because incremental
+      saves require exclusive allocation.
+    model: deepseek-v4.1
