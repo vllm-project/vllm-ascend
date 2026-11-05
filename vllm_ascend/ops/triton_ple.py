@@ -137,9 +137,7 @@ def _ple_conv_kernel(
         ).to(tl.float32)
         acc += weight * tap
 
-    _store_ple_conv_output(
-        acc, residual_ptr, outer_residual_ptr, output_t, c_offs, c_mask, out_ok, C, FUSE_RESIDUAL
-    )
+    _store_ple_conv_output(acc, residual_ptr, outer_residual_ptr, output_t, c_offs, c_mask, out_ok, C, FUSE_RESIDUAL)
 
 
 @triton.jit(do_not_specialize=["has_token_map"])
@@ -203,9 +201,7 @@ def _ple_conv_decode_kernel(
         ).to(tl.float32)
         acc += weight * tap
 
-    _store_ple_conv_output(
-        acc, residual_ptr, outer_residual_ptr, output_t, c_offs, c_mask, state_ok, C, FUSE_RESIDUAL
-    )
+    _store_ple_conv_output(acc, residual_ptr, outer_residual_ptr, output_t, c_offs, c_mask, state_ok, C, FUSE_RESIDUAL)
 
     # Decode has one program per request and channel block, so state writeback
     # can share the convolution launch.
@@ -352,9 +348,7 @@ def _ple_conv_spec_kernel(
 
     # Roll back draft state to the last accepted token.
     num_acc = tl.load(num_acc_ptr + r)
-    slot_off = tl.minimum(tl.maximum(num_acc - 1, 0), SPEC_QUERY_LEN - 1).to(
-        tl.int32
-    )
+    slot_off = tl.minimum(tl.maximum(num_acc - 1, 0), SPEC_QUERY_LEN - 1).to(tl.int32)
 
     sid = tl.load(state_idx_ptr + r * state_idx_stride).to(tl.int64)
     state_ok = sid != NULL_STATE_ID
@@ -391,9 +385,7 @@ def _ple_conv_spec_kernel(
         ).to(tl.float32)
         acc += weight * tap
 
-    _store_ple_conv_output(
-        acc, residual_ptr, outer_residual_ptr, output_t, c_offs, c_mask, out_ok, C, FUSE_RESIDUAL
-    )
+    _store_ple_conv_output(acc, residual_ptr, outer_residual_ptr, output_t, c_offs, c_mask, out_ok, C, FUSE_RESIDUAL)
 
 
 @triton.jit(do_not_specialize=["has_token_map"])
@@ -431,9 +423,7 @@ def _ple_conv_spec_writeback_kernel(
     qlen = (q_end - q_start).to(tl.int32)
     num_acc = tl.load(num_acc_ptr + r)
     # Use the same rollback window as the output kernel.
-    slot_off = tl.minimum(tl.maximum(num_acc - 1, 0), SPEC_QUERY_LEN - 1).to(
-        tl.int32
-    )
+    slot_off = tl.minimum(tl.maximum(num_acc - 1, 0), SPEC_QUERY_LEN - 1).to(tl.int32)
     shift = 1
 
     src_ok = state_ok
@@ -485,9 +475,7 @@ def ple_conv_spec(
     """Run speculative short conv with channel-contiguous weights and a
     separate (race-free) state writeback."""
     if query_start_loc is None or num_accepted_tokens is None:
-        raise ValueError(
-            "query_start_loc and num_accepted_tokens are required for spec decode"
-        )
+        raise ValueError("query_start_loc and num_accepted_tokens are required for spec decode")
     BLOCK_C = PLE_BLOCK_C
     T, C = inputs.shape
     K = conv_weights.shape[1]
@@ -497,8 +485,7 @@ def ple_conv_spec(
         T = token_indices.numel()
     if conv_state.shape[2] != C or conv_state.shape[1] < state_width:
         raise ValueError(
-            "conv_state must have shape [slots, window, channels], with "
-            f"channels={C} and window >= {state_width}"
+            f"conv_state must have shape [slots, window, channels], with channels={C} and window >= {state_width}"
         )
     state_bs, state_ws, state_cs = conv_state.stride()
     num_reqs = state_indices.numel()

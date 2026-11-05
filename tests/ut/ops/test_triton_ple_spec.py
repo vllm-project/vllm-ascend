@@ -32,9 +32,7 @@ class _CaptureKernel:
         (torch.float16, torch.int32, False, True, True),
     ],
 )
-def test_spec_launch_contract(
-    monkeypatch, dtype, index_dtype, window_contiguous, outer_enabled, map_enabled
-):
+def test_spec_launch_contract(monkeypatch, dtype, index_dtype, window_contiguous, outer_enabled, map_enabled):
     capture_out = _CaptureKernel()
     capture_writeback = _CaptureKernel()
     monkeypatch.setattr(triton_ple, "_ple_conv_spec_kernel", capture_out)
@@ -57,9 +55,7 @@ def test_spec_launch_contract(
     token_map = torch.arange(tokens - 1, -1, -1, dtype=index_dtype) if map_enabled else None
     query_start_loc = torch.tensor([0, spec_query_len, tokens], dtype=torch.int32)
     accepted = torch.tensor([1, spec_query_len], dtype=torch.int32)
-    snapshots = [
-        tensor.clone() for tensor in (inputs, residual, state, weights, indices, query_start_loc, accepted)
-    ]
+    snapshots = [tensor.clone() for tensor in (inputs, residual, state, weights, indices, query_start_loc, accepted)]
 
     triton_ple.ple_conv_spec(
         inputs,
@@ -122,9 +118,7 @@ def test_spec_launch_contract(
     assert tap_major_weights.is_contiguous()
     assert tap_major_weights.data_ptr() != weights.data_ptr()
     torch.testing.assert_close(tap_major_weights, weights.transpose(0, 1))
-    for tensor, snapshot in zip(
-        (inputs, residual, state, weights, indices, query_start_loc, accepted), snapshots
-    ):
+    for tensor, snapshot in zip((inputs, residual, state, weights, indices, query_start_loc, accepted), snapshots):
         torch.testing.assert_close(tensor, snapshot)
 
 
