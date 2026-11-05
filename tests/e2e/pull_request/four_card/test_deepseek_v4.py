@@ -30,16 +30,14 @@ from tests.e2e.pull_request.kv_pool_watch import run_pool_hit_sequence
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-# KV pool watch load. 16,388 tokens = 128 full blocks plus a 4-token tail at
-# block_size=128; only whole blocks can hit, so the ratio stays near 1.
-POOL_PROMPT_TOKENS = 16388
-# Chunked prefill cap: 4096 = 32 blocks of 128. Caps the 16K dummy prefill
-# activation peak so the KV budget still fits.
-POOL_BATCHED_TOKENS = 4096
+# 16,388 = lcm(16,384) + 4. MTP trims the final lcm block, so a 16,384-token
+# prompt would hit 0; the 4-token tail keeps 16,384 hit tokens.
+POOL_LCM_BLOCK_SIZE = 16384
+POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
 # max_model_len needs headroom for output tokens.
 POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
 
-# DSV4-Flash block-key layerwise is the only mooncake layerwise slot in PR.
+# DSV4-Flash block-key layerwise is the only mooncake layerwise slot in PR-A3.
 POOL_KV_TRANSFER_CONFIG = {
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_both",
@@ -93,7 +91,7 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
             "gdydems/DeepSeek-V4-Flash-w4a8-mtp",
             max_model_len=POOL_MAX_MODEL_LEN,
             max_num_seqs=16,
-            max_num_batched_tokens=POOL_BATCHED_TOKENS,
+            max_num_batched_tokens=POOL_PROMPT_TOKENS,
             dtype="auto",
             tensor_parallel_size=4,
             enable_expert_parallel=True,
@@ -124,7 +122,14 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
             assert len(output_ids) > 0
             assert output_ids == expected_token_ids[i]
 
-        run_pool_hit_sequence(vllm_model, block_size=128, prompt_tokens=POOL_PROMPT_TOKENS, tag="dsv4-tp4-layerwise")
+        # MTP: assert exact hit tokens (16,384), not a 0.9 ratio.
+        run_pool_hit_sequence(
+            vllm_model,
+            block_size=128,
+            prompt_tokens=POOL_PROMPT_TOKENS,
+            lcm_block_size=POOL_LCM_BLOCK_SIZE,
+            tag="dsv4-tp4-layerwise",
+        )
 
 
 @pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")

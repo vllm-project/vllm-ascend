@@ -47,8 +47,6 @@ curated_tests:
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
     - tests/e2e/pull_request/one_card/test_flash_attn_precision.py
-    - tests/e2e/pull_request/four_card/pool/test_deepseek_v4_1_pool.py
-    - tests/e2e/pull_request/four_card/pool/test_deepseek_v4_1_pool_mooncake.py
 
 # === Skipped Tests ===
 # Removed from any selection after directory scanning, so they are never
@@ -124,12 +122,6 @@ runner_mapping:
   tests/e2e/pull_request/two_card:
     default: a3-2
     310p: 310p-2
-  # A5 (Ascend 950) four-card pool cases: same precedent as
-  # one_card/test_flash_attn_precision.py -> a5-4.
-  tests/e2e/pull_request/four_card/pool/test_deepseek_v4_1_pool\.py$:
-    default: a5-4
-  tests/e2e/pull_request/four_card/pool/test_deepseek_v4_1_pool_mooncake\.py$:
-    default: a5-4
   tests/e2e/pull_request/four_card:
     default: a3-4
     310p: 310p-4
