@@ -66,8 +66,8 @@ def _register_sharded_rdt():
     import importlib
 
     for factory, module_name, class_name in (
-        (WeightTransferEngineFactory, "sharded_rdt_engine", "ShardedRDTWeightTransferEngine"),
-        (WeightTransferTrainerFactory, "sharded_rdt_trainer", "ShardedRDTTrainerWeightTransferEngine"),
+        (WeightTransferEngineFactory, "sharded_rdt_engine", "ShardedRDTHixlWeightTransferEngine"),
+        (WeightTransferTrainerFactory, "sharded_rdt_trainer", "ShardedRDTHixlTrainerWeightTransferEngine"),
     ):
         original = factory._registry.get("sharded_rdt")
         if original is None or getattr(original, "_ascend_sharded_rdt", False):

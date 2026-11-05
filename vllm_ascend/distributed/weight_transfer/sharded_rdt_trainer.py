@@ -32,19 +32,15 @@ from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
     _EXPORT_RING_MAX_BYTES,
     DEFAULT_STALL_TIMEOUT_S,
     ShardedRDTTrainerInitInfo,
+    ShardedRDTTrainerWeightTransferEngine,
+    _RDTProducerServer,
     _SharedPack,
-)
-from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
-    ShardedRDTTrainerWeightTransferEngine as _UpstreamTrainer,
-)
-from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
-    _RDTProducerServer as _UpstreamProducer,
 )
 
 from vllm_ascend.distributed.weight_transfer.hixl_session import HixlSession
 
 
-class _RDTProducerServer(_UpstreamProducer):
+class _HixlProducerServer(_RDTProducerServer):
     def __init__(
         self,
         *,
@@ -346,7 +342,7 @@ class _RDTProducerServer(_UpstreamProducer):
             self._pack_dsts.clear()
 
 
-class ShardedRDTTrainerWeightTransferEngine(_UpstreamTrainer):
+class ShardedRDTHixlTrainerWeightTransferEngine(ShardedRDTTrainerWeightTransferEngine):
     def _pack_group_for_export(self, held: list, slot_idx: int) -> tuple:
         """Copy ``held`` into ring slot ``slot_idx``; return ``(storages, views,
         refs)`` in the same shape the per-storage path returns, but with ONE
@@ -493,7 +489,7 @@ class ShardedRDTTrainerWeightTransferEngine(_UpstreamTrainer):
         # Preserve the trainer's visible-device mapping; the sidecar uses the
         # same logical index and never reserves an additional accelerator.
         env_vars["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
-        server_cls = ray.remote(_RDTProducerServer).options(
+        server_cls = ray.remote(_HixlProducerServer).options(
             name=self._server_name,
             namespace=ii.trainer_actor_namespace,
             num_cpus=0,

@@ -217,7 +217,7 @@ def test_producer_lease_blocks_source_deregistration():
     # Execute the actual producer lease/close methods without importing the
     # device-only module. A live reader must block teardown before HIXL close.
     tree = ast.parse((MODULE_DIR / "sharded_rdt_trainer.py").read_text(encoding="utf-8"))
-    server = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "_RDTProducerServer")
+    server = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "_HixlProducerServer")
     names = {"hixl_add_consumer", "hixl_remove_consumer", "shutdown"}
     body = [node for node in server.body if isinstance(node, ast.FunctionDef) and node.name in names]
     namespace = {}
@@ -281,8 +281,8 @@ def test_public_backend_name_dispatches_both_factories(session, monkeypatch, pla
     )
     new_worker, new_trainer = object(), object()
     for suffix, symbol, result in (
-        ("engine", "ShardedRDTWeightTransferEngine", new_worker),
-        ("trainer", "ShardedRDTTrainerWeightTransferEngine", new_trainer),
+        ("engine", "ShardedRDTHixlWeightTransferEngine", new_worker),
+        ("trainer", "ShardedRDTHixlTrainerWeightTransferEngine", new_trainer),
     ):
         name = f"vllm_ascend.distributed.weight_transfer.sharded_rdt_{suffix}"
         module = ModuleType(name)

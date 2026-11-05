@@ -300,7 +300,6 @@ nav:
     - Feature Guide:
         - user_guide/feature_guide/index.md
         - user_guide/feature_guide/hisparse.md
-        - user_guide/sharded_rdt_hixl.md
         - user_guide/feature_guide/graph_mode.md
         - user_guide/feature_guide/cpu_binding.md
         - user_guide/feature_guide/Ai_QoS_introduction_en.md
