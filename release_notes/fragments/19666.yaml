@@ -1,0 +1,4 @@
+pr: 19666
+entries:
+  - category: bugfix
+    text: Restored EAGLE/MTP prefix-cache replay protection for standalone engines and aligned Mamba checkpoints with the effective replay boundary. Affected requests may reuse a shorter prefix to recompute the required tail.

@@ -25,7 +25,7 @@ producers align against the resolved common cache-group boundary because their
 physical indexer-state block is smaller than the Mamba checkpoint interval.
 Other models retain the upstream behavior.
 
-On a pure PD prefill producer or a standalone instance the EAGLE one-block
+On a pure PD prefill producer the EAGLE one-block
 backoff of the last cacheable position is suppressed: matched content-hash
 blocks are always verified prompt blocks there, while the backoff would leave
 the final full mamba-align state page unmaterialized across the chunk boundary
@@ -67,7 +67,7 @@ def _mamba_block_aligned_split(
 ) -> int:
     """Preserve PD windows and align sparse index-kpool cache groups.
 
-    On a pure PD prefill producer or a standalone instance the EAGLE
+    On a pure PD prefill producer the EAGLE
     one-block backoff of the last cacheable position is suppressed.
     ``Scheduler._mamba_block_aligned_split`` backs the last cacheable
     mamba-align page off by one block (and, on newer vLLM revisions, shifts
@@ -95,9 +95,8 @@ def _mamba_block_aligned_split(
     ``self.vllm_config.kv_transfer_config`` via ``_skips_eagle_block_drop``
     (the same PD role source used by the coordinator and the neighboring
     mamba split logic), so consumers and ``kv_both`` instances pass straight
-    through with upstream behavior. Standalone instances (no connector)
-    suppress the backoff too: the coordinator never drops there, so backing
-    the split off would only erase cacheable hit length.
+    through with upstream behavior. Standalone instances also retain the
+    upstream backoff because they execute speculative decode.
     """
     kv_transfer_config = self.vllm_config.kv_transfer_config
     # A consumer only needs the unsplit verifier window after some prefix has
@@ -109,7 +108,7 @@ def _mamba_block_aligned_split(
     if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer and has_computed_prefix:
         return num_new_tokens
 
-    # Pure PD prefill producer or standalone instance: suppress the EAGLE
+    # Pure PD prefill producer: suppress the EAGLE
     # one-block backoff (see the docstring). The sparse index-kpool
     # early-return path below must observe it too (it previously ran under
     # a temporary bit clear from the outer producer wrapper).
