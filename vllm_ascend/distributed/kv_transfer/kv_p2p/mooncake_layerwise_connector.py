@@ -116,6 +116,12 @@ if TYPE_CHECKING:
 MooncakeAgentMetadata = LayerwiseAgentMetadata
 
 LAYERWISE_REUSE_WAIT_LOG_INTERVAL_SECONDS = 10.0
+# Poll/timeout used by the layerwise background threads so a stop request can
+# interrupt a blocking wait. Threads observe the stop event and exit on their
+# own; the ZMQ socket is never closed from another thread.
+THREAD_STOP_POLL_SECONDS = 0.2
+# Best-effort upper bound for joining a layer thread during shutdown.
+SHUTDOWN_JOIN_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass
@@ -267,14 +273,23 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.ready_event = ready_event
         self.callback_func = callback_func
         self.reuse_completion_callback = reuse_completion_callback
+        # Set by stop() to let the send loop exit; see run().
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        """Signal the send loop to exit; idempotent."""
+        self._stop_event.set()
 
     def run(self):
         local_rank = get_world_group().local_rank
         device = torch.device(f"npu:{local_rank}")
         torch.npu.set_device(device)
         self.ready_event.set()
-        while True:
-            send_task = self.send_queue.get()
+        while not self._stop_event.is_set():
+            try:
+                send_task = self.send_queue.get(timeout=THREAD_STOP_POLL_SECONDS)
+            except queue.Empty:
+                continue
             self._handle_request(send_task)
 
     def _handle_request(self, send_task: SendTask):
@@ -594,6 +609,8 @@ class KVCacheRecvingLayerThread(threading.Thread):
         self.task_tracker = dict[str, int]()
         self.ready_event = ready_event
         self.metadata = metadata
+        # Set by stop() to let the recv loop exit; see run().
+        self._stop_event = threading.Event()
 
     def get_and_clear_done_requests(self) -> set[str]:
         """
@@ -643,6 +660,10 @@ class KVCacheRecvingLayerThread(threading.Thread):
                 self.task_tracker.pop(req_id)
                 self.done_requests.add(req_id)
 
+    def stop(self) -> None:
+        """Signal the recv loop to exit; idempotent."""
+        self._stop_event.set()
+
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         handshake_port = layerwise_handshake_port(base_port=self.side_channel_port, tp_rank=self.tp_rank)
@@ -653,8 +674,10 @@ class KVCacheRecvingLayerThread(threading.Thread):
         with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore
             self.ready_event.set()
             decoder = msgspec.msgpack.Decoder(type=tuple)
-            while True:
+            while not self._stop_event.is_set():
                 try:
+                    if sock.poll(int(THREAD_STOP_POLL_SECONDS * 1000)) == 0:
+                        continue
                     frames = sock.recv_multipart()
                     if len(frames) < 2:
                         logger.error(
@@ -740,6 +763,9 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
 class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
     requires_full_blocks_on_update_after_alloc = True
     supports_layerwise_buffer_reuse = True
+    # Subclasses that override __init__ without calling super().__init__() keep
+    # inherited shutdown() safe through this class default.
+    _shutdown_complete: bool = False
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config, role, kv_cache_config)
@@ -757,6 +783,16 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = MooncakeLayerwiseConnectorWorker(vllm_config, kv_cache_config, str(self.engine_id))
+
+    def shutdown(self) -> None:
+        """Idempotent connector shutdown; delegates to scheduler and/or worker side."""
+        if getattr(self, "_shutdown_complete", False):
+            return
+        self._shutdown_complete = True
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.shutdown()
+        if self.connector_worker is not None:
+            self.connector_worker.shutdown()
 
     def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
         # vLLM main's scheduler uses this for skip_zeroing_group_ids and for
@@ -890,6 +926,22 @@ class MooncakeLayerwiseConnectorScheduler:
         self.need_truncate = self._has_attn_mamba_hybrid_cache(kv_cache_config)
         self.executor = ThreadPoolExecutor(32)
         self.metaserver_client = MetaserverClient(vllm_config)
+        self._shutdown_complete = False
+
+    def shutdown(self) -> None:
+        """Idempotent best-effort shutdown: stop executor, then close metaserver client."""
+        if getattr(self, "_shutdown_complete", False):
+            return
+        self._shutdown_complete = True
+        try:
+            self.executor.shutdown(wait=True)
+        except Exception as error:
+            logger.warning("Failed to shutdown layerwise scheduler executor. error=%s. ", error)
+        try:
+            self.metaserver_client.close()
+        except Exception as error:
+            logger.warning("Failed to close layerwise metaserver client. error=%s. ", error)
+        logger.info("MooncakeLayerwiseConnectorScheduler shutdown complete. engine_id=%s", self.engine_id)
 
     @staticmethod
     def _iter_kv_cache_specs(kv_cache_config: KVCacheConfig):
@@ -1191,6 +1243,9 @@ class MooncakeLayerwiseConnectorWorker:
         # Background thread for sending or receiving KV caches.
         self.kv_recv_layer_thread: KVCacheRecvingLayerThread | None = None
         self.kv_send_layer_thread: KVCacheSendingLayerThread | None = None
+        # Idempotent shutdown state; see shutdown().
+        self._shutdown_complete = False
+        self._shutdown_lock = threading.Lock()
         self.layer_storage_slots: dict[int, tuple[int, ...]] = {}
         self.storage_send_done_events: list[threading.Event] = []
         self._storage_send_errors: dict[int, str] = {}
@@ -1235,6 +1290,31 @@ class MooncakeLayerwiseConnectorWorker:
         self.virtual_request: set[str] = set()
         self._invalid_block_ids: set[int] = set()
         self._recving_metadata: dict[str, ReqMeta] = {}
+
+    def shutdown(self) -> None:
+        """Idempotent best-effort shutdown of layerwise worker threads."""
+        with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            self._shutdown_complete = True
+        threads = [t for t in (self.kv_recv_layer_thread, self.kv_send_layer_thread) if t is not None]
+        for thread in threads:
+            try:
+                thread.stop()
+            except Exception as error:
+                logger.warning("Failed to signal layerwise thread stop. thread=%s. error=%s. ", thread.name, error)
+        for thread in threads:
+            try:
+                thread.join(timeout=SHUTDOWN_JOIN_TIMEOUT_SECONDS)
+                if thread.is_alive():
+                    logger.warning(
+                        "Layerwise thread did not stop within %.1f s. thread=%s. ",
+                        SHUTDOWN_JOIN_TIMEOUT_SECONDS,
+                        thread.name,
+                    )
+            except Exception as error:
+                logger.warning("Failed to join layerwise thread. thread=%s. error=%s. ", thread.name, error)
+        logger.info("MooncakeLayerwiseConnectorWorker shutdown complete. engine_id=%s", self.engine_id)
 
     def _init_layerwise_reuse_state(self) -> None:
         slot_by_addr: dict[int, int] = {}
