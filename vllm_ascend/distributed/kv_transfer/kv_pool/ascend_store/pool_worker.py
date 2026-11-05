@@ -51,6 +51,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_trans
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     get_physical_layer_index,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mamba_state_sharding import (
+    resolve_mamba_state_sharding,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
@@ -291,17 +294,11 @@ class KVPoolWorker:
 
     def _init_mamba_state_sharding(self) -> None:
         """Resolve optional model declarations before building state cache keys."""
-        if self.use_layerwise or self.use_kvpp or not self.use_mamba:
+        if not self.use_mamba:
             return
-        model_cls = get_model_cls(self.vllm_config.model_config)
-        get_sharding = getattr(model_cls, "get_mamba_state_sharding", None)
-        if not callable(get_sharding):
-            return
-        declarations = get_sharding(self.vllm_config.parallel_config, self.tp_rank, self.pcp_rank)
-        for spec, group_ids in get_mamba_groups(self.kv_cache_config).items():
-            if spec.mamba_type in declarations:
-                for group_id in group_ids:
-                    self.mamba_state_sharding[group_id] = declarations[spec.mamba_type]
+        self.mamba_state_sharding = resolve_mamba_state_sharding(
+            self.vllm_config, self.kv_cache_config, self.tp_rank, self.pcp_rank
+        )
 
     def _init_metadata(self, model_config, vllm_config, extra_config) -> None:
         partitions = None
