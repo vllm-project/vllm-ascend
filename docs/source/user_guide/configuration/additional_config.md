@@ -101,6 +101,8 @@ projections retain their existing behavior.
 Enable it with `--additional-config '{"enable_indexer_query_parallel": true}'`.
 The minimum **PCP-local scheduled query rows**, before splitting across TP, uses
 vLLM's `--attention-config '{"indexer_tp_shard_min_rows": 65536}'` setting.
+This threshold is configurable with current vLLM main. On vLLM v0.32.0,
+which does not expose that setting, the minimum remains 65536 local query rows.
 The default is 65,536. This is a batch/chunk size threshold, not the accumulated
 context length: a 1M context with an 8,192-token chunk budget does not meet the
 default threshold. A lower threshold can be tested explicitly, for example

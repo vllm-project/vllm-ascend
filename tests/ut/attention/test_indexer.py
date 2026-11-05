@@ -15,12 +15,29 @@ from vllm_ascend.attention.indexer import (
     AscendSFAIndexerBackend,
     AscendSFAIndexerMetadata,
     AscendSFAIndexerMetadataBuilder,
+    _balanced_query_shard_sizes,
     _query_parallel_supported,
 )
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.device_op import A5DeviceAdaptor
 
 _KERNEL_BLOCK_SIZE = 128
+
+
+@pytest.mark.parametrize(
+    ("query_lens", "seq_lens", "tp_size", "expected"),
+    [
+        ([8], [8], 4, [3, 2, 1, 2]),
+        ([4, 4], [4, 104], 4, [4, 1, 1, 2]),
+        ([2, 2, 2, 2], [2, 2, 2, 2], 4, [1, 2, 2, 3]),
+        ([3], [0], 2, None),
+        ([1], [1], 2, None),
+    ],
+)
+def test_query_shard_planner_balances_causal_work(query_lens, seq_lens, tp_size, expected):
+    # Small PCP-local batches must work with both supported core versions;
+    # a release core's CUDA row threshold must not disable this host plan.
+    assert _balanced_query_shard_sizes(torch.tensor(seq_lens), torch.tensor(query_lens), tp_size) == expected
 
 
 def _make_builder(
@@ -619,6 +636,19 @@ def test_query_shards_preserve_every_causal_row_and_bound_padding(query_lens, se
     for shard in shards[:-1]:
         request_start = max(start for start in starts if start <= shard.end)
         assert (shard.end - request_start) % 128 == 0
+
+
+@pytest.mark.parametrize(("rows", "eligible"), [(4096, False), (65536, True)])
+def test_query_shard_legacy_core_without_configurable_threshold(rows, eligible):
+    builder, common = _query_shard_builder([rows], [rows], 4)
+    del builder.vllm_config.attention_config.indexer_tp_shard_min_rows
+    with (
+        patch("vllm_ascend.attention.indexer.get_ascend_config") as ascend,
+        patch("vllm_ascend.attention.indexer.get_tp_group", return_value=SimpleNamespace(rank_in_group=0)),
+    ):
+        ascend.return_value.enable_indexer_query_parallel = True
+        builder._warn_if_query_parallel_inactive(builder.vllm_config)
+        assert (builder._build_query_shard(common) is not None) is eligible
 
 
 def test_query_shards_fall_back_when_aligned_cuts_make_a_rank_too_small():

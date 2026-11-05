@@ -20,7 +20,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.mla.indexer import balanced_prefill_row_shard
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.utils import CpuGpuBuffer
@@ -56,6 +55,33 @@ INDEXER_K_CACHE_SLOT = 0
 INDEXER_SCALE_CACHE_SLOT = 1
 INDEXER_MIN_QUERY_ROWS_PER_RANK = 128
 INDEXER_QUERY_SHARD_ALIGNMENT = 128
+INDEXER_DEFAULT_MIN_QUERY_ROWS = 65536
+
+
+def _balanced_query_shard_sizes(
+    seq_lens_cpu: torch.Tensor, query_lens_cpu: torch.Tensor, tp_size: int
+) -> list[int] | None:
+    # Ordinary SFA has one candidate key per causal position. Plan on host
+    # arrays: vLLM v0.32's CUDA planner has a fixed 16K-row floor per rank,
+    # whereas PCP-local Ascend batches can be much smaller.
+    query_lens = query_lens_cpu.numpy().astype(np.int64, copy=False)
+    seq_lens = seq_lens_cpu.numpy().astype(np.int64, copy=False)
+    num_rows = int(query_lens.sum())
+    if tp_size < 2 or num_rows < tp_size:
+        return None
+    first_key = np.repeat(seq_lens - query_lens + 1, query_lens)
+    row_in_request = np.arange(num_rows) - np.repeat(np.cumsum(query_lens) - query_lens, query_lens)
+    cost = np.cumsum(first_key + row_in_request)
+    total = int(cost[-1])
+    if total <= 0:
+        return None
+    targets = np.arange(1, tp_size) * total // tp_size
+    bounds = [0, *np.searchsorted(cost, targets).tolist(), num_rows]
+    for i in range(1, tp_size):
+        bounds[i] = max(bounds[i], bounds[i - 1] + 1)
+    for i in range(tp_size - 1, 0, -1):
+        bounds[i] = min(bounds[i], bounds[i + 1] - 1)
+    return [bounds[i + 1] - bounds[i] for i in range(tp_size)]
 
 
 def _align_query_shard_sizes(sizes: list[int], query_starts: np.ndarray) -> list[int]:
@@ -964,7 +990,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             )
             return
         min_rows = max(
-            config.attention_config.indexer_tp_shard_min_rows,
+            getattr(config.attention_config, "indexer_tp_shard_min_rows", INDEXER_DEFAULT_MIN_QUERY_ROWS),
             parallel.tensor_parallel_size * INDEXER_MIN_QUERY_ROWS_PER_RANK,
         )
         budget = config.scheduler_config.max_num_batched_tokens
@@ -988,7 +1014,10 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         rows = common.num_actual_tokens
         config = self.vllm_config
         tp_size = config.parallel_config.tensor_parallel_size
-        min_rows = max(config.attention_config.indexer_tp_shard_min_rows, tp_size * INDEXER_MIN_QUERY_ROWS_PER_RANK)
+        min_rows = max(
+            getattr(config.attention_config, "indexer_tp_shard_min_rows", INDEXER_DEFAULT_MIN_QUERY_ROWS),
+            tp_size * INDEXER_MIN_QUERY_ROWS_PER_RANK,
+        )
         if rows != common.num_input_tokens or rows < min_rows:
             return None
         query_lens_cpu = common.query_start_loc_cpu[1 : common.num_reqs + 1].diff(
@@ -999,12 +1028,10 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         seq_lens_cpu = common.seq_lens_cpu_upper_bound
         if seq_lens_cpu is None:
             return None
-        sizes = balanced_prefill_row_shard(
+        sizes = _balanced_query_shard_sizes(
             seq_lens_cpu[: common.num_reqs],
             query_lens_cpu,
-            1,
             tp_size,
-            min_rows,
         )
         if sizes is None or sum(sizes) != rows:
             return None
