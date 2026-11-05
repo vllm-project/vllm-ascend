@@ -46,6 +46,7 @@ env_common: &env_common
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   VLLM_SERVER_DEV_MODE: "1"
   LD_LIBRARY_PATH: "/usr/local/lib/:$LD_LIBRARY_PATH"
+  SERVER_PORT: "${PORT}"
   VLLM_USE_MODELSCOPE: "true"
 
 env_prefill: &env_prefill
