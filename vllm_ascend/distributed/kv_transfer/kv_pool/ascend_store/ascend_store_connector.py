@@ -51,6 +51,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStorePromMetrics,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
+    BaseKVPoolScheduler,
     KVPoolScheduler,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
@@ -61,7 +62,7 @@ if TYPE_CHECKING:
 
 def create_kv_pool_scheduler(
     vllm_config: VllmConfig, use_layerwise: bool, kv_cache_config: KVCacheConfig | None = None
-) -> KVPoolScheduler:
+) -> BaseKVPoolScheduler:
     scheduler_class = LayerwiseKVPoolScheduler if use_layerwise else KVPoolScheduler
     return scheduler_class(vllm_config, use_layerwise, kv_cache_config)
 
@@ -169,7 +170,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # Opt in only for synchronous bulk loads, not background retrieval.
         self.requires_mamba_state_copy_after_load = not self.use_layerwise and not extra_config.get("load_async", False)
 
-        self.connector_scheduler: KVPoolScheduler | None = None
+        self.connector_scheduler: BaseKVPoolScheduler | None = None
         self.connector_worker: KVPoolWorker | None = None
         self.dspark_prefix_cache_enabled = False
 
@@ -339,16 +340,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.register_kv_caches(kv_caches)
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
-        """Fence only the saves of requests whose blocks this step may reuse.
+        """Fence the previous save before this step can reuse KV blocks.
 
-        Blocks are freed immediately when a request finishes or is preempted.
-        Before this step's forward can reallocate them, the in-flight puts of
-        exactly those requests are awaited (released_req_ids carried in the
-        connector metadata), instead of the whole previous save batch.
+        This hook is temporarily reused for deferred KV cache save
+        synchronization and will be replaced by a dedicated mechanism.
         """
         assert self.connector_worker is not None
-        released_req_ids = getattr(kv_connector_metadata, "released_req_ids", None)
-        self.connector_worker.handle_released_saves(released_req_ids)
+        self.connector_worker.wait_for_previous_save()
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         super().bind_connector_metadata(connector_metadata)
@@ -533,11 +531,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.build_connector_worker_meta()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.connector_scheduler is not None:
-            return self.connector_scheduler.get_stats()
-        if self.connector_worker is not None:
-            return self.connector_worker.get_stats()
-        return None
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_stats()
 
     @classmethod
     def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> KVConnectorStats:

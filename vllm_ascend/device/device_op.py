@@ -255,36 +255,6 @@ class BaseDeviceAdaptor:
         return scale
 
     @staticmethod
-    def moe_gating_top_k(
-        x: torch.Tensor,
-        *,
-        k: int,
-        k_group: int,
-        group_count: int,
-        group_select_mode: int,
-        renorm: int,
-        norm_type: int,
-        out_flag: bool,
-        routed_scaling_factor: float = 1.0,
-        eps: float = 1e-20,
-        bias_opt: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, out = torch.ops._C_ascend.moe_gating_top_k(
-            x,
-            k=k,
-            k_group=k_group,
-            group_count=group_count,
-            group_select_mode=group_select_mode,
-            renorm=renorm,
-            norm_type=norm_type,
-            out_flag=out_flag,
-            routed_scaling_factor=routed_scaling_factor,
-            eps=eps,
-            bias_opt=bias_opt,
-        )
-        return topk_weights, topk_ids.to(torch.int32), out
-
-    @staticmethod
     def npu_mm_reduce_scatter_base(
         x1: torch.Tensor,
         x2: torch.Tensor,
@@ -1217,38 +1187,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         if scale.shape[-1] % 2 != 0:
             raise ValueError(f"Invalid MXFP scale shape: {tuple(scale.shape)}")
         return scale.reshape(scale.shape[0], scale.shape[1] // 2, 2)
-
-    @staticmethod
-    def moe_gating_top_k(
-        x: torch.Tensor,
-        *,
-        k: int,
-        k_group: int,
-        group_count: int,
-        group_select_mode: int,
-        renorm: int,
-        norm_type: int,
-        out_flag: bool,
-        routed_scaling_factor: float = 1.0,
-        eps: float = 1e-20,
-        bias_opt: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, out = torch_npu.npu_moe_gating_top_k(
-            x,
-            k=k,
-            bias=bias_opt,
-            k_group=k_group,
-            group_count=group_count,
-            group_select_mode=group_select_mode,
-            renorm=0,
-            norm_type=norm_type,
-            routed_scaling_factor=routed_scaling_factor,
-            eps=eps,
-        )
-        if norm_type == 0 and renorm == 1:
-            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-
-        return topk_weights, topk_ids.to(torch.int32), out
 
     @staticmethod
     def npu_mm_reduce_scatter_base(

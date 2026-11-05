@@ -267,6 +267,102 @@ expert choices. See the upstream
 [routed experts example](https://docs.vllm.ai/en/latest/examples/rl/routed_experts_e2e/)
 for decoding and replay logic.
 
+### Sampling Mask (Distribution Replay)
+
+During RL rollout inference, top-k/top-p/min-p sampling truncates the model's
+distribution. Sampling Mask returns the retained token IDs for each generated
+position, so training can normalize policy probabilities over the same support
+used during rollout. See the upstream
+[Sampling Mask (Distribution Replay) guide](https://docs.vllm.ai/en/latest/training/sampling_mask/)
+for training-side usage.
+
+`--return-sampling-mask` enables the feature and is disabled by default.
+Model runner V2 and `--logprobs-mode processed_logprobs` are required.
+The following example also uses `--tokens-only` to expose the token-in/token-out
+API and skip tokenizer initialization. Use `--enable-scale-out` instead to expose the
+same endpoint while retaining the normal serving setup and tokenizer.
+See [Tokens in, tokens out](#tokens-in-tokens-out) for serving details.
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 \
+vllm serve Qwen/Qwen3-0.6B \
+    --tokens-only \
+    --return-sampling-mask \
+    --logprobs-mode processed_logprobs
+```
+
+With sampling-mask capture enabled, requests must use
+`temperature > 0` and `top_k > 0`. Send pre-tokenized input to
+`/inference/v1/generate`:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/inference/v1/generate \
+    -H 'Content-Type: application/json' \
+    -d '{
+        "token_ids": [785, 6722, 315, 9625, 374],
+        "sampling_params": {
+            "temperature": 1.0,
+            "top_k": 20,
+            "top_p": 0.95,
+            "max_tokens": 2,
+            "logprobs": 1
+        },
+        "output_mode": "tokens",
+        "stream": false
+    }'
+```
+
+Each choice returns one support set per generated token. The following tested
+Qwen3-0.6B response excerpt omits metadata, ranks, and `top_logprobs`:
+
+```json
+{
+  "finish_reason": "length",
+  "token_ids": [12095, 11],
+  "sampling_mask": [
+    [220, 264, 279, 304, 320, 510, 1112, 1181, 1304, 2130,
+     2598, 7407, 7436, 9625, 12095, 21718, 24209, 30743, 32671, 55201],
+    [11, 13, 323, 382]
+  ],
+  "logprobs": {
+    "content": [
+      {"token_id": 12095, "logprob": -0.2592906951904297},
+      {"token_id": 11, "logprob": -0.7923774719238281}
+    ]
+  }
+}
+```
+
+Basic distribution replay needs the complete mask and the sampled token's old
+logprob. During training, apply the saved mask to the current policy's logits
+to compute that token's new logprob. Old logprobs for every candidate token are
+not required.
+
+The sampled token belongs to its corresponding support. Mask size is independent
+of `logprobs`, and top-k ties can retain more than `top_k` tokens. With
+`stream=true`, concatenate token and mask chunks by choice index and token
+position.
+
+For an MTP-capable model, speculative decoding is supported with fixed
+verification boundaries. Add the following configuration to the server command:
+
+```bash
+--speculative-config '{"method":"mtp","num_speculative_tokens":2,"enable_adaptive_verification":false}'
+```
+
+Each committed token receives the processed target-model support at its
+position. The mask does not record draft or acceptance probabilities.
+
+On Ascend, supports are packed on the NPU and decoded on the CPU using the
+exact bitmask fallback. This preserves the complete support but adds transfer,
+CPU decoding, and response-size overhead. The adapter requires the upstream
+request-major sampling-mask interface.
+
+Diffusion models, custom logits processors, adaptive verification, and the
+batch-sharded LM-head gather path are not supported for this feature.
+Sampling masks contain neither probability values nor RNG state; they do not
+force a token sequence as [Trace Replay](#trace-replay) does.
+
 ## Deterministic rollouts
 
 Batch invariance reduces output differences caused by changes in batch shape
@@ -288,15 +384,25 @@ limitations.
 
 ## Tokens in, tokens out
 
-The experimental tokens-only endpoint accepts pre-tokenized prompts and
-returns generated token IDs. Start the normal `serve` command with
-`--tokens-only`:
+The experimental token-in/token-out (TITO) endpoint accepts pre-tokenized
+prompts and, by default (`output_mode="tokens"`), returns generated token IDs.
+Apply tokenization and any chat template on the client before sending
+`token_ids`. Choose one of two serving modes:
 
 ```bash
+# Dedicated token-only serving: skips tokenizer initialization.
 vllm serve Qwen/Qwen3-0.6B --tokens-only
+
+# Enable TITO while retaining the normal serving setup and tokenizer.
+vllm serve Qwen/Qwen3-0.6B --enable-scale-out
 ```
 
-Send requests to `/inference/v1/generate`:
+`--tokens-only` uses token output and does not support stop strings; use
+`sampling_params.stop_token_ids` instead. A normal server started without
+either flag returns HTTP 403 for TITO requests, with a message to enable
+`--enable-scale-out`.
+
+Send a non-streaming request to `/inference/v1/generate`:
 
 ```bash
 curl http://127.0.0.1:8000/inference/v1/generate \
@@ -304,38 +410,80 @@ curl http://127.0.0.1:8000/inference/v1/generate \
     -d '{
         "request_id": "rollout-001",
         "token_ids": [151644, 8948, 198],
+        "output_mode": "tokens",
         "sampling_params": {
             "temperature": 1.0,
-            "max_tokens": 32,
+            "max_tokens": 2,
             "logprobs": 1
         }
     }'
 ```
 
-A non-streaming response has the following shape:
+The following non-streaming response excerpt illustrates the structure for a
+request that reaches the two-token limit. Token IDs and logprob values are
+illustrative, not captured model output; other response fields are omitted:
 
 ```json
 {
-  "request_id": "rollout-001",
+  "request_id": "generate-tokens-rollout-001",
   "model": "Qwen/Qwen3-0.6B",
+  "output_mode": "tokens",
   "choices": [
     {
       "index": 0,
-      "logprobs": null,
-      "finish_reason": "stop",
+      "logprobs": {
+        "content": [
+          {
+            "token_id": 123,
+            "logprob": -0.5,
+            "rank": 1,
+            "top_logprobs": [
+              {"token_id": 123, "logprob": -0.5, "rank": 1}
+            ]
+          },
+          {
+            "token_id": 456,
+            "logprob": -0.7,
+            "rank": 1,
+            "top_logprobs": [
+              {"token_id": 456, "logprob": -0.7, "rank": 1}
+            ]
+          }
+        ]
+      },
+      "finish_reason": "length",
+      "stop_reason": null,
       "token_ids": [123, 456],
       "routed_experts": null
     }
   ],
   "prompt_logprobs": null,
-  "usage": null
+  "usage": {
+    "prompt_tokens": 3,
+    "completion_tokens": 2,
+    "total_tokens": 5
+  }
 }
 ```
 
-The exact logprob and usage values depend on the sampling parameters and
-server configuration. The API is intended for disaggregated serving and may
-change; track the upstream [Tokens API RFC](https://github.com/vllm-project/vllm/issues/22817)
-for its status.
+In token output mode, `choices[].logprobs.content` contains an integer
+`token_id`, its `logprob` and `rank`, and `top_logprobs` for each generated
+position. Non-streaming responses include `usage` without requiring
+`stream_options.include_usage`. Here, three prompt tokens and two completion
+tokens give five total tokens; `stop_reason` is `null` because generation
+reached `max_tokens`.
+
+Set `stream=true` to receive server-sent events (SSE), ending with
+`data: [DONE]`. To cancel an in-flight request, send a POST to
+`/inference/v1/abort_requests` with a JSON body containing `request_ids`, a
+list of IDs returned by the server (including the `generate-tokens-` prefix),
+rather than the original client-supplied IDs.
+
+For the full protocol and the `text` output mode, which requires a tokenizer,
+see the upstream
+[TITO guide](https://docs.vllm.ai/en/latest/serving/online_serving/token_in_token_out/).
+The [Tokens API RFC](https://github.com/vllm-project/vllm/issues/22817)
+provides design background.
 
 ## Tool calling for agentic RL
 
@@ -386,15 +534,16 @@ model runner V2 and the scale-out endpoints:
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=1 \
-VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 \
 vllm serve Qwen/Qwen3-8B \
+    --enable-scale-out \
     --enable-trace-replay
 ```
 
 `VLLM_USE_V2_MODEL_RUNNER=1` prevents the server from falling back to model
 runner V1, which is incompatible with trace replay.
-`VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1` registers the
+`--enable-scale-out` registers the
 `/inference/v1/generate` endpoint for a normal serving process.
+`--enable-trace-replay` opts the server into accepting trace replay requests.
 
 Send requests to `/inference/v1/generate`:
 
@@ -426,8 +575,9 @@ The output tokens will always be `[15, 284, 1026, 374]`. The logprobs reflect th
 | `--weight-transfer-config '{"backend": "hccl"}'` | Cross-NPU weight transfer | Register the Ascend HCCL transfer engine |
 | `--weight-transfer-config '{"backend": "ipc"}'` | Same-NPU weight transfer | Select the Ascend NPU IPC transfer engine |
 | `--enable-return-routed-experts` | MoE router replay | Return encoded expert routing decisions |
-| `VLLM_USE_V2_MODEL_RUNNER=1` | Trace replay | Select the required model runner V2 implementation |
-| `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1` | Token-in/token-out requests on a normal server | Register `/inference/v1/generate` |
+| `--return-sampling-mask` | Sampling Mask (Distribution Replay) | Return the support set for each generated token; disabled by default |
+| `VLLM_USE_V2_MODEL_RUNNER=1` | Sampling Mask and Trace Replay | Select the model runner V2 implementation required by both features |
+| `--enable-scale-out` | Token-in/token-out requests on a normal server | Register `/inference/v1/generate`; `--tokens-only` also registers this endpoint |
 | `--enable-trace-replay` | trace replay | Forces decoding to follow a predetermined token sequence |
 
 For the Ascend-specific option definitions, see

@@ -369,31 +369,9 @@ A few important things to consider when using DFlash2 draft models:
       --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens": 8}'
     ```
 
-2. **Model runner V2 draft graphs**: DFlash2 uses full ACL graphs when the
-   target enables `FULL_DECODE_ONLY` and the draft's `enforce_eager` is unset
-   or false. The draft backbone and candidate selector retain the configured
-   Dynamo compilation path. Candidate scoring uses its own request-shaped
-   forward context and compilation cache namespace, while the outer draft ACL
-   graph captures the compiled operations, candidate TopK, path sampling, and
-   proposal-cache updates. Set `"enforce_eager": true`
-   to compare against eager drafting. Validate graph/eager equivalence and
-   request reuse on the intended NPU configuration before deployment.
-
-   Non-causal draft layers with sliding-window size `W` use FIA band mode
-   (`sparse_mode=4`) with a cached compressed mask and
-   `pre_tokens=next_tokens=W-1`, matching upstream FlashAttention's symmetric
-   window. Both eager execution and graph capture preserve this window;
-   layers without a window retain full attention. This replaces the earlier
-   workaround that ignored non-causal sliding windows, including in eager
-   execution. The compressed mask is a band-mode template, not a causal
-   restriction on draft tokens.
-
-   The model-level acceptance test exercises DFlash2 draft graphs using
-   `VLLM_COMPILE` with `FULL_DECODE_ONLY` on two NPUs:
-
-   ```shell
-   pytest -sv tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py -k test_dflash2_v2_acceptance
-   ```
+2. **Model runner V2 draft graphs**: DFlash2 supports full ACL graphs when the
+   target enables `FULL_DECODE_ONLY` or `FULL_AND_PIECEWISE` and the draft's
+   `enforce_eager` is unset or false.
 
 3. **Graph capture sizes**: each decode step runs `(1 + K)` tokens per
    request, so every capture size must be `n * (num_speculative_tokens + 1)`
@@ -486,16 +464,29 @@ The following code configures vLLM Ascend to use speculative decoding where prop
 
 On 950DT Products with Model Runner V2, GLM (`GlmMoeDsaForCausalLM`) targets paired with
 `Qwen3DSparkModel` GQA drafts can use the device-length CANN FlashAttn backend.
-This requires FP16/BF16 queries and unquantized draft KV cache. MLA drafts keep
-their existing backend. When all draft layers use FlashAttn, the runner can skip
-the speculative CPU length synchronization; PP, PCP, DCP, KV transfer, sparse
-KV offload, and adaptive verification retain their existing synchronization path.
+This requires FP16/BF16 queries and unquantized draft KV cache. When all draft
+layers use FlashAttn, the runner can skip the speculative CPU length
+synchronization; PP, PCP, DCP, KV transfer, sparse KV offload, and adaptive
+verification retain their existing synchronization path.
 
-For draft heads of size 192, the backend zero-pads Q/K/V to 256 for the CANN
+For GQA draft heads of size 192, the backend zero-pads Q/K/V to 256 for the CANN
 kernel, keeps the original attention scale, and trims the output back to 192.
 Model weights and logical head sizes are unchanged. These draft KV cache pages
 use one third more storage than unpadded 192-wide pages, and padding adds work;
 this backend does not guarantee higher speculative acceptance rates.
+
+GLM also supports DSpark with MLA drafts (`Glm5DSparkForCausalLM`), which can
+use the device-length FlashMLA backend on the same hardware and runner.
+This requires FP16/BF16 queries and unquantized KV cache with matching dtype.
+When the draft selects FlashMLA, the runner can skip speculative CPU length
+synchronization under the same conditions as the GQA path; FIA fallback retains
+exact CPU length synchronization.
+
+FlashMLA currently requires local Q heads and `local Q heads * DCP size` in
+`{8, 12, 64, 96}`, with latent/RoPE dimensions of 512/64. The 64-head GLM draft
+therefore uses FIA at TP2/TP4. KV NZ and PCP are unsupported. When the target
+KV cache is FP8, set `"kv_cache_dtype": "bfloat16"` in `--speculative-config`
+for a BF16 draft.
 
 !!! warning
 
@@ -575,6 +566,63 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-8B \
 
 Adaptive verification takes effect only with model runner V2.
 
+#### Hybrid Gated DeltaNet targets
+
+The Model Runner V2 GDN path supports variable verification lengths, including
+steps that admit no draft tokens. Zero-draft decode requests retain the previous
+step's accepted-token offset so convolution and recurrent attention resume from
+the correct state. ACL Graph capture uses the same speculative path for one-token
+rows, and padding requests have zero-length GDN queries.
+
+Adaptive GDN verification directly reuses vLLM's Triton recurrent implementation
+with a two-dimensional state table. Its row stride is independent of the current
+query length, so a one-token query can restore the state from an earlier step
+that accepted multiple tokens. The fixed-length path keeps the native recurrent
+operator. This adaptive path requires triton-ascend and is not supported by the
+310P recurrent backend.
+
+Ascend declares the device/host query-length mismatch capability and the bounded
+variable-length decode graph capability in its own backend and metadata builder.
+It does not depend on inheriting those declarations from upstream GDN classes.
+The variable-length graph bound is `1 + num_speculative_tokens` with adaptive
+verification enabled; the 310P backend explicitly rejects this capability.
+
+Use a matching vLLM revision with the strided recurrent API and adaptive-verification
+initialization hooks and the convolution kernel interface used by the paired
+vLLM checkout, together with a DSpark checkpoint
+trained for the target model. For Qwen hybrid targets, including
+Qwen3.8-27B, set `num_speculative_tokens` to the draft checkpoint's supported
+length and enable `enable_adaptive_verification` as above. Keep full decode graphs
+enabled; do not set the target's `enforce_eager=True`. M-RoPE positions continue
+to use vLLM's model-state implementation and the compacted device query boundaries.
+
+Ascend reuses vLLM's confidence estimates, cost profiling, budget allocator, and
+rejection sampler. Newer vLLM Triton budget allocators are used directly; the
+Ascend `index_fill_` workaround applies only to the older torch allocator.
+No change to sampling probabilities or model weights is required.
+
+Validate each target/draft pair on the intended NPU and CANN version. Compare
+plain decoding, fixed-length DSpark, and adaptive DSpark with the same precision,
+TP size, concurrency, prompt/output lengths, and cache settings, after warmup.
+Check output quality and actual admitted draft counts as well as throughput.
+Adaptive GDN uses strided Triton convolution and recurrent updates with device
+query boundaries. This supports FULL-graph padding and a previously accepted
+block followed by a shorter verification query without copying the state cache.
+On A2, fixed verification queries of at least nine tokens also use the strided
+recurrent update as a workaround for native NaNs observed with BF16 and eight
+draft tokens. This threshold records the observed failing configuration, not a
+general hardware limit. A3 and A5 retain their native fixed-verification path;
+adaptive verification uses the strided path independently of this workaround.
+The fixed-path workaround can be removed after the replacement native operator
+stack passes the recurrent numerical and state-update regression tests on A2.
+
+The FIA path copies admitted query boundaries back to the host for partial draft
+budgets. Full and zero budgets already have exact host boundaries and skip that
+synchronization; include the remaining synchronization cost in profiling.
+The upstream recurrent kernel may also have different performance from the native
+operator on each NPU generation; measure the complete target step, rather than
+inferring a speedup from the reduced verification token count alone.
+
 > **Performance note (Ascend):** The benefits of adaptive verification depend on
 > the workload.
 >
@@ -589,6 +637,15 @@ Adaptive verification takes effect only with model runner V2.
 >
 > - **In high-throughput scenarios**, performance gains from adaptive verification may sometimes fall short of expectations.
 >   In such cases, start by investigating the cause at the actual serving concurrency.
+
+For DSpark on Ascend, DEBUG logs report scheduled and admitted draft counts,
+confidence estimates, and the profiled verification costs. The Ascend runtime
+configuration can reset worker logging to INFO; set
+`runtime_config.ascend_log.modules.vllm.logger` to `DEBUG` in
+`--additional-config` for a diagnostic run. Remove that override for performance
+measurements. If the confidence head produces non-finite estimates, they are
+treated as 1 for budget selection; compare adaptive outputs with fixed and
+non-speculative outputs on NPU before relying on performance results.
 
 For more details, see the
 [vLLM community documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
@@ -1085,13 +1142,39 @@ and devices:
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-RecoverSSM requires speculative decoding and does not support pipeline
-parallelism (PP), prefill context parallelism (PCP), or decode context
-parallelism (DCP). Stochastic rounding must be disabled.
+RecoverSSM requires speculative decoding, PP=1 and DCP=1. PCP is limited to
+Prefill producers with TP=1 using the Mooncake connectors below;
+PCP Decode consumers and colocated PCP execution are not supported.
+Stochastic rounding must be disabled.
 
 For prefill/decode separation, use `MooncakeConnectorV2` or
-`MooncakePullConnector` with matching model weights, TP size, speculative window,
-and RecoverSSM settings on both sides.
+`MooncakePullConnector` with matching model weights, speculative window,
+cache dtypes, convolution layout and RecoverSSM settings on both sides.
+PCP producers may use a different KDA head-shard count from Decode consumers:
+Mooncake gathers the producer head shards into each receiving consumer's state.
+Use SD convolution state layout `[state_len, conv_dim]` on both roles when
+their KDA head-shard counts differ.
+
+For example, an eight-device Prefill role and an eight-device Decode role can
+use the following layout with `--use-replayssm` and MTP5 on both sides:
+
+| Setting | Prefill | Decode |
+| --- | --- | --- |
+| Tensor parallel size | 1 | 1 |
+| Prefill context parallel size | 8 | 1 |
+| Data parallel size | 1 | 8 |
+| Expert parallelism | Enabled (EP8) | Enabled (EP8) |
+| KV role | `kv_producer` | `kv_consumer` |
+| Target and draft execution | Eager | `FULL_DECODE_ONLY` |
+
+In this example, set `--enforce-eager` on Prefill and keep its draft eager as well. Each Decode
+DP rank receives all eight KDA head shards for its assigned requests; DP ranks
+do not divide one request's recurrent state. Keep the same prefix-caching
+configuration on both roles.
+
+PCP does not require `--enforce-eager` for the entire P model. Its KDA path has
+an eager dispatch boundary, allowing the surrounding model to be compiled.
+Validate the selected P graph configuration separately for your deployment.
 
 !!! warning
 

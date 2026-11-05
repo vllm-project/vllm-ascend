@@ -50,8 +50,8 @@ class Indexer(nn.Module):
     ):
         super().__init__()
         indexer_kv_dtype = vllm_config.attention_config.indexer_kv_dtype
-        if indexer_kv_dtype not in ("auto", "bf16", "fp8", "int8"):
-            raise ValueError(f"GLM KPool indexer_kv_dtype must be auto, bf16, fp8 or int8, got {indexer_kv_dtype!r}.")
+        if indexer_kv_dtype not in ("auto", "bf16", "fp8"):
+            raise ValueError(f"GLM KPool indexer_kv_dtype must be auto, bf16 or fp8, got {indexer_kv_dtype!r}.")
         if indexer_kv_dtype == "fp8":
             kv_transfer_config = vllm_config.kv_transfer_config
             if kv_transfer_config is not None and any(
@@ -108,10 +108,11 @@ class Indexer(nn.Module):
         self.scale_fmt = None
         self.quant_block_size = self.head_dim
         self.topk_indices_buffer = topk_indices_buffer
-        # Completed pools store BF16, FP8 with FP32 scales, or INT8 with FP16 scales.
+        # KeyPool projects in BF16; completed pools optionally store FP8 keys
+        # with a per-pool FP32 descale for CANN PoolKeyIndexer.
         self.k_cache = Glm5NextIndexerCache(
             head_dim=self.head_dim,
-            dtype={"fp8": torch.float8_e4m3fn, "int8": torch.int8}.get(indexer_kv_dtype, torch.bfloat16),
+            dtype=(torch.float8_e4m3fn if indexer_kv_dtype == "fp8" else torch.bfloat16),
             cache_role="indexer",
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
