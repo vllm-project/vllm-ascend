@@ -386,3 +386,45 @@ KVPP supports non-hybrid MLA/SFA models with eager execution or `PIECEWISE` grap
 KVPP can be combined with `MooncakeConnectorV2` for P/D disaggregation and `AscendStoreConnector` for KV pooling under the connector-specific restrictions in the [KVPP guide](../feature_guide/kvpp.md#kv-transfer-configuration). Enable KVPP only on the prefill node for P/D disaggregation. `MultiConnector` can combine these connectors; each child must satisfy its own type and role requirements.
 
 PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-forward cache contents before attention; the broadcast decision uses the global scheduled batch rather than PCP-local segment offsets.
+
+### INT8 quantized all-reduce
+
+`quantized_all_reduce_config` enables a shared-scale INT8 SUM path for large BF16 collectives. It is disabled by default. The default threshold is 32 MiB. On Atlas A5, enable it only after validating the intended model:
+
+```json
+{
+    "quantized_all_reduce_config": {
+        "enable": true,
+        "min_numel": 16777216
+    }
+}
+```
+
+`min_numel` counts BF16 elements, so `16777216` corresponds to a 32 MiB input. All workers must use the same configuration.
+
+On A5 the optimized path requires all of the following:
+
+- standard TP group with TP=2 or TP=4;
+- Eager pure prefill identified from host forward metadata;
+- contiguous BF16 input;
+- `numel >= min_numel`;
+- execution outside graph capture.
+
+Decode, mixed prefill/decode batches, speculative decode, draft-model forwards, profiling, graph execution/capture, unknown metadata and non-TP groups use ordinary BF16 all-reduce. ReduceScatter and fused communication paths are not intercepted.
+
+Each rank computes a per-channel maximum. An FP32 MAX all-reduce creates a shared scale, with `max_q = 127 // TP`; the activations are quantized, summed through ordinary INT8 HCCL all-reduce, then dequantized directly to a BF16 result. The bound guarantees `TP * max_q <= 127`, so same-sign INT8 sums do not wrap. This path uses `npu_quantize`, `npu_anti_quant` and ordinary HCCL; it does not require `ops-transformer`, native QuantAllReduce or a separate communication domain.
+
+The effective INT8 range decreases as TP grows. A5 synthetic-input measurements showed approximately 1.59%–1.98% relative L2 error at TP=2 and 3.40%–4.15% at TP=4. These values are diagnostic results rather than model-accuracy guarantees. Validate the target model before deployment.
+
+Use the standalone benchmark to check the installed operators, numerical behavior and complete-path crossover:
+
+```bash
+python3 -m torch.distributed.run --standalone --nproc-per-node 2 \
+    benchmarks/benchmark_int8_all_reduce.py \
+    --tokens 512 2048 4096 8192 16384 \
+    --hidden-sizes 2048 5120 \
+    --warmup 10 --iterations 50 --rounds 4 --breakdown \
+    --output int8_tp2.json
+```
+
+For routing diagnostics, enable debug logging for `distributed.device_communicators.quantized_all_reduce` through `runtime_config.ascend_log.debug` and inspect `QAR-HIT` / `QAR-SKIP`. Disable debug logging for performance measurements. A microbenchmark gain does not establish model-level accuracy, TTFT or throughput improvement.

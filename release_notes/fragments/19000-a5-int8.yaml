@@ -1,0 +1,8 @@
+pr: 19000
+entries:
+  - category: feature
+    text: >-
+      Added opt-in INT8 quantized all-reduce support for Atlas A5 TP=2/4 eager
+      pure prefill, with automatic BF16 fallback for decode, mixed batches,
+      graph execution, and non-TP groups.
+    hardware: [A5]

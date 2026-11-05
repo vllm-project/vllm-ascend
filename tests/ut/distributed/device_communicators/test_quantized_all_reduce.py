@@ -26,20 +26,24 @@ rounding can never exceed max_q and ws * max_q <= 127 holds for any input.
 This needs no clamp kernel at all (int8 clamp_/clamp/hardtanh are ~250x
 slower than minimum/maximum on Ascend).
 
-The wrapper is also built for non-TP groups (ep/mc2 = DP x PCP x TP). Those can
-exceed the supported group size, so an oversized group must fall back to bf16
-instead of raising: the review reported a 16-rank EP/MC2 group aborting start-up
-while a supported TP=4 was configured.
+On A2/A3 the wrapper is also built for non-TP groups (ep/mc2 = DP x PCP x TP).
+Those can exceed the supported group size, so an oversized group must fall back
+to bf16 instead of raising: the review reported a 16-rank EP/MC2 group aborting
+start-up while a supported TP=4 was configured. A5 is restricted to the
+standard TP group and eager pure prefill.
 """
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.config import CUDAGraphMode
 
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
     QuantizedAllReduce,
+    _is_eager_pure_prefill,
     logger as qar_logger,
 )
 
@@ -48,6 +52,7 @@ def _make(
     world_size: int = 4,
     min_numel: int = 8,
     device_type: AscendDeviceType = AscendDeviceType.A2,
+    group_name: str = "",
 ) -> QuantizedAllReduce:
     """Build a wrapper; raises on unvalidated device families only."""
     with patch(
@@ -59,7 +64,7 @@ def _make(
             "vllm_ascend.distributed.device_communicators.quantized_all_reduce.dist.get_world_size",
             return_value=world_size,
         ):
-            return QuantizedAllReduce(group, min_numel=min_numel)
+            return QuantizedAllReduce(group, min_numel=min_numel, group_name=group_name)
 
 
 class TestQuantizedAllReduce(unittest.TestCase):
@@ -70,15 +75,48 @@ class TestQuantizedAllReduce(unittest.TestCase):
         wrapper = _make(min_numel=12345)
         self.assertEqual(wrapper.min_numel, 12345)
 
+    def test_a5_phase_detection_uses_host_metadata(self):
+        metadata = SimpleNamespace(num_prefills=1, num_decodes=0, num_spec_decodes=0)
+        context = SimpleNamespace(
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            additional_kwargs={},
+            attn_metadata={"layer0": metadata, "layer1": metadata},
+        )
+        with (
+            patch(
+                "vllm_ascend.distributed.device_communicators.quantized_all_reduce.is_forward_context_available",
+                return_value=True,
+            ),
+            patch(
+                "vllm_ascend.distributed.device_communicators.quantized_all_reduce.get_forward_context",
+                return_value=context,
+            ),
+        ):
+            self.assertTrue(_is_eager_pure_prefill())
+            metadata.num_decodes = 1
+            self.assertFalse(_is_eager_pure_prefill())
+            metadata.num_decodes = 0
+            context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+            self.assertFalse(_is_eager_pure_prefill())
+
+    def test_a5_phase_detection_rejects_missing_context(self):
+        with patch(
+            "vllm_ascend.distributed.device_communicators.quantized_all_reduce.is_forward_context_available",
+            return_value=False,
+        ):
+            self.assertFalse(_is_eager_pure_prefill())
+
     def test_accepted_on_validated_device_families(self):
         for dt in (AscendDeviceType.A2, AscendDeviceType.A3):
             wrapper = _make(world_size=4, device_type=dt)
             self.assertEqual(wrapper.max_q, 31)
+        wrapper = _make(world_size=4, device_type=AscendDeviceType.A5, group_name="tp")
+        self.assertTrue(wrapper.supported)
+        self.assertEqual(wrapper.max_q, 31)
 
     def test_raises_on_unvalidated_device_families(self):
-        for dt in (AscendDeviceType._310P, AscendDeviceType.A5):
-            with self.assertRaisesRegex(RuntimeError, "only validated on"):
-                _make(world_size=4, device_type=dt)
+        with self.assertRaisesRegex(RuntimeError, "only validated on"):
+            _make(world_size=4, device_type=AscendDeviceType._310P)
 
     def test_supported_flag_only_up_to_max_group_size(self):
         for ws in (2, 4, 8):
@@ -88,6 +126,16 @@ class TestQuantizedAllReduce(unittest.TestCase):
         # EP/MC2 groups are DP x PCP x TP: larger than any valid TP degree.
         for ws in (9, 16, 32):
             wrapper = _make(world_size=ws)
+            self.assertFalse(wrapper.supported)
+            self.assertEqual(wrapper.max_q, 0)
+
+    def test_a5_supports_only_standard_tp2_tp4(self):
+        for ws in (2, 4):
+            wrapper = _make(world_size=ws, device_type=AscendDeviceType.A5, group_name="tp")
+            self.assertTrue(wrapper.supported)
+            self.assertEqual(wrapper.max_q, 127 // ws)
+        for ws, group_name in ((1, "tp"), (8, "tp"), (4, "dp"), (4, "ep:0")):
+            wrapper = _make(world_size=ws, device_type=AscendDeviceType.A5, group_name=group_name)
             self.assertFalse(wrapper.supported)
             self.assertEqual(wrapper.max_q, 0)
 
@@ -120,15 +168,15 @@ class TestQuantizedAllReduce(unittest.TestCase):
         ):
             wrapper.all_reduce(x)
         mock_logger.warning_once.assert_called_once()
-        self.assertEqual(mock_logger.warning_once.call_args.args[1], 16)
+        self.assertEqual(mock_logger.warning_once.call_args.args[2], 16)
 
     def test_max_q_integer_safe_for_common_tp_sizes(self):
         for ws in (2, 4, 8):
             self.assertLessEqual(ws * (127 // ws), 127)
 
     def test_small_message_skips_quantization(self):
-        wrapper = _make(min_numel=8)
-        x = torch.randn(2, 3, dtype=torch.bfloat16)  # numel=6 < 8
+        wrapper = _make(min_numel=128)
+        x = torch.randn(1, 64, dtype=torch.bfloat16)  # numel=64 < 128
         with (
             patch("torch.distributed.all_reduce") as mock_ar,
             patch("torch_npu.npu_quantize", create=True) as mock_q,
@@ -141,11 +189,29 @@ class TestQuantizedAllReduce(unittest.TestCase):
             mock_aq.assert_not_called()
             self.assertTrue(out is x)
 
+    def test_degenerate_shapes_skip_quantization(self):
+        wrapper = _make(min_numel=8)
+        cases = (
+            torch.randn(64, dtype=torch.bfloat16),
+            torch.randn(64, 32, dtype=torch.bfloat16),
+        )
+        for x in cases:
+            with (
+                self.subTest(shape=tuple(x.shape)),
+                patch("torch.distributed.all_reduce") as mock_ar,
+                patch("torch_npu.npu_quantize", create=True) as mock_q,
+            ):
+                out = wrapper.all_reduce(x)
+            mock_ar.assert_called_once()
+            mock_q.assert_not_called()
+            self.assertTrue(out is x)
+
     def test_large_message_uses_quantized_path(self):
         wrapper = _make(min_numel=8)
-        x = torch.randn(4, 8, dtype=torch.bfloat16)  # numel=32 >= 8
+        x = torch.randn(4, 64, dtype=torch.bfloat16)
+        original = x.clone()
 
-        q_fake = torch.zeros(4, 8, dtype=torch.int8)
+        q_fake = torch.zeros(4, 64, dtype=torch.int8)
         deq_fake = torch.randn_like(x)
         with (
             patch("torch.distributed.all_reduce") as mock_ar,
@@ -158,19 +224,113 @@ class TestQuantizedAllReduce(unittest.TestCase):
             mock_q.assert_called_once()
             mock_aq.assert_called_once()
             self.assertTrue(torch.equal(out, deq_fake))
-            # result is written in place to keep the mutation contract
-            self.assertTrue(torch.equal(x, deq_fake))
+            # GroupCoordinator consumes the out-of-place result.
+            self.assertTrue(torch.equal(x, original))
             # payload all-reduce must be int8
             second_call = mock_ar.call_args_list[1]
             self.assertEqual(second_call.args[0].dtype, torch.int8)
 
+    def test_a5_large_prefill_uses_quantized_path(self):
+        wrapper = _make(
+            min_numel=8,
+            device_type=AscendDeviceType.A5,
+            group_name="tp",
+        )
+        x = torch.randn(4, 64, dtype=torch.bfloat16)
+        original = x.clone()
+        q_fake = torch.zeros(4, 64, dtype=torch.int8)
+        deq_fake = torch.randn_like(x)
+        with (
+            patch(
+                "vllm_ascend.distributed.device_communicators.quantized_all_reduce._is_eager_pure_prefill",
+                return_value=True,
+            ),
+            patch.object(torch.npu, "is_current_stream_capturing", return_value=False, create=True),
+            patch("torch.linalg.vector_norm", wraps=torch.linalg.vector_norm) as mock_norm,
+            patch("torch.distributed.all_reduce") as mock_ar,
+            patch("torch_npu.npu_quantize", create=True, return_value=q_fake),
+            patch("torch_npu.npu_anti_quant", create=True, return_value=deq_fake),
+        ):
+            out = wrapper.all_reduce(x)
+        self.assertEqual(mock_ar.call_count, 2)
+        mock_norm.assert_called_once()
+        self.assertTrue(torch.equal(out, deq_fake))
+        self.assertTrue(torch.equal(x, original))
+
+    def test_a5_decode_or_mixed_batch_falls_back_to_bf16(self):
+        wrapper = _make(
+            min_numel=8,
+            device_type=AscendDeviceType.A5,
+            group_name="tp",
+        )
+        x = torch.randn(4, 64, dtype=torch.bfloat16)
+        with (
+            patch(
+                "vllm_ascend.distributed.device_communicators.quantized_all_reduce._is_eager_pure_prefill",
+                return_value=False,
+            ),
+            patch("torch.distributed.all_reduce") as mock_ar,
+            patch("torch_npu.npu_quantize", create=True) as mock_q,
+            patch("torch_npu.npu_anti_quant", create=True) as mock_aq,
+        ):
+            out = wrapper.all_reduce(x)
+        mock_ar.assert_called_once()
+        self.assertEqual(mock_ar.call_args.args[0].dtype, torch.bfloat16)
+        mock_q.assert_not_called()
+        mock_aq.assert_not_called()
+        self.assertTrue(out is x)
+
+    def test_a5_explicit_capture_falls_back_to_bf16(self):
+        wrapper = _make(
+            min_numel=8,
+            device_type=AscendDeviceType.A5,
+            group_name="tp",
+        )
+        x = torch.randn(4, 64, dtype=torch.bfloat16)
+        with (
+            patch(
+                "vllm_ascend.distributed.device_communicators.quantized_all_reduce._is_eager_pure_prefill",
+                return_value=True,
+            ),
+            patch.object(torch.npu, "is_current_stream_capturing", return_value=True, create=True),
+            patch("torch.distributed.all_reduce") as mock_ar,
+            patch("torch_npu.npu_quantize", create=True) as mock_q,
+            patch("torch_npu.npu_anti_quant", create=True) as mock_aq,
+        ):
+            wrapper.all_reduce(x)
+        mock_ar.assert_called_once()
+        mock_q.assert_not_called()
+        mock_aq.assert_not_called()
+
+    def test_a5_non_contiguous_input_falls_back_to_bf16(self):
+        wrapper = _make(
+            min_numel=8,
+            device_type=AscendDeviceType.A5,
+            group_name="tp",
+        )
+        x = torch.randn(64, 8, dtype=torch.bfloat16).transpose(0, 1)
+        self.assertFalse(x.is_contiguous())
+        with (
+            patch(
+                "vllm_ascend.distributed.device_communicators.quantized_all_reduce._is_eager_pure_prefill",
+                return_value=True,
+            ),
+            patch("torch.distributed.all_reduce") as mock_ar,
+            patch("torch_npu.npu_quantize", create=True) as mock_q,
+            patch("torch_npu.npu_anti_quant", create=True) as mock_aq,
+        ):
+            wrapper.all_reduce(x)
+        mock_ar.assert_called_once()
+        mock_q.assert_not_called()
+        mock_aq.assert_not_called()
+
     def test_debug_logs_identify_quantized_and_fallback_calls(self):
-        wrapper = _make(world_size=2, min_numel=8)
+        wrapper = _make(world_size=2, min_numel=128)
         wrapper.group_name = "tp:0"
         cases = (
-            (torch.ones(2, 4, dtype=torch.bfloat16), "[QAR-HIT]", "payload_bytes=16"),
-            (torch.ones(2, 3, dtype=torch.bfloat16), "[QAR-SKIP]", "reason=below_threshold"),
-            (torch.ones(2, 4, dtype=torch.float16), "[QAR-SKIP]", "reason=dtype"),
+            (torch.ones(2, 64, dtype=torch.bfloat16), "[QAR-HIT]", "payload_bytes=256"),
+            (torch.ones(1, 64, dtype=torch.bfloat16), "[QAR-SKIP]", "reason=below_threshold"),
+            (torch.ones(2, 64, dtype=torch.float16), "[QAR-SKIP]", "reason=dtype"),
         )
         for x, marker, expected in cases:
             with self.subTest(marker=marker, dtype=x.dtype, shape=x.shape):
@@ -208,13 +368,13 @@ class TestQuantizedAllReduce(unittest.TestCase):
     def test_wrapper_uses_exact_bound_scale_and_does_not_clamp(self):
         """The wrapper must use scale = amax / max_q and skip the clamp."""
         wrapper = _make(min_numel=8)
-        x = torch.full((4, 8), 1.0, dtype=torch.bfloat16)  # x == amax
+        x = torch.full((4, 64), 1.0, dtype=torch.bfloat16)  # x == amax
         captured: dict[str, list[torch.Tensor]] = {}
 
         def fake_ar(t, group=None, op=None):
             captured.setdefault("payload", []).append(t.clone())
 
-        q_fake = torch.full((4, 8), wrapper.max_q, dtype=torch.int8)
+        q_fake = torch.full((4, 64), wrapper.max_q, dtype=torch.int8)
         with (
             patch("torch.distributed.all_reduce", side_effect=fake_ar),
             patch("torch_npu.npu_quantize", create=True, return_value=q_fake) as mock_q,

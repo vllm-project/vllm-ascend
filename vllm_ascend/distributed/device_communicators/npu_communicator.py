@@ -21,6 +21,7 @@ from vllm.distributed.device_communicators.base_device_communicator import Devic
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
     QuantizedAllReduce,
 )
@@ -66,22 +67,22 @@ class NPUCommunicator(DeviceCommunicatorBase):
         # FlashInfer PCIe IPC backend on NPU.
         self.fi_pcie_ipc_ar_comm = None
         self.all2all_manager = _NpuAll2AllManager()
-        # Optional int8 quantized all-reduce for large bf16 TP collectives,
-        # configured through --additional-config (ascend_config). This
-        # communicator is also built for dp/ep/mc2/... groups: the wrapper is
-        # created for all of them, but only TP-sized groups take the int8 path
-        # (oversized groups keep bf16 instead of failing at start-up).
+        # Optional int8 quantized all-reduce for large bf16 collectives. A2/A3
+        # preserve the existing group behavior. A5 only wraps the standard TP
+        # group; the wrapper itself additionally gates eager pure prefill.
         quantized_cfg = get_ascend_config().quantized_all_reduce_config
         self.quantized_ar: QuantizedAllReduce | None = None
-        if quantized_cfg.enable:
+        is_standard_tp = self.unique_name.split(":", 1)[0] == "tp"
+        if quantized_cfg.enable and (not is_950() or is_standard_tp):
             self.quantized_ar = QuantizedAllReduce(
                 self.device_group, min_numel=quantized_cfg.min_numel, group_name=self.unique_name
             )
             if self.quantized_ar.supported:
                 # Once per worker process: every group constructs a wrapper, but
-                # only the TP-sized ones actually enable the int8 path.
+                # only eligible groups take the int8 path.
                 logger.info_once(
-                    "Quantized all-reduce enabled (min_numel=%d, max_q=%d).",
+                    "INT8 quantized all-reduce enabled (group=%s, min_numel=%d, max_q=%d).",
+                    self.unique_name,
                     self.quantized_ar.min_numel,
                     self.quantized_ar.max_q,
                 )
