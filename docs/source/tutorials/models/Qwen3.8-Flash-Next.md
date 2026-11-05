@@ -904,8 +904,6 @@ The 10K target is the processed input length, including text and image tokens. B
 
 The complete Prefill, Decode, and proxy commands are provided below.
 
-#### 5.3.1 Start the Prefill and Decode engines
-
 === "Ascend 950 DT"
 
     Initialize the environment as described in [Section 4](#4-installation) and run Prefill and Decode in separate terminals. Both roles load `Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp` from ModelScope.
@@ -981,6 +979,36 @@ The complete Prefill, Decode, and proxy commands are provided below.
         --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32480,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":2,"pp_layer_partition":"25,23"},"decode":{"dp_size":2,"tp_size":2}}}'
     ```
 
+    **Proxy:**
+
+    After both model APIs are ready, run the proxy from the vLLM-Ascend repository root:
+
+    ```bash
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        --host 127.0.0.1 \
+        --port 8246 \
+        --prefiller-hosts 127.0.0.1 \
+        --prefiller-ports 8247 \
+        --decoder-hosts 127.0.0.1 \
+        --decoder-ports 8248
+    ```
+
+    **Service Verification:**
+
+    Wait until both model APIs are ready, then start the proxy as described above. Check that prefill uses TP2/PP2/DP1, decode uses TP2/DP2 with static kernels enabled, and both roles report `max_model_len=143360`. Send a 10K image-and-text sample through the proxy using the request below. Replace `<IMAGE_URL>` with the sample image URL and `<TEXT_PROMPT>` with its text; the image must be accessible from the serving environment.
+
+    ```bash
+    curl --fail http://127.0.0.1:8247/v1/models
+    curl --fail http://127.0.0.1:8248/v1/models
+    curl --fail http://127.0.0.1:8246/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -d '{"model":"qwen38-megamoe-sp-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
+    ```
+
+    Expected result: HTTP 200 with a response that addresses both the image and text. Check `usage.prompt_tokens` against the 10K validation target and confirm that the request completes without image-processing, KV-transfer, or out-of-memory errors. Supply the actual validation sample before using this request as a 10K test.
+
     **Key parameters:**
 
     - Prefill partitions the layers across two pipeline stages with `VLLM_PP_LAYER_PARTITION=25,23`. Keep `pp_size=2` and `pp_layer_partition="25,23"` in both Mooncake configurations consistent with this partition.
@@ -988,36 +1016,6 @@ The complete Prefill, Decode, and proxy commands are provided below.
     - Prefill disables prefix caching and graph capture and sets MTP `enforce_eager=true`. Decode enables prefix caching and `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, enables static kernels, and disables super kernels.
     - Both roles enable Engram CPU offload with `dp_shared_memory=false`, use `HCCL_BUFFSIZE=512`, and retain the supplied case's startup timeout of 2400 seconds. Provide sufficient host memory for the checkpoint and the decode DP replicas.
     - This case retains `VLLM_ASCEND_PLE_BACKEND=torch` from the supplied scripts. It only selects a backend in runtimes that implement this variable; an unknown-variable warning means it has no effect.
-
-#### 5.3.2 Start the proxy
-
-After both model APIs are ready, run the proxy from the vLLM-Ascend repository root:
-
-```bash
-unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
-
-python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
-    --host 127.0.0.1 \
-    --port 8246 \
-    --prefiller-hosts 127.0.0.1 \
-    --prefiller-ports 8247 \
-    --decoder-hosts 127.0.0.1 \
-    --decoder-ports 8248
-```
-
-#### 5.3.3 Verify the image-and-text 10K service
-
-Wait until both model APIs are ready, then start the proxy as described above. Check that prefill uses TP2/PP2/DP1, decode uses TP2/DP2 with static kernels enabled, and both roles report `max_model_len=143360`. Send a 10K image-and-text sample through the proxy using the request below. Replace `<IMAGE_URL>` with the sample image URL and `<TEXT_PROMPT>` with its text; the image must be accessible from the serving environment.
-
-```bash
-curl --fail http://127.0.0.1:8247/v1/models
-curl --fail http://127.0.0.1:8248/v1/models
-curl --fail http://127.0.0.1:8246/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{"model":"qwen38-megamoe-sp-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
-```
-
-Expected result: HTTP 200 with a response that addresses both the image and text. Check `usage.prompt_tokens` against the 10K validation target and confirm that the request completes without image-processing, KV-transfer, or out-of-memory errors. Supply the actual validation sample before using this request as a 10K test.
 
 ## 6 Functional Verification
 
