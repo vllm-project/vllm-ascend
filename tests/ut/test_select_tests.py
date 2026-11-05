@@ -50,7 +50,7 @@ def test_stale_nodeid_falls_back_to_file_target(tmp_path, monkeypatch, capsys):
     test_file = Path("tests/e2e/pull_request/one_card/test_sample.py")
     test_file.parent.mkdir(parents=True)
     test_file.write_text("def test_current():\n    pass\n", encoding="utf-8")
-    groups = defaultdict(list)
+    groups: defaultdict[str, list[str]] = defaultdict(list)
     monkeypatch.setattr(module, "_route_e2e_file", lambda _target: "a2-1")
 
     module._route_explicit_test_target(f"{test_file.as_posix()}::test_removed", groups)
