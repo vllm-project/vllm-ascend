@@ -199,6 +199,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker.kv_role = "kv_producer"
         worker.consumer_is_to_put = False
         worker.dcp_size = 1
+        worker.dcp_rank = 0
         worker.tp_rank = 0
         worker.pp_rank = 0
         worker.pcp_rank = 0

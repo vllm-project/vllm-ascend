@@ -11,7 +11,7 @@ from copy import copy
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
-from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -124,6 +124,28 @@ def validate_pp_groups(kv_cache_config: Any, parallel_config: Any) -> None:
             f"Mooncake layerwise PP requires each stage to own layers in every KV cache group; empty groups: {empty}. "
             "Use a partition covering all groups, or disable layerwise pooling. Draft-only groups are not supported."
         )
+
+
+def validate_dcp_groups(kv_cache_config: Any) -> None:
+    """Reject cache groups whose keys cannot be written per DCP shard.
+
+    Recurrent/align-state caches are sharded across TP but not across DCP:
+    only the TP owner writes a state page, so requiring one object per DCP
+    rank would demand keys that no rank owns.
+    """
+    if kv_cache_config is None:
+        return
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+        if any(
+            isinstance(sub_spec, MambaSpec) and getattr(sub_spec, "mamba_cache_mode", None) == "align"
+            for sub_spec in specs
+        ):
+            raise ValueError(
+                "Mooncake layerwise DCP does not support recurrent/align-state cache groups; "
+                "disable DCP or use a cache layout without recurrent state."
+            )
 
 
 def group_block_size_signature(group) -> tuple[int, ...]:

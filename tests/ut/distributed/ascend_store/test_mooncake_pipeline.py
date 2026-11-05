@@ -44,6 +44,8 @@ class TestMooncakePipeline(unittest.TestCase):
         cache_block_size=16,
         pcp_size=1,
         pcp_rank=0,
+        dcp_size=1,
+        dcp_rank=0,
     ):
         # Uneven PP partition; the last stage optionally owns an extra draft
         # layer that is not part of get_num_layers().
@@ -86,6 +88,8 @@ class TestMooncakePipeline(unittest.TestCase):
                 cache_block_size=cache_block_size,
                 pcp_size=pcp_size,
                 pcp_rank=pcp_rank,
+                dcp_size=dcp_size,
+                dcp_rank=dcp_rank,
             )
         worker.m_store = store
         arrays = {}
@@ -405,9 +409,13 @@ class TestMooncakePipeline(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "empty groups"):
             protocol.validate_pp_groups(SimpleNamespace(kv_cache_groups=[group]), worker.vllm_config.parallel_config)
         config = SimpleNamespace(
-            parallel_config=SimpleNamespace(pipeline_parallel_size=2, decode_context_parallel_size=2)
+            parallel_config=SimpleNamespace(
+                pipeline_parallel_size=2,
+                prefill_context_parallel_size=2,
+                decode_context_parallel_size=2,
+            )
         )
-        with self.assertRaisesRegex(ValueError, "decode context parallelism"):
+        with self.assertRaisesRegex(ValueError, "supports PCP or DCP, not both"):
             worker.layerwise_backend.bind_layerwise_keys(
                 vllm_config=config,
                 kv_cache_config=worker.kv_cache_config,
