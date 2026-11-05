@@ -27,6 +27,7 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.compilation import breakable_cudagraph
+from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -644,6 +645,11 @@ class NPUModelRunner(GPUModelRunner):
                 for module in model.modules()
                 if id(module) not in owner_ids and callable(getattr(module, "close_host_offload", None))
             )
+        config = self.ascend_config.ascend_compilation_config
+        if config.enable_static_kernel and not config.enable_npugraph_ex:
+            torch.npu.synchronize()
+            breakable_cudagraph.BreakableCUDAGraphWrapper.clear_all_graphs()
+            CUDAGraphWrapper.clear_all_graphs()
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
         entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
