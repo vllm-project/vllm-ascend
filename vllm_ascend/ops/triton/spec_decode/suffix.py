@@ -8,7 +8,21 @@ acceptance observation and corpus ingestion. Host launch wrappers retain the
 upstream positional ABI and derive NPU launch metadata from tensors and scalar
 arguments. Request lifecycle and execution ordering remain with the upstream
 speculator.
+
+Scoped launch adapters also live here because upstream has no instance launch
+hooks. A process-lifetime lock serializes Ascend proposal/ingestion while the
+upstream module bindings are replaced. Direct upstream suffix calls must not
+run concurrently in that process. Bindings are restored after submission,
+without waiting for device completion. Remove the overrides when upstream
+provides overridable launch methods or a device kernel provider.
 """
+
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
+from functools import partial
+from threading import RLock
+from types import ModuleType
 
 import torch
 from vllm.triton_utils import tl, triton
@@ -29,6 +43,9 @@ _INGEST_BLOCK = 1024
 _NUM_LEN_BUCKETS = tl.constexpr(9)
 _STATS_HALF_LIFE = 1024
 _OBSERVE_RESET_BLOCK = 256
+
+# Shared for this worker process; reentrancy preserves nested override scopes.
+_SUFFIX_KERNEL_LOCK = RLock()
 
 
 @triton.jit
@@ -677,3 +694,45 @@ def launch_suffix_ingest(
         table,
         **launch_options,
     )
+
+
+@dataclass(frozen=True)
+class _KernelLaunchAdapter:
+    """Expose a host launch function through the upstream kernel[grid](...) ABI."""
+
+    launch: Callable
+
+    def __getitem__(self, grid: tuple[int, ...]) -> Callable:
+        return partial(self.launch, grid)
+
+
+@contextmanager
+def _override_suffix_kernels(module: ModuleType, launches: Mapping[str, Callable]) -> Iterator[None]:
+    with _SUFFIX_KERNEL_LOCK:
+        originals = {name: getattr(module, name) for name in launches}
+        try:
+            for name, launch in launches.items():
+                setattr(module, name, _KernelLaunchAdapter(launch))
+            yield
+        finally:
+            for name, original in originals.items():
+                setattr(module, name, original)
+
+
+@contextmanager
+def ascend_suffix_proposal(module: ModuleType) -> Iterator[None]:
+    with _override_suffix_kernels(
+        module,
+        {
+            "_suffix_local_scan_kernel": launch_suffix_local_scan,
+            "_suffix_finalize_kernel": launch_suffix_finalize,
+            "_suffix_observe_kernel": launch_suffix_observe,
+        },
+    ):
+        yield
+
+
+@contextmanager
+def ascend_suffix_ingestion(module: ModuleType) -> Iterator[None]:
+    with _override_suffix_kernels(module, {"_suffix_ingest_kernel": launch_suffix_ingest}):
+        yield
