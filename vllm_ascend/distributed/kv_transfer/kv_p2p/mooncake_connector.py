@@ -10,7 +10,6 @@ import time
 from collections import OrderedDict, defaultdict, deque
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -82,6 +81,12 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport imp
     string_to_int64_hash,
     zmq_ctx,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.metadata import (
+    GroupPull,
+    MooncakeConnectorMetadata,
+    ReqMeta,
+    TransferRequest,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -125,36 +130,6 @@ MooncakeAgentMetadata = PullAgentMetadata
 # other peers already waiting in the global executor queue can make progress.
 MAX_REQUESTS_PER_PEER_HANDLER = 5
 KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
-
-
-@dataclass
-class ReqMeta:
-    local_block_ids: BlockIds
-    num_external_tokens: int
-    num_computed_tokens: int
-    remote_block_ids: BlockIds
-
-    remote_host: str
-    remote_port: int
-    remote_engine_id: str
-    remote_request_id: str
-    remote_pcp_size: int
-    remote_dcp_size: int
-    remote_ptp_size: int | None
-    remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]]
-    num_prompt_blocks: int
-    remote_block_size: int
-    local_full_block_ids: BlockIds = tuple()
-    do_virtual: bool = False
-
-
-@dataclass(frozen=True)
-class GroupPull:
-    group_id: int
-    remote_tp_offset: int
-    num_group_pulls: int
-    prefill_pp_rank: int = 0
-    is_group_transfer_end: bool = False
 
 
 class KVCacheSendingThread(threading.Thread):
@@ -497,26 +472,25 @@ class KVCacheRecvingThread(threading.Thread):
         awaiting_kvs: bool = True,
     ):
         """Add a new request to the queue for processing."""
-        if remote_port_send_num is None:
-            remote_port_send_num = {}
-        trans_info = {
-            "request_id": request_id,
-            "local_block_ids": local_block_ids,
-            "remote_block_ids": remote_block_ids,
-            "local_block_ids_replicate_k": local_block_ids_replicate_k or tuple(),
-            "remote_block_ids_replicate_k": remote_block_ids_replicate_k or tuple(),
-            "group_pulls": group_pulls,
-            "remote_engine_id": remote_engine_id,
-            "remote_request_id": remote_request_id,
-            "remote_host": remote_host,
-            "remote_handshake_port": remote_handshake_port,
-            "num_computed_tokens": num_computed_tokens,
-            "remote_port_send_num": remote_port_send_num,
-            "all_task_done": all_task_done,
-            "shard_idx": shard_idx,
-            "remote_block_size": remote_block_size,
-            "awaiting_kvs": awaiting_kvs,
-        }
+        transfer_request = TransferRequest.from_legacy_kwargs(
+            request_id=request_id,
+            remote_request_id=remote_request_id,
+            local_block_ids=local_block_ids,
+            remote_block_ids=remote_block_ids,
+            group_pulls=group_pulls,
+            remote_engine_id=remote_engine_id,
+            remote_host=remote_host,
+            remote_handshake_port=remote_handshake_port,
+            remote_block_size=remote_block_size,
+            remote_port_send_num=remote_port_send_num,
+            num_computed_tokens=num_computed_tokens,
+            all_task_done=all_task_done,
+            shard_idx=shard_idx,
+            local_block_ids_replicate_k=local_block_ids_replicate_k,
+            remote_block_ids_replicate_k=remote_block_ids_replicate_k,
+            awaiting_kvs=awaiting_kvs,
+        )
+        trans_info = transfer_request.as_legacy_dict()
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
         self.request_queue.put(trans_info)
 
@@ -1468,40 +1442,6 @@ class KVCacheRecvingThread(threading.Thread):
     ) -> None:
         """Return the remote socket to the pool."""
         self.remote_socket_pool.return_socket(sock, remote_host, remote_handshake_port)
-
-
-class MooncakeConnectorMetadata(KVConnectorMetadata):
-    def __init__(self):
-        self.requests: dict[str, ReqMeta] = {}
-        self.requests_to_send: dict[str, float] = {}
-        self.reqs_in_batch: set[str] = set()
-
-    def add_new_req(
-        self,
-        request_id: str,
-        local_block_ids: BlockIds,
-        num_external_tokens: int,
-        kv_transfer_params: dict[str, Any],
-        local_full_block_ids: BlockIds | None = None,
-    ):
-        self.requests[request_id] = ReqMeta(
-            local_block_ids=local_block_ids,
-            num_external_tokens=num_external_tokens,
-            num_computed_tokens=kv_transfer_params.get("num_computed_tokens", 0),
-            remote_block_ids=kv_transfer_params["remote_block_ids"],
-            remote_engine_id=kv_transfer_params["remote_engine_id"],
-            remote_request_id=kv_transfer_params["remote_request_id"],
-            remote_host=kv_transfer_params["remote_host"],
-            remote_port=kv_transfer_params["remote_port"],
-            remote_pcp_size=kv_transfer_params.get("remote_pcp_size", 1),
-            remote_dcp_size=kv_transfer_params.get("remote_dcp_size", 1),
-            remote_ptp_size=kv_transfer_params.get("remote_ptp_size"),
-            remote_multi_nodes_meta_mapping=kv_transfer_params.get("remote_multi_nodes_meta_mapping", {}),
-            num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
-            remote_block_size=kv_transfer_params.get("remote_block_size", 0),
-            local_full_block_ids=local_full_block_ids or tuple(),
-            do_virtual=kv_transfer_params.get("do_virtual", False),
-        )
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
