@@ -6,6 +6,7 @@ The NPU kernels are replaced by PyTorch references here; the end-to-end run
 on NPU lives in ``tests/e2e/pull_request/one_card/test_muse_spark.py``.
 """
 
+import abc
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -149,6 +150,27 @@ class _StubAdapter(nn.Module):
         self.quant_method = scheme
 
 
+class _SlottedMlpStage(abc.ABC, nn.Module):
+    """A stage with the real method chain's object layout.
+
+    ``QuantizeMethodBase`` derives from ``abc.ABC``, whose slots are empty,
+    and ``UnquantizedFusedMoEMethod`` also derives from ``CustomOp``, an
+    ``nn.Module``: two classes in one chain adding an instance dict. Putting a
+    further base in front of that is not layout-compatible with it, so
+    installing the norm by reassigning ``__class__`` raises "object layout
+    differs". ``_StubMlpStage`` above is a plain ``nn.Module``, whose layout
+    accepts the assignment -- which is why the unit tests passed while the
+    real method chain raised.
+    """
+
+    __slots__ = ()
+
+    rows: torch.Tensor
+
+    def apply_gmm2(self, mlp_compute_input, hidden_states, act_out_scale):
+        return self.rows
+
+
 def _bare_moe_method(rows: torch.Tensor | None = None) -> nn.Module:
     method = _StubMlpStage()
     if rows is not None:
@@ -180,8 +202,8 @@ def test_routed_experts_set_the_pre_norm_all_reduce_from_the_moe_config(tp_size,
     """Expert parallelism leaves the MoE TP size at 1; plain TP does not.
 
     The flag is set by the routed experts, not by the method's constructor:
-    the norm is mixed in by reassigning ``__class__`` on a method the factory
-    already built, so there is no constructor of ours to read the config in.
+    the norm is installed on a method the factory already built, so there is no
+    constructor of ours to read the config in.
     """
     experts = object.__new__(muse_spark.AscendMuseSparkRoutedExperts)
     nn.Module.__init__(experts)
@@ -211,7 +233,7 @@ def test_the_pre_norm_all_reduce_reaches_a_quantized_checkpoints_scheme():
     assert experts.adopt_mlp_stage() is scheme
 
     assert scheme.pre_norm_all_reduce is True
-    assert not isinstance(adapter, muse_spark.MuseSparkPostExpertNormMixin)
+    assert not muse_spark.has_post_expert_norm(adapter)
 
 
 def test_tp_partial_rows_are_summed_before_the_norm():
@@ -270,7 +292,7 @@ def test_the_norm_lands_on_the_scheme_a_quantized_checkpoint_installs():
     target = muse_spark.adopt_post_expert_norm(adapter)
 
     assert target is scheme
-    assert not isinstance(adapter, muse_spark.MuseSparkPostExpertNormMixin)
+    assert not muse_spark.has_post_expert_norm(adapter)
     norm = _post_expert_norm(hidden_size)
     target.post_expert_norm_fn = norm.forward
     torch.testing.assert_close(
@@ -282,6 +304,51 @@ def test_the_norm_lands_on_the_scheme_a_quantized_checkpoint_installs():
 def test_a_method_without_an_mlp_stage_is_rejected_rather_than_left_unnormalized():
     with pytest.raises(RuntimeError, match="MLP stage"):
         muse_spark.adopt_post_expert_norm(nn.Module())
+
+
+def test_the_norm_installs_on_a_method_with_the_real_object_layout():
+    """The real MoE methods sit under ``abc.ABC`` and ``nn.Module`` with empty
+    slots, and nothing built on that layout can be assigned to ``__class__``.
+
+    Installing the norm must not depend on building a class, or it works
+    against every stub and fails against every checkpoint.
+    """
+    torch.manual_seed(0)
+    hidden_size = 8
+    routed_rows = torch.randn(NUM_TOKENS, hidden_size)
+    stage = _SlottedMlpStage()
+    stage.rows = routed_rows
+
+    assert muse_spark.adopt_post_expert_norm(stage) is stage
+    assert muse_spark.has_post_expert_norm(stage)
+
+    norm = _post_expert_norm(hidden_size)
+    stage.post_expert_norm_fn = norm.forward
+    torch.testing.assert_close(
+        stage.apply_gmm2(None, None, None),
+        norm.forward_native(routed_rows, out_dtype=routed_rows.dtype),
+    )
+
+
+def test_installing_the_norm_twice_does_not_stack_it():
+    """``mlp_stage_method`` resolves the stage on every call, so the installer
+    runs more than once on the same object and must stay idempotent -- a
+    second wrapper would normalize already-normalized rows.
+    """
+    torch.manual_seed(0)
+    hidden_size = 8
+    routed_rows = torch.randn(NUM_TOKENS, hidden_size)
+    stage = _SlottedMlpStage()
+    stage.rows = routed_rows
+
+    muse_spark.adopt_post_expert_norm(stage)
+    norm = _post_expert_norm(hidden_size)
+    stage.post_expert_norm_fn = norm.forward
+    once = stage.apply_gmm2(None, None, None)
+
+    muse_spark.adopt_post_expert_norm(stage)
+    assert stage.post_expert_norm_fn is norm.forward
+    torch.testing.assert_close(stage.apply_gmm2(None, None, None), once)
 
 
 class _Container(nn.Module):
