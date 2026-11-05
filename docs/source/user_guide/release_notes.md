@@ -1,9 +1,8 @@
 # Release Notes
 
 ## v0.32.0rc1 - 2026.11.02
-This is the first release candidate of vLLM Ascend v0.32.0, aligned with upstream vLLM v0.32.0. This release expands **Qwen3.8-Flash-Next** with pipeline and sequence parallelism, introduces experimental support for **MiniMax-M3.1-Flash**, and adds optimizations for **DeepSeek V4.1-Flash** and **GLM-5.3-Flash**. It also improves context parallelism, speculative decoding, and KV Cache management. The hardware and deployment scope below summarizes the configurations documented in each model guide; it does not claim validation for other model and hardware combinations. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/latest/) to get started.
+This is the first release candidate of vLLM Ascend v0.32.0, aligned with upstream vLLM v0.32.0. This release introduces support for **MiniMax-M3.1-Flash** and **Qwen3.8-Flash-Next**, and adds optimizations for **DeepSeek V4.1-Flash** and **GLM-5.3-Flash**. It also improves context parallelism, speculative decoding, and KV Cache management. The hardware and deployment scope below summarizes the configurations documented in each model guide; it does not claim validation for other model and hardware combinations. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/latest/) to get started.
 
-### Hardware and Operator Support
 | Model | Supported Hardware | Validated Deployment and Features |
 | --- | --- | --- |
 | MiniMax-M3.1-Flash | A2 Products, A3 Products, 950DT Products | W8A8 on A2/A3 and MXFP8 on 950DT; text, image, and video inference; DSpark speculative decoding; single-node and multi-node P/D deployment configurations. |
@@ -70,8 +69,6 @@ Use the official v0.32.0rc1 release images to ensure that the required operator 
 - Refined Qwen3.5-397B-A17B deployment guidance with corrected MTP checkpoint names, Docker shared-memory settings, and evaluation instructions. Improved AISBench accuracy-evaluation documentation for Qwen3.5-27B and Qwen3.6-27B. [#20283](https://github.com/vllm-project/vllm-ascend/pull/20283) [#20170](https://github.com/vllm-project/vllm-ascend/pull/20170)
 - Corrected Kimi K3 mixed and P/D deployment configurations, including explicit Model Runner V2 selection and Ascend 950DT memory-utilization settings. [#20379](https://github.com/vllm-project/vllm-ascend/pull/20379)
 - Fixed the Qwen3-30B-A3B tutorial's serving command to use the valid `--served-model-name` option. [#20874](https://github.com/vllm-project/vllm-ascend/pull/20874)
-
-### Stability and Bug Fixes
 
 ### Stability and Bug Fixes
 - Fixed Model Runner V2 speculative decoding issues involving GLM-5.3-Flash, Gemma4, hybrid KV Cache, and PCP graph execution, improving compatibility and execution reliability. [#18931](https://github.com/vllm-project/vllm-ascend/pull/18931) [#19264](https://github.com/vllm-project/vllm-ascend/pull/19264) [#19165](https://github.com/vllm-project/vllm-ascend/pull/19165) [#19192](https://github.com/vllm-project/vllm-ascend/pull/19192)
