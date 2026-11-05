@@ -68,14 +68,10 @@ def test_mark_finished_defers_rare_finish_when_async_pair_enabled():
         RequestGuardStore.reset_for_tests()
 
 
-def test_consume_rare_pairs_async_submits_and_releases_pin(monkeypatch):
+def test_consume_rare_pairs_async_submits_and_releases_pin():
     RequestGuardStore.reset_for_tests()
     reset_rare_pair_wait_queue_for_tests()
     try:
-        import vllm_ascend.envs as envs
-
-        monkeypatch.setattr(envs, "VLLM_ASCEND_RARE_PAIR_SYNC", False)
-
         p = RuntimeGuardProcessor.__new__(RuntimeGuardProcessor)
         p.runner = SimpleNamespace(_rg_rare_pair_hold=object())
         p.detectors = MagicMock()
