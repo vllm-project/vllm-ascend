@@ -34,7 +34,7 @@ from enum import Enum
 import aiohttp
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 ###############################################################################
 # FastAPI app & global state
@@ -65,11 +65,181 @@ class EncoderDispatchMode(str, Enum):
     FANOUT = "fanout"
 
 
-def _record_encode_failure(url: str) -> None:
-    """Record an encoder URL that failed so later routing can avoid it."""
+_STAGE_HISTOGRAM_BUCKETS = (
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    30.0,
+    60.0,
+    120.0,
+    300.0,
+    600.0,
+)
+
+
+def _format_bucket(bound: float) -> str:
+    return f"{bound:g}"
+
+
+class ProxyStats:
+    """In-process counters and histograms exposed by the /metrics endpoint."""
+
+    def __init__(self) -> None:
+        self.inflight = 0
+        self.encoder_requests = 0
+        self.mm_items = 0
+        self.stage_requests: dict[tuple[str, str], int] = {}
+        self.retries: dict[str, int] = {}
+        self.stage_histograms: dict[str, dict] = {}
+
+    def record_stage(self, stage: str, status: str, duration_seconds: float) -> None:
+        key = (stage, status)
+        self.stage_requests[key] = self.stage_requests.get(key, 0) + 1
+        histogram = self.stage_histograms.setdefault(
+            stage,
+            {"buckets": [0] * len(_STAGE_HISTOGRAM_BUCKETS), "sum": 0.0, "count": 0},
+        )
+        for index, bucket_bound in enumerate(_STAGE_HISTOGRAM_BUCKETS):
+            if duration_seconds <= bucket_bound:
+                histogram["buckets"][index] += 1
+        histogram["sum"] += duration_seconds
+        histogram["count"] += 1
+
+    def record_retry(self, stage: str) -> None:
+        self.retries[stage] = self.retries.get(stage, 0) + 1
+
+    def record_encoder_requests(self, count: int = 1) -> None:
+        self.encoder_requests += count
+
+    def record_mm_items(self, count: int) -> None:
+        self.mm_items += count
+
+    def render_prometheus(self) -> str:
+        lines = [
+            "# HELP epd_requests_total EPD proxy stage requests by stage and status.",
+            "# TYPE epd_requests_total counter",
+        ]
+        for (stage, status), count in sorted(self.stage_requests.items()):
+            lines.append(f'epd_requests_total{{stage="{stage}",status="{status}"}} {count}')
+        lines.extend(
+            [
+                "# HELP epd_stage_seconds EPD proxy stage request duration in seconds.",
+                "# TYPE epd_stage_seconds histogram",
+            ]
+        )
+        for stage, histogram in sorted(self.stage_histograms.items()):
+            for bucket_bound, bucket_count in zip(_STAGE_HISTOGRAM_BUCKETS, histogram["buckets"]):
+                le = _format_bucket(bucket_bound)
+                lines.append(f'epd_stage_seconds_bucket{{stage="{stage}",le="{le}"}} {bucket_count}')
+            lines.append(f'epd_stage_seconds_bucket{{stage="{stage}",le="+Inf"}} {histogram["count"]}')
+            lines.append(f'epd_stage_seconds_sum{{stage="{stage}"}} {histogram["sum"]:.6f}')
+            lines.append(f'epd_stage_seconds_count{{stage="{stage}"}} {histogram["count"]}')
+        lines.extend(
+            [
+                "# HELP epd_retries_total EPD proxy stage retries.",
+                "# TYPE epd_retries_total counter",
+            ]
+        )
+        for stage, count in sorted(self.retries.items()):
+            lines.append(f'epd_retries_total{{stage="{stage}"}} {count}')
+        lines.extend(
+            [
+                "# HELP epd_encoder_requests_total Encoder requests sent by the proxy.",
+                "# TYPE epd_encoder_requests_total counter",
+                f"epd_encoder_requests_total {self.encoder_requests}",
+                "# HELP epd_mm_items_total Multimodal items forwarded to encoders.",
+                "# TYPE epd_mm_items_total counter",
+                f"epd_mm_items_total {self.mm_items}",
+                "# HELP epd_requests_inflight Client requests currently being processed.",
+                "# TYPE epd_requests_inflight gauge",
+                f"epd_requests_inflight {self.inflight}",
+            ]
+        )
+        return "\n".join(lines) + "\n"
+
+
+def _get_stats() -> ProxyStats:
+    """Return the app-wide metrics collector, creating it when configured programmatically."""
+    stats = getattr(app.state, "stats", None)
+    if stats is None:
+        stats = ProxyStats()
+        app.state.stats = stats
+    return stats
+
+
+def _stage_status_label(status: int) -> str:
+    if 200 <= status < 300:
+        return "ok"
+    if 400 <= status < 500:
+        return "http_4xx"
+    return "http_5xx"
+
+
+def _outbound_error_label(exc: BaseException) -> str:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return "timeout"
+    if isinstance(exc, aiohttp.ClientConnectionError):
+        return "connection"
+    return "error"
+
+
+def _http_exception_status(exc: BaseException) -> int | None:
+    """Return the downstream status carried by an HTTPException detail, if any."""
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict):
+        status = detail.get("status")
+        if isinstance(status, int):
+            return status
+    return None
+
+
+def _record_encode_failure(url: str, status: int | None = None) -> None:
+    """Record a health-relevant encoder failure (connection, timeout or 5xx).
+
+    Client errors (4xx) are request-side problems and must not mark the encoder
+    instance as unhealthy.
+    """
+    if status is not None and status < 500:
+        return
     if not hasattr(app.state, "encode_failures"):
         app.state.encode_failures = {}
     app.state.encode_failures[url] = time.time()
+
+
+def _clear_encode_failure(url: str) -> None:
+    """Forget a previous failure after a successful encode request."""
+    failures = getattr(app.state, "encode_failures", None)
+    if failures:
+        failures.pop(url, None)
+
+
+def _encoder_urls_by_health() -> list[str]:
+    """Return encoder URLs ordered healthy-first, falling back to all URLs."""
+    e_urls = list(getattr(app.state, "e_urls", []))
+    cooldown = getattr(app.state, "encoder_failure_cooldown_seconds", 30.0)
+    failures = getattr(app.state, "encode_failures", {}) or {}
+    if not failures or cooldown <= 0:
+        return e_urls
+    now = time.time()
+    healthy: list[str] = []
+    failing: list[str] = []
+    for url in e_urls:
+        failed_at = failures.get(url)
+        if failed_at is not None and now - failed_at <= cooldown:
+            failing.append(url)
+        else:
+            healthy.append(url)
+    if not healthy:
+        return e_urls
+    return healthy + failing
 
 
 def _stage_timeout(stage: str) -> aiohttp.ClientTimeout | None:
@@ -137,14 +307,22 @@ async def _post_stage(
     """POST one stage request; the response is always released by the context manager."""
     if session is None:
         raise HTTPException(status_code=500, detail=f"{stage} session not initialized")
+    stats = _get_stats()
+    started = time.perf_counter()
     try:
         async with session.post(url, json=payload, headers=headers, **_stage_timeout_kwargs(stage)) as resp:
             status = resp.status
             body = await resp.read()
     except HTTPException:
+        stats.record_stage(stage, "error", time.perf_counter() - started)
         raise
     except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+        stats.record_stage(stage, _outbound_error_label(exc), time.perf_counter() - started)
         raise _classify_outbound_error(stage, url, exc) from exc
+    except Exception:
+        stats.record_stage(stage, "error", time.perf_counter() - started)
+        raise
+    stats.record_stage(stage, _stage_status_label(status), time.perf_counter() - started)
     logger.debug("[%s] %s stage returned status %d from %s", req_id, stage, status, url)
     return status, body
 
@@ -185,6 +363,10 @@ async def _encode_fanout(
 
     logger.info("[%s] got %d multimodal items...", req_id, len(mm_items))
 
+    stats = _get_stats()
+    stats.record_encoder_requests(len(mm_items))
+    stats.record_mm_items(len(mm_items))
+
     # Round-robin over encode servers to distribute load a bit
     target_urls = [e_urls[i % len(e_urls)] for i in range(len(mm_items))]
 
@@ -220,14 +402,16 @@ async def _encode_fanout(
     failures: list[tuple[int, str, BaseException]] = []
     for idx, result in enumerate(results):
         if isinstance(result, BaseException):
-            _record_encode_failure(target_urls[idx])
+            _record_encode_failure(target_urls[idx], status=_http_exception_status(result))
             failures.append((idx, target_urls[idx], result))
             continue
         status, body = result
         if not (200 <= status < 300):
-            _record_encode_failure(target_urls[idx])
+            _record_encode_failure(target_urls[idx], status=status)
             error = _downstream_status_error("encode", f"{target_urls[idx]}/v1/chat/completions", status, body)
             failures.append((idx, target_urls[idx], error))
+        else:
+            _clear_encode_failure(target_urls[idx])
 
     if failures:
         logger.error("[%s] %d/%d encoder requests failed", req_id, len(failures), len(mm_items))
@@ -273,14 +457,19 @@ async def _encode_single_request(
     if encode_session is None:
         raise HTTPException(status_code=500, detail="Encode session not initialized")
 
+    _get_stats().record_encoder_requests(1)
     url = f"{e_url}/v1/chat/completions"
     try:
         status, body = await _post_stage(encode_session, url, request_data, headers, "encode", req_id)
         if not (200 <= status < 300):
             raise _downstream_status_error("encode", url, status, body)
+    except HTTPException as exc:
+        _record_encode_failure(e_url, status=_http_exception_status(exc))
+        raise
     except Exception:
         _record_encode_failure(e_url)
         raise
+    _clear_encode_failure(e_url)
 
     logger.debug("Encoder processing completed successfully for req_id: %s", req_id)
 
@@ -290,13 +479,14 @@ async def fanout_encoder_primer(
     req_id: str,
 ):
     mode = app.state.encoder_dispatch_mode
+    encoder_urls = _encoder_urls_by_health()
 
     if mode == EncoderDispatchMode.SINGLE:
-        e_url = random.choice(app.state.e_urls)
+        e_url = random.choice(encoder_urls)
         await _encode_single_request(orig_request, e_url, req_id)
 
     elif mode == EncoderDispatchMode.FANOUT:
-        await _encode_fanout(orig_request, app.state.e_urls, req_id)
+        await _encode_fanout(orig_request, encoder_urls, req_id)
 
     else:
         raise RuntimeError(f"Unknown encoder dispatch mode: {mode}")
@@ -431,6 +621,38 @@ async def log_requests(request: Request, call_next):
 ###############################################################################
 
 
+async def _close_sessions() -> None:
+    """Close the HTTP client sessions created by on_startup."""
+    global encode_session, prefill_session, decode_session
+    if encode_session:
+        await encode_session.close()
+    if prefill_session:
+        await prefill_session.close()
+    if decode_session:
+        await decode_session.close()
+
+
+async def _probe_encoder_instances() -> None:
+    """Probe every encoder /health once and fail fast on unreachable instances."""
+    probe_timeout = aiohttp.ClientTimeout(total=5.0)
+    unreachable: list[str] = []
+    for e_url in app.state.e_urls:
+        try:
+            if encode_session is None:
+                unreachable.append(e_url)
+                continue
+            async with encode_session.get(f"{e_url}/health", timeout=probe_timeout) as resp:
+                if not (200 <= resp.status < 300):
+                    unreachable.append(e_url)
+        except Exception:
+            unreachable.append(e_url)
+    if unreachable:
+        logger.error("Unreachable encoder instances: %s", unreachable)
+        await _close_sessions()
+        raise RuntimeError(f"Unreachable encoder instances: {unreachable}")
+    logger.info("All %d encoder instances are reachable", len(app.state.e_urls))
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     global encode_session, prefill_session, decode_session
@@ -441,17 +663,21 @@ async def on_startup() -> None:
         # only setup if prefill instance(s) exist
         prefill_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     decode_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+    if getattr(app.state, "probe_encoders_on_startup", False):
+        await _probe_encoder_instances()
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    global encode_session, prefill_session, decode_session
-    if encode_session:
-        await encode_session.close()
-    if prefill_session:
-        await prefill_session.close()
-    if decode_session:
-        await decode_session.close()
+    stats = _get_stats()
+    drain_seconds = getattr(app.state, "shutdown_drain_seconds", 0.0) or 0.0
+    if drain_seconds > 0:
+        deadline = time.monotonic() + drain_seconds
+        while stats.inflight > 0 and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+        if stats.inflight > 0:
+            logger.warning("Shutdown drain timed out with %d request(s) in flight", stats.inflight)
+    await _close_sessions()
 
 
 ###############################################################################
@@ -466,13 +692,13 @@ async def forward_non_stream(req_data: dict, req_id: str, p_url: str, d_url: str
             await fanout_encoder_primer(req_data, req_id)
 
         if has_mm_input(req_data):
-            await non_stream_retry_wrap(run_encoder)
+            await non_stream_retry_wrap(run_encoder, stage="encode")
 
         # Step 2: Process through Prefill instance
         async def run_prefill():
             return await maybe_prefill(req_data, p_url, req_id)
 
-        req_data = await non_stream_retry_wrap(run_prefill)
+        req_data = await non_stream_retry_wrap(run_prefill, stage="prefill")
 
         async def run_decode_non_stream():
             # Step 3: Process through Decode instance
@@ -495,7 +721,7 @@ async def forward_non_stream(req_data: dict, req_id: str, p_url: str, d_url: str
                     detail={"stage": "decode", "url": url, "error": "invalid_json", "reason": str(exc)},
                 ) from exc
 
-        return await non_stream_retry_wrap(run_decode_non_stream)
+        return await non_stream_retry_wrap(run_decode_non_stream, stage="decode")
 
     except HTTPException:
         raise
@@ -504,7 +730,7 @@ async def forward_non_stream(req_data: dict, req_id: str, p_url: str, d_url: str
         raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}") from e
 
 
-async def stream_retry_wrap(forward_func, max_retries: int = 3, delay: float = 0.001):
+async def stream_retry_wrap(forward_func, max_retries: int = 3, delay: float = 0.001, *, stage: str = "unknown"):
     last_exc = None
     first_chunk_sent = False
     for attempt in range(max_retries):
@@ -519,6 +745,8 @@ async def stream_retry_wrap(forward_func, max_retries: int = 3, delay: float = 0
             if isinstance(e, HTTPException) and e.status_code < 500:
                 raise
             last_exc = e
+            if attempt + 1 < max_retries:
+                _get_stats().record_retry(stage)
             logger.warning(
                 "attempt %s / %s failed retrying... ",
                 attempt + 1,
@@ -529,7 +757,7 @@ async def stream_retry_wrap(forward_func, max_retries: int = 3, delay: float = 0
     raise RuntimeError(f"all {max_retries} retries failed.") from last_exc
 
 
-async def non_stream_retry_wrap(forward_func, max_retries: int = 3, delay: float = 0.001):
+async def non_stream_retry_wrap(forward_func, max_retries: int = 3, delay: float = 0.001, *, stage: str = "unknown"):
     last_exc = None
     for attempt in range(max_retries):
         try:
@@ -539,6 +767,8 @@ async def non_stream_retry_wrap(forward_func, max_retries: int = 3, delay: float
             if isinstance(e, HTTPException) and e.status_code < 500:
                 raise
             last_exc = e
+            if attempt + 1 < max_retries:
+                _get_stats().record_retry(stage)
             logger.warning(
                 "attempt %s / %s failed retrying... ",
                 attempt + 1,
@@ -548,20 +778,20 @@ async def non_stream_retry_wrap(forward_func, max_retries: int = 3, delay: float
     raise RuntimeError(f"all {max_retries} retries failed.") from last_exc
 
 
-async def forward_stream(req_data: dict, req_id: str, p_url: str, d_url: str) -> AsyncIterator[str]:
+async def _forward_stream_impl(req_data: dict, req_id: str, p_url: str, d_url: str) -> AsyncIterator[str]:
     try:
         # Step 1: Process through Encoder instance (if has MM input)
         async def run_encoder():
             await fanout_encoder_primer(req_data, req_id)
 
         if has_mm_input(req_data):
-            await non_stream_retry_wrap(run_encoder)
+            await non_stream_retry_wrap(run_encoder, stage="encode")
 
         # Step 2: Process through Prefill instance
         async def run_prefill():
             return await maybe_prefill(req_data, p_url, req_id)
 
-        req_data = await non_stream_retry_wrap(run_prefill)
+        req_data = await non_stream_retry_wrap(run_prefill, stage="prefill")
 
         async def run_decode_stream():
             # Step 3: Process through Decode instance
@@ -593,7 +823,7 @@ async def forward_stream(req_data: dict, req_id: str, p_url: str, d_url: str) ->
 
             logger.info("[%s] Streaming completed", req_id)
 
-        async for chunk in stream_retry_wrap(run_decode_stream):
+        async for chunk in stream_retry_wrap(run_decode_stream, stage="decode"):
             yield chunk
 
     except HTTPException:
@@ -604,6 +834,16 @@ async def forward_stream(req_data: dict, req_id: str, p_url: str, d_url: str) ->
         raise HTTPException(status_code=500, detail=f"Proxy streaming error: {str(e)}") from e
 
 
+async def forward_stream(req_data: dict, req_id: str, p_url: str, d_url: str) -> AsyncIterator[str]:
+    """Stream the response and always release the in-flight request gauge."""
+    stats = _get_stats()
+    try:
+        async for chunk in _forward_stream_impl(req_data, req_id, p_url, d_url):
+            yield chunk
+    finally:
+        stats.inflight = max(0, stats.inflight - 1)
+
+
 ###############################################################################
 # Public routes
 ###############################################################################
@@ -611,6 +851,9 @@ async def forward_stream(req_data: dict, req_id: str, p_url: str, d_url: str) ->
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
+    stats = _get_stats()
+    stats.inflight += 1
+    streaming_handed_off = False
     try:
         req_data = await request.json()
         req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
@@ -621,10 +864,13 @@ async def chat_completions(request: Request):
         is_streaming = req_data.get("stream", False)
 
         if is_streaming:
-            return StreamingResponse(
+            response = StreamingResponse(
                 forward_stream(req_data, req_id, p_url, d_url),
                 media_type="text/event-stream",
             )
+            # forward_stream releases the gauge when the generator finishes.
+            streaming_handed_off = True
+            return response
         result = await forward_non_stream(req_data, req_id, p_url, d_url)
         return JSONResponse(content=result)
 
@@ -633,6 +879,9 @@ async def chat_completions(request: Request):
     except Exception as e:
         logger.exception("Error in chat_completions endpoint: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Request processing error: {str(e)}") from e
+    finally:
+        if not streaming_handed_off:
+            stats.inflight = max(0, stats.inflight - 1)
 
 
 @app.get("/v1/models")
@@ -678,6 +927,12 @@ async def health_check():
         },
         status_code=status_code,
     )
+
+
+@app.get("/metrics")
+async def metrics():
+    """Expose Prometheus text metrics for the proxy."""
+    return PlainTextResponse(_get_stats().render_prometheus())
 
 
 ###############################################################################
@@ -816,6 +1071,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Decode stage timeout in seconds; 0 = shared overall client timeout (legacy behavior)",
     )
+    parser.add_argument(
+        "--encoder-failure-cooldown-seconds",
+        type=float,
+        default=30.0,
+        help="Seconds a failed encoder is deprioritized; <=0 disables health-aware ordering (default: 30)",
+    )
+    parser.add_argument(
+        "--probe-encoders-on-startup",
+        action="store_true",
+        default=False,
+        help="Probe every encoder /health on startup and fail fast when an instance is unreachable",
+    )
+    parser.add_argument(
+        "--shutdown-drain-seconds",
+        type=float,
+        default=0.0,
+        help="On shutdown wait up to this many seconds for in-flight requests; 0 closes immediately (legacy behavior)",
+    )
     return parser
 
 
@@ -837,7 +1110,11 @@ def configure_app_state(args: argparse.Namespace) -> None:
         "prefill": args.prefill_timeout_seconds,
         "decode": args.decode_timeout_seconds,
     }
+    app.state.encoder_failure_cooldown_seconds = args.encoder_failure_cooldown_seconds
+    app.state.probe_encoders_on_startup = args.probe_encoders_on_startup
+    app.state.shutdown_drain_seconds = args.shutdown_drain_seconds
     app.state.encode_failures = {}
+    app.state.stats = ProxyStats()
 
 
 def main() -> None:

@@ -852,6 +852,21 @@ which speaks the same OpenAI-compatible front end with its own E/P/D URL groups.
 The notes below describe that script; `--ec-consumer-zmq-addrs` is not one of
 its options.
 
+Besides `--encode-servers-urls`, `--prefill-servers-urls`, `--decode-servers-urls`
+(use `disable` or `none` for the E+PD topology) and `--encoder-dispatch-mode`
+(`single`, one encoder request per request, or `fanout`, one encoder request per
+multimodal item), these optional parameters are opt-in and keep the previous
+behavior by default:
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `--encode-timeout-seconds` | `0` | Per-request timeout for the encode stage; `0` keeps the shared overall client timeout of 100000 seconds |
+| `--prefill-timeout-seconds` | `0` | Same for the prefill stage |
+| `--decode-timeout-seconds` | `0` | Same for the decode stage, including streaming decode |
+| `--encoder-failure-cooldown-seconds` | `30` | Seconds a failed encoder URL is deprioritized when several encoders are configured; `0` or negative disables health-aware ordering |
+| `--probe-encoders-on-startup` | off | Probe every encoder `GET /health` on startup (5 s per probe) and fail fast when an instance is unreachable |
+| `--shutdown-drain-seconds` | `0` | On shutdown, wait up to this many seconds for in-flight requests before closing the client sessions; `0` closes immediately |
+
 ### Health checks and startup order
 
 Every vLLM instance exposes `GET /health`, which returns HTTP 200 once the
@@ -874,6 +889,15 @@ only exposes `GET /healthcheck`, which reports its own status and the number of
 connected encoder, prefill, decode, and PD instances without aggregating
 instance health.
 
+With `--probe-encoders-on-startup`, the reference proxy checks every encoder
+`/health` once while starting (5 s timeout) and refuses to start when an
+encoder is unreachable. The reference proxy also exposes Prometheus metrics at
+`GET /metrics`: `epd_requests_total{stage,status}`,
+`epd_stage_seconds_bucket/sum/count{stage}`, `epd_retries_total{stage}`,
+`epd_encoder_requests_total`, `epd_mm_items_total`, and
+`epd_requests_inflight`. The metrics endpoint is additive and does not change
+the `/health` response.
+
 Start the services in this order and wait for each instance's `/health` before
 starting the next stage:
 
@@ -889,10 +913,13 @@ check device health while the service is starting.
 
 ### Graceful shutdown and cleanup
 
-The current proxy has no request-drain window. Stop in this order:
+The reference proxy supports an optional drain window via
+`--shutdown-drain-seconds` (default `0`, which closes immediately as before).
+When it is greater than zero, shutdown waits until no request is in flight or
+the window expires, then closes the client sessions. Stop in this order:
 
-1. Stop the proxy so that no new request is admitted and close its client
-   sessions (the reference proxy does this in its shutdown hook).
+1. Stop the proxy; it drains and closes its client sessions in its shutdown
+   hook.
 2. Stop the P and D instances with SIGTERM, then the E instance(s). On SIGTERM
    the worker calls `ensure_kv_transfer_shutdown()` and then
    `ensure_ec_transfer_shutdown()`, which calls the connector `shutdown()`
@@ -907,34 +934,39 @@ The current proxy has no request-drain window. Stop in this order:
 
 ### Failure and retry semantics
 
-- **Stage failure and retries**: each stage request gets up to three attempts
-  in total (the initial attempt plus up to two retries). The retry wrapper
-  stops early only when the proxy itself raises an `HTTPException`
-  with a status below 500; for example, in `fanout` dispatch mode a downstream
-  encoder 4xx response is propagated to the client without being retried.
-  Other failures are retried, including downstream 4xx responses that the
-  single-encoder and decode paths currently convert into errors before the
-  retry wrapper sees them. When the attempts are exhausted the client receives
-  HTTP 500.
-- **P stage failure**: a prefill failure returns HTTP 500 to the client and D
-  is not started, so no partial output is produced.
-- **D stage**: non-streaming requests use the same at-most-three-attempt rule.
-  Streaming requests are retried only before the first chunk is forwarded;
-  once streaming has started, an error is surfaced to the client instead of
-  being retried.
-- **Error classification limitation**: per-stage error classification is not
-  implemented yet, so a downstream client error on the single-encoder or
-  decode path is retried like a server error; only errors the proxy itself
-  classifies as client errors skip retries.
+- **Stage attempts**: each stage request gets up to three attempts in total
+  (the initial attempt plus up to two retries).
+- **Retryable failures**: connection errors are mapped to HTTP 502, stage
+  timeouts to HTTP 504, and downstream 5xx responses to HTTP 502; all of them
+  are retried. Every 2xx response is treated as success.
+- **Downstream 4xx**: the 4xx status is preserved and the request is **not**
+  retried.
+- **Multi-encoder routing**: when several encoder URLs are configured, a
+  failed encoder is deprioritized for `--encoder-failure-cooldown-seconds`.
+  Only connection errors, timeouts and 5xx count as encoder failures; 4xx is a
+  request-side error and does not mark the encoder unhealthy. Retries
+  therefore prefer healthy encoders, and when all encoders are failing the
+  proxy falls back to the full list. With a single encoder the selection is
+  unchanged.
+- **Exhaustion**: when all attempts fail, the client receives HTTP 500.
+- **P stage failure**: a prefill failure returns its mapped status (4xx
+  preserved, otherwise 502/504) and D is not started, so no partial output is
+  produced.
+- **D stage**: non-streaming requests use the same attempt rule. Streaming
+  requests are retried only before the first chunk is forwarded; once
+  streaming has started, an error is surfaced to the client instead of being
+  retried.
 - **Encoder-cache miss on the consumer**: behavior depends on the connector.
   `ECMemcacheConnector` falls back to local encoding and logs an
   `EC LOAD miss` warning. The shared-filesystem (`ECExampleConnector`) load
   path requires the EC entry to exist; if it is missing, the request fails with
   an error, so make sure the E instance and the P/D instances use the same
   `shared_storage_path`.
-- **Timeouts**: the reference proxy currently applies one overall client
-  timeout (`total=100_000`) to all stages. Per-stage timeouts are not
-  configurable yet.
+- **Timeouts**: the three `--*-timeout-seconds` options configure per-stage
+  timeouts. With the default `0` the proxy omits the per-request timeout, so
+  the shared 100000-second overall client timeout applies; a value greater
+  than zero bounds the corresponding stage request (including streaming
+  decode).
 
 ## Limitations
 
@@ -943,9 +975,6 @@ The current proxy has no request-drain window. Stop in this order:
   should be treated as a V1 deployment.
 - **Encoder-only pooling models** (`--runner pooling`) are not EPD; they have
   no PD/EPD split. SigLIP2 does not support PD separation.
-- **Retry classification**: per-stage retry classification is not implemented;
-  downstream 4xx responses on the single-encoder and decode paths may be
-  retried. This is planned for a later change.
 - **EC + Pipeline Parallel** is not verified. Treat the combination as unknown
   until coverage exists.
 - **ECCPUConnector** works on a single host only (pinned `/dev/shm` mapping).

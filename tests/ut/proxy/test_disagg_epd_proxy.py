@@ -24,6 +24,7 @@ no network access is needed.
 import asyncio
 import json
 import re
+import time
 
 import aiohttp
 import pytest
@@ -71,6 +72,10 @@ class FakeResponse:
             raise self._read_exc
         return self._body
 
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise aiohttp.ClientError(f"fake HTTP {self.status}")
+
 
 class FakeSession:
     """Records outbound calls and returns scripted FakeResponse objects."""
@@ -78,12 +83,22 @@ class FakeSession:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
+        self.closed = False
 
     def post(self, url, json=None, headers=None, **kwargs):
-        self.calls.append({"url": url, "json": json, "headers": headers, "kwargs": kwargs})
+        self.calls.append({"method": "post", "url": url, "json": json, "headers": headers, "kwargs": kwargs})
         if not self.responses:
             raise AssertionError(f"unexpected POST to {url}")
         return self.responses.pop(0)
+
+    def get(self, url, **kwargs):
+        self.calls.append({"method": "get", "url": url, "kwargs": kwargs})
+        if not self.responses:
+            raise AssertionError(f"unexpected GET to {url}")
+        return self.responses.pop(0)
+
+    async def close(self):
+        self.closed = True
 
 
 def _image_request(num_images=1):
@@ -109,6 +124,10 @@ def _isolated_app_state(monkeypatch):
     monkeypatch.setattr(proxy.app.state, "d_urls", [DECODE_URL], raising=False)
     monkeypatch.setattr(proxy.app.state, "encoder_dispatch_mode", proxy.EncoderDispatchMode.SINGLE, raising=False)
     monkeypatch.setattr(proxy.app.state, "encode_failures", {}, raising=False)
+    monkeypatch.setattr(proxy.app.state, "encoder_failure_cooldown_seconds", 30.0, raising=False)
+    monkeypatch.setattr(proxy.app.state, "probe_encoders_on_startup", False, raising=False)
+    monkeypatch.setattr(proxy.app.state, "shutdown_drain_seconds", 0.0, raising=False)
+    monkeypatch.setattr(proxy.app.state, "stats", proxy.ProxyStats(), raising=False)
     _set_timeouts(monkeypatch)
 
 
@@ -482,3 +501,328 @@ def test_configure_app_state_sets_stage_timeouts_and_failures():
     )
     proxy.configure_app_state(prefill_args)
     assert proxy.app.state.p_urls == [PREFILL_URL]
+
+
+# --------------------------------------------------------------------------- #
+# Health-aware encoder routing (N5)
+# --------------------------------------------------------------------------- #
+class _FakeAiohttpModule:
+    """Replacement for the aiohttp module used by on_startup."""
+
+    ClientTimeout = aiohttp.ClientTimeout
+
+    def __init__(self, sessions):
+        self.sessions = list(sessions)
+        self.created = []
+
+    def TCPConnector(self, **kwargs):
+        return None
+
+    def ClientSession(self, **kwargs):
+        session = self.sessions.pop(0)
+        self.created.append(session)
+        return session
+
+
+def _install_fake_aiohttp(monkeypatch, sessions):
+    fake = _FakeAiohttpModule(sessions)
+    monkeypatch.setattr(proxy, "aiohttp", fake)
+    return fake
+
+
+def test_record_encode_failure_ignores_4xx(monkeypatch):
+    # 4xx is a request-side problem and must not mark the encoder unhealthy.
+    _run_single_encode(monkeypatch, FakeResponse(400, b"bad request"))
+    assert proxy.app.state.encode_failures == {}
+
+    _run_single_encode(monkeypatch, FakeResponse(500, b"server exploded"))
+    assert ENCODE_URL in proxy.app.state.encode_failures
+
+    proxy.app.state.encode_failures.clear()
+    _run_single_encode(monkeypatch, FakeResponse(enter_exc=aiohttp.ClientConnectionError("boom")))
+    assert ENCODE_URL in proxy.app.state.encode_failures
+
+    # A successful encode clears a previous failure timestamp.
+    proxy.app.state.encode_failures[ENCODE_URL] = time.time()
+    session = FakeSession([FakeResponse(200, b"{}")])
+    monkeypatch.setattr(proxy, "encode_session", session, raising=False)
+    asyncio.run(proxy._encode_single_request(_image_request(), ENCODE_URL, "req-1"))
+    assert ENCODE_URL not in proxy.app.state.encode_failures
+
+
+def _health_state(monkeypatch, e_urls, failures, cooldown=30.0):
+    monkeypatch.setattr(proxy.app.state, "e_urls", list(e_urls), raising=False)
+    monkeypatch.setattr(proxy.app.state, "encode_failures", dict(failures), raising=False)
+    monkeypatch.setattr(proxy.app.state, "encoder_failure_cooldown_seconds", cooldown, raising=False)
+
+
+def test_failure_cooldown_prefers_healthy_encoder(monkeypatch):
+    now = time.time()
+    _health_state(monkeypatch, ["e1", "e2", "e3"], {"e2": now})
+    assert proxy._encoder_urls_by_health() == ["e1", "e3", "e2"]
+
+    # A stale failure outside the cooldown window is healthy again.
+    _health_state(monkeypatch, ["e1", "e2"], {"e2": now - 120.0}, cooldown=30.0)
+    assert proxy._encoder_urls_by_health() == ["e1", "e2"]
+
+    # cooldown <= 0 disables health-aware ordering.
+    _health_state(monkeypatch, ["e1", "e2"], {"e2": now}, cooldown=0.0)
+    assert proxy._encoder_urls_by_health() == ["e1", "e2"]
+
+    # All encoders failing falls back to the full list (best effort).
+    _health_state(monkeypatch, ["e1", "e2"], {"e1": now, "e2": now})
+    assert proxy._encoder_urls_by_health() == ["e1", "e2"]
+
+    # A single encoder is unaffected.
+    _health_state(monkeypatch, ["e1"], {"e1": now})
+    assert proxy._encoder_urls_by_health() == ["e1"]
+
+
+def test_single_mode_picks_healthy_encoder(monkeypatch):
+    _health_state(monkeypatch, ["e1", "e2"], {"e1": time.time()})
+    monkeypatch.setattr(proxy.app.state, "encoder_dispatch_mode", proxy.EncoderDispatchMode.SINGLE, raising=False)
+    session = FakeSession([FakeResponse(200, b"{}")])
+    monkeypatch.setattr(proxy, "encode_session", session, raising=False)
+    seen = []
+
+    def fake_choice(candidates):
+        seen.append(list(candidates))
+        return candidates[0]
+
+    monkeypatch.setattr(proxy.random, "choice", fake_choice)
+    asyncio.run(proxy.fanout_encoder_primer(_image_request(), "req-1"))
+    assert seen and seen[0][0] == "e2"
+
+
+def test_fanout_mode_rotates_from_healthy_encoder(monkeypatch):
+    _health_state(monkeypatch, ["e1", "e2"], {"e1": time.time()})
+    monkeypatch.setattr(proxy.app.state, "encoder_dispatch_mode", proxy.EncoderDispatchMode.FANOUT, raising=False)
+    captured = {}
+
+    async def fake_fanout(request, urls, req_id):
+        captured["urls"] = list(urls)
+
+    monkeypatch.setattr(proxy, "_encode_fanout", fake_fanout)
+    asyncio.run(proxy.fanout_encoder_primer(_image_request(), "req-1"))
+    assert captured["urls"] == ["e2", "e1"]
+
+
+# --------------------------------------------------------------------------- #
+# Startup probing
+# --------------------------------------------------------------------------- #
+def test_probe_encoders_on_startup_fails_fast(monkeypatch):
+    fake = _install_fake_aiohttp(monkeypatch, [FakeSession([FakeResponse(500, b"down")]), FakeSession([])])
+    monkeypatch.setattr(proxy.app.state, "e_urls", ["http://e1:1", "http://e2:2"], raising=False)
+    monkeypatch.setattr(proxy.app.state, "probe_encoders_on_startup", True, raising=False)
+
+    with pytest.raises(RuntimeError, match="Unreachable encoder instances") as exc_info:
+        asyncio.run(proxy.on_startup())
+    assert "http://e1:1" in str(exc_info.value)
+    assert "http://e2:2" in str(exc_info.value)
+    assert fake.created[0].calls[0]["url"] == "http://e1:1/health"
+    assert all(session.closed for session in fake.created)
+
+
+def test_probe_encoders_on_startup_passes_when_reachable(monkeypatch):
+    fake = _install_fake_aiohttp(
+        monkeypatch,
+        [FakeSession([FakeResponse(200, b"{}"), FakeResponse(200, b"{}")]), FakeSession([])],
+    )
+    monkeypatch.setattr(proxy.app.state, "e_urls", ["http://e1:1", "http://e2:2"], raising=False)
+    monkeypatch.setattr(proxy.app.state, "probe_encoders_on_startup", True, raising=False)
+
+    asyncio.run(proxy.on_startup())
+    urls = [call["url"] for call in fake.created[0].calls]
+    assert urls == ["http://e1:1/health", "http://e2:2/health"]
+    assert not any(session.closed for session in fake.created)
+
+
+def test_probe_disabled_by_default(monkeypatch):
+    fake = _install_fake_aiohttp(monkeypatch, [FakeSession([]), FakeSession([])])
+    monkeypatch.setattr(proxy.app.state, "e_urls", ["http://e1:1"], raising=False)
+
+    asyncio.run(proxy.on_startup())
+    assert fake.created[0].calls == []
+
+
+# --------------------------------------------------------------------------- #
+# /metrics
+# --------------------------------------------------------------------------- #
+def test_metrics_endpoint_reports_stage_stats(monkeypatch):
+    session = FakeSession([FakeResponse(200, b"{}")])
+    asyncio.run(proxy._post_stage(session, f"{ENCODE_URL}/v1/chat/completions", {}, {}, "encode", "id"))
+    failure = FakeSession([FakeResponse(400, b"bad")])
+    asyncio.run(proxy._post_stage(failure, f"{ENCODE_URL}/v1/chat/completions", {}, {}, "encode", "id"))
+
+    response = asyncio.run(proxy.metrics())
+    text = response.body.decode()
+    assert 'epd_requests_total{stage="encode",status="ok"} 1' in text
+    assert 'epd_requests_total{stage="encode",status="http_4xx"} 1' in text
+    for metric in (
+        "epd_requests_total",
+        "epd_stage_seconds_bucket",
+        "epd_stage_seconds_sum",
+        "epd_stage_seconds_count",
+        "epd_retries_total",
+        "epd_encoder_requests_total",
+        "epd_mm_items_total",
+        "epd_requests_inflight",
+    ):
+        assert metric in text
+    assert "# HELP epd_requests_total" in text
+    assert "# TYPE epd_requests_total counter" in text
+
+
+def test_metrics_histogram_and_retries(monkeypatch):
+    session = FakeSession([FakeResponse(200, b"{}")])
+    asyncio.run(proxy._post_stage(session, f"{ENCODE_URL}/v1/chat/completions", {}, {}, "encode", "id"))
+    text = asyncio.run(proxy.metrics()).body.decode()
+    assert 'epd_stage_seconds_count{stage="encode"} 1' in text
+    assert 'epd_stage_seconds_bucket{stage="encode",le="+Inf"} 1' in text
+
+    async def always_fails():
+        raise proxy.HTTPException(status_code=502, detail="bad gateway")
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(proxy.non_stream_retry_wrap(always_fails, stage="encode"))
+    text = asyncio.run(proxy.metrics()).body.decode()
+    assert 'epd_retries_total{stage="encode"} 2' in text
+
+
+def test_encoder_and_mm_item_counters(monkeypatch):
+    session = FakeSession([FakeResponse(200, b"{}"), FakeResponse(200, b"{}")])
+    monkeypatch.setattr(proxy, "encode_session", session, raising=False)
+    asyncio.run(proxy._encode_fanout(_image_request(num_images=2), [ENCODE_URL], "req-1"))
+    text = asyncio.run(proxy.metrics()).body.decode()
+    assert "epd_encoder_requests_total 2" in text
+    assert "epd_mm_items_total 2" in text
+
+
+# --------------------------------------------------------------------------- #
+# Shutdown draining
+# --------------------------------------------------------------------------- #
+def test_drain_waits_for_inflight(monkeypatch):
+    session = FakeSession([])
+    monkeypatch.setattr(proxy, "encode_session", session, raising=False)
+    monkeypatch.setattr(proxy, "prefill_session", None, raising=False)
+    monkeypatch.setattr(proxy, "decode_session", None, raising=False)
+    monkeypatch.setattr(proxy.app.state, "shutdown_drain_seconds", 0.5, raising=False)
+    stats = proxy.app.state.stats
+    stats.inflight = 1
+
+    async def release_later():
+        await asyncio.sleep(0.05)
+        stats.inflight = 0
+
+    async def run_shutdown():
+        started = time.monotonic()
+        task = asyncio.ensure_future(release_later())
+        await proxy.on_shutdown()
+        await task
+        return time.monotonic() - started
+
+    elapsed = asyncio.run(run_shutdown())
+    assert stats.inflight == 0
+    assert session.closed
+    assert 0.05 <= elapsed < 0.4
+
+
+def test_drain_times_out_and_closes_with_remaining_inflight(monkeypatch):
+    session = FakeSession([])
+    monkeypatch.setattr(proxy, "encode_session", session, raising=False)
+    monkeypatch.setattr(proxy, "prefill_session", None, raising=False)
+    monkeypatch.setattr(proxy, "decode_session", None, raising=False)
+    monkeypatch.setattr(proxy.app.state, "shutdown_drain_seconds", 0.2, raising=False)
+    stats = proxy.app.state.stats
+    stats.inflight = 1
+
+    started = time.monotonic()
+    asyncio.run(proxy.on_shutdown())
+    elapsed = time.monotonic() - started
+    assert 0.15 <= elapsed < 0.5
+    assert stats.inflight == 1
+    assert session.closed
+
+
+def test_drain_zero_closes_immediately(monkeypatch):
+    session = FakeSession([])
+    monkeypatch.setattr(proxy, "encode_session", session, raising=False)
+    monkeypatch.setattr(proxy, "prefill_session", None, raising=False)
+    monkeypatch.setattr(proxy, "decode_session", None, raising=False)
+    monkeypatch.setattr(proxy.app.state, "shutdown_drain_seconds", 0.0, raising=False)
+    stats = proxy.app.state.stats
+    stats.inflight = 1
+
+    started = time.monotonic()
+    asyncio.run(proxy.on_shutdown())
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.2
+    assert session.closed
+    assert stats.inflight == 1
+
+
+# --------------------------------------------------------------------------- #
+# CLI flags for the new options
+# --------------------------------------------------------------------------- #
+def test_new_cli_defaults_and_flags():
+    parser = proxy.build_arg_parser()
+    required = [
+        "--encode-servers-urls",
+        ENCODE_URL,
+        "--prefill-servers-urls",
+        "disable",
+        "--decode-servers-urls",
+        DECODE_URL,
+    ]
+    args = parser.parse_args(required)
+    assert args.encoder_failure_cooldown_seconds == 30.0
+    assert args.probe_encoders_on_startup is False
+    assert args.shutdown_drain_seconds == 0.0
+
+    flagged = parser.parse_args(
+        required
+        + [
+            "--encoder-failure-cooldown-seconds",
+            "5",
+            "--probe-encoders-on-startup",
+            "--shutdown-drain-seconds",
+            "12.5",
+        ]
+    )
+    assert flagged.encoder_failure_cooldown_seconds == 5.0
+    assert flagged.probe_encoders_on_startup is True
+    assert flagged.shutdown_drain_seconds == 12.5
+
+    proxy.configure_app_state(flagged)
+    assert proxy.app.state.encoder_failure_cooldown_seconds == 5.0
+    assert proxy.app.state.probe_encoders_on_startup is True
+    assert proxy.app.state.shutdown_drain_seconds == 12.5
+    assert isinstance(proxy.app.state.stats, proxy.ProxyStats)
+
+
+# --------------------------------------------------------------------------- #
+# /health contract
+# --------------------------------------------------------------------------- #
+def test_health_contract_unchanged(monkeypatch):
+    encode = FakeSession([FakeResponse(200, b"{}")])
+    decode = FakeSession([FakeResponse(200, b"{}")])
+    monkeypatch.setattr(proxy, "encode_session", encode, raising=False)
+    monkeypatch.setattr(proxy, "prefill_session", None, raising=False)
+    monkeypatch.setattr(proxy, "decode_session", decode, raising=False)
+    monkeypatch.setattr(proxy.app.state, "e_urls", [ENCODE_URL], raising=False)
+    monkeypatch.setattr(proxy.app.state, "p_urls", [], raising=False)
+    monkeypatch.setattr(proxy.app.state, "d_urls", [DECODE_URL], raising=False)
+
+    response = asyncio.run(proxy.health_check())
+    assert response.status_code == 200
+    assert json.loads(response.body) == {
+        "proxy": "healthy",
+        "encode_cluster": "healthy",
+        "prefill_cluster": "empty",
+        "decode_cluster": "healthy",
+    }
+
+    encode.responses.append(FakeResponse(503, b""))
+    response = asyncio.run(proxy.health_check())
+    assert response.status_code == 503
+    assert json.loads(response.body)["encode_cluster"] == "unhealthy"

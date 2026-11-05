@@ -189,6 +189,20 @@ The Ascend ExampleConnector adaptation (`vllm_ascend/patch/platform/patch_exampl
 | `VLLM_USE_V2_MODEL_RUNNER=1` | Force Model Runner V2 |
 | `VLLM_USE_V2_MODEL_RUNNER=0` | Force Model Runner V1 |
 
+### Reference proxy options
+
+The reference proxy (`examples/disaggregated_encoder/disagg_epd_proxy.py`)
+accepts these opt-in options; the defaults keep the previous behavior:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--encode-timeout-seconds` | `0` | Per-request encode timeout; `0` omits the per-request timeout so the shared 100000-second client timeout applies |
+| `--prefill-timeout-seconds` | `0` | Per-request prefill timeout |
+| `--decode-timeout-seconds` | `0` | Per-request decode timeout, including streaming decode |
+| `--encoder-failure-cooldown-seconds` | `30` | Window in which a failed encoder URL is deprioritized when several encoders are configured; `0` or negative disables health-aware ordering |
+| `--probe-encoders-on-startup` | off | Probe each encoder `/health` on startup (5 s per probe) and fail fast when unreachable |
+| `--shutdown-drain-seconds` | `0` | Wait up to this long for in-flight requests during shutdown before closing sessions; `0` closes immediately |
+
 ## Specifications Design
 
 ### Idempotency
@@ -205,12 +219,14 @@ The Ascend ExampleConnector adaptation (`vllm_ascend/patch/platform/patch_exampl
 
 - The reference proxy makes up to three attempts per stage request: the
   initial attempt plus up to two retries.
-- Retrying stops early only when the proxy itself raises an `HTTPException`
-  with status below 500; in `fanout` dispatch mode a downstream encoder 4xx
-  response is propagated that way and is not retried.
-- Other failures are retried, including downstream 4xx responses that the
-  single-encoder and decode paths currently convert into errors before the
-  retry wrapper sees them; per-stage error classification is not implemented.
+- Connection errors map to 502, stage timeouts to 504, and downstream 5xx
+  responses to 502; all of them are retried. Every 2xx response is success.
+- Downstream 4xx responses keep their status and are not retried.
+- When several encoder URLs are configured, connection/timeout/5xx failures
+  mark the encoder URL unhealthy for `--encoder-failure-cooldown-seconds` and
+  retries prefer healthy encoders; when every encoder is marked unhealthy the
+  proxy falls back to the full list. 4xx responses are request-side errors and
+  never mark an encoder unhealthy.
 - Streaming requests are not retried after the first chunk is forwarded;
   non-streaming requests are retried normally. Encoder and prefill stages are
   never streamed, so they are always retried as non-streaming requests.
@@ -218,10 +234,14 @@ The Ascend ExampleConnector adaptation (`vllm_ascend/patch/platform/patch_exampl
 
 ### Timeouts
 
-The reference proxy configures one overall HTTP client timeout
-(`total=100_000`) shared by the E, P, and D sessions; per-stage timeouts are
-not implemented yet, so long stages are bounded only by that overall timeout
-and by the instance-side limits.
+Each stage can get its own per-request timeout through
+`--encode-timeout-seconds`, `--prefill-timeout-seconds`, and
+`--decode-timeout-seconds` (the last one also covers streaming decode). A
+value greater than zero bounds that stage request. The default `0` omits the
+per-request timeout so the shared overall client timeout
+(`_LEGACY_TOTAL_TIMEOUT_SECONDS = 100_000`) configured on the sessions applies.
+Omitting the keyword matters: passing `timeout=None` to aiohttp would replace
+the session timeout with `ClientTimeout(total=None)` and disable it.
 
 ### Concurrency and crosstalk
 
@@ -269,7 +289,33 @@ launching.
 - The layerwise proxy used by the E+P+D guide only exposes `GET /healthcheck`,
   which reports the proxy status and connected instance counts without
   aggregating instance health.
+- With `--probe-encoders-on-startup`, the proxy probes every encoder
+  `GET /health` once during startup (5 s per request) and raises before
+  serving when any instance is unreachable; the default is off.
 - Startup order is E, then P/D, then the proxy, waiting for `/health` first.
+
+### Observability
+
+The reference proxy exposes Prometheus text metrics at `GET /metrics`
+(implemented without extra dependencies):
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `epd_requests_total{stage,status}` | counter | stage requests by stage and outcome (`ok`, `http_4xx`, `http_5xx`, `timeout`, `connection`, `error`) |
+| `epd_stage_seconds_bucket/sum/count{stage}` | histogram | stage request latency |
+| `epd_retries_total{stage}` | counter | retries performed per stage |
+| `epd_encoder_requests_total` | counter | encoder requests sent |
+| `epd_mm_items_total` | counter | multimodal items forwarded to encoders |
+| `epd_requests_inflight` | gauge | client requests currently being processed |
+
+`/health` keeps its existing contract; the metrics endpoint is additive.
+
+### Shutdown drain
+
+With `--shutdown-drain-seconds` greater than zero the shutdown hook waits
+until `epd_requests_inflight` reaches zero or the window expires (logging the
+remaining count), then closes the client sessions. With the default `0` the
+sessions close immediately, matching the previous behavior.
 
 ### Logging
 
@@ -291,8 +337,3 @@ script (`disagg_1e1pd_example.sh`) redirects them to files under `LOG_PATH`.
 - **E+P+D** is a supported design with example scripts, but end-to-end test
   coverage currently exists for E+PD only; MRV1 EPD and E+P+D scenarios are
   still being added.
-- **Retry classification**: per-stage retry classification is not implemented;
-  downstream 4xx responses on the single-encoder and decode paths may be
-  retried. This is planned for a later change.
-- Per-stage proxy timeouts, proactive encoder probing, and request metrics are
-  not implemented yet.
