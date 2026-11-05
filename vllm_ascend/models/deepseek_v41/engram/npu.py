@@ -309,17 +309,11 @@ class SharedUvaBuffer:
                 with patch("multiprocessing.resource_tracker.register", lambda *args, **kwargs: None):
                     self.shm = shared_memory.SharedMemory(name=name)
             assert self.shm.size >= size
-            host_address = ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf))
-            address_of_mapping = ctypes.c_void_p(host_address)
+            address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf)))
             _madvise_hugepage(self.shm, size)
-            flags = DeviceOperator.host_register_flags()
-            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, flags)
+            rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, DeviceOperator.host_register_flags())
             if rc:
-                raise RuntimeError(
-                    f"aclrtHostRegisterV2 failed: rc={rc} size={size} "
-                    f"address_mod_4k={host_address % 4096} flags={flags:#x} "
-                    f"device_adaptor={DeviceOperator.__name__}"
-                )
+                raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
             # Registration succeeded: from here on the mapping owes exactly one
             # aclrtHostUnregister, and close() must keep the owner until it
             # returns success.  ``pointer`` is therefore set only
