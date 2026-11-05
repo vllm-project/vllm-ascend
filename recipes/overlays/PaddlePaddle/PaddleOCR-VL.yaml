@@ -69,7 +69,7 @@ variants:
     precision: bf16
     label: BF16 · Ascend A2 graph
     vram_minimum_gb: 3
-    description: Original 0.9B checkpoint on one Ascend 910B3. Long-context inputs are not validated.
+    description: Original 0.9B checkpoint on one Ascend 910B3. Context uses the checkpoint default; 16384 is the batch-token budget. Long-context inputs are not validated.
     supported_hardware:
       - ascend_910b3
     hardware_overrides:
