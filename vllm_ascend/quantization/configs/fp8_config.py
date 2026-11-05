@@ -59,19 +59,7 @@ class AscendFp8Config(Fp8Config):
             )
 
     def _is_layer_skipped(self, prefix: str) -> bool:
-        """Check ``prefix`` against ``ignored_layers``, falling back to a
-        suffix match if the configured (normally ``exact``) mode fails.
-
-        Some checkpoints list ``ignored_layers`` using a flat module-prefix
-        convention that doesn't match what vLLM constructs for a nested model
-        wrapper (e.g. a conditional-generation model whose language model
-        lives under a ``language_model.`` submodule). When that happens, the
-        exact match never succeeds, and the affected layers -- some with no
-        ``weight_scale_inv`` at all -- silently get FP8-quantized instead of
-        staying unquantized, with no error or warning. The suffix fallback
-        below only ever triggers after an exact-match failure, so it cannot
-        change behavior for a checkpoint whose exact match already works.
-        """
+        """Allow flat checkpoint prefixes to match layers under a model wrapper."""
         if not getattr(self, "ignored_layers", None):
             return False
 
