@@ -168,8 +168,7 @@ topology. See the [SigLIP2 guide](../../tutorials/models/SigLIP2.md).
 - `ec_connector_module_path`: when the connector class is not found by name in
   the upstream factory (used by `ECMemcacheConnector`).
 
-Every instance that must see the same cache entries has to use the same
-connector and the same extra configuration.
+Instances that must share cache entries use the same connector and extra configuration.
 
 ### Connector extra configuration
 
@@ -180,9 +179,7 @@ connector and the same extra configuration.
 | `ECCPUConnector` | `ec_cpu_bytes` | Pinned `/dev/shm` mmap size; must fit at least one encoder-cache block; single host only |
 | `ECMemcacheConnector` | `ec_connector_module_path`, `recv_buffer_tokens` | `ec_connector_module_path` must point to `vllm_ascend.distributed.ec_transfer.ec_memcache_connector`; `recv_buffer_tokens` defaults to 8192 and must be between 2048 and `max_num_batched_tokens`; needs the `memcache_hybrid` package and `MMC_LOCAL_CONFIG_PATH` |
 
-The Ascend ExampleConnector adaptation
-(`vllm_ascend/patch/platform/patch_example_connector.py`) pins the load device
-on TP>1 consumers; non-EC and producer paths keep the upstream behavior.
+The Ascend ExampleConnector adaptation (`vllm_ascend/patch/platform/patch_example_connector.py`) pins the load device on TP>1 consumers; other paths keep upstream behavior.
 
 ### Runner selection
 
@@ -196,37 +193,49 @@ on TP>1 consumers; non-EC and producer paths keep the upstream behavior.
 
 ### Idempotency
 
-- Cache writes are idempotent: writing the same `mm_hash` again overwrites the
-  same entry. A retried encode therefore does not corrupt the cache.
+- Cache writes are expected to be idempotent: writing the same `mm_hash`
+  again overwrites the same per-key entry (for `ECExampleConnector`, the same
+  safetensors file under `shared_storage_path`). A retried encode therefore
+  does not corrupt the cache.
 - The key is the content hash, so two requests for the same image share one
   entry regardless of which E instance served them.
 - Duplicate multimodal items inside one request are deduplicated per request.
 
 ### Retry semantics
 
-- The reference proxy retries a failed stage at most three times.
-- 5xx responses, connection errors, and timeouts are retried.
-- Errors already classified as proxy client errors (HTTP 4xx) are not retried.
-- For streaming responses, no retry happens after the first chunk has been
-  forwarded to the client; non-streaming responses are retried normally.
-- Encoder and prefill stages are never streamed, so they are always retried as
-  non-streaming requests.
+- The reference proxy makes up to three attempts per stage request: the
+  initial attempt plus up to two retries.
+- Retrying stops early only when the proxy itself raises an `HTTPException`
+  with status below 500; in `fanout` dispatch mode a downstream encoder 4xx
+  response is propagated that way and is not retried.
+- Other failures are retried, including downstream 4xx responses that the
+  single-encoder and decode paths currently convert into errors before the
+  retry wrapper sees them; per-stage error classification is not implemented.
+- Streaming requests are not retried after the first chunk is forwarded;
+  non-streaming requests are retried normally. Encoder and prefill stages are
+  never streamed, so they are always retried as non-streaming requests.
+- When the attempts are exhausted the client receives HTTP 500.
 
 ### Timeouts
 
 The reference proxy configures one overall HTTP client timeout
 (`total=100_000`) shared by the E, P, and D sessions; per-stage timeouts are
-not implemented yet. Long-running stages are therefore bounded only by that
-overall timeout and by the instance-side limits.
+not implemented yet, so long stages are bounded only by that overall timeout
+and by the instance-side limits.
 
 ### Concurrency and crosstalk
 
-- The proxy uses child request IDs for the encoder and prefill requests. Because
-  the cache key is `mm_hash` and not the request ID, retries and concurrent
-  child requests cannot collide on the cache entry.
+- In `fanout` dispatch mode the proxy derives a child request ID per
+  multimodal item for encoder requests; in `single` mode the encoder request
+  and the prefill request reuse the parent request ID. Because the cache key
+  is `mm_hash` and not the request ID, retries and concurrent child requests
+  cannot collide on the cache entry.
 - The encoder stage refreshes the cache before the request reaches D, so a
-  concurrent request for the same image either finds a completed entry or falls
-  back to its own encode.
+  concurrent request for the same image either finds a completed entry or
+  reaches the model with a cache miss. On a miss the behavior depends on the
+  connector: `ECMemcacheConnector` falls back to local encoding and logs an
+  `EC LOAD miss` warning, while `ECExampleConnector` requires the entry to
+  exist and fails the request when it is missing (see the user guide).
 
 ## DFX Analysis
 
@@ -243,28 +252,30 @@ overall timeout and by the instance-side limits.
 ### Port conflicts
 
 The E, P, D, and proxy services each bind their own port. The examples use
-distinct ports for every instance and expose them as overridable environment
-variables; colliding with an already bound port makes the instance fail at
-startup, so the port list should be checked before launching.
+distinct, overridable ports for every instance; colliding with an already bound
+port makes the instance fail at startup, so check the port list before
+launching.
 
 ### Health checks
 
 - Each vLLM instance exposes `GET /health` and returns 200 only when the engine
   is ready.
-- The proxy's `GET /health` aggregates the three URL groups and returns
+- The reference proxy (`examples/disaggregated_encoder/disagg_epd_proxy.py`)
+  exposes `GET /health`, which aggregates the three URL groups and returns
   `{"proxy": "healthy", "encode_cluster": ..., "prefill_cluster": ...,
   "decode_cluster": ...}`; the HTTP status is 200 when no cluster is unhealthy
   and 503 otherwise. A cluster with no configured instances reports
   `empty`; a configured but unreachable instance reports `unhealthy`.
-- Startup order is E, then P/D, then the proxy, waiting for each instance's
-  `/health` before proceeding.
+- The layerwise proxy used by the E+P+D guide only exposes `GET /healthcheck`,
+  which reports the proxy status and connected instance counts without
+  aggregating instance health.
+- Startup order is E, then P/D, then the proxy, waiting for `/health` first.
 
 ### Logging
 
-The proxy logs a request ID for every client request and logs each stage
-transition, retry, and failure. Each vLLM instance keeps its own log; the
-example scripts redirect them to separate files under `LOG_PATH` so that a
-failing stage can be identified from its log.
+The proxy logs a request ID for every client request and each stage transition,
+retry, and failure. Each vLLM instance keeps its own log; the E+PD example
+script (`disagg_1e1pd_example.sh`) redirects them to files under `LOG_PATH`.
 
 ## Limitations
 
@@ -280,5 +291,8 @@ failing stage can be identified from its log.
 - **E+P+D** is a supported design with example scripts, but end-to-end test
   coverage currently exists for E+PD only; MRV1 EPD and E+P+D scenarios are
   still being added.
+- **Retry classification**: per-stage retry classification is not implemented;
+  downstream 4xx responses on the single-encoder and decode paths may be
+  retried. This is planned for a later change.
 - Per-stage proxy timeouts, proactive encoder probing, and request metrics are
   not implemented yet.

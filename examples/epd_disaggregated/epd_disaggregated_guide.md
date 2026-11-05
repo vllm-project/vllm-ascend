@@ -328,11 +328,13 @@ curl -s http://127.0.0.1:23001/health   # encoder (E)
 curl -s http://127.0.0.1:33003/health   # prefill (P, 1E1P1D)
 curl -s http://127.0.0.1:33006/health   # decode (D, 1E1P1D)
 curl -s http://127.0.0.1:33005/health   # prefill+decode (PD, 1E1PD)
-curl -s http://127.0.0.1:8001/health    # proxy
+curl -s http://127.0.0.1:8001/healthcheck   # proxy
 ```
 
-The proxy health endpoint aggregates the configured E/P/D clusters: it returns
-200 when all of them are healthy and 503 otherwise.
+The layerwise proxy exposes `GET /healthcheck`, which reports the proxy status
+and the number of connected encoder, prefill, decode, and PD instances. It
+always returns HTTP 200 and does not aggregate instance health; check each
+instance's own `/health` endpoint (above) for readiness.
 
 To stop the deployment, stop the proxy first so that no new request is
 admitted, then stop the D and P instances, and stop the E instance last. Send

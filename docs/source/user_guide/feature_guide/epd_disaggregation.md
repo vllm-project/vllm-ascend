@@ -866,16 +866,25 @@ The response is a JSON object with `proxy`, `encode_cluster`,
 `healthy`, `unhealthy`, or `empty` (no instance configured); the endpoint
 returns 200 when no cluster is unhealthy and 503 otherwise.
 
+This aggregated `/health` endpoint belongs to the reference proxy
+`examples/disaggregated_encoder/disagg_epd_proxy.py`. The layerwise proxy used
+by the E+P+D guide
+(`examples/epd_disaggregated/epd_load_balance_proxy_layerwise_server_example.py`)
+only exposes `GET /healthcheck`, which reports its own status and the number of
+connected encoder, prefill, decode, and PD instances without aggregating
+instance health.
+
 Start the services in this order and wait for each instance's `/health` before
 starting the next stage:
 
 1. E instance(s).
 2. P and D instance(s) (in E+P+D, P before D).
 3. The proxy.
-4. Wait for `GET /health` on the proxy before sending traffic.
+4. Wait for the proxy health endpoint before sending traffic (`/health` for
+   the reference proxy, `/healthcheck` for the layerwise proxy).
 
-The E+PD example script implements this wait with `curl -sf <url>/health` and a
-timeout. On the NPU side, `npu-smi info -i <rank> -t health` can be used to
+The E+PD example script implements this wait with `curl -sf <url>/health` and
+a timeout. On the NPU side, `npu-smi info -i <rank> -t health` can be used to
 check device health while the service is starting.
 
 ### Graceful shutdown and cleanup
@@ -898,16 +907,25 @@ The current proxy has no request-drain window. Stop in this order:
 
 ### Failure and retry semantics
 
-- **E stage failure**: the proxy retries the encoder request at most three
-  times; if all attempts fail, the client receives HTTP 500. A P failure
-  likewise returns 500 and D is not started, so no partial output is produced.
-- **D stage**: non-streaming requests are retried at most three times.
+- **Stage failure and retries**: each stage request gets up to three attempts
+  in total (the initial attempt plus up to two retries). The retry wrapper
+  stops early only when the proxy itself raises an `HTTPException`
+  with a status below 500; for example, in `fanout` dispatch mode a downstream
+  encoder 4xx response is propagated to the client without being retried.
+  Other failures are retried, including downstream 4xx responses that the
+  single-encoder and decode paths currently convert into errors before the
+  retry wrapper sees them. When the attempts are exhausted the client receives
+  HTTP 500.
+- **P stage failure**: a prefill failure returns HTTP 500 to the client and D
+  is not started, so no partial output is produced.
+- **D stage**: non-streaming requests use the same at-most-three-attempt rule.
   Streaming requests are retried only before the first chunk is forwarded;
   once streaming has started, an error is surfaced to the client instead of
   being retried.
-- **Retryable errors**: 5xx responses, connection errors, and timeouts are
-  retried. Errors that the proxy classifies as client errors (HTTP 4xx) are
-  not retried.
+- **Error classification limitation**: per-stage error classification is not
+  implemented yet, so a downstream client error on the single-encoder or
+  decode path is retried like a server error; only errors the proxy itself
+  classifies as client errors skip retries.
 - **Encoder-cache miss on the consumer**: behavior depends on the connector.
   `ECMemcacheConnector` falls back to local encoding and logs an
   `EC LOAD miss` warning. The shared-filesystem (`ECExampleConnector`) load
@@ -925,6 +943,9 @@ The current proxy has no request-drain window. Stop in this order:
   should be treated as a V1 deployment.
 - **Encoder-only pooling models** (`--runner pooling`) are not EPD; they have
   no PD/EPD split. SigLIP2 does not support PD separation.
+- **Retry classification**: per-stage retry classification is not implemented;
+  downstream 4xx responses on the single-encoder and decode paths may be
+  retried. This is planned for a later change.
 - **EC + Pipeline Parallel** is not verified. Treat the combination as unknown
   until coverage exists.
 - **ECCPUConnector** works on a single host only (pinned `/dev/shm` mapping).
