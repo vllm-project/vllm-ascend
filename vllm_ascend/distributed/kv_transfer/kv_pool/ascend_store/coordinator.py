@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from functools import lru_cache, partial
 from importlib import import_module
-from typing import Any, cast
+from typing import Any, Literal, cast, overload
 from weakref import proxy
 
 from vllm.logger import logger
@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    StoreLookupResult,
     block_hash_to_bytes,
     get_block_hashes,
     infer_cacheable_group_ids,
@@ -90,6 +91,9 @@ class ExternalCachedBlockPool:
         self.null_block = KVCacheBlock(block_id=0)
         self._present_block = KVCacheBlock(block_id=1)
 
+    def contains(self, group_id: int, block_hash: BlockHash) -> bool:
+        return self._exists is not None and (group_id, block_hash_to_bytes(block_hash)) in self._exists
+
     def get_cached_block(
         self,
         block_hash: BlockHash,
@@ -120,6 +124,7 @@ class AscendStoreCoordinator:
         group_cache_families: list[str],
         use_eagle: bool = False,
         retention_interval: int | None = None,
+        enable_partial_hash_hits: bool = False,
     ) -> None:
         assert len(kv_cache_groups) == len(group_block_sizes)
         assert len(kv_cache_groups) == len(group_cache_families)
@@ -132,6 +137,8 @@ class AscendStoreCoordinator:
         self.lcm_block_size = scheduler_block_size
         self.use_eagle = use_eagle
         self.retention_interval = retention_interval
+        self.enable_partial_hash_hits = enable_partial_hash_hits
+        self._partial_coordinator = None
         self.group_block_sizes = group_block_sizes
         self.group_cache_families = group_cache_families
         self.group_effective_block_sizes = list(group_block_sizes)
@@ -148,6 +155,22 @@ class AscendStoreCoordinator:
             self.eagle_group_ids = set(range(len(kv_cache_groups)))
 
         self._verify_and_split_kv_cache_groups()
+        if enable_partial_hash_hits:
+            # Reuse upstream's proof and convergence rules. Ascend only adapts
+            # physical group layouts and the external key/address transport.
+            from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import MooncakeStoreCoordinator
+
+            self._partial_coordinator = MooncakeStoreCoordinator(
+                [
+                    replace(group, kv_cache_spec=spec)
+                    for group, spec in zip(kv_cache_groups, self.group_effective_specs)
+                ],
+                scheduler_block_size,
+                hash_block_size,
+                use_eagle=use_eagle,
+                retention_interval=retention_interval,
+                enable_partial_hash_hits=True,
+            )
         # Do not keep the coordinator alive through its cache while GC is frozen.
         self._cached_reachable_masks = lru_cache(maxsize=_REACHABLE_MASK_CACHE_SIZE)(
             partial(type(self)._reachable_masks, proxy(self))
@@ -196,6 +219,10 @@ class AscendStoreCoordinator:
         *,
         apply_eagle: bool = True,
     ) -> tuple[tuple[list[bool], ...], int]:
+        if self._partial_coordinator is not None:
+            return self._partial_coordinator.find_longest_cache_hit(
+                block_hashes, max_length, cached_block_pool, apply_eagle=apply_eagle
+            )
         blocks_per_group, hit_length = self._find_hit_blocks(
             block_hashes,
             max_length,
@@ -279,6 +306,7 @@ class AscendStoreCoordinator:
                 assert len(mask) == num_chunks
         return tuple(None if mask is None or all(mask) else mask.copy() for _, mask in masks)
 
+    @overload
     def find_reachable_hit_tokens(
         self,
         block_hashes: list[BlockHash],
@@ -287,7 +315,43 @@ class AscendStoreCoordinator:
         *,
         log_context: str = "reachable_lookup",
         hbm_hit_tokens: int = 0,
-    ) -> int:
+        return_details: Literal[False] = False,
+    ) -> int: ...
+
+    @overload
+    def find_reachable_hit_tokens(
+        self,
+        block_hashes: list[BlockHash],
+        token_len: int,
+        query_group_hits: GroupHitQuery,
+        *,
+        log_context: str = "reachable_lookup",
+        hbm_hit_tokens: int = 0,
+        return_details: Literal[True],
+    ) -> StoreLookupResult: ...
+
+    @overload
+    def find_reachable_hit_tokens(
+        self,
+        block_hashes: list[BlockHash],
+        token_len: int,
+        query_group_hits: GroupHitQuery,
+        *,
+        log_context: str = "reachable_lookup",
+        hbm_hit_tokens: int = 0,
+        return_details: bool = False,
+    ) -> int | StoreLookupResult: ...
+
+    def find_reachable_hit_tokens(
+        self,
+        block_hashes: list[BlockHash],
+        token_len: int,
+        query_group_hits: GroupHitQuery,
+        *,
+        log_context: str = "reachable_lookup",
+        hbm_hit_tokens: int = 0,
+        return_details: bool = False,
+    ) -> int | StoreLookupResult:
         """Reachability-aware external hit lookup shared by both transfer paths.
 
         Queries, per group, only the blocks the group's lookup mask allows —
@@ -317,19 +381,69 @@ class AscendStoreCoordinator:
 
         if not exists and hbm_hit_tokens <= 0:
             logger.debug("%s: token_len=%d no pooled blocks found", log_context, token_len)
-            return 0
+            return StoreLookupResult() if return_details else 0
         hit_hashes: Sequence[BlockHash] = block_hashes
         if hbm_hit_tokens > 0:
             num_hbm_hashes = min(hbm_hit_tokens // self.hash_block_size, token_len // self.hash_block_size)
             hit_hashes = _HBMPrefixBlockHashes(block_hashes, num_hbm_hashes)
+        pool = ExternalCachedBlockPool(self.hash_block_size, exists)
         _, hit_length = self.find_longest_cache_hit(
             hit_hashes,
             token_len,
-            ExternalCachedBlockPool(self.hash_block_size, exists),
+            pool,
             apply_eagle=False,
         )
         logger.debug("%s: token_len=%d hit_tokens=%d", log_context, token_len, hit_length)
+        if return_details:
+            raw_hit = hit_length
+            limit = token_len - 1
+            if hit_length > limit:
+                _, hit_length = self.find_longest_cache_hit(hit_hashes, limit, pool, apply_eagle=False)
+            return StoreLookupResult(hit_length, store_skip_tokens=raw_hit)
         return hit_length
+
+    def find_partial_hit(
+        self,
+        block_hashes: list[BlockHash],
+        token_len: int,
+        query_group_hits: GroupHitQuery,
+        *,
+        hbm_hit_tokens: int = 0,
+    ) -> StoreLookupResult:
+        """Resolve recovery length and tail keys from one existence snapshot."""
+        assert self._partial_coordinator is not None
+        hashes = block_hashes[: token_len // self.hash_block_size]
+        exists = {
+            (group_id, block_hash_to_bytes(hit))
+            for group_id in self.cacheable_group_ids
+            for hit in query_group_hits(group_id, hashes, None)
+        }
+        pool = ExternalCachedBlockPool(self.hash_block_size, exists)
+        hit_hashes = (
+            _HBMPrefixBlockHashes(block_hashes, hbm_hit_tokens // self.hash_block_size)
+            if hbm_hit_tokens
+            else block_hashes
+        )
+        limit = self._partial_coordinator.align_lookup_length(token_len - 1)
+        if limit <= 0:
+            return StoreLookupResult()
+        _, hit = self.find_longest_cache_hit(hit_hashes, limit, pool)
+        if hit <= hbm_hit_tokens:
+            return StoreLookupResult(hit)
+        tails = {}
+        first = hit // self.hash_block_size - 1
+        for group_id in self.cacheable_group_ids:
+            block_size = self.group_effective_block_sizes[group_id]
+            last = min(cdiv(hit, block_size) * block_size // self.hash_block_size, len(hashes))
+            # The coordinator already proved the boundary; preserve the key
+            # it matched so receive does not invent a shorter state key.
+            for index in range(first, last):
+                if pool.contains(group_id, hashes[index]):
+                    tails[group_id] = (index + 1) * self.hash_block_size
+                    break
+            else:
+                raise AssertionError(f"Missing tail key for group {group_id} at {hit}")
+        return StoreLookupResult(hit, tails)
 
     def block_hashes_for_spec(self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec) -> BlockHashList:
         # Managers accept lazy sequences and preserve their terminal hashes

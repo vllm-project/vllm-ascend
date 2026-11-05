@@ -235,3 +235,44 @@ def test_copy_kv_cache_blocks_copies_combined_kv_with_leading_pair_axis(num_bloc
         copy_kv_cache_blocks_inplace([cache], num_blocks, copies)
 
         torch.testing.assert_close(raw_storage, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("mla_first", [False, True])
+@pytest.mark.parametrize("cyclic", [False, True])
+def test_copy_kv_cache_blocks_with_overlapping_mamba_and_packed_mla_views(mla_first, cyclic):
+    """Aliased Mamba views cover only 542720 of a packed MLA page's 608256 bytes."""
+    num_blocks = 4
+    kernel_blocks_per_page = 9
+    kernel_block_size = 128
+    packed_head_size = 528
+    page_bytes = kernel_blocks_per_page * kernel_block_size * packed_head_size
+    conv_bytes = 3 * 3072 * 2
+    raw = (torch.arange(num_blocks * page_bytes, dtype=torch.int32) % 97 + 1).to(torch.uint8)
+    conv = torch.as_strided(
+        raw.view(torch.bfloat16),
+        size=(num_blocks, 3, 3072),
+        stride=(page_bytes // 2, 3072, 1),
+    )
+    ssm = torch.as_strided(
+        raw.view(torch.float32),
+        size=(num_blocks, 8, 128, 128),
+        stride=(page_bytes // 4, 128 * 128, 128, 1),
+        storage_offset=conv_bytes // 4,
+    )
+    mla = raw.view(torch.int8).view(num_blocks * kernel_blocks_per_page, kernel_block_size, 1, packed_head_size)
+    assert conv.data_ptr() == mla.data_ptr()
+    views = [mla, conv, ssm, conv, ssm] if mla_first else [conv, ssm, conv, ssm, mla]
+    copies = [KVCacheBlockCopy(src_block_id=0, dst_block_id=3)]
+    if cyclic:
+        copies += [
+            KVCacheBlockCopy(src_block_id=0, dst_block_id=1),
+            KVCacheBlockCopy(src_block_id=1, dst_block_id=0),
+        ]
+    before = raw.view(num_blocks, page_bytes).clone()
+    expected = before.clone()
+    for copy in copies:
+        expected[copy.dst_block_id] = before[copy.src_block_id]
+
+    copy_kv_cache_blocks_inplace(views, num_blocks, copies)
+
+    torch.testing.assert_close(raw.view(num_blocks, page_bytes), expected, rtol=0, atol=0)

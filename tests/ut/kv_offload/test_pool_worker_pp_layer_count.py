@@ -61,6 +61,7 @@ def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_la
     worker.cacheable_group_ids = list(range(num_groups))
     worker.use_layerwise_transfer = use_layerwise_transfer
     worker.use_layerwise = False
+    worker.use_eagle = False
     worker._extra_config = {}
 
     worker._init_layerwise_config()

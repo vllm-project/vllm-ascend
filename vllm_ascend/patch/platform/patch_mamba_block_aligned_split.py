@@ -100,20 +100,23 @@ def _mamba_block_aligned_split(
     the split off would only erase cacheable hit length.
     """
     kv_transfer_config = self.vllm_config.kv_transfer_config
-    # A consumer only needs the unsplit verifier window after some prefix has
-    # already been computed locally or loaded from the connector.  ``kv_both``
-    # also handles cold prefills; bypassing alignment for those requests means
-    # no reusable Mamba state is ever materialized, so neither HBM nor the KV
-    # pool can cache the prefix.
-    has_computed_prefix = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens > 0
-    if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer and has_computed_prefix:
+    # Preserve the verifier window only when at most the final input token
+    # remains. A computed prefix can also be an earlier prefill chunk: that
+    # request still needs alignment to materialize its later checkpoints.
+    num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+    is_verifier_window = num_computed_tokens > 0 and num_computed_tokens >= request.num_tokens - 1
+    if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer and is_verifier_window:
         return num_new_tokens
 
     # Pure PD prefill producer or standalone instance: suppress the EAGLE
     # one-block backoff (see the docstring). The sparse index-kpool
     # early-return path below must observe it too (it previously ran under
     # a temporary bit clear from the outer producer wrapper).
-    if _get_sparse_index_kpool(self.vllm_config.model_config) is not None:
+    # Fine-grained caching needs the upstream hash-aligned tail checkpoint.
+    # The legacy sparse path below materializes only full-page boundaries.
+    if _get_sparse_index_kpool(self.vllm_config.model_config) is not None and not getattr(
+        self, "mamba_partial_cache_hit", False
+    ):
         num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
         if num_computed_tokens < max(
             request.num_prompt_tokens,
