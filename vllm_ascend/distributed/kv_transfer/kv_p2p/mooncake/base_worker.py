@@ -307,6 +307,7 @@ class MooncakeBaseConnectorWorker:
         block_lens_per_layer: list[list[int]] = []
         block_shapes_per_layer: list[list[tuple[int, ...]]] = []
         block_size_scales_per_layer: list[list[int]] = []
+        indexer_replication_sizes: list[int] = []
         configured_layer_names: set[str] = set()
 
         for tensor_config in self.kv_cache_config.kv_cache_tensors:
@@ -387,6 +388,9 @@ class MooncakeBaseConnectorWorker:
                 block_lens_per_layer.append(block_lens)
                 block_shapes_per_layer.append(block_shapes)
                 block_size_scales_per_layer.append(block_size_scales)
+                indexer_replication_sizes.append(
+                    spec.sfa_dcp_replicated_indexer_size if isinstance(spec, AscendSFAIndexerCacheSpec) else 0
+                )
 
         unexpected_layers = kv_caches.keys() - configured_layer_names
         if unexpected_layers:
@@ -400,6 +404,7 @@ class MooncakeBaseConnectorWorker:
             engine_id=self.engine_id,
             te_rpc_port=self.te_rpc_port,
             block_size=self.block_size,
+            cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
             num_blocks=self.num_blocks,
             layer_names=layer_names,
             layer_block_sizes=layer_block_sizes,
@@ -409,6 +414,7 @@ class MooncakeBaseConnectorWorker:
             block_lens=block_lens_per_layer,
             block_shapes=block_shapes_per_layer,
             block_size_scales=block_size_scales_per_layer,
+            indexer_replication_sizes=indexer_replication_sizes,
             local_ip=self.side_channel_host,
             handshake_port=self.handshake_port,
         )

@@ -488,7 +488,12 @@ def _int64_kv_slots(slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
     if slots.dtype == torch.int64:
         return slots
     cached = getattr(attn_metadata, "kv_slots_i64", None)
-    if cached is None or cached[0] is not slots:
+    if cached is None or (
+        cached[0].data_ptr() != slots.data_ptr()
+        or cached[0].shape != slots.shape
+        or cached[0].stride() != slots.stride()
+        or cached[0].device != slots.device
+    ):
         cached = (slots, slots.to(torch.int64))
         attn_metadata.kv_slots_i64 = cached  # type: ignore[attr-defined]
     return cached[1]
@@ -1003,14 +1008,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         qt = type(quant_method) if quant_method is not None else None
 
-        # PROLOG_V3 takes precedence over MLAPO and is the default fused
-        # preprocessing for quantized SFA layers in every deployment (plain
-        # serving, PD KV producers and KV consumers). The C8 switches select the
-        # KV cache layout and are orthogonal to this choice. Unquantized
-        # layers keep the NATIVE chain outside KV consumers because the
-        # unquantized weight preparation transposes fused_qkv_a_proj.weight
-        # in place, which the NATIVE fallback still consumes.
-        if getattr(self, "dcp_group", None) is None:
+        # PROLOG_V3 takes precedence over MLAPO for eligible quantized SFA
+        # layers. K3.1 DCP without PCP also supports this preprocessing.
+        if getattr(self, "dcp_group", None) is None or (
+            self.is_kimi_k31 and self.vllm_config.parallel_config.prefill_context_parallel_size == 1
+        ):
             prolog_v3_eligible = qt is not None or self.is_kv_consumer
             if prolog_v3_eligible and (
                 qt is AscendW8A8DynamicLinearMethod or qt is AscendW8A8MXFP8DynamicLinearMethod or qt is None
@@ -1908,10 +1910,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_cache=kv_cache,
                     cos=cos,
                     sin=sin,
-                    # npu_mla_prolog_v3 requires int64 cache indices; reuse
-                    # the per-step conversion so all layers of a step share
-                    # one Cast kernel (the .to() inside is a no-op on int64).
-                    slot_mapping=_int64_kv_slots(slot_mapping_sfa, attn_metadata),
+                    slot_mapping=slot_mapping_sfa,
                     attn_metadata=attn_metadata,
                 )
             else:
@@ -1924,6 +1923,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     num_input_tokens=num_input_tokens,
                     attn_metadata=attn_metadata,
                 )
+            self._record_query_gather_context(ql_nope, q_pe, attn_metadata)
         # native
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."

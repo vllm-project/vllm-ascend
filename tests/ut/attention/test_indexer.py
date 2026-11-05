@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -17,6 +17,7 @@ from vllm_ascend.attention.indexer import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.device_op import A5DeviceAdaptor
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage
 
 _KERNEL_BLOCK_SIZE = 128
 
@@ -37,7 +38,8 @@ def _make_builder(
     vllm_config.model_config = SimpleNamespace(
         hf_text_config=SimpleNamespace(index_topk=2048),
         hf_config=SimpleNamespace(),
-        max_model_len=1024,
+        # DCP fixtures below provide two 128-token columns per rank.
+        max_model_len=512,
     )
     vllm_config.parallel_config = SimpleNamespace(
         prefill_context_parallel_size=pcp_size,
@@ -129,6 +131,8 @@ def test_sfa_indexer_metadata_builder_builds_kernel_metadata(mock_cos_sin, mock_
     assert torch.equal(metadata.block_table, common.block_table_tensor[:2])
     assert metadata.block_size == _KERNEL_BLOCK_SIZE
     assert torch.equal(metadata.actual_seq_lengths_query, common.query_start_loc[1:3])
+    assert torch.equal(metadata.query_start_loc, common.query_start_loc[:3])
+    assert metadata.query_start_loc.data_ptr() == common.query_start_loc.data_ptr()
     assert torch.equal(metadata.actual_seq_lengths_key, common.seq_lens[:2])
     assert metadata.num_decode_tokens == 0
 
@@ -146,6 +150,54 @@ def test_sfa_indexer_metadata_builder_builds_kernel_metadata(mock_cos_sin, mock_
 def _make_decode_pcp_context() -> SimpleNamespace:
     # Only the global-prefill flag is read when no request is prefilling.
     return SimpleNamespace(global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([False])))
+
+
+@patch("vllm_ascend.attention.indexer.get_ascend_config")
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+def test_sfa_indexer_builder_defers_local_qli_only_in_target_scope(mock_cos_sin, mock_get_ascend_config):
+    mock_cos_sin.return_value = (torch.zeros(5, 1, 1, 8), torch.zeros(5, 1, 1, 8))
+    builder = _make_builder()
+    builder.use_sharded_dcp = True
+    builder.use_native_dcp_qli = False
+    builder.vllm_config.parallel_config.cp_kv_cache_interleave_size = 2
+    config = builder.vllm_config.model_config.hf_text_config
+    config.index_n_heads, config.index_head_dim = 32, 128
+    common = _make_common_metadata()
+    plan = torch.empty(1024, dtype=torch.int32)
+
+    # This CPU test owns producer scheduling; length math is covered separately.
+    def build_local_lengths(seq_lens, query_lens, key_lengths, visible_lengths, *args):
+        key_lengths.copy_(torch.tensor([2, 2], dtype=key_lengths.dtype))
+        visible_lengths.zero_()
+
+    length_ops = ModuleType("vllm_ascend.ops.triton.sharded_indexer")
+    length_ops.build_local_lengths = build_local_lengths
+    length_ops.build_local_key_lengths = Mock(side_effect=AssertionError("legacy producer test"))
+    with (
+        patch.dict("sys.modules", {length_ops.__name__: length_ops}),
+        patch(
+            "vllm_ascend.attention.indexer.get_dcp_group", return_value=SimpleNamespace(world_size=2, rank_in_group=1)
+        ),
+        patch("vllm_ascend.attention.indexer.is_pin_memory_available", return_value=False),
+        patch("vllm_ascend.attention.indexer.DeviceOperator.build_indexer_local_metadata", return_value=plan) as kernel,
+    ):
+        with builder.defer_device_metadata(in_graph=True):
+            metadata = builder.build(0, common)
+        kernel.assert_not_called()
+        assert metadata.qli_metadata is None
+        (task,) = builder.take_device_metadata_tasks()
+        assert task.stage == DeviceMetadataStage.INDEXER
+        assert task.group_id == metadata.qli_metadata_group_id == id(builder)
+        task.run()
+        assert metadata.qli_metadata is plan
+        assert kernel.call_args.kwargs == {"num_heads_q": 32, "head_dim": 128, "topk": 2048}
+        torch.testing.assert_close(kernel.call_args.args[0], torch.tensor([0, 2, 4], dtype=torch.int32))
+        # Rank 1 owns positions [2,3], [6,7], ... with interleave=2.
+        torch.testing.assert_close(kernel.call_args.args[1], torch.tensor([2, 2], dtype=torch.int32))
+        draft = builder.build_for_drafting(common, draft_index=0)
+        assert draft.qli_metadata_group_id is None and draft.qli_metadata is None
+        assert builder.take_device_metadata_tasks() == ()
+        kernel.assert_called_once()
 
 
 @patch("vllm_ascend.attention.indexer.get_ascend_config")

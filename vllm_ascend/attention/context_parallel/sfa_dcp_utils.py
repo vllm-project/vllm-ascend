@@ -50,8 +50,14 @@ def get_sfa_dcp_local_block_table(
     max_local_block_table_cols: int,
 ) -> torch.Tensor:
     """Select the rank-local physical block-table view."""
-    local_cols = min(block_table.shape[1], max_local_block_table_cols)
-    return block_table[:num_reqs, :local_cols]
+    if block_table.shape[1] < max_local_block_table_cols:
+        raise ValueError(
+            f"SFA DCP block table needs {max_local_block_table_cols} columns, "
+            f"but only {block_table.shape[1]} were provided."
+        )
+    # The operator uses the logical width as its row stride. A slice of a
+    # wider backing table must not retain that backing table's stride.
+    return block_table[:num_reqs, :max_local_block_table_cols].contiguous()
 
 
 def build_sfa_dcp_replicated_block_table(

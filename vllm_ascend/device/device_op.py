@@ -40,6 +40,9 @@ if TYPE_CHECKING:
 ACL_HOST_REG_MAPPED = 0x2
 ACL_HOST_REG_PINNED = 0x10000000
 INT64_MAX = torch.iinfo(torch.int64).max
+_SFA_MAX_GENERIC_QUERY_GROUP_SIZE = 64
+_SFA_PADDED_QUERY_GROUP_SIZE = 128
+
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
@@ -502,6 +505,7 @@ class BaseDeviceAdaptor:
         block_table: torch.Tensor | None = None,
         sparse_mode: int = 3,
         return_lse: bool = False,
+        packed_query: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if block_table is None:
             block_table = attn_metadata.block_table
@@ -516,6 +520,8 @@ class BaseDeviceAdaptor:
             torch.float8_e4m3fn,
             torch.float8_e5m2,
         )
+        if packed_query is not None and not use_kv_quant_sparse_attention:
+            raise ValueError("Packed DCP queries require the quantized SFA path.")
         if use_kv_quant_sparse_attention:
             result = cls._execute_kv_quant_sparse_flash_attention_vllm(
                 sfa_impl,
@@ -528,11 +534,24 @@ class BaseDeviceAdaptor:
                 actual_seq_lengths_key,
                 sparse_mode=sparse_mode,
                 return_lse=return_lse,
+                packed_query=packed_query,
             )
         else:
             # NoPE sparse MLA has one latent KV cache and no RoPE inputs.
             nope = sfa_impl.qk_rope_head_dim == 0
             key_rope = None if nope else kv_cache[1]
+            num_kv_heads = kv.shape[2]
+            query_group_size = ql_nope.shape[1] // num_kv_heads
+            pad_query_groups = _SFA_MAX_GENERIC_QUERY_GROUP_SIZE < query_group_size < _SFA_PADDED_QUERY_GROUP_SIZE
+            if pad_query_groups:
+                # Non-quantized MLA SFA accepts query groups 1..64 or 128.
+                # DCP can gather Kimi's 96 heads into one group. Heads attend
+                # independently, so zero-pad within each KV group and remove
+                # the extra output/LSE heads before the existing DCP merge.
+                padding = (0, 0, 0, _SFA_PADDED_QUERY_GROUP_SIZE - query_group_size)
+                ql_nope = F.pad(ql_nope.unflatten(1, (num_kv_heads, query_group_size)), padding).flatten(1, 2)
+                if q_pe is not None:
+                    q_pe = F.pad(q_pe.unflatten(1, (num_kv_heads, query_group_size)), padding).flatten(1, 2)
             result = torch.ops._C_ascend.npu_sparse_flash_attention(
                 query=ql_nope,
                 key=kv,
@@ -551,6 +570,17 @@ class BaseDeviceAdaptor:
                 attention_mode=2,
                 return_softmax_lse=return_lse,
             )
+            if pad_query_groups:
+                output, softmax_max, softmax_sum = result
+                output = (
+                    output.unflatten(1, (num_kv_heads, _SFA_PADDED_QUERY_GROUP_SIZE))[:, :, :query_group_size]
+                    .flatten(1, 2)
+                    .contiguous()
+                )
+                if return_lse:
+                    softmax_max = softmax_max[..., :query_group_size].contiguous()
+                    softmax_sum = softmax_sum[..., :query_group_size].contiguous()
+                result = (output, softmax_max, softmax_sum)
         if not isinstance(result, tuple):
             if return_lse:
                 raise RuntimeError("Sparse flash attention did not return softmax max/sum for DCP LSE merge.")

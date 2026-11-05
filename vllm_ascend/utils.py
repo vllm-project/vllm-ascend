@@ -237,6 +237,19 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
     return model_uses_sfa_sparse(vllm_config.model_config) and parallel_config.decode_context_parallel_size > 1
 
 
+def enable_sfa_dcp_sharded_indexer(vllm_config: VllmConfig | None = None) -> bool:
+    """Kimi's uncompressed indexer uses the same token owners as MLA."""
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+    text = vllm_config.model_config.hf_text_config
+    return enable_sfa_dcp_replicated_indexer(vllm_config) and getattr(text, "model_type", None) in (
+        "kimi_linear",
+        "kimi_k31",
+    )
+
+
 def clear_enable_sp():
     enable_pcp_o_proj_weight_sharding.cache_clear()
     enable_pcp_embedding_lmhead_weight_sharding.cache_clear()
