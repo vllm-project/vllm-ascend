@@ -5144,6 +5144,40 @@ class NPUModelRunner(GPUModelRunner):
 
         return kv_caches
 
+    def _resolve_layer_kv_cache_spec(
+        self,
+        group_spec: KVCacheSpec,
+        layer_name: str,
+        static_forward_context=None,
+        attn_layer=None,
+    ) -> KVCacheSpec:
+        """Resolve the per-layer spec inside a UniformType KV cache group.
+
+        KV-sharing layers (e.g. Gemma4 MTP draft layers) are appended to the
+        target layer's group by ``add_kv_sharing_layers_to_kv_cache_groups``
+        without a spec entry of their own. Reuse the sharing target's spec so
+        backend selection and cache allocation see the geometry of the cache
+        the layer actually reads.
+        """
+        if not isinstance(group_spec, UniformTypeKVCacheSpecs):
+            return group_spec
+        specs = group_spec.kv_cache_specs
+        if layer_name in specs:
+            return specs[layer_name]
+        target_layer_name = getattr(self, "shared_kv_cache_layers", {}).get(layer_name)
+        if target_layer_name is None and attn_layer is None and static_forward_context is not None:
+            attn_layer = static_forward_context.get(layer_name)
+        if target_layer_name is None and attn_layer is not None:
+            target_layer_name = getattr(attn_layer, "kv_sharing_target_layer_name", None)
+        if target_layer_name is not None and target_layer_name in specs:
+            return specs[target_layer_name]
+        # Returning the container would defer the failure to the first leaf
+        # attribute access (e.g. page_size_bytes) with an opaque AttributeError.
+        raise KeyError(
+            f"KV cache spec for layer {layer_name!r} (or its sharing target "
+            f"{target_layer_name!r}) not found in UniformTypeKVCacheSpecs."
+        )
+
     def _get_layer_kv_cache_specs(self, kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
         compilation_config = getattr(self, "compilation_config", None)
         if compilation_config is None:
@@ -5154,10 +5188,9 @@ class NPUModelRunner(GPUModelRunner):
         for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
             group_spec = group_kv_cache_spec.kv_cache_spec
             for layer_name in group_kv_cache_spec.layer_names:
-                if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                    layer_kv_cache_spec[layer_name] = group_spec.kv_cache_specs[layer_name]
-                else:
-                    layer_kv_cache_spec[layer_name] = group_spec
+                layer_kv_cache_spec[layer_name] = self._resolve_layer_kv_cache_spec(
+                    group_spec, layer_name, static_forward_context
+                )
                 if static_forward_context is not None:
                     attn_layer = static_forward_context.get(layer_name)
                     if isinstance(attn_layer, AttentionLayerBase):
@@ -6557,9 +6590,9 @@ class NPUModelRunner(GPUModelRunner):
             # layer.
             for layer_name in kv_cache_group_spec.layer_names:
                 layer = layers[layer_name]
-                layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-                if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                layer_kv_cache_spec = self._resolve_layer_kv_cache_spec(
+                    kv_cache_group_spec.kv_cache_spec, layer_name, attn_layer=layer
+                )
                 # Prefer the backend declared by the layer itself. Some
                 # indexer-cache layers require their own metadata builder.
                 attn_backend = layer.get_attn_backend()
