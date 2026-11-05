@@ -1,4 +1,0 @@
-pr: 21063
-entries:
-  - category: bugfix
-    text: Fixed a Mamba checkpoint boundary mismatch that could suppress fine-grained prefix-cache hits with speculative decoding in standalone and prefill-only deployments.
