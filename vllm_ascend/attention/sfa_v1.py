@@ -28,6 +28,8 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.context_parallel.registry import resolve_cp_classes
+from vllm_ascend.attention.context_parallel.topology import resolve_cp_topology
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -374,9 +376,8 @@ class AscendSFABackend(AttentionBackend):
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadMetadataBuilder
 
             return AscendSFAKVOffloadMetadataBuilder
-        from vllm_ascend.attention.context_parallel.sfa_cp import resolve_sfa_metadata_builder
-
-        return resolve_sfa_metadata_builder(get_current_vllm_config())
+        vllm_config = get_current_vllm_config()
+        return resolve_cp_classes("sfa", vllm_config, resolve_cp_topology(vllm_config))[0]
 
     @staticmethod
     def get_kv_cache_shape(
@@ -394,9 +395,8 @@ class AscendSFABackend(AttentionBackend):
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
 
             return AscendSFAKVOffloadImpl
-        from vllm_ascend.attention.context_parallel.sfa_cp import resolve_sfa_impl
-
-        return resolve_sfa_impl(get_current_vllm_config())
+        vllm_config = get_current_vllm_config()
+        return resolve_cp_classes("sfa", vllm_config, resolve_cp_topology(vllm_config))[1]
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:

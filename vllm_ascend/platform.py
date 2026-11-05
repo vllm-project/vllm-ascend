@@ -347,13 +347,7 @@ class NPUPlatform(Platform):
             return compatibility_backend_map.get(key, compatibility_backend_map[(False, False)])
 
         if attn_selector_config.use_pcp:
-            pcp_backend_map = {
-                (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
-                (False, False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
-                (True, True, False): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
-                (True, False, True): "vllm_ascend.attention.dsa_v1.AscendDSABackend",
-            }
-            pcp_backend = pcp_backend_map.get(backend_key)
+            pcp_backend = backend_map.get(backend_key)
             if pcp_backend is None:
                 raise NotImplementedError(f"Ascend MRV2 PCP does not support attention backend {backend_key}.")
             return pcp_backend

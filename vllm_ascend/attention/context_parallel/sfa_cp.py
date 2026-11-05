@@ -29,6 +29,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_dcp_max_local_block_table_cols,
     get_sfa_pcp_global_metadata,
 )
+from vllm_ascend.attention.context_parallel.topology import resolve_cp_topology
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
@@ -1418,38 +1419,40 @@ def resolve_sfa_metadata_builder(
     vllm_config: VllmConfig | None = None,
 ) -> type[AscendSFAMetadataBuilder]:
     """Resolve one SFA metadata builder from the independent CP switches."""
-    dcp_enabled = enable_sfa_dcp_replicated_indexer()
-    use_pcp = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
-    if use_pcp and dcp_enabled:
-        return AscendSFAPCPDCPMetadataBuilder
-    if dcp_enabled:
-        return AscendSFADCPMetadataBuilder
-    return AscendSFAMetadataBuilder
+    return _resolve_sfa_cp_classes(vllm_config, _resolve_sfa_topology(vllm_config))[0]
 
 
 def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImpl]:
     """Resolve one SFA implementation from the independent CP switches."""
-    dcp_enabled = enable_sfa_dcp_replicated_indexer()
-    use_pcp = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
-    if use_pcp and dcp_enabled:
-        return AscendSFAPCPDCPImpl
-    if dcp_enabled:
-        return AscendSFADCPImpl
-    if use_pcp:
-        return AscendSFAPCPImpl
-    return AscendSFAImpl
+    return _resolve_sfa_cp_classes(vllm_config, _resolve_sfa_topology(vllm_config))[1]
+
+
+def _resolve_sfa_topology(vllm_config: VllmConfig | None):
+    """Build the CP topology for the SFA wrappers, tolerating legacy configs.
+
+    Legacy callers only declare the PCP size on their config; they keep the
+    pre-registry PCP-only predicate instead of failing on the missing DCP field.
+    """
+    if vllm_config is None:
+        return None
+    if not hasattr(vllm_config.parallel_config, "decode_context_parallel_size"):
+        return None
+    return resolve_cp_topology(vllm_config)
 
 
 def _resolve_sfa_cp_classes(vllm_config, topology) -> tuple[type, type]:
-    """Resolve SFA CP classes from the independent CP switches.
+    """Resolve the SFA CP class pair from the independent CP switches.
 
-    Registry-level mirror of ``resolve_sfa_metadata_builder``/``resolve_sfa_impl``:
-    the builder has three layouts (PCP+DCP / DCP / base) and the impl four
-    (PCP+DCP / DCP / PCP-only / base). Those functions are untouched so existing
-    callers keep their behavior until the selection reroute lands.
+    Shared by the registry provider and the ``resolve_sfa_*`` wrappers: the
+    builder has three layouts (PCP+DCP / DCP / base) and the impl four
+    (PCP+DCP / DCP / PCP-only / base).
     """
     dcp_enabled = enable_sfa_dcp_replicated_indexer()
-    use_pcp = topology.is_pcp_enabled
+    use_pcp = (
+        topology.is_pcp_enabled
+        if topology is not None
+        else bool(vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1)
+    )
     if use_pcp and dcp_enabled:
         builder_cls = AscendSFAPCPDCPMetadataBuilder
     elif dcp_enabled:

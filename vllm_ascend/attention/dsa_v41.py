@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -29,6 +29,8 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.context_parallel.registry import resolve_cp_classes
+from vllm_ascend.attention.context_parallel.topology import resolve_cp_topology
 from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
@@ -1611,15 +1613,13 @@ class DeepseekV41CacheBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls():
-        from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes
-
-        return get_v41_cp_classes()[1]
+        vllm_config = get_current_vllm_config()
+        return resolve_cp_classes("dsa_v41", vllm_config, resolve_cp_topology(vllm_config))[1]
 
     @staticmethod
     def get_builder_cls():
-        from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes
-
-        return get_v41_cp_classes()[0]
+        vllm_config = get_current_vllm_config()
+        return resolve_cp_classes("dsa_v41", vllm_config, resolve_cp_topology(vllm_config))[0]
 
     @classmethod
     def supports_pcp(cls) -> bool:

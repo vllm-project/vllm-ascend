@@ -11,9 +11,11 @@ import ast
 from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
+from vllm_ascend.attention import attention_v1, dsa_v1, dsa_v41, mla_v1, sfa_v1
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
@@ -26,11 +28,13 @@ from vllm_ascend.attention.context_parallel import (
     registry,
     sfa_cp,
 )
-from vllm_ascend.attention.context_parallel.topology import CPTopology
+from vllm_ascend.attention.context_parallel.topology import CPTopology, resolve_cp_topology
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl, AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl, AscendMLAMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadataBuilder
+from vllm_ascend.device.hardware_profile import AttentionBackendFamily
+from vllm_ascend.platform import NPUPlatform
 
 
 class _SimBaseBuilder:
@@ -256,3 +260,187 @@ def test_registry_module_is_a_leaf() -> None:
     assert set(runtime_imports) <= allowed_stdlib
     assert not any("context_parallel" in module for module in runtime_imports)
     assert not any(module.startswith(("vllm.", "vllm_ascend")) for module in runtime_imports)
+
+
+def test_builtin_provider_lazy_import_registers_on_resolve(tmp_path, monkeypatch) -> None:
+    # A module that is only reachable through the lazy-loading table must be
+    # imported on first resolve and register its provider as a side effect.
+    module_name = "test_cp_registry_lazy_probe_module"
+    (tmp_path / f"{module_name}.py").write_text(
+        "from vllm_ascend.attention.context_parallel.registry import CPBackendProvider, register_cp_backend\n"
+        "\n"
+        "\n"
+        "class _LazyProbeBaseBuilder:\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "class _LazyProbeBaseImpl:\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "register_cp_backend(\n"
+        "    CPBackendProvider(\n"
+        '        name="lazy_probe",\n'
+        "        base_builder_cls=_LazyProbeBaseBuilder,\n"
+        "        base_impl_cls=_LazyProbeBaseImpl,\n"
+        "    )\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setitem(registry._CP_BACKEND_MODULES, "lazy_probe", module_name)
+    assert registry.get_cp_backend("lazy_probe") is None
+    try:
+        builder_cls, impl_cls = registry.resolve_cp_classes(
+            "lazy_probe", None, CPTopology(tp_size=1, pcp_size=1, dcp_size=1)
+        )
+    finally:
+        registry._CP_BACKEND_REGISTRY.pop("lazy_probe", None)
+    assert builder_cls.__name__ == "_LazyProbeBaseBuilder"
+    assert impl_cls.__name__ == "_LazyProbeBaseImpl"
+
+
+def test_platform_pcp_backend_selection_preserves_class_paths() -> None:
+    cases = (
+        ((True, False, False), "vllm_ascend.attention.mla_v1.AscendMLABackend"),
+        ((False, False, False), "vllm_ascend.attention.attention_v1.AscendAttentionBackend"),
+        ((True, True, False), "vllm_ascend.attention.sfa_v1.AscendSFABackend"),
+        ((True, False, True), "vllm_ascend.attention.dsa_v1.AscendDSABackend"),
+    )
+    with (
+        patch("vllm_ascend.platform._validate_fa3_backend", return_value=False),
+        patch("vllm_ascend.platform._validate_flash_attn_backend", return_value=False),
+        patch(
+            "vllm_ascend.platform.get_current_hardware_profile",
+            return_value=SimpleNamespace(attention_backend_family=AttentionBackendFamily.STANDARD),
+        ),
+    ):
+        for (use_mla, use_sparse, use_compress), expected_path in cases:
+            selector = SimpleNamespace(
+                use_mla=use_mla,
+                use_sparse=use_sparse,
+                use_compress=use_compress,
+                use_pcp=True,
+            )
+            assert NPUPlatform._select_attn_backend_cls(selector) == expected_path
+        unsupported = SimpleNamespace(use_mla=False, use_sparse=True, use_compress=False, use_pcp=True)
+        with pytest.raises(NotImplementedError, match="PCP does not support attention backend"):
+            NPUPlatform._select_attn_backend_cls(unsupported)
+
+
+@pytest.mark.parametrize(
+    ("dcp_enabled", "topology"),
+    [
+        (False, CPTopology(tp_size=2, pcp_size=1, dcp_size=1)),
+        (False, CPTopology(tp_size=2, pcp_size=2, dcp_size=1)),
+        (True, CPTopology(tp_size=2, pcp_size=1, dcp_size=2)),
+        (True, CPTopology(tp_size=2, pcp_size=2, dcp_size=2)),
+    ],
+    ids=["disabled", "pcp-only", "dcp-only", "pcp-dcp"],
+)
+def test_sfa_resolve_wrappers_match_provider(monkeypatch, dcp_enabled, topology) -> None:
+    monkeypatch.setattr(sfa_cp, "enable_sfa_dcp_replicated_indexer", lambda: dcp_enabled)
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=topology.pcp_size,
+            decode_context_parallel_size=topology.dcp_size,
+        ),
+    )
+    expected_builder, expected_impl = registry.resolve_cp_classes("sfa", vllm_config, topology)
+    assert sfa_cp.resolve_sfa_metadata_builder(vllm_config) is expected_builder
+    assert sfa_cp.resolve_sfa_impl(vllm_config) is expected_impl
+
+    # The no-arg call keeps the pre-registry PCP-only predicate.
+    if dcp_enabled:
+        assert (sfa_cp.resolve_sfa_metadata_builder(), sfa_cp.resolve_sfa_impl()) == (
+            sfa_cp.AscendSFADCPMetadataBuilder,
+            sfa_cp.AscendSFADCPImpl,
+        )
+    else:
+        assert (sfa_cp.resolve_sfa_metadata_builder(), sfa_cp.resolve_sfa_impl()) == (
+            AscendSFAMetadataBuilder,
+            AscendSFAImpl,
+        )
+
+    # A legacy partial config that only declares the PCP size still resolves.
+    partial_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=topology.pcp_size))
+    assert sfa_cp.resolve_sfa_metadata_builder(partial_config) is expected_builder
+    assert sfa_cp.resolve_sfa_impl(partial_config) is expected_impl
+
+
+_V1_BACKEND_CASES = [
+    (
+        attention_v1.AscendAttentionBackend,
+        attention_v1,
+        "gqa",
+        (1, 1),
+        (1, 2),
+        (AscendAttentionMetadataBuilder, AscendAttentionBackendImpl),
+        (attention_cp.AscendAttentionDCPMetadataBuilder, attention_cp.AscendAttentionDCPImpl),
+    ),
+    (
+        mla_v1.AscendMLABackend,
+        mla_v1,
+        "mla",
+        (1, 1),
+        (1, 2),
+        (AscendMLAMetadataBuilder, AscendMLAImpl),
+        (mla_cp.AscendMlaDCPMetadataBuilder, mla_cp.AscendMlaDCPImpl),
+    ),
+    (
+        sfa_v1.AscendSFABackend,
+        sfa_v1,
+        "sfa",
+        (1, 1),
+        (2, 1),
+        (AscendSFAMetadataBuilder, AscendSFAImpl),
+        (AscendSFAMetadataBuilder, sfa_cp.AscendSFAPCPImpl),
+    ),
+    (
+        dsa_v1.AscendDSABackend,
+        dsa_v1,
+        "dsa",
+        (1, 1),
+        (2, 1),
+        (AscendDSAMetadataBuilder, AscendDSAImpl),
+        (dsa_cp.AscendDSAPCPMetadataBuilder, dsa_cp.AscendDSAPCPImpl),
+    ),
+    (
+        dsa_v41.DeepseekV41CacheBackend,
+        dsa_v41,
+        "dsa_v41",
+        (1, 1),
+        (2, 1),
+        (AscendDSAV41MetadataBuilder, AscendDSAV41Impl),
+        (dsa_v41_cp.AscendDSAV41PCPMetadataBuilder, dsa_v41_cp.AscendDSAV41PCPImpl),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("backend", "backend_module", "name", "off_sizes", "on_sizes", "base_pair", "cp_pair"),
+    _V1_BACKEND_CASES,
+    ids=["gqa", "mla", "sfa", "dsa", "dsa_v41"],
+)
+def test_v1_backends_delegate_to_registry(
+    monkeypatch, backend, backend_module, name, off_sizes, on_sizes, base_pair, cp_pair
+) -> None:
+    # SFA also consults the KV-offload switch and the DCP indexer switch.
+    monkeypatch.setattr(
+        sfa_v1,
+        "get_ascend_config",
+        lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
+    )
+    monkeypatch.setattr(sfa_cp, "enable_sfa_dcp_replicated_indexer", lambda: False)
+    for sizes, expected_pair in ((off_sizes, base_pair), (on_sizes, cp_pair)):
+        vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=sizes[0],
+                decode_context_parallel_size=sizes[1],
+            ),
+        )
+        monkeypatch.setattr(backend_module, "get_current_vllm_config", lambda config=vllm_config: config)
+        expected = registry.resolve_cp_classes(name, vllm_config, resolve_cp_topology(vllm_config))
+        assert expected == expected_pair
+        assert backend.get_builder_cls() is expected[0]
+        assert backend.get_impl_cls() is expected[1]
