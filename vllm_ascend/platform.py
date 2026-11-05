@@ -79,12 +79,19 @@ else:
     FlexibleArgumentParser = None
     AscendConfig = None
 
-# Keep Breakable CUDAGraph opt-in on Ascend. Upstream may auto-enable it
-# for selected architectures when the environment variable is absent.
-value = os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+# Keep breakable ACL graph opt-in on Ascend, but never shadow upstream's
+# per-architecture requirement. Upstream only auto-enables
+# VLLM_USE_BREAKABLE_CUDAGRAPH when the variable is absent, and only for
+# architectures that cannot be torch.compile'd
+# (vllm/config/vllm.py: DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES, e.g.
+# DeepseekV41ForCausalLM). Forcing "0" here suppressed that auto-enable, so
+# those models captured a regular ACL graph, which replays corrupted logits
+# and NaN logprobs on Ascend. Leaving the variable unset keeps the upstream
+# policy -- opt-in for every other architecture -- while an explicit
+# VLLM_USE_BREAKABLE_CUDAGRAPH=0 still forces it off.
 logger.info_once(
-    "Breakable CUDAGraph on Ascend is opt-in; using VLLM_USE_BREAKABLE_CUDAGRAPH=%s.",
-    value,
+    "Breakable CUDAGraph on Ascend follows upstream policy (VLLM_USE_BREAKABLE_CUDAGRAPH=%s).",
+    os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH", "unset"),
     scope="process",
 )
 
@@ -1395,6 +1402,44 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
         compilation_config.cudagraph_mode = cudagraph_mode
 
 
+def _maybe_disable_cudagraph_for_moe_lora(vllm_config: VllmConfig) -> None:
+    """Drop ACL graph when LoRA runs on the expert-parallel MoE AlltoAll path.
+
+    LoRA + expert parallel is pinned to ``MoECommType.ALLTOALL`` (see
+    ``ascend_forward_context.select_moe_comm_method``) because FusedMC2 is a
+    single closed C++ op that LoRA cannot patch. That dispatcher derives the
+    ``all_to_all_single`` split sizes from ``topk_ids`` through a
+    device-to-host copy (``TokenDispatcherWithAll2AllV._preprocess``); graph
+    capture rejects the copy (``AclrtSynchronizeStreamWithTimeout`` on the
+    copy stream, ``Not_Supported(EE1016)``) and the exchanged shape is data
+    dependent, so the layer cannot be captured. Fall back to eager instead of
+    aborting engine startup.
+    """
+    from vllm.config.compilation import CUDAGraphMode
+
+    compilation_config = vllm_config.compilation_config
+    if getattr(vllm_config, "lora_config", None) is None:
+        return
+    if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+        return
+    parallel_config = vllm_config.parallel_config
+    if not parallel_config.enable_expert_parallel:
+        return
+    if parallel_config.tensor_parallel_size * parallel_config.data_parallel_size <= 1:
+        return
+    if vllm_config.model_config is None or not is_moe_model(vllm_config):
+        return
+    previous_mode = compilation_config.cudagraph_mode
+    compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    logger.warning(
+        "Disabling ACL graph (%s -> NONE): LoRA with expert parallel uses the "
+        "MoE AlltoAll dispatcher, whose split sizes are computed on the host "
+        "and cannot be captured. Run with --enforce-eager to silence this "
+        "warning, or disable expert parallel to keep ACL graph for LoRA.",
+        previous_mode,
+    )
+
+
 def _setup_compile_backend(
     vllm_config: VllmConfig,
     compile_backend: str,
@@ -1412,6 +1457,7 @@ def _setup_compile_backend(
     from vllm.config.compilation import CUDAGraphMode
 
     compilation_config = vllm_config.compilation_config
+    _maybe_disable_cudagraph_for_moe_lora(vllm_config)
     additional_config = vllm_config.additional_config
     if additional_config is None:
         vllm_config.additional_config = {}
