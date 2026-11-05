@@ -8,12 +8,10 @@ import vllm.config.speculative as speculative_config
 from transformers import DeepseekV2Config, PretrainedConfig
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
 from vllm_ascend.utils import is_deepseek_v41, is_gqa_pcp_dcp_config, vllm_version_is
-
-logger = init_logger(__name__)
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
