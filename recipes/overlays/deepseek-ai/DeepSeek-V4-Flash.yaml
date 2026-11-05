@@ -173,6 +173,8 @@ strategy_overrides:
         extra_args:
           - '--kv-cache-dtype'
           - auto
+          - '--compilation-config'
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 features:
   spec_decoding:
     modes:
