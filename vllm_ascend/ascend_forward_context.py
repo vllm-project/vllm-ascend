@@ -97,6 +97,20 @@ def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     )
 
 
+def uses_kimi_prefill_megamoe(vllm_config: VllmConfig) -> bool:
+    """Whether Kimi's A5 MegaMoE phase agreement is needed for this model."""
+    architectures = getattr(vllm_config.model_config, "architectures", None) or []
+    return (
+        get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        and get_ascend_config().enable_fused_mc2 == 1
+        and is_mega_moe_supported()
+        and any(
+            name in ("KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
+            for name in architectures
+        )
+    )
+
+
 @contextmanager
 def set_ascend_forward_context(
     attn_metadata: Any,
@@ -115,6 +129,7 @@ def set_ascend_forward_context(
     device_metadata_executor=None,
     has_sinks=False,
     eplb_heat_collection_status: bool = False,
+    batch_contains_decode: bool = True,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -154,6 +169,8 @@ def set_ascend_forward_context(
             vllm_config,
             is_draft_model=is_draft_model,
             draft_moe_quant_type=draft_moe_quant_type,
+            batch_contains_decode=batch_contains_decode or (is_draft_model and not in_profile_run),
+            aclgraph_runtime_mode=aclgraph_runtime_mode,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -339,8 +356,10 @@ def _select_capacity_and_world_size_moe_comm_method(
     mc2_tokens_capacity: int,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    *,
+    allow_fused: bool = True,
 ) -> MoECommType:
-    if get_ascend_config().enable_fused_mc2 == 1:
+    if allow_fused and get_ascend_config().enable_fused_mc2 == 1:
         if is_mega_moe_supported():
             if is_draft_model and draft_moe_quant_type not in A5_SUPPORT_MEGA_MOE_QUANT_TYPES:
                 # The A5 mega moe (FUSED_MC2) operator only supports a subset of
@@ -375,6 +394,9 @@ def select_moe_comm_method(
     vllm_config: VllmConfig,
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
+    *,
+    batch_contains_decode: bool | None = None,
+    aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
 ) -> MoECommType | None:
     """Select the MoE communication method from the active hardware policy,
     parallel settings, and token count.
@@ -385,6 +407,11 @@ def select_moe_comm_method(
         is_draft_model (bool): Whether the model runs in MTP mode.
         draft_moe_quant_type (QuantType): The draft model's MoE quantization
             type, used on A5 to decide whether the draft can use mega moe.
+        batch_contains_decode (bool | None): DP-agreed real Decode flag.
+            None is reserved for construction/capacity estimation; runtime
+            contexts default to True until the v1 runner supplies the phase.
+        aclgraph_runtime_mode (CUDAGraphMode): Agreed execution mode. Kimi
+            MegaMoE is restricted to prefill outside graph capture/replay.
     Returns:
         MoECommType | None: The selected MoE communication method.
     """
@@ -402,6 +429,23 @@ def select_moe_comm_method(
         # is a single fused C++ op. This covers both normal model
         # forward and _dummy_run during profile_run.
         moe_comm_type = MoECommType.ALLTOALL
+    elif uses_kimi_prefill_megamoe(vllm_config) and (
+        batch_contains_decode
+        or aclgraph_runtime_mode != CUDAGraphMode.NONE
+        or is_draft_model
+        or getattr(vllm_config, "use_v2_model_runner", False)
+        or getattr(getattr(vllm_config, "kv_transfer_config", None), "is_kv_consumer", False)
+    ):
+        # Metadata=None is only for model construction/profile capacity
+        # estimation. Runtime callers pass an explicit synchronized phase.
+        moe_comm_type = _select_capacity_and_world_size_moe_comm_method(
+            num_tokens,
+            vllm_config,
+            mc2_tokens_capacity,
+            is_draft_model,
+            draft_moe_quant_type,
+            allow_fused=False,
+        )
     elif moe_comm_policy is MoECommPolicy.ALLGATHER:
         moe_comm_type = MoECommType.ALLGATHER
     else:

@@ -96,6 +96,43 @@ class SubmittedSharedExpertGateUp:
     path: SharedExpertMLPPath
 
 
+def _run_shared_sparse_situ(
+    gate_up: torch.Tensor,
+    expert_tokens: torch.Tensor,
+    beta: float,
+    linear_beta: float,
+) -> torch.Tensor:
+    return torch.ops.custom.npu_situ_and_mul_sparse(
+        gate_up,
+        expert_tokens,
+        beta=beta,
+        alpha=linear_beta,
+        high_precision=False,
+    )
+
+
+class AscendSharedSparseSituAndMul(SituAndMul):
+    """Use the recipes sparse SiTU activation for NPU BF16 shared experts."""
+
+    def __init__(self, beta: float, linear_beta: float | None):
+        super().__init__(beta=beta, linear_beta=linear_beta, compile_native=False)
+        self.register_buffer(
+            "_all_rows_expert_tokens",
+            torch.tensor([torch.iinfo(torch.int64).max], dtype=torch.int64),
+            persistent=False,
+        )
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        if (
+            x.device.type != "npu"
+            or x.dtype != torch.bfloat16
+            or self.linear_beta is None
+            or not hasattr(torch.ops.custom, "npu_situ_and_mul_sparse")
+        ):
+            return super().forward_native(x)
+        return _run_shared_sparse_situ(x, self._all_rows_expert_tokens, self.beta, self.linear_beta)
+
+
 class AscendSharedExperts:
     """Ascend-owned shared expert executor.
 

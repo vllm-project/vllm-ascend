@@ -696,6 +696,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        shared_expert_schedule=None,
     ):
         forward_context = get_forward_context()
         # When static kernels are enabled, the forward pass runs twice
@@ -736,6 +737,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         )
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
+        self._ascend_shared_schedule = shared_expert_schedule
         try:
             fused_experts_results: FusedExpertsResult = self.quant_method.apply(
                 layer=self,
@@ -748,6 +750,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         finally:
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
+            self._ascend_shared_schedule = None
 
         if self._use_v2_model_runner:
             _record_v2_eplb_load(self.router, fused_experts_results)

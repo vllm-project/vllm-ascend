@@ -53,6 +53,19 @@ def is_mega_moe_supported() -> bool:
     return _MEGA_MOE_SUPPORTED
 
 
+def _supports_kimi_megamoe_overlap(vllm_config: VllmConfig) -> bool:
+    """Kimi's SP shared executor joins collectives after routed finalize."""
+    architectures = getattr(vllm_config.model_config, "architectures", None) or []
+    return (
+        is_mega_moe_supported()
+        and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        and any(
+            name in ("KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
+            for name in architectures
+        )
+    )
+
+
 def validate_additional_config_bool(value: Any, path: str) -> bool:
     """Apply the same pydantic bool rules to values read before config init."""
     try:
@@ -847,7 +860,11 @@ class AscendConfig:
             "MiniMax M3 does not support enable_fused_mc2=1 (dispatch_ffn_combine). "
             "Set additional_config.enable_fused_mc2 to 2 to enable MegaMoe, or 0 to disable fused MC2."
         )
-        if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
+        if (
+            self.enable_fused_mc2 == 1
+            and self.multistream_overlap_shared_expert
+            and not _supports_kimi_megamoe_overlap(vc)
+        ):
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
                 "enable_fused_mc2 and multistream_overlap_shared_expert "

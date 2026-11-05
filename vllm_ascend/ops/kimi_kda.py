@@ -23,10 +23,12 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.models.kimi_k3.nvidia.kda import (
     KimiK3DeltaAttention,
 )
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -47,6 +49,43 @@ from vllm_ascend.utils import npu_stream_switch
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
 _KDA_BFG_STREAM: torch.npu.Stream | None = None
+
+
+def _ascend_kda_forward(
+    mixed_qkv: torch.Tensor,
+    g1: torch.Tensor,
+    g2: torch.Tensor,
+    beta: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    beta_is_preprocessed: bool,
+) -> None:
+    # The upstream KDA constructor registers this layer in static_forward_context;
+    # each execution context exposes that model's layers through no_compile_layers.
+    layer = get_forward_context().no_compile_layers[layer_name]
+    layer._kda_forward_impl(mixed_qkv, g1, g2, beta, core_attn_out, beta_is_preprocessed=beta_is_preprocessed)
+
+
+def _ascend_kda_forward_fake(
+    mixed_qkv: torch.Tensor,
+    g1: torch.Tensor,
+    g2: torch.Tensor,
+    beta: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    beta_is_preprocessed: bool,
+) -> None:
+    # The caller owns the output buffer; tracing must not read runtime metadata.
+    return None
+
+
+# Keep profile-run metadata=None outside Dynamo's no-guards graph.
+direct_register_custom_op(
+    op_name="ascend_kda_forward",
+    op_func=_ascend_kda_forward,
+    mutates_args=["core_attn_out"],
+    fake_impl=_ascend_kda_forward_fake,
+)
 
 
 def _kda_bfg_stream() -> torch.npu.Stream:
@@ -284,6 +323,12 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fork BFG work to an auxiliary stream and join it back to main."""
+        if torch.compiler.is_compiling() and not get_ascend_config().ascend_compilation_config.enable_npugraph_ex:
+            fused_bfg = self._project_bfg(hidden_states)
+            quantized_qkv = self._quantize_fused_qkv(hidden_states)
+            mixed_qkv = self._matmul_fused_qkv(quantized_qkv)
+            beta, g1, g2 = self._postprocess_bfg(fused_bfg)
+            return mixed_qkv, beta, g1, g2
         main_stream = torch.npu.current_stream()
         bfg_stream = _kda_bfg_stream()
 
@@ -519,8 +564,28 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         state_copy.scatter(recurrent_state, final_state, state_indices)
         return output
 
-    @eager_break_during_capture
     def _forward(
+        self,
+        mixed_qkv: torch.Tensor,
+        g1: torch.Tensor,
+        g2: torch.Tensor,
+        beta: torch.Tensor,
+        core_attn_out: torch.Tensor,
+        *,
+        beta_is_preprocessed: bool = False,
+    ) -> None:
+        torch.ops.vllm.ascend_kda_forward(
+            mixed_qkv,
+            g1,
+            g2,
+            beta,
+            core_attn_out,
+            self.prefix,
+            beta_is_preprocessed,
+        )
+
+    @eager_break_during_capture
+    def _kda_forward_impl(
         self,
         mixed_qkv: torch.Tensor,
         g1: torch.Tensor,

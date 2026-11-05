@@ -58,8 +58,9 @@ EXPERT_TOKEN_NUMS_TYPE_COUNT = 1
 
 def _get_expert_token_nums_type(token_dispatch_input: MoETokenDispatchInput) -> int:
     # grouped_matmul_swiglu_quant_v2 consumes per-expert counts; existing
-    # MC2 grouped-matmul paths consume prefix sums.
-    if token_dispatch_input.quant.use_w4a8_per_channel_gmm_swiglu:
+    # MC2 grouped-matmul paths consume prefix sums unless the SiTU operator
+    # needs counts. Requesting counts at dispatch avoids diff + concat in MoE.
+    if token_dispatch_input.quant.use_w4a8_per_channel_gmm_swiglu or token_dispatch_input.prefer_expert_token_counts:
         return EXPERT_TOKEN_NUMS_TYPE_COUNT
     return EXPERT_TOKEN_NUMS_TYPE_CUMSUM
 

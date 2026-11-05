@@ -111,6 +111,7 @@ def _initialize_static_kernel_runtime(vllm_config: VllmConfig) -> None:
 
     # TODO: Temporary workaround. Remove this static kernel blacklist once these ops are supported.
     incompatible_ops = [
+        "FusedInferAttentionScore",  # Kimi K3: static tiling is not supported.
         "TopKV2",  # minimax-m3 910C
         "GenericBlockSparseAttn",  # minimax-m3 910C
         "QuantBatchMatmulV3",  # glm5.2 910C

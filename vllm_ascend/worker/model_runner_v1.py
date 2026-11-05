@@ -257,6 +257,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
     set_mc2_mask,
     set_mc2_tokens_capacity,
     use_cann_megamoe,
+    uses_kimi_prefill_megamoe,
 )
 
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
@@ -422,6 +423,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self._synced_batch_contains_decode = True
         self.use_score_encoder_cache = is_score_encoder_cache_manager(self.vllm_config)
 
         self.kvpp = KVPPRuntime()
@@ -825,6 +827,8 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens: int,
         is_draft_model: bool = False,
         cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        is_dummy_run: bool = False,
+        batch_contains_decode: bool = True,
     ) -> tuple[int, torch.Tensor | None, CUDAGraphMode]:
         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
         # our case, we still need to sync the other two flags as well. So we need to
@@ -832,25 +836,48 @@ class NPUModelRunner(GPUModelRunner):
         # even if we are running in eager mode, which harms performance.
         # FIXME: Restore the `or self.vllm_config.model_config.enforce_eager` here
         # immediately once the other two flags are no longer needed.
+        self._synced_batch_contains_decode = batch_contains_decode
+        phase_sync = uses_kimi_prefill_megamoe(self.vllm_config) and not is_draft_model
         if self.dp_size == 1:
             return num_tokens, None, cudagraph_mode
 
-        if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
+        if not phase_sync and should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
             return num_tokens, num_tokens_after_padding, cudagraph_mode
 
-        packed_tensor = torch.zeros(2, self.dp_size, device="cpu", dtype=torch.int32)
+        packed_tensor = torch.zeros(
+            DP_PHASE_METADATA_FIELDS if phase_sync else DP_BASE_METADATA_FIELDS,
+            self.dp_size,
+            device="cpu",
+            dtype=torch.int32,
+        )
         packed_tensor[0][self.dp_rank] = num_tokens
         packed_tensor[1][self.dp_rank] = cudagraph_mode.value
+        if phase_sync:
+            packed_tensor[DP_HAS_REAL_WORK][self.dp_rank] = not is_dummy_run
+            packed_tensor[DP_HAS_DECODE][self.dp_rank] = batch_contains_decode
         dist.all_reduce(packed_tensor, group=get_dp_group().cpu_group)
 
         # Unpack the results
         num_tokens_across_dp = packed_tensor[0, :]
         max_tokens_across_dp = int(num_tokens_across_dp.max().item())
         synced_cudagraph_mode = CUDAGraphMode(_post_process_cudagraph_mode(packed_tensor))
+        if phase_sync:
+            active = packed_tensor[DP_HAS_REAL_WORK].bool()
+            if not active.any():
+                active = torch.ones_like(active)
+            self._synced_batch_contains_decode = bool(packed_tensor[DP_HAS_DECODE, active].bool().any())
+            # Keep 0.30's max-token padding. Idle ranks must have enough input
+            # rows for its existing MegaMoE buffer/dispatch contract.
+            num_tokens_across_dp[~active] = max_tokens_across_dp
 
         # Create a tensor for num_tokens_after_padding
-        comm_method = select_moe_comm_method(max_tokens_across_dp, self.vllm_config)
+        comm_method = select_moe_comm_method(
+            max_tokens_across_dp,
+            self.vllm_config,
+            batch_contains_decode=self._synced_batch_contains_decode,
+            aclgraph_runtime_mode=synced_cudagraph_mode,
+        )
         needs_uniform_moe_input = comm_method in {MoECommType.ALLGATHER, MoECommType.MC2}
         needs_uniform_mega_moe_input = comm_method == MoECommType.FUSED_MC2 and use_cann_megamoe(self.vllm_config)
         finegrained_tp = self.ascend_config.finegrained_tp_config
@@ -2557,6 +2584,7 @@ class NPUModelRunner(GPUModelRunner):
                 aclgraph_runtime_mode=cudagraph_mode,
                 batch_descriptor=batch_desc,
                 num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
+                batch_contains_decode=self._synced_batch_contains_decode,
                 model_instance=self.model,
                 device_metadata_executor=active_device_metadata_executor,
                 skip_compiled=has_encoder_input,
@@ -3340,7 +3368,22 @@ class NPUModelRunner(GPUModelRunner):
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
+        is_dummy_run: bool = False,
+        batch_contains_decode: bool | None = None,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
+        phase_sync = uses_kimi_prefill_megamoe(self.vllm_config)
+        if batch_contains_decode is None:
+            if phase_sync and not is_dummy_run:
+                decode_mask = (
+                    self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                    >= self.input_batch.num_prompt_tokens[:num_reqs]
+                )
+                batch_contains_decode = bool(np.any(decode_mask))
+                if bool(np.any(~decode_mask)):
+                    force_eager = True
+            else:
+                batch_contains_decode = True
+        self._synced_batch_contains_decode = batch_contains_decode
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         has_initial_state = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         if self.use_dcp or self.model_config.is_hybrid:
@@ -3403,6 +3446,8 @@ class NPUModelRunner(GPUModelRunner):
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
                 num_tokens=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode,
+                is_dummy_run=is_dummy_run,
+                batch_contains_decode=batch_contains_decode,
             )
 
             # Extract DP padding if there is any
@@ -4009,6 +4054,8 @@ class NPUModelRunner(GPUModelRunner):
             # LoRA state when determining the batch descriptor for capture
             force_has_lora=num_active_loras > 0,
             force_num_active_loras=num_active_loras,
+            is_dummy_run=True,
+            batch_contains_decode=is_graph_capturing or not (with_prefill or is_profile),
         )
         dcp_dummy_metadata = None
         if cudagraph_runtime_mode is None:
@@ -4257,6 +4304,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_across_dp=num_tokens_across_dp,
                 in_profile_run=is_profile,
                 num_actual_tokens=num_tokens_padded,
+                batch_contains_decode=self._synced_batch_contains_decode,
                 aclgraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_desc,
                 model_instance=self.model,
@@ -6659,6 +6707,13 @@ class NPUModelRunner(GPUModelRunner):
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=(self.compilation_config.static_forward_context),
         )
+
+
+# DP metadata row indices; phase fields are enabled only for Kimi A5 MegaMoE.
+DP_BASE_METADATA_FIELDS = 2
+DP_HAS_REAL_WORK = 2
+DP_HAS_DECODE = 3
+DP_PHASE_METADATA_FIELDS = 4
 
 
 def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
