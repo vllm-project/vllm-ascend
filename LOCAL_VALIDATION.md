@@ -21,7 +21,7 @@ failed windows resample at the original rejection using its saved statistics.
 ## Checks run locally
 
 The standalone host test below passes on macOS without torch. It validates
-host planning/control flow or event ownership; it does not validate Triton
+greedy and random window control flow, including original rejection normalizers; it does not validate Triton
 lowering, NPU numerical accuracy or serving performance.
 
 ```bash
