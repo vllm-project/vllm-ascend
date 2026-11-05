@@ -1331,7 +1331,9 @@ class NPUModelRunner310V2(NPUModelRunner):
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             sampler_output = self.sampler(logits, input_batch)
             can_sample_np = input_batch.seq_lens_np[: input_batch.num_reqs] >= input_batch.prefill_len_np
-            self._sampled_tokens_cpu = None
+            # CPU penalty/bad-word history must include samples even when
+            # this batch contains no draft tokens (baseline or MTP prefill).
+            self._sampled_tokens_cpu = sampler_output.sampled_token_ids.detach().to("cpu")
             num_reqs = input_batch.num_reqs
             np.copyto(
                 self._num_sampled_staging.np[:num_reqs],
@@ -1366,12 +1368,12 @@ class NPUModelRunner310V2(NPUModelRunner):
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
+        draft_tokens: torch.Tensor | None = None,
     ) -> None:
         """Run request bookkeeping on CPU; upload only immediate NPU consumers."""
         # Device arguments remain for upstream API compatibility.
-        del num_sampled, num_rejected, query_start_loc
-        if self._sampled_tokens_cpu is not None:
-            assert self.rejection_sampler is not None
+        del num_sampled, num_rejected, query_start_loc, draft_tokens
+        if self._sampled_tokens_cpu is not None and self.rejection_sampler is not None:
             self.rejection_sampler.synchronize_cpu()
         # Host rejection counts are ready after synchronize_cpu; reuse them in
         # propose() instead of another device→host copy.

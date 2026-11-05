@@ -16,7 +16,11 @@ _CPU_GENERATOR_CACHE_310P: dict[int, tuple[torch.Generator, torch.Generator]] = 
 def _prepare_cpu_generators_310p(
     generators: dict[int, torch.Generator],
 ) -> dict[int, torch.Generator]:
-    """Return CPU RNGs while preserving requests across batch reordering."""
+    """Reuse request-owned CPU RNGs; cache mirrors only for non-CPU sources.
+
+    CPU sources must retain their current state across temporary batch absence
+    and baseline/speculative sampling, rather than restarting from initial_seed.
+    """
     cached_by_source = {
         id(source): (source, cpu_generator) for source, cpu_generator in _CPU_GENERATOR_CACHE_310P.values()
     }
@@ -24,6 +28,9 @@ def _prepare_cpu_generators_310p(
     next_cache: dict[int, tuple[torch.Generator, torch.Generator]] = {}
 
     for request_index, source in generators.items():
+        if isinstance(source, torch.Generator) and source.device.type == "cpu":
+            prepared[request_index] = source
+            continue
         cache_entry = cached_by_source.get(id(source))
         if cache_entry is None or cache_entry[0] is not source:
             cpu_generator = torch.Generator(device="cpu")

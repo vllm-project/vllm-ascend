@@ -369,31 +369,9 @@ A few important things to consider when using DFlash2 draft models:
       --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens": 8}'
     ```
 
-2. **Model runner V2 draft graphs**: DFlash2 uses full ACL graphs when the
-   target enables `FULL_DECODE_ONLY` and the draft's `enforce_eager` is unset
-   or false. The draft backbone and candidate selector retain the configured
-   Dynamo compilation path. Candidate scoring uses its own request-shaped
-   forward context and compilation cache namespace, while the outer draft ACL
-   graph captures the compiled operations, candidate TopK, path sampling, and
-   proposal-cache updates. Set `"enforce_eager": true`
-   to compare against eager drafting. Validate graph/eager equivalence and
-   request reuse on the intended NPU configuration before deployment.
-
-   Non-causal draft layers with sliding-window size `W` use FIA band mode
-   (`sparse_mode=4`) with a cached compressed mask and
-   `pre_tokens=next_tokens=W-1`, matching upstream FlashAttention's symmetric
-   window. Both eager execution and graph capture preserve this window;
-   layers without a window retain full attention. This replaces the earlier
-   workaround that ignored non-causal sliding windows, including in eager
-   execution. The compressed mask is a band-mode template, not a causal
-   restriction on draft tokens.
-
-   The model-level acceptance test exercises DFlash2 draft graphs using
-   `VLLM_COMPILE` with `FULL_DECODE_ONLY` on two NPUs:
-
-   ```shell
-   pytest -sv tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py -k test_dflash2_v2_acceptance
-   ```
+2. **Model runner V2 draft graphs**: DFlash2 supports full ACL graphs when the
+   target enables `FULL_DECODE_ONLY` or `FULL_AND_PIECEWISE` and the draft's
+   `enforce_eager` is unset or false.
 
 3. **Graph capture sizes**: each decode step runs `(1 + K)` tokens per
    request, so every capture size must be `n * (num_speculative_tokens + 1)`
@@ -486,16 +464,29 @@ The following code configures vLLM Ascend to use speculative decoding where prop
 
 On 950DT Products with Model Runner V2, GLM (`GlmMoeDsaForCausalLM`) targets paired with
 `Qwen3DSparkModel` GQA drafts can use the device-length CANN FlashAttn backend.
-This requires FP16/BF16 queries and unquantized draft KV cache. MLA drafts keep
-their existing backend. When all draft layers use FlashAttn, the runner can skip
-the speculative CPU length synchronization; PP, PCP, DCP, KV transfer, sparse
-KV offload, and adaptive verification retain their existing synchronization path.
+This requires FP16/BF16 queries and unquantized draft KV cache. When all draft
+layers use FlashAttn, the runner can skip the speculative CPU length
+synchronization; PP, PCP, DCP, KV transfer, sparse KV offload, and adaptive
+verification retain their existing synchronization path.
 
-For draft heads of size 192, the backend zero-pads Q/K/V to 256 for the CANN
+For GQA draft heads of size 192, the backend zero-pads Q/K/V to 256 for the CANN
 kernel, keeps the original attention scale, and trims the output back to 192.
 Model weights and logical head sizes are unchanged. These draft KV cache pages
 use one third more storage than unpadded 192-wide pages, and padding adds work;
 this backend does not guarantee higher speculative acceptance rates.
+
+GLM also supports DSpark with MLA drafts (`Glm5DSparkForCausalLM`), which can
+use the device-length FlashMLA backend on the same hardware and runner.
+This requires FP16/BF16 queries and unquantized KV cache with matching dtype.
+When the draft selects FlashMLA, the runner can skip speculative CPU length
+synchronization under the same conditions as the GQA path; FIA fallback retains
+exact CPU length synchronization.
+
+FlashMLA currently requires local Q heads and `local Q heads * DCP size` in
+`{8, 12, 64, 96}`, with latent/RoPE dimensions of 512/64. The 64-head GLM draft
+therefore uses FIA at TP2/TP4. KV NZ and PCP are unsupported. When the target
+KV cache is FP8, set `"kv_cache_dtype": "bfloat16"` in `--speculative-config`
+for a BF16 draft.
 
 !!! warning
 
@@ -1085,13 +1076,39 @@ and devices:
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-RecoverSSM requires speculative decoding and does not support pipeline
-parallelism (PP), prefill context parallelism (PCP), or decode context
-parallelism (DCP). Stochastic rounding must be disabled.
+RecoverSSM requires speculative decoding, PP=1 and DCP=1. PCP is limited to
+Prefill producers with TP=1 using the Mooncake connectors below;
+PCP Decode consumers and colocated PCP execution are not supported.
+Stochastic rounding must be disabled.
 
 For prefill/decode separation, use `MooncakeConnectorV2` or
-`MooncakePullConnector` with matching model weights, TP size, speculative window,
-and RecoverSSM settings on both sides.
+`MooncakePullConnector` with matching model weights, speculative window,
+cache dtypes, convolution layout and RecoverSSM settings on both sides.
+PCP producers may use a different KDA head-shard count from Decode consumers:
+Mooncake gathers the producer head shards into each receiving consumer's state.
+Use SD convolution state layout `[state_len, conv_dim]` on both roles when
+their KDA head-shard counts differ.
+
+For example, an eight-device Prefill role and an eight-device Decode role can
+use the following layout with `--use-replayssm` and MTP5 on both sides:
+
+| Setting | Prefill | Decode |
+| --- | --- | --- |
+| Tensor parallel size | 1 | 1 |
+| Prefill context parallel size | 8 | 1 |
+| Data parallel size | 1 | 8 |
+| Expert parallelism | Enabled (EP8) | Enabled (EP8) |
+| KV role | `kv_producer` | `kv_consumer` |
+| Target and draft execution | Eager | `FULL_DECODE_ONLY` |
+
+In this example, set `--enforce-eager` on Prefill and keep its draft eager as well. Each Decode
+DP rank receives all eight KDA head shards for its assigned requests; DP ranks
+do not divide one request's recurrent state. Keep the same prefix-caching
+configuration on both roles.
+
+PCP does not require `--enforce-eager` for the entire P model. Its KDA path has
+an eager dispatch boundary, allowing the surrounding model to be compiled.
+Validate the selected P graph configuration separately for your deployment.
 
 !!! warning
 

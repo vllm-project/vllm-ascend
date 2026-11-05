@@ -35,6 +35,7 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 from vllm_ascend.ascend_config import KVPPConfig, StairConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
+    DeviceAdaptorFamily,
     HardwareCapability,
     QuantizationBackendFamily,
     get_current_hardware_profile,
@@ -125,6 +126,13 @@ class NPUPlatform(Platform):
     @classmethod
     def manual_seed_all(cls, seed: int) -> None:
         pass
+
+    @classmethod
+    def register_triton_kernel_overrides(cls) -> None:
+        if get_current_hardware_profile().device_adaptor_family is DeviceAdaptorFamily.COMPATIBILITY:
+            from vllm_ascend._310p.worker.v2.sample.dispatch import register_sampling_kernel_overrides
+
+            register_sampling_kernel_overrides()
 
     @classmethod
     def get_kv_cache_config_builder_cls(cls, vllm_config: VllmConfig) -> str:
@@ -1873,8 +1881,8 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
     ):
         raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=DCP=1.")
     load_format = vllm_config.load_config.load_format
-    if load_format not in ("auto", "safetensors", "dummy"):
-        raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors), or dummy weights.")
+    if load_format not in ("auto", "safetensors", "rfork", "dummy"):
+        raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors/rfork), or dummy weights.")
 
 
 def _validate_parallel_config(vllm_config: VllmConfig) -> None:

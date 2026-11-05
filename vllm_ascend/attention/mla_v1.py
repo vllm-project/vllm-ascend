@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.compilation import backends
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import logger
@@ -1037,7 +1038,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ring_mla_mask_size = 512
 
         self.speculative_config = self.vllm_config.speculative_config
-        self.is_draft_model = self.vllm_config.model_config.runner_type == "draft"
+        self.is_draft_model = self.vllm_config.model_config.runner_type == "draft" or backends.model_tag == "eagle_head"
         self.enable_mlapo = not self.is_draft_model and enabling_mlapo(self.vllm_config)
         if self.qkv_a_gate_fused and self.enable_mlapo:
             # MLAPO consumes the fused QKV-A projection as the latent q/kv pair
@@ -1084,7 +1085,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # History sees all Q heads in the DCP group; current uses local heads.
         if self.use_pcp or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
-        if not supports_component_major_mla_pd(config) or enable_sfa(config):
+        if not supports_component_major_mla_pd(config):
             return False
         return get_flashmla_ops() is not None
 
@@ -1398,7 +1399,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if not isinstance(get_offloader(), NoopOffloader) or not self.supports_prolog_v3_writer():
             return
         config = self.vllm_config
-        if enable_sfa(config):
+        # Avoid preparing unused PROLOG weights for FIA drafts under SFA targets.
+        if enable_sfa(config) and not self.use_flashmla:
             return
         if not config.use_v2_model_runner and (
             hasattr(config.model_config.hf_config, "compress_ratios")
@@ -2088,10 +2090,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                     self.qk_head_dim,
                 )
                 weight_uq_qr = F.pad(weight_uq_qr, (0, 0, 0, self.head_padding))
+                # NZ conversion needs a materialized 2-D matrix rather than
+                # a view retaining the padded 3-D base storage layout.
                 weight_uq_qr = weight_uq_qr.view(
                     self.q_lora_rank,
                     self.num_heads_padded * self.qk_head_dim,
-                )
+                ).clone()
                 if weight_uk.shape[0] == self.num_heads:
                     weight_uk = F.pad(weight_uk, (0, 0, 0, 0, 0, self.head_padding))
                 prolog_num_heads = self.num_heads_padded

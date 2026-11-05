@@ -343,7 +343,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         pcp_manager = getattr(self, "pcp_manager", None)
         pcp_context = None
-        if pcp_manager is not None and model_uses_kpool_indexer(self.vllm_config.model_config):
+        if (
+            pcp_manager is not None
+            and model_uses_kpool_indexer(self.vllm_config.model_config)
+            and pcp_manager.is_target_attn_groups(attn_groups)
+        ):
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
         if pcp_context is not None and not input_batch.is_dummy:
             # PCP turns one prefill request into two rank-local segments. The
@@ -380,20 +384,19 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             )
             local_metadata.update(global_metadata)
             self.attn_metadata = local_metadata
-            return local_metadata
-
-        self.attn_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
-            self,
-            input_batch,
-            cudagraph_mode,
-            block_tables,
-            slot_mappings,
-            attn_groups,
-            kv_cache_config,
-            for_capture,
-            use_pcp_padding=pcp_context is not None,
-            pcp_context=pcp_context,
-        )
+        else:
+            self.attn_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
+                self,
+                input_batch,
+                cudagraph_mode,
+                block_tables,
+                slot_mappings,
+                attn_groups,
+                kv_cache_config,
+                for_capture,
+                use_pcp_padding=pcp_context is not None,
+                pcp_context=pcp_context,
+            )
         if self.recoverssm is not None:
             self.recoverssm.record_step(self.attn_metadata, attn_groups, for_capture=for_capture)
         return self.attn_metadata

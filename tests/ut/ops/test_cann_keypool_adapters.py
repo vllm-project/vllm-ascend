@@ -130,9 +130,8 @@ def test_cache_writer_passes_padded_page_and_block_layout_without_running_kernel
     assert args[0] is tail
     assert args[1] is cache
     assert args[2] is scale_cache
-    assert args[19] == (scale_cache.stride(0) if quantized else 0)
-    assert args[24] is quantized
-    assert args[25] is False
+    assert args[18] == (scale_cache.stride(0) if quantized else 0)
+    assert args[23] is quantized
     tensors = [arg for arg in args if isinstance(arg, torch.Tensor)]
     assert any(arg is slots for arg in tensors)
     assert any(arg is writes for arg in tensors)
