@@ -1,6 +1,6 @@
 # fused_dcp_lse_combine
 
-> Source: `vllm_ascend/ops/triton/dcp/dcp_a2a.py` and `dcp_a2a_batched.py`.
+> Source: `vllm_ascend/ops/triton/dcp/dcp_a2a.py`, `dcp_a2a_batched.py`, and `dcp_a2a_rank_tiled.py`.
 
 ## Description
 
@@ -10,8 +10,9 @@
   1. Validate a contiguous receive buffer `[P, local_scatter_size, replicated_size, D + lse_pack_dim]`, infer the output's token/head shape from `scatter_dim`, and optionally validate the local tensors.
   2. Launch `min(output_rows, get_vectorcore_num())` Triton programs. The scalar kernel loops over rows, finds the largest valid LSE across the ranks and optional local contribution, then loops over ranks again to accumulate weighted output in FP32.
   3. Ignore non-finite LSE and mask its output before multiplication, preventing a zero weight times NaN from contaminating the result. Normalize once, store the output, and optionally append merged LSE.
-  4. On eligible A5 BF16 head-scatter shapes with a local contribution, `_fused_dcp_lse_combine_batched_kernel` processes eight rows per tile. It streams ranks to keep one `[BLOCK_ROWS, BLOCK_D]` FP32 accumulator live and masks the last partial tile.
-- **Supported modes**: Atlas A2 and A3 use the scalar-row kernel. A5 additionally uses the eight-row kernel within its dispatch range. The wrapper runs after DCP exchange in eager execution; the enclosing registered custom op supplies a FakeTensor implementation for tracing.
+  4. On eligible A5 BF16 head-scatter shapes with a local contribution, `_fused_dcp_lse_combine_batched_kernel` processes eight rows per tile. It streams ranks to keep one `[BLOCK_ROWS, BLOCK_D]` FP32 accumulator live and masks the last partial tile. This path returns before the rank-tiled kernel.
+  5. Otherwise, eligible BF16 head-scatter shapes launch `_fused_dcp_lse_combine_rank_tiled_kernel`. Each program walks a grid-stride over `(token, head, feature tile)` jobs. One program holds a rank tile and a feature tile, reconstructs the four-lane LSE, and reduces the rank tile in FP32 together with the local contribution. Remaining shapes use the scalar-row kernel.
+- **Supported modes**: Atlas A2, Atlas A3, and 950PR/950DT. A5 uses the eight-row kernel when its dispatch matches, then the rank-tiled kernel, then the scalar kernel. A2 and A3 use the rank-tiled kernel when its dispatch matches, otherwise the scalar kernel. The wrapper runs after DCP exchange in eager execution; the enclosing registered custom op supplies a FakeTensor implementation for tracing.
 
 ## Parameters
 
@@ -28,20 +29,21 @@
 ## Constraints
 
 - `recv` must be contiguous on NPU. Its packed dimension must equal `D + 1` for FP32 or `D + 4` for BF16/FP16. `local_output` and `local_lse` must be supplied together and match the post-scatter output shape.
-- `return_lse=True` requires an FP32 receive buffer. The A5 batched path requires `return_lse=False` and a local contribution; all other valid combinations use the scalar kernel.
+- `return_lse=True` requires an FP32 receive buffer. The A5 batched path and the rank-tiled path both require `return_lse=False` and a local contribution. Shapes that miss those paths use the scalar kernel.
 - A5 batching also requires BF16, `1 <= P <= 8`, `scatter_dim=1`, `D <= 512`, and at least `4 * get_vectorcore_num()` output rows. For `P <= 2` and `D > 256`, it requires at least `8 * get_vectorcore_num()` rows and unit feature stride on `local_output`.
-- `BLOCK_D = next_power_of_2(D)`; the batched kernel uses `BLOCK_ROWS = 8`. The rank count is a compile-time loop bound. This is an inference operator without a backward pass.
+- Rank tiling requires BF16, `scatter_dim=1`, `4 <= P <= 16`, a local contribution with unit feature stride, and enough rows to occupy the vector cores. With `rank_tile = next_power_of_2(P)` and `feature_tile = min(128, next_power_of_2(D), 2048 // rank_tile)`, it also requires `P >= 2 * cdiv(D, feature_tile)` and `rows >= max(cdiv(4 * vector_cores, P), cdiv(vector_cores, cdiv(D, feature_tile)))`. `num_heads` and `num_tokens` are runtime arguments and are not specialized. The parallel FP32 reduction can cross a BF16 rounding boundary relative to the scalar FMA loop.
+- `BLOCK_D = next_power_of_2(D)` on the scalar and batched kernels; the batched kernel uses `BLOCK_ROWS = 8`. The rank-tiled kernel uses `BLOCK_R = rank_tile` and `BLOCK_D = feature_tile`. This is an inference operator without a backward pass.
 
 ## Origin and Differences
 
 - **Origin**: Developed for the vllm-ascend DCP path to merge the payload produced by [`pack_dcp_output_lse`](pack_dcp_output_lse.md) after HCCL exchange.
 - **Differences**:
-    - NPU adaptation for performance: the A5 kernel batches eight rows while streaming rank contributions, limiting live FP32 accumulator storage. The scalar path retains the broader shape and dtype support.
+    - NPU adaptation for performance: the A5 kernel batches eight rows while streaming rank contributions, limiting live FP32 accumulator storage. Eligible DCP 4–16 BF16 head-scatter shapes instead reduce a rank tile and a feature tile together, bounding the FP32 temporary by `rank_tile * feature_tile <= 2048`. The scalar path retains the broader shape and dtype support.
     - Modified for vllm-ascend DCP flows: an optional local contribution is included exactly once after the received ranks; the wrapper can return a merged FP32 LSE for a later merge.
 
 ## Test Cases
 
-The single-card nightly test compares the result against an independent FP32 softmax-weighted reference and the scalar kernel. It covers DCP sizes 1/2/8 and wider values for pack-only fallback, head dimensions 96/256/512, both scatter axes, strided local tensors, invalid LSE, A5 dispatch boundaries, and a partial eight-row tile. The combine comparison uses the per-dtype tolerances declared in the test (BF16 up to `atol=2e-2, rtol=2e-2`). The multi-card A3 test runs the registered operator with a real HCCL exchange.
+The single-card nightly test compares the result against an independent FP32 softmax-weighted reference and the scalar kernel. It covers DCP sizes 1/2/8 and wider values for pack-only fallback, head dimensions 96/256/512, both scatter axes, strided local tensors, invalid LSE, A5 dispatch boundaries, and a partial eight-row tile. `test_rank_tiled_combine_fp64_reference` checks the rank-tiled dispatch against an FP64 reference (`rtol=1e-4`, `atol=1e-5`) and requires the BF16 store to match that kernel's own FP32 result cast to BF16. The combine comparison uses the per-dtype tolerances declared in the test (BF16 up to `atol=2e-2, rtol=2e-2`). The multi-card A3 test runs the registered operator with a real HCCL exchange.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
