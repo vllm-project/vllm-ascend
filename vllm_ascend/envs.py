@@ -72,6 +72,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Whether to split the fused Qwen3.5 GDN input projection `in_proj_qkvz` into
+    # two separate linears `in_proj_qkv` + `in_proj_z`, which avoids the
+    # split/reshape on the fused output at the cost of one extra matmul.
+    # 0 (default): keep the upstream fused `in_proj_qkvz` layout.
+    # 1: use the split `in_proj_qkv` + `in_proj_z` layout.
+    "VLLM_ASCEND_ENABLE_GDN_QKV_SPLIT": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_GDN_QKV_SPLIT", "0"))),
 }
 
 # end-env-vars-definition
