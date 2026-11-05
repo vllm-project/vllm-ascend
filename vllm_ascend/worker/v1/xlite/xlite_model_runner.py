@@ -53,8 +53,8 @@ class XliteModelRunner(XliteModelRunnerMixin, NPUModelRunner):  # type: ignore[m
         with self._bypass_xlite_wrapper():
             return super().get_model()
 
-    def load_model(self) -> None:
-        super().load_model()
+    def load_model(self, load_dummy_weights: bool = False) -> None:
+        super().load_model(load_dummy_weights)
         self.fallback_model = self.model
         # NOTE: this will create a circular reference between XliteModelRunner and XliteWrapper instances,
         # but this should be fine since they are both long-lived objects

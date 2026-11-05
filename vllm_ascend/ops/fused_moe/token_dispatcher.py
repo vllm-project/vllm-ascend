@@ -25,13 +25,14 @@ from typing import Generic
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.fasteep.policy import is_fasteep, local_physical_mask
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
     all2all_lora_indices,
@@ -80,7 +81,8 @@ class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
     @property
     def ep_group(self):
         """Get expert model parallel group."""
-        return get_ep_group().device_group
+        group = get_ep_group()
+        return group if getattr(group, "fasteep", False) is True else group.device_group
 
     @property
     def ep_rank(self):
@@ -353,6 +355,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
 class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadata]):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        config = get_current_vllm_config_or_none()
+        self.fasteep_physical_routing = config is not None and is_fasteep(config)
         self.max_num_tokens = kwargs.get("max_num_tokens")
         num_experts_local = kwargs.get("num_local_experts", 0)
         self.num_experts_local = (
@@ -418,10 +422,13 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
 
         if expert_map is not None:
             global_num_experts = len(expert_map) + global_redundant_expert_num
-            mask = expert_map[topk_ids] != -1
-            topk_weights = topk_weights * mask
             first_expert_idx = get_ep_group().rank_in_group * self.num_experts_local
             last_expert_idx = first_expert_idx + self.num_experts_local
+            if getattr(self, "fasteep_physical_routing", False):
+                mask = local_physical_mask(topk_ids, get_ep_group().rank_in_group, self.num_experts_local)
+            else:
+                mask = expert_map[topk_ids] != -1
+            topk_weights = topk_weights * mask
         else:
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
@@ -495,9 +502,12 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             )
 
         # TODO: Try local_rank = ep_group.rank_in_group
-        local_rank = torch.distributed.get_rank(group=self.ep_group)
-        backend = self.ep_group._get_backend(torch.device("npu"))
-        self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+        if getattr(self.ep_group, "fasteep", False) is True:
+            self.moe_all_to_all_group_name = None
+        else:
+            local_rank = torch.distributed.get_rank(group=self.ep_group)
+            backend = self.ep_group._get_backend(torch.device("npu"))
+            self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
 
     def token_dispatch(
         self,

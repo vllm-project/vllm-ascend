@@ -156,6 +156,7 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.parallel.current_platform`
 #   2. `vllm.distributed.eplb.eplb_state._move_to_workspace`
+#   3. `RoutedExperts.get_expert_mapping` and `make_expert_params_mapping`
 #    Why:
 #       Upstream EPLB owns the Model Runner V2 control plane, but its platform
 #       capability check excludes NPU. Its async workspace move also has no
@@ -165,6 +166,10 @@
 #       Ascend lookup after an async layer commit. Router behavior and load
 #       scope are owned by downstream instances rather than patched upstream
 #       classes; upstream torch.distributed communication runs over HCCL.
+#       FastEEP uses its explicit logical-to-slot placement when loading
+#       checkpoints, including V2, instead of upstream contiguous EP placement.
+#       The factory disables upstream EPLB router rewriting for FastEEP; the
+#       Ascend router applies the committed migration map exactly once.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/49700
 #    Related RFC:
@@ -172,7 +177,9 @@
 #    Future Plan:
 #       Remove this patch once the upstream `EplbPlatformBackend` interface is
 #       available in the supported vLLM version. Retain only the NPU backend,
-#       operator, communicator, load normalization, and weight views.
+#       operator, communicator, load normalization, and weight views. Remove
+#       the FastEEP mapping adapter when upstream exposes an explicit-placement
+#       checkpoint loading hook.
 #
 # ** 8. File: platform/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1870,3 +1877,17 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+
+# ** File: platform/patch_stateless_coordinator.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.stateless_coordinator.StatelessGroupCoordinator`
+#    Why:
+#       Standby group construction hardcodes the CUDA communicator after
+#       resolving the platform communicator class.
+#    How:
+#       Replace the module's CUDA communicator reference with NPUCommunicator
+#       during Ascend platform registration, before standby groups are created.
+#    Related PR:
+#       https://github.com/vllm-project/vllm-ascend/pull/19961
+#    Future Plan:
+#       Remove the patch once upstream constructs device_comm_cls directly.

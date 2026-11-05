@@ -1,0 +1,4 @@
+pr: 20235
+entries:
+  - category: feature
+    text: Added experimental retained-state FastEEP with reclaimable PIECEWISE graph memory and HCCL buffers, expert-level migration, and a serialized resize endpoint.

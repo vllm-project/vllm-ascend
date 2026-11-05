@@ -12,6 +12,7 @@ from unittest.mock import patch
 import torch
 import torch_npu
 import vllm.envs as envs
+from torch.utils._pytree import tree_flatten, tree_unflatten
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
@@ -61,6 +62,7 @@ class ACLGraphEntry:
     # for aclgraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
     input_addresses: list[int] | None = None
+    input_buffers: dict[int, torch.Tensor] = dataclasses.field(default_factory=dict)
 
 
 class ACLGraphWrapper:
@@ -119,6 +121,14 @@ class ACLGraphWrapper:
         self._runnable_str = str(runnable) if self.is_debugging_mode else None
 
         self.graph_pool = current_platform.get_global_graph_pool()
+        from vllm_ascend.distributed.fasteep.policy import is_fasteep
+
+        self.graph_allocator = None
+        if is_fasteep(vllm_config):
+            from vllm_ascend.device_allocator.camem import CaMemAllocator
+
+            self.graph_allocator = CaMemAllocator.get_instance()
+            self.graph_pool = self.graph_allocator.get_graph_pool_handle()
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
@@ -157,6 +167,37 @@ class ACLGraphWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
+    def _stage_fasteep_inputs(self, entry, args, kwargs):
+        """Keep eager MoE outputs at recoverable addresses between graph pieces.
+
+        Parameters, KV storage and preceding graph outputs already belong to
+        managed pools. Only external activation buffers need stable copies.
+        """
+        allocator = self.graph_allocator
+        if allocator is None:
+            return args, kwargs
+        leaves, spec = tree_flatten((args, kwargs))
+        if entry.aclgraph is None:
+            ranges = [(ptr, ptr + data.handle[1]) for ptr, data in allocator.pointer_to_data.items()]
+            with allocator.use_graph_memory():
+                for index, value in enumerate(leaves):
+                    if not isinstance(value, torch.Tensor) or value.device.type != "npu":
+                        continue
+                    if any(start <= value.data_ptr() < end for start, end in ranges):
+                        continue
+                    buffer = torch.empty_like(value)
+                    if buffer.stride() != value.stride():
+                        raise ValueError("FastEEP graph inputs require a preservable tensor stride.")
+                    entry.input_buffers[index] = buffer
+        for index, buffer in entry.input_buffers.items():
+            value = leaves[index]
+            if value.shape != buffer.shape or value.dtype != buffer.dtype or value.device != buffer.device:
+                raise ValueError("FastEEP graph input metadata changed within one captured batch.")
+            if value.data_ptr() != buffer.data_ptr():
+                buffer.copy_(value)
+            leaves[index] = buffer
+        return tree_unflatten(leaves, spec)
+
     def __call__(self, *args, **kwargs):
         if not is_forward_context_available():
             # Standalone modules can run outside the model's forward context.
@@ -180,6 +221,7 @@ class ACLGraphWrapper:
             self.concrete_aclgraph_entries[batch_descriptor] = ACLGraphEntry(batch_descriptor=batch_descriptor)
 
         entry = self.concrete_aclgraph_entries[batch_descriptor]
+        args, kwargs = self._stage_fasteep_inputs(entry, args, kwargs)
 
         if entry.aclgraph is None:
             if self.aclgraph_options.debug_log_enable:
@@ -213,6 +255,8 @@ class ACLGraphWrapper:
                 from vllm.model_executor.offloader.base import get_offloader
 
                 get_offloader().sync_prev_onload()
+                if self.graph_allocator is not None:
+                    stack.enter_context(self.graph_allocator.capture_graph_memory())
                 forward_context.capturing = True
                 try:
                     with torch.npu.graph(aclgraph, pool=self.graph_pool):
@@ -280,7 +324,7 @@ class ACLGraphWrapper:
             # manage the memory during acl graph capture
             return output
 
-        if self.is_debugging_mode:
+        if self.is_debugging_mode or self.graph_allocator is not None:
             # check if the input addresses are the same
             new_input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             assert new_input_addresses == entry.input_addresses, (

@@ -401,6 +401,14 @@ class RlConfig:
 
 
 @config
+class FastEEPConfig:
+    """Communication and optional readback checks for retained-worker resizing."""
+
+    communication: Literal["allgather", "alltoall"] = "allgather"
+    verify_migration: bool = False
+
+
+@config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
 
@@ -633,6 +641,7 @@ class AscendConfig:
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
+    fasteep: FastEEPConfig = dataclasses.field(default_factory=FastEEPConfig)
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.

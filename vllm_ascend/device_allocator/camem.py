@@ -99,6 +99,7 @@ class CaMemAllocator(CuMemAllocator):
 
     instance = None
     default_tag: str = "default"
+    graphs_tag: str = "graphs"
 
     @staticmethod
     def get_instance() -> "CaMemAllocator":
@@ -217,6 +218,80 @@ class CaMemAllocator(CuMemAllocator):
         gc.collect()
         torch.npu.empty_cache()
 
+    def get_graph_pool_handle(self) -> tuple[int, int]:
+        """Own a pluggable graph pool without entering use_mem_pool.
+
+        NPUGraph capture enters the pool itself. Nesting use_mem_pool around
+        it leaves an allocator capture active during graph-entry empty_cache.
+        """
+        if self.graphs_tag not in self.allocator_and_pools:
+            allocator = get_pluggable_allocator(self.python_malloc_callback, self.python_free_callback)
+            pool = torch.npu.memory.MemPool(allocator._allocator)
+            # Older torch-npu versions bind the custom allocator on first use.
+            # Register it before capture, whose entry clears the default cache.
+            with torch.npu.memory.use_mem_pool(pool):
+                pass
+            self.allocator_and_pools[self.graphs_tag] = (pool, allocator)
+        return self.allocator_and_pools[self.graphs_tag][0].id
+
+    @contextmanager
+    def use_graph_memory(self):
+        """Allocate persistent inputs in the existing graph pool before capture."""
+        self.get_graph_pool_handle()
+        previous = self.current_tag
+        self.current_tag = self.graphs_tag
+        try:
+            with torch.npu.memory.use_mem_pool(self.allocator_and_pools[self.graphs_tag][0]):
+                yield
+        finally:
+            self.current_tag = previous
+
+    @contextmanager
+    def capture_graph_memory(self):
+        """Tag graph-capture allocations while preserving the previous tag."""
+        pool = self.get_graph_pool_handle()
+        previous = self.current_tag
+        self.current_tag = self.graphs_tag
+        # torch-npu versions with TLS-based pluggable allocation also need
+        # the pool context alive during capture, without starting a second
+        # allocation scope for the same graph pool.
+        context = torch.npu.memory.MemPoolContext(self.allocator_and_pools[self.graphs_tag][0])
+        try:
+            yield pool
+        finally:
+            del context
+            self.current_tag = previous
+
+    def offload(self, tags: tuple[str, ...] | str) -> int:
+        """Back up and unmap selected pools without disturbing other tags.
+
+        Captured graphs retain their virtual addresses and Python objects.
+        Their live allocation contents must survive sleep, unlike discarded
+        weight/KV pools. A failed copy must never release the source mapping.
+        """
+        if isinstance(tags, str):
+            tags = (tags,)
+        selected = [(ptr, data) for ptr, data in self.pointer_to_data.items() if data.tag in tags]
+        for _, data in selected:
+            if data.is_asleep and data.cpu_backup_tensor is None:
+                raise RuntimeError("Cannot offload an allocation whose contents were discarded.")
+        for device in {data.handle[0] for _, data in selected if not data.is_asleep}:
+            torch.npu.synchronize(device)
+        released = 0
+        for ptr, data in selected:
+            if data.is_asleep:
+                continue
+            size = data.handle[1]
+            backup = torch.empty(size, dtype=torch.uint8, device="cpu", pin_memory=True)
+            result = memcpy(backup.data_ptr(), size, ptr, size, 2)
+            if result != 0:
+                raise RuntimeError(f"CANN pool backup failed with error {result}.")
+            data.cpu_backup_tensor = backup
+            unmap_and_release(data.handle)
+            data.is_asleep = True
+            released += size
+        return released
+
     def discard(self, tags: tuple[str, ...] | str) -> None:
         """Discard mapped allocations with the given tags without CPU backup."""
         if isinstance(tags, str):
@@ -254,7 +329,7 @@ class CaMemAllocator(CuMemAllocator):
         All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory."""
         gc.collect()
-        torch.accelerator.empty_cache()
+        torch.npu.empty_cache()
 
         restore_count = sum(1 for data in self.pointer_to_data.values() if tags is None or data.tag in tags)
         logger.info(
@@ -269,16 +344,18 @@ class CaMemAllocator(CuMemAllocator):
             if tags is None or data.tag in tags:
                 handle = data.handle
                 create_and_map(handle)
-                data.is_asleep = False
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
                         size_in_bytes = cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         ACL_MEMCPY_HOST_TO_DEVICE = 1
-                        dest_max = ptr + size_in_bytes * 2
-                        memcpy(ptr, dest_max, cpu_ptr, size_in_bytes, ACL_MEMCPY_HOST_TO_DEVICE)
+                        result = memcpy(ptr, size_in_bytes, cpu_ptr, size_in_bytes, ACL_MEMCPY_HOST_TO_DEVICE)
+                        if result != 0:
+                            unmap_and_release(handle)
+                            raise RuntimeError(f"CANN pool restore failed with error {result}.")
                         data.cpu_backup_tensor = None
+                data.is_asleep = False
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):

@@ -69,6 +69,11 @@ from vllm_ascend.utils import (
 )
 
 if TYPE_CHECKING:
+    from datetime import timedelta
+
+    import torch.distributed  # noqa: F401
+    from torch.distributed import ProcessGroup
+    from torch.distributed.distributed_c10d import PrefixStore
     from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
     from vllm_ascend.ascend_config import AscendConfig
@@ -97,6 +102,44 @@ _MINIMAX_M3_ARCHITECTURES = frozenset(
 )
 _V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "stair_config"})
 _V2_STAIR_CONFIG_FIELDS = frozenset(StairConfig.__dataclass_fields__)
+
+
+def ensure_hccl_socket_port_range() -> None:
+    """Reserve a per-process NPU-adapter port range for HCCL rootInfo detection.
+
+    The NPU-adapter socket used for rootInfo detection defaults to a single
+    port (16666) shared by every process on the host. An elastic-EP worker
+    hosts several HCCL comms at once (its local ws=1 torch world plus multiple
+    stateless groups), and concurrent comm creation across processes then
+    fails with Communication_Error_Bind_IP_Port (EI0020, "port already
+    bound"). Give each NPU device -- i.e. each worker process on a node -- its
+    own port range. The rootInfo exchanged via the store carries the actual
+    port, so the ranks of a comm may use different ranges (verified on 910
+    with the EEP group-lifecycle test, 4 ranks x distinct ranges). An
+    explicitly configured HCCL_NPU_SOCKET_PORT_RANGE (operator override) wins.
+
+    Ray-scheduled workers are fenced to one device via
+    ASCEND_RT_VISIBLE_DEVICES, so ``torch.npu.current_device()`` is 0 in all
+    of them; the physical device id must come from the env var instead.
+    Multi-device processes (harness-spawned test workers sharing one
+    ASCEND_RT_VISIBLE_DEVICES list) must instead map their *current logical*
+    device to the physical id, otherwise every rank derives the same range
+    and concurrent comm creation collides again with EI0020.
+    """
+    if "HCCL_NPU_SOCKET_PORT_RANGE" in os.environ:
+        return
+    visible = [t.strip() for t in os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "").split(",") if t.strip()]
+    try:
+        if len(visible) == 1:
+            device = int(visible[0])
+        elif len(visible) > 1:
+            device = int(visible[torch.npu.current_device()])
+        else:
+            device = torch.npu.current_device()
+    except (ValueError, IndexError):
+        device = torch.npu.current_device()
+    base = 17000 + device * 20
+    os.environ["HCCL_NPU_SOCKET_PORT_RANGE"] = f"{base}-{base + 19}"
 
 
 class NPUPlatform(Platform):
@@ -237,6 +280,85 @@ class NPUPlatform(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm_ascend.distributed.device_communicators.npu_communicator.NPUCommunicator"
+
+    @classmethod
+    def stateless_init_device_torch_dist_pg(
+        cls,
+        backend: str,
+        prefix_store: PrefixStore,
+        group_rank: int,
+        group_size: int,
+        timeout: timedelta,
+    ) -> ProcessGroup:
+        """Create a stateless HCCL process group.
+
+        Used by vLLM elastic EP to create standby groups that live outside
+        ``torch.distributed``'s global world state, so that groups can be
+        created, switched to, and destroyed during elastic scaling. Mirrors
+        the CUDA platform implementation (vllm/platforms/cuda.py) and the
+        proven direct-construction pattern from the netloader
+        (``vllm_ascend/model_loader/netloader/executor/netloader_pg.py``).
+        """
+        from datetime import timedelta as _timedelta
+
+        from torch.distributed import PrefixStore, ProcessGroup, is_hccl_available
+        from torch.distributed.distributed_c10d import Backend
+        from torch_npu._C._distributed_c10d import ProcessGroupHCCL
+
+        if not is_hccl_available():
+            raise RuntimeError("HCCL is not available")
+        if backend != "hccl":
+            raise ValueError(f"Unsupported stateless distributed backend on Ascend NPU: {backend}, expected 'hccl'")
+
+        hccl_backend = Backend("hccl")
+        pg: ProcessGroup = ProcessGroup(prefix_store, group_rank, group_size)
+        pg._set_default_backend(Backend.backend_type_map[hccl_backend])
+
+        pg_options = ProcessGroupHCCL.Options()
+        pg_options.is_high_priority_stream = False
+        pg_options._timeout = timeout or _timedelta(minutes=30)
+        pg_options.global_ranks_in_group = []
+        # Each stateless group rendezvouses on its own TCP port, so the
+        # underlying store's host:port is unique per group and identical
+        # on every rank. Use it as the HCCL comm identity, like the
+        # netloader does (group_id = init_method-based string); an empty
+        # group_id lets sequentially created comms collide on HCCL's
+        # identity-scoped resources (e.g. the EI0019 port-60000 bind).
+        underlying_store = prefix_store
+        while isinstance(underlying_store, PrefixStore):
+            underlying_store = underlying_store.underlying_store
+        pg_options.group_id = f"tcp://{underlying_store.host}:{underlying_store.port}/"
+        # Give each stateless group its own HCCL host-socket port window.
+        # Listeners used for rootInfo detection are not always released
+        # when a group is destroyed, so a later group can hit
+        # Communication_Error_Bind_IP_Port (EI0019) on the default 60000
+        # range. The rendezvous port is unique per group and identical on
+        # every rank, and HCCL comm init is lazy (at the first collective),
+        # so the env value seen at init time is this group's. Window:
+        # [base, base + 100), 50 windows starting at 60000. An explicitly
+        # configured HCCL_IF_BASE_PORT (operator override) wins. We capture
+        # the operator override once and always assign a unique port window
+        # per stateless group otherwise, because reusing the same environment
+        # value across groups causes EI0019 port collisions.
+        if not hasattr(cls, "_operator_hccl_if_base_port"):
+            cls._operator_hccl_if_base_port = os.environ.get("HCCL_IF_BASE_PORT")
+        if cls._operator_hccl_if_base_port is not None:
+            os.environ["HCCL_IF_BASE_PORT"] = cls._operator_hccl_if_base_port
+        else:
+            os.environ["HCCL_IF_BASE_PORT"] = str(60000 + (underlying_store.port % 50) * 100)
+        # The NPU-adapter socket used for rootInfo detection defaults to a
+        # single port (16666) shared by every process on the host. An
+        # elastic-EP worker hosts several HCCL comms at once (its local
+        # ws=1 torch world plus multiple stateless groups), and concurrent
+        # comm creation across processes then fails with
+        # Communication_Error_Bind_IP_Port (EI0020, "port already bound").
+        ensure_hccl_socket_port_range()
+
+        backend_class = ProcessGroupHCCL(prefix_store, group_rank, group_size, pg_options)
+        backend_class._set_sequence_number_for_group()
+
+        pg._register_backend(torch.device("npu"), ProcessGroup.BackendType.CUSTOM, backend_class)
+        return pg
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
@@ -1103,7 +1225,15 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
     if not isinstance(eplb_config, dict):
         raise TypeError("additional_config.eplb_config must be a dictionary.")
 
+    from vllm_ascend.distributed.fasteep.policy import is_fasteep
+
     use_v2_model_runner = bool(getattr(vllm_config, "use_v2_model_runner", False))
+    if is_fasteep(vllm_config):
+        # FastEEP owns static placement and migration for both runners. The
+        # V2 continuous-EPLB filter would discard its checkpoint placement.
+        if vllm_config.parallel_config.enable_eplb:
+            raise ValueError("Pause continuous EPLB when using FastEEP-controlled expert migration.")
+        return
     if use_v2_model_runner:
         unsupported_eplb_fields = sorted(set(eplb_config) - _V2_EPLB_CONFIG_FIELDS)
         stair_config = eplb_config.get("stair_config")
@@ -1487,6 +1617,13 @@ def _setup_compile_backend(
                 "vllm::glm5next_kda_forward_with_output",
             ]
         )
+        from vllm_ascend.distributed.fasteep.policy import is_fasteep
+
+        if is_fasteep(vllm_config):
+            # Recreated HCCL handles must remain outside retained ACL graphs.
+            compilation_config.splitting_ops.extend(
+                ["vllm::moe_forward", "vllm::moe_forward_shared", "vllm::ascend_moe_forward_shared_sp"]
+            )
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
