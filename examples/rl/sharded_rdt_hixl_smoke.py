@@ -7,6 +7,8 @@ Run against an idle Ray cluster exposing at least two NPU resources:
 This tests CANN transfer and persistent buffers, not layerwise model reload.
 """
 
+import os
+
 import ray
 
 
@@ -25,6 +27,12 @@ class Endpoint:
         torch.npu.set_device(0)
         self.session = HixlSession(torch.device("npu", 0))
         self.buffer = self.session.allocate(ALIGNMENT)
+
+    def device_info(self):
+        return {
+            "visible_devices": os.environ.get("ASCEND_RT_VISIBLE_DEVICES"),
+            "assigned_devices": ray.get_runtime_context().get_accelerator_ids().get("NPU", []),
+        }
 
     def publish(self, value):
         self.buffer.fill_(value)
@@ -50,6 +58,12 @@ if __name__ == "__main__":
     if ray.available_resources().get("NPU", 0) < 2:
         raise RuntimeError("The smoke test requires two idle Ray NPU resources")
     source, consumer = Endpoint.remote(), Endpoint.remote()
+    source_device, consumer_device = ray.get([source.device_info.remote(), consumer.device_info.remote()], timeout=300)
+    if not source_device["assigned_devices"] or not consumer_device["assigned_devices"]:
+        raise RuntimeError("Ray did not assign physical NPU IDs to the smoke actors")
+    if set(source_device["assigned_devices"]) & set(consumer_device["assigned_devices"]):
+        raise RuntimeError("HIXL smoke source and consumer must use distinct NPUs")
+    print(f"HIXL devices: source={source_device}, consumer={consumer_device}")
     for value in (17, 93):
         descriptor = ray.get(source.publish.remote(value), timeout=300)
         nbytes = ray.get(consumer.receive.remote(descriptor, value), timeout=300)

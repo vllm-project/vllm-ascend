@@ -397,6 +397,13 @@ class NPUWorker(WorkerBase):
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
+    def shutdown_weight_transfer_engine(self) -> None:
+        """Release the trainer connection without shutting down inference."""
+        if self._weight_update_active:
+            raise RuntimeError("Cannot release a trainer connection during a weight update")
+        if self.weight_transfer_engine is not None:
+            self.weight_transfer_engine.shutdown()
+
     def _check_nz_disabled(self) -> None:
         if get_ascend_config().weight_nz_mode:
             raise ValueError(
