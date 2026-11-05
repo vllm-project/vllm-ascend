@@ -31,6 +31,7 @@ from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.device.device_config import supports_kda_int8_quant_overlap
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
@@ -39,9 +40,11 @@ from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
 )
+from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.utils import npu_stream_switch, vllm_version_is
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
@@ -304,8 +307,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
         with npu_stream_switch(bfg_stream):
             # Stage 2: after both first-stage branches complete, overlap the
-            # QKV Cube matmul with beta's FP32 conversion and sigmoid vector
-            # work. Split and reshape the F/output gates here as well so all
+            # QKV Cube matmul with beta's FP32 conversion, sigmoid and raw-gate
+            # packing. Split and reshape the F/output gates here as well so all
             # BFG output handling occurs after the QKV matmul is enqueued.
             bfg_stream.wait_event(quant_ready)
             beta, g1, g2 = self._postprocess_bfg(fused_bfg)
@@ -333,16 +336,29 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             dim=-1,
         )
         beta = beta.float().sigmoid().unsqueeze(0)
-        raw_gate = rearrange(raw_gate, "n (h d) -> 1 n h d", d=self.head_dim)
+        # Keep packing beside sigmoid on the auxiliary stream. This also
+        # copies graph padding and precedes any mixed-token index_select.
+        raw_gate = rearrange(raw_gate, "n (h d) -> 1 n h d", d=self.head_dim).contiguous()
         output_gate = rearrange(output_gate, "n (h d) -> n h d", d=self.head_dim)
         return beta, raw_gate, output_gate
 
     def _quantize_fused_qkv(
         self,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor]:
         quant_method = self.in_proj_qkvgfab.quant_method
         inner_quant_method = getattr(quant_method, "quant_method", quant_method)
+        if (
+            type(inner_quant_method) is AscendW8A8DynamicLinearMethod
+            and hidden_states.dtype in (torch.float16, torch.bfloat16)
+            and hidden_states.ndim == 2
+            and supports_kda_int8_quant_overlap()
+        ):
+            # Prepare on main before the BFG completion wait. apply() consumes
+            # the INT8 tensor and per-token scales without quantizing again.
+            prepared = inner_quant_method.prepare_input_for_overlap(self.in_proj_qkvgfab, hidden_states)
+            if prepared is not None:
+                return prepared
         if (
             isinstance(
                 inner_quant_method,
@@ -368,7 +384,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
     def _matmul_fused_qkv(
         self,
-        qkv_input: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        qkv_input: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
         quant_method = self.in_proj_qkvgfab.quant_method
         if quant_method is None:
@@ -727,24 +743,34 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             maybe_save_kv_layer_to_connector("", [])
             return
 
-        # Reuse the caller-owned result buffer. FULL graphs can leave rows
-        # outside the live spec/non-spec index sets, so define them before the
-        # two index copies rather than allocating a temporary merged tensor.
-        core_attn_out[:, :num_actual_tokens].zero_()
-        if core_spec is not None and core_non_spec is not None:
-            assert spec_token_indices is not None
-            assert non_spec_token_indices is not None
-            assert spec_token_indices.numel() + non_spec_token_indices.numel() <= num_actual_tokens
-            core_attn_out[:, :num_actual_tokens].index_copy_(1, spec_token_indices, core_spec)
-            core_attn_out[:, :num_actual_tokens].index_copy_(1, non_spec_token_indices, core_non_spec)
-        elif core_spec is not None:
-            core_attn_out[:, :num_actual_tokens] = core_spec
-        elif core_non_spec is not None:
-            core_attn_out[:, :num_actual_tokens] = core_non_spec
-
-        # Keep the registered norm's parameters while writing into the
-        # caller-owned attention output directly.
         norm_out = core_attn_out[:, :num_actual_tokens]
-        self.o_norm.forward_oot(norm_out, g2, out=norm_out)
-        core_attn_out[:, num_actual_tokens:].zero_()
+        single_core = core_spec if core_non_spec is None else core_non_spec if core_spec is None else None
+        if (
+            single_core is not None
+            and single_core.shape == norm_out.shape
+            and single_core.dtype == norm_out.dtype
+            and single_core.device == norm_out.device
+            and single_core.is_contiguous()
+        ):
+            # A single full-coverage branch is already in destination order.
+            # Read it directly; clearing/copying the destination would be wasted.
+            norm_input = single_core
+        else:
+            # FULL graphs can leave holes in mixed index sets. Preserve both
+            # zero-input norm semantics and the original copy/cast ordering.
+            norm_out.zero_()
+            if core_spec is not None and core_non_spec is not None:
+                assert spec_token_indices is not None
+                assert non_spec_token_indices is not None
+                assert spec_token_indices.numel() + non_spec_token_indices.numel() <= num_actual_tokens
+                norm_out.index_copy_(1, spec_token_indices, core_spec)
+                norm_out.index_copy_(1, non_spec_token_indices, core_non_spec)
+            elif core_spec is not None:
+                norm_out.copy_(core_spec)
+            else:
+                norm_out.copy_(core_non_spec)
+            norm_input = norm_out
+
+        # The norm writes valid rows and zeroes graph padding in one launch.
+        self.o_norm.forward_oot(norm_input, g2, out=core_attn_out)
         maybe_save_kv_layer_to_connector("", [])
