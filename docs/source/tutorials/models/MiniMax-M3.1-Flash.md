@@ -29,7 +29,7 @@ The official release of MiniMax-M3.1-Flash is available on [Hugging Face](https:
 | Weight Version | Deployment | Model Path |
 | --- | --- | --- |
 | MiniMax-M3.1-Flash-W8A8 | Atlas 800I A2, two-node PD colocation <br> Atlas 800I A3, single-node deployment or three-host PD disaggregation (1P1D, Decode spans two hosts) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8) |
-| MiniMax-M3.1-Flash-MXFP8 | 950DT products, three-host PD disaggregation (1P1D, Decode spans two hosts) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8-mxfp8) |
+| MiniMax-M3.1-Flash-MXFP8 | 950DT products, single-node deployment or three-host PD disaggregation (1P1D, Decode spans two hosts) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8-mxfp8) |
 
 Download the weight variant used by the serving commands to the same model directory on all participating nodes. It is recommended to place the model weight in a shared cache directory.
 
@@ -2197,7 +2197,7 @@ Proxy (:19080)
 
     Wait for rank 0 to print `Started DP Coordinator process`. Start the second node from another shell; initialization needs both D nodes.
 
-On 950DT products, start one pooled Decode process on each Decode host instead of one process per rank. D1 serves local DP ranks 0–1 and D2 serves local DP ranks 2–3; start both before waiting, because the distributed group needs both hosts:
+    On 950DT products, start one pooled Decode process on each Decode host instead of one process per rank. D1 serves local DP ranks 0–1 and D2 serves local DP ranks 2–3; start both before waiting, because the distributed group needs both hosts:
 
     ```bash
     # On the first Decode host (D1).
