@@ -5,6 +5,7 @@ import math
 import threading
 import time
 from collections.abc import Callable, Sequence
+from copy import copy
 
 import torch
 import vllm.envs as envs
@@ -1533,7 +1534,7 @@ class KVPoolWorker:
         num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match
         # lookup_scheduler()'s [rank_shard][block] result slicing.
-        for pp_rank in range(self.pp_size):
+        for pp_rank in self._get_group_pp_ranks(group_id):
             for dcp_rank in range(self.dcp_size):
                 for head_or_tp_rank in range(num_head_or_tp_ranks):
                     for key in keys:
@@ -1541,6 +1542,44 @@ class KVPoolWorker:
                         rank_key = self._replace_key_field(rank_key, "head_or_tp_rank", head_or_tp_rank)
                         expanded.append(self._replace_key_field(rank_key, "pp_rank", pp_rank))
         return expanded
+
+    def _get_group_pp_ranks(self, group_id: int) -> list[int]:
+        """Return PP stages that own at least one layer in a cache group.
+
+        Fall back to every stage when the global group manifest or a layer's
+        physical index is unavailable. A conservative fallback can only lose a
+        cache hit; it must never report a partial prefix as complete.
+        """
+        all_ranks = list(range(self.pp_size))
+        if self.pp_size <= 1 or self.kv_cache_config is None:
+            return all_ranks
+        groups = getattr(self.kv_cache_config, "kv_cache_groups", None)
+        if groups is None or group_id >= len(groups):
+            return all_ranks
+        layer_names = groups[group_id].layer_names
+        if not layer_names:
+            return all_ranks
+
+        try:
+            layer_indices = [self._extract_physical_layer_index(name) for name in layer_names]
+            stage_ranges: list[tuple[int, int, int]] = []
+            parallel_config = self.vllm_config.parallel_config
+            for pp_rank in all_ranks:
+                stage_config = copy(parallel_config)
+                stage_config.rank = pp_rank * self.tp_size
+                start, end = self.vllm_config.model_config.get_layers_start_end_indices(stage_config)
+                stage_ranges.append((pp_rank, start, end))
+
+            owners: set[int] = set()
+            for index in layer_indices:
+                index_owners = {pp_rank for pp_rank, start, end in stage_ranges if start <= index < end}
+                if not index_owners:
+                    return all_ranks
+                owners.update(index_owners)
+            return sorted(owners)
+        except (AttributeError, IndexError, TypeError, ValueError):
+            pass
+        return all_ranks
 
     def _expand_lookup_key_variants(self, key: str, group_id: int, include_all_ranks: bool) -> list[str]:
         if not include_all_ranks:

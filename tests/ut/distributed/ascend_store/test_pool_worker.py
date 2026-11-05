@@ -48,6 +48,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
+    ChunkedTokenDatabase,
+    KeyMetadata,
     LoadSpec,
     ReqMeta,
 )
@@ -589,6 +591,43 @@ class TestKVPPPoolWorker(unittest.TestCase):
             shard_keys = keys[shard * 2 : shard * 2 + 2]
             self.assertTrue(all(f"@pp_rank:{shard // 4}@" in key for key in shard_keys))
             self.assertTrue(all(f"@head_or_tp_rank:{shard % 4}@" in key for key in shard_keys))
+
+    def test_pp_hybrid_lookup_requires_only_group_owners(self):
+        worker = make_worker(self, pp_size=2, pp_partition=[1, 1])
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(layer_names=["model.layers.0.self_attn"]),
+                SimpleNamespace(layer_names=["model.layers.1.self_attn"]),
+            ]
+        )
+        worker.num_kv_cache_groups = 2
+        worker.grouped_block_size = [16, 16]
+        worker.group_uses_align_state = [False, False]
+        worker.cache_coordinator = None
+        worker.token_database = ChunkedTokenDatabase(
+            [
+                KeyMetadata("llama-7b", 0, 0, 0, 0),
+                KeyMetadata("llama-7b", 0, 0, 0, 1),
+            ],
+            [16, 16],
+            None,
+        )
+
+        def only_real_owner_exists(keys):
+            return [
+                int(("@group:0@" in key and "@pp_rank:0@" in key) or ("@group:1@" in key and "@pp_rank:1@" in key))
+                for key in keys
+            ]
+
+        worker.m_store.exists.side_effect = only_real_owner_exists
+
+        self.assertEqual(worker.lookup_scheduler(16, ["h0"], [0, 1]), 16)
+        queried_keys = [key for call in worker.m_store.exists.call_args_list for key in call.args[0]]
+        self.assertEqual(len(queried_keys), 2)
+        self.assertTrue(any("@group:0@" in key and "@pp_rank:0@" in key for key in queried_keys))
+        self.assertTrue(any("@group:1@" in key and "@pp_rank:1@" in key for key in queried_keys))
+        self.assertFalse(any("@group:0@" in key and "@pp_rank:1@" in key for key in queried_keys))
+        self.assertFalse(any("@group:1@" in key and "@pp_rank:0@" in key for key in queried_keys))
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
