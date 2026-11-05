@@ -300,7 +300,10 @@ def test_local_remote_block_port_mappings_block_size_ratio_two():
 )
 def test_local_remote_block_port_mappings_structure(overrides):
     p_meta, d_meta, mappings = _port_mappings(**overrides)
-    assert set(p_meta) == set(d_meta)
+    # P and D head groups may be partitioned differently (one head per rank on
+    # one side, merged head groups on the other); the implementation matches
+    # each P group against the D group that contains it.
+    assert all(any(set(pk).issubset(set(dk)) for dk in d_meta) for pk in p_meta)
     for d_port, p_port_lists in mappings.items():
         assert isinstance(d_port, int)
         assert isinstance(p_port_lists, list)
@@ -310,6 +313,17 @@ def test_local_remote_block_port_mappings_structure(overrides):
                 assert 30000 <= port < 30000 + overrides.get("prefill_tp_size", 2) * 1
     for d_port in mappings:
         assert 31000 <= d_port < 31000 + overrides.get("decode_tp_size", 2) * 1
+
+
+def test_local_remote_block_port_mappings_cross_partition_head_groups():
+    # P side keeps one head per TP rank ((0,), (1,), (2,), (3,)) while D side
+    # merges two heads per rank ((0, 1), (2, 3)). Subset matching pairs each P
+    # head group with its D group, so each D port receives one P port list per
+    # matched head group.
+    p_meta, d_meta, mappings = _port_mappings(num_key_value_heads=4, use_mla=False, prefill_tp_size=4, decode_tp_size=2)
+    assert set(p_meta) == {(0,), (1,), (2,), (3,)}
+    assert set(d_meta) == {(0, 1), (2, 3)}
+    assert mappings == {31000: [[30000], [30001]], 31001: [[30002], [30003]]}
 
 
 # ---------------------------------------------------------------- set_hma_shared_port
