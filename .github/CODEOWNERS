@@ -103,12 +103,12 @@
 /vllm_ascend/core/single_type_kv_cache_manager.py @yzeyu71 @Angazenn
 
 # Core framework
-/vllm_ascend/ascend_config.py 
-/vllm_ascend/ascend_forward_context.py
+/vllm_ascend/ascend_config.py @ningjingbengxiaohai @zzzzwwjj
+/vllm_ascend/ascend_forward_context.py @zzzzwwjj
 /vllm_ascend/batch_invariant.py @Ronald1995
 /vllm_ascend/config_utils.py
 /vllm_ascend/cpu_binding.py
-/vllm_ascend/envs.py
+/vllm_ascend/envs.py @ningjingbengxiaohai @zzzzwwjj
 /vllm_ascend/logger.py
 /vllm_ascend/meta_registration.py
 /vllm_ascend/mrv2_utils.py @yzeyu71
@@ -131,19 +131,19 @@
 /vllm_ascend/worker/worker.py @wxsIcey
 
 # Worker V2
-/vllm_ascend/worker/v2/model_states
+/vllm_ascend/worker/v2/model_states @zzzzwwjj
 /vllm_ascend/worker/v2/aclgraph_utils.py
-/vllm_ascend/worker/v2/attn_utils.py
-/vllm_ascend/worker/v2/block_table.py @Tflowers-0129
+/vllm_ascend/worker/v2/attn_utils.py @Angazenn @zzzzwwjj
+/vllm_ascend/worker/v2/block_table.py @Tflowers-0129 @zzzzwwjj
 /vllm_ascend/worker/v2/eplb.py
-/vllm_ascend/worker/v2/input_batch.py @yiz-liu
+/vllm_ascend/worker/v2/input_batch.py @yiz-liu @zzzzwwjj
 /vllm_ascend/worker/v2/kv_connector.py @yzeyu71
 /vllm_ascend/worker/v2/kvpp.py
-/vllm_ascend/worker/v2/model_runner.py @yiz-liu
+/vllm_ascend/worker/v2/model_runner.py @yiz-liu @zzzzwwjj
 /vllm_ascend/worker/v2/pcp_manager.py @weiguihua2
 /vllm_ascend/worker/v2/pp_transport.py
-/vllm_ascend/worker/v2/states.py @yiz-liu
-/vllm_ascend/worker/v2/utils.py
+/vllm_ascend/worker/v2/states.py @yiz-liu @zzzzwwjj
+/vllm_ascend/worker/v2/utils.py @zzzzwwjj
 
 # Models
 /vllm_ascend/models/minimax_m3 @realliujiaxu
@@ -162,7 +162,7 @@
 /recipes/ @SOMEONEUNSEEN
 
 # tests
-/tests/
+/tests/e2e/nightly @wenjun91
 
 # vllm_ascend module directories (subdirs broken out one level)
 # TODO(owner): /vllm_ascend/_cann_ops_custom
@@ -184,25 +184,5 @@
 # TODO(owner): /vllm_ascend/xlite
 # /vllm_ascend/xlite
 
-# tests (ut subdirs mirror the source-module ownership)
-# TODO(owner): /tests/*.py
-# /tests/*.py
-# TODO(owner): /tests/coveragerc
-# /tests/coveragerc
-# TODO(owner): /tests/coverage_settingInfo.xml
-# /tests/coverage_settingInfo.xml
-# TODO(owner): /tests/manual/
-# /tests/manual/
-# TODO(owner): /tests/e2e/
-# /tests/e2e/
-# TODO(owner): /tests/ut/
-# /tests/ut/
-
-
-
 # TODO(owner): /benchmarks/
 # /benchmarks/
-
-
-
-
