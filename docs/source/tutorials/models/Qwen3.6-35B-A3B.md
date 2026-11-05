@@ -331,6 +331,24 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `--quantization ascend` enables Ascend quantization for the W8A8 model used in this example.
     - `--compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'` enables the hybrid full and piecewise ACLGraph mode.
 
+    The recurrent state of each GDN layer can be stored in either BF16 or
+    FP32 independently of its convolution state. Add one of the following
+    options to the `vllm serve` command:
+
+    ```shell
+    # Lower GDN KV cache memory usage.
+    --mamba-ssm-cache-dtype bfloat16
+
+    # Keep the GDN recurrent state in FP32.
+    --mamba-ssm-cache-dtype float32
+    ```
+
+    `--mamba-ssm-cache-dtype` controls only the recurrent SSM state. The
+    convolution state remains controlled by `--mamba-cache-dtype`. The
+    default value, `auto`, follows the model/cache configuration. FP32 uses
+    twice as many bytes as BF16 for the recurrent state and can therefore
+    reduce the available KV cache capacity.
+
 === "Atlas 300I DUO"
 
     ```shell
