@@ -49,6 +49,7 @@ on:
           - 'releases/v0.18.0'
 
 permissions:
+  actions: read
   packages: write
   contents: read
 
@@ -95,3 +96,24 @@ jobs:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
+
+  collect-build-info:
+    needs: [setup-matrix, image_build]
+    permissions:
+      actions: write
+      contents: read
+    # Check the reports even if a matrix leg failed or was skipped. The
+    # collector fails until every image expected from this run is published.
+    if: ${{ always() && needs.setup-matrix.result == 'success' && github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+    uses: ./.github/workflows/_collect_build_info.yaml
+    with:
+      branch: ${{ github.event_name == 'workflow_dispatch' && inputs.docker_ref || github.ref_name }}
+      targets_json: ${{ needs.setup-matrix.outputs.build_meta }}
+      expected_types_json: ${{ github.event_name == 'push' && '["tag"]' || '["base"]' }}
+      obs_bucket: vllm-ascend
+      obs_endpoint: https://obs.cn-north-4.myhuaweicloud.com
+      obs_region: cn-north-4
+      obs_prefix: ci/build-info
+    secrets:
+      BUILD_INFO_OBS_AK: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
+      BUILD_INFO_OBS_SK: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}

@@ -51,6 +51,7 @@ from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -108,6 +109,7 @@ from vllm_ascend.utils import (
     lmhead_tp_pad_rows,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
@@ -316,48 +318,6 @@ class NPUModelRunner(GPUModelRunner):
             self._start_dump_data()
         self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
 
-    def _restore_replicated_draft_target_states(self) -> None:
-        """Restore target states consumed by a replicated PCP draft."""
-        state = self.execute_model_state
-        pcp_manager = self.pcp_manager
-        if (
-            state is None
-            or pcp_manager is None
-            or not self.is_last_pp_rank
-            or not getattr(self.speculator, "replicated_pcp", False)
-        ):
-            return
-
-        get_hidden_states = getattr(
-            self.model,
-            "get_mtp_target_hidden_states",
-            None,
-        )
-        if get_hidden_states is not None:
-            mtp_target_hidden_states = get_hidden_states()
-            if mtp_target_hidden_states is not None:
-                pcp_manager.restore_hidden_state_buffer(mtp_target_hidden_states)
-
-        # vLLM main captures draft_hidden_states before maybe_restore_pcp_for_sampling,
-        # so a replicated draft would read the PCP-local target output. Restore
-        # it to the global layout up front.
-        if state.hidden_states is not None:
-            replacements: dict[str, Any] = {"hidden_states": pcp_manager.restore_hidden_states(state.hidden_states)}
-            # vLLM #57980 folded the aux-hidden restore into
-            # restore_for_sampling. The replicated-PCP fast path below bypasses
-            # that call, so restore aux here too.
-            if state.aux_hidden_states is not None:
-                replacements["aux_hidden_states"] = [
-                    pcp_manager.restore_hidden_states(aux) for aux in state.aux_hidden_states
-                ]
-            state = state._replace(**replacements)
-            # Tell restore_for_sampling to skip its second all-gather for this
-            # step. The layout is tracked explicitly because a length match is
-            # ambiguous under piecewise/FULL graphs: every rank pads its local
-            # batch to the same global padded length.
-            pcp_manager._sampling_hidden_restored = True
-        self.execute_model_state = state
-
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
         if (
@@ -376,22 +336,6 @@ class NPUModelRunner(GPUModelRunner):
                 "prompt logprobs and fixed-token prompt scoring are not supported with lmhead TP."
             )
 
-        pcp_manager = self.pcp_manager
-        if pcp_manager is not None and not self.is_last_pp_rank and self.execute_model_state is not None:
-            assert isinstance(pcp_manager, AscendPCPManager)
-            # The last PP stage restores PCP outputs to the global request
-            # layout before sampling. Non-last stages do not own final hidden
-            # states, but their PP receive/postprocess path must use that same
-            # global request layout rather than PCP-local segment rows.
-            self.execute_model_state = self.execute_model_state._replace(
-                input_batch=pcp_manager.global_batch,
-            )
-
-        # The pre-restore marker is scoped to this sampling step; stale state
-        # from a previous step must not suppress the upstream all-gather.
-        if pcp_manager is not None and isinstance(pcp_manager, AscendPCPManager):
-            pcp_manager._sampling_hidden_restored = False
-        self._restore_replicated_draft_target_states()
         output = super().sample_tokens(grammar_output)
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
@@ -420,6 +364,10 @@ class NPUModelRunner(GPUModelRunner):
 
     def _init_kv_zero_meta(self) -> None:
         """Use a tuple-aware zeroer for Ascend V1-compatible cache protocols."""
+        offload_manager = getattr(self, "sparse_kv_offload_manager", None)
+        excluded_cache_components = (
+            offload_manager.get_topk_cache_components() if offload_manager is not None else set()
+        )
         self.kv_block_zeroer = AscendV2KVBlockZeroer(
             self.device,
             attn_groups_iter=(g for groups in self.attn_groups for g in groups),
@@ -427,6 +375,7 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=self.compilation_config.static_forward_context,
             num_blocks=self.kv_cache_config.num_blocks,
             cache_dtype=self.cache_config.cache_dtype,
+            excluded_cache_components=excluded_cache_components,
         )
         if is_c8_mxfp_kv_quant(self.vllm_config):
             # The zeroer skips the static V scales (4th tuple component); the
@@ -497,9 +446,9 @@ class NPUModelRunner(GPUModelRunner):
             )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
-                self.pcp_manager.vllm_config = self.vllm_config
-                self.pcp_manager.kv_cache_config = kv_cache_config
-                self.pcp_manager.global_input_buffers = self.input_buffers
+                self.pcp_manager.set_runner_state(self.vllm_config, kv_cache_config, self.input_buffers)
+                if isinstance(self.speculator, DraftModelSpeculator):
+                    self.pcp_manager.set_speculator(self.speculator)
                 self.model_state.pcp_manager = self.pcp_manager
         bind_dspark_context_receiver(
             self.vllm_config,
@@ -543,6 +492,10 @@ class NPUModelRunner(GPUModelRunner):
             and getattr(get_kv_transfer_group(), "requires_mamba_state_copy_after_load", False)
         ):
             self.kv_connector = MambaCopyKVConnector(self.kv_connector, copy_mamba_state)
+
+        initialize_cpu_lengths = getattr(self.model_state, "initialize_spec_cpu_length_sync", None)
+        if callable(initialize_cpu_lengths):
+            initialize_cpu_lengths(self)
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
@@ -933,9 +886,13 @@ class NPUModelRunner(GPUModelRunner):
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
         if adaptive_verification_active:
-            cu_num_logits, query_start_loc, total_num_draft_tokens = adaptive_verification_manager.reallocate_drafts(
-                req_ids, idx_mapping
-            )
+            # vLLM main appends the admitted draft counts (a 4th element) for
+            # batch-sharded sampling; the release tree returns three fields.
+            draft_split = adaptive_verification_manager.reallocate_drafts(req_ids, idx_mapping)
+            if vllm_version_is("0.32.0"):
+                cu_num_logits, query_start_loc, total_num_draft_tokens = draft_split
+            else:
+                cu_num_logits, query_start_loc, total_num_draft_tokens, _ = draft_split
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
 
             # Non-fia backends skip padding query boundary when using adaptive verification
@@ -1144,15 +1101,17 @@ class NPUModelRunner(GPUModelRunner):
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
             )
-            # Both supported upstream lanes reject drafts checked against a
-            # permissive grammar row.
-            from vllm.v1.worker.gpu.structured_outputs import grammar_invalid_drafts
+            if vllm_version_is("0.32.0"):
+                # 0.32.0 rejects drafts verified against a permissive grammar
+                # row; main moved that bookkeeping into the scheduler and the
+                # draft-token handler.
+                import vllm.v1.worker.gpu.structured_outputs as structured_outputs  # type: ignore[import-not-found]
 
-            invalid_drafts = grammar_invalid_drafts(
-                input_batch,
-                grammar_output.structured_output_request_ids,
-                grammar_output.num_acceptable_drafts,
-            )
+                invalid_drafts = structured_outputs.grammar_invalid_drafts(  # type: ignore[attr-defined]
+                    input_batch,
+                    grammar_output.structured_output_request_ids,
+                    grammar_output.num_acceptable_drafts,  # type: ignore[attr-defined]
+                )
 
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             assert self.sampler is not None
@@ -1161,13 +1120,20 @@ class NPUModelRunner(GPUModelRunner):
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
             assert self.speculator is not None
-            sampler_output = self.rejection_sampler(
-                logits,
-                input_batch,
-                # Draft logits are needed for probabilistic rejection sampling.
-                self.speculator.draft_logits,
-                invalid_drafts,
-            )
+            if vllm_version_is("0.32.0"):
+                sampler_output = self.rejection_sampler(
+                    logits,
+                    input_batch,
+                    # Draft logits are needed for probabilistic rejection sampling.
+                    self.speculator.draft_logits,
+                    invalid_drafts,
+                )
+            else:
+                sampler_output = self.rejection_sampler(
+                    logits,
+                    input_batch,
+                    self.speculator.draft_logits,
+                )
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
@@ -1275,6 +1241,10 @@ class NPUModelRunner(GPUModelRunner):
         if is_deepseek_v41(self.model_config.hf_config):
             return True
 
+        model_can_skip = getattr(getattr(self, "model_state", None), "can_skip_spec_cpu_length_sync", None)
+        if callable(model_can_skip) and model_can_skip() is True:
+            return True
+
         spec = self.speculative_config
         if (  # noqa: SIM103
             spec is not None
@@ -1291,9 +1261,19 @@ class NPUModelRunner(GPUModelRunner):
             or self.speculator is None
             or spec.method != "dspark"
             or self.model_config.architecture
-            not in ("MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration")
+            not in (
+                "MiniMaxM3SparseForCausalLM",
+                "MiniMaxM3SparseForConditionalGeneration",
+                "GlmMoeDsaForCausalLM",
+            )
             or spec.draft_model_config is None
-            or "Qwen3DSparkModel" not in (spec.draft_model_config.architectures or ())
+            or (
+                "Qwen3DSparkModel" not in (spec.draft_model_config.architectures or ())
+                and (
+                    "Glm5DSparkForCausalLM" not in (spec.draft_model_config.architectures or ())
+                    or not getattr(self.speculator, "use_flashmla", False)
+                )
+            )
         ):
             return False
 
@@ -1304,7 +1284,10 @@ class NPUModelRunner(GPUModelRunner):
         # Keep parallel, transfer, offload and adaptive paths on host counts.
         return (
             bool(draft_backends)
-            and all(backend is AscendFlashAttentionBackend for backend in draft_backends.values())
+            and (
+                all(backend is AscendFlashAttentionBackend for backend in draft_backends.values())
+                or getattr(self.speculator, "use_flashmla", False)
+            )
             and parallel_config.pipeline_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
             and parallel_config.decode_context_parallel_size == 1
@@ -1320,6 +1303,7 @@ class NPUModelRunner(GPUModelRunner):
         num_sampled,
         num_rejected,
         query_start_loc=None,
+        draft_tokens=None,
     ):
         """Update device state and refresh exact CPU counts when required."""
         if (
@@ -1332,13 +1316,25 @@ class NPUModelRunner(GPUModelRunner):
             # Restore its rows before Mamba aligns the accepted recurrent state.
             # Postprocess skips -1 (freed/unsampled) rows; gather needs valid indices.
             self.block_tables.gather_block_tables(idx_mapping.clamp_min(0), idx_mapping.shape[0])
-        super().postprocess_sampled(
-            idx_mapping,
-            sampled_tokens,
-            num_sampled,
-            num_rejected,
-            query_start_loc,
-        )
+        if draft_tokens is None:
+            super().postprocess_sampled(
+                idx_mapping,
+                sampled_tokens,
+                num_sampled,
+                num_rejected,
+                query_start_loc,
+            )
+        else:
+            # Main hands non-last PP ranks the drafts received from the last
+            # rank; 0.32.0 has no such argument, hence the None-only path above.
+            super().postprocess_sampled(
+                idx_mapping,
+                sampled_tokens,
+                num_sampled,
+                num_rejected,
+                query_start_loc,
+                draft_tokens,  # type: ignore[call-arg]
+            )
 
         # Non-last PP stages receive rejections without owning a speculator.
         if self.speculator is not None or self.sync_spec_pp_cpu_counts:

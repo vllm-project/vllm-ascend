@@ -18,14 +18,16 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_layerwise_reuse_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    LoadSpec,
+    RequestTracker,
     block_hash_to_str,
     get_block_hashes,
     get_group_block_size,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
 
 
-class LayerwiseKVPoolScheduler(KVPoolScheduler):
+class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -38,26 +40,19 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         self.layerwise_data_plane = (
             self.layerwise_backend.layerwise_data_plane if self.layerwise_backend is not None else None
         )
+        if use_layerwise and self.layerwise_data_plane not in ("block_key", "gva"):
+            raise ValueError(
+                f"Backend {backend_name!r} does not support layerwise KV pooling: "
+                f"unsupported layerwise_data_plane={self.layerwise_data_plane!r}"
+            )
         self.use_block_key_layerwise = use_layerwise and self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = use_layerwise and self.layerwise_data_plane == "gva"
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
-        cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
-        if (
-            self.use_layerwise
-            and self.backend_name != "memcache"
-            and not self.use_block_key_layerwise
-            and len(cacheable_block_sizes) != len(self.original_block_size)
-        ):
-            raise ValueError("AscendStore private KV state requires Mooncake block-key or non-layerwise transfer")
-
-    def _use_hybrid(self, vllm_config: VllmConfig, kv_cache_groups: list[Any] | None) -> bool:
-        return super()._use_hybrid(vllm_config, kv_cache_groups) or (
-            self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
-        )
-
-    def _init_layerwise_runtime(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig | None) -> None:
+        self.load_async = False
+        if self.use_layerwise_transfer:
+            self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (
             self.layerwise_backend.bind_layerwise_keys(
@@ -72,38 +67,72 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         )
         if self.use_block_key_layerwise and self.tp_mismatch:
             raise ValueError("Mooncake layerwise does not yet support prefill/decode TP mismatch")
-        self.layerwise_max_transfer_blocks = int(
-            vllm_config.kv_transfer_config.kv_connector_extra_config.get("layerwise_max_transfer_blocks", 0)
+        self.layerwise_max_transfer_blocks = int(extra_config.get("layerwise_max_transfer_blocks", 0))
+        cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
+        if (
+            self.use_layerwise
+            and self.backend_name != "memcache"
+            and not self.use_block_key_layerwise
+            and len(cacheable_block_sizes) != len(self.original_block_size)
+        ):
+            raise ValueError("AscendStore private KV state requires Mooncake block-key or non-layerwise transfer")
+
+    def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
+        return store_skip_tokens > 0
+
+    def _async_load_enabled(self) -> bool:
+        return False
+
+    def _init_layerwise_offload(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, extra_config) -> Any:
+        reuse_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
+        if kv_cache_config is not None and reuse_config is not None:
+            reuse_layout = build_layerwise_reuse_layout(
+                get_layerwise_kv_cache_specs(kv_cache_config),
+                self.num_layers,
+                reuse_config,
+            )
+            if reuse_layout.layer_cache_specs:
+                self.num_layers = max(
+                    self.num_layers,
+                    max(reuse_layout.layer_cache_specs) + 1,
+                )
+            self.layerwise_offload = reuse_layout.has_layer_reuse
+        else:
+            self.layerwise_offload = build_layerwise_cache_layout(
+                self.num_layers,
+                extra_config,
+            ).has_layer_reuse
+
+    def get_running_target_token_len(self, request: Request, num_new_tokens: int) -> int:
+        target_token_len = request.num_computed_tokens + num_new_tokens
+        if self.layerwise_offload:
+            return target_token_len
+        return min(target_token_len, len(request.all_token_ids))
+
+    def _running_load_spec(self, request_tracker: RequestTracker, num_current_tokens: int) -> LoadSpec | None:
+        if self.layerwise_offload and num_current_tokens > 0:
+            return LoadSpec(
+                vllm_cached_tokens=num_current_tokens,
+                kvpool_cached_tokens=num_current_tokens,
+                can_load=True,
+                layerwise_snapshot_end_token=request_tracker.last_layerwise_snapshot_end_token,
+                layerwise_snapshot_block_index=request_tracker.last_layerwise_snapshot_block_index,
+                layerwise_snapshot_start_block=request_tracker.last_layerwise_snapshot_start_block,
+                layerwise_previous_step=True,
+            )
+        return None
+
+    def _use_hybrid(self, vllm_config: VllmConfig, kv_cache_groups: list[Any] | None) -> bool:
+        return super()._use_hybrid(vllm_config, kv_cache_groups) or (
+            self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
 
-    def _init_layerwise_offload(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig | None) -> None:
-        self.layerwise_offload = False
-        if self.use_layerwise_transfer:
-            extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
-            if kv_cache_config is not None and extra_config is not None:
-                reuse_layout = build_layerwise_reuse_layout(
-                    get_layerwise_kv_cache_specs(kv_cache_config),
-                    self.num_layers,
-                    extra_config,
-                )
-                if reuse_layout.layer_cache_specs:
-                    self.num_layers = max(
-                        self.num_layers,
-                        max(reuse_layout.layer_cache_specs) + 1,
-                    )
-                self.layerwise_offload = reuse_layout.has_layer_reuse
-            else:
-                self.layerwise_offload = build_layerwise_cache_layout(
-                    self.num_layers,
-                    vllm_config.kv_transfer_config.kv_connector_extra_config,
-                ).has_layer_reuse
-
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
-        if not self.use_layerwise:
-            return super()._lookup_external_hit_tokens(request, num_computed_tokens)
         prompt_token_len = len(request.prompt_token_ids)
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
+            if not self.use_eagle and len(self.cacheable_group_ids) != len(self.original_block_size):
+                token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
             if token_len < self.cache_transfer_granularity:
                 return None
             return self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens)
@@ -111,14 +140,7 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         if self.use_layerwise_transfer:
             return self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens)
 
-        token_len = (
-            self._floor_to_cache_transfer_granularity(prompt_token_len)
-            if self._discard_partial_chunks
-            else prompt_token_len
-        )
-        if token_len < self.cache_transfer_granularity:
-            return None
-        return self._get_store_lookup_hit_tokens(request, token_len, num_computed_tokens, include_layers=True)
+        raise RuntimeError(f"Unsupported layerwise data plane: {self.layerwise_data_plane!r}")
 
     def _get_layerwise_hit_tokens(
         self,
@@ -284,8 +306,8 @@ class LayerwiseKVPoolScheduler(KVPoolScheduler):
         backend's protocol module.
 
         Single-group uses PR #11585 format; multi-group includes group_id.
-        A block is a hit only when every PP stage has saved it, so the
-        protocol helper enumerates all stages and head/TP ranks.
+        A block is a hit only when every PP stage and PCP rank has saved it,
+        so the protocol helper enumerates all stages, PCP ranks and heads.
         """
         assert self.layerwise_keys is not None
         draft_keys = self.dspark_prefix_keys
