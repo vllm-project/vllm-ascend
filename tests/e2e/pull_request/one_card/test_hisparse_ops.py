@@ -410,13 +410,13 @@ def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream):
     torch.npu.synchronize()
     torch.testing.assert_close(sc.cpu(), torch.zeros(query_rows, dtype=torch.int32))
     torch.testing.assert_close(stats.cpu(), torch.tensor([union, union], dtype=torch.int64))
-    stream = torch.npu.Stream()
-    stream.wait_stream(torch.npu.current_stream())
-    with torch.npu.stream(stream):
+    capture_stream = torch.npu.Stream()
+    capture_stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(capture_stream):
         forward()
     torch.npu.synchronize()
     graph = torch.npu.NPUGraph()
-    with torch.npu.graph(graph, stream=stream):
+    with torch.npu.graph(graph, stream=capture_stream):
         forward()
     dgi.fill_(-1)
     lru.copy_(torch.arange(hot_size, dtype=torch.int16)[None, :])
