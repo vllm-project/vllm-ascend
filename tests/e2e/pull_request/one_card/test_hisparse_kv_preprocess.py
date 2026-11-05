@@ -121,12 +121,12 @@ def test_c8_prolog_keeps_parent_outputs_and_hisparse_destination(rows, capture):
     _setup()
     from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
     from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
-    from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+    from vllm_ascend.quantization.methods import AscendW8A8MXFP8DynamicLinearMethod
 
     torch.manual_seed(71)
     device, block, width = "npu", 128, 656
     impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
-    impl._quant_type = AscendW8A8DynamicLinearMethod
+    impl._quant_type = AscendW8A8MXFP8DynamicLinearMethod
     impl.enable_sparse_sfa_c8 = True
     impl.c8_cache_dtype = torch.float8_e4m3fn
     impl.q_lora_rank, impl.kv_lora_rank, impl.qk_rope_head_dim = 2048, 512, 64
@@ -134,14 +134,17 @@ def test_c8_prolog_keeps_parent_outputs_and_hisparse_destination(rows, capture):
     impl.is_kv_consumer, impl.rl_weight_update_enabled = False, False
     impl.sfa_qsfa_tile_size = block
     impl._kv_staging_capacity = block
-    impl.fused_qkv_a_proj = SimpleNamespace(
-        weight=torch.randint(-4, 5, (6144, 2624), dtype=torch.int8, device=device),
-        weight_scale=torch.full((2624,), 0.02, dtype=torch.float32, device=device),
-    )
-    impl.q_proj = SimpleNamespace(
-        weight=torch.randint(-4, 5, (2048, 2048), dtype=torch.int8, device=device),
-        weight_scale=torch.full((2048,), 0.02, dtype=torch.float32, device=device),
-    )
+
+    def mx_layer(inputs, outputs):
+        weight, scale = torch_npu.npu_dynamic_mx_quant(
+            torch.randn(outputs, inputs, dtype=torch.bfloat16, device=device) * 0.02,
+            dst_type=torch.float8_e4m3fn,
+        )
+        return SimpleNamespace(weight=weight.T.contiguous(), weight_scale=scale.transpose(0, 1).contiguous())
+
+    impl.fused_qkv_a_proj = mx_layer(6144, 2624)
+    impl.q_proj = mx_layer(2048, 2048)
+    impl.sfa_qsfa_k_nope_clip_alpha = None
     impl.W_UK_T = torch.randn(8, 192, 512, dtype=torch.bfloat16, device=device) * 0.02
     impl.q_a_layernorm = SimpleNamespace(
         weight=torch.ones(2048, dtype=torch.bfloat16, device=device), variance_epsilon=1e-5
@@ -178,6 +181,8 @@ def test_c8_prolog_keeps_parent_outputs_and_hisparse_destination(rows, capture):
             for a, e in zip(actual, expected):
                 compare(a, e)
         elif actual is not None:
+            if actual.dtype == torch.float8_e4m3fn:
+                actual, expected = actual.view(torch.uint8), expected.view(torch.uint8)
             torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
         else:
             assert expected is None
