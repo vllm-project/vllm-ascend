@@ -21,3 +21,9 @@
   handler: ms_service_metric.provider_handlers:phase_all_handler
   metrics:
     - name: eplb:expert_weight_replace:duration
+
+- symbol: vllm_ascend.eplb.core.eplb_device_transfer_loader:D2DExpertWeightLoader.asyn_expert_weight_transfer
+  handler: vllm_ascend.observability.ms_metrics.handlers:eplb_expert_weight_transfer_handler
+  metrics:
+    - name: eplb:expert_weight_transfer:duration
+      type: histogram

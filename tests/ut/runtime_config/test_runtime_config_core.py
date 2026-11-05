@@ -217,6 +217,95 @@ def test_report_save_sensitive_wrong_type_rejected():
         validate_runtime_config(data)
 
 
+def test_metrics_level_normalizes_and_rejects_unknown():
+    from copy import deepcopy
+
+    from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
+    from vllm_ascend.observability.runtime_config.config import validate_runtime_config
+
+    data = deepcopy(_DEFAULTS)
+    data["metrics"]["level"] = 2
+    validate_runtime_config(data)
+    assert data["metrics"]["level"] == "detail"
+
+    data = deepcopy(_DEFAULTS)
+    data["metrics"]["level"] = "nope"
+    with pytest.raises(ValueError, match="invalid metric level"):
+        validate_runtime_config(data)
+
+    data = deepcopy(_DEFAULTS)
+    data["metrics"]["enabled"] = True
+    with pytest.raises(ValueError, match="unknown key"):
+        validate_runtime_config(data)
+
+
+def test_hot_reload_apply_metric_level(tmp_path: Path):
+    from vllm_ascend.observability.ms_metrics.level import (
+        METRIC_LEVEL_BASIC,
+        METRIC_LEVEL_DEBUG,
+        METRIC_LEVEL_DETAIL,
+        get_metric_level,
+        set_metric_level,
+    )
+
+    cfg_path = tmp_path / "runtime_config.json"
+    _write(cfg_path, {})
+    cfg = RuntimeConfig(
+        config_path=cfg_path,
+        report_dir=tmp_path / "report",
+        ensure_file=True,
+        hot_reload=True,
+    )
+    try:
+        cfg.apply_metric_level()
+        assert get_metric_level() == METRIC_LEVEL_BASIC
+
+        _write(cfg_path, {"metrics": {"level": "detail"}})
+        time.sleep(0.01)
+        assert cfg.reload(force=True) is True
+        cfg.apply_metric_level()
+        assert cfg.metrics_level() == "detail"
+        assert get_metric_level() == METRIC_LEVEL_DETAIL
+
+        _write(cfg_path, {"metrics": {"level": "debug"}})
+        time.sleep(0.01)
+        assert cfg.reload(force=True) is True
+        cfg.apply_metric_level()
+        assert get_metric_level() == METRIC_LEVEL_DEBUG
+    finally:
+        set_metric_level("basic")
+
+
+def test_persist_metrics_level_updates_existing_file(tmp_path: Path):
+    cfg_path = tmp_path / "runtime_config.json"
+    _write(cfg_path, {"metrics": {"level": "basic"}, "ascend_log": {"level": "INFO"}})
+    cfg = RuntimeConfig(
+        config_path=cfg_path,
+        report_dir=tmp_path / "report",
+        ensure_file=True,
+        hot_reload=True,
+    )
+    assert cfg.persist_metrics_level("2") == "detail"
+    assert cfg.metrics_level() == "detail"
+    on_disk = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert on_disk["metrics"]["level"] == "detail"
+    assert on_disk["ascend_log"]["level"] == "INFO"
+    # Digest matches the write, so the next poll does not treat it as a new edit.
+    assert cfg.reload(force=False) is False
+
+
+def test_persist_metrics_level_leaves_missing_file(tmp_path: Path):
+    cfg_path = tmp_path / "runtime_config.json"
+    cfg = RuntimeConfig(
+        config_path=cfg_path,
+        report_dir=tmp_path / "report",
+        ensure_file=False,
+    )
+    assert cfg.persist_metrics_level("debug") == "debug"
+    assert cfg.metrics_level() == "debug"
+    assert not cfg_path.exists()
+
+
 def test_ascend_log_enabled_unknown_key_rejected():
     from copy import deepcopy
 

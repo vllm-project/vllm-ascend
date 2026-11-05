@@ -316,6 +316,12 @@ class NPUWorker(WorkerBase):
             model.get_parameter(name).copy_(value)
         self._sleep_saved_parameters.clear()
 
+    def set_metrics_level(self, level: str) -> str:
+        """Set this worker process's MS metric level. Called by collective RPC."""
+        from vllm_ascend.observability.ms_metrics.control import apply_process_metrics_level
+
+        return apply_process_metrics_level(level)
+
     def sleep(self, level: int = 1) -> None:
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
@@ -344,6 +350,10 @@ class NPUWorker(WorkerBase):
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
+
+        from vllm_ascend.observability.ms_metrics.handlers.rl_lifecycle import record_sleep_freed_gb
+
+        record_sleep_freed_gb(level, freed_bytes / GiB_bytes)
 
         logger.info(
             "Sleep mode (level=%s) freed %.2f GiB memory, %.2f GiB memory is still in use.",
