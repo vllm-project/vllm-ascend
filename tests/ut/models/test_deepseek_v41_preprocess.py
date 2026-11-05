@@ -29,6 +29,103 @@ def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
     impl.forward.assert_called_once_with(attn, None, hidden, output)
 
 
+@pytest.mark.parametrize(
+    "configured,threshold,query_tokens,cache_tokens,expected",
+    [
+        (False, 1024, 4, 4, False),
+        (True, 0, 4, 4, False),
+        (True, 4, 4, 4, True),
+        (True, 3, 4, 4, False),
+        (True, 4, 2, 5, False),
+    ],
+)
+def test_multistream_policy_uses_largest_input(
+    monkeypatch,
+    configured,
+    threshold,
+    query_tokens,
+    cache_tokens,
+    expected,
+):
+    monkeypatch.setattr(dsa_v41.envs, "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", threshold)
+    impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
+    impl.multistream_dsv4_dsa_overlap = configured
+
+    assert impl._use_multistream(query_tokens, cache_tokens) is expected
+
+
+@pytest.mark.parametrize(
+    "configured,threshold,expected_stream",
+    [(False, 4, "main"), (True, 3, "main"), (True, 4, "aux")],
+)
+def test_indexer_streams_follow_multistream_policy(monkeypatch, configured, threshold, expected_stream):
+    trace = []
+    active_stream = "main"
+
+    class Stream:
+        def __init__(self, name):
+            self.name = name
+
+        def record_event(self):
+            event = f"event{len(trace)}"
+            trace.append((self.name, "record", event))
+            return event
+
+        def wait_event(self, event):
+            trace.append((self.name, "wait", event))
+
+    main_stream = Stream("main")
+    aux_stream = Stream("aux")
+
+    @contextmanager
+    def switch(stream):
+        nonlocal active_stream
+        previous, active_stream = active_stream, stream.name
+        try:
+            yield
+        finally:
+            active_stream = previous
+
+    def record(name, value):
+        trace.append((active_stream, name, None))
+        return value.clone()
+
+    indexer = SimpleNamespace(
+        project_query=lambda value: record("query", value),
+        project_weights=lambda value: record("weights", value),
+        apply_query_rope=lambda *args: trace.append((active_stream, "rope", None)),
+        quantize_query=lambda value: (record("quantize", value), torch.ones(value.shape[0])),
+    )
+    attn = SimpleNamespace(indexer=indexer)
+    metadata = SimpleNamespace(indexer=SimpleNamespace(cache=SimpleNamespace(max_cache_seq_len=1)))
+    hidden_states = torch.zeros(4, 8)
+
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: main_stream)
+    monkeypatch.setattr(torch.npu, "stream", switch)
+    monkeypatch.setattr(dsa_v41, "dsv4_dsa_overlap_stream", lambda: aux_stream)
+    monkeypatch.setattr(dsa_v41.envs, "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", threshold)
+
+    impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
+    impl.multistream_dsv4_dsa_overlap = configured
+    impl.role = SimpleNamespace(has_long_context=True, is_index_source=True)
+    use_multistream = impl._use_multistream(hidden_states.shape[0], hidden_states.shape[0])
+
+    prepared = impl._prepare_indexer_inputs(
+        attn,
+        hidden_states,
+        hidden_states,
+        None,
+        None,
+        metadata,
+        use_multistream=use_multistream,
+    )
+    impl._quantize_indexer_query(attn, prepared, metadata)
+
+    assert next(stream for stream, operation, _ in trace if operation == "weights") == expected_stream
+    assert next(stream for stream, operation, _ in trace if operation == "quantize") == expected_stream
+    assert (prepared.quantize_done is not None) is use_multistream
+
+
 @pytest.mark.parametrize("overlap", [False, True])
 @pytest.mark.parametrize(
     "layout,num_tokens,quantized_kv,a5_batch,communication",
