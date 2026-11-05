@@ -1839,7 +1839,7 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
     assert metadata_kwargs["layout_kv"] == "PA_BBND"
     assert metadata_kwargs["mask_mode"] == 1
     assert metadata_kwargs["quant_mode"] == 0
-    assert metadata_kwargs["softmax_precision"] == 0
+    assert metadata_kwargs["softmax_precision"] == (1 if device_type == AscendDeviceType.A5 else 0)
     assert "is_packed_gqa" not in metadata_kwargs
 
     gbsa_attention_op.assert_called_once()
@@ -1979,7 +1979,7 @@ def test_sparse_decode_cache_separates_bf16_and_fp8_schedules(mock_gbsa_ops, mon
             gbsa_metadata_cache=cache,
         )
         schedules.append(attention_op.call_args.kwargs["metadata"])
-        assert attention_op.call_args.kwargs["softmax_precision"] == (1 if dtype == torch.float8_e4m3fn else 0)
+        assert attention_op.call_args.kwargs["softmax_precision"] == 1
     assert metadata_op.call_count == 2 and len(cache) == 2
     assert schedules[0] is schedules[2] and schedules[0] is not schedules[1]
 
@@ -2098,15 +2098,15 @@ def test_prepared_gbsa_counts_match_decode_topk_mask(query_len, topk, logical_bl
 
 @pytest.mark.parametrize("query_len", [1, 2, 3, 4, 7, 8])
 @pytest.mark.parametrize(
-    "device_type,kv_cache_dtype",
+    "device_type,kv_cache_dtype,expected_precision",
     [
-        (AscendDeviceType.A3, torch.bfloat16),
-        (AscendDeviceType.A5, torch.bfloat16),
-        (AscendDeviceType.A5, torch.float8_e4m3fn),
+        (AscendDeviceType.A3, torch.bfloat16, 0),
+        (AscendDeviceType.A5, torch.bfloat16, 1),
+        (AscendDeviceType.A5, torch.float8_e4m3fn, 1),
     ],
 )
 def test_sparse_builder_prepares_gbsa_before_layers_and_refreshes_in_place(
-    query_len, device_type, kv_cache_dtype, mock_gbsa_ops, monkeypatch
+    query_len, device_type, kv_cache_dtype, expected_precision, mock_gbsa_ops, monkeypatch
 ):
     metadata_op, attention_op = mock_gbsa_ops
     monkeypatch.setattr(msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
@@ -2159,9 +2159,7 @@ def test_sparse_builder_prepares_gbsa_before_layers_and_refreshes_in_place(
             )
             assert attention_op.call_args.kwargs["metadata"] is buffer
             assert attention_op.call_args.kwargs["quant_mode"] == (5 if kv_cache_dtype == torch.float8_e4m3fn else 0)
-            assert attention_op.call_args.kwargs["softmax_precision"] == (
-                1 if kv_cache_dtype == torch.float8_e4m3fn else 0
-            )
+            assert attention_op.call_args.kwargs["softmax_precision"] == expected_precision
     assert events == ["metadata", "gbsa", "gbsa", "gbsa"]
     assert metadata_op.call_args.kwargs["quant_mode"] == attention_op.call_args.kwargs["quant_mode"]
     assert metadata_op.call_args.kwargs["softmax_precision"] == attention_op.call_args.kwargs["softmax_precision"]
@@ -2428,18 +2426,19 @@ def test_sparse_attn_prefill_a5_uses_fp8_inputs(
 
 
 @pytest.mark.parametrize(
-    ("device_type", "dtype"),
+    ("device_type", "dtype", "expected_precision"),
     [
-        (AscendDeviceType.A2, torch.bfloat16),
-        (AscendDeviceType.A3, torch.bfloat16),
-        (AscendDeviceType.A5, torch.bfloat16),
-        (AscendDeviceType.A5, torch.float8_e4m3fn),
+        (AscendDeviceType.A2, torch.bfloat16, 0),
+        (AscendDeviceType.A3, torch.bfloat16, 0),
+        (AscendDeviceType.A5, torch.bfloat16, 1),
+        (AscendDeviceType.A5, torch.float8_e4m3fn, 1),
     ],
 )
 @pytest.mark.parametrize("cache_layout", ["tensor", "tuple", "list"])
 def test_sparse_attn_prefill_missing_split_kv_uses_cann_gbsa(
     device_type: AscendDeviceType,
     dtype,
+    expected_precision,
     cache_layout,
     mock_gbsa_ops: tuple[MagicMock, MagicMock],
 ) -> None:
@@ -2480,7 +2479,7 @@ def test_sparse_attn_prefill_missing_split_kv_uses_cann_gbsa(
     gbsa_metadata_op.assert_called_once()
     metadata_kwargs = gbsa_metadata_op.call_args.kwargs
     assert metadata_kwargs["max_seqlen_q"] == 3
-    assert metadata_kwargs["softmax_precision"] == (1 if dtype == torch.float8_e4m3fn else 0)
+    assert metadata_kwargs["softmax_precision"] == expected_precision
     assert torch.equal(metadata_kwargs["cu_seqlens_q"], torch.tensor([0, 2, 5], dtype=torch.int64))
     assert torch.equal(metadata_kwargs["seqused_kv"], torch.tensor([130, 3], dtype=torch.int32))
 

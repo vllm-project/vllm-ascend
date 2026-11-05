@@ -248,6 +248,8 @@ class HardwareProfile:
 
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
     requires_2d_nz_linear_input: bool = False
+    # Stable CANN GBSA releases require mode 1 for BF16 on A5; A3 uses mode 0.
+    minimax_m3_gbsa_bf16_softmax_precision: int = 0
     # Fixed GDN verification uses the strided recurrent kernel at/above this
     # query length to work around native operator numerical failures. None
     # retains native dispatch; this is a stack workaround, not a silicon limit.
@@ -357,6 +359,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         AscendDeviceType.A5: HardwareProfile(
             _device_type=AscendDeviceType.A5,
             requires_2d_nz_linear_input=True,
+            minimax_m3_gbsa_bf16_softmax_precision=1,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.TOPO_AFFINITY,
             default_worker_cls=_DEFAULT_WORKER_CLS,
