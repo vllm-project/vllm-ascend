@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
+from torch._subclasses.fake_tensor import FakeTensorMode
 from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
 from vllm.model_executor.models import qwen3_vl as upstream_qwen3_vl
 from vllm.model_executor.models.qwen3_vl import (
@@ -615,9 +616,16 @@ def test_disabled_video_pruning_preserves_upstream_placeholder(upstream_result, 
 @pytest.mark.parametrize(
     "pruning_spec, expected_method", [(None, None), (("evs", 0.75), "evs"), (("vidcom2", 0.5), "vidcom2")]
 )
-def test_video_pruning_method_initialized_through_mixin(pruning_spec, expected_method, monkeypatch):
-    class ModelBase:
+@pytest.mark.parametrize("has_triton", [False, True])
+def test_video_pruning_method_initialized_through_mixin(pruning_spec, expected_method, has_triton, monkeypatch):
+    monkeypatch.setattr(qwen3_5_vl, "HAS_TRITON", has_triton)
+    native_method = qwen3_5_vl.AscendUnquantizedLinearMethod()
+    embedding_method = qwen3_5_vl.UnquantizedEmbeddingMethod()
+    quantized_method = object()
+
+    class ModelBase(torch.nn.Module):
         def __init__(self, *, vllm_config, prefix):
+            super().__init__()
             self.multimodal_config = SimpleNamespace(get_video_pruning_spec=lambda: pruning_spec)
             self.model_config = SimpleNamespace()
             self.config = SimpleNamespace(
@@ -625,7 +633,16 @@ def test_video_pruning_method_initialized_through_mixin(pruning_spec, expected_m
                     in_channels=C, patch_size=PS, temporal_patch_size=TPS, spatial_merge_size=MS
                 )
             )
-            self.visual = SimpleNamespace(input_norm=object())
+            self.visual = torch.nn.Module()
+            self.visual.input_norm = object()
+            self.visual.linear = torch.nn.Linear(3, 4)
+            self.visual.linear.quant_method = native_method
+            self.visual.quantized = torch.nn.Linear(3, 4)
+            self.visual.quantized.quant_method = quantized_method
+            self.decoder = torch.nn.Linear(3, 4)
+            self.decoder.quant_method = native_method
+            self.lm_head = torch.nn.Embedding(4, 3)
+            self.lm_head.quant_method = embedding_method
 
     class Model(_AscendVLPreprocessMixin, ModelBase):
         pass
@@ -634,3 +651,41 @@ def test_video_pruning_method_initialized_through_mixin(pruning_spec, expected_m
     model = Model(vllm_config=None, prefix="model")
 
     assert model.video_pruning_method == expected_method
+    # Quant methods must remain native throughout checkpoint loading.
+    assert model.visual.linear.quant_method is native_method
+    assert model.decoder.quant_method is native_method
+    assert model.lm_head.quant_method is embedding_method
+    weights_before = {name: weight.detach().clone() for name, weight in model.named_parameters()}
+    model.process_weights_after_loading()
+    if expected_method == "evs" and has_triton:
+        assert isinstance(model.visual.linear.quant_method, qwen3_5_vl._EVSUnquantizedLinearMethod)
+        assert isinstance(model.decoder.quant_method, qwen3_5_vl._EVSUnquantizedLinearMethod)
+        assert isinstance(model.lm_head.quant_method, qwen3_5_vl._EVSUnquantizedEmbeddingMethod)
+    else:
+        assert model.visual.linear.quant_method is native_method
+        assert not getattr(model.visual.linear, "skip_weight_nz_conversion", False)
+        assert model.decoder.quant_method is native_method
+        assert not getattr(model.decoder, "skip_weight_nz_conversion", False)
+        assert model.lm_head.quant_method is embedding_method
+    assert model.visual.quantized.quant_method is quantized_method
+    methods_before = [getattr(module, "quant_method", None) for module in model.modules()]
+    model.process_weights_after_loading()
+    assert methods_before == [getattr(module, "quant_method", None) for module in model.modules()]
+    for name, weight in model.named_parameters():
+        torch.testing.assert_close(weight, weights_before[name], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("shape, expected_shape", [((3, 4), (3, 5)), ((2, 3, 4), (2, 3, 5))])
+@pytest.mark.parametrize("with_bias", [False, True])
+def test_evs_linear_fake_tensor_contract(shape, expected_shape, with_bias):
+    # Graph compilation must infer output metadata without executing the NPU
+    # kernel's device-property queries or importing its worker-only backend.
+    with FakeTensorMode():
+        inputs = torch.empty(shape, dtype=torch.bfloat16)
+        weight = torch.empty((5, 4), dtype=torch.bfloat16)
+        bias = torch.empty(5, dtype=torch.bfloat16) if with_bias else None
+        output = torch.ops.vllm.qwen35_evs_linear(inputs, weight, bias)
+
+    assert output.shape == expected_shape
+    assert output.dtype == inputs.dtype
+    assert output.device == inputs.device
