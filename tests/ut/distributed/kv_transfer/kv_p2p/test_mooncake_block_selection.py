@@ -68,7 +68,7 @@ class FakeRequest:
         self.kv_transfer_params = kv_transfer_params
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
-        self._all_token_ids = list(prompt_token_ids if all_token_ids is None else all_token_ids)
+        self._all_token_ids = list(all_token_ids if all_token_ids is not None else (prompt_token_ids or []))
         self.num_prompt_tokens = len(self._all_token_ids) if num_prompt_tokens is None else num_prompt_tokens
         self.max_tokens = 16
         self.block_hashes = ["old-prompt-hash"]
@@ -237,16 +237,16 @@ def test_truncate_request_for_prefill_handles_prompt_embeds():
 
 
 @pytest.mark.parametrize(
-    "params,prompt_token_ids,num_prompt_tokens",
+    "params,prompt_token_ids,num_prompt_tokens,expected_truncated_flag",
     [
-        (None, [1, 2, 3], 3),
-        ({"_p_side_truncated": True}, [1, 2, 3], 3),
-        ({}, [1], 1),
-        ({}, None, 3),
+        (None, [1, 2, 3], 3, False),
+        ({"_p_side_truncated": True}, [1, 2, 3], 3, True),
+        ({}, [1], 1, False),
+        ({}, None, 3, False),
     ],
     ids=["no-params", "already-truncated", "single-token", "no-payload"],
 )
-def test_truncate_request_for_prefill_guards(params, prompt_token_ids, num_prompt_tokens):
+def test_truncate_request_for_prefill_guards(params, prompt_token_ids, num_prompt_tokens, expected_truncated_flag):
     request = FakeRequest(
         kv_transfer_params=params,
         prompt_token_ids=prompt_token_ids,
@@ -258,7 +258,7 @@ def test_truncate_request_for_prefill_guards(params, prompt_token_ids, num_promp
     assert request.max_tokens == 16
     assert request.block_hashes == ["old-prompt-hash"]
     if params is not None:
-        assert "_p_side_truncated" not in params
+        assert params.get("_p_side_truncated", False) is expected_truncated_flag
 
 
 # ---------------------------------------------------------------- layerwise
