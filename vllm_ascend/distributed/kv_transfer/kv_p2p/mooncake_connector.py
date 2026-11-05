@@ -166,6 +166,8 @@ KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
 THREAD_STOP_POLL_SECONDS = 0.2
 # Best-effort upper bound for joining a background thread during shutdown.
 SHUTDOWN_JOIN_TIMEOUT_SECONDS = 5.0
+# Startup wait bound for the transfer threads; on timeout the worker rolls back.
+KV_CACHE_THREAD_STARTUP_TIMEOUT_SECONDS = 5 * 60
 
 
 class KVCacheSendingThread(threading.Thread):
@@ -201,6 +203,8 @@ class KVCacheSendingThread(threading.Thread):
         self.task_tracker = KVCacheTaskTracker()
         # Set by stop() to let the busy loop exit; see run_busy_loop().
         self._stop_event = threading.Event()
+        # First fatal (unrecoverable) error raised by run(); read by the worker.
+        self.fatal_error: BaseException | None = None
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -247,6 +251,7 @@ class KVCacheSendingThread(threading.Thread):
                 self.ready_event.set()
                 self.run_busy_loop(sock)
         except Exception as e:
+            self.fatal_error = e
             logger.exception(
                 "Mooncake KVCacheSendingThread encountered exception. "
                 "Thread: tp_rank=%d, pp_rank=%d, listening_path=%s. "
@@ -2088,6 +2093,13 @@ class MooncakeConnectorWorker:
                     )
             except Exception as error:
                 logger.warning("Failed to join mooncake thread. thread=%s. error=%s. ", thread.name, error)
+        fatal_error = self.get_thread_fatal_error()
+        if fatal_error is not None:
+            logger.error(
+                "Mooncake transfer thread reported a fatal error. engine_id=%s. error=%s. ",
+                self.engine_id,
+                fatal_error,
+            )
         if self.kv_recv_thread is not None:
             try:
                 self.kv_recv_thread.executor.shutdown(wait=True)
@@ -2098,6 +2110,26 @@ class MooncakeConnectorWorker:
             except Exception as error:
                 logger.warning("Failed to close mooncake remote socket pool. error=%s. ", error)
         logger.info("MooncakeConnectorWorker shutdown complete. engine_id=%s", self.engine_id)
+
+    def _wait_until_ready(self, thread, ready_event) -> None:
+        """Wait for the transfer thread to become ready; roll back on failure."""
+        start_wait_time = time.time()
+        while not ready_event.is_set():
+            if not thread.is_alive():
+                self.shutdown()
+                raise RuntimeError("KV Cache sending/receiving thread failed to start.")
+            if time.time() - start_wait_time > KV_CACHE_THREAD_STARTUP_TIMEOUT_SECONDS:
+                self.shutdown()
+                raise RuntimeError("Timeout waiting for KV Cache thread to be ready.")
+            time.sleep(3)
+
+    def get_thread_fatal_error(self) -> BaseException | None:
+        """Return the first fatal error reported by a transfer thread, if any."""
+        for thread in (self.kv_recv_thread, self.kv_send_thread):
+            error = getattr(thread, "fatal_error", None) if thread is not None else None
+            if error is not None:
+                return error
+        return None
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -2587,52 +2619,50 @@ class MooncakeConnectorWorker:
         )
         self.xfer_handshake_metadata = metadata
 
-        ready_event = threading.Event()
-        if self.kv_role == "kv_producer":
-            self.kv_send_thread = KVCacheSendingThread(
-                self.vllm_config,
-                self.tp_rank,
-                self._prefill_tp_size,
-                self.engine_id,
-                self.side_channel_host,
-                self.side_channel_port,
-                metadata,
-                ready_event,
-                self.kv_caches,
-                self.pcp_rank,
-            )
-            self.kv_send_thread.start()
-        else:
-            self.kv_recv_thread = KVCacheRecvingThread(
-                self.tp_rank,
-                self.tp_size,
-                self._prefill_pp_size,
-                self.engine,
-                self.engine_id,
-                self.handshake_port,
-                self.side_channel_port,
-                self.kv_caches_base_addr,
-                self.block_len_per_addr,
-                self.block_stride_per_addr,
-                self._is_hma_required,
-                ready_event,
-                self.vllm_config,
-                self.kv_caches,
-                self._prefill_pp_layer_partition,
-                self.kv_group2layeridx,
-                self.block_size_scale,
-                use_request_level_recv_errors=self._use_request_level_recv_errors,
-            )
-            self.kv_recv_thread.start()
-        start_wait_time = time.time()
-        thread = self.kv_send_thread if self.kv_role == "kv_producer" else self.kv_recv_thread
-        assert thread is not None
-        while not ready_event.is_set():
-            if not thread.is_alive():
-                raise RuntimeError("KV Cache sending/receiving thread failed to start.")
-            if time.time() - start_wait_time > 5 * 60:
-                raise RuntimeError("Timeout waiting for KV Cache thread to be ready.")
-            time.sleep(3)
+        try:
+            ready_event = threading.Event()
+            if self.kv_role == "kv_producer":
+                self.kv_send_thread = KVCacheSendingThread(
+                    self.vllm_config,
+                    self.tp_rank,
+                    self._prefill_tp_size,
+                    self.engine_id,
+                    self.side_channel_host,
+                    self.side_channel_port,
+                    metadata,
+                    ready_event,
+                    self.kv_caches,
+                    self.pcp_rank,
+                )
+                self.kv_send_thread.start()
+            else:
+                self.kv_recv_thread = KVCacheRecvingThread(
+                    self.tp_rank,
+                    self.tp_size,
+                    self._prefill_pp_size,
+                    self.engine,
+                    self.engine_id,
+                    self.handshake_port,
+                    self.side_channel_port,
+                    self.kv_caches_base_addr,
+                    self.block_len_per_addr,
+                    self.block_stride_per_addr,
+                    self._is_hma_required,
+                    ready_event,
+                    self.vllm_config,
+                    self.kv_caches,
+                    self._prefill_pp_layer_partition,
+                    self.kv_group2layeridx,
+                    self.block_size_scale,
+                    use_request_level_recv_errors=self._use_request_level_recv_errors,
+                )
+                self.kv_recv_thread.start()
+            thread = self.kv_send_thread if self.kv_role == "kv_producer" else self.kv_recv_thread
+            assert thread is not None
+            self._wait_until_ready(thread, ready_event)
+        except Exception:
+            self.shutdown()
+            raise
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         results = self.get_transfer_results()

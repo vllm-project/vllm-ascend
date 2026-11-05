@@ -122,6 +122,8 @@ LAYERWISE_REUSE_WAIT_LOG_INTERVAL_SECONDS = 10.0
 THREAD_STOP_POLL_SECONDS = 0.2
 # Best-effort upper bound for joining a layer thread during shutdown.
 SHUTDOWN_JOIN_TIMEOUT_SECONDS = 5.0
+# Startup wait bound for the layer threads; on timeout the worker rolls back.
+KV_CACHE_THREAD_STARTUP_TIMEOUT_SECONDS = 5 * 60
 
 
 @dataclass
@@ -275,6 +277,8 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.reuse_completion_callback = reuse_completion_callback
         # Set by stop() to let the send loop exit; see run().
         self._stop_event = threading.Event()
+        # First fatal (unrecoverable) error raised by run(); read by the worker.
+        self.fatal_error: BaseException | None = None
 
     def stop(self) -> None:
         """Signal the send loop to exit; idempotent."""
@@ -285,12 +289,17 @@ class KVCacheSendingLayerThread(threading.Thread):
         device = torch.device(f"npu:{local_rank}")
         torch.npu.set_device(device)
         self.ready_event.set()
-        while not self._stop_event.is_set():
-            try:
-                send_task = self.send_queue.get(timeout=THREAD_STOP_POLL_SECONDS)
-            except queue.Empty:
-                continue
-            self._handle_request(send_task)
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    send_task = self.send_queue.get(timeout=THREAD_STOP_POLL_SECONDS)
+                except queue.Empty:
+                    continue
+                self._handle_request(send_task)
+        except Exception as error:
+            self.fatal_error = error
+            logger.exception("Mooncake KVCacheSendingLayerThread terminated unexpectedly. error=%s. ", error)
+            raise
 
     def _handle_request(self, send_task: SendTask):
         error: str | None = None
@@ -1314,7 +1323,34 @@ class MooncakeLayerwiseConnectorWorker:
                     )
             except Exception as error:
                 logger.warning("Failed to join layerwise thread. thread=%s. error=%s. ", thread.name, error)
+        fatal_error = self.get_thread_fatal_error()
+        if fatal_error is not None:
+            logger.error(
+                "Layerwise transfer thread reported a fatal error. engine_id=%s. error=%s. ",
+                self.engine_id,
+                fatal_error,
+            )
         logger.info("MooncakeLayerwiseConnectorWorker shutdown complete. engine_id=%s", self.engine_id)
+
+    def _wait_until_ready(self, thread, ready_event) -> None:
+        """Wait for the layer thread to become ready; roll back on failure."""
+        start_wait_time = time.time()
+        while not ready_event.is_set():
+            if not thread.is_alive():
+                self.shutdown()
+                raise RuntimeError("KV Cache layer thread failed to start.")
+            if time.time() - start_wait_time > KV_CACHE_THREAD_STARTUP_TIMEOUT_SECONDS:
+                self.shutdown()
+                raise RuntimeError("Timeout waiting for KV Cache layer thread to be ready.")
+            time.sleep(3)
+
+    def get_thread_fatal_error(self) -> BaseException | None:
+        """Return the first fatal error reported by a layer thread, if any."""
+        for thread in (self.kv_recv_layer_thread, self.kv_send_layer_thread):
+            error = getattr(thread, "fatal_error", None) if thread is not None else None
+            if error is not None:
+                return error
+        return None
 
     def _init_layerwise_reuse_state(self) -> None:
         slot_by_addr: dict[int, int] = {}
@@ -1548,47 +1584,51 @@ class MooncakeLayerwiseConnectorWorker:
             te_rpc_port=self.te_rpc_port,
             layer_metadata=self.layer_metadata,
         )
-        if self.vllm_config.kv_transfer_config.is_kv_producer:
-            ready_event = threading.Event()
-            self.kv_send_layer_thread = KVCacheSendingLayerThread(
-                engine=self.engine,
-                vllm_config=self.vllm_config,
-                kv_cache_config=self.kv_cache_config,
-                kv_cache_specs=self.kv_cache_specs,
-                attn_resharding_group_idx=self.attn_resharding_group_idx,
-                total_layers=self.total_layers,
-                ready_event=ready_event,
-                tp_size=self.tp_size,
-                tp_rank=self.tp_rank,
-                pd_head_ratio=self.pd_head_ratio,
-                num_head_replica=self.num_head_replica,
-                layer_metadata=self.layer_metadata,
-                use_mla=self.use_mla,
-                use_attn_mamba_hybrid=self.use_attn_mamba_hybrid,
-                k_buffer=self.k_buffer,
-                v_buffer=self.v_buffer,
-                enable_kv_quant=self.enable_kv_quant,
-                enable_c8_quant=self.enable_c8_quant,
-                resharding_stream=self.resharding_stream,
-                callback_func=self.send_done_send_signal,
-                reuse_completion_callback=self._complete_layer_reuse,
-            )
-            self.kv_send_layer_thread.start()
-            ready_event.wait()
+        try:
+            if self.vllm_config.kv_transfer_config.is_kv_producer:
+                ready_event = threading.Event()
+                self.kv_send_layer_thread = KVCacheSendingLayerThread(
+                    engine=self.engine,
+                    vllm_config=self.vllm_config,
+                    kv_cache_config=self.kv_cache_config,
+                    kv_cache_specs=self.kv_cache_specs,
+                    attn_resharding_group_idx=self.attn_resharding_group_idx,
+                    total_layers=self.total_layers,
+                    ready_event=ready_event,
+                    tp_size=self.tp_size,
+                    tp_rank=self.tp_rank,
+                    pd_head_ratio=self.pd_head_ratio,
+                    num_head_replica=self.num_head_replica,
+                    layer_metadata=self.layer_metadata,
+                    use_mla=self.use_mla,
+                    use_attn_mamba_hybrid=self.use_attn_mamba_hybrid,
+                    k_buffer=self.k_buffer,
+                    v_buffer=self.v_buffer,
+                    enable_kv_quant=self.enable_kv_quant,
+                    enable_c8_quant=self.enable_c8_quant,
+                    resharding_stream=self.resharding_stream,
+                    callback_func=self.send_done_send_signal,
+                    reuse_completion_callback=self._complete_layer_reuse,
+                )
+                self.kv_send_layer_thread.start()
+                self._wait_until_ready(self.kv_send_layer_thread, ready_event)
 
-        if self.vllm_config.kv_transfer_config.is_kv_consumer:
-            ready_event = threading.Event()
-            self.kv_recv_layer_thread = KVCacheRecvingLayerThread(
-                self.tp_rank,
-                self.side_channel_port,
-                self.tp_size,
-                self.pd_head_ratio,
-                self.engine_id,
-                metadata,
-                ready_event,
-            )
-            self.kv_recv_layer_thread.start()
-            ready_event.wait()
+            if self.vllm_config.kv_transfer_config.is_kv_consumer:
+                ready_event = threading.Event()
+                self.kv_recv_layer_thread = KVCacheRecvingLayerThread(
+                    self.tp_rank,
+                    self.side_channel_port,
+                    self.tp_size,
+                    self.pd_head_ratio,
+                    self.engine_id,
+                    metadata,
+                    ready_event,
+                )
+                self.kv_recv_layer_thread.start()
+                self._wait_until_ready(self.kv_recv_layer_thread, ready_event)
+        except Exception:
+            self.shutdown()
+            raise
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         done_recving = (
