@@ -1,0 +1,4 @@
+pr: 21015
+entries:
+  - category: bugfix
+    text: Fixed Model Runner V2 MTP startup on Ascend 310P after PCP graph-capture interface changes.
