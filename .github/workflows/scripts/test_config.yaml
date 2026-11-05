@@ -105,6 +105,12 @@ accuracy_tests:
   - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py
   - tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
   - tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py
+  # Temporarily skipped: the A5 build does not register the ``attn_res_fwd``
+  # custom op yet; re-enable once the A5 csrc build is fixed.
+  - tests/e2e/nightly/single_node/ops/singlecard_ops/test_attn_res_fwd.py
+  # Temporarily skipped: not adapted to vllm main's ``DraftLogitsCache`` API
+  # (a raw logits tensor is rejected); re-enable after updating the test.
+  - tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dflash_candidate_sampler.py
 
 # === Runner Mapping ===
 # Maps test paths to logical partitions using regex patterns.
