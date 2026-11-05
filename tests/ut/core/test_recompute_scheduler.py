@@ -427,7 +427,7 @@ def test_waiting_encoder_stall_allows_later_request(scheduler_cls, monkeypatch):
 
         monkeypatch.setattr(scheduler, "_try_schedule_encoder_inputs", schedule_encoder_inputs)
     stalled = make_mm_request("stalled", [("image", [True, True])])
-    ready = create_request(request_id="ready")
+    ready = create_request(request_id=1)
     scheduler.add_request(stalled)
     scheduler.add_request(ready)
 
