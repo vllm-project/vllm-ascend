@@ -40,11 +40,9 @@ class TestVitMropeSetupPatch(unittest.TestCase):
                     kernel = MagicMock()
                     upstream = modules[target]
                     original = MagicMock(name="original_vit_mrope_setup")
-                    upstream.vit_mrope_setup = original
+                    vars(upstream)["vit_mrope_setup"] = original
                     for model in loaded_models:
-                        modules[model].vit_mrope_setup = original
-                    for model in blocked_models:
-                        modules[model] = None
+                        vars(modules[model])["vit_mrope_setup"] = original
                     vars(upstream)["_vit_mrope_setup_kernel"] = kernel
                     vars(modules["vllm.triton_utils"])["triton"] = types.SimpleNamespace(
                         cdiv=lambda x, y: (x + y - 1) // y,
@@ -56,7 +54,7 @@ class TestVitMropeSetupPatch(unittest.TestCase):
                     spec = importlib.util.spec_from_file_location("_test_vit_mrope_patch", path)
                     assert spec is not None and spec.loader is not None
                     module = importlib.util.module_from_spec(spec)
-                    with patch.dict(sys.modules, modules):
+                    with patch.dict(sys.modules, {**modules, **dict.fromkeys(blocked_models)}):
                         spec.loader.exec_module(module)
                         self.assertIs(upstream.vit_mrope_setup, module.vit_mrope_setup)
                         self.assertIs(upstream._vit_mrope_setup_kernel, kernel)

@@ -42,7 +42,7 @@ def test_vit_mrope_setup(grids, merge, sections):
     inv_cpu = [1.0 / (10000.0 ** (torch.arange(size, dtype=torch.float32) / size)) for size in sections]
     inv = [freq.to("npu") for freq in inv_cpu]
     positions = _reference_positions(grids, merge)
-    cos, sin = vit_mrope_setup(*inv, grids, merge)
+    cos, sin = vit_mrope_setup(inv[0], inv[1], inv[2], grids, merge)
     expected_shape = (3, positions.shape[0], sum(sections))
     assert cos.shape == sin.shape == expected_shape
     cos, sin = cos.cpu(), sin.cpu()
