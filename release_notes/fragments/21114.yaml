@@ -1,0 +1,6 @@
+pr: 21114
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DFlash2 initialization with pipeline parallelism when the target
+      input embedding is unavailable on the draft's pipeline stage.
