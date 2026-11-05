@@ -30,7 +30,6 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
-
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
     create_kv_pool_worker,
@@ -872,7 +871,6 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
     def _make_sparse_swa_coordinator(self):
         import torch
         from vllm.v1.kv_cache_interface import KVCacheGroupSpec, SlidingWindowSpec
-
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 
         with patch(

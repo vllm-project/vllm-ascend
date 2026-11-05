@@ -998,8 +998,7 @@ class KVPoolWorker:
                     )
                     if not addr or not size or len(addr) != len(size):
                         logger.warning(
-                            "Skipping KV pool get key without valid local descriptors: "
-                            "request=%s group=%d key=%s",
+                            "Skipping KV pool get key without valid local descriptors: request=%s group=%d key=%s",
                             request.req_id,
                             group_id,
                             key,
