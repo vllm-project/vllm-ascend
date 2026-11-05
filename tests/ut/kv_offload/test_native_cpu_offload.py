@@ -242,6 +242,9 @@ def test_ascend_connector_worker_accepts_separate_kv_tensors(
         num_blocks=4,
         kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
         kv_cache_tensors=[],
+        # The connector offloads the groups vLLM selects, not all of them.
+        prefix_cacheable_group_ids=(0,),
+        hisparse_host_num_blocks=None,
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
@@ -286,6 +289,9 @@ def test_ascend_connector_worker_accepts_aligned_mamba_states(
         num_blocks=4,
         kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
         kv_cache_tensors=[],
+        # The connector offloads the groups vLLM selects, not all of them.
+        prefix_cacheable_group_ids=(0,),
+        hisparse_host_num_blocks=None,
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config

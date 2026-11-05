@@ -243,10 +243,9 @@ class TestAscendStoreConnector(unittest.TestCase):
             role=KVConnectorRole.SCHEDULER,
             kv_cache_config=MagicMock(),
         )
-        stats = MagicMock()
-        mock_scheduler_cls.return_value.get_stats.return_value = stats
         mock_scheduler_cls.assert_called_once()
-        self.assertIs(connector.get_kv_connector_stats(), stats)
+        self.assertIsNone(connector.get_kv_connector_stats())
+        mock_scheduler_cls.return_value.get_stats.assert_not_called()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
@@ -374,19 +373,6 @@ class TestAscendStoreConnector(unittest.TestCase):
         mock_worker.get_finished.return_value = ({"r1"}, {"r2"})
         done_s, done_r = connector.get_finished({"r1"})
         self.assertEqual(done_s, {"r1"})
-
-    def test_handle_preemptions_fences_only_released_requests(self):
-        connector = AscendStoreConnector.__new__(AscendStoreConnector)
-        connector.connector_worker = MagicMock()
-        meta = AscendConnectorMetadata(preempted_req_ids={"p1"})
-        connector.handle_preemptions(meta)
-        connector.connector_worker.handle_released_saves.assert_called_once_with({"p1"})
-
-    def test_handle_preemptions_tolerates_metadata_without_released_ids(self):
-        connector = AscendStoreConnector.__new__(AscendStoreConnector)
-        connector.connector_worker = MagicMock()
-        connector.handle_preemptions(types.SimpleNamespace())
-        connector.connector_worker.handle_released_saves.assert_called_once_with(None)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_worker")
