@@ -103,6 +103,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.models.layerwise import uses_model_layerwise_physical_budget
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -787,6 +788,9 @@ class NPUWorker(WorkerBase):
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         if not kv_cache_groups:
             return available_memory
+        if uses_model_layerwise_physical_budget(kv_cache_spec):
+            # The model adapter budgets unique physical backings itself.
+            return available_memory
         # Ascend's DSV4/V4.1 and GLM-Next planners already account for shared
         # physical storage across all groups. Their budgets must not take the
         # generic per-layer scale, including when the runner uses sparse SFA.
@@ -1219,6 +1223,12 @@ class NPUWorker(WorkerBase):
     ) -> tuple[int, int, float]:
         if not kv_cache_spec:
             return 0, 0, 1.0
+        if uses_model_layerwise_physical_budget(kv_cache_spec):
+            # Exact model planning consumes the real device budget. Applying
+            # the legacy logical-layer multiplier here would count reuse twice
+            # (and its attention-only planner cannot represent GDN/PLE).
+            num_layers = self.model_config.get_num_layers(self.parallel_config)
+            return num_layers, num_layers, 1.0
         # Match the allocation planner: persistent draft pages are not target
         # scratch slots and must be counted once each in the physical budget.
         excluded_layer_names = (excluded_layer_names or set()) & kv_cache_spec.keys()

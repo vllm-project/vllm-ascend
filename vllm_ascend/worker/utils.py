@@ -19,6 +19,7 @@ from vllm.v1.worker.utils import (
     select_common_block_size,
 )
 
+from vllm_ascend.models.layerwise import rebuild_model_layerwise_plan
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -118,7 +119,9 @@ def prepare_ascend_kernel_block_sizes(
     stay dense and contiguous. The group then keeps the manager block size,
     leaving NoPE SFA addressing 256-token blocks while its backend, metadata
     builder and block table all address 128-token kernel blocks. Re-split the
-    groups whose only evidence of packing is aliasing.
+    groups whose only evidence of packing is aliasing. Validated model plans
+    use negative descriptor strides as a non-affine guard, not evidence of
+    block-outermost packing; their adapter constructs the kernel-page views.
 
     Args:
         kv_cache_config: The KV cache configuration.
@@ -127,6 +130,7 @@ def prepare_ascend_kernel_block_sizes(
     Returns:
         List of kernel block sizes for each cache group.
     """
+    model_plan = rebuild_model_layerwise_plan(kv_cache_config)
     kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
 
     # Upstream drops only encoder-only groups, so this index tracks its output.
@@ -143,10 +147,11 @@ def prepare_ascend_kernel_block_sizes(
         strides = _group_tensor_strides(kv_cache_config, group.layer_names)
         block_outermost_packed = any(0 < layer_stride < block_stride for layer_stride, block_stride in strides)
         aliases_layers = any(layer_stride == 0 and block_stride > 0 for layer_stride, block_stride in strides)
+        model_views = model_plan is not None and any(layer_stride < 0 for layer_stride, _ in strides)
         if (
             spec.has_layer_views
             and isinstance(spec, AttentionSpec)
-            and aliases_layers
+            and (aliases_layers or model_views)
             and not block_outermost_packed
             and kernel_block_sizes[index] == manager_block_size
             and group_id < len(attn_groups)

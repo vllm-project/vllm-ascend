@@ -7,10 +7,12 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
+from vllm_ascend.core.layerwise_cache_config import get_model_summary
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
@@ -18,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_layerwise_reuse_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendStoreKVConnectorWorkerMetadata,
     LoadSpec,
     RequestTracker,
     block_hash_to_str,
@@ -50,6 +53,12 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
+        summary = get_model_summary(kv_cache_config)
+        self._model_save_blocks = (
+            InFlightSaveBlockTracker(vllm_config.parallel_config.world_size)
+            if summary is not None and summary.has_reuse
+            else None
+        )
         self.load_async = False
         if self.use_layerwise_transfer:
             self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
@@ -80,10 +89,44 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
         return store_skip_tokens > 0
 
+    def retain_blocks_for_save(self, req_meta) -> None:
+        tracker = getattr(self, "_model_save_blocks", None)
+        if tracker is not None:
+            groups = {
+                group_id: self.num_speculative_blocks_by_group.get(group_id, 0)
+                for group_id in range(len(req_meta.block_ids_by_group))
+            }
+            tracker.retain(req_meta, groups, self._block_pool)
+
+    def update_connector_output(self, connector_output) -> None:
+        super().update_connector_output(connector_output)
+        tracker = getattr(self, "_model_save_blocks", None)
+        meta = connector_output.kv_connector_worker_meta
+        if (
+            tracker is not None
+            and isinstance(meta, AscendStoreKVConnectorWorkerMetadata)
+            and self._block_pool is not None
+        ):
+            tracker.complete(meta.completed_events, self._block_pool)
+
+    def has_pending_push_work(self) -> bool:
+        tracker = getattr(self, "_model_save_blocks", None)
+        return tracker is not None and tracker.has_pending_work()
+
+    def reset_store(self) -> bool:
+        if self.has_pending_push_work():
+            return False
+        return super().reset_store()
+
     def _async_load_enabled(self) -> bool:
         return False
 
     def _init_layerwise_offload(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, extra_config) -> Any:
+        summary = get_model_summary(kv_cache_config)
+        if summary is not None:
+            self.layerwise_offload = summary.has_reuse
+            self.num_layers = max(self.num_layers, max(owner.physical_layer for owner in summary.owners) + 1)
+            return
         reuse_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
         if kv_cache_config is not None and reuse_config is not None:
             reuse_layout = build_layerwise_reuse_layout(

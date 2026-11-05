@@ -609,6 +609,10 @@ def get_qwen4_exp_max_memory_usage(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int | None:
     """Use the allocation divisor for admission across all group lifetimes."""
+    # Lazy import: the model adapter reuses this module's physical primitives.
+    from vllm_ascend.models.layerwise import get_model_layerwise_context
+
+    context = get_model_layerwise_context(vllm_config, kv_cache_groups)
     bytes_per_block = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
     if bytes_per_block is None:
         return None
@@ -616,6 +620,10 @@ def get_qwen4_exp_max_memory_usage(
         cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), group.kv_cache_spec.page_size_bytes)
         for group in kv_cache_groups
     )
+    if context is not None:
+        adapter, policy = context
+        if adapter.build_layout(kv_cache_groups, policy, 1).has_reuse:
+            return adapter.build_layout(kv_cache_groups, policy, max(1, required_blocks)).required_bytes
     return required_blocks * bytes_per_block
 
 
@@ -654,6 +662,12 @@ def get_qwen4_exp_kv_cache_config(
     deliberately alias the same allocation because a physical block ID is
     owned by only one group at a time.
     """
+    # Lazy import avoids the adapter/cache primitive dependency cycle.
+    from vllm_ascend.models.layerwise import get_model_layerwise_cache_config, preserve_inactive_model_summary
+
+    model_config = get_model_layerwise_cache_config(vllm_config, kv_cache_groups, available_memory)
+    if model_config is not None:
+        return model_config
     probe = build_qwen4_kv_cache_layout(
         kv_cache_groups,
         num_blocks=1,
@@ -728,9 +742,12 @@ def get_qwen4_exp_kv_cache_config(
         for owner in private_owners
     )
 
-    return KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=tensors,
-        kv_cache_groups=kv_cache_groups,
-        prefix_cache_retention_interval=(vllm_config.cache_config.prefix_cache_retention_interval),
+    return preserve_inactive_model_summary(
+        KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=tensors,
+            kv_cache_groups=kv_cache_groups,
+            prefix_cache_retention_interval=(vllm_config.cache_config.prefix_cache_retention_interval),
+        ),
+        vllm_config,
     )

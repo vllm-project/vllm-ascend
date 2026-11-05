@@ -315,6 +315,20 @@
 #    Future Plan:
 #       Move this override into an Ascend KVCacheConfigBuilder, or remove it
 #       once upstream provides a platform hook for multi-allocation accounting.
+#   3. `get_kv_cache_configs` and Qwen4 layout planning hooks
+#    Why:
+#       Qwen4 layerwise owners have non-affine addresses; upstream rank
+#       normalization also discards each rank's original reserved budget.
+#    How:
+#       Use the common physical planner for capacity/admission, carry a
+#       declared dataclass summary through worker IPC and scheduler deepcopy,
+#       then rebuild at the upstream-normalized N with the original budget.
+#       The MRV2 allocator consumes owner views instead of affine descriptors.
+#    Related PR (if no, explain why):
+#       No upstream model-layout/normalization callback covers this contract.
+#    Future Plan:
+#       Replace this bridge with an upstream model layout adapter and a
+#       fixed-capacity normalization hook that retains allocation budgets.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1546,10 +1560,13 @@
 #    How：
 #       Re-run the selection with an alias-aware packing check
 #       (`0 < layer_stride < block_stride`) so alias layouts still split.
+#       Validated model-aware non-affine descriptors also retain the backend's
+#       kernel-page selection; their negative stride is a guard, not packing.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/57169
 #    Future Plan:
-#       Remove this patch once upstream stops treating alias layouts as packed.
+#       Remove this patch once upstream distinguishes alias/model views from
+#       block-outermost packing during kernel-page selection.
 #
 #   4. `vllm.v1.worker.gpu.attn_utils._allocate_kv_cache`,
 #      `vllm.v1.worker.gpu.attn_utils._reshape_kv_cache`,

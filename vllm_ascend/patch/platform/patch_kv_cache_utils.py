@@ -27,6 +27,8 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import (
     is_prefix_cacheable,
 )
+from vllm_ascend.core.layerwise_cache_config import get_model_summary
+from vllm_ascend.core.layerwise_cache_planner import materialize_layerwise_plan
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -42,6 +44,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.models.layerwise import get_model_layerwise_pool_bytes, resolve_cache_layout_adapter
 from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_kv_cache_config,
     get_qwen4_exp_kv_cache_groups,
@@ -73,6 +76,7 @@ _orig_annotate_eagle_groups = getattr(_kv_cache_planning, "_annotate_eagle_group
 _orig_get_kv_cache_config_from_groups = _kv_cache_planning.get_kv_cache_config_from_groups
 _orig_max_memory_usage_bytes_from_groups = _kv_cache_planning._max_memory_usage_bytes_from_groups
 _orig_pool_bytes_per_block = _kv_cache_planning._pool_bytes_per_block
+_orig_get_kv_cache_configs = _kv_cache_planning.get_kv_cache_configs
 if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
 
     def _uniform_type_max_num_blocks_per_req(
@@ -660,6 +664,9 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
         return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
+    model_bytes = get_model_layerwise_pool_bytes(vllm_config, kv_cache_groups)
+    if model_bytes is not None:
+        return model_bytes
     qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
     if qwen_bytes is not None:
         return qwen_bytes
@@ -678,6 +685,7 @@ def _has_ascend_multi_allocation_kv_cache_layout(
         tq_cache.uses_turboquant_groups(kv_cache_groups)
         or is_deepseek_v41_cache(kv_cache_groups)
         or _get_glm5_next_cache_layout(kv_cache_groups) is not None
+        or get_qwen4_exp_pool_bytes_per_block(kv_cache_groups) is not None
         or _is_deepseek_v4_groups(kv_cache_groups)
     )
 
@@ -863,6 +871,27 @@ def _ascend_get_kv_cache_config_from_groups(
     return kv_cache_config
 
 
+def _ascend_get_kv_cache_configs(vllm_config, kv_cache_specs, available_memory, *args, **kwargs):
+    """Retain rank budgets after upstream selects the common block count.
+
+    Both builder and pre-builder upstream lanes re-plan larger ranks. That
+    selects the correct N but discards their padding budget. Rebuild only
+    model-owned layouts at that final N, keeping the original rank budgets.
+    """
+    configs = _orig_get_kv_cache_configs(vllm_config, kv_cache_specs, available_memory, *args, **kwargs)
+    for index, config in enumerate(configs):
+        summary = get_model_summary(config)
+        if summary is None or not summary.has_reuse:
+            continue
+        adapter = resolve_cache_layout_adapter(config.kv_cache_groups)
+        plan = materialize_layerwise_plan(
+            adapter, config.kv_cache_groups, summary.policy, config.num_blocks, available_memory[index]
+        )
+        configs[index] = adapter.export(config, plan)
+        configs[index].kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    return configs
+
+
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
 assert _orig_get_packed_kv_cache_groups is not None
 if _orig_annotate_eagle_groups is not None:
@@ -876,6 +905,7 @@ KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
 _kv_cache_planning.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
 _kv_cache_planning._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
 _kv_cache_planning._pool_bytes_per_block = _ascend_pool_bytes_per_block
+_kv_cache_planning.get_kv_cache_configs = _ascend_get_kv_cache_configs
 
 # vLLM's builder-based planner derives the pool size by probing a one-block
 # placement unless the builder overrides this hook. Ascend's DSV4.1, DSV4, GLM5
@@ -890,3 +920,4 @@ if _default_kv_cache_builder is not None:
 import vllm.v1.engine.core  # noqa: E402
 
 vllm.v1.engine.core.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+vllm.v1.engine.core.get_kv_cache_configs = _ascend_get_kv_cache_configs

@@ -98,6 +98,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
+from vllm_ascend.models.layerwise import rebuild_model_layerwise_plan, resolve_cache_layout_adapter
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
     HIDDEN,
@@ -1167,6 +1168,17 @@ def _allocate_kv_cache(
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    model_plan = rebuild_model_layerwise_plan(kv_cache_config, vllm_config)
+    if model_plan is not None:
+        backings = {
+            backing.backing_id: _allocate_int8_cache_tensor(
+                backing.size_bytes, max(alignment, backing.alignment), device
+            )
+            for backing in model_plan.backings
+        }
+        for view in model_plan.views:
+            kv_cache_raw_tensors[view.owner] = backings[view.backing_id]
+        return kv_cache_raw_tensors
     attn_layers: dict[str, AttentionLayerBase] | None = None
     # Gemma 4 full/sliding groups share one pool while retaining contiguous
     # K/V views. The worker keeps the full budget only for this V2 path.
@@ -1705,9 +1717,15 @@ def _reshape_kv_cache_v2(
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
     # view from the same deterministic layout that _allocate_kv_cache used:
     # Shared slabs hold QSA/GDN slots and indexer regions; PLE/hidden banks are private.
-    qwen4_cache_layout = build_qwen4_kv_cache_layout(
-        kv_cache_config.kv_cache_groups,
-        kv_cache_config.num_blocks,
+    model_plan = rebuild_model_layerwise_plan(kv_cache_config, vllm_config)
+    model_adapter = resolve_cache_layout_adapter(kv_cache_config.kv_cache_groups) if model_plan is not None else None
+    qwen4_cache_layout = (
+        None
+        if model_plan is not None
+        else build_qwen4_kv_cache_layout(
+            kv_cache_config.kv_cache_groups,
+            kv_cache_config.num_blocks,
+        )
     )
     layer_tuple_strides: dict[str, int] = {}
     if is_deepseek_v41_cache(layer_kv_cache_spec):
@@ -1749,6 +1767,15 @@ def _reshape_kv_cache_v2(
                 continue
 
             kv_cache_spec = layer_kv_cache_spec[layer_name]
+
+            if model_plan is not None:
+                assert model_adapter is not None
+                model_views = model_adapter.reshape(
+                    model_plan, layer_name, kv_cache_spec, kv_cache_raw_tensors[layer_name], kernel_block_size
+                )
+                if model_views is not None:
+                    kv_caches[layer_name] = model_views
+                    continue
 
             if type(kv_cache_spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
                 raw_cache = kv_cache_raw_tensors[layer_name]

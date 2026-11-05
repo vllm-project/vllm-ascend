@@ -1,5 +1,8 @@
 # Layerwise and Sparse KV Cache Offloading Guide
 
+For the separate experimental Qwen4Exp hybrid-cache reuse path, see
+[Qwen4Exp layerwise KV cache reuse](qwen4_layerwise_kv_offload.md).
+
 Layerwise and sparse KV cache offloading are supported only in disaggregated
 Prefill/Decode (PD) deployments. Colocated Prefill/Decode serving is not supported.
 

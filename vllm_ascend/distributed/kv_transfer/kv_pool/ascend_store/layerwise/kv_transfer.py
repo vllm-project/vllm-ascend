@@ -822,6 +822,7 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
         raise_on_transfer_failure: bool = True,
         invalid_block_ids: set[int] | None = None,
         invalid_block_ids_lock: threading.Lock | None = None,
+        require_complete_save: bool = False,
     ):
         super().__init__(
             m_store,
@@ -843,6 +844,7 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
         self._put_started_keys_lock = put_started_keys_lock or threading.Lock()
         self._session_tracker = session_tracker
         self.raise_on_transfer_failure = raise_on_transfer_failure
+        self.require_complete_save = require_complete_save
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self._active_put_keys: set[str] | None = None
@@ -1012,6 +1014,8 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                 self.write_results.clear()
                 for task in request:
                     task.write_finish_keys.clear()
+                if self.require_complete_save:
+                    raise RuntimeError("Incomplete layerwise save cannot release a reused cache region")
         except Exception as exc:
             self._fatal_error = exc
             raise
@@ -1157,6 +1161,36 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 group_id=0,
             )
 
+    def begin_generation(self, generation: int) -> None:
+        """Advance only after the worker has drained both transfer queues.
+
+        CPU completions and their associated NPU events remain readable by
+        every consumer throughout a generation. The worker clears them only
+        after all readers and saves finish, before recording any new event.
+        """
+        if self.request_queue.unfinished_tasks:
+            raise RuntimeError("Cannot advance layerwise generation with pending loads")
+        if generation <= getattr(self, "_generation", 0):
+            raise ValueError("Layerwise generations must increase")
+        self._generation = generation
+
+    def _wait_for_dependencies(self, data: LayerLoadTask) -> bool:
+        if data.generation is not None and data.generation != getattr(self, "_generation", None):
+            raise RuntimeError("Stale layerwise transfer generation")
+        for predecessor in data.predecessors:
+            if predecessor >= data.layer_id:
+                raise ValueError("Layerwise load depends on an unexecuted layer")
+            if not self._wait_for_event(self.layer_save_finished_events[predecessor], self.save_failure_checker):
+                return False
+            if self.save_failure_checker is not None:
+                self.save_failure_checker()
+            # Also fences non-saving TP ranks whose CPU flag means recorded,
+            # not that their local compute stream has completed.
+            self.sync_save_events[predecessor].synchronize()
+            if data.generation is None:
+                self.layer_save_finished_events[predecessor].clear()
+        return True
+
     def build_shared_data(self, task: LayerTransferTask) -> SharedBlockData | None:
         """Pre-compute block rows shared by every layer in the task."""
         if self.group_builders is not None:
@@ -1235,14 +1269,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
     def _handle_range_layer_task(self, data: LayerLoadTask) -> None:
         layer_id = data.layer_id
         try:
-            wait_for_save = data.wait_for_save_layer
-            if wait_for_save is not None:
-                if not self._wait_for_event(self.layer_save_finished_events[wait_for_save], self.save_failure_checker):
-                    return
-                if self.save_failure_checker is not None:
-                    self.save_failure_checker()
-                self.sync_save_events[wait_for_save].synchronize()
-                self.layer_save_finished_events[wait_for_save].clear()
+            if not self._wait_for_dependencies(data):
+                return
 
             if data.attention_start_gate is not None:
                 if not self._wait_for_event(data.attention_start_gate):
@@ -1298,6 +1326,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             if not self._copy_gva_layers(data):
                 self.load_disabled.set()
                 self._mark_failed_requests([br.request for task in data.transfer_tasks for br in task.block_ranges])
+                if data.generation is not None:
+                    raise RuntimeError("Incomplete layerwise restore cannot release a reused cache region")
         except Exception as exc:
             self._fatal_error = exc
             raise
@@ -1309,22 +1339,12 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
     def _copy_gva_layers(self, data: LayerLoadTask) -> bool:
         # Layerwise threads only run when the worker-side
         # protocol gate is on; every store call below sits on the Backend ABC.
-        wait_for_save = data.wait_for_save_layer
         transfer_tasks = data.transfer_tasks
         layer_id = data.layer_id
         attention_start_gate = data.attention_start_gate
 
-        if wait_for_save is not None:
-            if not self._wait_for_event(self.layer_save_finished_events[wait_for_save], self.save_failure_checker):
-                return False
-            if self.save_failure_checker is not None:
-                self.save_failure_checker()
-            # Non-saving TP ranks have no D2H task to synchronize the event.
-            # Their CPU save-finished signal only means the event was recorded;
-            # wait for the NPU work before reusing the local HBM buffer.
-            self.sync_save_events[wait_for_save].synchronize()
-            logger.debug("Layer save event cleared: layer %d", wait_for_save)
-            self.layer_save_finished_events[wait_for_save].clear()
+        if not self._wait_for_dependencies(data):
+            return False
 
         if self.load_disabled.is_set():
             if self.external_slot_release_waiter is not None:
