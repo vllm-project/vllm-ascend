@@ -34,7 +34,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 | `Qwen3.8-Flash-Next-w4a8` (quantized version) | A2 series / A3 series | |
 | `Qwen3.8-Flash-Next-w4a8-mxfp` (quantized version) | Ascend 950 DT | |
 
-The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`, except for the 950 DT TP2 × PP2 prefill case, which uses a dedicated local checkpoint. Both PD roles must load the same checkpoint.
+The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. Both PD roles must load the same checkpoint.
 
 ## 4 Installation
 
@@ -334,7 +334,7 @@ curl --fail http://127.0.0.1:8088/v1/models
 
 The response should list the configured model name. After startup, use [Section 6](#6-functional-verification) to verify generation.
 
-### 5.2 PD Separation Deployment
+### 5.2 Basic PD Separation Deployment
 
 Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Select the hardware and parallel configuration below. Run the model commands in separate terminals and start the proxy after all model APIs are ready.
 
@@ -896,15 +896,24 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     - Keep the Mooncake DP2 / TP2 declarations synchronized with the service topology and route both ranks of each role through the proxy. `kv_port` is a base port shared by ranks of the same role: the connector adds the DP serving index × TP × PP × PCP, then the local device index. With TP2 and PP = PCP = 1, prefill rank 0 uses ports 30000–30001 and rank 1 uses 30002–30003; decode uses 30100–30103. Do not increment the configured base port for rank 1.
     - For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to all four model commands and verify proxy forwarding. Validate multimodal input and thinking control through the proxy with the selected checkpoint.
 
-=== "Ascend 950 DT (TP2 × PP2 prefill)"
+### 5.3 Image-and-Text 10K PD Separation Deployment
 
-    This alternative single-host deployment uses TP2 × PP2 × DP1 for prefill on devices 0–3 and TP2 × DP2 for decode on devices 4–7. Both roles use a maximum context length of 143360 tokens, 64 active sequences, and a batch token budget of 8192.
+This case uses the same eight-device Ascend 950 DT host as the basic PD example in [Section 5.2](#52-basic-pd-separation-deployment). For image-and-text 10K validation, prefill uses TP2 × PP2 × DP1 with a `25,23` layer partition, and decode uses TP2 × DP2 behind one API endpoint. Both roles use 8192 batch tokens and `HCCL_BUFFSIZE=512`. Prefill disables prefix caching; decode enables prefix caching and static kernels.
 
-    Use the same dedicated QSA-RouterOnly-O-BF16 W4A8-MXFP checkpoint for both roles. For Docker deployment, add `-v /mnt/share/weight:/mnt/share/weight:ro` to the Ascend 950 DT Docker command in [Section 4.1](#41-docker-image-installation) before starting the container. If the checkpoint is stored elsewhere, update the mount and both model paths so that they point to the checkpoint inside the container. Initialize the environment as described in [Section 4](#4-installation) and run each role in a separate terminal.
+The 10K target is the processed input length, including text and image tokens. Both roles retain `--max-model-len 143360`; keep the input plus requested output within this limit. Use the W4A8-MXFP checkpoint from [Section 3.1](#31-model-weight) with its vision encoder and image processor.
+
+The complete Prefill, Decode, and proxy commands are provided below.
+
+#### 5.3.1 Start the Prefill and Decode engines
+
+=== "Ascend 950 DT"
+
+    Initialize the environment as described in [Section 4](#4-installation) and run Prefill and Decode in separate terminals. Both roles load `Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp` from ModelScope.
 
     **Prefill:**
 
     ```bash
+    export VLLM_USE_MODELSCOPE=True
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=2400
@@ -914,7 +923,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     export HCCL_BUFFSIZE=512
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 
-    vllm serve /mnt/share/weight/Qwen3.8-Flash-Next-W4A8-MXFP-A5-QSA-RouterOnly-O-BF16-20261031 \
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp \
         --host 0.0.0.0 \
         --port 8247 \
         --served-model-name qwen38-megamoe-sp-pd \
@@ -940,6 +949,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     **Decode:**
 
     ```bash
+    export VLLM_USE_MODELSCOPE=True
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_ENGINE_READY_TIMEOUT_S=2400
@@ -949,7 +959,7 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
     export HCCL_BUFFSIZE=512
     export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
 
-    vllm serve /mnt/share/weight/Qwen3.8-Flash-Next-W4A8-MXFP-A5-QSA-RouterOnly-O-BF16-20261031 \
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp \
         --host 0.0.0.0 \
         --port 8248 \
         --served-model-name qwen38-megamoe-sp-pd \
@@ -966,44 +976,48 @@ Install compatible vLLM and vLLM-Ascend, then follow the [Mooncake installation 
         --enable-expert-parallel \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false},"enable_fused_mc2":0}' \
+        --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false},"enable_fused_mc2":0}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
         --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32480,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":2,"pp_layer_partition":"25,23"},"decode":{"dp_size":2,"tp_size":2}}}'
-    ```
-
-    **Proxy:**
-
-    After both model APIs are ready, run the proxy from the vLLM-Ascend repository root:
-
-    ```bash
-    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
-
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
-        --host 127.0.0.1 \
-        --port 8246 \
-        --prefiller-hosts 127.0.0.1 \
-        --prefiller-ports 8247 \
-        --decoder-hosts 127.0.0.1 \
-        --decoder-ports 8248
-    ```
-
-    **Service Verification:**
-
-    ```bash
-    curl --fail http://127.0.0.1:8247/v1/models
-    curl --fail http://127.0.0.1:8248/v1/models
-    curl --fail http://127.0.0.1:8246/v1/chat/completions \
-        -H "Content-Type: application/json" \
-        -d '{"model":"qwen38-megamoe-sp-pd","messages":[{"role":"user","content":"Who are you?"}],"max_tokens":1024,"temperature":0}'
     ```
 
     **Key parameters:**
 
     - Prefill partitions the layers across two pipeline stages with `VLLM_PP_LAYER_PARTITION=25,23`. Keep `pp_size=2` and `pp_layer_partition="25,23"` in both Mooncake configurations consistent with this partition.
     - Decode uses TP2 × DP2 behind one API endpoint on port `8248`; the proxy routes to that endpoint rather than separate DP-rank APIs.
-    - Prefill disables prefix caching and graph capture and sets MTP `enforce_eager=true`. Decode enables prefix caching and `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, and disables static kernels and super kernels.
+    - Prefill disables prefix caching and graph capture and sets MTP `enforce_eager=true`. Decode enables prefix caching and `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, enables static kernels, and disables super kernels.
     - Both roles enable Engram CPU offload with `dp_shared_memory=false`, use `HCCL_BUFFSIZE=512`, and retain the supplied case's startup timeout of 2400 seconds. Provide sufficient host memory for the checkpoint and the decode DP replicas.
     - This case retains `VLLM_ASCEND_PLE_BACKEND=torch` from the supplied scripts. It only selects a backend in runtimes that implement this variable; an unknown-variable warning means it has no effect.
+
+#### 5.3.2 Start the proxy
+
+After both model APIs are ready, run the proxy from the vLLM-Ascend repository root:
+
+```bash
+unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    --host 127.0.0.1 \
+    --port 8246 \
+    --prefiller-hosts 127.0.0.1 \
+    --prefiller-ports 8247 \
+    --decoder-hosts 127.0.0.1 \
+    --decoder-ports 8248
+```
+
+#### 5.3.3 Verify the image-and-text 10K service
+
+Wait until both model APIs are ready, then start the proxy as described above. Check that prefill uses TP2/PP2/DP1, decode uses TP2/DP2 with static kernels enabled, and both roles report `max_model_len=143360`. Send a 10K image-and-text sample through the proxy using the request below. Replace `<IMAGE_URL>` with the sample image URL and `<TEXT_PROMPT>` with its text; the image must be accessible from the serving environment.
+
+```bash
+curl --fail http://127.0.0.1:8247/v1/models
+curl --fail http://127.0.0.1:8248/v1/models
+curl --fail http://127.0.0.1:8246/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{"model":"qwen38-megamoe-sp-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
+```
+
+Expected result: HTTP 200 with a response that addresses both the image and text. Check `usage.prompt_tokens` against the 10K validation target and confirm that the request completes without image-processing, KV-transfer, or out-of-memory errors. Supply the actual validation sample before using this request as a 10K test.
 
 ## 6 Functional Verification
 
@@ -1017,9 +1031,9 @@ Use the OpenAI-compatible `/v1/chat/completions` API to verify generation. Selec
 | A2 series PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a2-pd` |
 | A3 series PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a3-pd` |
 | Ascend 950 DT PD proxy | `http://192.168.0.1:8087` | `qwen38-flash-next-950-dt-pd` |
-| Ascend 950 DT TP2 × PP2 prefill PD proxy | `http://127.0.0.1:8246` | `qwen38-megamoe-sp-pd` |
+| Ascend 950 DT image-and-text 10K PD proxy | `http://127.0.0.1:8246` | `qwen38-megamoe-sp-pd` |
 
-For PD, first complete the proxy check and review the key parameters in [Section 5.2](#52-pd-separation-deployment).
+For PD, complete the proxy check in [Section 5.2](#52-basic-pd-separation-deployment), or [Section 5.3](#53-image-and-text-10k-pd-separation-deployment) for the image-and-text 10K case.
 
 ### 6.1 Basic Chat Completion
 
@@ -1073,7 +1087,7 @@ Expected result: the service returns HTTP 200 OK and describes the supplied imag
 
 ### 6.3 Function Calling
 
-Function Calling requires the following startup options, which are included in the colocated examples in Section 5; for PD separation, see [Section 5.2](#52-pd-separation-deployment):
+Function Calling requires the following startup options, which are included in the colocated examples in Section 5; for PD separation, see [Section 5.2](#52-basic-pd-separation-deployment):
 
 ```text
 --enable-auto-tool-choice --tool-call-parser qwen3_xml
@@ -1121,7 +1135,7 @@ When the model chooses the function, the parsed result appears in `choices[0].me
 
 ### 6.4 Reasoning Parser and Thinking Control
 
-Reasoning parsing requires the following startup option, which is included in the colocated examples in Section 5; for PD separation, see [Section 5.2](#52-pd-separation-deployment):
+Reasoning parsing requires the following startup option, which is included in the colocated examples in Section 5; for PD separation, see [Section 5.2](#52-basic-pd-separation-deployment):
 
 ```text
 --reasoning-parser qwen3
@@ -1214,8 +1228,8 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | A2 series | Decode | 0–7 on decode host | 2 × 1 × 4 | 141312 | 32 | 8192 |
 | A3 series | Decode | 8–15 | 2 × 1 × 4 | 141312 | 32 | 4096 |
 | Ascend 950 DT | Decode | 4–7 | 2 × 1 × 2 | 141312 | 64 | 4096 |
-| Ascend 950 DT | Prefill (PP case) | 0–3 | 2 × 2 × 1 | 143360 | 64 | 8192 |
-| Ascend 950 DT | Decode (PP case) | 4–7 | 2 × 1 × 2 | 143360 | 64 | 8192 |
+| Ascend 950 DT | Prefill (image-and-text 10K) | 0–3 | 2 × 2 × 1 | 143360 | 64 | 8192 |
+| Ascend 950 DT | Decode (image-and-text 10K) | 4–7 | 2 × 1 × 2 | 143360 | 64 | 8192 |
 
 ### 9.2 Tuning Guidelines
 
