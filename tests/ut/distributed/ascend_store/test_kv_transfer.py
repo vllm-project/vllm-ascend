@@ -573,7 +573,6 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         )
         return t, store
 
-
     def test_pp_hybrid_producer_skips_groups_without_local_descriptors(self):
         layouts = (
             (0, {0: [1000, 2000], 1: []}, {0: [16, 16], 1: []}, {0: 2, 1: 0}, 0),
@@ -593,10 +592,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 database.set_group_buffers(
                     addrs,
                     sizes,
-                    {
-                        group_id: [16] * len(group_addrs)
-                        for group_id, group_addrs in addrs.items()
-                    },
+                    {group_id: [16] * len(group_addrs) for group_id, group_addrs in addrs.items()},
                     group_num_layers=layer_counts,
                 )
                 thread = KVCacheStoreSendingThread(
@@ -624,12 +620,11 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
                 self.assertEqual(len(store.put_calls), 1)
                 keys, stored_addrs, stored_sizes = store.put_calls[0]
-                self.assertTrue(
-                    all(f"@group:{expected_group}@" in key for key in keys)
-                )
+                self.assertTrue(all(f"@group:{expected_group}@" in key for key in keys))
                 self.assertTrue(all(stored_addrs))
                 self.assertTrue(all(stored_sizes))
                 self.assertEqual(thread.get_saved_offset(request.req_id), 16)
+
     def test_save_keeps_checks_for_align_state_slots(self):
         thread, store = self._make_thread()
         thread.group_uses_align_state = [True]

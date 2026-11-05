@@ -820,9 +820,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
         for group_id in req_meta.kv_cache_group_ids or [0]:
-            local_group_layers = self.token_database.group_num_layers.get("kv", {}).get(
-                group_id, 0
-            )
+            local_group_layers = self.token_database.group_num_layers.get("kv", {}).get(group_id, 0)
             if local_group_layers <= 0:
                 pp_rank = (
                     self.token_database.metadata[group_id].pp_rank
@@ -832,7 +830,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 logger.debug(
                     "Skipping KV pool put for cache group without local descriptors: "
                     "request=%s group=%d pp_rank=%s local_layers=%d",
-                    req_id, group_id, pp_rank, local_group_layers,
+                    req_id,
+                    group_id,
+                    pp_rank,
+                    local_group_layers,
                 )
                 continue
             group_block_size = self._get_block_size(group_id)
@@ -955,7 +956,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     logger.warning(
                         "Skipping KV pool key without local descriptors: "
                         "request=%s group=%d pp_rank=%s key=%s local_layers=%d",
-                        req_id, group_id, pp_rank, keys[index], local_group_layers,
+                        req_id,
+                        group_id,
+                        pp_rank,
+                        keys[index],
+                        local_group_layers,
                     )
                     continue
                 prepared_keys.append(keys[index])

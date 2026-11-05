@@ -483,7 +483,9 @@ class MemcacheBackend(Backend):
         if not (len(key) == len(addr) == len(size)):
             logger.error(
                 "Refusing unaligned memcache put batch: keys=%d addrs=%d sizes=%d",
-                len(key), len(addr), len(size),
+                len(key),
+                len(addr),
+                len(size),
             )
             return [False] * len(key)
         invalid_rows = [
@@ -493,8 +495,7 @@ class MemcacheBackend(Backend):
         ]
         if invalid_rows:
             logger.error(
-                "Refusing memcache put rows without valid local descriptors: "
-                "rows=%s keys=%s local_layer_counts=%s",
+                "Refusing memcache put rows without valid local descriptors: rows=%s keys=%s local_layer_counts=%s",
                 invalid_rows,
                 [key[index] for index in invalid_rows],
                 [len(addr[index]) for index in invalid_rows],
