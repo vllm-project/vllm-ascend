@@ -77,6 +77,24 @@ initialization overhead per request.
 Run the normal Linux CPU-UT environment with real vLLM dependencies, the complete
 repository formatting check, and selected Ascend transfer/E2E cases in CI.
 
+## PR preparation on 2026-11-05
+
+Rebased onto upstream `main` at
+`75593e4662d7d45984d6a14df19e50fa57d68e7f`. The scheduler refactor merged
+upstream required resolving imports in the two pool scheduler modules; its
+new base class and transfer-mode behavior were retained.
+
+After rebasing, the broader local CPU command again reported 910 passed,
+1 skipped, and 40 deselected. The initial baseline exclusion list was retained.
+The local bootstrap additionally loads the actual upstream `KVConnectorOutput`
+dataclass: the generic dependency mock discards constructor fields used by the
+updated scheduler test. The same failure was reproduced with the unchanged
+upstream scheduler before adding that leaf dependency to the local bootstrap.
+Ruff checking and formatting passed across 60 affected and adjacent Python files,
+and `git diff --check` passed against the updated base.
+A third `bash format.sh ci` attempt remained in actionlint dependency setup and
+was stopped after 228 seconds without completing the checks.
+
 ## Baseline failure IDs
 
 These cases failed before production changes and were excluded from the runnable
