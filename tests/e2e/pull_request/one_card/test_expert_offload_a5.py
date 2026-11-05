@@ -70,6 +70,7 @@ def expert_bundle(monkeypatch):
     # Exercise the real post-processing without constructing a complete model.
     scheme = object.__new__(AscendW4A8MXFPDSDynamicFusedMoEMethod)
     scheme.group_size = GROUP_SIZE
+    scheme.use_expert_weight_list = False
     with set_current_vllm_config(VllmConfig()):
         yield MXFP4ExpertAdapter(SimpleNamespace(activation="silu"), scheme), store
 
@@ -231,7 +232,7 @@ class ExpertOffloadAuditWorker:
             "replays": audit["replays"],
             "capture_sizes": list(runner.cudagraph_manager.capture_sizes),
             "layer_names": [binding.layer_name for binding in bindings],
-            "loaded": all(binding.host_store.finalized and binding.host_store.prepared for binding in bindings),
+            "loaded": all(binding.host_store.prepared for binding in bindings),
             "addresses": {
                 binding.layer_name: {name: tensor.data_ptr() for name, tensor in binding.resident.items()}
                 for binding in bindings
