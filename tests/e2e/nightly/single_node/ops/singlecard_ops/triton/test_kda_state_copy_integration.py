@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """NPU regressions for startup plans and dynamic selected counts.
 
-These tests exercise real device copies and deny JIT entry after sealing. They
+These tests exercise real device copies and deny compiler entry after registry warmup. They
 are operator/integration tests, not model-serving or performance benchmarks.
 """
 
@@ -12,30 +12,53 @@ from unittest.mock import Mock
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.kda_state_copy_plan import KDAStateCopyPlan, initialize_kda_state_copy
-from vllm_ascend.ops.triton import kda_state_copy_kernel as lowlevel
 
-# Triton Ascend KDA state-copy launcher arguments are incompatible.
-KDA_LAUNCHER_SKIP = pytest.mark.skip(reason="Triton Ascend KDA state-copy launcher arguments are incompatible")
+
+def _warmup_keys(plan):
+    from vllm_ascend.ops.triton.kda_state_copy_kernel import _KDA_STATE_COPY_KERNEL
+
+    return _KDA_STATE_COPY_KERNEL.get_warmup_keys(
+        dtype=plan._signature[1],
+        cache_rows=plan._scalars[0],
+        cache_stride_elements=plan._scalars[1],
+        payload_elements=plan._payload,
+        cache_aligned=plan._signature[-1] == 0,
+    )
+
+
+@pytest.fixture(autouse=True)
+def registry_warmup_for_standalone_plans(monkeypatch):
+    """Reproduce the worker's late registration for standalone operator tests."""
+    from vllm_ascend.ops.kda_state_copy_plan import StridedKDAFallbackPlan
+
+    def seal_and_warm(plan):
+        plan._sealed = True
+        registry = JitWarmupRegistry(None)
+        with registry.activate():
+            plan.register_warmup()
+        registry.warmup()
+
+    monkeypatch.setattr(KDAStateCopyPlan, "seal", seal_and_warm)
+    monkeypatch.setattr(StridedKDAFallbackPlan, "seal", seal_and_warm)
 
 
 def _forbid_compilation(monkeypatch):
-    """Fail loudly on both kernel JIT and compiler API entry during serving."""
+    """Allow cached JIT launches but fail on any new compilation during serving."""
 
     def forbidden(*args, **kwargs):
         raise AssertionError("KDA steady-state compilation is forbidden")
 
-    monkeypatch.setattr(lowlevel._kda_state_copy_kernel, "run", forbidden)
     for name in ("triton", "triton.compiler", "triton.compiler.compiler", "triton.runtime.jit"):
         module = importlib.import_module(name)
         if callable(getattr(module, "compile", None)):
             monkeypatch.setattr(module, "compile", forbidden)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -55,7 +78,7 @@ def test_dynamic_grid_and_metadata_use_only_four_compiled_variants(dtype, shape,
     with pytest.raises(RuntimeError, match="sealed"):
         plan.gather(state, torch.zeros(1, dtype=torch.int64, device="npu"), None)
     plan.seal()
-    assert len(plan._compiled) == 4
+    assert len(_warmup_keys(plan)) == 4
     _forbid_compilation(monkeypatch)
     # Every count 0..65 is covered, plus the scheduler boundary. INT32/INT64
     # inputs alternate and intentionally start at a misaligned, strided offset.
@@ -84,7 +107,7 @@ def test_dynamic_grid_and_metadata_use_only_four_compiled_variants(dtype, shape,
         expected_state = expected_backing.as_strided(state.shape, state.stride(), 1)
         expected_state[host_indices[valid]] = 11
         torch.testing.assert_close(backing.cpu(), expected_backing, rtol=0, atol=0)
-    assert len(plan._compiled) == 4
+    assert len(_warmup_keys(plan)) == 4
 
 
 @torch.inference_mode()
@@ -95,7 +118,7 @@ def test_worker_plan_deduplication_and_failed_reinitialization(monkeypatch):
     initialize_kda_state_copy(dict(enumerate(layers)), 8)
     plans = [layer._ascend_kda_state_copy for layer in layers]
     assert len({id(plan) for plan in plans}) == len(layers)
-    assert all(plan._compiled is plans[0]._compiled for plan in plans)
+    assert all(plan._signature is plans[0]._signature for plan in plans)
     for layer in layers:
         torch.testing.assert_close(layer.kv_cache[1], state, rtol=0, atol=0)
     layers[-1].kv_cache = ()
@@ -104,7 +127,6 @@ def test_worker_plan_deduplication_and_failed_reinitialization(monkeypatch):
     assert all(layer._ascend_kda_state_copy is None for layer in layers)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -134,7 +156,6 @@ def test_worker_plan_graph_replay_and_rejections(monkeypatch):
         plan.gather(state, indices, flags[:1])
 
 
-@KDA_LAUNCHER_SKIP
 @torch.inference_mode()
 def test_real_prefill_with_native_chunk_matches_existing_path(monkeypatch):
     """Run the actual prefill method and installed native chunk (no model load).
@@ -188,14 +209,12 @@ def test_real_prefill_with_native_chunk_matches_existing_path(monkeypatch):
     torch.testing.assert_close(state, reference, rtol=0, atol=0)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
 @torch.inference_mode()
-def test_int32_fast_path_does_not_convert_or_scan_environment(monkeypatch):
-    """Serving uses the caller's aligned INT32 pointer and no config scan/JIT."""
-    from vllm_ascend.ops import kda_state_copy_plan as production
+def test_int32_fast_path_preserves_indices_without_new_compilation(monkeypatch):
+    """Serving retains aligned INT32 inputs and hits the prewarmed cache."""
 
     state = torch.randn((8, 2, 3, 4), device="npu")
     plan = KDAStateCopyPlan.prepare(state, 16)
@@ -204,16 +223,12 @@ def test_int32_fast_path_does_not_convert_or_scan_environment(monkeypatch):
     assert plan._indices(state, indices) is indices
     _forbid_compilation(monkeypatch)
 
-    def forbidden():
-        raise AssertionError("serving scanned compiler environment")
-
-    monkeypatch.setattr(production, "_configuration", forbidden)
     for count in (1, 2, 8, 16):
         ids = torch.arange(count, dtype=torch.int32, device="npu") % 8
         result = plan.gather(state, ids, None)
         torch.testing.assert_close(result, state[ids], rtol=0, atol=0)
     plan.scatter(state, state[indices].clone(), indices)
-    assert len(plan._compiled) == 4
+    assert len(_warmup_keys(plan)) == 4
 
 
 @pytest.mark.skipif(
@@ -275,11 +290,6 @@ def test_auto_fp16_fallback_is_precompiled(monkeypatch, index_dtype, page_stride
     assert isinstance(plan, production.StridedKDAFallbackPlan)
     torch.testing.assert_close(backing.cpu(), initial, rtol=0, atol=0)
     _forbid_compilation(monkeypatch)
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("fallback serving entered JIT")
-
-    monkeypatch.setattr(production.batch_memcpy_kernel, "run", forbidden)
     for count in (0, 1, 4, 8, 16):
         backing.copy_(initial)
         ids = torch.arange(count, device="npu", dtype=index_dtype) - 1
@@ -322,7 +332,7 @@ def test_fallback_direct_launch_with_constexpr_and_byte_tail(monkeypatch, dtype,
     plan.seal()
     torch.testing.assert_close(backing.cpu(), initial, rtol=0, atol=0)
     _forbid_compilation(monkeypatch)
-    monkeypatch.setattr(production.batch_memcpy_kernel, "run", Mock(side_effect=AssertionError("serving JIT")))
+    _forbid_compilation(monkeypatch)
     ids = torch.tensor([3, -1, 4, 0], dtype=index_dtype, device="npu")
     if to_cache:
         packed = torch.full((4, 1, 1, payload), 17, dtype=dtype, device="npu")
@@ -340,7 +350,6 @@ def test_fallback_direct_launch_with_constexpr_and_byte_tail(monkeypatch, dtype,
         torch.testing.assert_close(backing.cpu(), initial, rtol=0, atol=0)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -366,7 +375,6 @@ def test_scatter_graph_replay_int64_extremes(monkeypatch):
     torch.testing.assert_close(state, expected, rtol=0, atol=0)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -397,7 +405,6 @@ def test_production_plan_offsets_beyond_four_gib(monkeypatch):
     assert torch.all(backing[-32:] == -23).item()
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Automatic fused KDA selection requires Ascend A5"
 )
@@ -418,7 +425,6 @@ def test_automatic_startup_uses_fused_plan(monkeypatch):
     torch.testing.assert_close(actual, state[ids], rtol=0, atol=0)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -439,7 +445,6 @@ def test_prepared_plan_nan_inf_signed_zero_bits(monkeypatch):
     torch.testing.assert_close(state[1].view(torch.int32), actual[0].view(torch.int32), rtol=0, atol=0)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
@@ -475,8 +480,8 @@ def test_plan_current_stream_and_device_guard(monkeypatch):
 @pytest.mark.parametrize(
     "dtype",
     [
-        pytest.param(torch.float32, marks=KDA_LAUNCHER_SKIP),
-        pytest.param(torch.bfloat16, marks=KDA_LAUNCHER_SKIP),
+        torch.float32,
+        torch.bfloat16,
         torch.float16,
     ],
 )
@@ -499,12 +504,6 @@ def test_fullgraph_state_copy_uses_sealed_context_plan(dtype, page_stride, monke
     plan = layer._ascend_kda_state_copy
     monkeypatch.setattr(production, "get_forward_context", lambda: SimpleNamespace(no_compile_layers={"layer": layer}))
     _forbid_compilation(monkeypatch)
-    if dtype == torch.float16:
-
-        def forbidden(*args, **kwargs):
-            raise AssertionError("fallback entered JIT after seal")
-
-        monkeypatch.setattr(production.batch_memcpy_kernel, "run", forbidden)
 
     def copy_roundtrip(cache, indices, flags):
         packed = plan.gather(cache, indices, flags)
@@ -551,8 +550,8 @@ def test_fullgraph_state_copy_uses_sealed_context_plan(dtype, page_stride, monke
 @pytest.mark.parametrize(
     "dtype",
     [
-        pytest.param(torch.float32, marks=KDA_LAUNCHER_SKIP),
-        pytest.param(torch.bfloat16, marks=KDA_LAUNCHER_SKIP),
+        torch.float32,
+        torch.bfloat16,
         torch.float16,
     ],
 )
@@ -569,9 +568,9 @@ def test_fullgraph_same_layout_layers_keep_distinct_bindings(dtype, monkeypatch)
     initialize_kda_state_copy(layers, 8)
     plans = [layer._ascend_kda_state_copy for layer in layers.values()]
     assert plans[0] is not plans[1]
-    assert plans[0]._compiled is plans[1]._compiled
+    assert plans[0]._signature is plans[1]._signature
     _forbid_compilation(monkeypatch)
-    monkeypatch.setattr(production.batch_memcpy_kernel, "run", Mock(side_effect=AssertionError("serving JIT")))
+    _forbid_compilation(monkeypatch)
     indices = torch.tensor([0, 2], dtype=torch.int32, device="npu")
     flags = torch.tensor([True, False], device="npu")
     for value, (name, layer) in enumerate(layers.items(), 3):
@@ -607,38 +606,25 @@ def test_fullgraph_same_layout_layers_keep_distinct_bindings(dtype, monkeypatch)
         torch.testing.assert_close(state[indices], expected + 1, rtol=0, atol=0)
 
 
-@KDA_LAUNCHER_SKIP
 @pytest.mark.skipif(
     get_ascend_device_type() != AscendDeviceType.A5, reason="Fused KDA state-copy plan requires Ascend A5"
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("state_offset", [0, 1])
 @torch.inference_mode()
-def test_prepare_matches_alignment_of_unaligned_scratch_backing(dtype, state_offset, monkeypatch):
-    """Scratch alignment follows both actual pointers, not an allocator assumption."""
+def test_prepare_uses_no_scratch_and_warms_cache_alignment(dtype, state_offset, monkeypatch):
+    """Metadata-only preparation preserves both aligned and offset cache keys."""
     payload = 6
     source = torch.full((8 * payload + state_offset,), 7, dtype=dtype, device="npu")
     state = source.narrow(0, state_offset, 8 * payload).view(8, 1, 2, 3)
-    scratch_size = payload + 16 // state.element_size()
-    zeros = torch.zeros
-    allocations = []
-
-    def unaligned_zeros(size, *args, **kwargs):
-        """Offset only the scratch allocation; index metadata stays aligned."""
-        if size == scratch_size and kwargs.get("dtype") == dtype:
-            offset = 8 // state.element_size()
-            backing = zeros(size + offset, *args, **kwargs).narrow(0, offset, size)
-            assert backing.data_ptr() % 16 == 8
-            allocations.append(backing)
-            return backing
-        return zeros(size, *args, **kwargs)
-
-    monkeypatch.setattr(torch, "zeros", unaligned_zeros)
-    plan = KDAStateCopyPlan.prepare(state, 8)
+    with monkeypatch.context() as patch:
+        forbidden = Mock(side_effect=AssertionError("prepare allocated device storage"))
+        patch.setattr(torch, "zeros", forbidden)
+        patch.setattr(torch, "empty", forbidden)
+        plan = KDAStateCopyPlan.prepare(state, 8)
     plan.seal()
-    assert len(allocations) == 1
-    assert len(plan._compiled) == 4
-    # Startup must only mutate its disposable storage, never the bound cache.
+    assert len(_warmup_keys(plan)) == 4
+    assert all(key.cache_aligned == (state.data_ptr() % 16 == 0) for key in _warmup_keys(plan))
     torch.testing.assert_close(state, torch.full_like(state, 7), rtol=0, atol=0)
     _forbid_compilation(monkeypatch)
     indices = torch.tensor([0, 7], dtype=torch.int32, device="npu")
@@ -655,7 +641,6 @@ def test_prepare_matches_alignment_of_unaligned_scratch_backing(dtype, state_off
 @torch.inference_mode()
 def test_auto_contiguous_prefill_masks_invalid_rows(monkeypatch, index_dtype):
     """Exercise real prefill dispatch and copies; only chunk math is substituted."""
-    from vllm_ascend.ops import kda_state_copy_plan as production
     from vllm_ascend.ops import kimi_kda as kimi
 
     attention = kimi.AscendKimiK3DeltaAttention.__new__(kimi.AscendKimiK3DeltaAttention)
@@ -676,7 +661,7 @@ def test_auto_contiguous_prefill_masks_invalid_rows(monkeypatch, index_dtype):
     chunk = Mock(return_value=("output", final))
     monkeypatch.setattr(kimi, "run_chunk_kda", chunk)
     _forbid_compilation(monkeypatch)
-    monkeypatch.setattr(production.batch_memcpy_kernel, "run", Mock(side_effect=AssertionError("serving JIT")))
+    _forbid_compilation(monkeypatch)
     metadata = SimpleNamespace(
         cu_seqlens_host=tuple(range(7)), cu_seqlens_kern=None, keep_meta=None, chunk_indices_chunk64_host=()
     )

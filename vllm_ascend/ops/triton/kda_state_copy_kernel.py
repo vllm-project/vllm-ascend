@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """KDA state-copy kernel and metadata validation for worker-owned plans.
 
-Production selects its plan by device/cache layout. The sole prepare/seal
-lifecycle lives in ops/kda_state_copy_plan.py; independent tests use that same plan.
-This module has no launcher registry.
+Production selects its plan by device/cache layout. Bound layout metadata is
+late-registered before kernel_warmup; warmup and serving share one launcher.
 
 Contract:
     state: NPU FP32/BF16 cache [cache_rows, H, V, K]. Inner payload is dense;
@@ -22,46 +21,17 @@ Cache and packed storage must not overlap. Concurrent writers are unsupported.
 
 from __future__ import annotations
 
-import os
-from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Protocol
+from dataclasses import dataclass
+from typing import Any
 
 import torch
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import LaunchSpec, TritonWarmupTensor
 from vllm.triton_utils import tl, triton
 
-if TYPE_CHECKING:
-
-    class _CompiledKernelSource(Protocol):
-        """Source metadata needed to match a compiled launcher's arguments."""
-
-        @property
-        def signature(self) -> Mapping[str, str]: ...
-
-    class _CompiledKernel(Protocol):
-        """Structural launch interface for vendor Triton kernels without stubs."""
-
-        @property
-        def src(self) -> _CompiledKernelSource: ...
-
-        def __getitem__(self, grid: tuple[int, int, int]) -> Callable[..., object]: ...
-
+from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
 
 DEFAULT_KDA_BLOCK_SIZE = 8192
-
-
-def _configuration():
-    """Pin compile-related environment and runtime versions for this process.
-
-    This is a fail-closed configuration check, not a portable compiler-cache key.
-    Loaded backend/binaries must remain fixed; live code replacement is unsupported.
-    """
-    prefixes = ("TRITON_", "ASCEND_", "CANN_", "TORCH_NPU_", "NPU_", "LLVM_")
-    keys = {"LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONPATH"}
-    return (
-        torch.__version__,
-        triton.__version__,
-        tuple(sorted((k, v) for k, v in os.environ.items() if k.startswith(prefixes) or k in keys)),
-    )
 
 
 @triton.jit
@@ -119,13 +89,105 @@ def _kda_state_copy_kernel(
         tl.store(packed_ptr + packed_offset, value, mask=in_payload)
 
 
+class KDAStateCopyKernel(AscendTritonJitKernel["KDAStateCopyKernel.CompileKey"]):
+    kernel = _kda_state_copy_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        dtype: torch.dtype
+        index_dtype: torch.dtype
+        cache_rows: int
+        cache_stride_elements: int
+        payload_elements: int
+        cache_aligned: bool
+        to_cache: bool
+
+    def dispatch(
+        self,
+        *,
+        dtype: torch.dtype,
+        index_dtype: torch.dtype,
+        cache_rows: int,
+        cache_stride_elements: int,
+        payload_elements: int,
+        cache_aligned: bool,
+        to_cache: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            dtype=dtype,
+            index_dtype=index_dtype,
+            cache_rows=cache_rows,
+            cache_stride_elements=cache_stride_elements,
+            payload_elements=payload_elements,
+            cache_aligned=cache_aligned,
+            to_cache=to_cache,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        dtype: torch.dtype,
+        cache_rows: int,
+        cache_stride_elements: int,
+        payload_elements: int,
+        cache_aligned: bool,
+    ) -> list[CompileKey]:
+        # These scalars are fixed by the bound cache, including i64 page strides.
+        # Selected count occurs only in the grid and cannot add a JIT variant.
+        return self._trace_dispatch(self.dispatch)(
+            dtype=dtype,
+            index_dtype=(torch.int32, torch.int64),
+            cache_rows=cache_rows,
+            cache_stride_elements=cache_stride_elements,
+            payload_elements=payload_elements,
+            cache_aligned=cache_aligned,
+            to_cache=(False, True),
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            cache=TritonWarmupTensor(compile_key.dtype, aligned=compile_key.cache_aligned),
+            packed=TritonWarmupTensor(compile_key.dtype),
+            indices=TritonWarmupTensor(compile_key.index_dtype),
+            flags=TritonWarmupTensor(compile_key.index_dtype if compile_key.to_cache else torch.bool),
+            cache_rows=compile_key.cache_rows,
+            cache_stride_elements=compile_key.cache_stride_elements,
+            payload_elements=compile_key.payload_elements,
+            to_cache=compile_key.to_cache,
+            selected=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        cache: torch.Tensor,
+        packed: torch.Tensor,
+        indices: torch.Tensor,
+        flags: torch.Tensor,
+        *,
+        cache_rows: int,
+        cache_stride_elements: int,
+        payload_elements: int,
+        to_cache: bool,
+        selected: int,
+    ) -> LaunchSpec:
+        return (selected, triton.cdiv(payload_elements, DEFAULT_KDA_BLOCK_SIZE)), dict(
+            index_stride=1,
+            flag_stride=0 if to_cache else 1,
+            TO_CACHE=to_cache,
+            HAS_FLAGS=not to_cache,
+            BLOCK_SIZE=DEFAULT_KDA_BLOCK_SIZE,
+        )
+
+
+_KDA_STATE_COPY_KERNEL = KDAStateCopyKernel()
+
+
 def _validate_cache_layout(state: torch.Tensor) -> tuple[int, int, int]:
     """Validate a real fused cache once at startup and extract launch scalars.
 
-    ``prepare`` builds its own disposable packed row and index vectors from
-    this cache's metadata. Their shape, dtype, device and contiguous layout
-    are construction guarantees, not external inputs to validate here. Actual
-    request indices and packed final states are checked by the sealed plan.
+    Preparation reads only metadata; registry warmup uses pointer-free tensors.
+    Request indices and packed final states are checked by the sealed plan.
     """
     if state.device.type != "npu":
         raise RuntimeError("state must be an NPU tensor")
