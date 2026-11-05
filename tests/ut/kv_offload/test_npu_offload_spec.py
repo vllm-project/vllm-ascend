@@ -63,6 +63,7 @@ def test_npu_worker_releases_handlers_before_mmap() -> None:
     worker._store_handler = FakeHandler("store")  # type: ignore[assignment]
     worker._load_handler = FakeHandler("load")  # type: ignore[assignment]
     worker._mmap_region = FakeRegion()
+    worker._pinned_tensors = []
 
     worker.shutdown()
 
@@ -115,6 +116,7 @@ def test_npu_worker_supports_shared_region_view_apis(
         blocks_per_chunk=2,
         num_cpu_blocks=3,
         mmap_region=FakeRegion(),
+        pin_shared_mmap=False,
     )
 
     assert created_page_sizes == [8]
@@ -221,6 +223,7 @@ def test_tiering_worker_matches_v027_shared_region_contract(
         parallel=SimpleNamespace(world_size=world_size, rank=worker_rank),
     )
     spec._engine_id = "engine-dp0"
+    spec.extra_config = {}
     spec.replicated_layout = replicated_layout
     spec.cpu_page_size_per_worker = 64
     spec.num_chunks = 10
@@ -241,6 +244,8 @@ def test_tiering_worker_matches_v027_shared_region_contract(
         "blocks_per_chunk": 2,
         "num_cpu_blocks": 10,
         "mmap_region": captured["region"],
+        "pin_shared_mmap": True,
+        "worker_slot_only": not replicated_layout,
     }
 
 
