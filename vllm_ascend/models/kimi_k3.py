@@ -1137,7 +1137,7 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config):
-        return get_kda_state_shape(vllm_config)
+        return get_kda_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
@@ -1243,7 +1243,7 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config):
-        return get_kda_state_shape(vllm_config)
+        return get_kda_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)

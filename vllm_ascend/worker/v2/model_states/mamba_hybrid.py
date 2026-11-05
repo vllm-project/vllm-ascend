@@ -17,7 +17,6 @@
 # This file is a part of the vllm-ascend project.
 
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -352,16 +351,17 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             or model_uses_kimi_kda(self.vllm_config.model_config)
         ):
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
-        if pcp_context is not None and not getattr(input_batch, "is_dummy", False):
-            # Recurrent state uses global request order; SFA keeps local queries.
-            local_groups = [
-                [group for group in groups if not isinstance(group.kv_cache_spec, MambaSpec)] for groups in attn_groups
-            ]
-            mamba_groups = [
-                [group for group in groups if isinstance(group.kv_cache_spec, MambaSpec)] for groups in attn_groups
-            ]
 
-            def build_pcp_metadata(**kwargs):
+        def build_metadata(**kwargs):
+            if pcp_context is not None and not getattr(input_batch, "is_dummy", False):
+                # Recurrent state uses global request order; SFA keeps local queries.
+                local_groups = [
+                    [group for group in groups if not isinstance(group.kv_cache_spec, MambaSpec)]
+                    for groups in attn_groups
+                ]
+                mamba_groups = [
+                    [group for group in groups if isinstance(group.kv_cache_spec, MambaSpec)] for groups in attn_groups
+                ]
                 metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
                     self,
                     input_batch,
@@ -389,19 +389,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                     )
                 )
                 return metadata
-
-            if getattr(self, "device_metadata", None) is not None:
-                # One target step owns both local SFA and global KDA producers.
-                self.attn_metadata = self.device_metadata.run_build(
-                    build_pcp_metadata,
-                    attn_groups=attn_groups,
-                    full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
-                    for_cudagraph_capture=for_capture,
-                )
-            else:
-                self.attn_metadata = build_pcp_metadata()
-        else:
-            self.attn_metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
+            return AscendMambaHybridModelState._build_attn_metadata_for_batch(
                 self,
                 input_batch,
                 cudagraph_mode,
@@ -413,6 +401,17 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                 use_pcp_padding=pcp_context is not None,
                 pcp_context=pcp_context,
             )
+
+        if getattr(self, "device_metadata", None) is not None:
+            # Real, capture and idle batches share one producer lifecycle.
+            self.attn_metadata = self.device_metadata.run_build(
+                build_metadata,
+                attn_groups=attn_groups,
+                full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
+                for_cudagraph_capture=for_capture,
+            )
+        else:
+            self.attn_metadata = build_metadata()
         if self.recoverssm is not None:
             self.recoverssm.record_step(self.attn_metadata, attn_groups, for_capture=for_capture)
         return self.attn_metadata
@@ -491,11 +490,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
-        build_metadata = build_attn_metadata
-        # PCP already owns one build scope for local SFA and global KDA.
-        if getattr(self, "device_metadata", None) is not None and pcp_context is None:
-            build_metadata = partial(self.device_metadata.run_build, build_attn_metadata)
-        return build_metadata(
+        return build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_actual_reqs=input_batch.num_reqs,

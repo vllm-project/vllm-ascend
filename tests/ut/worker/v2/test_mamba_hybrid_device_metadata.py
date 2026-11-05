@@ -76,12 +76,14 @@ def state_env(monkeypatch):
     state.vllm_config = config
     state.max_model_len = 151552
     state.device_metadata = TargetDeviceMetadata()
+    state.recoverssm = None
     batch = SimpleNamespace(
         num_reqs=2,
         num_tokens=2,
         num_reqs_after_padding=4,
         num_tokens_after_padding=4,
         is_prefilling_np=np.array([False, False]),
+        prefill_runs_as_decode_np=None,
         num_scheduled_tokens=np.array([1, 1]),
         query_start_loc=torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32),
         query_start_loc_np=np.array([0, 1, 2, 2, 2], dtype=np.int32),
@@ -106,11 +108,15 @@ def state_env(monkeypatch):
 
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
 @pytest.mark.parametrize("for_capture", [False, True])
-def test_pcp_local_and_global_builds_share_one_qli_producer_lifecycle(state_env, monkeypatch, mode, for_capture):
+@pytest.mark.parametrize("is_dummy", [False, True])
+def test_pcp_local_and_global_builds_share_one_qli_producer_lifecycle(
+    state_env, monkeypatch, mode, for_capture, is_dummy
+):
     env = state_env
     text_config = env.state.vllm_config.model_config.hf_text_config
     text_config.model_type = "kimi_linear"
     text_config.linear_attn_config = {"num_heads": 96}
+    env.batch.is_dummy = is_dummy
     context = SimpleNamespace(global_batch=env.batch, global_block_tables=(), global_slot_mappings=torch.empty(0))
     env.state.pcp_manager = SimpleNamespace(build_attention_context=lambda *args: context)
     env.groups[0][0].kv_cache_spec = object()
@@ -119,9 +125,12 @@ def test_pcp_local_and_global_builds_share_one_qli_producer_lifecycle(state_env,
     build_indexer = hybrid.build_attn_metadata
 
     def build(**kwargs):
+        metadata = {}
         if kwargs["attn_groups"][0]:
-            return build_indexer(**kwargs)
-        return {"kda": SimpleNamespace()}
+            metadata.update(build_indexer(**kwargs))
+        if kwargs["attn_groups"][1]:
+            metadata["kda"] = SimpleNamespace()
+        return metadata
 
     monkeypatch.setattr(hybrid, "build_attn_metadata", build)
     run_build = Mock(wraps=env.state.device_metadata.run_build)

@@ -18,12 +18,15 @@ PAD_SLOT_ID = -1
 def runtime():
     class BaseBuilder:
         def __init__(self, spec, names, config, device):
+            self.vllm_config = config
+            self.compilation_config = config.compilation_config
             self.decode_cudagraph_max_bs = config.capture_capacity
+            self.spec_sequence_masks = torch.empty(max(config.scheduler_config.max_num_seqs, config.capture_capacity))
             self.spec_state_indices_tensor = torch.empty(self.decode_cudagraph_max_bs, 4, dtype=torch.int32)
             self.non_spec_state_indices_tensor = torch.empty(self.decode_cudagraph_max_bs, dtype=torch.int32)
 
         def build(self, *args, **kwargs):
-            return args[-1]
+            return self._finalize_metadata(args[1])
 
         def build_for_cudagraph_capture(self, metadata):
             # Installed upstream capture dispatches through self.build().
@@ -32,8 +35,9 @@ def runtime():
         def _reset_spec_decode_graph_inputs(self, count):
             self.spec_state_indices_tensor[:count].fill_(PAD_SLOT_ID)
 
-    scope = dict(torch=torch, copy=copy, AscendGDNHostMetadataBuilder=BaseBuilder, PAD_SLOT_ID=PAD_SLOT_ID)
+    scope = dict(torch=torch, copy=copy, AscendGDNAttentionMetadataBuilder=BaseBuilder, PAD_SLOT_ID=PAD_SLOT_ID)
     sources = [
+        ("vllm_ascend/ops/gdn_attn_builder.py", "AscendGDNHostMetadataBuilder"),
         ("vllm_ascend/ops/kda_pcp.py", "KimiKDAHostMetadataBuilder"),
         ("vllm_ascend/ops/kimi_kda.py", "_normalize_causal_cache_indices"),
     ]
@@ -46,9 +50,12 @@ def runtime():
         config = SimpleNamespace(
             parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
             scheduler_config=SimpleNamespace(max_num_batched_tokens=128, max_num_seqs=32),
+            compilation_config=SimpleNamespace(
+                static_forward_context={"kda": SimpleNamespace(use_contiguous_conv_indices=True)}
+            ),
             capture_capacity=capture_capacity,
         )
-        return scope["KimiKDAHostMetadataBuilder"](None, [], config, "cpu")
+        return scope["KimiKDAHostMetadataBuilder"](None, ["kda"], config, "cpu")
 
     return SimpleNamespace(
         make=make,
@@ -128,7 +135,9 @@ def test_contiguous_decode_stays_zero_copy_and_groups_do_not_alias(runtime):
     source = torch.arange(8, dtype=torch.int32)
     builders = [runtime.make(), runtime.make()]
     result = builders[0].build(0, metadata(non_spec_indices=source))
-    assert result.non_spec_decode_metadata.causal_conv1d.cache_indices is source
+    prepared = result.non_spec_decode_metadata.causal_conv1d.cache_indices
+    assert prepared.data_ptr() == source.data_ptr()
+    torch.testing.assert_close(prepared, source)
     spec = torch.arange(16, dtype=torch.int32).reshape(4, 4)
     first = builders[0].build(0, metadata(spec_indices=spec)).spec_decode_metadata.spec_causal_conv1d.cache_indices
     second = (

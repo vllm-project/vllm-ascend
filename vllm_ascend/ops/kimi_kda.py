@@ -203,6 +203,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
     # Worker startup prepares this layer after KV-cache binding.
     _requires_kda_state_copy = True
+    use_contiguous_conv_indices = True
 
     def __init__(self, config, vllm_config, prefix: str = "") -> None:
         quant_config = getattr(vllm_config, "quant_config", None)
@@ -303,12 +304,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             self.hidden_size,
             output_sizes,
             self.tp_size,
+            padding_size=self.in_proj_padding,
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_qkvgfab",
         )
-        if self.in_proj_padding:
-            self.in_proj_qkvgfab.weight.data[-self.in_proj_padding :].zero_()
         self.f_b_proj = KDAColumnParallelLinear(
             self.head_dim,
             self.projection_size,

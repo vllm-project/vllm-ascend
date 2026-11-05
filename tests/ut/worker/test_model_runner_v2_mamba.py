@@ -615,7 +615,7 @@ def test_prepare_attn_propagates_actual_request_count_to_metadata_builder():
     build_call = next(
         node
         for node in ast.walk(prepare_attn)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_metadata"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_attn_metadata"
     )
     keywords = {keyword.arg: keyword.value for keyword in build_call.keywords}
 
