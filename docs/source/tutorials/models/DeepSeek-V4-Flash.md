@@ -1142,7 +1142,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
         --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 --gpu-memory-utilization 0.97 \
         --quantization ascend \
-        --speculative-config "{\"num_speculative_tokens\":1,\"method\":\"dspark\"}" \
+        --speculative-config "{\"num_speculative_tokens\":5,\"method\":\"dspark\"}" \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --kv-transfer-config "$kv_config" \
         --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
@@ -2275,7 +2275,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 --gpu-memory-utilization 0.97 \
             --quantization ascend \
-            --speculative-config "{\"num_speculative_tokens\":1,\"method\":\"dspark\"}" \
+            --speculative-config "{\"num_speculative_tokens\":5,\"method\":\"dspark\"}" \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --kv-transfer-config "$kv_config" \
             --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
@@ -2367,7 +2367,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 --gpu-memory-utilization 0.97 \
             --quantization ascend \
-            --speculative-config "{\"num_speculative_tokens\":1,\"method\":\"dspark\"}" \
+            --speculative-config "{\"num_speculative_tokens\":5,\"method\":\"dspark\"}" \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --kv-transfer-config "$kv_config" \
             --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
