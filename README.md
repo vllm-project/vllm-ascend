@@ -69,9 +69,9 @@ Whether you are a performance tuner looking to deploy vLLM-Ascend in production 
 - Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series, Atlas 800I A3 Inference series, Atlas A3 Training series, Atlas 300I Duo (Experimental)
 - OS: Linux
 - Software:
-    - Python >= 3.10, < 3.13
-    - CANN == 9.1.0 (For Ascend HDK version, please refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md))
-    - PyTorch == 2.10.0, TorchNPU == 2.10.0.post4
+    - Python == 3.12
+    - CANN == 9.2.1 (For Ascend HDK version, please refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/latest/softwareinst/releasenote/9.2.1/release-notes.md))
+    - PyTorch == 2.10.0, TorchNPU == 2.10.0.post7
     - vLLM (the same version as vllm-ascend)
 
 ## Accessing Ascend NPU
