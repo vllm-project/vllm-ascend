@@ -55,13 +55,12 @@ The official DeepSeek-V4.1-Flash-1017 checkpoint is available from
 [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) and
 [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4.1-Flash-1017).
 
-The recommended Ascend W4A8 checkpoint used by this guide is available as
-[Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8)
-on ModelScope. It includes the DSpark draft parameters and INT8 Engram tables.
+The following Ascend quantized checkpoints are available on ModelScope:
 
-The Ascend W8A8 checkpoint remains available as
-[Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8)
-on ModelScope and can also be used for deployment.
+| Quantization | Checkpoint | Notes |
+|--------------|------------|-------|
+| W4A8 | [DeepSeek-V4.1-Flash-1017-w4a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8) | Recommended for performance. Includes DSpark draft parameters and INT8 Engram tables. |
+| W8A8 | [DeepSeek-V4.1-Flash-1017-w8a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8) | Also supported for deployment. |
 
 Alternatively, use [ModelSlim](https://github.com/Ascend/msmodelslim) to
 prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
@@ -82,9 +81,6 @@ Use one of the following hardware configurations:
 - **A2 series**: two Atlas 800I A2 servers. Each server has 8 NPUs with 64GB
   memory per NPU and exposes 8 devices to the container.
 - **A2 1P1D**: four Atlas 800I A2 servers with the same device configuration.
-
-Store the checkpoint in a shared directory or copy it to the same absolute
-path on every server.
 
 ### 3.2 Verify Multi-node Communication
 
@@ -276,6 +272,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     - `--safetensors-load-strategy lazy` avoids eagerly materializing the whole
         checkpoint during loading.
     - `--swa-bounded-replay` enables SWA bounded replay.
+    - `enable_flashcomm1: false` disables FlashComm for compatibility with SWA bounded replay.
     - `enable_fused_mc2` and `enable_shared_expert_dp` enable the A3 MoE and
         communication optimizations
         used by this configuration. `enable_cpu_binding` pins worker processes to
@@ -382,6 +379,19 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     | `--dp-rpc-port` | DP coordination port. It must be unused and reachable within the node group. |
     | `--vllm-start-port` | First API port; the launcher increments it for each local DP rank. |
 
+    The launcher passes eight positional arguments to `run_dp_template.sh`:
+
+    | Position | Value | Used by the template |
+    |----------|-------|----------------------|
+    | `$1` | `visible_devices` | `ASCEND_RT_VISIBLE_DEVICES` |
+    | `$2` | `vllm_engine_port` | `--port` |
+    | `$3` | `dp_size` | `--data-parallel-size` |
+    | `$4` | `dp_rank` | `--data-parallel-rank` |
+    | `$5` | `args.dp_address` | `--data-parallel-address` |
+    | `$6` | `args.dp_rpc_port` | `--data-parallel-rpc-port` |
+    | `$7` | `tp_size` | `--tensor-parallel-size` |
+    | `$8` | `pcp_size` | `--prefill-context-parallel-size` |
+
     #### 5.2.1.2 Start the Prefill Node
 
     On the Prefill node, save the following script as `run_dp_template.sh`. Set
@@ -444,7 +454,6 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
             "enable_cpu_binding":true,
             "enable_fused_mc2":2,
             "enable_flashcomm1":false,
-            "enable_shared_expert_dp":true,
             "multistream_overlap_shared_expert":false
         }' \
         --kv-transfer-config '{
@@ -624,7 +633,6 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
         processes and runtime threads.
         - `enable_fused_mc2: 2` selects the MegaMoE path on Prefill.
         - `enable_flashcomm1: false` disables FlashComm for compatibility with SWA bounded replay.
-        - `enable_shared_expert_dp: true` uses data parallelism for shared experts.
         - `multistream_overlap_shared_expert: false` disables shared-expert
         multistream overlap on Prefill, where MegaMoE is enabled.
 
@@ -1219,7 +1227,6 @@ vllm serve "$MODEL_PATH" \
         "enable_cpu_binding":true,
         "enable_fused_mc2":2,
         "enable_flashcomm1":false,
-        "enable_shared_expert_dp":true,
         "multistream_overlap_shared_expert":false
     }' \
     --kv-transfer-config '{
@@ -1363,13 +1370,14 @@ Start the sixteen DP16/TP1 Decode engines with the launcher command from
 
 #### 5.3.4 Startup and Verification
 
-Start Memcache MetaService, then standalone Memcache on both Prefill and
-Decode nodes. Wait until both standalone Memcache processes report successful
-initialization, then start the Prefill and Decode engines in parallel.
+Start the components in this order: Memcache MetaService, standalone Memcache
+on both Prefill and Decode nodes, Decode engines, Prefill engines, and then the
+PD proxy.
 
-After all Prefill and Decode engines report `Application startup complete`,
-start the proxy with the four Prefill and sixteen Decode endpoints described
-in [Section 5.2.1.4](#5214-deploy-the-pd-proxy).
+Wait until both standalone Memcache processes report successful initialization
+before starting the Decode engines. Then wait until every Decode engine reports
+`Application startup complete` before starting Prefill. After every Prefill engine is ready, start the proxy with the
+same endpoint mapping described in [Section 5.2.1.4](#5214-deploy-the-pd-proxy).
 
 Send the same request twice with a reusable prefix. Confirm that Prefill logs
 show Memcache lookup, get, put, and hit activity, and that Decode logs still
@@ -1820,11 +1828,24 @@ true
 
 ## 7 Accuracy Evaluation
 
+### 7.1 Using AISBench
+
 Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md)
-to evaluate the deployed service. Accuracy results will be documented in the
-[release notes](../../user_guide/release_notes.md). When reporting results, record the
-checkpoint, prompt encoder, reasoning effort, sampling parameters, dataset
-version, and whether DSpark is enabled.
+to evaluate the deployed service.
+
+### 7.2 Accuracy Results
+
+The following table lists accuracy results for the
+`DeepSeek-V4.1-Flash-1017-w4a8` checkpoint on A3 products and the generation
+parameters used for each dataset.
+
+| Dataset | Hardware | Score | generation_kwargs |
+|---------|----------|-------|-------------------|
+| GPQA | A3 series | 89.9 | `temperature=1.0, top_p=1.0, max_tokens=131072` |
+| MMMU-PRO | A3 series | 81.3 | `temperature=1.0, top_p=0.95, max_tokens=131072` |
+
+When reporting results, record the checkpoint, prompt encoder, reasoning
+effort, sampling parameters, dataset version, and whether DSpark is enabled.
 
 ## 8 Performance Evaluation
 
