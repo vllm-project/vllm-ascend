@@ -135,10 +135,10 @@ def write_hisparse_indexer_c8(key, scale, values, scales, slots) -> None:
         raise ValueError("HiSparse FP8 indexer writes require E4M3FN data and FP32 scales.")
     store_indexer_key_scale(
         values.contiguous().view(torch.int8).reshape(-1, width),
-        scales.reshape(-1),
+        scales.view(torch.int32).reshape(-1),
         slots.reshape(-1),
         key.view(torch.int8),
-        scale,
+        scale.view(torch.int32),
         block_size=block,
         key_block_stride=key.stride(0),
         scale_block_stride=scale.stride(0),
