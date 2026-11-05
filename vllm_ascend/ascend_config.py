@@ -15,14 +15,11 @@
 # limitations under the License.
 from __future__ import annotations
 
-import ast
 import dataclasses
 import importlib.util
 import json
 import math
 import os
-import sys
-from pathlib import Path
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -54,31 +51,6 @@ def is_mega_moe_supported() -> bool:
     if _MEGA_MOE_SUPPORTED is None:
         _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
     return _MEGA_MOE_SUPPORTED
-
-
-def is_deepgemm_available() -> bool:
-    """Identify the optional Ascend package without importing native operators.
-
-    Ascend and CUDA distributions both import as deep_gemm. Only the Ascend
-    initializer re-exports get_npu_arch from its native extension.
-    """
-    loaded = sys.modules.get("deep_gemm")
-    if loaded is not None:
-        return callable(getattr(loaded, "get_npu_arch", None))
-    spec = importlib.util.find_spec("deep_gemm")
-    if spec is None or not spec.origin or not spec.origin.endswith(".py"):
-        return False
-    try:
-        tree = ast.parse(Path(spec.origin).read_text(encoding="utf-8"))
-    except (OSError, SyntaxError, UnicodeError):
-        return False
-    return any(
-        isinstance(node, ast.ImportFrom)
-        and node.level == 1
-        and node.module == "_C"
-        and any(alias.name == "get_npu_arch" for alias in node.names)
-        for node in tree.body
-    )
 
 
 def validate_additional_config_bool(value: Any, path: str) -> bool:
@@ -640,8 +612,6 @@ class AscendConfig:
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0
-    # DeepSeek V4.1 FP8 x FP4 backend from DeepGEMM-Ascend (950, TP1/EP8).
-    deepgemm_mega_moe: bool = False
     enable_mlapo: bool = True
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
@@ -691,14 +661,6 @@ class AscendConfig:
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
-        if self.deepgemm_mega_moe:
-            if not is_deepgemm_available():
-                logger.warning_once(
-                    "deepgemm_mega_moe was requested but the NPU DeepGEMM package is unavailable. "
-                    "Install the matching deepgemm_ascend wheel to enable it. "
-                    "Setting deepgemm_mega_moe=False and using the standard MoE backend."
-                )
-                self.deepgemm_mega_moe = False
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
