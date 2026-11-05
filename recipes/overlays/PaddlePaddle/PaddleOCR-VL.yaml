@@ -130,6 +130,16 @@ guide_sections:
     does not make the current image compatible with an older CANN installation.
     The source tutorial permits eager as a graph fallback on older compatible runtimes.
 
+    The same pinned 310P environment also ran the document parser below with
+    PaddleOCR 3.3.2 and the frozen ModelZoo PP-DocLayoutV2 conversion. Graph PNG,
+    graph one-page PDF generated from that PNG, and eager PNG each produced
+    Markdown and JSON with 31 layout blocks; content and bounding boxes were
+    checked. All 85 document-recognition HTTP requests returned 200. This is a
+    functional document supplement, not a full-dataset score. Both modes logged
+    `EngineDeadError` during explicit shutdown after requests completed, including
+    a frontend-only SIGTERM retry. Keep those errors in validation reports; this
+    environment has not passed an error-free-log acceptance check.
+
     ### Historical tested source environment
 
     - HiDevLab Ascend 310P3: one of two logical devices selected, about 44 GB usable
