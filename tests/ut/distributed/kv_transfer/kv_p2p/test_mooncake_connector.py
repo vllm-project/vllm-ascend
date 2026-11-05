@@ -1076,10 +1076,10 @@ class TestSocketManagement(unittest.TestCase):
             kv_caches=self.kv_caches,
             prefill_pp_layer_partition=None,
         )
-        self.thread.remote_sockets = defaultdict(deque)
+        self.thread.remote_socket_pool.sockets = defaultdict(deque)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.zmq.Context")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.zmq.Context")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.make_zmq_socket")
     def test_get_remote_socket(self, mock_make_socket, mock_context):
         mock_sock = MagicMock()
         mock_make_socket.return_value = mock_sock
@@ -1094,8 +1094,8 @@ class TestSocketManagement(unittest.TestCase):
         self.assertEqual(kwargs.get("path"), "tcp://test_host:12345")
         self.assertEqual(kwargs.get("socket_type"), zmq.REQ)  # type: ignore
         self.assertFalse(kwargs.get("bind", True))
-        mock_sock.setsockopt.assert_any_call(zmq.SNDTIMEO, int(self.thread.timeout * 1000))  # type: ignore
-        mock_sock.setsockopt.assert_any_call(zmq.RCVTIMEO, int(self.thread.timeout * 1000))  # type: ignore
+        mock_sock.setsockopt.assert_any_call(zmq.SNDTIMEO, int(self.thread.remote_socket_pool.timeout * 1000))  # type: ignore
+        mock_sock.setsockopt.assert_any_call(zmq.RCVTIMEO, int(self.thread.remote_socket_pool.timeout * 1000))  # type: ignore
 
     def test_return_socket_to_pool(self):
         mock_sock = MagicMock()
@@ -1105,8 +1105,8 @@ class TestSocketManagement(unittest.TestCase):
 
         self.thread._return_remote_socket(mock_sock, test_host, test_port)
 
-        self.assertEqual(len(self.thread.remote_sockets[test_path]), 1)
-        self.assertEqual(self.thread.remote_sockets[test_path][0], mock_sock)
+        self.assertEqual(len(self.thread.remote_socket_pool.sockets[test_path]), 1)
+        self.assertEqual(self.thread.remote_socket_pool.sockets[test_path][0], mock_sock)
 
 
 class TestCoreFunctionality(unittest.TestCase):
@@ -1974,7 +1974,7 @@ def wire_transfer_contract(monkeypatch, request):
     socket = MagicMock()
     # Seed only the external socket pool: real acquisition, codec and ACK path
     # are retained without opening a port or starting the receiver/executor.
-    receiver.remote_sockets[make_zmq_path("tcp", "127.0.0.1", 6000)].append(socket)
+    receiver.remote_socket_pool.sockets[make_zmq_path("tcp", "127.0.0.1", 6000)].append(socket)
     try:
         yield worker, receiver, engine, socket, peer
     finally:
@@ -2174,7 +2174,7 @@ def test_wire_transfer_failure_does_not_poison_next_request(wire_transfer_contra
     module = sys.modules[MooncakeConnectorWorker.__module__]
     socket = MagicMock(spec=Socket)
     socket.recv.side_effect = [msgspec.msgpack.encode(peer), done_ack, b"ACK"]
-    socket_pool = receiver.remote_sockets[make_zmq_path("tcp", "127.0.0.1", 6000)]
+    socket_pool = receiver.remote_socket_pool.sockets[make_zmq_path("tcp", "127.0.0.1", 6000)]
     socket_pool.clear()
     socket_pool.append(socket)
     used_sockets = [socket]

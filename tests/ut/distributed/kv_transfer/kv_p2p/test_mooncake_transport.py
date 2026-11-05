@@ -80,3 +80,48 @@ def test_ensure_zmq_recv_retries_with_mock_socket():
     mock_logger.warning.assert_called_once()
     mock_logger.error.assert_called_once()
     mock_sleep.assert_called_once()
+
+
+def test_socket_pool_returns_and_closes():
+    mock_socket = MagicMock()
+    mock_context = MagicMock()
+    pool = transport.RemoteSocketPool(timeout=1.0)
+    remote_path = transport.make_zmq_path("tcp", "host", 1234)
+    with (
+        patch.object(transport.zmq, "Context", return_value=mock_context) as mock_context_cls,
+        patch.object(transport, "make_zmq_socket", return_value=mock_socket) as mock_make_socket,
+    ):
+        first_socket = pool.get("host", 1234)
+        assert first_socket is mock_socket
+        mock_context_cls.assert_called_once()
+        mock_make_socket.assert_called_once()
+        pool.return_socket(first_socket, "host", 1234)
+        assert len(pool.sockets[remote_path]) == 1
+        second_socket = pool.get("host", 1234)
+        assert second_socket is mock_socket
+        mock_make_socket.assert_called_once()
+        pool.return_socket(second_socket, "host", 1234)
+        pool.close()
+    mock_socket.close.assert_called_once_with(linger=0)
+    mock_context.destroy.assert_called_once_with(linger=0)
+    assert not pool.sockets
+    pool.close()  # idempotent
+    # A failing socket must not abort the cleanup nor make close() raise.
+    failing_socket = MagicMock()
+    failing_socket.close.side_effect = RuntimeError("close failed")
+    pool.sockets[remote_path].append(failing_socket)
+    pool.close()
+    failing_socket.close.assert_called_once_with(linger=0)
+
+
+def test_socket_pool_timeout_is_applied():
+    mock_socket = MagicMock()
+    pool = transport.RemoteSocketPool(timeout=2.5)
+    with (
+        patch.object(transport.zmq, "Context"),
+        patch.object(transport, "make_zmq_socket", return_value=mock_socket),
+    ):
+        pool.get("host", 1234)
+    expected_timeout = int(pool.timeout * 1000)
+    mock_socket.setsockopt.assert_any_call(transport.zmq.SNDTIMEO, expected_timeout)
+    mock_socket.setsockopt.assert_any_call(transport.zmq.RCVTIMEO, expected_timeout)

@@ -17,14 +17,19 @@ They are intentionally **not** imported from the V2 ``mooncake/utils.py``:
 * keeping the copy local gives the V1 unit tests a stable ``mooncake_v1.common``
   patch target instead of coupling them to the V2 module.
 
+``RemoteSocketPool.close()`` is implemented for resource cleanup but is not
+wired into the connectors yet: shutdown wiring is handled by the lifecycle
+node.
+
 This module must not import any ``vllm_ascend.*`` module.
 """
 
 import contextlib
 import hashlib
 import struct
+import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -33,7 +38,7 @@ import numpy as np
 import numpy.typing as npt
 import zmq
 from vllm.logger import logger
-from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 
 
 @dataclass
@@ -169,7 +174,91 @@ def ensure_zmq_recv(
                 raise RuntimeError(f"Failed to receive data after {max_retries} retries: {e}")
 
 
+class RemoteSocketPool:
+    """Reusable REQ sockets keyed by the remote ``host:port`` path.
+
+    Extracted from ``KVCacheRecvingThread`` without behaviour changes: sockets
+    are created lazily per path, reused through a FIFO queue and bounded by
+    ``timeout`` seconds (``SNDTIMEO``/``RCVTIMEO``).
+
+    ``close`` releases the sockets pooled by this instance together with the ZMQ
+    context each of them created. It is intentionally not called by the
+    connectors yet; the lifecycle node owns the shutdown wiring.
+    """
+
+    def __init__(self, timeout: float = 1.0):
+        self.timeout = timeout
+        self.lock = threading.Lock()
+        self.sockets: dict[str, deque[zmq.Socket]] = defaultdict(deque)
+        # Sockets created by ``get`` own the context stored here; it is only
+        # used by ``close`` to destroy the contexts this pool created.
+        self._contexts: dict[Any, Any] = {}
+
+    def get(self, remote_host: str, remote_handshake_port: int) -> zmq.Socket:  # type: ignore
+        """Get a socket to the remote host."""
+        remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
+        with self.lock:
+            if self.sockets[remote_path]:
+                return self.sockets[remote_path].popleft()
+
+            ctx = zmq.Context()  # type: ignore
+            sock = make_zmq_socket(
+                ctx=ctx,
+                path=remote_path,
+                socket_type=zmq.REQ,  # type: ignore
+                bind=False,
+            )
+            sock.setsockopt(
+                zmq.SNDTIMEO,  # type: ignore
+                int(self.timeout * 1000),
+            )
+            sock.setsockopt(
+                zmq.RCVTIMEO,  # type: ignore
+                int(self.timeout * 1000),
+            )
+            self._contexts[sock] = ctx
+            return sock
+
+    def return_socket(
+        self,
+        sock: zmq.Socket,  # type: ignore
+        remote_host: str,
+        remote_handshake_port: int,
+    ) -> None:
+        """Return the remote socket to the pool."""
+        remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
+        with self.lock:
+            self.sockets[remote_path].append(sock)
+
+    def close(self) -> None:
+        """Close the pooled sockets and destroy the contexts this pool created.
+
+        Idempotent and best effort: a failure on one socket or context only logs
+        a warning and does not abort the remaining cleanup. Sockets currently
+        checked out of the pool are not tracked and keep the previous behaviour.
+        """
+        with self.lock:
+            pooled_sockets = self.sockets
+            self.sockets = defaultdict(deque)
+            contexts = self._contexts
+            self._contexts = {}
+        for remote_path, sock_queue in pooled_sockets.items():
+            for sock in sock_queue:
+                try:
+                    sock.close(linger=0)
+                except Exception:
+                    logger.warning("Failed to close pooled socket. path=%s. ", remote_path)
+                finally:
+                    ctx = contexts.pop(sock, None)
+                    if ctx is not None:
+                        try:
+                            ctx.destroy(linger=0)
+                        except Exception:
+                            logger.warning("Failed to destroy socket context. path=%s. ", remote_path)
+
+
 __all__ = [
+    "RemoteSocketPool",
     "SizedDict",
     "ensure_zmq_recv",
     "ensure_zmq_send",

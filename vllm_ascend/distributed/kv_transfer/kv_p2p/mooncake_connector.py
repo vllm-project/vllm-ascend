@@ -40,7 +40,7 @@ from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.utils.math_utils import cdiv
-from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
+from vllm.utils.network_utils import get_ip, make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -62,6 +62,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.protocol impo
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.tracker import KVCacheTaskTracker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport import (
+    RemoteSocketPool,
     SizedDict,
     ensure_zmq_recv,
     ensure_zmq_send,
@@ -404,13 +405,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
-        self.remote_sockets_lock = threading.Lock()
-        self.remote_sockets: dict[  # type: ignore
-            str, deque[zmq.Socket]
-        ] = defaultdict(  # type: ignore
-            deque
-        )
-        self.timeout = 1.0  # seconds
+        self.remote_socket_pool = RemoteSocketPool(timeout=1.0)
 
         assert vllm_config is not None
         self.vllm_config: VllmConfig = vllm_config
@@ -1447,27 +1442,7 @@ class KVCacheRecvingThread(threading.Thread):
 
     def _get_remote_socket(self, remote_host: str, remote_handshake_port: int) -> zmq.Socket:  # type: ignore
         """Get a socket to the remote host."""
-        remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
-        with self.remote_sockets_lock:
-            if self.remote_sockets[remote_path]:
-                return self.remote_sockets[remote_path].popleft()
-
-            ctx = zmq.Context()  # type: ignore
-            sock = make_zmq_socket(
-                ctx=ctx,
-                path=remote_path,
-                socket_type=zmq.REQ,  # type: ignore
-                bind=False,
-            )
-            sock.setsockopt(
-                zmq.SNDTIMEO,  # type: ignore
-                int(self.timeout * 1000),
-            )
-            sock.setsockopt(
-                zmq.RCVTIMEO,  # type: ignore
-                int(self.timeout * 1000),
-            )
-            return sock
+        return self.remote_socket_pool.get(remote_host, remote_handshake_port)
 
     def _return_remote_socket(
         self,
@@ -1476,9 +1451,7 @@ class KVCacheRecvingThread(threading.Thread):
         remote_handshake_port: int,
     ) -> None:
         """Return the remote socket to the pool."""
-        remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
-        with self.remote_sockets_lock:
-            self.remote_sockets[remote_path].append(sock)
+        self.remote_socket_pool.return_socket(sock, remote_host, remote_handshake_port)
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
