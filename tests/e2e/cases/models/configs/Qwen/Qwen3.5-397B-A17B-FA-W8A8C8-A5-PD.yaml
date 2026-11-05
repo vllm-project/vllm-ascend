@@ -114,7 +114,7 @@ templates:
       - --additional-config
       - '{"enable_flashcomm1":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false},"weight_nz_mode":1,"mega_moe_max_tokens":65535,"enable_cpu_binding":true,"enable_fused_mc2":2,"enable_prefill_mc2":false,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":false,"scheduler_config":{"recompute_scheduler_enable":false}}'
       - --kv-transfer-config
-      - '{"kv_connector":"MooncakeConnectorV2","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"55220","engine_id":"0","kv_connector_extra_config":{"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":1,"tp_size":8},"decode":{"dp_size":2,"tp_size":4}}}'
+      - '{"kv_connector":"MooncakeConnectorV2","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"55220","engine_id":"0","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":8},"decode":{"dp_size":2,"tp_size":4}}}'
 
   - node_index: 1
     envs:
