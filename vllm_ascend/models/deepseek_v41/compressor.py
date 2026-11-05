@@ -47,7 +47,7 @@ class DeepseekV41Compressor(nn.Module):
                     ),
                 )
 
-    def prepare_ring_compressor(self):
+    def prepare_ring_compressor(self, max_tokens, device):
         """Validate the native backend before graph capture."""
         dim = self.wkv.in_features
         if self.width not in (128, 512) or not 1024 <= dim <= 10240 or dim % 512:

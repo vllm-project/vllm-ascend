@@ -1290,15 +1290,15 @@ def test_native_compressor_uses_bf16_weights(config, runtime, monkeypatch):
     native = DeepseekV41Compressor(config, 2, runtime)
     assert native.wkv.weight.dtype == native.wgate.weight.dtype == torch.bfloat16
     monkeypatch.setattr(torch.ops._C_ascend, "compressor_v2", lambda *args: None, raising=False)
-    native.prepare_ring_compressor()
+    native.prepare_ring_compressor(4096, "cpu")
     monkeypatch.setattr(
         compressor_module, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda capability: False)
     )
     with pytest.raises(ValueError, match="A2/A3"):
-        native.prepare_ring_compressor()
+        native.prepare_ring_compressor(4096, "cpu")
     config.head_dim = 8
     with pytest.raises(ValueError, match="D=128/512"):
-        DeepseekV41Compressor(config, 2, runtime).prepare_ring_compressor()
+        DeepseekV41Compressor(config, 2, runtime).prepare_ring_compressor(4096, "cpu")
 
 
 @pytest.mark.parametrize("complete", [[False, True, True, False, True], [False] * 5])
