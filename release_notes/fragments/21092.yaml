@@ -1,8 +1,0 @@
-pr: 21092
-entries:
-  - category: performance
-    text: >-
-      DeepSeek V4.1 now excludes graph and sequence-parallel padding from local
-      expert routes by default in the supported Model Runner V2 fixed-AllGather
-      expert-parallel layout, without an additional environment variable.
-    model: deepseek-v4.1
