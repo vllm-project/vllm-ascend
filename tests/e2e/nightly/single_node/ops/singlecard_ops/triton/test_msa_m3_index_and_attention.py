@@ -147,20 +147,23 @@ def test_decode_index_counts_and_output_buffer(query_len, replay):
 @pytest.mark.parametrize("layout", ["page-first", "kv-first", "split"])
 @torch.inference_mode()
 def test_sparse_attention_matches_cpu_reference(decode, layout):
+    torch.manual_seed(17)
     query_len, heads, blocks = 4, 8, 4
     lengths = torch.tensor([129, 385], dtype=torch.int32, device="cpu")
     table = torch.randperm(2 * blocks, dtype=torch.int32, device="cpu").reshape(2, blocks)
     query = torch.randn((2 * query_len, heads, HEAD_DIM), dtype=torch.bfloat16, device="cpu")
     cache = torch.randn((2 * blocks, 2, BLOCK_SIZE, 1, HEAD_DIM), dtype=torch.bfloat16, device="cpu")
     indices = torch.full((1, 2 * query_len, TOPK), -1, dtype=torch.int32, device="cpu")
-    indices[..., :2] = torch.tensor([0, 2], dtype=torch.int32, device="cpu")
     expected = torch.empty_like(query)
     for request, length in enumerate(lengths.tolist()):
         for token in range(query_len):
             row = request * query_len + token
             position = length - query_len + token
+            # Match the indexer's contract: future blocks are padded with -1.
+            selected = [block for block in (0, 2) if block * BLOCK_SIZE <= position]
+            indices[0, row, : len(selected)] = torch.tensor(selected, dtype=torch.int32, device="cpu")
             positions = [
-                p for block in (0, 2) for p in range(block * BLOCK_SIZE, (block + 1) * BLOCK_SIZE) if p <= position
+                p for block in selected for p in range(block * BLOCK_SIZE, (block + 1) * BLOCK_SIZE) if p <= position
             ]
             logical = torch.tensor(positions, device="cpu")
             page, offset = table[request, logical // BLOCK_SIZE].long(), logical % BLOCK_SIZE
