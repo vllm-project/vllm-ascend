@@ -113,6 +113,21 @@ class TestRlConfig(TestBase):
         with self.assertRaises(ValueError):
             RlConfig(refresh=False)  # type: ignore[call-arg]
 
+    def test_sleep_policies_are_typed_and_validated(self):
+        config = RlConfig(
+            sleep_hccl_policy="destroy",
+            sleep_acl_graph_policy="workspace_only",
+            sleep_allow_fallback=False,
+        )
+
+        self.assertEqual(config.sleep_hccl_policy, "destroy")
+        self.assertEqual(config.sleep_acl_graph_policy, "workspace_only")
+        self.assertFalse(config.sleep_allow_fallback)
+        with self.assertRaises(ValueError):
+            RlConfig(sleep_hccl_policy="suspend")  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            RlConfig(sleep_acl_graph_policy="keep")  # type: ignore[arg-type]
+
 
 class TestAscendConfig(TestBase):
     @staticmethod
