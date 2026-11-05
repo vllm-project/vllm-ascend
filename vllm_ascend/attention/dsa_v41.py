@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.utils import notify_dsv41_cache_written
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -818,6 +819,8 @@ class AscendDSAV41Impl:
         else:
             heads = attn.n_local_heads
             attention_output = hidden_states.new_empty((0, heads, attn.head_dim))
+        if num_tokens:
+            notify_dsv41_cache_written(self.swa_prefix)
         self._project_output(attn, attention_output, hidden_states, metadata, projected=output)
         return output
 

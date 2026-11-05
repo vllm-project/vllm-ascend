@@ -644,6 +644,13 @@ def maybe_save_kv_layer_to_connector(
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
 
 
+def notify_dsv41_cache_written(cache_name: str) -> None:
+    if has_kv_transfer_group() and is_v1_kv_transfer_group():
+        callback = getattr(get_kv_transfer_group(), "on_dsv41_cache_written", None)
+        if callback is not None:
+            callback(cache_name)
+
+
 def notify_kv_cache_written(layer_name: str = ""):
     """Notify the connector that the paged KV cache for ``layer_name`` has been
     written for the current step.

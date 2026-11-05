@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import msgspec
 import torch
 import zmq
 
@@ -51,6 +52,8 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunne
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (  # noqa: E402
+    DSV41LayerMetadata,
+    DSV41MooncakeAgentMetadata,
     KVCacheRecvingLayerThread,
     KVCacheSendingLayerThread,
     KVConnectorBase_V1,
@@ -102,6 +105,42 @@ def _make_mock_kv_cache_config(block_size=16):
     kv_cache_config = MagicMock()
     kv_cache_config.kv_cache_groups = [group_spec]
     return kv_cache_config
+
+
+class TestDSV41Isolation(unittest.TestCase):
+    def test_handshake_uses_separate_metadata(self):
+        encoder = msgspec.msgpack.Encoder()
+        legacy = MooncakeAgentMetadata(123, {"swa": _make_layer_metadata()})
+        v41 = DSV41MooncakeAgentMetadata(123, {"swa": DSV41LayerMetadata([0], [1000], [32], [1], [64])})
+        legacy_payload = encoder.encode(legacy)
+        v41_payload = encoder.encode(v41)
+
+        self.assertNotIn("block_stride", msgspec.msgpack.decode(legacy_payload)["layer_metadata"]["swa"])
+        self.assertEqual(msgspec.msgpack.decode(legacy_payload, type=MooncakeAgentMetadata), legacy)
+        self.assertEqual(msgspec.msgpack.decode(v41_payload, type=DSV41MooncakeAgentMetadata), v41)
+
+    def test_failed_receive_completion_is_v41_only(self):
+        for is_dsv41 in (False, True):
+            with self.subTest(is_dsv41=is_dsv41):
+                request_id = "req-12345678"
+                recv_thread = MagicMock()
+                recv_thread.get_and_clear_done_requests.return_value = set()
+                recv_thread.get_and_clear_failed_requests.return_value = {"req"}
+                worker = SimpleNamespace(
+                    vllm_config=SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_consumer=True)),
+                    kv_recv_layer_thread=recv_thread,
+                    request_map={"req": request_id},
+                    virtual_request=set(),
+                    _invalid_block_ids=set(),
+                    _recving_metadata={request_id: SimpleNamespace(local_block_ids=[[0, 19]])},
+                    dsv41_cache_plan={"swa": object()} if is_dsv41 else {},
+                )
+
+                self.assertEqual(
+                    MooncakeLayerwiseConnectorWorker.get_finished(worker),
+                    (set(), {request_id} if is_dsv41 else set()),
+                )
+                self.assertEqual(worker._invalid_block_ids, {19} if is_dsv41 else {0, 19})
 
 
 class TestKVCacheSendingLayerThread(unittest.TestCase):
