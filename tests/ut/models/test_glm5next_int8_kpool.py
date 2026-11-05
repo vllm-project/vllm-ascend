@@ -25,7 +25,7 @@ def test_unsupported_dtype_fails_before_layer_construction(dtype):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.int8])
 def test_int8_kpool_requires_a3_without_restricting_bf16(monkeypatch, device, dtype):
     profile = get_hardware_profile(device)
-    assert profile.supports(HardwareCapability.POOL_KEY_INDEXER_INT8) == (device is AscendDeviceType.A3)
+    assert profile.supports(HardwareCapability.POOL_KEY_INDEXER_INT8) == (device in (AscendDeviceType.A2, AscendDeviceType.A3))
     monkeypatch.setattr(backend_module, "get_current_hardware_profile", lambda: profile)
     monkeypatch.setattr(Glm5NextKPoolIndexerBackend, "_init_cann_ops", lambda self: None)
     indexer = SimpleNamespace(
