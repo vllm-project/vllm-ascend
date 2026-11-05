@@ -69,6 +69,12 @@ def dsa_v41_forward(
     """Execute V4.1 attention behind an explicit graph side-effect boundary."""
     forward_context = get_forward_context()
     attn = forward_context.no_compile_layers[layer_name]
+    # LoRA activation swaps the linear modules in the model tree after the V1
+    # projection impl was built. ``dsa_forward`` re-binds its cached references
+    # on every call, but V4.1 runs through this boundary instead, so without the
+    # same refresh the O projection keeps reading the base layer and the
+    # adapter is dropped silently (``__getattr__`` still answers ``weight``).
+    attn.dsa_attn.dsa_attn.impl.sync_projection_layers(attn)
     attn.v41_impl.forward(attn, None, hidden_states, output)
 
 
