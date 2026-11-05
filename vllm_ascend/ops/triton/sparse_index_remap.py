@@ -20,7 +20,35 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
-from vllm_ascend.ops.triton.triton_utils import get_element
+from vllm_ascend.device.device_config import is_950
+from vllm_ascend.ops.triton.triton_utils import _resolve_triton_ascend_op, get_element
+
+_a5_sort = _resolve_triton_ascend_op("sort")
+
+
+@triton.jit
+def _remap_sort_a5(
+    indices,
+    output,
+    K: tl.constexpr,
+    DCP_BITS: tl.constexpr,
+    RANK: tl.constexpr,
+    INTERLEAVE_BITS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK)
+    idx = tl.load(indices + row * K + offsets, offsets < K, -1)
+    owner = (idx >> INTERLEAVE_BITS) & ((1 << DCP_BITS) - 1)
+    valid = (offsets < K) & (idx >= 0) & (owner == RANK)
+    local = ((idx >> (INTERLEAVE_BITS + DCP_BITS)) << INTERLEAVE_BITS) + (idx & ((1 << INTERLEAVE_BITS) - 1))
+    # Unique FP32 position keys preserve top-k order, including duplicate IDs.
+    # Only positions are converted numerically; index payloads travel as bits.
+    order = _a5_sort(tl.where(valid, offsets.to(tl.float32), float("inf")), descending=False)
+    lookup = tl.minimum(order, BLOCK - 1).to(tl.int32)
+    selected = tl.gather(local.to(tl.float32, bitcast=True), lookup, 0).to(tl.int32, bitcast=True)
+    result = tl.where(order < float("inf"), selected, -1)
+    tl.store(output + row * K + offsets, result, offsets < K)
 
 
 @triton.jit(do_not_specialize=["topk_count", "dcp_rank"])
@@ -125,7 +153,7 @@ def remap_sparse_indices_triton(
     ``AscendSFADCPImpl._remap_sparse_indices``.
 
     Args:
-        topk_indices: [..., topk_count] int32 replicated-view topk indices.
+        topk_indices: [..., topk_count] int32 or int64 replicated-view topk indices.
         dcp_size: Number of DCP ranks.
         dcp_rank: This rank's index in the DCP group.
         interleave_size: KV cache interleave size of the replicated view.
@@ -161,6 +189,22 @@ def remap_sparse_indices_triton(
     # leading dims (e.g. [dcp_size, 1, topk_count] from the DCP all_gather) can
     # be flattened to a 2D view and restored afterwards.
     indices = indices.view(rows, topk_count)
+
+    # A5 uses vector FP32 position sorting instead of scalar-lowered scans.
+    # The original two-pass implementation remains available on A2/A3.
+    if is_950() and indices.dtype == torch.int32 and topk_count <= 4096:
+        out = torch.empty_like(indices)
+        _remap_sort_a5[(rows,)](
+            indices,
+            out,
+            topk_count,
+            dcp_size.bit_length() - 1,
+            dcp_rank,
+            interleave_size.bit_length() - 1,
+            next_power_of_2(topk_count),
+        )
+        out = out.view(orig_shape)
+        return out if orig_dtype == torch.int32 else out.to(orig_dtype)
 
     block = min(128, next_power_of_2(topk_count))
     num_chunks = triton.cdiv(topk_count, block)

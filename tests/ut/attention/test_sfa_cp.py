@@ -31,7 +31,11 @@ from vllm_ascend.attention.sfa_v1 import (
     PreprocessType,
     SFAForwardContext,
 )
-from vllm_ascend.quantization.methods import AscendLinearScheme, AscendW8A8DynamicLinearMethod
+from vllm_ascend.quantization.methods import (
+    AscendLinearScheme,
+    AscendW8A8DynamicLinearMethod,
+    AscendW8A8MXFP8DynamicLinearMethod,
+)
 from vllm_ascend.weight_switch import (
     WeightSwitchConfig,
     WeightSwitchGatherSpec,
@@ -39,6 +43,58 @@ from vllm_ascend.weight_switch import (
     WeightSwitchMixin,
 )
 from vllm_ascend.weight_switch.o_proj import OProjectionMode, ParallelOProjection
+
+
+@pytest.mark.parametrize(
+    "impl_cls,is_kimi_k31,pcp_size,expected",
+    [
+        (AscendSFADCPImpl, True, 1, PreprocessType.PROLOG_V3),
+        (AscendSFADCPImpl, False, 1, PreprocessType.NATIVE),
+        (AscendSFAPCPDCPImpl, True, 2, PreprocessType.NATIVE),
+        (AscendSFAImpl, False, 1, PreprocessType.PROLOG_V3),
+    ],
+)
+def test_k31_prolog_v3_route_preserves_other_backends(impl_cls, is_kimi_k31, pcp_size, expected):
+    impl = impl_cls.__new__(impl_cls)
+    impl.is_kimi_k31 = is_kimi_k31
+    impl.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size))
+    if issubclass(impl_cls, AscendSFADCPImpl):
+        impl.dcp_group = object()
+    quant_cls = AscendW8A8MXFP8DynamicLinearMethod
+    impl.fused_qkv_a_proj = SimpleNamespace(quant_method=SimpleNamespace(quant_method=quant_cls.__new__(quant_cls)))
+    impl.q_proj = SimpleNamespace(_chunk_size=0)
+    impl.q_a_layernorm = object()
+    impl.kv_a_layernorm = object()
+    impl.qk_rope_head_dim = 64
+    impl.is_kv_consumer = True
+    impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
+    impl.enable_mlapo = False
+    impl.has_indexer = True
+    impl.indexer = SimpleNamespace(wq_b=SimpleNamespace(weight_scale=torch.ones(1)))
+    with patch.object(impl, "_try_enable_type", return_value=True) as prepare:
+        assert impl._resolve_preprocess_type(torch.bfloat16) == expected
+    assert prepare.called is (expected == PreprocessType.PROLOG_V3)
+
+
+@pytest.mark.parametrize("sharded_indexer", [False, True])
+def test_dcp_prolog_records_cache_gather_after_direct_write(sharded_indexer):
+    impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+    impl._sharded_indexer = sharded_indexer
+    hidden = torch.empty(2, 8)
+    cache = (torch.empty(2, 128, 1, 656),)
+    slots = torch.tensor([127, -1], dtype=torch.int32)
+    metadata = SimpleNamespace()
+    events = []
+    output = (hidden, hidden, hidden, None)
+    impl._record_dcp_kv_gather_context = Mock(side_effect=lambda *_: events.append("gather"))
+    with patch.object(
+        AscendSFAImpl, "_sfa_preprocess_prolog_v3", side_effect=lambda *_, **__: events.append("write") or output
+    ) as prolog:
+        assert impl._sfa_preprocess_prolog_v3(hidden, cache, hidden, hidden, slots, attn_metadata=metadata) is output
+    assert prolog.call_args.args[1] is cache
+    assert prolog.call_args.args[4] is slots
+    assert events == (["write"] if sharded_indexer else ["write", "gather"])
 
 
 @pytest.mark.parametrize("first_block_id", [0, 3])
@@ -1747,6 +1803,7 @@ def _make_sfa_split_builder(use_pcp: bool, threshold: int = 1) -> AscendSFAMetad
     builder.is_pcp_decode_sharded = False
     builder.decode_threshold = threshold
     builder.nope = False
+    builder.use_rope = True
     builder.kernel_block_size = 128
     builder.metadata_cls = AscendSFAMetadata
     builder.model_config = SimpleNamespace(get_head_size=lambda: 64)

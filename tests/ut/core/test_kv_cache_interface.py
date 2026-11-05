@@ -12,7 +12,9 @@ from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     HiddenStateCacheSpec,
     UniformTypeKVCacheSpecs,
+    compute_layout_strides,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.kv_cache_interface import (
@@ -55,6 +57,35 @@ def test_mixed_mla_indexer_specs_are_not_uniform(indexer_first):
     if indexer_first:
         specs.reverse()
     assert not is_kv_cache_spec_uniform(dict(specs))
+
+
+@pytest.mark.parametrize("replicas", [1, 2, 8])
+@pytest.mark.parametrize("block_size", [128, 768])
+@pytest.mark.parametrize(
+    "dtype,head_size,scale_dim,scale_dtype",
+    [
+        (torch.bfloat16, 128, 0, torch.int8),
+        (torch.int8, 128, 1, torch.float16),
+        (torch.uint8, 64, 4, torch.float8_e8m0fnu),
+    ],
+)
+def test_indexer_layout_strides_cover_replicated_keys_and_scales(
+    replicas, block_size, dtype, head_size, scale_dim, scale_dtype
+):
+    spec = AscendSFAIndexerCacheSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=head_size,
+        dtype=dtype,
+        scale_dim=scale_dim,
+        scale_dtype=scale_dtype,
+        sfa_dcp_replicated_indexer_size=replicas,
+    )
+    num_blocks = 3
+    layer_stride, block_stride, *_ = compute_layout_strides(spec, num_blocks, 2, KVCacheLayout.LBNHC)
+    assert block_stride == spec.page_size_bytes
+    assert layer_stride == num_blocks * spec.page_size_bytes
+    assert spec.unpadded_page_size_bytes == spec.page_size_bytes
 
 
 def test_matching_ascend_mla_specs_merge():

@@ -24,6 +24,8 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     engine_id: str
     te_rpc_port: int
     block_size: int
+    # Token stripe width used by this worker's CP slot mapping.
+    cp_kv_cache_interleave_size: int
     num_blocks: int
     layer_names: list[str]
     layer_block_sizes: list[int]
@@ -33,11 +35,20 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     block_lens: list[list[int]]
     block_shapes: list[list[tuple[int, ...]]]
     block_size_scales: list[list[int]]
+    # Per layer: 0 for non-indexer caches, 1 for unreplicated indexers,
+    # >1 for replicated indexers. Distinct from kernel blocks per scheduler page.
+    indexer_replication_sizes: list[int]
     local_ip: str = ""
     handshake_port: int = 0
 
     def __post_init__(self) -> None:
+        if self.cp_kv_cache_interleave_size <= 0:
+            raise ValueError("Mooncake CP interleave size must be positive.")
         num_layers = len(self.layer_names)
+        if len(self.indexer_replication_sizes) != num_layers or any(
+            size < 0 for size in self.indexer_replication_sizes
+        ):
+            raise ValueError("Invalid per-layer indexer replication sizes.")
         per_layer_fields: tuple[tuple[str, Sequence[object]], ...] = (
             ("layer_block_sizes", self.layer_block_sizes),
             ("group_indices", self.group_indices),
@@ -96,6 +107,8 @@ class MooncakePPTransferMetadata:
     """Metadata shared by all PCP replicas belonging to one PP rank."""
 
     block_size: int
+    # Token stripe width used by this worker's CP slot mapping.
+    cp_kv_cache_interleave_size: int
     num_blocks: int
     layer_names: list[str]
     layer_block_sizes: list[int]
@@ -105,6 +118,7 @@ class MooncakePPTransferMetadata:
     block_shapes: list[list[tuple[int, ...]]]
     block_size_scales: list[list[int]]
     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
+    indexer_replication_sizes: list[int]
 
 
 @dataclass(frozen=True)

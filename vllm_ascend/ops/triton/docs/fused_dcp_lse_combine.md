@@ -10,8 +10,8 @@
   1. Validate a contiguous receive buffer `[P, local_scatter_size, replicated_size, D + lse_pack_dim]`, infer the output's token/head shape from `scatter_dim`, and optionally validate the local tensors.
   2. Launch `min(output_rows, get_vectorcore_num())` Triton programs. The scalar kernel loops over rows, finds the largest valid LSE across the ranks and optional local contribution, then loops over ranks again to accumulate weighted output in FP32.
   3. Ignore non-finite LSE and mask its output before multiplication, preventing a zero weight times NaN from contaminating the result. Normalize once, store the output, and optionally append merged LSE.
-  4. On eligible A5 BF16 head-scatter shapes with a local contribution, `_fused_dcp_lse_combine_batched_kernel` processes eight rows per tile. It streams ranks to keep one `[BLOCK_ROWS, BLOCK_D]` FP32 accumulator live and masks the last partial tile.
-- **Supported modes**: Atlas A2 and A3 use the scalar-row kernel. A5 additionally uses the eight-row kernel within its dispatch range. The wrapper runs after DCP exchange in eager execution; the enclosing registered custom op supplies a FakeTensor implementation for tracing.
+  4. On eligible A5 BF16 head-scatter shapes `_fused_dcp_lse_combine_batched_kernel` processes eight rows per tile with a local contribution and 32 rows without one. It streams ranks to keep one `[BLOCK_ROWS, BLOCK_D]` FP32 accumulator live and masks the last partial tile.
+- **Supported modes**: Atlas A2 and A3 use the scalar-row kernel. A5 additionally uses the batched kernel within its dispatch range. The wrapper runs after DCP exchange in eager execution; the enclosing registered custom op supplies a FakeTensor implementation for tracing.
 
 ## Parameters
 
@@ -28,15 +28,15 @@
 ## Constraints
 
 - `recv` must be contiguous on NPU. Its packed dimension must equal `D + 1` for FP32 or `D + 4` for BF16/FP16. `local_output` and `local_lse` must be supplied together and match the post-scatter output shape.
-- `return_lse=True` requires an FP32 receive buffer. The A5 batched path requires `return_lse=False` and a local contribution; all other valid combinations use the scalar kernel.
-- A5 batching also requires BF16, `1 <= P <= 8`, `scatter_dim=1`, `D <= 512`, and at least `4 * get_vectorcore_num()` output rows. For `P <= 2` and `D > 256`, it requires at least `8 * get_vectorcore_num()` rows and unit feature stride on `local_output`.
-- `BLOCK_D = next_power_of_2(D)`; the batched kernel uses `BLOCK_ROWS = 8`. The rank count is a compile-time loop bound. This is an inference operator without a backward pass.
+- `return_lse=True` requires an FP32 receive buffer. The A5 batched path requires `return_lse=False`; all other valid combinations use the scalar kernel.
+- A5 batching also requires BF16, `1 <= P <= 8`, `scatter_dim=1`, `D <= 512`, and at least `4 * get_vectorcore_num()` output rows. For `P <= 2` and `D > 256`, it requires at least `8 * get_vectorcore_num()` rows and unit feature stride when `local_output` is present. Without a local contribution, at least `8 * get_vectorcore_num()` rows are required for all supported rank counts.
+- `BLOCK_D = next_power_of_2(D)`; the batched kernel uses `BLOCK_ROWS = 8` with a local contribution and 32 without one. The local path unrolls the rank loop; the received-only path streams ranks with multibuffering disabled to bound UB usage. This is an inference operator without a backward pass.
 
 ## Origin and Differences
 
 - **Origin**: Developed for the vllm-ascend DCP path to merge the payload produced by [`pack_dcp_output_lse`](pack_dcp_output_lse.md) after HCCL exchange.
 - **Differences**:
-    - NPU adaptation for performance: the A5 kernel batches eight rows while streaming rank contributions, limiting live FP32 accumulator storage. The scalar path retains the broader shape and dtype support.
+    - NPU adaptation for performance: the A5 kernel batches rows while streaming rank contributions, limiting live FP32 accumulator storage. The scalar path retains the broader shape and dtype support.
     - Modified for vllm-ascend DCP flows: an optional local contribution is included exactly once after the received ranks; the wrapper can return a merged FP32 LSE for a later merge.
 
 ## Test Cases
