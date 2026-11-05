@@ -22,16 +22,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import json
 import logging
 import os
 import random
+import time
 import uuid
 from collections.abc import AsyncIterator
 from enum import Enum
 
 import aiohttp
 import uvicorn
-from aiohttp import ClientResponse
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -41,6 +42,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("proxy")
+
+# Default overall client timeout kept for backwards compatibility; per-stage
+# timeouts override it only when the corresponding CLI value is greater than 0.
+_LEGACY_TOTAL_TIMEOUT_SECONDS = 100_000.0
 
 app = FastAPI()
 encode_session: aiohttp.ClientSession | None = None
@@ -58,6 +63,79 @@ MM_TYPES = {"image_url", "audio_url", "input_audio"}
 class EncoderDispatchMode(str, Enum):
     SINGLE = "single"
     FANOUT = "fanout"
+
+
+def _record_encode_failure(url: str) -> None:
+    """Record an encoder URL that failed so later routing can avoid it."""
+    if not hasattr(app.state, "encode_failures"):
+        app.state.encode_failures = {}
+    app.state.encode_failures[url] = time.time()
+
+
+def _stage_timeout(stage: str) -> aiohttp.ClientTimeout | None:
+    """Return the per-stage client timeout, or None for the legacy shared one."""
+    seconds = getattr(app.state, "stage_timeouts", {}).get(stage, 0.0)
+    return aiohttp.ClientTimeout(total=seconds) if seconds and seconds > 0 else None
+
+
+def _classify_outbound_error(stage: str, url: str, exc: BaseException) -> HTTPException:
+    """Map connection or timeout failures of one stage to 502/504."""
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return HTTPException(status_code=504, detail={"stage": stage, "url": url, "error": "timeout"})
+    if isinstance(exc, aiohttp.ClientConnectionError):
+        return HTTPException(
+            status_code=502,
+            detail={"stage": stage, "url": url, "error": "connection", "reason": str(exc)},
+        )
+    if isinstance(exc, aiohttp.ClientError):
+        return HTTPException(
+            status_code=502,
+            detail={"stage": stage, "url": url, "error": "client_error", "reason": str(exc)},
+        )
+    return HTTPException(status_code=502, detail={"stage": stage, "url": url, "error": "outbound", "reason": str(exc)})
+
+
+def _downstream_status_error(stage: str, url: str, status: int, body: bytes) -> HTTPException:
+    """Map a non-200 downstream status: keep 4xx, collapse other failures to 502."""
+    message = body.decode("utf-8", errors="replace")[:500]
+    if 400 <= status < 500:
+        return HTTPException(
+            status_code=status,
+            detail={
+                "stage": stage,
+                "url": url,
+                "status": status,
+                "error": "downstream_client_error",
+                "message": message,
+            },
+        )
+    return HTTPException(
+        status_code=502,
+        detail={"stage": stage, "url": url, "status": status, "error": "downstream_server_error", "message": message},
+    )
+
+
+async def _post_stage(
+    session: aiohttp.ClientSession,
+    url: str,
+    payload: dict,
+    headers: dict,
+    stage: str,
+    req_id: str,
+) -> tuple[int, bytes]:
+    """POST one stage request; the response is always released by the context manager."""
+    if session is None:
+        raise HTTPException(status_code=500, detail=f"{stage} session not initialized")
+    try:
+        async with session.post(url, json=payload, headers=headers, timeout=_stage_timeout(stage)) as resp:
+            status = resp.status
+            body = await resp.read()
+    except HTTPException:
+        raise
+    except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+        raise _classify_outbound_error(stage, url, exc) from exc
+    logger.debug("[%s] %s stage returned status %d from %s", req_id, stage, status, url)
+    return status, body
 
 
 def extract_mm_items(request_data: dict) -> list[dict]:
@@ -91,14 +169,16 @@ async def _encode_fanout(
         logger.info("[%s] No multimodal items, skipping encoder", req_id)
         return  # nothing to do
 
+    if encode_session is None:
+        raise HTTPException(status_code=500, detail="Encode session not initialized")
+
     logger.info("[%s] got %d multimodal items...", req_id, len(mm_items))
 
-    tasks = []
-
     # Round-robin over encode servers to distribute load a bit
-    url_cycle = (e_urls[i % len(e_urls)] for i in range(len(mm_items)))
+    target_urls = [e_urls[i % len(e_urls)] for i in range(len(mm_items))]
 
-    for idx, (item, target_url) in enumerate(zip(mm_items, url_cycle)):
+    tasks = []
+    for idx, (item, target_url) in enumerate(zip(mm_items, target_urls)):
         # Derive a *child* request id:  <parent>:<index>:<random-short>
         child_req_id = f"{req_id}:{idx}:{uuid.uuid4().hex[:6]}"
         headers = {"x-request-id": child_req_id}
@@ -113,51 +193,52 @@ async def _encode_fanout(
             "max_tokens": 1,
             "stream": False,
         }
-        if encode_session is None:
-            raise HTTPException(status_code=500, detail="Encode session not initialized")
         tasks.append(
-            encode_session.post(
+            _post_stage(
+                encode_session,
                 f"{target_url}/v1/chat/completions",
-                json=encoder_req,
-                headers=headers,
+                encoder_req,
+                headers,
+                "encode",
+                child_req_id,
             )
         )
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Fail fast if any sub-request failed
-    for idx, r in enumerate(results):
-        if isinstance(r, Exception):
-            logger.error(
-                "[%s] Encoder request #%d raised exception: %s",
-                req_id,
-                idx,
-                r,
-                exc_info=r,
-            )
-            error_detail = str(r)
-            if hasattr(r, "status"):
-                error_detail = f"Status: {r.status}, Error: {error_detail}"
-            elif hasattr(r, "status_code"):
-                error_detail = f"Status: {r.status_code}, Error: {error_detail}"
-            raise HTTPException(status_code=502, detail=f"Encoder request failed: {error_detail}")
-        if isinstance(r, ClientResponse):
-            if hasattr(r, "status") and r.status != 200:
-                try:
-                    detail = await r.text()
-                except Exception:
-                    detail = "<unable to read body>"
-                logger.error(
-                    "[%s] Encoder request #%d returned status %s: %s",
-                    req_id,
-                    idx,
-                    r.status,
-                    detail,
-                )
-                raise HTTPException(
-                    status_code=r.status,
-                    detail=f"Encoder request failed: {detail}",
-                )
+    failures: list[tuple[int, str, BaseException]] = []
+    for idx, result in enumerate(results):
+        if isinstance(result, BaseException):
+            _record_encode_failure(target_urls[idx])
+            failures.append((idx, target_urls[idx], result))
+            continue
+        status, body = result
+        if status != 200:
+            _record_encode_failure(target_urls[idx])
+            error = _downstream_status_error("encode", f"{target_urls[idx]}/v1/chat/completions", status, body)
+            failures.append((idx, target_urls[idx], error))
+
+    if failures:
+        logger.error("[%s] %d/%d encoder requests failed", req_id, len(failures), len(mm_items))
+        statuses = [error.status_code if isinstance(error, HTTPException) else 502 for _, _, error in failures]
+        client_errors = [status for status in statuses if 400 <= status < 500]
+        if client_errors:
+            status_code = client_errors[0]
+        elif 504 in statuses:
+            status_code = 504
+        else:
+            status_code = 502
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "stage": "encode",
+                "error": "encoder_request_failed",
+                "items": [
+                    {"index": idx, "url": url, "reason": str(getattr(error, "detail", error))}
+                    for idx, url, error in failures
+                ],
+            },
+        )
 
     logger.info("[%s] All %d encoder requests completed successfully", req_id, len(mm_items))
 
@@ -167,11 +248,7 @@ async def _encode_single_request(
     e_url: str,
     req_id: str,
 ) -> None:
-    """
-    1. Build one request *per MM item* with all text removed.
-    2. Send them concurrently to the encode cluster.
-    3. Raise if any of them fails.
-    """
+    """Send the full multimodal request to one encoder instance."""
     logger.info("[%s] Processing multimodal items...", req_id)
 
     request_data = copy.deepcopy(orig_request)
@@ -182,31 +259,19 @@ async def _encode_single_request(
     if "max_completion_tokens" in request_data:
         request_data["max_completion_tokens"] = 1
 
+    if encode_session is None:
+        raise HTTPException(status_code=500, detail="Encode session not initialized")
+
+    url = f"{e_url}/v1/chat/completions"
     try:
-        if encode_session is None:
-            raise HTTPException(status_code=500, detail="Encode session not initialized")
+        status, body = await _post_stage(encode_session, url, request_data, headers, "encode", req_id)
+        if status != 200:
+            raise _downstream_status_error("encode", url, status, body)
+    except Exception:
+        _record_encode_failure(e_url)
+        raise
 
-        encode_response = await encode_session.post(f"{e_url}/v1/chat/completions", json=request_data, headers=headers)
-        encode_response.raise_for_status()
-
-        if encode_response.status != 200:
-            encode_text = await encode_response.text()
-            raise HTTPException(
-                status_code=encode_response.status,
-                detail={"error": "Encoder request failed", "message": encode_text},
-            )
-        logger.debug("Encoder processing completed successfully for req_id: %s", req_id)
-
-        return encode_response
-
-    except Exception as e:
-        logger.error("Encoder processing failed: %s", str(e))
-        raise HTTPException(
-            status_code=500,
-            detail={"error": "Encoder processing error", "message": str(e)},
-        ) from e
-
-    logger.info("[%s] Encoder request completed successfully", req_id)
+    logger.debug("Encoder processing completed successfully for req_id: %s", req_id)
 
 
 async def fanout_encoder_primer(
@@ -239,13 +304,11 @@ async def maybe_prefill(
     if p_url:
         logger.info("[%s] Processing through prefill: %s", req_id, p_url)
 
-        prefill_response = await process_prefill_stage(req_data, p_url, req_id)
-        if isinstance(prefill_response, ClientResponse):
-            # for nixl connector to facilitate kv transfer...
-            prefill_response_json = await prefill_response.json()
-            kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
-            if kv_transfer_params:
-                req_data["kv_transfer_params"] = kv_transfer_params
+        prefill_response_json = await process_prefill_stage(req_data, p_url, req_id)
+        # for nixl connector to facilitate kv transfer...
+        kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
+        if kv_transfer_params:
+            req_data["kv_transfer_params"] = kv_transfer_params
         return req_data
     else:
         return req_data
@@ -255,8 +318,8 @@ async def process_prefill_stage(
     req_data: dict,
     p_url: str,
     req_id: str,
-) -> ClientResponse:
-    """Process request through Prefill stage and return kv_transfer_params"""
+) -> dict:
+    """Process request through Prefill stage and return its JSON response."""
     logger.info("[%s] Sending prefill request to: %s", req_id, p_url)
 
     prefill_request = req_data.copy()
@@ -275,38 +338,24 @@ async def process_prefill_stage(
     if "stream_options" in prefill_request:
         del prefill_request["stream_options"]
 
+    if prefill_session is None:
+        raise HTTPException(status_code=500, detail="Prefill session not initialized")
+
     headers = {"x-request-id": req_id}
+    url = f"{p_url}/v1/chat/completions"
+    status, body = await _post_stage(prefill_session, url, prefill_request, headers, "prefill", req_id)
+    if status != 200:
+        logger.error("[%s] Prefill request failed with status %d", req_id, status)
+        raise _downstream_status_error("prefill", url, status, body)
     try:
-        if prefill_session is None:
-            raise HTTPException(status_code=500, detail="Prefill session not initialized")
-
-        prefill_response = await prefill_session.post(
-            f"{p_url}/v1/chat/completions", json=prefill_request, headers=headers
-        )
-        prefill_response.raise_for_status()
-
-        if prefill_response.status != 200:
-            error_text = await prefill_response.text()
-            logger.error(
-                "[%s] Prefill request failed with status %d: %s",
-                req_id,
-                prefill_response.status,
-                error_text,
-            )
-            raise HTTPException(
-                status_code=prefill_response.status,
-                detail={"error": "Prefill request failed", "message": error_text},
-            )
-        logger.info("[%s] Prefill request completed successfully", req_id)
-
-        return prefill_response
-
-    except Exception as e:
-        logger.error("Prefill processing failed: %s", str(e))
+        prefill_response_json = json.loads(body)
+    except (TypeError, ValueError) as exc:
         raise HTTPException(
-            status_code=500,
-            detail={"error": "Prefill processing error", "message": str(e)},
-        ) from e
+            status_code=502,
+            detail={"stage": "prefill", "url": url, "error": "invalid_json", "reason": str(exc)},
+        ) from exc
+    logger.info("[%s] Prefill request completed successfully", req_id)
+    return prefill_response_json
 
 
 def has_mm_input(request_data: dict):
@@ -374,7 +423,7 @@ async def log_requests(request: Request, call_next):
 @app.on_event("startup")
 async def on_startup() -> None:
     global encode_session, prefill_session, decode_session
-    timeout = aiohttp.ClientTimeout(total=100_000)
+    timeout = aiohttp.ClientTimeout(total=_LEGACY_TOTAL_TIMEOUT_SECONDS)
     connector = aiohttp.TCPConnector(limit=0, force_close=False, keepalive_timeout=0)
     encode_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     if app.state.p_urls:
@@ -418,14 +467,22 @@ async def forward_non_stream(req_data: dict, req_id: str, p_url: str, d_url: str
             # Step 3: Process through Decode instance
             logger.info("[%s] Forwarding to decode: %s", req_id, d_url)
             headers = {"x-request-id": req_id}
+            url = f"{d_url}/v1/chat/completions"
 
             # Non-streaming response
             if decode_session is None:
                 raise HTTPException(status_code=500, detail="Decode session not initialized")
 
-            async with decode_session.post(f"{d_url}/v1/chat/completions", json=req_data, headers=headers) as resp:
-                resp.raise_for_status()
-                return await resp.json()
+            status, body = await _post_stage(decode_session, url, req_data, headers, "decode", req_id)
+            if status != 200:
+                raise _downstream_status_error("decode", url, status, body)
+            try:
+                return json.loads(body)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail={"stage": "decode", "url": url, "error": "invalid_json", "reason": str(exc)},
+                ) from exc
 
         return await non_stream_retry_wrap(run_decode_non_stream)
 
@@ -499,20 +556,29 @@ async def forward_stream(req_data: dict, req_id: str, p_url: str, d_url: str) ->
             # Step 3: Process through Decode instance
             logger.info("[%s] Starting streaming from decode: %s", req_id, d_url)
             headers = {"x-request-id": req_id}
+            url = f"{d_url}/v1/chat/completions"
 
             # Streaming response
             if decode_session is None:
                 raise HTTPException(status_code=500, detail="Decode session not initialized")
 
-            async with decode_session.post(
-                f"{d_url}/v1/chat/completions",
-                json=req_data,
-                headers=headers,
-            ) as resp:
-                resp.raise_for_status()
-                async for chunk in resp.content.iter_chunked(1024):
-                    if chunk:
-                        yield chunk.decode("utf-8", errors="ignore")
+            try:
+                async with decode_session.post(
+                    url,
+                    json=req_data,
+                    headers=headers,
+                    timeout=_stage_timeout("decode"),
+                ) as resp:
+                    if resp.status != 200:
+                        body = await resp.read()
+                        raise _downstream_status_error("decode", url, resp.status, body)
+                    async for chunk in resp.content.iter_chunked(1024):
+                        if chunk:
+                            yield chunk.decode("utf-8", errors="ignore")
+            except HTTPException:
+                raise
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                raise _classify_outbound_error("decode", url, exc) from exc
 
             logger.info("[%s] Streaming completed", req_id)
 
@@ -693,7 +759,8 @@ async def stop_profile(request: Request):
     return await _profile_cmd("stop", body, e_url, p_url, d_url)
 
 
-if __name__ == "__main__":
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the proxy CLI parser (kept separate so it can be unit tested)."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
@@ -720,8 +787,29 @@ if __name__ == "__main__":
         default="single",
         help="Encoder dispatch mode: single (one request) or fanout (per-MM-item)",
     )
+    parser.add_argument(
+        "--encode-timeout-seconds",
+        type=float,
+        default=0.0,
+        help="Encode stage timeout in seconds; 0 = shared overall client timeout (legacy behavior)",
+    )
+    parser.add_argument(
+        "--prefill-timeout-seconds",
+        type=float,
+        default=0.0,
+        help="Prefill stage timeout in seconds; 0 = shared overall client timeout (legacy behavior)",
+    )
+    parser.add_argument(
+        "--decode-timeout-seconds",
+        type=float,
+        default=0.0,
+        help="Decode stage timeout in seconds; 0 = shared overall client timeout (legacy behavior)",
+    )
+    return parser
 
-    args = parser.parse_args()
+
+def configure_app_state(args: argparse.Namespace) -> None:
+    """Populate app.state from parsed CLI arguments."""
     app.state.e_urls = [u.strip() for u in args.encode_servers_urls.split(",") if u.strip()]
     app.state.d_urls = [u.strip() for u in args.decode_servers_urls.split(",") if u.strip()]
     # handle prefill instances
@@ -733,6 +821,18 @@ if __name__ == "__main__":
         logger.info("Disaggregated prefill phase is enabled. Running E + P + D...")
 
     app.state.encoder_dispatch_mode = EncoderDispatchMode(args.encoder_dispatch_mode)
+    app.state.stage_timeouts = {
+        "encode": args.encode_timeout_seconds,
+        "prefill": args.prefill_timeout_seconds,
+        "decode": args.decode_timeout_seconds,
+    }
+    app.state.encode_failures = {}
+
+
+def main() -> None:
+    """Parse CLI arguments, configure the app and serve the proxy."""
+    args = build_arg_parser().parse_args()
+    configure_app_state(args)
 
     logger.info("Proxy listening on %s:%s", args.host, args.port)
     logger.info("Encode servers: %s", app.state.e_urls)
@@ -747,3 +847,7 @@ if __name__ == "__main__":
         loop="uvloop",
         access_log=True,
     )
+
+
+if __name__ == "__main__":
+    main()
