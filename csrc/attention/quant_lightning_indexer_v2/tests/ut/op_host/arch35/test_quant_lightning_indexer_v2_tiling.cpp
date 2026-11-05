@@ -525,3 +525,107 @@ TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_950_tiling_h
     p.qScaleShape = {78, 64};
     qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
 }
+
+// ======================= DCP (Decode Context Parallel, 解码上下文并行) on Ascend950 =======================
+static qliv2_ut::CaseParam Make950DcpCase() {
+    qliv2_ut::CaseParam p;
+    p.soc = "Ascend950";
+    p.coreNum = 56;
+    p.layoutQ = "TND";
+    p.layoutK = "PA_BBND";
+    p.qShape = {4, 64, 128};  // TND: (T1, N1, D)
+    p.wShape = {4, 64};
+    p.qScaleShape = {4, 64};
+    p.kShape = {1, 16, 1, 128};  // PA: (block_num, block_size, N2, D)
+    p.kScaleShape = {1, 16, 1};
+    p.blockTable = {1, 1};
+    p.cuSeqQ = {0, 4};
+    p.sequsedK = {1};
+    p.outShape = {4, 1, 2048};
+    p.valuesShape = {4, 1, 2048};
+    p.qType = ge::DT_FLOAT8_E4M3FN;
+    p.kType = ge::DT_FLOAT8_E4M3FN;
+    p.wType = ge::DT_FLOAT;
+    p.qScaleType = ge::DT_FLOAT;
+    p.kScaleType = ge::DT_FLOAT;
+    p.quantMode = 1;
+    p.maxSeqlenQ = 4;
+    p.maskMode = 3;
+    p.returnValue = 1;
+    p.causalLens = {1};
+    p.enableDcp = true;
+    p.cpWorld = 2;
+    p.cpRank = 1;
+    p.cpInterleave = 16;
+    return p;
+}
+
+// DCP 合法组合: TND + PA_BBND, return_value=1, mask_mode=3
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_950_tiling_dcp_success) {
+    auto p = Make950DcpCase();
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+// DCP 无 causal (mask_mode=0) 也合法
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_950_tiling_dcp_mask_mode0_success) {
+    auto p = Make950DcpCase();
+    p.maskMode = 0;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+// DCP 要求 layout_q=TND
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_950_tiling_dcp_layout_failed) {
+    auto p = Make950DcpCase();
+    p.layoutQ = "BSND";
+    p.qShape = {2, 2, 64, 128};
+    p.wShape = {2, 2, 64};
+    p.qScaleShape = {2, 2, 64};
+    p.outShape = {2, 2, 1, 2048};
+    p.valuesShape = {2, 2, 1, 2048};
+    p.cuSeqQ = {};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+// DCP 要求 return_value=1
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_950_tiling_dcp_return_value_failed) {
+    auto p = Make950DcpCase();
+    p.returnValue = 0;
+    p.valuesShape = {0};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+// DCP 要求 causal_seqlens_kv_global 必传
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_950_tiling_dcp_causal_missing_failed) {
+    auto p = Make950DcpCase();
+    p.causalLens = {};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+// DCP 要求 cp_rank 在 [0, cp_world)
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_950_tiling_dcp_rank_failed) {
+    auto p = Make950DcpCase();
+    p.cpRank = 2;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+// DCP 与 cmp_ratio>1 互斥
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_950_tiling_dcp_cmp_ratio_failed) {
+    auto p = Make950DcpCase();
+    p.cmpRatio = 4;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+// DCP 禁止 output_idx_offset (避免与框架 local->global 映射重复偏移)
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_950_tiling_dcp_idx_offset_failed) {
+    auto p = Make950DcpCase();
+    p.idxOffset = {4, 1};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+// enable_dcp=false 时 cp_* 必须为默认值
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_950_tiling_dcp_off_nondefault_failed) {
+    auto p = Make950DcpCase();
+    p.enableDcp = false;
+    p.causalLens = {};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
