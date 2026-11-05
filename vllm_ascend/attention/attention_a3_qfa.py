@@ -55,21 +55,18 @@ def _quantize_per_head(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return payload.to(torch.int8), descale
 
 
-def _build_int8_cu_seqlens(attn_metadata, num_tokens: int) -> torch.Tensor:
-    """Sanitized INT32 [B+1] prefix sums from the persistent query buffer.
+def _build_int8_cu_seqlens(attn_metadata) -> torch.Tensor:
+    """Real per-request cumulative query lengths into the operator's INT32 [B+1].
 
-    The padded tail of ``query_start_loc_gpu`` may hold -1/stale entries;
-    clamp + cummax turn it into zero-length requests, matching the
-    operator's "non-decreasing, ends at T" contract.
+    ``actual_seq_lengths_q`` carries the true batch (no padded tail) and is
+    what the FIA prefill paths already consume; prefix the mandatory 0.
     """
-    num_reqs = attn_metadata.num_reqs
-    cu = (
-        attn_metadata.query_start_loc_gpu[: num_reqs + 1]
-        .clamp(min=0, max=num_tokens)
-        .cummax(dim=0)
-        .values
+    device = attn_metadata.query_start_loc_gpu.device
+    return torch.tensor(
+        [0, *attn_metadata.actual_seq_lengths_q],
+        dtype=torch.int32,
+        device=device,
     )
-    return cu.to(torch.int32).contiguous()
 
 
 class AscendQFA3PrefillBackendImpl(AscendAttentionBackendImpl):
@@ -128,7 +125,7 @@ class AscendQFA3PrefillBackendImpl(AscendAttentionBackendImpl):
 
         # PrefillNoCache: this step's K/V is the whole history, so the query
         # prefix sums serve both sides.
-        cu_seqlens = _build_int8_cu_seqlens(attn_metadata, num_tokens)
+        cu_seqlens = _build_int8_cu_seqlens(attn_metadata)
         max_seqlen = attn_metadata.max_query_len or num_tokens
 
         attn_out, _ = quant_flash_attn(
