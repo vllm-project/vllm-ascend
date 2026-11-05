@@ -6,7 +6,7 @@ Operators shared by both runners, model-layer kernels, and general utilities
 keep their functional directories. A model supported by V2 alone does not make
 all of its mathematical kernels V2 runner operators.
 
-This inventory covers all 107 non-`__init__.py` Python modules under this package.
+This inventory covers all 109 non-`__init__.py` Python modules under this package.
 It includes launch wrappers and utilities as well as JIT definitions. Operators
 defined under `worker/v2/`, `models/`, or other packages are outside this layout
 change.
@@ -96,6 +96,7 @@ configuration rather than the V1/V2 runner input or sampling interface.
 | [compressor/compressor_triton.py](compressor/compressor_triton.py) | Model compression |
 | [dcp/dcp_a2a.py](dcp/dcp_a2a.py) | Distributed attention |
 | [dcp/dcp_a2a_batched.py](dcp/dcp_a2a_batched.py) | Distributed attention |
+| [dcp/dcp_a2a_rank_tiled.py](dcp/dcp_a2a_rank_tiled.py) | Distributed attention |
 | [dcp/sfa_dcp_exchange.py](dcp/sfa_dcp_exchange.py) | Model/attention primitive or shared utility |
 | [dcp/sfa_dcp_merge.py](dcp/sfa_dcp_merge.py) | Model/attention primitive or shared utility |
 | [dcp/sfa_dcp_query.py](dcp/sfa_dcp_query.py) | Model/attention primitive or shared utility |
