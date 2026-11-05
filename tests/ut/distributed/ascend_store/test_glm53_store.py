@@ -22,7 +22,7 @@ from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 from tests.ut.distributed.ascend_store.test_mooncake_hybrid import MemoryRangeStore
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker, start_patch
 from tests.ut.models.test_glm5next_cache_config import make_config, make_specs
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, MambaStateSharding
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -36,12 +36,26 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_groups,
     get_glm5_next_pool_bytes_per_block,
 )
-from vllm_ascend.models.glm5next.parallel import get_kda_state_sharding
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
-def glm_state_sharding(parallel_config, tp_rank, pcp_rank):
-    return {MambaAttentionBackendEnum.GDN_ATTN: get_kda_state_sharding(parallel_config, tp_rank, pcp_rank)}
+def pcp_state_sharding(parallel_config, tp_rank, pcp_rank):
+    return {
+        MambaAttentionBackendEnum.GDN_ATTN: MambaStateSharding(
+            shard_rank=pcp_rank, shard_count=parallel_config.prefill_context_parallel_size
+        )
+    }
+
+
+def tp_state_sharding(parallel_config, tp_rank, pcp_rank):
+    return {
+        MambaAttentionBackendEnum.GDN_ATTN: MambaStateSharding(
+            shard_rank=tp_rank,
+            shard_count=parallel_config.tensor_parallel_size,
+            replica_rank=pcp_rank,
+            replica_count=parallel_config.prefill_context_parallel_size,
+        )
+    }
 
 
 def make_glm53_plan(layer_offset=0, *, use_recoverssm=False):
@@ -237,7 +251,7 @@ class TestGLM53Store(unittest.TestCase):
                         pcp_rank=pcp_rank,
                         extra_config={"load_async": load_async},
                         use_recoverssm=use_recoverssm,
-                        mamba_state_sharding=glm_state_sharding,
+                        mamba_state_sharding=pcp_state_sharding if tp_size == 1 else tp_state_sharding,
                     )
                     caches = make_glm53_caches(plan)
                     worker.m_store.requires_exists_before_put = False
@@ -351,7 +365,7 @@ class TestGLM53Store(unittest.TestCase):
                     pcp_size=2,
                     pp_size=1,
                     use_recoverssm=True,
-                    model_sharding=glm_state_sharding,
+                    model_sharding=pcp_state_sharding,
                 )
 
     def test_layerwise_replicas_load_the_same_model_tp_partition(self):
@@ -362,7 +376,7 @@ class TestGLM53Store(unittest.TestCase):
                     tp_size=2,
                     pcp_size=2,
                     pp_size=1,
-                    model_sharding=glm_state_sharding,
+                    model_sharding=tp_state_sharding,
                 )
 
     def check_layerwise_round_trip(
@@ -515,7 +529,7 @@ class TestGLM53Store(unittest.TestCase):
                 pcp_size=8,
                 pcp_rank=pcp_rank,
                 extra_config={"backend": "mooncake"},
-                mamba_state_sharding=glm_state_sharding,
+                mamba_state_sharding=pcp_state_sharding,
             )
             original_keys = {
                 group_id: worker.layerwise_keys.make_full_key(group_id, "prefix", 0, 0, pcp_rank) for group_id in (0, 4)
@@ -564,7 +578,7 @@ class TestGLM53Store(unittest.TestCase):
                 num_layers=4,
                 use_layerwise=True,
                 pcp_size=2,
-                mamba_state_sharding=glm_state_sharding,
+                mamba_state_sharding=pcp_state_sharding,
             )
 
     def test_mooncake_layerwise_excludes_private_tail(self):
