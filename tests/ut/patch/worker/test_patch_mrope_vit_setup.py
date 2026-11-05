@@ -12,14 +12,16 @@ from unittest.mock import MagicMock, patch
 class TestVitMropeSetupPatch(unittest.TestCase):
     def test_launch_grid_matches_block_size(self):
         target = "vllm.model_executor.layers.rotary_embedding.mrope_vit_setup"
-        model = "vllm.models.minimax_m3.common.vision_tower"
+        models = (
+            "vllm.models.minimax_m3.common.vision_tower",
+            "vllm_ascend.models._vllm_minimax_m3_common_vision_tower",
+        )
         for n in (1, 16, 17, 32, 33, 65):
-            for model_loaded in (False, True):
-                with self.subTest(n=n, model_loaded=model_loaded):
+            for loaded_models in ((), models[:1], models[1:], models):
+                with self.subTest(n=n, loaded_models=loaded_models):
                     modules = {}
                     names = [target, "vllm.triton_utils", "vllm.utils.torch_utils"]
-                    if model_loaded:
-                        names.append(model)
+                    names.extend(loaded_models)
                     for name in names:
                         parts = name.split(".")
                         for end in range(1, len(parts) + 1):
@@ -33,6 +35,10 @@ class TestVitMropeSetupPatch(unittest.TestCase):
                     modules["torch"] = torch
                     kernel = MagicMock()
                     upstream = modules[target]
+                    original = MagicMock(name="original_vit_mrope_setup")
+                    upstream.vit_mrope_setup = original
+                    for model in loaded_models:
+                        modules[model].vit_mrope_setup = original
                     vars(upstream)["_vit_mrope_setup_kernel"] = kernel
                     vars(modules["vllm.triton_utils"])["triton"] = types.SimpleNamespace(
                         cdiv=lambda x, y: (x + y - 1) // y,
@@ -48,12 +54,18 @@ class TestVitMropeSetupPatch(unittest.TestCase):
                         spec.loader.exec_module(module)
                         self.assertIs(upstream.vit_mrope_setup, module.vit_mrope_setup)
                         self.assertIs(upstream._vit_mrope_setup_kernel, kernel)
-                        if model_loaded:
+                        for model in models:
+                            if model not in loaded_models:
+                                self.assertNotIn(model, sys.modules)
+                                modules[model] = types.ModuleType(model)
+                                exec(f"from {target} import vit_mrope_setup", vars(modules[model]))
                             self.assertIs(modules[model].vit_mrope_setup, module.vit_mrope_setup)
                         inv = MagicMock()
                         inv.numel.return_value = 21
-                        upstream.vit_mrope_setup(inv, inv, inv, [[1, 1, n]], 1)
-                    kernel.__getitem__.assert_called_once_with(((n + 15) // 16,))
+                        for model in models:
+                            modules[model].vit_mrope_setup(inv, inv, inv, [[1, 1, n]], 1)
+                    self.assertEqual(kernel.__getitem__.call_count, len(models))
+                    kernel.__getitem__.assert_called_with(((n + 15) // 16,))
                     args, kwargs = kernel.__getitem__.return_value.call_args
                     self.assertEqual(args[7:9], (n, 1))
                     self.assertEqual(kwargs["BLOCK_N"], 16)

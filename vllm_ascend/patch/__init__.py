@@ -1916,8 +1916,9 @@
 #    How:
 #       Copy the upstream vit_mrope_setup wrapper and change BLOCK_N from 32
 #       to 16, using the same value for the launch grid divisor. Keep the
-#       upstream kernel unchanged. Rebind the MiniMax vision tower alias if
-#       it is already loaded; subsequent imports use the patched wrapper.
+#       upstream kernel unchanged. Rebind both the standard MiniMax vision tower alias and the
+#       Ascend shadow-module alias if already loaded; subsequent imports
+#       use the patched wrapper.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/58526
 #       https://github.com/vllm-project/vllm/pull/58673
