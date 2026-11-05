@@ -1,3 +1,5 @@
+from importlib import import_module
+
 import vllm.model_executor.layers.mamba.ops.causal_conv1d as _cc1d
 import vllm.third_party.flash_linear_attention.ops as fla_ops
 import vllm.third_party.flash_linear_attention.ops.layernorm_guard as fla_layernorm_guard
@@ -165,3 +167,36 @@ thinking_budget._load_effective_token = _load_effective_token_ascend
 # TODO: Remove after Triton-Ascend 3.6.0 is the minimum supported version.
 thinking_budget._update_committed_marker_cache_kernel = _update_committed_marker_cache_kernel_ascend
 trace_replay.apply_trace_tokens = apply_trace_tokens
+
+
+def patch_suffix_kernels() -> None:
+    """Bind suffix launch adapters once per Ascend worker, including repeated setup.
+
+    Older vLLM lanes predate MRV2 suffix. Skip only that missing module; an
+    unrelated missing dependency must still fail rather than silently using
+    the GPU kernels. Remove these bindings when upstream has device dispatch.
+    """
+    module_name = "vllm.v1.worker.gpu.spec_decode.suffix.speculator"
+    try:
+        suffix_speculator = import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name in ("vllm.v1.worker.gpu.spec_decode.suffix", module_name):
+            return
+        raise
+
+    # Lazy imports keep suffix device code out of older worker lanes.
+    from vllm_ascend.ops.triton.spec_decode.suffix import (
+        SuffixKernelLaunchAdapter,
+        launch_suffix_finalize,
+        launch_suffix_ingest,
+        launch_suffix_local_scan,
+        launch_suffix_observe,
+    )
+
+    suffix_speculator._suffix_local_scan_kernel = SuffixKernelLaunchAdapter(launch_suffix_local_scan)
+    suffix_speculator._suffix_finalize_kernel = SuffixKernelLaunchAdapter(launch_suffix_finalize)
+    suffix_speculator._suffix_observe_kernel = SuffixKernelLaunchAdapter(launch_suffix_observe)
+    suffix_speculator._suffix_ingest_kernel = SuffixKernelLaunchAdapter(launch_suffix_ingest)
+
+
+patch_suffix_kernels()
