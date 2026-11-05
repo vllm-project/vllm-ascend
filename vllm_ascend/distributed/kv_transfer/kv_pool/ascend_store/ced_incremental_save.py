@@ -13,6 +13,7 @@ from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -280,6 +281,51 @@ class CEDSessionSliceTask:
     event: Any
 
 
+@dataclass
+class CEDLoadUnit:
+    """One dependency unit of a pipelined load: a member range of one group.
+
+    ``gate_layer`` is the first consumer layer of the member range (the KV
+    source layer for full-context slot slices, the member's own layer for
+    SWA member rows).
+    """
+
+    group_id: int
+    member_start: int
+    member_end: int
+    gate_layer: int
+
+
+@dataclass
+class CEDLoadTask:
+    """Back-to-back unit list of one request, drained in dependency order."""
+
+    req_meta: ReqMeta
+    token_len: int
+    units: list[CEDLoadUnit]
+    gate_events: dict[int, threading.Event] = field(default_factory=dict)
+    remaining_by_gate: dict[int, int] = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def settle_gate(self, gate_layer: int) -> None:
+        with self.lock:
+            remaining = self.remaining_by_gate.get(gate_layer, 0) - 1
+            if remaining > 0:
+                self.remaining_by_gate[gate_layer] = remaining
+                return
+            self.remaining_by_gate.pop(gate_layer, None)
+        event = self.gate_events.get(gate_layer)
+        if event is not None:
+            event.set()
+
+    def settle_all_gates(self) -> None:
+        with self.lock:
+            self.remaining_by_gate.clear()
+            events = list(self.gate_events.values())
+        for event in events:
+            event.set()
+
+
 class CEDSessionSendThread(KVCacheStoreSendingThread):
     """Sending thread with a memcache WRITING-session data plane.
 
@@ -532,6 +578,135 @@ class CEDSessionSendThread(KVCacheStoreSendingThread):
             self.set_finished_request(session.req_id)
 
 
+class CEDPipelinedRecvingThread(KVCacheStoreRecvingThread):
+    """Recving thread draining CED dependency units back-to-back.
+
+    Bulk load requests flow through the inherited handler unchanged. A CED
+    task resolves every key's GVA once, then copies each unit's member range
+    from the pool object straight into the local cache (GVA + object offset
+    addressing, direction G2L), settling the unit's gate event on arrival.
+    Failures mark the request failed, release every remaining gate, and the
+    in-model gates raise so the step aborts instead of reading half-loaded
+    KV.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        max_transfer_blocks: int = 0,
+        max_transfer_bytes: int = 0,
+        **kwargs: Any,
+    ):
+        super().__init__(*args, **kwargs)
+        self.max_transfer_blocks = max_transfer_blocks
+        self.max_transfer_bytes = max_transfer_bytes
+
+    def _handle_request(self, request_data: Any):
+        if isinstance(request_data, CEDLoadTask):
+            try:
+                self._handle_ced_load(request_data)
+            except Exception:
+                logger.exception("CED pipelined load failed for request %s", request_data.req_meta.req_id)
+                self._fail_ced_load(request_data)
+            finally:
+                self.request_queue.task_done()
+            return
+        super()._handle_request(request_data)
+
+    def _handle_ced_load(self, task: CEDLoadTask) -> None:
+        req_meta = task.req_meta
+        try:
+            load_masks = self.token_database.load_mask(req_meta.block_hashes, task.token_len)
+        except AssertionError:
+            load_masks = None
+        unit_chunks: list[tuple[CEDLoadUnit, CEDSaveChunks]] = []
+        for unit in task.units:
+            chunks = self._list_load_chunks(req_meta, task.token_len, unit.group_id, load_masks)
+            if chunks.keys:
+                unit_chunks.append((unit, chunks))
+        if not unit_chunks:
+            task.settle_all_gates()
+            return
+        keys = []
+        for _unit, chunks in unit_chunks:
+            keys.extend(chunks.keys)
+        keys = list(dict.fromkeys(keys))
+        key_infos = self.m_store.batch_get_key_info(keys)
+        if key_infos is None or len(key_infos) != len(keys):
+            raise RuntimeError(f"CED load key resolution returned {len(key_infos or [])} infos for {len(keys)} keys")
+        gva_by_key: dict[str, int] = {}
+        for key, key_info in zip(keys, key_infos, strict=True):
+            gvas = key_info.gva_list() if key_info is not None else []
+            gva_by_key[key] = int(gvas[0]) if gvas else 0
+        for unit, chunks in unit_chunks:
+            src_gvas: list[int] = []
+            dst_addrs: list[int] = []
+            sizes: list[int] = []
+            for index, key in enumerate(chunks.keys):
+                gva = gva_by_key.get(key, 0)
+                if gva <= 0:
+                    with self._invalid_block_ids_lock:
+                        self._invalid_block_ids.add(chunks.block_ids[index])
+                    raise RuntimeError(f"CED load key {key} is not resolvable for request {req_meta.req_id}")
+                rows = chunk_member_transfer(
+                    self.token_database,
+                    unit.group_id,
+                    chunks.block_ids[index],
+                    chunks.starts[index],
+                    chunks.ends[index],
+                    unit.member_start,
+                    unit.member_end,
+                )
+                for device_addr, object_offset, size in rows:
+                    src_gvas.append(gva + object_offset)
+                    dst_addrs.append(device_addr)
+                    sizes.append(size)
+            if src_gvas:
+                result = self._batch_copy_with_limits(
+                    np.asarray(src_gvas, dtype=np.int64),
+                    np.asarray(dst_addrs, dtype=np.int64),
+                    np.asarray(sizes, dtype=np.int64),
+                    _MMC_COPY_G2L,
+                    self.max_transfer_blocks,
+                    self.max_transfer_bytes,
+                )
+                if result != 0:
+                    raise RuntimeError(f"CED load copy failed with code {result}")
+            task.settle_gate(unit.gate_layer)
+
+    def _list_load_chunks(self, req_meta: ReqMeta, token_len: int, group_id: int, load_masks: Any) -> CEDSaveChunks:
+        chunks = CEDSaveChunks()
+        if group_id >= len(req_meta.block_ids_by_group):
+            return chunks
+        block_ids = req_meta.block_ids_by_group[group_id]
+        group_block_size = self._get_block_size(group_id)
+        load_spec = req_meta.load_spec
+        mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size if load_spec else 0
+
+        def chunk_filter(start: int) -> bool:
+            return self.token_database.mask_allows_chunk(load_masks, group_id, start)
+
+        iterator = self.token_database.process_token_key_strings_with_block_ids(
+            token_len,
+            req_meta.block_hashes,
+            block_ids,
+            mask_num,
+            kv_cache_group_id=group_id,
+            skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
+            chunk_filter=chunk_filter,
+        )
+        for start, end, key, _block_hash, block_id in iterator:
+            chunks.starts.append(start)
+            chunks.ends.append(end)
+            chunks.keys.append(key)
+            chunks.block_ids.append(block_id)
+        return chunks
+
+    def _fail_ced_load(self, task: CEDLoadTask) -> None:
+        task.settle_all_gates()
+        self._mark_failed_requests([task.req_meta])
+
+
 class CEDSaveWorker(KVPoolWorker):
     """Bulk pool worker extended with the CED incremental session save.
 
@@ -560,6 +735,16 @@ class CEDSaveWorker(KVPoolWorker):
         )
         self._ced_fallback_groups: dict[str, list[int]] = {}
         self._ced_fired_triggers: set[int] = set()
+        self._ced_load_gates: dict[str, dict[int, threading.Event]] = {}
+        # The pipelined load rides the async-loading connector contract: the
+        # scheduler holds the request in WAITING_FOR_REMOTE_KV until
+        # get_finished reports it, and the early finished notification below
+        # releases it while units stream in behind the in-model gates.
+        self._ced_load_capable = (
+            bool(self.ced_trigger_map.slices_by_group)
+            and self.load_async
+            and callable(getattr(self.m_store, "batch_get_key_info", None))
+        )
         if self.ced_trigger_map.slices_by_group:
             if self.pp_size > 1:
                 logger.warning("CED_layerwise session saves fall back to bulk under PP>1 in this revision.")
@@ -598,29 +783,31 @@ class CEDSaveWorker(KVPoolWorker):
     def _start_kv_transfer_threads(self) -> None:
         if self._transfer_threads_started:
             return
-        if self.can_put and self.ced_trigger_layers:
-            ready_event_sending = threading.Event()
-            self.kv_send_thread = CEDSessionSendThread(
-                self.m_store,
-                self.token_database,
-                self.grouped_block_size,
-                self.tp_rank,
-                self.tp_size,
-                0 if self.use_kvpp else self.pcp_rank,
-                1 if self.use_kvpp else self.pcp_size,
-                self.dcp_size,
-                self.put_step,
-                self.kv_role,
-                ready_event_sending,
-                self.group_uses_align_state,
-                self.enable_kv_events,
-                worker=self if self.tp_mismatch else None,
-                trigger_map=self.ced_trigger_map,
-                max_transfer_blocks=int(self._extra_config.get("ced_max_transfer_blocks", 0)),
-                max_transfer_bytes=int(self._extra_config.get("ced_max_transfer_bytes", 0)),
-            )
-            self.kv_send_thread.start()
-            ready_event_sending.wait()
+        ced_active = bool(self.ced_trigger_layers)
+        if ced_active and (self.can_put or self._ced_load_capable):
+            if self.can_put:
+                ready_event_sending = threading.Event()
+                self.kv_send_thread = CEDSessionSendThread(
+                    self.m_store,
+                    self.token_database,
+                    self.grouped_block_size,
+                    self.tp_rank,
+                    self.tp_size,
+                    0 if self.use_kvpp else self.pcp_rank,
+                    1 if self.use_kvpp else self.pcp_size,
+                    self.dcp_size,
+                    self.put_step,
+                    self.kv_role,
+                    ready_event_sending,
+                    self.group_uses_align_state,
+                    self.enable_kv_events,
+                    worker=self if self.tp_mismatch else None,
+                    trigger_map=self.ced_trigger_map,
+                    max_transfer_blocks=int(self._extra_config.get("ced_max_transfer_blocks", 0)),
+                    max_transfer_bytes=int(self._extra_config.get("ced_max_transfer_bytes", 0)),
+                )
+                self.kv_send_thread.start()
+                ready_event_sending.wait()
             if self.load_async:
                 self._start_ced_recving_thread()
             self._transfer_threads_started = True
@@ -628,12 +815,8 @@ class CEDSaveWorker(KVPoolWorker):
         super()._start_kv_transfer_threads()
 
     def _start_ced_recving_thread(self) -> None:
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
-            KVCacheStoreRecvingThread,
-        )
-
         ready_event = threading.Event()
-        self.kv_recv_thread = KVCacheStoreRecvingThread(
+        common_args = (
             self.m_store,
             self.token_database,
             self.grouped_block_size,
@@ -641,11 +824,22 @@ class CEDSaveWorker(KVPoolWorker):
             self.tp_size,
             self.dcp_size,
             ready_event,
-            invalid_block_ids=self._invalid_block_ids,
-            invalid_block_ids_lock=self._invalid_block_ids_lock,
-            worker=self if self.tp_mismatch else None,
-            record_operation=self._record_kv_connector_operation,
         )
+        common_kwargs = {
+            "invalid_block_ids": self._invalid_block_ids,
+            "invalid_block_ids_lock": self._invalid_block_ids_lock,
+            "worker": self if self.tp_mismatch else None,
+            "record_operation": self._record_kv_connector_operation,
+        }
+        if self._ced_load_capable:
+            self.kv_recv_thread = CEDPipelinedRecvingThread(
+                *common_args,
+                **common_kwargs,
+                max_transfer_blocks=int(self._extra_config.get("ced_max_transfer_blocks", 0)),
+                max_transfer_bytes=int(self._extra_config.get("ced_max_transfer_bytes", 0)),
+            )
+        else:
+            self.kv_recv_thread = KVCacheStoreRecvingThread(*common_args, **common_kwargs)
         self.kv_recv_thread.start()
         ready_event.wait()
 
@@ -655,11 +849,102 @@ class CEDSaveWorker(KVPoolWorker):
     def start_load_kv(self, metadata: Any):
         self._ced_fired_triggers = set()
         self._ced_fallback_groups.clear()
+        self._ced_load_gates.clear()
+        if self._ced_load_capable and metadata.requests:
+            self._prepare_ced_loads(metadata)
         if self.can_put and self.ced_trigger_layers and metadata.requests:
             send_thread = self.kv_send_thread
             if isinstance(send_thread, CEDSessionSendThread):
                 self._prepare_ced_sessions(send_thread, metadata)
         super().start_load_kv(metadata)
+
+    def _prepare_ced_loads(self, metadata: Any) -> None:
+        recv_thread = self.kv_recv_thread
+        if not isinstance(recv_thread, CEDPipelinedRecvingThread):
+            return
+        for request in metadata.requests:
+            load_spec = request.load_spec
+            if load_spec is None or not load_spec.can_load:
+                continue
+            group_ids = request.kv_cache_group_ids or [0]
+            if any(group not in self.ced_trigger_map.slices_by_group for group in group_ids):
+                # Draft or unrecognized groups keep the bulk load.
+                continue
+            token_len = request.token_len_chunk
+            if (load_spec.kvpool_cached_tokens % self.cache_transfer_granularity != 0) and (
+                load_spec.kvpool_cached_tokens == token_len - 1
+            ):
+                token_len = load_spec.kvpool_cached_tokens + 1
+            else:
+                token_len = load_spec.kvpool_cached_tokens
+            units = self._build_ced_load_units(set(group_ids))
+            if not units:
+                continue
+            gate_events = {unit.gate_layer: threading.Event() for unit in units}
+            remaining: dict[int, int] = {}
+            for unit in units:
+                remaining[unit.gate_layer] = remaining.get(unit.gate_layer, 0) + 1
+            recv_thread.add_request(
+                CEDLoadTask(
+                    req_meta=request,
+                    token_len=token_len,
+                    units=units,
+                    gate_events=gate_events,
+                    remaining_by_gate=remaining,
+                )
+            )
+            # Early release: the request reports finished recving as soon as
+            # its unit task is queued, so the scheduler starts the forward
+            # while units stream in; the in-model gates enforce arrival.
+            recv_thread.set_finished_request(request.req_id)
+            self._ced_load_gates[request.req_id] = gate_events
+            load_spec.can_load = False
+
+    def _build_ced_load_units(self, group_ids: set[int]) -> list[CEDLoadUnit]:
+        """One load unit per (group, consumer layer), members merged.
+
+        Uses the physical layer -> (group, member index) map, so full-context
+        slots gate at their KV source layer and every SWA member gates at its
+        own layer without model-specific branching.
+        """
+        by_group_layer: dict[tuple[int, int], tuple[int, int]] = {}
+        for local_layer, entries in self.physical_layer_to_group_layers.items():
+            for group_id, member_index in entries:
+                if group_id not in group_ids:
+                    continue
+                start, end = by_group_layer.get((group_id, local_layer), (member_index, member_index + 1))
+                by_group_layer[(group_id, local_layer)] = (min(start, member_index), max(end, member_index + 1))
+        units = [
+            CEDLoadUnit(group_id, start, end, local_layer)
+            for (group_id, local_layer), (start, end) in by_group_layer.items()
+        ]
+        units.sort(key=lambda unit: unit.gate_layer)
+        return units
+
+    def wait_for_ced_layer_load(self, layer_idx: int) -> None:
+        """Block the forward at a consumer layer until its unit arrives.
+
+        Polls the recving thread while waiting so a fatal transfer error
+        surfaces here instead of hanging the step; request-level load
+        failures raise so the step aborts before reading half-loaded KV.
+        """
+        gates = self._ced_load_gates
+        if not gates:
+            return
+        recv_thread = self.kv_recv_thread
+        if recv_thread is None:
+            return
+        pending = [(req_id, events[layer_idx]) for req_id, events in gates.items() if layer_idx in events]
+        if not pending:
+            return
+        for _req_id, event in pending:
+            while not event.wait(timeout=1.0):
+                recv_thread.raise_if_failed()
+        with recv_thread.done_task_lock:
+            failed = [req_id for req_id, _event in pending if req_id in recv_thread.failed_requests]
+        if failed:
+            raise RuntimeError(f"CED pipelined load failed for requests {failed}")
+        recv_thread.raise_if_failed()
 
     def _prepare_ced_sessions(self, send_thread: CEDSessionSendThread, metadata: Any) -> None:
         for request in metadata.requests:

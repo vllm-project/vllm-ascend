@@ -70,8 +70,29 @@ def dsa_v41_forward(
     """Execute V4.1 attention behind an explicit graph side-effect boundary."""
     forward_context = get_forward_context()
     attn = forward_context.no_compile_layers[layer_name]
+    _maybe_wait_ced_layer_load(attn)
     attn.v41_impl.forward(attn, None, hidden_states, output)
     _maybe_trigger_ced_save(attn)
+
+
+def _maybe_wait_ced_layer_load(attn: Any) -> None:
+    """Gate a V4.1 consumer layer on its CED pipelined load unit.
+
+    No-op for every connector without the CED load pipeline; when active it
+    blocks until the unit backing this layer's cache members has landed.
+    """
+    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
+        return
+    forward_context = get_forward_context()
+    if forward_context.attn_metadata is None:
+        return
+    layer_idx = getattr(attn, "layer_idx", None)
+    if layer_idx is None:
+        return
+    connector = get_kv_transfer_group()
+    wait = getattr(connector, "wait_for_ced_layer_load", None)
+    if callable(wait):
+        wait(layer_idx)
 
 
 def _maybe_trigger_ced_save(attn: Any) -> None:

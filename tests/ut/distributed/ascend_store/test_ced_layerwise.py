@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -23,8 +24,11 @@ from unittest.mock import MagicMock
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ced_incremental_save import (
     CED_LAYERWISE_CONFIG_KEY,
+    CEDLoadTask,
+    CEDLoadUnit,
     CEDSaveChunks,
     CEDSessionSendThread,
+    CEDPipelinedRecvingThread,
     build_ced_trigger_map,
     chunk_member_transfer,
     is_ced_model,
@@ -220,23 +224,38 @@ class FakeCEDStore:
         return gvas
 
     def batch_copy(self, gvas, addrs, sizes, direction):
-        assert direction == 0, "session writes use the L2G direction"
         if self.fail_copy:
             return -1
-        for dst, src, size in zip(gvas, addrs, sizes, strict=True):
-            self.pool[dst : dst + size] = self.device[src : src + size]
+        for gva, addr, size in zip(gvas, addrs, sizes, strict=True):
+            if direction == 0:
+                # save: device -> pool
+                self.pool[gva : gva + size] = self.device[addr : addr + size]
+            else:
+                # load: pool -> device
+                self.device[addr : addr + size] = self.pool[gva : gva + size]
         return 0
 
     def batch_write_finish(self, keys, results):
         self.finish_calls.append((list(keys), list(results)))
         for key, result in zip(keys, results, strict=True):
             if int(result) == 0:
-                base = self.alloc_base.pop(key)
-                self.published[key] = bytes(self.pool[base : base + self.alloc_sizes.pop(key)])
+                base = self.alloc_base.get(key)
+                self.published[key] = bytes(self.pool[base : base + self.alloc_sizes[key]])
+                self.alloc_sizes.pop(key, None)
             else:
                 self.alloc_base.pop(key, None)
                 self.alloc_sizes.pop(key, None)
         return [0] * len(keys)
+
+    def batch_get_key_info(self, keys):
+        infos = []
+        for key in keys:
+            base = self.alloc_base.get(key)
+            if base is None:
+                infos.append(None)
+            else:
+                infos.append(SimpleNamespace(gva_list=lambda b=base: [b]))
+        return infos
 
     def batch_remove_lease(self, keys):
         return 0
@@ -359,6 +378,117 @@ def _slice_task(session, slice_index):
     )
 
     return CEDSessionSliceTask(session, slice_index, MagicMock())
+
+
+class TestCEDPipelinedLoad(unittest.TestCase):
+    def _derived_key(self, database, block_hashes=("h0",)):
+        for _start, _end, key, _bh, _block_id in database.process_token_key_strings_with_block_ids(
+            16,
+            list(block_hashes),
+            [7],
+            0,
+            kv_cache_group_id=0,
+            skip_null_blocks=False,
+            chunk_filter=lambda start: True,
+        ):
+            return key
+        raise AssertionError("chunk enumeration produced no key")
+
+    def _publish_reference_object(self):
+        """Publish one block through the session save and return the pieces."""
+        database = _mla_database()
+        database.load_mask = lambda block_hashes, token_len: None
+        database.mask_allows_chunk = lambda masks, group_id, start: True
+        trigger_map = build_ced_trigger_map(
+            {
+                0: [
+                    "model.layers.2.self_attn.long_kv_cache",
+                    "model.layers.2.self_attn.indexer.k_cache",
+                    "model.layers.8.self_attn.long_kv_cache",
+                    "model.layers.8.self_attn.indexer.k_cache",
+                ]
+            },
+            (2, 8),
+        )
+        device = bytearray(0x10000)
+        for member, base in enumerate(_MLA_MEMBER_BASES):
+            addr = base + 7 * 24
+            for i in range(_MLA_MEMBER_SIZES[member]):
+                device[addr + i] = (0x11 * (member + 1) + i) & 0xFF
+        store = FakeCEDStore(device)
+        send_thread = CEDSessionSendThread(store, database, [16], tp_rank=0, trigger_map=trigger_map)
+        req_meta = ReqMeta("r1", block_ids=[7])
+        chunks = CEDSaveChunks(starts=[0], ends=[16], keys=[self._derived_key(database)], block_ids=[7])
+        session = send_thread.open_ced_session(req_meta, 0, chunks, object_size=24)
+        send_thread._handle_ced_open(session)
+        send_thread._handle_ced_slice(session, 0, MagicMock())
+        send_thread._handle_ced_slice(session, 1, MagicMock())
+        return database, trigger_map, store
+
+    def test_load_roundtrip_restores_device_bytes_and_sets_gates(self):
+        database, _trigger_map, store = self._publish_reference_object()
+        expected = next(iter(store.published.values()))
+        device_target = bytearray(0x10000)
+        store.device = device_target
+        recv_thread = CEDPipelinedRecvingThread(store, database, [16], tp_rank=0)
+        load_spec = SimpleNamespace(vllm_cached_tokens=0)
+        req_meta = ReqMeta(
+            "r1",
+            token_len_chunk=16,
+            block_ids=[[7], [7]],
+            block_hashes=["h0"],
+            load_spec=load_spec,
+            kv_cache_group_ids=[0],
+        )
+        units = [
+            CEDLoadUnit(0, 0, 2, 2),
+            CEDLoadUnit(0, 2, 4, 8),
+        ]
+        gate_events = {2: threading.Event(), 8: threading.Event()}
+        task = CEDLoadTask(
+            req_meta=req_meta,
+            token_len=16,
+            units=units,
+            gate_events=gate_events,
+            remaining_by_gate={2: 1, 8: 1},
+        )
+        recv_thread.request_queue.put(task)
+        recv_thread._handle_request(task)
+        self.assertTrue(gate_events[2].is_set())
+        self.assertTrue(gate_events[8].is_set())
+        restored = b"".join(
+            bytes(device_target[base + 7 * 24 : base + 7 * 24 + _MLA_MEMBER_SIZES[member]])
+            for member, base in enumerate(_MLA_MEMBER_BASES)
+        )
+        self.assertEqual(restored, expected)
+
+    def test_missing_key_marks_invalid_block_and_fails_request(self):
+        database, _trigger_map, store = self._publish_reference_object()
+        store.alloc_base.clear()
+        device_target = bytearray(0x10000)
+        store.device = device_target
+        recv_thread = CEDPipelinedRecvingThread(store, database, [16], tp_rank=0)
+        load_spec = SimpleNamespace(vllm_cached_tokens=0)
+        req_meta = ReqMeta(
+            "r1",
+            token_len_chunk=16,
+            block_ids=[[7], [7]],
+            block_hashes=["h0"],
+            load_spec=load_spec,
+            kv_cache_group_ids=[0],
+        )
+        task = CEDLoadTask(
+            req_meta=req_meta,
+            token_len=16,
+            units=[CEDLoadUnit(0, 0, 2, 2)],
+            gate_events={2: threading.Event()},
+            remaining_by_gate={2: 1},
+        )
+        recv_thread.request_queue.put(task)
+        recv_thread._handle_request(task)
+        self.assertTrue(task.gate_events[2].is_set())
+        self.assertIn("r1", recv_thread.failed_requests)
+        self.assertIn(7, recv_thread._invalid_block_ids)
 
 
 if __name__ == "__main__":

@@ -477,6 +477,18 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if isinstance(worker, CEDSaveWorker):
             worker.on_ced_save_trigger(trigger_layer)
 
+    def wait_for_ced_layer_load(self, layer_idx: int) -> None:
+        """Gate a V4.1 consumer layer on its pipelined load unit.
+
+        No-op unless ``CED_layerwise`` is enabled with the async-loading
+        contract, so the hook is free to call this unconditionally.
+        """
+        if not self.ced_layerwise:
+            return
+        worker = self.connector_worker
+        if isinstance(worker, CEDSaveWorker):
+            worker.wait_for_ced_layer_load(layer_idx)
+
     def wait_for_save(self):
         if not self.can_put:
             # A load-only consumer has no store thread to wait for.
