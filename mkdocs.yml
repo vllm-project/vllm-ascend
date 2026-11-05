@@ -269,6 +269,7 @@ nav:
         - tutorials/features/pd_disaggregation_mooncake_single_node.md
         - tutorials/features/pd_disaggregation_mooncake_multi_node.md
         - tutorials/features/suffix_speculative_decoding.md
+        - tutorials/features/thinking_budget.md
         - tutorials/features/ray.md
     - faqs.md
   - User Guide:

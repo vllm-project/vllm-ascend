@@ -27,11 +27,9 @@ from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingStates
 from vllm.v1.sample.logits_processor import BatchUpdateBuilder, LogitsProcessors
-from vllm.v1.sample.thinking_budget_state import (
-    maybe_create_thinking_budget_state_holder,
-)
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
+from vllm_ascend.sample.thinking_budget import maybe_create_thinking_budget_state_holder
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
 

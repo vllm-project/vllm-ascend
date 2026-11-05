@@ -121,6 +121,26 @@ def test_v2_thinking_budget_allows_tokens_before_budget():
     assert torch.all(out == 0)
 
 
+@pytest.mark.parametrize("budget", [None, -1, 16, 2**40])
+@pytest.mark.parametrize("num_logits", [1, 4])
+def test_v2_nonbinding_budget_preserves_logits_and_greedy_choice(budget, num_logits):
+    req_states = _make_req_states([1, START, 10, 11], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=budget))
+    state.apply_staged_writes()
+
+    # Include tied and near-tied maxima in ordinary and speculative rows.
+    logits = torch.full((num_logits, VOCAB_SIZE), -10.0, device=DEVICE)
+    logits[:, 5] = 1.0
+    logits[:, 7] = 1.0
+    logits[:, 9] = 0.999
+    expected = logits.cpu()
+    out = _apply(state, logits, input_ids=[11] + [10] * (num_logits - 1), local_pos=list(range(num_logits)))
+
+    assert torch.equal(out, expected)
+    assert torch.equal(out.argmax(dim=-1), expected.argmax(dim=-1))
+
+
 def test_v2_thinking_budget_continues_multi_token_end_marker():
     req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
     state = ThinkingBudgetState(req_states, MockMultiTokenEndReasoningConfig())
@@ -236,3 +256,42 @@ def test_v2_thinking_budget_continues_end_prefix_from_prompt():
 
     assert out[0, END_B] == pytest.approx(1.0e9)
     assert out[0, END_A] == 0
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_v2_thinking_budget_mixed_rows_and_slot_reuse(reverse):
+    req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
+    req_states.add_request(
+        req_id="plain",
+        prompt_len=1,
+        all_token_ids=[1, START, 20],
+        num_computed_tokens=3,
+        max_tokens=32,
+    )
+    req_states.apply_staged_writes()
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.add_request(2, SamplingParams())
+    state.apply_staged_writes()
+    indices = [2, 3] if reverse else [3, 2]
+    mapping = torch.tensor(indices, dtype=torch.int32, device=DEVICE)
+    ctx = LogitsContext(
+        expanded_idx_mapping=mapping,
+        idx_mapping=mapping,
+        idx_mapping_np=np.array(indices, dtype=np.int32),
+        expanded_local_pos=torch.zeros(2, dtype=torch.int32, device=DEVICE),
+        input_ids=torch.tensor([20 if i == 2 else 12 for i in indices], dtype=torch.int32, device=DEVICE),
+        pos=torch.zeros(2, dtype=torch.int32, device=DEVICE),
+        seq_lens_upper_bound_np=np.zeros(2, dtype=np.int32),
+    )
+    logits = torch.zeros((2, VOCAB_SIZE), device=DEVICE)
+    state.apply(logits, ctx)
+    expected = torch.zeros_like(logits)
+    expected[indices.index(3), END] = 1.0e9
+    torch.testing.assert_close(logits, expected)
+    # Reusing a budgeted slot for an ordinary request must clear its budget.
+    state.add_request(3, SamplingParams())
+    state.apply_staged_writes()
+    logits.zero_()
+    state.apply(logits, ctx)
+    torch.testing.assert_close(logits, torch.zeros_like(logits))
