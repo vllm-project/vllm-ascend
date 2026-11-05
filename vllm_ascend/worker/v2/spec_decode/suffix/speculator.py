@@ -10,7 +10,7 @@ import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.suffix import speculator as upstream
 
-from vllm_ascend.worker.v2.spec_decode.suffix.kernel_adapters import (
+from vllm_ascend.ops.triton.spec_decode.suffix import (
     ascend_suffix_ingestion,
     ascend_suffix_proposal,
 )
