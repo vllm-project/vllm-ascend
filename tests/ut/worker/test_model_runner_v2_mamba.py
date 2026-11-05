@@ -518,7 +518,8 @@ def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata
 
 
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
-def test_kimi_pcp_uses_global_kda_and_local_sfa_metadata(graph_mode):
+@pytest.mark.parametrize("is_target", [False, True])
+def test_kimi_pcp_metadata_respects_target_and_draft_groups(graph_mode, is_target):
     context = SimpleNamespace(global_batch=object(), global_block_tables=object(), global_slot_mappings=object())
     state = SimpleNamespace(
         vllm_config=SimpleNamespace(
@@ -526,7 +527,10 @@ def test_kimi_pcp_uses_global_kda_and_local_sfa_metadata(graph_mode):
                 hf_text_config=SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 96})
             )
         ),
-        pcp_manager=SimpleNamespace(build_attention_context=MagicMock(return_value=context)),
+        pcp_manager=SimpleNamespace(
+            is_target_attn_groups=MagicMock(return_value=is_target),
+            build_attention_context=MagicMock(return_value=context),
+        ),
         device_metadata=None,
         recoverssm=None,
     )
@@ -536,7 +540,7 @@ def test_kimi_pcp_uses_global_kda_and_local_sfa_metadata(graph_mode):
     with patch.object(
         AscendMambaHybridModelState,
         "_build_attn_metadata_for_batch",
-        side_effect=[{"sfa": "local"}, {"kda": "global"}],
+        side_effect=[{"sfa": "local"}, {"kda": "global"}] if is_target else [{"draft": "global"}],
     ) as build:
         result = AscendMambaHybridModelState.prepare_attn(
             state,
@@ -547,6 +551,15 @@ def test_kimi_pcp_uses_global_kda_and_local_sfa_metadata(graph_mode):
             [[sfa_group], [mamba_group]],
             MagicMock(),
         )
+    state.pcp_manager.is_target_attn_groups.assert_called_once_with([[sfa_group], [mamba_group]])
+    if not is_target:
+        state.pcp_manager.build_attention_context.assert_not_called()
+        assert result == {"draft": "global"}
+        build.assert_called_once()
+        assert build.call_args.args[1] is local_batch
+        assert build.call_args.args[5] == [[sfa_group], [mamba_group]]
+        assert build.call_args.kwargs == {"use_pcp_padding": False, "pcp_context": None}
+        return
     assert result == {"sfa": "local", "kda": "global"}
     local, global_ = build.call_args_list
     assert local.args[1] is local_batch
@@ -578,7 +591,10 @@ def test_kimi_pcp_builds_local_and_global_metadata_in_one_device_lifecycle(graph
                 hf_text_config=SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 96})
             )
         ),
-        pcp_manager=SimpleNamespace(build_attention_context=MagicMock(return_value=context)),
+        pcp_manager=SimpleNamespace(
+            is_target_attn_groups=MagicMock(return_value=True),
+            build_attention_context=MagicMock(return_value=context),
+        ),
         device_metadata=owner,
         recoverssm=None,
     )
@@ -683,7 +699,10 @@ def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests(recover, for_c
         global_block_tables=("global_table",),
         global_slot_mappings="global_slots",
     )
-    pcp_manager = SimpleNamespace(build_attention_context=MagicMock(return_value=pcp_context))
+    pcp_manager = SimpleNamespace(
+        is_target_attn_groups=MagicMock(return_value=True),
+        build_attention_context=MagicMock(return_value=pcp_context),
+    )
     state = SimpleNamespace(
         pcp_manager=pcp_manager,
         vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
@@ -709,6 +728,7 @@ def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests(recover, for_c
             for_capture=for_capture,
         )
 
+    pcp_manager.is_target_attn_groups.assert_called_once_with(attn_groups)
     assert metadata == {"sfa": local_metadata["sfa"], "linear_attn": mamba_metadata}
     assert mamba_metadata.pcp_context is pcp_context
     if recover:

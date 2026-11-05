@@ -347,9 +347,13 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         pcp_manager = getattr(self, "pcp_manager", None)
         pcp_context = None
-        if pcp_manager is not None and (
-            model_uses_kpool_indexer(self.vllm_config.model_config)
-            or model_uses_kimi_kda(self.vllm_config.model_config)
+        if (
+            pcp_manager is not None
+            and (
+                model_uses_kpool_indexer(self.vllm_config.model_config)
+                or model_uses_kimi_kda(self.vllm_config.model_config)
+            )
+            and pcp_manager.is_target_attn_groups(attn_groups)
         ):
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
         if pcp_context is not None and not getattr(input_batch, "is_dummy", False):
