@@ -112,12 +112,13 @@ def _ranks_kernel(
             n_vec = tl.zeros([BLOCK_SIZE], dtype=tl.int32)
             for i in range(0, vocab_size, BLOCK_SIZE):
                 block = i + tl.arange(0, BLOCK_SIZE)
-                valid = block < vocab_size
-                logits = tl.load(row_ptr + block, mask=valid, other=float("-inf"))
-                # Rank counts entries at or above the sampled logit; padding is
-                # -inf, which also satisfies `>=` when x is -inf.
-                n_vec += (valid & (logits >= x)).to(tl.int32)
-            n = tl.sum(n_vec)
+                logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
+                n_vec += (logits >= x).to(tl.int32)
+            # Padding satisfies >= only when x is -inf. Subtract it after the
+            # reduction to avoid an extra vector predicate on A2/A3's small UB.
+            # Unlike clamping to vocab_size, this preserves NaN comparisons.
+            padding = tl.cdiv(vocab_size, BLOCK_SIZE) * BLOCK_SIZE - vocab_size
+            n = tl.sum(n_vec) - tl.where(x == float("-inf"), padding, 0)
             tl.store(output_ptr + req_idx, n)
 
 
