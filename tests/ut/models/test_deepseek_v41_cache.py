@@ -943,8 +943,6 @@ def test_async_compressed_lengths_use_device_values_at_rejection_boundary(runtim
 @pytest.mark.parametrize("deferred", [False, True])
 @pytest.mark.parametrize("query_len", [1, 3])
 def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monkeypatch, deferred, query_len):
-    # This test mocks the CANN metadata ABI; packed A5 planning has separate coverage.
-    monkeypatch.setattr(dsa_v41.DeviceOperator, "get_dsv41_packed_cache_ops", lambda: None)
     groups = make_cache_config(17).kv_cache_groups
     builders = []
     for group in groups:
