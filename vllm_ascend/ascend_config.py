@@ -437,7 +437,7 @@ class AscendConfig:
             "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
-            "mega_moe_max_tokens": 65536,
+            "mega_moe_max_tokens": 0,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
             "enable_fused_mc2": 0,
             "enable_mlapo": true,
@@ -590,13 +590,16 @@ class AscendConfig:
     combine_quant_mode: Literal[0, 2, 3, 4] = 0
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
     # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
-    # The same value is passed as dispatch_ffn_combine's max_output_size
-    # and CANN MegaMoe buffer's max_recv_token_num.
-    # This is a reference value: if the actual per-rank received token
-    # count exceeds it, tokens may be truncated, causing precision
-    # degradation. Do not set it too large because workspace memory scales
-    # linearly with this value. Default 65536.
-    mega_moe_max_tokens: int = 65536
+    # MegaMoe (enable_fused_mc2=2/3): passed as the symm buffer's
+    # max_recv_token_num. 0 (default) lets the operator auto-compute it as
+    # num_max_tokens_per_rank * ep_world_size * min(num_topk, expert_per_rank).
+    # A positive value is used as a reference capacity instead: if the actual
+    # per-rank received token count exceeds it, tokens may be truncated,
+    # causing precision degradation. Do not set it too large because
+    # workspace memory scales linearly with this value.
+    # Plain MC2 (enable_fused_mc2=1): the same value is passed as
+    # dispatch_ffn_combine's max_output_size; 0 falls back to 65536 there.
+    mega_moe_max_tokens: int = 0
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
@@ -953,9 +956,9 @@ class AscendConfig:
 
         self._validate_mc2_comm_alg(vc)
 
-        # mega_moe_max_tokens range
-        if self.mega_moe_max_tokens <= 0:
-            raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
+        # mega_moe_max_tokens range (0 = let the MegaMoe operator auto-compute)
+        if self.mega_moe_max_tokens < 0:
+            raise ValueError(f"mega_moe_max_tokens must be a non-negative integer, got {self.mega_moe_max_tokens}")
 
         # batch-sharded sampling (Model Runner V2) shards the sampler inputs
         # per TP rank, while lmhead TP overrides NPUModelRunner.sample with a
@@ -1126,15 +1129,18 @@ class AscendConfig:
             return False
         # Preserve MiniMax-M3's 6144-wide first projection and also allow K3's
         # validated SiTU shape without widening support for unrelated models.
+        # Values are l1_weights.dim1 (the full 2x-intermediate output width),
+        # kept in sync with the A5 operator's intermediate_hidden <= 3072
+        # bound (intermediate_hidden == l1 dim1 / 2).
         supported_intermediate_sizes = {1024, 2048, 3072, 4096, 7168}
         if is_minimax_m3 or is_kimi_k3:
             supported_intermediate_sizes.add(6144)
-        # intermediate_hidden == l1_weights.dim1 == 2 * moe_intermediate_size.
-        intermediate_hidden = 2 * int(moe_intermediate_size)
-        if intermediate_hidden not in supported_intermediate_sizes:
+        # The l1 output width == 2 * moe_intermediate_size (gate + up halves).
+        l1_output_width = 2 * int(moe_intermediate_size)
+        if l1_output_width not in supported_intermediate_sizes:
             logger.warning(
-                "mega moe operator is not supported by current a5 config, for intermediate_hidden size %s is not in %s",
-                intermediate_hidden,
+                "mega moe operator is not supported by current a5 config, for l1 output width %s is not in %s",
+                l1_output_width,
                 sorted(supported_intermediate_sizes),
             )
             return False

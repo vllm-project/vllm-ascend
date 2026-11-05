@@ -406,28 +406,44 @@ class FusedMC2CommImpl(MoECommMethod):
         if is_decode_only_node:
             max_recv_token_num = absolute_safe_max_recv_token_num
         else:
-            # P nodes and PD-mixed nodes use the configured value. This keeps
-            # the existing memory/performance tradeoff for prefill workloads.
-            max_recv_token_num = get_ascend_config().mega_moe_max_tokens
-            # absolute_safe_max_recv_token_num is the max value required by mega moe api
-            if max_recv_token_num > absolute_safe_max_recv_token_num:
-                max_recv_token_num = absolute_safe_max_recv_token_num
-            logger.warning_once(
-                "MegaMoe symm buffer: max_recv_token_num is set from "
-                "mega_moe_max_tokens=%d (reference value) on a P or PD-mixed "
-                "node. If the actual per-rank received token count after "
-                "dispatch exceeds this value, precision degradation will "
-                "occur. The absolute safe upper bound is %d "
-                "(num_max_tokens_per_rank=%d, ep_world_size=%d, num_topk=%d, "
-                "expert_per_rank=%d). Please tune mega_moe_max_tokens in "
-                "additional_config based on actual expert load distribution.",
-                max_recv_token_num,
-                absolute_safe_max_recv_token_num,
-                num_max_tokens_per_rank,
-                int(self.token_dispatcher.ep_world_size),
-                num_topk,
-                expert_per_rank,
-            )
+            # P nodes and PD-mixed nodes: 0 (default) lets the operator
+            # auto-compute the receive capacity (identical to
+            # absolute_safe_max_recv_token_num); a configured value keeps the
+            # existing memory/performance tradeoff for prefill workloads.
+            configured_max_recv_token_num = get_ascend_config().mega_moe_max_tokens
+            if configured_max_recv_token_num > 0:
+                # absolute_safe_max_recv_token_num is the max value required by mega moe api
+                max_recv_token_num = min(configured_max_recv_token_num, absolute_safe_max_recv_token_num)
+                logger.warning_once(
+                    "MegaMoe symm buffer: max_recv_token_num is set from "
+                    "mega_moe_max_tokens=%d (reference value) on a P or PD-mixed "
+                    "node. If the actual per-rank received token count after "
+                    "dispatch exceeds this value, precision degradation will "
+                    "occur. The absolute safe upper bound is %d "
+                    "(num_max_tokens_per_rank=%d, ep_world_size=%d, num_topk=%d, "
+                    "expert_per_rank=%d). Leave mega_moe_max_tokens unset (0) to "
+                    "let the operator auto-compute it.",
+                    max_recv_token_num,
+                    configured_max_recv_token_num,
+                    absolute_safe_max_recv_token_num,
+                    num_max_tokens_per_rank,
+                    int(self.token_dispatcher.ep_world_size),
+                    num_topk,
+                    expert_per_rank,
+                )
+        # Surface the effective receive capacity. When 0 is passed, the
+        # operator auto-computes it with the exact formula of
+        # absolute_safe_max_recv_token_num, so log that resolved value.
+        logger.info(
+            "CANN MegaMoe sym buffer max_recv_token_num=%d%s (num_max_tokens_per_rank=%d, ep_world_size=%d, "
+            "num_topk=%d, expert_per_rank=%d).",
+            max_recv_token_num if max_recv_token_num > 0 else absolute_safe_max_recv_token_num,
+            "" if max_recv_token_num > 0 else " (auto-computed by the operator)",
+            num_max_tokens_per_rank,
+            int(self.token_dispatcher.ep_world_size),
+            num_topk,
+            expert_per_rank,
+        )
 
         logger.info(
             "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): ep_rank=%s ep_world=%s global_bs=%s",
@@ -442,7 +458,12 @@ class FusedMC2CommImpl(MoECommMethod):
             num_max_tokens_per_rank,
             num_topk,
             hidden=self.moe_config.hidden_dim,
-            intermediate_hidden=2 * self.moe_config.intermediate_size_per_partition,
+            # Per the operator's contract, intermediate_hidden is the
+            # post-activation width (half of the l1 output width). The
+            # intermediate_size_per_partition is exactly that: gate and up
+            # each take half of the 2x-intermediate l1 output. Passing 2x
+            # over-reserves the GMM1 segment of the symm buffer.
+            intermediate_hidden=self.moe_config.intermediate_size_per_partition,
             max_recv_token_num=max_recv_token_num,
             dispatch_quant_mode=dispatch_quant_mode,
             dispatch_quant_out_dtype=dispatch_quant_out_dtype,
@@ -622,6 +643,12 @@ class FusedMC2CommImpl(MoECommMethod):
                 )
 
                 out = torch.empty_like(fused_experts_input.hidden_states)
+                # mega_moe_max_tokens=0 means "operator auto-compute" for the
+                # MegaMoe symm buffer; the plain-MC2 dispatch_ffn_combine
+                # kernel has no auto mode and keeps the historical default.
+                max_output_size = get_ascend_config().mega_moe_max_tokens
+                if max_output_size <= 0:
+                    max_output_size = 65536
                 torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                     x=fused_experts_input.hidden_states,
                     weight1=weights.w1,
@@ -633,7 +660,7 @@ class FusedMC2CommImpl(MoECommMethod):
                     bias2=weights.w2_scale_bias,
                     probs=fused_experts_input.topk_weights.to(torch.float32),
                     group=self.token_dispatcher.moe_all_to_all_group_name,
-                    max_output_size=get_ascend_config().mega_moe_max_tokens,
+                    max_output_size=max_output_size,
                     swiglu_limit=self.swiglu_limit,
                     world_size=self.token_dispatcher.ep_world_size,
                     x_active_mask=fused_experts_input.routing.mc2_mask,
