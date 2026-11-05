@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""Scheduler-owned bootstrap service for Mooncake layerwise push transfers."""
+"""Layerwise proxy dispatch and scheduler metadata service for Mooncake Push."""
 
 import threading
 import time
@@ -11,9 +11,7 @@ import msgspec
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
-    get_mooncake_bootstrap_addr,
-)
+from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
@@ -21,13 +19,11 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
     MooncakeMetadataThread,
 )
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.bootstrap_server import (
-    AscendMooncakeBootstrapServer,
-    register_workers_with_bootstrap,
-)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
+    MooncakeTransferMetadataGroups,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import MooncakeMetaserverClient
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -55,15 +51,10 @@ class MooncakePushMetadataThread(MooncakeMetadataThread):
 
 
 class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
-    """Own the P bootstrap service in EngineCore's scheduler process.
-
-    Register P endpoints and retain source blocks until workers finish sends.
-    D serves static worker metadata on a background thread.
-    """
+    """Publish D allocations through the layerwise proxy; track P sends."""
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: "KVCacheConfig") -> None:
         super().__init__(vllm_config, engine_id, kv_cache_config)
-        self.bootstrap_server: AscendMooncakeBootstrapServer | None = None
         self._metadata_thread: MooncakePushMetadataThread | None = None
         self._reqs_pending_recv: dict[str, tuple[Request, BlockIds, int]] = {}
         self._reqs_need_send_layerwise: dict[str, tuple[Request, BlockIds]] = {}
@@ -72,50 +63,29 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         self._reqs_finished_sending: set[str] = set()
         self._reqs_pending_send: dict[str, float] = {}
         self._reqs_aborted: dict[str, str] = {}
-        self._registered_worker_metadata: bytes | None = None
-        self.start_bootstrap_server()
-
-    def _should_launch_bootstrap_server(self) -> bool:
-        """Elect one P scheduler without querying worker TP/PP process groups."""
-        if not self.kv_transfer_config.is_kv_producer:
-            return False
-        if self.kv_transfer_config.get_from_extra_config("bootstrap_server_address", None) is not None:
-            return False
-        parallel_config = self.vllm_config.parallel_config
-        if parallel_config.local_engines_only:
-            return parallel_config.data_parallel_rank_local == 0
-        return parallel_config.data_parallel_index == 0
-
-    def start_bootstrap_server(self) -> None:
-        """Start the upstream HTTP registry in a scheduler-owned thread."""
-        if not self._should_launch_bootstrap_server() or self.bootstrap_server is not None:
-            return
-        _, port = get_mooncake_bootstrap_addr(self.vllm_config)
-        server = AscendMooncakeBootstrapServer("0.0.0.0", port)
-        try:
-            server.start()
-        except Exception:
-            server.shutdown()
-            raise
-        self.bootstrap_server = server
+        self._remote_worker_addresses: tuple[tuple[int, int, int, str], ...] = ()
+        self.metaserver_client = MooncakeMetaserverClient() if self.kv_transfer_config.is_kv_consumer else None
 
     def shutdown(self) -> None:
-        """Called through the connector when EngineCore shuts down its scheduler."""
+        if self.metaserver_client is not None:
+            self.metaserver_client.shutdown()
+            self.metaserver_client = None
         if self._metadata_thread is not None:
             self._metadata_thread.shutdown()
             self._metadata_thread = None
-        if self.bootstrap_server is not None:
-            self.bootstrap_server.shutdown()
-            self.bootstrap_server = None
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int) -> None:
         """Track P source allocations or queue D receives for worker metadata."""
+        if self.metaserver_client is not None:
+            self.metaserver_client.check_errors()
         params = request.kv_transfer_params
         if self.kv_transfer_config.is_kv_producer:
             if not params or not params.get("do_remote_decode"):
                 return
-            if not params.get("transfer_id"):
-                raise ValueError("Missing Push transfer parameter: transfer_id")
+            if not params.get("remote_request_id"):
+                raise ValueError("Missing Push transfer parameter: remote_request_id")
+            if params["remote_num_external_tokens"] == 0:
+                return
             if request.request_id in self._reqs_sent_to_worker:
                 raise RuntimeError("Preempting an active Mooncake Push transfer is not supported")
             self._reqs_need_send_layerwise[request.request_id] = (
@@ -134,8 +104,36 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                     num_external_tokens,
                 )
             params["do_remote_prefill"] = False
+            assert self.metaserver_client is not None
+            # The proxy matches external IDs; workers retain the full D ID.
+            external_request_id = request.request_id[:-9]
+            message = dict(
+                request_id=external_request_id,
+                remote_request_id=request.request_id,
+                token_ids=[],
+                do_remote_prefill=False,
+                do_remote_decode=True,
+                remote_block_ids=tuple(
+                    tuple(group)
+                    for group in self._get_transfer_block_ids(blocks.get_block_ids(), request.num_prompt_tokens)
+                ),
+                remote_block_size=self.group_block_size,
+                remote_engine_id=self.engine_id,
+                remote_host=self.side_channel_host,
+                remote_port=self.side_channel_port,
+                remote_tp_size=self.tp_size,
+                remote_pp_size=self.pp_size,
+                remote_pcp_size=self.pcp_size,
+                remote_dcp_size=self.dcp_size,
+                remote_num_computed_tokens=params["num_computed_tokens"],
+                remote_num_external_tokens=num_external_tokens,
+                remote_worker_addresses=self._remote_worker_addresses,
+            )
+            self.metaserver_client.submit(request.request_id, params["metaserver"], message)
 
     def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> MooncakeConnectorMetadata:
+        if self.metaserver_client is not None:
+            self.metaserver_client.check_errors()
         meta = MooncakeConnectorMetadata()
         if self.kv_transfer_config.is_kv_producer:
             # Core can recycle preempted blocks before the worker receives this
@@ -181,6 +179,10 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
             self._reqs_pending_send = {}
             meta.push_aborted_requests = self._reqs_aborted
             self._reqs_aborted = {}
+            # P layer hooks need request state before forward, including steps
+            # that only drain outstanding transfers or process cancellations.
+            if self._reqs_need_send_layerwise or meta.push_aborted_requests:
+                scheduler_output.has_sync_kv_loads = True
 
         else:
             for req_id, (req, block_ids, num_external_tokens) in self._reqs_pending_recv.items():
@@ -190,8 +192,6 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                     local_block_ids=block_ids,
                     num_external_tokens=num_external_tokens,
                     kv_transfer_params=req.kv_transfer_params,
-                    scheduler_host=self.side_channel_host,
-                    scheduler_port=self.side_channel_port,
                 )
             self._reqs_pending_recv.clear()
         return meta
@@ -202,18 +202,14 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
             return False, None
         req_id = request.request_id
         params = request.kv_transfer_params
-        if not params or not params.get("do_remote_decode") or not params.get("transfer_id"):
+        if not params or not params.get("do_remote_decode") or not params.get("remote_request_id"):
             return False, None
         normal_finish = request.status in (RequestStatus.FINISHED_LENGTH_CAPPED, RequestStatus.FINISHED_STOPPED)
         if not normal_finish:
-            # Ready may arrive before the first source metadata. The worker
-            # needs transfer_id to reject that pending handoff even on abort.
-            self._reqs_aborted[req_id] = params["transfer_id"]
+            # Notify workers even if cancellation precedes the first dispatch.
+            self._reqs_aborted[req_id] = params["remote_request_id"]
         if req_id not in self._reqs_need_send_layerwise:
             return False, None
-        # The Mooncake proxy already provides D's transfer_id, P engine and
-        # externally reachable bootstrap endpoint. Do not return the local
-        # registration URL (which can be loopback in external-LB mode).
         if req_id not in self._reqs_sent_to_worker or req_id in self._reqs_finished_sending:
             self._reqs_finished_sending.discard(req_id)
             self._reqs_sent_to_worker.discard(req_id)
@@ -225,6 +221,8 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         return True, None
 
     def update_connector_output(self, connector_output: "KVConnectorOutput") -> None:
+        if self.metaserver_client is not None:
+            self.metaserver_client.check_errors()
         if not self.kv_transfer_config.is_kv_producer:
             return
         finished_sending: set[str] = set()
@@ -245,7 +243,9 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
     def set_xfer_handshake_metadata_from_workers(
         self, metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata]
     ) -> None:
-        """Validate worker topology, then register P endpoints or serve D metadata."""
+        """Serve D cache layouts and publish its worker completion endpoints."""
+        if self.kv_transfer_config.is_kv_producer:
+            return
         use_kv_pp = self.ascend_config.kvpp_config.size > 1
         if use_kv_pp and self.dcp_size != 1:
             raise ValueError("Mooncake KVPP cannot be combined with DCP")
@@ -261,25 +261,6 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
             use_kv_pp,
             threading.Event(),
         )
-        if self.kv_transfer_config.is_kv_producer:
-            if self._registered_worker_metadata is not None:
-                if thread.encoded_metadata != self._registered_worker_metadata:
-                    raise RuntimeError("Replacing registered P worker metadata is not supported")
-                return
-            host, port = get_mooncake_bootstrap_addr(self.vllm_config)
-            register_workers_with_bootstrap(
-                host=host,
-                port=port,
-                engine_id=self.engine_id,
-                dp_rank=self.vllm_config.parallel_config.data_parallel_index,
-                tp_size=self.tp_size,
-                pp_size=self.pp_size,
-                pcp_size=self.pcp_size,
-                dcp_size=self.dcp_size,
-                encoded_metadata=thread.encoded_metadata,
-            )
-            self._registered_worker_metadata = thread.encoded_metadata
-            return
         if self._metadata_thread is not None:
             if self._metadata_thread.error is not None:
                 raise RuntimeError("Mooncake scheduler metadata thread failed") from self._metadata_thread.error
@@ -292,3 +273,10 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
             thread.shutdown()
             raise
         self._metadata_thread = thread
+        groups = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+        self._remote_worker_addresses = tuple(
+            (pp_rank, pcp_rank, tp_rank, make_zmq_path("tcp", worker.local_ip, worker.handshake_port))
+            for pp_rank, pp in groups.metadata_by_pp_rank.items()
+            for pcp_rank, pcp in pp.metadata_by_pcp_rank.items()
+            for tp_rank, worker in pcp.metadata_by_tp_rank.items()
+        )

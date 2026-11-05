@@ -141,16 +141,12 @@ class ReqMeta:
 
 @dataclass(frozen=True)
 class PushReqMeta:
-    """D allocation snapshot; shared by the main and Ready-sender threads."""
+    """D allocation snapshot, installed before consuming completion messages."""
 
-    transfer_id: str
-    remote_engine_id: str
-    remote_bootstrap_addr: str
+    request_id: str
     local_block_ids: tuple[tuple[int, ...], ...]
     num_computed_tokens: int
     num_external_tokens: int
-    scheduler_host: str
-    scheduler_port: int
 
 
 @dataclass(frozen=True)
@@ -161,11 +157,19 @@ class PushSendReqMeta:
     that prefix immediately, but must wait for layer events for new tokens.
     """
 
-    transfer_id: str
+    # Full D request ID, also used by completion messages.
+    request_id: str
     local_block_ids: tuple[tuple[int, ...], ...]
     num_prompt_tokens: int
     num_computed_tokens: int
     num_scheduled_tokens: int
+    remote_engine_id: str
+    remote_host: str
+    remote_port: int
+    remote_block_ids: tuple[tuple[int, ...], ...]
+    remote_num_computed_tokens: int
+    remote_num_external_tokens: int
+    remote_worker_addresses: tuple[tuple[int, int, int, str], ...]
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -175,7 +179,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.requests: dict[str, ReqMeta] = {}
         self.push_requests: dict[str, PushReqMeta] = {}
         self.push_send_requests: dict[str, PushSendReqMeta] = {}
-        # P request ID -> transfer ID, including aborts before first dispatch.
+        # P request ID -> D request ID, including aborts before first dispatch.
         self.push_aborted_requests: dict[str, str] = {}
         self.requests_to_send: dict[str, float] = {}
         self.reqs_in_batch: set[str] = set()
@@ -209,23 +213,12 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         local_block_ids: BlockIds,
         num_external_tokens: int,
         kv_transfer_params: dict[str, Any],
-        *,
-        scheduler_host: str,
-        scheduler_port: int,
     ) -> None:
-        """Register a D receive with an immutable allocation snapshot."""
-        for field in ("transfer_id", "remote_engine_id", "remote_bootstrap_addr"):
-            if not kv_transfer_params.get(field):
-                raise ValueError(f"Missing Push transfer parameter: {field}")
         self.push_requests[request_id] = PushReqMeta(
-            transfer_id=kv_transfer_params["transfer_id"],
-            remote_engine_id=kv_transfer_params["remote_engine_id"],
-            remote_bootstrap_addr=kv_transfer_params["remote_bootstrap_addr"],
+            request_id=request_id,
             local_block_ids=tuple(tuple(group) for group in local_block_ids),
             num_computed_tokens=kv_transfer_params["num_computed_tokens"],
             num_external_tokens=num_external_tokens,
-            scheduler_host=scheduler_host,
-            scheduler_port=scheduler_port,
         )
 
     def add_new_push_send_req(
@@ -239,11 +232,18 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
     ) -> None:
         """Snapshot one scheduled P chunk for the layerwise worker."""
         self.push_send_requests[request_id] = PushSendReqMeta(
-            transfer_id=kv_transfer_params["transfer_id"],
+            request_id=kv_transfer_params["remote_request_id"],
             local_block_ids=tuple(tuple(group) for group in local_block_ids),
             num_prompt_tokens=num_prompt_tokens,
             num_computed_tokens=num_computed_tokens,
             num_scheduled_tokens=num_scheduled_tokens,
+            remote_engine_id=kv_transfer_params["remote_engine_id"],
+            remote_host=kv_transfer_params["remote_host"],
+            remote_port=kv_transfer_params["remote_port"],
+            remote_block_ids=tuple(tuple(group) for group in kv_transfer_params["remote_block_ids"]),
+            remote_num_computed_tokens=kv_transfer_params["remote_num_computed_tokens"],
+            remote_num_external_tokens=kv_transfer_params["remote_num_external_tokens"],
+            remote_worker_addresses=tuple(tuple(worker) for worker in kv_transfer_params["remote_worker_addresses"]),
         )
 
 
