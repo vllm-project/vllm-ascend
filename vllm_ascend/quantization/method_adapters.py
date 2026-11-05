@@ -97,6 +97,10 @@ class AscendLinearMethod(LinearMethodBase):
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
 
+        self.quant_method.validate_weight_shapes(
+            layer, input_size, output_size, input_size_per_partition, output_partition_sizes
+        )
+
         weight_dict = self.quant_method.get_weight(input_size_per_partition, output_size_per_partition, params_dtype)
 
         # Extract packing information (if present)
@@ -293,6 +297,8 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
+        self.quant_method.validate_weight_shapes(layer, intermediate_size_per_partition)
+
         weight_param = self.quant_method.get_weight(
             num_experts, intermediate_size_per_partition, hidden_size, params_dtype
         )
