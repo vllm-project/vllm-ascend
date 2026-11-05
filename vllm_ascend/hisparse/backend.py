@@ -112,7 +112,27 @@ class AscendHiSparseBackend(HiSparseBackend):
                 raise RuntimeError("Bind the HiSparse leader before follower caches.")
             workspace = leader_ops.workspace
         mapping = runtime.registered_host_pool._hisparse_registration
-        return HiSparseNPUOps(mapping, workspace)
+        attention_capacity = 0
+        attention_block_stride = None
+        if runtime.kv_dtype == torch.float8_e4m3fn:
+            from vllm_ascend.hisparse.c8 import c8_storage_view
+
+            # The resolver consumes virtual page rows. Attention consumes dense
+            # addresses relative to its own layer view, including any HMA gaps.
+            # Qualify the bound geometry once, without adding replay-time work.
+            view, block, attention_block_stride, _ = c8_storage_view(runtime.hot.cache)
+            attention_view, _, _, _ = c8_storage_view(runtime.hot.attention_cache)
+            attention_capacity = view.shape[0]
+            if block != runtime.hot.block_size or attention_capacity > attention_view.shape[0]:
+                raise ValueError("HiSparse C8 resolver and Attention views have incompatible geometry")
+            if runtime is not group.leader and (
+                attention_capacity != group.leader.cache_ops.attention_capacity
+                or attention_block_stride != group.leader.cache_ops.attention_block_stride
+            ):
+                raise ValueError("Shared HiSparse C8 indices require matching per-layer page geometry")
+        return HiSparseNPUOps(
+            mapping, workspace, attention_capacity=attention_capacity, attention_block_stride=attention_block_stride
+        )
 
     def validate_kv_cache_config(self, kv_cache_config: KVCacheConfig) -> None:
         from .binding import get_hisparse_indexer_specs

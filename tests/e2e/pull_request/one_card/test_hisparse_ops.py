@@ -161,7 +161,8 @@ def reference(topk, requests, states, source, resident, hot_table, dgi, lru, blo
 
 
 @pytest.mark.parametrize("device_row_count", [False, True])
-def test_resolver_strides_padding_graph(device_row_count):
+@pytest.mark.parametrize("compact_attention", [False, True])
+def test_resolver_strides_padding_graph(device_row_count, compact_attention):
     torch.npu.set_device(0)
     raw = torch.empty(8192, dtype=torch.uint8)
     offset = (-raw.data_ptr()) % 4096
@@ -192,7 +193,11 @@ def test_resolver_strides_padding_graph(device_row_count):
     lru = torch.cat((lru, torch.arange(8, 16, dtype=torch.int16)[None, :].expand(2, -1)), dim=1)
     expected = reference(topk, requests, states, source, resident, hot_table, dgi, lru, 4)
     workspace = ResolverWorkspace(4, 16, 16, torch.device("npu:0"))
-    ops = HiSparseNPUOps(mapping, workspace)
+    stride_rows = hot.stride(0) // hot.size(2)
+    capacity = (hot.size(0) - 1) * stride_rows + hot.size(1)
+    ops = HiSparseNPUOps(
+        mapping, workspace, attention_capacity=capacity if compact_attention else 0, attention_block_stride=stride_rows
+    )
     topk_n, requests_n, states_n, source_n, resident_n, hot_table_n, dgi_n, lru_n = [
         t.npu() for t in (topk, requests, states, source, resident, hot_table, dgi, lru)
     ]
@@ -246,7 +251,16 @@ def test_resolver_strides_padding_graph(device_row_count):
         ("indices", "counts", "swap_host", "swap_device", "swap_counts", "dgi", "lru", "stats"), actual, expected
     ):
         torch.testing.assert_close(a.cpu(), e, msg=name)
-    expected_attn = torch.where(expected[0] >= 0, expected[0] // 4 * 8 + expected[0] % 4, -1)
+
+    def attention_reference(physical):
+        mapped = torch.where(physical >= 0, physical // 4 * 8 + physical % 4, -1)
+        if compact_attention:
+            for row in mapped:
+                valid = [value for value in row.tolist() if value >= 0]
+                row.copy_(torch.tensor(valid + [-1] * (row.numel() - len(valid)), dtype=row.dtype))
+        return mapped
+
+    expected_attn = attention_reference(expected[0])
     torch.testing.assert_close(attn.cpu(), expected_attn)
     for row in range(4):
         for col in range(int(expected[4][row])):
@@ -324,6 +338,7 @@ def test_resolver_strides_padding_graph(device_row_count):
             torch.npu.synchronize()
             for actual_value, expected_value in zip(actual, oracle):
                 torch.testing.assert_close(actual_value.cpu(), expected_value)
+            torch.testing.assert_close(attn.cpu(), attention_reference(oracle[0]))
     graph.reset()
     mapping.close()
 

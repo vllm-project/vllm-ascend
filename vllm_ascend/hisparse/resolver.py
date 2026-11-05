@@ -34,7 +34,7 @@ def _load_resolver():
     return namespace
 
 
-def resolve_tensors(native, arguments, resolved_scratch, errors):
+def resolve_tensors(native, arguments, resolved_scratch, errors, *, attention_capacity=0, attention_block_stride=None):
     """Pass live tensors; C++ derives geometry and protects queued storage.
 
     During replay, external tensors remain owned by the runtime/workspace.
@@ -66,8 +66,9 @@ def resolve_tensors(native, arguments, resolved_scratch, errors):
         a["source_block_size"],
         a["resident_block_size"],
         a["resident_null_block"],
-        a["attention_block_stride"],
+        a["attention_block_stride"] if attention_block_stride is None else attention_block_stride,
         a["max_union_rows"],
+        attention_capacity,
     )
 
 
@@ -78,4 +79,11 @@ def resolve(owner, scope):
     resolved = scope["resolved_global_indices"]
     if resolved is None:
         resolved = workspace.first_refs[: rows * topk].view(rows, topk)
-    resolve_tensors(workspace.native, scope, resolved, workspace.errors[:rows])
+    resolve_tensors(
+        workspace.native,
+        scope,
+        resolved,
+        workspace.errors[:rows],
+        attention_capacity=owner.attention_capacity,
+        attention_block_stride=owner.attention_block_stride,
+    )
