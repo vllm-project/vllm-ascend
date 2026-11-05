@@ -58,6 +58,8 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
     the 310P hardware.
     """
 
+    supports_draft_extra_slots = False
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,

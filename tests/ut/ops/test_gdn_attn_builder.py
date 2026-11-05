@@ -199,6 +199,7 @@ def _make_vllm_config(
         speculative_config = SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
             parallel_drafting=False,
+            max_num_new_slots_for_drafting=0,
             enable_adaptive_verification=enable_adaptive_verification,
             use_eagle_block_drop=lambda: False,
         )
