@@ -190,7 +190,7 @@ CI 测试容器内需要配置上述四项必需变量。`nightly-plan.yaml` 仅
 ```bash
 python -m unittest discover -s tests/ut/tools/kimi_k3 -v
 python -m ruff check tools/kimi_k3 tests/ut/tools/kimi_k3 \
-  tests/e2e/cases/models/configs/Kimi/Kimi-K3-W4A8-EP256-A5.yaml \
+  tools/accuracy_runner.py \
   tests/e2e/cases/models/configs/Kimi/gsm8k_ep256_first500.py
 ```
 
