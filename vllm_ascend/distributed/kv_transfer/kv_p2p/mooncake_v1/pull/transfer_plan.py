@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pure transfer port/topology helpers of the pull mooncake v1 connector.
 
-These functions used to be nested in
+These functions used to be methods/nested functions of the pull worker
 ``MooncakeConnectorWorker._get_kv_split_metadata``. They only do arithmetic on
 parallel topology, head layout and handshake ports, so they can be unit-tested
 without a worker. The port-mapping/HMA helpers are pure address computation too;
@@ -12,10 +12,15 @@ that follows consumes ``pull.metadata`` types (``ReqMeta``/``GroupPull``), so
 keeping the planner helpers in the pull layer avoids a ``common`` -> ``pull``
 dependency; these helpers themselves only belong to the pull protocol family.
 
-This module is pure Python and must stay dependency-free (only ``math``).
+This module is pure Python and must stay dependency-free at runtime (only
+``math``/``typing``); ``RemotePortInfo`` is imported for type annotations only.
 """
 
 import math
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.protocol import RemotePortInfo
 
 
 def kv_head_groups(*, num_key_value_heads: int, use_mla: bool, use_sparse: bool, tp_size: int) -> list[tuple[int, ...]]:
@@ -250,10 +255,151 @@ def set_hma_shared_port(
     return remote_handshake_port_list
 
 
+def remote_host_info_by_port(
+    *,
+    base_port: int,
+    remote_handshake_port: int,
+    remote_host: str,
+    remote_engine_id: str,
+    remote_multi_nodes_meta_mapping: dict | None,
+    kv_port: int,
+) -> tuple[str, str]:
+    """Resolve the host/engine id owning a remote handshake port.
+
+    Looks the port offset up in the multi-node handshake mapping, first against
+    the serving kv_port and then against the request-level base port.
+    """
+    if remote_multi_nodes_meta_mapping is None:
+        return remote_host, remote_engine_id
+
+    rank = str(remote_handshake_port - kv_port)
+    info = remote_multi_nodes_meta_mapping.get(rank)
+    if info is None:
+        rank = str(remote_handshake_port - base_port)
+        info = remote_multi_nodes_meta_mapping.get(rank)
+    if info is None:
+        return remote_host, remote_engine_id
+    return info.get("host", remote_host), info.get("engine_id", remote_engine_id)
+
+
+def remote_port_send_num(
+    *,
+    remote_port: int,
+    remote_pcp_size: int,
+    prefill_tp_size: int,
+    kv_port: int,
+    remote_multi_nodes_meta_mapping: dict,
+    remote_host: str,
+    remote_engine_id: str,
+    local_remote_block_port_mappings: dict[int, list[list[int]]],
+) -> dict[int, "RemotePortInfo"]:
+    """Count how many transfer tasks each remote handshake port receives."""
+    remote_port_send_num: dict[int, RemotePortInfo] = {}
+    remote_ports: set[int] = set(range(remote_port, remote_port + prefill_tp_size * remote_pcp_size))
+    for key, remote_host_info in remote_multi_nodes_meta_mapping.items():
+        remote_ports.add(int(remote_host_info.get("handshake_port", kv_port + int(key))))
+    for remote_port_head_list in local_remote_block_port_mappings.values():
+        for remote_port_list in remote_port_head_list:
+            for target_port in remote_port_list:
+                remote_ports.add(target_port)
+
+    for target_port in remote_ports:
+        target_remote_host, _ = remote_host_info_by_port(
+            base_port=remote_port,
+            remote_handshake_port=target_port,
+            remote_host=remote_host,
+            remote_engine_id=remote_engine_id,
+            remote_multi_nodes_meta_mapping=remote_multi_nodes_meta_mapping,
+            kv_port=kv_port,
+        )
+        remote_port_send_num[target_port] = {"num": 0, "host": target_remote_host}
+
+    for remote_port_head_list in local_remote_block_port_mappings.values():
+        for remote_port_list in remote_port_head_list:
+            for target_port in remote_port_list:
+                remote_port_send_num[target_port]["num"] += 1
+    return remote_port_send_num
+
+
+def local_remote_cp_params(
+    *,
+    remote_block_size: int | None,
+    block_size: int,
+    dcp_rank: int,
+    dcp_size: int,
+    remote_dcp_size: int,
+) -> tuple[int, int, int, int, int]:
+    """Resolve CP geometry: (remote_block_size, local_cp_rank, local_cp_size,
+    remote_cp_size, r_blk), where r_blk = Bd/Bp (>=1) is the D/P block-size ratio.
+    Also validates that P/D block sizes are compatible under D-side CP.
+    """
+    remote_block_size = remote_block_size or block_size
+    # MRV2's DCP group already spans PCP; PCP is not another KV shard axis.
+    local_cp_rank = dcp_rank
+    local_cp_size = dcp_size
+    remote_cp_size = remote_dcp_size
+
+    if remote_block_size != block_size:
+        assert block_size % remote_block_size == 0 or remote_block_size % block_size == 0, (
+            f"Block sizes of P ({remote_block_size}) and D ({block_size}) must be divisible by each other."
+        )
+        if local_cp_size > 1:
+            assert block_size % remote_block_size == 0, (
+                f"D node DCP not support P node block_size({remote_block_size}) > D block_size({block_size})"
+            )
+            # Ensure that the blocks of each P cp rank belong to the same D rank.
+            assert (remote_cp_size // local_cp_size) % (block_size // remote_block_size) == 0, (
+                f"remote_cp_size({remote_cp_size}) must be an integer multiple of"
+                f"r({block_size // remote_block_size}) * local_cp_size({local_cp_size})"
+            )
+
+    r_blk = block_size // remote_block_size if block_size > remote_block_size else 1
+    return remote_block_size, local_cp_rank, local_cp_size, remote_cp_size, r_blk
+
+
+def kernel_block_scale(*, layer_indices: list[int], block_size_scale: list[list[int]]) -> int:
+    """Kernel block scale for logical-to-tensor block expansion."""
+    if layer_indices and layer_indices[0] < len(block_size_scale) and block_size_scale[layer_indices[0]]:
+        return block_size_scale[layer_indices[0]][0]
+    return 1
+
+
+def group_kernel_params(
+    *,
+    kv_group2layeridx: dict[int, tuple[dict, list[int]]],
+    block_size: int,
+    block_size_scale: list[list[int]],
+    remote_block_size: int,
+) -> dict[int, tuple[int, int, int]]:
+    """Per attention group kernel-expansion params: (local_scale, remote_scale, kernel_size).
+
+    The kernel size is shared by both sides, so remote_scale is derived locally
+    from it (no remote handshake scale needed). Mamba groups are not
+    block-sharded and are skipped.
+    """
+    group_kernel_params: dict[int, tuple[int, int, int]] = {}
+    for group_idx, (group_spec, layer_indices) in kv_group2layeridx.items():
+        if group_spec["kv_cache_spec_type"] == "MambaSpec":
+            continue
+        local_scale = kernel_block_scale(layer_indices=layer_indices, block_size_scale=block_size_scale)
+        kernel_size = block_size // local_scale
+        assert remote_block_size % kernel_size == 0, (
+            f"remote_block_size({remote_block_size}) not divisible by kernel_size({kernel_size})"
+        )
+        remote_scale = remote_block_size // kernel_size
+        group_kernel_params[group_idx] = (local_scale, remote_scale, kernel_size)
+    return group_kernel_params
+
+
 __all__ = [
     "context_parallel_parameters_check",
     "cp_group_meta",
+    "group_kernel_params",
+    "kernel_block_scale",
     "kv_head_groups",
     "local_remote_block_port_mappings",
+    "local_remote_cp_params",
+    "remote_host_info_by_port",
+    "remote_port_send_num",
     "set_hma_shared_port",
 ]

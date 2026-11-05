@@ -9,8 +9,13 @@ import pytest
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
     context_parallel_parameters_check,
     cp_group_meta,
+    group_kernel_params,
+    kernel_block_scale,
     kv_head_groups,
     local_remote_block_port_mappings,
+    local_remote_cp_params,
+    remote_host_info_by_port,
+    remote_port_send_num,
     set_hma_shared_port,
 )
 
@@ -398,3 +403,198 @@ def test_set_hma_shared_port_skips_duplicate_mamba_ports():
     result = set_hma_shared_port(**_hma(remote_dcp_size=1, chosen_tp_list=[0, 1], remote_handshake_port_list=port_list))
     assert result is port_list
     assert result == [[30000, 30001]]
+
+
+# ------------------------------------------------------------ remote host/port
+
+
+@pytest.mark.parametrize(
+    "mapping,expected",
+    [
+        (None, ("host-0", "engine-0")),
+        ({"20000": {"host": "host-kv", "engine_id": "engine-kv"}}, ("host-kv", "engine-kv")),
+        ({"0": {"host": "host-base"}}, ("host-base", "engine-0")),
+        ({"9": {"host": "host-other"}}, ("host-0", "engine-0")),
+        ({"20000": {"engine_id": "engine-kv"}}, ("host-0", "engine-kv")),
+    ],
+    ids=["mapping-none", "kv-port-hit", "base-port-fallback", "no-hit", "engine-only-override"],
+)
+def test_remote_host_info_by_port(mapping, expected):
+    assert (
+        remote_host_info_by_port(
+            base_port=30000,
+            remote_handshake_port=30000,
+            remote_host="host-0",
+            remote_engine_id="engine-0",
+            remote_multi_nodes_meta_mapping=mapping,
+            kv_port=10000,
+        )
+        == expected
+    )
+
+
+def _port_mappings_empty():
+    return {}
+
+
+def test_remote_port_send_num_base_range():
+    result = remote_port_send_num(
+        remote_port=30000,
+        remote_pcp_size=1,
+        prefill_tp_size=2,
+        kv_port=10000,
+        remote_multi_nodes_meta_mapping={},
+        remote_host="host-0",
+        remote_engine_id="engine-0",
+        local_remote_block_port_mappings=_port_mappings_empty(),
+    )
+    assert result == {
+        30000: {"num": 0, "host": "host-0"},
+        30001: {"num": 0, "host": "host-0"},
+    }
+
+
+def test_remote_port_send_num_counts_duplicates():
+    result = remote_port_send_num(
+        remote_port=30000,
+        remote_pcp_size=1,
+        prefill_tp_size=2,
+        kv_port=10000,
+        remote_multi_nodes_meta_mapping={},
+        remote_host="host-0",
+        remote_engine_id="engine-0",
+        local_remote_block_port_mappings={30000: [[30000], [30001]], 30001: [[30001]]},
+    )
+    assert result == {
+        30000: {"num": 1, "host": "host-0"},
+        30001: {"num": 2, "host": "host-0"},
+    }
+
+
+def test_remote_port_send_num_adds_multi_node_ports():
+    result = remote_port_send_num(
+        remote_port=30000,
+        remote_pcp_size=1,
+        prefill_tp_size=1,
+        kv_port=10000,
+        remote_multi_nodes_meta_mapping={"1": {"handshake_port": 30002}, "2": {}},
+        remote_host="host-0",
+        remote_engine_id="engine-0",
+        local_remote_block_port_mappings={},
+    )
+    assert result == {
+        30000: {"num": 0, "host": "host-0"},
+        30002: {"num": 0, "host": "host-0"},
+        10002: {"num": 0, "host": "host-0"},
+    }
+
+
+def test_remote_port_send_num_resolves_multi_node_host():
+    result = remote_port_send_num(
+        remote_port=30000,
+        remote_pcp_size=1,
+        prefill_tp_size=2,
+        kv_port=10000,
+        remote_multi_nodes_meta_mapping={"20000": {"handshake_port": 30000, "host": "host-9"}},
+        remote_host="host-0",
+        remote_engine_id="engine-0",
+        local_remote_block_port_mappings={},
+    )
+    assert result[30000] == {"num": 0, "host": "host-9"}
+    assert result[30001] == {"num": 0, "host": "host-0"}
+
+
+# ---------------------------------------------------------------- cp geometry
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected",
+    [
+        (
+            dict(remote_block_size=16, block_size=16, dcp_rank=1, dcp_size=2, remote_dcp_size=2),
+            (16, 1, 2, 2, 1),
+        ),
+        (
+            dict(remote_block_size=None, block_size=16, dcp_rank=0, dcp_size=1, remote_dcp_size=1),
+            (16, 0, 1, 1, 1),
+        ),
+        (
+            dict(remote_block_size=32, block_size=16, dcp_rank=0, dcp_size=1, remote_dcp_size=1),
+            (32, 0, 1, 1, 1),
+        ),
+        (
+            dict(remote_block_size=8, block_size=16, dcp_rank=0, dcp_size=1, remote_dcp_size=1),
+            (8, 0, 1, 1, 2),
+        ),
+        (
+            dict(remote_block_size=8, block_size=16, dcp_rank=1, dcp_size=2, remote_dcp_size=4),
+            (8, 1, 2, 4, 2),
+        ),
+    ],
+    ids=["equal", "none-uses-block-size", "p-block-larger", "d-block-larger", "d-block-larger-dcp"],
+)
+def test_local_remote_cp_params(kwargs, expected):
+    assert local_remote_cp_params(**kwargs) == expected
+
+
+def test_local_remote_cp_params_rejects_indivisible_block_sizes():
+    with pytest.raises(AssertionError) as excinfo:
+        local_remote_cp_params(remote_block_size=24, block_size=16, dcp_rank=0, dcp_size=1, remote_dcp_size=1)
+    assert str(excinfo.value) == "Block sizes of P (24) and D (16) must be divisible by each other."
+
+
+def test_local_remote_cp_params_rejects_p_block_larger_under_dcp():
+    with pytest.raises(AssertionError) as excinfo:
+        local_remote_cp_params(remote_block_size=32, block_size=16, dcp_rank=0, dcp_size=2, remote_dcp_size=2)
+    assert str(excinfo.value) == "D node DCP not support P node block_size(32) > D block_size(16)"
+
+
+def test_local_remote_cp_params_rejects_dcp_shard_misalignment():
+    with pytest.raises(AssertionError) as excinfo:
+        local_remote_cp_params(remote_block_size=8, block_size=16, dcp_rank=0, dcp_size=2, remote_dcp_size=2)
+    assert str(excinfo.value) == "remote_cp_size(2) must be an integer multiple ofr(2) * local_cp_size(2)"
+
+
+# ------------------------------------------------------------- kernel params
+
+
+@pytest.mark.parametrize(
+    "layer_indices,block_size_scale,expected",
+    [
+        ([], [[4]], 1),
+        ([0], [[4]], 4),
+        ([2], [[1], [2], [3]], 3),
+        ([5], [[1]], 1),
+        ([0], [[]], 1),
+        ([1], [[4], []], 1),
+    ],
+)
+def test_kernel_block_scale(layer_indices, block_size_scale, expected):
+    assert kernel_block_scale(layer_indices=layer_indices, block_size_scale=block_size_scale) == expected
+
+
+def test_group_kernel_params_skips_mamba_and_computes_scales():
+    kv_group2layeridx = {
+        0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0]),
+        1: ({"kv_cache_spec_type": "MambaSpec"}, [1]),
+        2: ({"kv_cache_spec_type": "MLAAttentionSpec"}, [2]),
+    }
+    result = group_kernel_params(
+        kv_group2layeridx=kv_group2layeridx,
+        block_size=16,
+        block_size_scale=[[2], [1], []],
+        remote_block_size=32,
+    )
+    assert result == {0: (2, 4, 8), 2: (1, 2, 16)}
+
+
+def test_group_kernel_params_rejects_indivisible_remote_block_size():
+    kv_group2layeridx = {0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0])}
+    with pytest.raises(AssertionError) as excinfo:
+        group_kernel_params(
+            kv_group2layeridx=kv_group2layeridx,
+            block_size=16,
+            block_size_scale=[[3]],
+            remote_block_size=16,
+        )
+    assert str(excinfo.value) == "remote_block_size(16) not divisible by kernel_size(5)"

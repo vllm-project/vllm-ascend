@@ -94,10 +94,25 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan i
     cp_group_meta as pull_cp_group_meta,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    group_kernel_params as pull_group_kernel_params,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    kernel_block_scale as pull_kernel_block_scale,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
     kv_head_groups as pull_kv_head_groups,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
     local_remote_block_port_mappings as pull_local_remote_block_port_mappings,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    local_remote_cp_params as pull_local_remote_cp_params,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    remote_host_info_by_port as pull_remote_host_info_by_port,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    remote_port_send_num as pull_remote_port_send_num,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
     set_hma_shared_port as pull_set_hma_shared_port,
@@ -2682,10 +2697,8 @@ class MooncakeConnectorWorker:
         return any(".index_cache" in layer_name for layer_name in group_spec.get("layer_names", []))
 
     def _get_kernel_block_scale(self, layer_indices: list[int]) -> int:
-        """Kernel block scale for logical-to-tensor block expansion."""
-        if layer_indices and layer_indices[0] < len(self.block_size_scale) and self.block_size_scale[layer_indices[0]]:
-            return self.block_size_scale[layer_indices[0]][0]
-        return 1
+        """Delegate kernel block scale computation to ``transfer_plan.kernel_block_scale``."""
+        return pull_kernel_block_scale(layer_indices=layer_indices, block_size_scale=self.block_size_scale)
 
     def _get_kernel_block_ids(self, layer_indices, meta, group_idx, group_spec):
         """No-CP per-group block ids at kernel granularity: (local, remote).
@@ -2721,49 +2734,23 @@ class MooncakeConnectorWorker:
         return kernel_local[:num_kernel_blocks], kernel_remote[:num_kernel_blocks]
 
     def _get_group_kernel_params(self, remote_block_size):
-        # Per attention group kernel-expansion params: (local_scale, remote_scale, kernel_size).
-        # The kernel size is shared by both sides, so remote_scale is derived locally from it
-        # (no remote handshake scale needed). Mamba groups are not block-sharded and skipped.
-        group_kernel_params: dict[int, tuple[int, int, int]] = {}
-        for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
-            if group_spec["kv_cache_spec_type"] == "MambaSpec":
-                continue
-            local_scale = self._get_kernel_block_scale(layer_indices)
-            kernel_size = self.block_size // local_scale
-            assert remote_block_size % kernel_size == 0, (
-                f"remote_block_size({remote_block_size}) not divisible by kernel_size({kernel_size})"
-            )
-            remote_scale = remote_block_size // kernel_size
-            group_kernel_params[group_idx] = (local_scale, remote_scale, kernel_size)
-        return group_kernel_params
+        """Delegate kernel-expansion params computation to ``transfer_plan.group_kernel_params``."""
+        return pull_group_kernel_params(
+            kv_group2layeridx=self.kv_group2layeridx,
+            block_size=self.block_size,
+            block_size_scale=self.block_size_scale,
+            remote_block_size=remote_block_size,
+        )
 
     def _get_local_remote_cp_params(self, meta: ReqMeta):
-        """Resolve CP geometry: (remote_block_size, local_cp_rank, local_cp_size,
-        remote_cp_size, r_blk), where r_blk = Bd/Bp (>=1) is the D/P block-size ratio.
-        Also validates that P/D block sizes are compatible under D-side CP.
-        """
-        remote_block_size = meta.remote_block_size or self.block_size
-        # MRV2's DCP group already spans PCP; PCP is not another KV shard axis.
-        local_cp_rank = self.dcp_rank
-        local_cp_size = self.dcp_size
-        remote_cp_size = meta.remote_dcp_size
-
-        if remote_block_size != self.block_size:
-            assert self.block_size % remote_block_size == 0 or remote_block_size % self.block_size == 0, (
-                f"Block sizes of P ({remote_block_size}) and D ({self.block_size}) must be divisible by each other."
-            )
-            if local_cp_size > 1:
-                assert self.block_size % remote_block_size == 0, (
-                    f"D node DCP not support P node block_size({remote_block_size}) > D block_size({self.block_size})"
-                )
-                # Ensure that the blocks of each P cp rank belong to the same D rank.
-                assert (remote_cp_size // local_cp_size) % (self.block_size // remote_block_size) == 0, (
-                    f"remote_cp_size({remote_cp_size}) must be an integer multiple of"
-                    f"r({self.block_size // remote_block_size}) * local_cp_size({local_cp_size})"
-                )
-
-        r_blk = self.block_size // remote_block_size if self.block_size > remote_block_size else 1
-        return remote_block_size, local_cp_rank, local_cp_size, remote_cp_size, r_blk
+        """Delegate CP geometry resolution to ``transfer_plan.local_remote_cp_params``."""
+        return pull_local_remote_cp_params(
+            remote_block_size=meta.remote_block_size,
+            block_size=self.block_size,
+            dcp_rank=self.dcp_rank,
+            dcp_size=self.dcp_size,
+            remote_dcp_size=meta.remote_dcp_size,
+        )
 
     def _get_decode_only_dcp_metadata(
         self,
@@ -2979,33 +2966,16 @@ class MooncakeConnectorWorker:
         def get_remote_port_send_num(
             local_remote_block_port_mappings: dict[int, list[list[int]]],
         ) -> dict[int, RemotePortInfo]:
-            remote_port_send_num: dict[int, RemotePortInfo] = {}
-            remote_ports: set[int] = set(
-                range(meta.remote_port, meta.remote_port + prefill_tp_size * meta.remote_pcp_size)
+            return pull_remote_port_send_num(
+                remote_port=meta.remote_port,
+                remote_pcp_size=meta.remote_pcp_size,
+                prefill_tp_size=prefill_tp_size,
+                kv_port=self.vllm_config.kv_transfer_config.kv_port,
+                remote_multi_nodes_meta_mapping=meta.remote_multi_nodes_meta_mapping,
+                remote_host=meta.remote_host,
+                remote_engine_id=meta.remote_engine_id,
+                local_remote_block_port_mappings=local_remote_block_port_mappings,
             )
-            kv_port = self.vllm_config.kv_transfer_config.kv_port
-            for key, remote_host_info in meta.remote_multi_nodes_meta_mapping.items():
-                remote_ports.add(int(remote_host_info.get("handshake_port", kv_port + int(key))))
-            for remote_port_head_list in local_remote_block_port_mappings.values():
-                for remote_port_list in remote_port_head_list:
-                    for remote_port in remote_port_list:
-                        remote_ports.add(remote_port)
-
-            for remote_port in remote_ports:
-                remote_host, _ = self._get_remote_host_info_by_port(
-                    meta.remote_port,
-                    remote_port,
-                    meta.remote_host,
-                    meta.remote_engine_id,
-                    meta.remote_multi_nodes_meta_mapping,
-                )
-                remote_port_send_num[remote_port] = {"num": 0, "host": remote_host}
-
-            for remote_port_head_list in local_remote_block_port_mappings.values():
-                for remote_port_list in remote_port_head_list:
-                    for remote_port in remote_port_list:
-                        remote_port_send_num[remote_port]["num"] += 1
-            return remote_port_send_num
 
         def _set_hma_shared_port(prefill_tp_size, meta, remote_handshake_port_list, req_id):
             """Delegate HMA attention replica balancing / Mamba port append to transfer_plan."""
@@ -3782,18 +3752,14 @@ class MooncakeConnectorWorker:
         remote_engine_id: str,
         remote_multi_nodes_meta_mapping: dict,
     ):
-        if remote_multi_nodes_meta_mapping is None:
-            return remote_host, remote_engine_id
-
-        kv_port = self.vllm_config.kv_transfer_config.kv_port
-        rank = str(remote_handshake_port - kv_port)
-        info = remote_multi_nodes_meta_mapping.get(rank)
-        if info is None:
-            rank = str(remote_handshake_port - base_port)
-            info = remote_multi_nodes_meta_mapping.get(rank)
-        if info is None:
-            return remote_host, remote_engine_id
-        return info.get("host", remote_host), info.get("engine_id", remote_engine_id)
+        return pull_remote_host_info_by_port(
+            base_port=base_port,
+            remote_handshake_port=remote_handshake_port,
+            remote_host=remote_host,
+            remote_engine_id=remote_engine_id,
+            remote_multi_nodes_meta_mapping=remote_multi_nodes_meta_mapping,
+            kv_port=self.vllm_config.kv_transfer_config.kv_port,
+        )
 
     def _prefill_get_remote_rank(self, req_id: str) -> list[int]:
         if self._is_hma_required:
