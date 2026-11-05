@@ -111,6 +111,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 850
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode_heavy.py: 1020
   tests/e2e/pull_request/two_card/test_data_parallel.py: 590
+  tests/e2e/pull_request/two_card/test_cpu_offloading.py: 600
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 270
   tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 170
   tests/e2e/pull_request/two_card/test_ec_mooncake_encoder_output.py: 900
