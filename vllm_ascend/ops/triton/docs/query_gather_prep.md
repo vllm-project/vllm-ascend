@@ -33,5 +33,4 @@ CPU routing tests use a test-only reference and verify error propagation. Device
 
 ```bash
 pytest -q tests/e2e/pull_request/one_card/test_dcp_pre_post.py -k query_prep
-python benchmarks/dcp_triton_ops.py --only query_gather_prep --output query-prep.json
 ```

@@ -26,13 +26,11 @@ CPU tests exercise merge selection and routing with a test-only reference
 finalizer, including ties, nonfinite scores, empty owners and query tiles.
 Production local finalization always calls Triton and propagates failures.
 NPU tests additionally compare the fused packed path with the existing remap
-and cover changed graph inputs. To compare the packed merge plus remap with
-the fused local merge on an allocated A5 device:
+and cover changed graph inputs. To validate the local output path on an
+allocated A5 device:
 
 ```bash
-python benchmarks/dcp_triton_ops.py --only candidate_merge_local --output local-merge.json
 pytest -q tests/e2e/pull_request/one_card/test_dcp_pre_post.py
 ```
 
-This benchmark excludes HCCL and model computation. No whole-model speedup or
-precision acceptance follows from the operator tests alone.
+No whole-model speedup or precision acceptance follows from the operator tests alone.
