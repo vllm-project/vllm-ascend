@@ -30,10 +30,10 @@ The common Mooncake dependency and deployment requirements are listed in the
 | Attention backend | Compute/transfer overlap is integrated with Ascend FA, SFA, and DSA paths. Other attention backends need their own integration. |
 | Execution mode | Eager and graph-mode compatibility follows the selected model and attention backend. |
 | Recurrent state | Recurrent and linear-attention groups, including GDN and KDA state, require `mamba_cache_mode="align"`. |
-| Parallelism | Use matching TP, PP, PCP, and PP layer partitions on sharing instances. DCP greater than `1` and TP mismatch are not supported. |
+| Parallelism | Use matching TP, PP, PCP, and DCP sizes and the same PP layer partitions on sharing instances. PCP and DCP cannot be enabled together. TP mismatch is not supported. |
 | PP | Uneven partitions and stage-local groups are supported only when every stage owns layers in every required group. Empty stage-local groups are not supported. |
 | PCP | Replicated cache groups share Store objects and only one PCP rank saves them. PCP-sharded Mamba groups retain a distinct state shard per PCP rank. |
-| KVPP | Hybrid layerwise pooling does not support KVPP. Mooncake layerwise PCP also cannot be combined with `enable_kvpp`. |
+| KVPP | Hybrid layerwise pooling does not support KVPP. Mooncake layerwise PCP or DCP also cannot be combined with `enable_kvpp`. |
 | Cache storage | Partial-block offloading and cross-layer cache-buffer reuse are not supported. |
 | Load failures | Hybrid models do not support `kv_load_failure_policy=recompute`. A load failure must not continue with incomplete state. |
 
@@ -175,6 +175,19 @@ coverage of a group block.
 Size the Store for unique cache objects and state shards. Replicated groups do
 not require one stored copy per PCP rank. Keep `enable_kvpp` disabled.
 
+### Decode Context Parallelism (DCP)
+
+Ordinary hybrid cache groups such as full attention, sliding-window, and
+compressed/indexer caches support standalone DCP with the same matching-topology
+rules as the [layerwise pooling guide](mooncake_layerwise_adaptation_and_optimization.md#decode-context-parallelism-dcp).
+Each DCP rank stores its own context shard, and a prefix is reusable only after
+every PP stage and DCP rank has committed it.
+
+Groups backed by recurrent/align-state state (`MambaSpec` with
+`mamba_cache_mode="align"`) do not support DCP: their state is sharded across TP
+but not across DCP, so a per-DCP-rank object would never complete. Disable DCP
+for such models. PCP and DCP cannot be enabled together.
+
 ## Configuration Parameters
 
 Hybrid pooling uses the same connector parameters as
@@ -188,7 +201,7 @@ model's cache configuration.
 | `kv_connector_extra_config.use_layerwise` | Set to `true`. |
 | `kv_connector_extra_config.layerwise_prefetch_layers` | Positive integer, default `2`; controls future-layer load distance. |
 | `mamba_cache_mode` | Use `"align"` for models with recurrent-state groups. |
-| `decode_context_parallel_size` | Keep at `1`. |
+| `decode_context_parallel_size` | Default `1`; sharing instances must use the same value. Cannot be enabled together with PCP. |
 | `prefill_context_parallel_size` | Default `1`; sharing instances must use the same value. |
 
 ## Tuning Suggestions

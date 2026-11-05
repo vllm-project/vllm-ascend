@@ -109,7 +109,7 @@ For either method, remove `--enforce-eager` and add the following option to use 
 - In P/D disaggregation, enable PCP only on the prefill (`kv_producer`) engine; the decode (`kv_consumer`) engine must use `prefill_context_parallel_size=1`.
 - With PCP, `MooncakeConnectorV1` and `MooncakeHybridConnector` do not support PP. `MooncakeHybridConnector` does not support DCP.
 - For PP+PCP, use `MooncakeConnectorV2` on [supported models](pipeline_parallel.md).
-- KV cache pooling with PCP supports only `AscendStoreConnector` with `use_layerwise=false`.
+- KV cache pooling with PCP supports `AscendStoreConnector` non-layerwise, and Mooncake block-key layerwise pooling when the producer and consumer use the same PCP size.
 - PCP speculative decoding supports MTP with MLA, SFA, and DeepSeek-V4 DSA models,
   Eagle3 with GQA models, and DSpark with SFA, DeepSeek-V4 DSA, and DeepSeek-V4.1 DSA models.
 - PCP does not support `FULL` CUDA graphs; use eager mode, `PIECEWISE`, `FULL_AND_PIECEWISE`, or `FULL_DECODE_ONLY`.
@@ -167,5 +167,7 @@ The following constraint applies to both standalone DCP and PCP+DCP:
         --cp-kv-cache-interleave-size 128 \
         --kv-transfer-config '{...}'
     ```
+
+- Mooncake block-key layerwise KV pooling supports standalone DCP when the producer and consumer use the same DCP size. PCP and DCP cannot be enabled together for layerwise pooling, and recurrent/align-state cache groups are not supported with DCP. See [Mooncake Layerwise KV Cache Pooling](mooncake_layerwise_adaptation_and_optimization.md#decode-context-parallelism-dcp).
 
 For implementation details, see the [Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).

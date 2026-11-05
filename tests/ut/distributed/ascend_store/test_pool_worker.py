@@ -115,6 +115,7 @@ def make_worker(
     pp_size=1,
     pp_rank=0,
     dcp_size=1,
+    dcp_rank=0,
     kv_cache_config=None,
     prefix_match_unit=None,
     layer_offset=0,
@@ -131,7 +132,7 @@ def make_worker(
     pcp_group.return_value.world_size = pcp_size
     pcp_group.return_value.rank_in_group = pcp_rank
     start_patch(test, f"{module}.get_decode_context_model_parallel_world_size", return_value=dcp_size)
-    start_patch(test, f"{module}.get_decode_context_model_parallel_rank", return_value=0)
+    start_patch(test, f"{module}.get_decode_context_model_parallel_rank", return_value=dcp_rank)
     importlib = start_patch(test, f"{module}.importlib")
     importlib.import_module.return_value = MagicMock()
 
