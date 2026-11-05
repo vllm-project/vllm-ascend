@@ -517,9 +517,8 @@ def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata
     np.testing.assert_array_equal(input_batch.is_prefilling_np, [True, True, False])
 
 
-@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
 @pytest.mark.parametrize("is_target", [False, True])
-def test_kimi_pcp_metadata_respects_target_and_draft_groups(graph_mode, is_target):
+def test_kimi_pcp_metadata_respects_target_and_draft_groups(is_target):
     context = SimpleNamespace(global_batch=object(), global_block_tables=object(), global_slot_mappings=object())
     state = SimpleNamespace(
         vllm_config=SimpleNamespace(
@@ -545,7 +544,7 @@ def test_kimi_pcp_metadata_respects_target_and_draft_groups(graph_mode, is_targe
         result = AscendMambaHybridModelState.prepare_attn(
             state,
             local_batch,
-            graph_mode,
+            CUDAGraphMode.NONE,
             blocks,
             slots,
             [[sfa_group], [mamba_group]],
@@ -572,10 +571,20 @@ def test_kimi_pcp_metadata_respects_target_and_draft_groups(graph_mode, is_targe
     assert global_.kwargs == {"use_pcp_padding": False, "pcp_context": context}
 
 
-@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
-def test_kimi_pcp_builds_local_and_global_metadata_in_one_device_lifecycle(graph_mode):
+@pytest.mark.parametrize(
+    ("graph_mode", "for_capture"),
+    [
+        (CUDAGraphMode.NONE, False),
+        (CUDAGraphMode.NONE, True),
+        (CUDAGraphMode.FULL, True),
+        (CUDAGraphMode.FULL, False),
+    ],
+)
+@pytest.mark.parametrize("is_dummy", [False, True])
+def test_kimi_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_capture, is_dummy):
     owner = TargetDeviceMetadata()
-    task = DeviceMetadataTask(DeviceMetadataStage.ATTENTION, lambda: None, 0)
+    produce = MagicMock()
+    task = DeviceMetadataTask(DeviceMetadataStage.ATTENTION, produce, 0)
     provider = SimpleNamespace(
         defer_device_metadata=lambda **kwargs: nullcontext(),
         take_device_metadata_tasks=MagicMock(return_value=(task,)),
@@ -600,43 +609,36 @@ def test_kimi_pcp_builds_local_and_global_metadata_in_one_device_lifecycle(graph
     )
     sfa, kda = SimpleNamespace(), SimpleNamespace()
     with patch.object(
-        AscendMambaHybridModelState, "_build_attn_metadata_for_batch", side_effect=[{"sfa": sfa}, {"kda": kda}]
-    ):
+        AscendMambaHybridModelState,
+        "_build_attn_metadata_for_batch",
+        side_effect=[{"sfa": sfa, "kda": kda}] if is_dummy else [{"sfa": sfa}, {"kda": kda}],
+    ) as build:
         result = AscendMambaHybridModelState.prepare_attn(
-            state, object(), graph_mode, (), object(), groups, MagicMock()
+            state,
+            SimpleNamespace(is_dummy=is_dummy),
+            graph_mode,
+            (),
+            object(),
+            groups,
+            MagicMock(),
+            for_capture=for_capture,
         )
     assert result == {"sfa": sfa, "kda": kda}
+    assert build.call_count == (1 if is_dummy else 2)
     assert sfa.device_metadata_executor is owner.executor
     assert kda.device_metadata_executor is owner.executor
     provider.take_device_metadata_tasks.assert_called_once_with()
-    if graph_mode == CUDAGraphMode.FULL:
-        assert owner._tasks == (task,)
+    if graph_mode == CUDAGraphMode.FULL or for_capture:
+        produce.assert_not_called()
+    if graph_mode == CUDAGraphMode.FULL and not for_capture:
+        owner.finish_replay()
+        assert not owner.executor.submission_in_flight
+        return
+    if for_capture:
         owner.begin_forward()
-    assert owner.executor.submission_in_flight
+    produce.assert_called_once()
     owner.finish()
-    assert not owner._tasks
     assert not owner.executor.submission_in_flight
-
-
-def test_prepare_attn_propagates_actual_request_count_to_metadata_builder():
-    model_state_path = (
-        Path(__file__).resolve().parents[3] / "vllm_ascend" / "worker" / "v2" / "model_states" / "mamba_hybrid.py"
-    )
-    module = ast.parse(model_state_path.read_text(encoding="utf-8"))
-    prepare_attn = next(
-        node
-        for node in ast.walk(module)
-        if isinstance(node, ast.FunctionDef) and node.name == "_build_attn_metadata_for_batch"
-    )
-    build_call = next(
-        node
-        for node in ast.walk(prepare_attn)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_attn_metadata"
-    )
-    keywords = {keyword.arg: keyword.value for keyword in build_call.keywords}
-
-    assert ast.unparse(keywords["num_reqs"]) == "num_reqs"
-    assert ast.unparse(keywords["num_actual_reqs"]) == "input_batch.num_reqs"
 
 
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")

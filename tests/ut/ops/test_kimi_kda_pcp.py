@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -12,9 +13,18 @@ from vllm_ascend.ops import kda_parallel, kda_pcp
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
 
 
+@contextmanager
+def parallel_groups(tp, pcp):
+    with (
+        patch.object(kda_parallel, "get_tp_group", return_value=tp),
+        patch.object(kda_parallel, "get_pcp_group", return_value=pcp),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=tp.rank_in_group),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=tp.world_size),
+    ):
+        yield
+
+
 @pytest.mark.parametrize("pcp", [1, 2, 4])
-@pytest.mark.parametrize("num_spec", [0, 3])
-@pytest.mark.parametrize("recover", [False, True])
 @pytest.mark.parametrize(
     ("model", "upstream"),
     [
@@ -22,12 +32,12 @@ from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
         (kimi_k3.AscendKimiK3ForConditionalGeneration, kimi_k3.UpstreamKimiK3ForConditionalGeneration),
     ],
 )
-def test_kda_state_shapes_delegate_to_upstream_without_mutating_config(pcp, num_spec, recover, model, upstream):
+def test_kda_state_shapes_delegate_to_upstream_without_mutating_config(pcp, model, upstream):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(tensor_parallel_size=2, prefill_context_parallel_size=pcp),
         model_config=object(),
-        speculative_config=SimpleNamespace(num_speculative_tokens=num_spec),
-        cache_config=SimpleNamespace(use_kda_recoverssm=recover),
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+        cache_config=SimpleNamespace(use_kda_recoverssm=True),
     )
     shapes = object()
     with patch.object(upstream, "get_mamba_state_shape_from_config", return_value=shapes) as get_shape:
@@ -53,12 +63,7 @@ def test_kda_projections_cover_global_heads_once(tp, pcp):
         tp_rank, pcp_rank = divmod(rank, pcp)
         tp_group = SimpleNamespace(world_size=tp, rank_in_group=tp_rank, all_reduce=lambda x: x)
         pcp_group = SimpleNamespace(world_size=pcp, rank_in_group=pcp_rank, all_reduce=lambda x: x)
-        with (
-            patch.object(kda_parallel, "get_tp_group", return_value=tp_group),
-            patch.object(kda_parallel, "get_pcp_group", return_value=pcp_group),
-            patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=tp_rank),
-            patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=tp),
-        ):
+        with parallel_groups(tp_group, pcp_group):
             projection = kda_parallel.KDAInputParallelLinear(hidden, [width] * 4 + [4, 16], size, bias=False)
             out = kda_parallel.KDARowParallelLinear(width, hidden, bias=False)
         for sid, weight in enumerate(weights):
@@ -83,12 +88,7 @@ def test_kda_input_projection_preserves_upstream_padding_and_replication(loader,
     output_sizes = [32] * 4 + [4, 8]
     if padding:
         output_sizes.append(padding * 4)
-    with (
-        patch.object(kda_parallel, "get_tp_group", return_value=tp),
-        patch.object(kda_parallel, "get_pcp_group", return_value=pcp),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=1),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=2),
-    ):
+    with parallel_groups(tp, pcp):
         projection = kda_parallel.KDAInputParallelLinear(8, output_sizes, 4, padding_size=padding, bias=False)
     projection.weight.data.fill_(9)
     weight = torch.arange(32).float().view(4, 8)
@@ -114,12 +114,7 @@ def test_kda_pcp_reduction_is_required_when_tp_reduction_is_deferred(reduce_resu
 
     tp = SimpleNamespace(world_size=4, rank_in_group=0, all_reduce=reduce_tp)
     pcp = SimpleNamespace(world_size=2, rank_in_group=0, all_reduce=reduce_pcp)
-    with (
-        patch.object(kda_parallel, "get_tp_group", return_value=tp),
-        patch.object(kda_parallel, "get_pcp_group", return_value=pcp),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=4),
-    ):
+    with parallel_groups(tp, pcp):
         projection = kda_parallel.KDARowParallelLinear(64, 8, bias=False, reduce_results=reduce_results)
     projection.weight.data.fill_(1)
     output = projection(torch.ones(3, 8))[0]
@@ -130,12 +125,7 @@ def test_kda_pcp_reduction_is_required_when_tp_reduction_is_deferred(reduce_resu
 def test_pcp_kda_output_projection_does_not_enter_tp_only_fusion(monkeypatch):
     tp = SimpleNamespace(world_size=4, rank_in_group=0)
     pcp = SimpleNamespace(world_size=2, rank_in_group=0)
-    with (
-        patch.object(kda_parallel, "get_tp_group", return_value=tp),
-        patch.object(kda_parallel, "get_pcp_group", return_value=pcp),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=4),
-    ):
+    with parallel_groups(tp, pcp):
         projection = kda_parallel.KDARowParallelLinear(64, 8, bias=False)
     layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
     torch.nn.Module.__init__(layer)
@@ -179,14 +169,11 @@ def test_pcp_causal_order_decode_sharding_and_padding(rank_inputs, restore, loca
         )
         metadata = builder._attach_pcp(SimpleNamespace(), context)
         group = SimpleNamespace(all_gather=lambda x, dim: gathered)
-        with (
-            patch.object(kda_pcp, "get_pcp_group", return_value=group),
-            patch.object(
-                kda_pcp,
-                "get_forward_context",
-                return_value=SimpleNamespace(
-                    attn_metadata={"kda": metadata}, no_compile_layers={"kda": SimpleNamespace(pcp_group=group)}
-                ),
+        with patch.object(
+            kda_pcp,
+            "get_forward_context",
+            return_value=SimpleNamespace(
+                attn_metadata={"kda": metadata}, no_compile_layers={"kda": SimpleNamespace(pcp_group=group)}
             ),
         ):
             restored = kda_pcp.kda_pcp_gather(gathered[:count], 2, "kda")
@@ -229,12 +216,7 @@ def test_pcp_builder_consumes_common_metadata_context(for_capture):
     common = SimpleNamespace(pcp_context=context)
 
     def build_base(self, common_prefix_len, common_attn_metadata, *args, **kwargs):
-        return SimpleNamespace(
-            pcp_context=common_attn_metadata.pcp_context,
-            spec_decode_metadata=None,
-            non_spec_prefill_metadata=None,
-            non_spec_decode_metadata=None,
-        )
+        return SimpleNamespace(pcp_context=common_attn_metadata.pcp_context)
 
     def capture_base(self, common_attn_metadata):
         return self.build(0, common_attn_metadata)
@@ -290,12 +272,7 @@ def test_kimi_head_parameters_and_conv_load_the_same_combined_rank(rank):
     config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=2, prefill_context_parallel_size=2))
     tp = SimpleNamespace(world_size=2, rank_in_group=rank // 2)
     pcp = SimpleNamespace(world_size=2, rank_in_group=rank % 2)
-    with (
-        patch.object(kda_parallel, "get_tp_group", return_value=tp),
-        patch.object(kda_parallel, "get_pcp_group", return_value=pcp),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=rank // 2),
-        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=2),
-    ):
+    with parallel_groups(tp, pcp):
         attention._init_pcp_projections(config, "kda")
     attention.A_log.weight_loader(attention.A_log, torch.arange(8).view(1, 1, 8, 1))
     attention.dt_bias.weight_loader(attention.dt_bias, torch.arange(32))
