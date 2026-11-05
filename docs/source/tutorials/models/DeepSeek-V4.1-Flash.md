@@ -546,7 +546,7 @@ revision.
         --reasoning-parser deepseek_v41 \
         --enable-auto-tool-choice \
         --trust-remote-code \
-        --no-enable-prefix-caching \
+        --enable-prefix-caching \
         --no-swa-bounded-replay \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"method":"dspark","num_speculative_tokens":5}' \
@@ -752,7 +752,7 @@ revision.
     - On Prefill, enable local prefix caching and `--swa-bounded-replay`.
       After a prefix hit, the engine reuses cached non-SWA blocks and
       recomputes the trailing SWA window.
-    - On Decode, disable local prefix caching and set
+    - On Decode, enable local prefix caching and set
       `scheduler_config.recompute_scheduler_enable` to `true`. The recompute
       scheduler cannot perform bounded replay, so use `--no-swa-bounded-replay`.
     - Set `--max-num-batched-tokens` to `5120` on Prefill and `1024` on Decode.
@@ -1625,8 +1625,9 @@ Select the tab for the target hardware.
 
     On Prefill, set `--max-num-batched-tokens` to `5120` and enable
     `--swa-bounded-replay`. Disable local prefix caching so that repeated-prefix
-    requests exercise the external pool. On Decode, use `1024` batch tokens
-    and disable local prefix caching.
+    requests exercise the external pool. On Decode, use `1024` batch tokens,
+    enable local prefix caching, and disable SWA bounded replay for the
+    recompute scheduler.
 
     ##### 5.3.1.1 Prepare Memcache
 
@@ -1763,7 +1764,8 @@ Select the tab for the target hardware.
         --reasoning-parser deepseek_v41 \
         --enable-auto-tool-choice \
         --trust-remote-code \
-        --no-enable-prefix-caching \
+        --enable-prefix-caching \
+        --no-swa-bounded-replay \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"method":"dspark","num_speculative_tokens":5}' \
         --additional-config '{
