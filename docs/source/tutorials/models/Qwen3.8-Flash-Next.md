@@ -12,7 +12,7 @@ Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experim
 
 This tutorial describes model preparation, installation, online serving, functional verification, and evaluation. It covers colocated deployment and prefill/decode (PD) separation on A2 series, A3 series, and Ascend 950 DT. A2 series and A3 series use the same parallel topology; PD separation requires 16 devices in total for the shared TP2 × DP4 configuration.
 
-Qwen3.8-Flash-Next was first supported in `vllm-ascend:v0.26.0rc` (experimental). The original A3 series W8A8 configuration was validated with text and multimodal input. The deployment examples below use W4A8 checkpoints (W4A8-MXFP on Ascend 950 DT) and additional performance settings; they require separate runtime and accuracy validation. For the best performance, it is recommended to use **vLLM-Ascend v0.32.0rc** (`releases/v0.32.0rc`).
+Qwen3.8-Flash-Next (experimental) was first supported in `vllm-ascend:v0.26.0rc`. The original A3 series W8A8 configuration was validated with text and multimodal input. The deployment examples below use W4A8 checkpoints (W4A8-MXFP on Ascend 950 DT) and additional performance settings; they require separate runtime and accuracy validation. For the best performance, it is recommended to use **vLLM-Ascend v0.32.0rc** (`releases/v0.32.0rc`).
 
 !!! warning
 
@@ -44,21 +44,17 @@ Refer to [using docker](../../getting_started/installation.md#installation-prebu
 
 Use the v0.32.0rc image for the target hardware.
 
-=== "Ascend 950 DT"
+=== "A2 series"
 
     ```bash
     # Reuse the host model cache at /root/.cache.
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc
     export NAME=vllm-ascend
 
     docker run --rm \
       --name $NAME \
       --net=host \
-      --shm-size=500g \
-      --device /dev/davinci_manager \
-      --device /dev/hisi_hdc \
-      --device /dev/ummu \
-      --device /dev/uburma \
+      --shm-size=128g \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
       --device /dev/davinci2 \
@@ -67,15 +63,16 @@ Use the v0.32.0rc image for the target hardware.
       --device /dev/davinci5 \
       --device /dev/davinci6 \
       --device /dev/davinci7 \
-      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-      -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
-      -v /root/host:/root/host \
-      -v /usr/local/sbin:/usr/local/sbin \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
       -v /usr/local/dcmi:/usr/local/dcmi \
-      -v /var/log/npu:/usr/slog \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
       -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /etc/hixlep:/etc/hixlep \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
@@ -121,17 +118,21 @@ Use the v0.32.0rc image for the target hardware.
       -it $IMAGE bash
     ```
 
-=== "A2 series"
+=== "Ascend 950 DT"
 
     ```bash
     # Reuse the host model cache at /root/.cache.
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc-a5
     export NAME=vllm-ascend
 
     docker run --rm \
       --name $NAME \
       --net=host \
-      --shm-size=128g \
+      --shm-size=500g \
+      --device /dev/davinci_manager \
+      --device /dev/hisi_hdc \
+      --device /dev/ummu \
+      --device /dev/uburma \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
       --device /dev/davinci2 \
@@ -140,16 +141,15 @@ Use the v0.32.0rc image for the target hardware.
       --device /dev/davinci5 \
       --device /dev/davinci6 \
       --device /dev/davinci7 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
+      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+      -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
+      -v /root/host:/root/host \
+      -v /usr/local/sbin:/usr/local/sbin \
       -v /usr/local/dcmi:/usr/local/dcmi \
-      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /var/log/npu:/usr/slog \
       -v /etc/ascend_install.info:/etc/ascend_install.info \
-      -v /etc/hccn.conf:/etc/hccn.conf:ro \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /etc/hixlep:/etc/hixlep \
       -v /root/.cache:/root/.cache \
       -it $IMAGE bash
     ```
@@ -914,6 +914,115 @@ Select the hardware tab below.
     - Keep the Mooncake DP2 / TP2 declarations synchronized with the service topology and route both ranks of each role through the proxy. `kv_port` is a base port shared by ranks of the same role: the connector adds the DP serving index × TP × PP × PCP, then the local device index. With TP2 and PP = PCP = 1, prefill rank 0 uses ports 30000–30001 and rank 1 uses 30002–30003; decode uses 30100–30103. Do not increment the configured base port for rank 1.
     - For Function Calling and reasoning parsing, add `--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3` to all four model commands and verify proxy forwarding. Validate multimodal input and thinking control through the proxy with the selected checkpoint.
 
+=== "Ascend 950 DT (TP2 × PP2 prefill)"
+
+    This alternative single-host deployment uses TP2 × PP2 × DP1 for prefill on devices 0–3 and TP2 × DP2 for decode on devices 4–7. Both roles use a maximum context length of 143360 tokens, 64 active sequences, and a batch token budget of 8192.
+
+    Use the same dedicated W4A8-MXFP checkpoint shown below for both roles. The path refers to the supplied QSA-RouterOnly-O-BF16 checkpoint; replace it with the location of that checkpoint on the host. Initialize the environment as described in Section 4 and run each role in a separate terminal.
+
+    **Prefill:**
+
+    ```bash
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ASCEND_PLE_BACKEND=torch
+    export VLLM_PP_LAYER_PARTITION=25,23
+    export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
+    export HCCL_BUFFSIZE=512
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+
+    vllm serve /mnt/share/weight/Qwen3.8-Flash-Next-W4A8-MXFP-A5-QSA-RouterOnly-O-BF16-20261031 \
+        --host 0.0.0.0 \
+        --port 8247 \
+        --served-model-name qwen38-megamoe-sp-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --pipeline-parallel-size 2 \
+        --data-parallel-size 1 \
+        --max-model-len 143360 \
+        --max-num-seqs 64 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.9 \
+        --no-enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --compilation-config '{"cudagraph_mode":"NONE"}' \
+        --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32470,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":2,"pp_layer_partition":"25,23"},"decode":{"dp_size":2,"tp_size":2}}}'
+    ```
+
+    **Decode:**
+
+    ```bash
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ASCEND_PLE_BACKEND=torch
+    unset VLLM_PP_LAYER_PARTITION
+    export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
+    export HCCL_BUFFSIZE=512
+    export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
+
+    vllm serve /mnt/share/weight/Qwen3.8-Flash-Next-W4A8-MXFP-A5-QSA-RouterOnly-O-BF16-20261031 \
+        --host 0.0.0.0 \
+        --port 8248 \
+        --served-model-name qwen38-megamoe-sp-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --data-parallel-size 2 \
+        --max-model-len 143360 \
+        --max-num-seqs 64 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.9 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false},"enable_fused_mc2":0}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32480,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":2,"pp_layer_partition":"25,23"},"decode":{"dp_size":2,"tp_size":2}}}'
+    ```
+
+    **Proxy:**
+
+    After both model APIs are ready, run the proxy from the vLLM-Ascend repository root:
+
+    ```bash
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        --host 127.0.0.1 \
+        --port 8246 \
+        --prefiller-hosts 127.0.0.1 \
+        --prefiller-ports 8247 \
+        --decoder-hosts 127.0.0.1 \
+        --decoder-ports 8248
+    ```
+
+    **Service Verification:**
+
+    ```bash
+    curl --fail http://127.0.0.1:8247/v1/models
+    curl --fail http://127.0.0.1:8248/v1/models
+    curl --fail http://127.0.0.1:8246/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -d '{"model":"qwen38-megamoe-sp-pd","messages":[{"role":"user","content":"Who are you?"}],"max_tokens":1024,"temperature":0}'
+    ```
+
+    **Key parameters:**
+
+    - Prefill partitions the layers across two pipeline stages with `VLLM_PP_LAYER_PARTITION=25,23`. Keep `pp_size=2` and `pp_layer_partition="25,23"` in both Mooncake configurations consistent with this partition.
+    - Decode uses TP2 × DP2 behind one API endpoint on port `8248`; the proxy routes to that endpoint rather than separate DP-rank APIs.
+    - Prefill disables prefix caching and graph capture and sets MTP `enforce_eager=true`. Decode enables prefix caching and `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, and disables static kernels and super kernels.
+    - Both roles enable Engram CPU offload with `dp_shared_memory=false`, use `HCCL_BUFFSIZE=512`, and retain the supplied case's startup timeout of 2400 seconds. Provide sufficient host memory for the checkpoint and the decode DP replicas.
+    - This case retains `VLLM_ASCEND_PLE_BACKEND=torch` from the supplied scripts. It only selects a backend in runtimes that implement this variable; an unknown-variable warning means it has no effect.
+
 ## 6 Functional Verification
 
 After the service is started, the model can be invoked by sending a prompt. The `chat/completions` API is supported. Use the `--served-model-name` you configured (`qwen3.8-flash-next` for `Qwen3.8-Flash-Next`).
@@ -928,6 +1037,7 @@ Use the API address and served model name for your deployment:
 | A2 series PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a2-pd` |
 | A3 series PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a3-pd` |
 | Ascend 950 DT PD proxy | `http://192.168.0.1:8087` | `qwen38-flash-next-950-dt-pd` |
+| Ascend 950 DT TP2 × PP2 prefill PD proxy | `http://127.0.0.1:8246` | `qwen38-megamoe-sp-pd` |
 
 For PD, first complete the proxy check and review the key parameters in [Section 5.2](#52-pd-separation-deployment).
 
@@ -1120,10 +1230,12 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | Ascend 950 DT | Colocated | 0–3 | 4 × 1 | 141312 | 32 | 4096 |
 | A2 series | Prefill | 0–7 on prefill host | 2 × 4 | 141312 | 32 | 8192 |
 | A3 series | Prefill | 0–7 | 2 × 4 | 141312 | 32 | 8192 |
+| Ascend 950 DT | Prefill | 0–3 | 2 × 2 | 141312 | 64 | 4096 |
 | A2 series | Decode | 0–7 on decode host | 2 × 4 | 141312 | 32 | 8192 |
 | A3 series | Decode | 8–15 | 2 × 4 | 141312 | 32 | 4096 |
-| Ascend 950 DT | Prefill | 0–3 | 2 × 2 | 141312 | 64 | 4096 |
 | Ascend 950 DT | Decode | 4–7 | 2 × 2 | 141312 | 64 | 4096 |
+
+The alternative Ascend 950 DT PD case uses TP2 × PP2 × DP1 for prefill and TP2 × DP2 for decode. Both roles use a maximum model length of 143360, 64 sequences, and 8192 batch tokens.
 
 ### 9.2 Tuning Guidelines
 
