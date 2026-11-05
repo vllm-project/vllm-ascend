@@ -27,11 +27,14 @@ class HixlSession:
 
         if binding is None:
             try:
-                import hixl as binding
-            except ImportError:
-                from vllm_ascend.distributed.eplb import hixl_compat as binding
+                import hixl
 
-                binding.ensure_available()
+                binding = hixl
+            except ImportError:
+                from vllm_ascend.distributed.eplb import hixl_compat
+
+                hixl_compat.ensure_available()
+                binding = hixl_compat
         self._binding = binding
         self._acl = acl
         self._device = device

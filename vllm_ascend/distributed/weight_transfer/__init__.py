@@ -81,5 +81,5 @@ def _register_sharded_rdt():
             module = importlib.import_module(f"vllm_ascend.distributed.weight_transfer.{module_name}")
             return getattr(module, class_name)
 
-        loader._ascend_sharded_rdt = True
+        loader.__dict__["_ascend_sharded_rdt"] = True
         factory._registry["sharded_rdt"] = loader
