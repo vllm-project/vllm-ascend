@@ -103,163 +103,162 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 === "950PR&950DT Products"
 
     <table>
-            <thead>
-                <tr style="text-align: center; vertical-align: middle;">
-                <th rowspan="2">Model</th><th rowspan="2">Support</th><th rowspan="2">Hardware</th>
-                <th colspan="4">Graph Mode</th>
-                <th colspan="2">Npugraph_ex</th>
-                <th colspan="2">CP</th>
-                <th rowspan="2">CPP(only P node)</th>
-                <th rowspan="2">KVPP(only D node)</th>
-                <th rowspan="2">TP</th>
-                <th rowspan="2">EP</th>
-                <th rowspan="2">DP</th>
-                <th rowspan="2">MLAPO</th>
-                <th rowspan="2">EPLB</th>
-                <th rowspan="2">Multistream MoE(only D node)</th>
-                <th rowspan="2">Shared Expert DP</th>
-                <th rowspan="2">Fused MC2</th>
-                <th colspan="4">Speculative Decoding</th>
-                <th colspan="3">Mooncake Backend Pool</th>
-                <th colspan="3">Memcache Backend Pool</th>
-                <th colspan="2">KV Cache Offloading</th>
-                <th rowspan="2"Prefix Cache</th><th rowspan="2">Weight nz</th><th rowspan="2">Async Scheduling</th><th rowspan="2">CPU Binding</th><th rowspan="2">flashcomml(only P node)</th>
-                <th colspan="4">Fine-grained TP</th>
+    <thead>
+        <tr style="text-align: center; vertical-align: middle;">
+        <th rowspan="2">Model</th><th rowspan="2">Support</th><th rowspan="2">Hardware</th>
+        <th colspan="4">Graph Mode</th>
+        <th colspan="2">Npugraph_ex</th>
+        <th colspan="2">CP</th>
+        <th rowspan="2">CPP(only P node)</th>
+        <th rowspan="2">KVPP(only D node)</th>
+        <th rowspan="2">TP</th>
+        <th rowspan="2">EP</th>
+        <th rowspan="2">DP</th>
+        <th rowspan="2">MLAPO</th>
+        <th rowspan="2">EPLB</th>
+        <th rowspan="2">Multistream MoE(only D node)</th>
+        <th rowspan="2">Shared Expert DP</th>
+        <th rowspan="2">Fused MC2</th>
+        <th colspan="4">Speculative Decoding</th>
+        <th colspan="3">Mooncake Backend Pool</th>
+        <th colspan="3">Memcache Backend Pool</th>
+        <th colspan="2">KV Cache Offloading</th>
+        <th rowspan="2">Prefix Cache</th><th rowspan="2">Weight nz</th><th rowspan="2">Async Scheduling</th><th rowspan="2">CPU Binding</th><th rowspan="2">flashcomml(only P node)</th>
+        <th colspan="4">Fine-grained TP</th>
 
-                </tr>
-                <tr style="text-align: center; vertical-align: middle;">
-                <th>PIECEWISE</th><th>FULL_DECODE_ONLY</th><th>FULL</th><th>FULL_AND_PIECEWISE</th>
-                <th>Static kernel</th><th>Super kernel</th>
-                <th>PCP</th><th>DCP</th>
-                <th>MTP</th><th>eagle3</th><th>DSpark</th><th>DFlash</th>
-                <th>Layerwise</th><th>Non-layerwise</th><th>SSD</th>
-                <th>Layerwise</th><th>Non-layerwise</th><th>SSD</th>
-                <th>Layerwise</th><th>Sparse</th>
-                <th>o_proj</th><th>embedding</th><th>MLP</th><th>LM_head</th>
-                </tr>
-            </thead>
-            <tbody>
+        </tr>
+        <tr style="text-align: center; vertical-align: middle;">
+        <th>PIECEWISE</th><th>FULL_DECODE_ONLY</th><th>FULL</th><th>FULL_AND_PIECEWISE</th>
+        <th>Static kernel</th><th>Super kernel</th>
+        <th>PCP</th><th>DCP</th>
+        <th>MTP</th><th>eagle3</th><th>DSpark</th><th>DFlash</th>
+        <th>Layerwise</th><th>Non-layerwise</th><th>SSD</th>
+        <th>Layerwise</th><th>Non-layerwise</th><th>SSD</th>
+        <th>Layerwise</th><th>Sparse</th>
+        <th>o_proj</th><th>embedding</th><th>MLP</th><th>LM_head</th>
+        </tr>
+    </thead>
+    <tbody>
 
-                <tr><td markdown="span">[DeepSeek-V4.1-Flash](../../tutorials/models/DeepSeek-V4.1-Flash.md)</td><td>✅</td><td>950DT Products</td><td>🟡</td><td>✅</td><td>❌</td><td>🟡</td><td>❌</td><td>❌</td><td>🟡</td><td>❌</td><td>🟡</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>❌</td><td>🟡</td><td>✅</td><td>🟡</td><td>❌</td><td>❌</td><td>🟡</td><td>5</td><td>❌<td><td>❌</td><td>🟡</td><td>🟡</td><td>❌</td><td>🟡</td><td>🟡</td><td>❌</td><td>❌</td><td>✅</td><td>🟡</td><td>✅</td><td>✅</td><td>🟡</td><td>❌</td><td>❌</td><td>❌</td><td>🟡</td></tr>
+        <tr><td markdown="span">[DeepSeek-V4.1-Flash](../../tutorials/models/DeepSeek-V4.1-Flash.md)</td><td>✅</td><td>950DT Products</td><td>🟡</td><td>✅</td><td>❌</td><td>🟡</td><td>❌</td><td>❌</td><td>🟡</td><td>❌</td><td>🟡</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>❌</td><td>🟡</td><td>✅</td><td>🟡</td><td>❌</td><td>❌</td><td>🟡</td><td>5</td><td>❌<td><td>❌</td><td>🟡</td><td>🟡</td><td>❌</td><td>🟡</td><td>🟡</td><td>❌</td><td>❌</td><td>✅</td><td>🟡</td><td>✅</td><td>✅</td><td>🟡</td><td>❌</td><td>❌</td><td>❌</td><td>🟡</td></tr>
 
-                <tr><td markdown="span">[GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md)</td><td>✅</td><td>950DT Products</td><td>✅</td><td>✅</td><td>🟡</td><td>🟡</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>🟡</td><td>🟡</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>🟡</td><td>✅</td><td>✅</td><td>🟡</td><td>✅</td><td>❌</td><td>❌</td><td>❌<td><td>🟡</td><td>🟡</td><td>🟡</td><td>🟡</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>🟡</td><td>🟡</td><td>🟡</td><td>🟡</td></tr>
+        <tr><td markdown="span">[GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md)</td><td>✅</td><td>950DT Products</td><td>✅</td><td>✅</td><td>🟡</td><td>🟡</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>🟡</td><td>🟡</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>🟡</td><td>✅</td><td>✅</td><td>🟡</td><td>✅</td><td>❌</td><td>❌</td><td>❌<td><td>🟡</td><td>🟡</td><td>🟡</td><td>🟡</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>🟡</td><td>🟡</td><td>🟡</td><td>🟡</td></tr>
 
-                <tr><td markdown="span">[Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md)</td><td>✅</td><td>950DT Products</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md)</td><td>✅</td><td>950DT Products</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-                <tr><td markdown="span">[Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md)</td><td>✅</td><td>950DT Products</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md)</td><td>✅</td><td>950DT Products</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-                <tr><td markdown="span">[Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md)</td><td>✅</td><td>950DT Products</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md)</td><td>✅</td><td>950DT Products</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-                <tr><td markdown="span">[Kimi-K3](../../tutorials/models/Kimi-K3.md)</td><td>✅</td><td>950DT Products</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Kimi-K3](../../tutorials/models/Kimi-K3.md)</td><td>✅</td><td>950DT Products</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-                <tr><td markdown="span">[MiniMax-M3](../../tutorials/models/MiniMax-M3.md)</td><td>✅</td><td>950DT Products</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[MiniMax-M3](../../tutorials/models/MiniMax-M3.md)</td><td>✅</td><td>950DT Products</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-                <tr><td markdown="span">[Step-5-Preview](../../tutorials/models/Step-5-Preview.md)</td><td>🔵</td><td>950DT Products</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Step-5-Preview](../../tutorials/models/Step-5-Preview.md)</td><td>🔵</td><td>950DT Products</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-                <tr><td markdown="span">[MiniMax-M3.1-Flash](../../tutorials/models/MiniMax-M3.1-Flash.md)</td><td>🔵</td><td>950DT Products</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-            
-            </tbody>
+        <tr><td markdown="span">[MiniMax-M3.1-Flash](../../tutorials/models/MiniMax-M3.1-Flash.md)</td><td>🔵</td><td>950DT Products</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>       
+    </tbody>
     </table>
 
 === "A2/A3"
 
     <table>
-        <thead>
-            <tr style="text-align: center; vertical-align: middle;">
-            <th rowspan="2">Model</th><th rowspan="2">Support</th><th rowspan="2">Hardware</th>
-            <th colspan="4">Graph Mode</th>
-            <th colspan="2">Npugraph_ex</th>
-            <th colspan="2">CP</th>
-            <th rowspan="2">CPP(only P node)</th>
-            <th rowspan="2">KVPP(only D node)</th>
-            <th rowspan="2">TP</th>
-            <th rowspan="2">EP</th>
-            <th rowspan="2">DP</th>
-            <th rowspan="2">MLAPO</th>
-            <th rowspan="2">EPLB</th>
-            <th rowspan="2">Multistream MoE(only D node)</th>
-            <th rowspan="2">Shared Expert DP</th>
-            <th rowspan="2">Fused MC2</th>
-            <th colspan="4">Speculative Decoding</th>
-            <th colspan="3">Mooncake Backend Pool</th>
-            <th colspan="3">Memcache Backend Pool</th>
-            <th colspan="2">KV Cache Offloading</th>
-            <th rowspan="2"Prefix Cache</th><th rowspan="2">Weight nz</th><th rowspan="2">Async Scheduling</th><th rowspan="2">CPU Binding</th><th rowspan="2">flashcomml(only P node)</th>
-            <th colspan="4">Fine-grained TP</th>
+    <thead>
+        <tr style="text-align: center; vertical-align: middle;">
+        <th rowspan="2">Model</th><th rowspan="2">Support</th><th rowspan="2">Hardware</th>
+        <th colspan="4">Graph Mode</th>
+        <th colspan="2">Npugraph_ex</th>
+        <th colspan="2">CP</th>
+        <th rowspan="2">CPP(only P node)</th>
+        <th rowspan="2">KVPP(only D node)</th>
+        <th rowspan="2">TP</th>
+        <th rowspan="2">EP</th>
+        <th rowspan="2">DP</th>
+        <th rowspan="2">MLAPO</th>
+        <th rowspan="2">EPLB</th>
+        <th rowspan="2">Multistream MoE(only D node)</th>
+        <th rowspan="2">Shared Expert DP</th>
+        <th rowspan="2">Fused MC2</th>
+        <th colspan="4">Speculative Decoding</th>
+        <th colspan="3">Mooncake Backend Pool</th>
+        <th colspan="3">Memcache Backend Pool</th>
+        <th colspan="2">KV Cache Offloading</th>
+        <th rowspan="2"Prefix Cache</th><th rowspan="2">Weight nz</th><th rowspan="2">Async Scheduling</th><th rowspan="2">CPU Binding</th><th rowspan="2">flashcomml(only P node)</th>
+        <th colspan="4">Fine-grained TP</th>
 
-            </tr>
-            <tr style="text-align: center; vertical-align: middle;">
-            <th>PIECEWISE</th><th>FULL_DECODE_ONLY</th><th>FULL</th><th>FULL_AND_PIECEWISE</th>
-            <th>Static kernel</th><th>Super kernel</th>
-            <th>PCP</th><th>DCP</th>
-            <th>MTP</th><th>eagle3</th><th>DSpark</th><th>DFlash</th>
-            <th>Layerwise</th><th>Non-layerwise</th><th>SSD</th>
-            <th>Layerwise</th><th>Non-layerwise</th><th>SSD</th>
-            <th>Layerwise</th><th>Sparse</th>
-            <th>o_proj</th><th>embedding</th><th>MLP</th><th>LM_head</th>
-            </tr>
-        </thead>
-        <tbody>
+        </tr>
+        <tr style="text-align: center; vertical-align: middle;">
+        <th>PIECEWISE</th><th>FULL_DECODE_ONLY</th><th>FULL</th><th>FULL_AND_PIECEWISE</th>
+        <th>Static kernel</th><th>Super kernel</th>
+        <th>PCP</th><th>DCP</th>
+        <th>MTP</th><th>eagle3</th><th>DSpark</th><th>DFlash</th>
+        <th>Layerwise</th><th>Non-layerwise</th><th>SSD</th>
+        <th>Layerwise</th><th>Non-layerwise</th><th>SSD</th>
+        <th>Layerwise</th><th>Sparse</th>
+        <th>o_proj</th><th>embedding</th><th>MLP</th><th>LM_head</th>
+        </tr>
+    </thead>
+    <tbody>
 
-            <tr><td markdown="span">[DeepSeek-V4.1-Flash](../../tutorials/models/DeepSeek-V4.1-Flash.md)</td><td>✅</td><td>A2</td><td>❌</td><td>✅</td><td>❌</td><td>❌</td><td>🟡</td><td>🟡</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>✅</td><td>5</td><td>❌<td><td>❌</td><td>🟡</td><td>🟡</td>
-            <td>❌</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>🟡</td></tr>
+        <tr><td markdown="span">[DeepSeek-V4.1-Flash](../../tutorials/models/DeepSeek-V4.1-Flash.md)</td><td>✅</td><td>A2</td><td>❌</td><td>✅</td><td>❌</td><td>❌</td><td>🟡</td><td>🟡</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>✅</td><td>5</td><td>❌<td><td>❌</td><td>🟡</td><td>🟡</td>
+        <td>❌</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>🟡</td></tr>
 
-            <tr><td markdown="span">[DeepSeek-V4.1-Flash](../../tutorials/models/DeepSeek-V4.1-Flash.md)</td><td>✅</td><td>A3</td><td>❌</td><td>✅</td><td>❌</td><td>❌</td><td>🟡</td><td>🟡</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>🟡</td><td>🟡</td><td>❌</td><td>5</td><td>❌<td><td>❌</td><td>🟡</td><td>🟡</td>
-            <td>❌</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>🟡</td></tr>
+        <tr><td markdown="span">[DeepSeek-V4.1-Flash](../../tutorials/models/DeepSeek-V4.1-Flash.md)</td><td>✅</td><td>A3</td><td>❌</td><td>✅</td><td>❌</td><td>❌</td><td>🟡</td><td>🟡</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>🟡</td><td>🟡</td><td>❌</td><td>5</td><td>❌<td><td>❌</td><td>🟡</td><td>🟡</td>
+        <td>❌</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>🟡</td></tr>
 
-            <tr><td markdown="span">[GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md)</td><td>✅</td><td>A2/A3</td><td>🟡</td><td>✅</td><td>❌</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>🟡</td><td>🟡</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>🟡</td><td>✅</td><td>✅</td><td>✅</td><td>3</td><td>❌</td><td>❌</td><td>❌<td><td>🟡</td><td>🟡</td><td>🟡</td>
-            <td>✅</td><td>🟡</td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>🟡</td><td>🟡</td><td>🟡</td><td>🟡</td></tr>
+        <tr><td markdown="span">[GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md)</td><td>✅</td><td>A2/A3</td><td>🟡</td><td>✅</td><td>❌</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>🟡</td><td>🟡</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>🟡</td><td>✅</td><td>✅</td><td>✅</td><td>3</td><td>❌</td><td>❌</td><td>❌<td><td>🟡</td><td>🟡</td><td>🟡</td>
+        <td>✅</td><td>🟡</td><td>✅</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>🟡</td><td>🟡</td><td>🟡</td><td>🟡</td></tr>
 
-            <tr><td markdown="span">[MiniMax-M3.1](../../tutorials/models/MiniMax-M3.1-Flash.md)</td><td>✅</td><td>A2</td><td>🟡</td><td>✅</td><td>🟡</td><td>🟡</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>🟡</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>🟡</td><td>✅</td><td>✅</td><td>🟡</td><td>❌</td><td>3</td><td>❌</td><td>❌<td><td>🟡</td><td>✅</td><td>✅</td>
-            <td>🟡</td><td>🟡</td><td>🟡</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>🟡</td><td>🟡</td><td>🟡</td><td>🟡</td></tr>
+        <tr><td markdown="span">[MiniMax-M3.1](../../tutorials/models/MiniMax-M3.1-Flash.md)</td><td>✅</td><td>A2</td><td>🟡</td><td>✅</td><td>🟡</td><td>🟡</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>🟡</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td><td>🟡</td><td>✅</td><td>✅</td><td>🟡</td><td>❌</td><td>3</td><td>❌</td><td>❌<td><td>🟡</td><td>✅</td><td>✅</td>
+        <td>🟡</td><td>🟡</td><td>🟡</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>🟡</td><td>🟡</td><td>🟡</td><td>🟡</td></tr>
 
-            <tr><td markdown="span">[Qwen3.8-Flash-Next](../../tutorials/models/Qwen3.8-Flash-Next.md)</td><td>✅</td><td>A2</td><td>🟡</td><td>✅</td><td>🟡</td><td>🟡</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>✅</td><td>❌</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>3</td><td>🟡</td><td>🟡</td><td>🟡<td><td>❌</td><td>❌</td><td>❌</td>
-            <td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>🟡</td><td>🟡</td><td>🟡</td><td>🟡</td></tr>
+        <tr><td markdown="span">[Qwen3.8-Flash-Next](../../tutorials/models/Qwen3.8-Flash-Next.md)</td><td>✅</td><td>A2</td><td>🟡</td><td>✅</td><td>🟡</td><td>🟡</td><td>✅</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>✅</td><td>❌</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>3</td><td>🟡</td><td>🟡</td><td>🟡<td><td>❌</td><td>❌</td><td>❌</td>
+        <td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>🟡</td><td>🟡</td><td>🟡</td><td>🟡</td></tr>
 
-            <tr><td markdown="span">[Qwen3-VL](../../tutorials/models/Qwen-VL-Dense.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
-            <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Qwen3-VL](../../tutorials/models/Qwen-VL-Dense.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-            <tr><td markdown="span">[Qwen3-VL-30B-A3B](../../tutorials/models/Qwen3-VL-30B-A3B-Instruct.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
-            <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Qwen3-VL-30B-A3B](../../tutorials/models/Qwen3-VL-30B-A3B-Instruct.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-            <tr><td markdown="span">[Qwen3-VL-235B-A22B](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md)</td><td>🔴</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
-            <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Qwen3-VL-235B-A22B](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md)</td><td>🔴</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-            <tr><td markdown="span">[Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
-            <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-            <tr><td markdown="span">[Qwen3.5-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
-            <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Qwen3.5-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-            <tr><td markdown="span">[Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
-            <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-            <tr><td markdown="span">[Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
-            <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-            <tr><td markdown="span">[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md)</td><td>🔴</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
-            <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md)</td><td>🔴</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-            <tr><td markdown="span">[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)</td><td>🔴</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
-            <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)</td><td>🔴</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-            <tr><td markdown="span">[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
-            <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-            <tr><td markdown="span">[Kimi-K3](../../tutorials/models/Kimi-K3.md)</td><td>✅</td><td>A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
-            <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Kimi-K3](../../tutorials/models/Kimi-K3.md)</td><td>✅</td><td>A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-            <tr><td markdown="span">[MiniMax-M3](../../tutorials/models/MiniMax-M3.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
-            <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[MiniMax-M3](../../tutorials/models/MiniMax-M3.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-            <tr><td markdown="span">[MiniMax-M3.1-Flash](../..//tutorials/models/MiniMax-M3.1-Flash.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
-            <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[MiniMax-M3.1-Flash](../..//tutorials/models/MiniMax-M3.1-Flash.md)</td><td>✅</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td>
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-            <tr><td markdown="span">[Cohere-Transcribe](../../tutorials/models/Cohere-Transcribe.md) </td><td>🔵</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+        <tr><td markdown="span">[Cohere-Transcribe](../../tutorials/models/Cohere-Transcribe.md) </td><td>🔵</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 
-            <tr><td markdown="span">[PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md)</td><td>🔴</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
- 
-        </tbody>
+        <tr><td markdown="span">[PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md)</td><td>🔴</td><td>A2/A3</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td><td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+
+    </tbody>
     </table>
 
 === "Atlas 300I DUO"

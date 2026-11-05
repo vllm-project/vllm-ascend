@@ -15,7 +15,6 @@ from torch.nn import functional as F
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SituAndMul
 
-from vllm_ascend.ascend_config import AscendConfig
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
@@ -2164,21 +2163,13 @@ def test_sp_multistream_custom_op_fake_returns_local_token_shape(hidden_dim_unpa
         (SharedExpertParallelMode.TENSOR_PARALLEL, True, True, False),
     ],
 )
-@pytest.mark.parametrize("request_deepgemm", [False, True])
 def test_runner_selects_sp_multistream_custom_op(
     monkeypatch,
-    request_deepgemm,
     mode,
     multistream_overlap,
     has_routed_input_transform,
     uses_sp_custom_op,
 ):
-    with patch("vllm_ascend.ascend_config.is_deepgemm_available", return_value=False):
-        config = AscendConfig(
-            sparse_kv_offload_config=SimpleNamespace(enabled=False), deepgemm_mega_moe=request_deepgemm
-        )
-    assert not config.deepgemm_mega_moe
-    monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: config)
     upstream_forward_entry = object()
     moe_config = SimpleNamespace(hidden_dim=4, ep_size=1)
     routed_experts = SimpleNamespace(
@@ -2232,8 +2223,6 @@ def test_runner_selects_sp_multistream_custom_op(
         routed_input_transform=object() if has_routed_input_transform else None,
     )
 
-    assert runner.ascend_shared_experts is shared_executor
-    assert not hasattr(routed_experts, "_deepgemm_v41_shared_experts")
     if uses_sp_custom_op:
         assert runner._forward_entry is torch.ops.vllm.ascend_moe_forward_shared_sp
     else:
@@ -3121,7 +3110,6 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
 
 def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_mc2_comm=None):
     """Construct AscendMoERunner with a lightweight MoERunner.__init__ stub."""
-    monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: SimpleNamespace(deepgemm_mega_moe=False))
     moe_config = SimpleNamespace(hidden_dim=4, ep_size=1)
     routed_experts = SimpleNamespace(
         quant_type=QuantType.NONE,
