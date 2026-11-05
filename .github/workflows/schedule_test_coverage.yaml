@@ -237,7 +237,7 @@ jobs:
       enable-coverage: true
       upload-coverage-to-obs: false
       coverage-file-suffix: ${{ matrix.target.coverage_file_suffix }}
-      timeout-minutes: 180
+      timeout-minutes: 360
     secrets:
       OBS_ACCESS_KEY_PRECISION: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
       OBS_SECRET_ACCESS_KEY_PRECISION: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
