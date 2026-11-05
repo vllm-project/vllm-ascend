@@ -1,4 +1,5 @@
 import math
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
@@ -252,6 +253,46 @@ def _draft_sparse_flash_mla_kwargs() -> dict[str, int]:
 
 def _draft_uses_sparse_flash_mla(vllm_config: VllmConfig) -> bool:
     return get_dsa_attn_kv_plan(vllm_config).uses_sparse_flash_mla
+
+
+# Optional PyTorch fallback for the indexed (ori_sparse_indices) DSA attention
+# path. On Ascend 910B (A2) the fused SparseFlashMla kernel runs in its
+# HCA-compatibility mode there; its per-call fixed overhead dominates at decode
+# batch sizes (measured 170us device time per call for 0.65MB / 63MFLOP of
+# actual work). This composition of generic kernels (gather + bmm + softmax +
+# bmm) measured 49-105us in-graph on the same shapes with bf16-level parity.
+# Opt-in, default off: unset keeps the fused kernel bit-identical.
+_TORCH_SPARSE_MLA = os.environ.get("VLLM_ASCEND_ENABLE_TORCH_SPARSE_MLA", "0") == "1"
+
+
+def _torch_sparse_mla(q: torch.Tensor, attn_kwargs: dict) -> torch.Tensor:
+    """Compose the indexed sparse-MLA decode step from generic kernels.
+
+    Covers the calls that pass ``ori_sparse_indices`` (DSpark draft / vision).
+    Column validity comes from either ``ori_topk_length`` (per-row count) or
+    the -1 padding in the index buffer itself.
+    """
+    idx = attn_kwargs["ori_sparse_indices"]
+    top, width = idx.shape[-2], idx.shape[-1]
+    T, H, D = q.shape
+    flat_kv = attn_kwargs["ori_kv"].reshape(-1, D)
+    idx = idx.reshape(-1, width).long()
+    valid = idx >= 0
+    lengths = attn_kwargs.get("ori_topk_length")
+    if lengths is not None:
+        cols = torch.arange(width, device=q.device)
+        valid = valid & (cols[None, :] < lengths.reshape(-1, 1).long())
+    kvs = flat_kv.index_select(0, idx.clamp(min=0).reshape(-1)).reshape(-1, width, D)
+    scores = torch.bmm(q.reshape(-1, H, D), kvs.transpose(1, 2))
+    scores = scores * attn_kwargs["softmax_scale"]
+    # finite (not -inf) so fully-invalid padded rows stay NaN-free downstream
+    scores = scores.masked_fill(~valid[:, None, :], -1e4)
+    sinks = attn_kwargs.get("sinks")
+    if sinks is not None:
+        scores = scores + sinks[None, :, None].to(scores.dtype)
+    probs = torch.softmax(scores, dim=-1)
+    out = torch.bmm(probs, kvs)
+    return out.reshape(T, H, D) if top == 1 else out
 
 
 def _dsa_layout_kv(vllm_config: VllmConfig) -> str:
@@ -3115,6 +3156,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         if self.turboquant is not None:
             q = self.turboquant.forward(q)
-        with attention_transfer_window():
-            result = attn_op(q, **attn_kwargs)[0]
+        if _TORCH_SPARSE_MLA and attn_kwargs.get("ori_sparse_indices") is not None:
+            result = _torch_sparse_mla(q, attn_kwargs)
+        else:
+            with attention_transfer_window():
+                result = attn_op(q, **attn_kwargs)[0]
         return self.turboquant.inverse(result) if self.turboquant is not None else result
