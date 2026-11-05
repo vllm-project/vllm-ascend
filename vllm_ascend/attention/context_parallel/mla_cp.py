@@ -204,16 +204,20 @@ class AscendMlaDCPMetadataBuilder(
         *,
         chunk_plan_lens_cpu: torch.Tensor | None = None,
         chunk_workspace_size: int | None = None,
+        chunk_request_indices: list[int] | None = None,
+        chunk_alignment: int | None = None,
     ):
         context_lens_cpu = (self.seq_lens - self.query_lens)[self.num_decodes : common_attn_metadata.num_reqs]
         gather_lens = context_lens_cpu if chunk_plan_lens_cpu is None else chunk_plan_lens_cpu
         use_default_chunk_workspace = chunk_workspace_size is None
         if chunk_workspace_size is None:
             chunk_workspace_size = self.chunked_prefill_workspace_size
-        local_rows = None
+        local_rows = chunk_request_indices
         block_table = None
         if self.use_pcp and self.use_dcp:
-            pcp_gather_lens, local_rows, block_table = self._get_pcp_prefill_kv_inputs()
+            pcp_gather_lens, pcp_local_rows, block_table = self._get_pcp_prefill_kv_inputs()
+            if chunk_request_indices is None:
+                local_rows = pcp_local_rows
             if pcp_gather_lens is not None:
                 if chunk_plan_lens_cpu is None:
                     gather_lens = pcp_gather_lens
@@ -226,7 +230,9 @@ class AscendMlaDCPMetadataBuilder(
             chunk_plan_lens_cpu=gather_lens,
             chunk_workspace_size=chunk_workspace_size,
             chunk_request_indices=local_rows,
-            chunk_alignment=lcm(self.block_size, self.cp_virtual_block_size),
+            chunk_alignment=(
+                lcm(self.block_size, self.cp_virtual_block_size) if chunk_alignment is None else chunk_alignment
+            ),
         )
         if chunked_context_metadata is None:
             return None
