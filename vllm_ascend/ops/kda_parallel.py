@@ -74,6 +74,9 @@ class KDAMergedColumnParallelLinear(MergedColumnParallelLinear, KDAColumnParalle
 class KDAInputParallelLinear(_KimiGDNMergedColumnParallelLinear, KDAColumnParallelLinear):
     def __init__(self, input_size: int, output_sizes: list[int], tp_size: int, **kwargs) -> None:
         self.replicated_shard_id = 4
+        # Ascend uses the exact projection width; main's inherited loaders
+        # also inspect the padding attribute initialized by the NVIDIA base.
+        self.padding_size = 0
         self.output_sizes = output_sizes.copy()
         self.output_sizes[self.replicated_shard_id] *= tp_size
         KDAColumnParallelLinear.__init__(self, input_size, sum(self.output_sizes), **kwargs)

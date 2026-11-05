@@ -263,7 +263,7 @@ def test_rope_sfa_keeps_rotary_tables_and_kernel_pages(monkeypatch):
         metadata = builder.build(0, common)
     rotary.assert_called_once()
     torch.testing.assert_close(rotary.call_args.args[0], common.positions)
-    assert rotary.call_args.kwargs == {"use_cache": True}
+    assert rotary.call_args.kwargs == {"use_cache": True, "use_rope": True}
     assert metadata.cos.data_ptr() == cos.data_ptr()
     assert metadata.sin.data_ptr() == sin.data_ptr()
     assert metadata.block_table.data_ptr() == common.block_table_tensor.data_ptr()
