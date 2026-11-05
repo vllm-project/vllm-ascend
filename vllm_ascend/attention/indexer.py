@@ -76,7 +76,8 @@ def _balanced_query_shard_sizes(
     if total <= 0:
         return None
     targets = np.arange(1, tp_size) * total // tp_size
-    bounds = [0, *np.searchsorted(cost, targets).tolist(), num_rows]
+    # targets is a 1-D array; NumPy's return stub also permits a scalar.
+    bounds = [0, *np.searchsorted(cost, targets).tolist(), num_rows]  # type: ignore[misc]
     for i in range(1, tp_size):
         bounds[i] = max(bounds[i], bounds[i - 1] + 1)
     for i in range(tp_size - 1, 0, -1):
