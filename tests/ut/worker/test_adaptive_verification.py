@@ -149,6 +149,7 @@ def test_index_fill_mode_can_reenter_native_device_adaptor(monkeypatch):
 @pytest.mark.parametrize("dummy_run", [False, True])
 def test_propose_adaptive_draft_negotiates_its_own_dp_shape(monkeypatch, adaptive, is_profile, dummy_run):
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.pcp_manager = None
     spec.use_dcp = False
     spec.replicated_pcp = False
     spec.input_buffers = SimpleNamespace(positions=torch.arange(20))
