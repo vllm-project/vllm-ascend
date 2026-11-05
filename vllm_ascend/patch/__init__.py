@@ -1870,3 +1870,20 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+# ** File: worker/v2/spec_decode/dflash/speculator.py (scoped loader override)**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.spec_decode.dflash.utils.maybe_share_target_embed`
+#    Why:
+#       The last target PP stage can lack the embedding required by DFlash2.
+#       Upstream raises before Ascend's draft post-processing can load it.
+#    How:
+#       During draft loading only, call the model's explicit embedding reload
+#       hook before the original sharing check. Load a private target vocab
+#       shard, including QuaRot alignment, and retain validation for all other
+#       models. Restore the loader binding on success and failure.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; this uses Ascend's target checkpoint loader.
+#    Future Plan:
+#       Remove the override when upstream supports loading missing target
+#       embeddings for PP drafters before its sharing check.
+#

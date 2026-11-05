@@ -2,17 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any, cast
+from unittest.mock import patch
 
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
+from vllm.v1.worker.gpu.spec_decode.dflash import utils as dflash_utils
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
@@ -125,6 +129,31 @@ def prepare_dflash_inputs_factory(
     return prepare_with_block_size
 
 
+@contextmanager
+def load_missing_pp_embedding(vllm_config: VllmConfig) -> Iterator[None]:
+    """Supply a missing target embedding before the upstream sharing check.
+
+    DFlash imports the sharing helper into its loader module, so scope the
+    replacement to that binding. Models without an explicit reload hook keep
+    the upstream validation, including its missing-embedding error.
+    """
+    if vllm_config.parallel_config.pipeline_parallel_size <= 1:
+        yield
+        return
+    original_share = dflash_utils.maybe_share_target_embed
+
+    def share_target_embed(draft_model, draft_inner, target_inner):
+        target_embed = getattr(target_inner, "embed_tokens", None) or getattr(target_inner, "embedding", None)
+        target_missing = target_embed is None or isinstance(target_embed, PPMissingLayer)
+        reload_embedding = getattr(draft_model, "load_missing_target_embedding", None)
+        if target_missing and not getattr(draft_model, "has_own_embed_tokens", False) and callable(reload_embedding):
+            reload_embedding(vllm_config)
+        return original_share(draft_model, draft_inner, target_inner)
+
+    with patch.object(dflash_utils, "maybe_share_target_embed", share_target_embed):
+        yield
+
+
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     if not vllm_version_is("0.32.0"):
 
@@ -137,7 +166,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        with disable_profiling_chunk_for_draft(self.vllm_config):
+        with load_missing_pp_embedding(self.vllm_config), disable_profiling_chunk_for_draft(self.vllm_config):
             model = super().load_draft_model(target_model, target_attn_layer_names)
         # QuaRot targets require draft weights to be aligned after sharing
         # target layers, using the restored target configuration.

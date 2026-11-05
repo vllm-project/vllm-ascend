@@ -20,7 +20,7 @@ from vllm.model_executor.models.qwen3_dflash import (
 )
 from vllm.model_executor.models.utils import maybe_prefix
 
-from vllm_ascend.models.qwen3_dspark import align_draft_weights
+from vllm_ascend.models.qwen3_dspark import align_draft_weights, load_draft_target_embedding
 from vllm_ascend.utils import get_rotation_path
 
 
@@ -283,6 +283,9 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
         self.output_multiplier = float(draft_config.get("output_multiplier", 1.0))
         softcap = float(draft_config.get("final_logit_softcapping") or 0.0)
         self.final_logit_softcapping = softcap if softcap > 0 else None
+
+    def load_missing_target_embedding(self, vllm_config: VllmConfig) -> None:
+        load_draft_target_embedding(self, vllm_config)
 
     def post_process(self, vllm_config: VllmConfig) -> None:
         if get_rotation_path(vllm_config) is None:
