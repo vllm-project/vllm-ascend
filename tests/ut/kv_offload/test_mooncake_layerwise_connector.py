@@ -229,7 +229,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         side_effect=lambda x, _align: x,
     )
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.npu.synchronize")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_contiguous_ids")
     def test_transfer_pd_gt1_uses_buffers_and_calls_engine(
         self, mock_group, _mock_sync, _mock_align, _mock_dataptr, mock_stream_switch
     ):
@@ -335,7 +335,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         self.engine.batch_transfer_sync_write.assert_not_called()
 
     @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_contiguous_ids",
         side_effect=group_concurrent_contiguous,
     )
     def test_transfer_merges_main_and_indexer_components(self, _mock_group):
@@ -391,7 +391,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         )
 
     @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_contiguous_ids",
         side_effect=group_concurrent_contiguous,
     )
     def test_sparse_sfa_c8_transfers_packed_main_indexer_and_scale_bytes(self, _mock_group):
@@ -525,7 +525,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         self.assertIn("req2", self.thread.failed_reqs)
 
     @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_contiguous_ids",
         side_effect=group_concurrent_contiguous,
     )
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.npu.synchronize")
@@ -1086,7 +1086,7 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
         meta = self.scheduler.build_connector_meta(out)
         self.assertEqual(len(meta.requests), 0)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_contiguous_ids")
     def test_build_connector_meta_emits_when_tokens_reach_total(self, mock_group_concurrent_contiguous):
         send_req_info = MagicMock(spec=SendReqInfo)
         send_req_info.local_block_ids = [[1, 2, 3]]
@@ -1159,21 +1159,21 @@ class TestHelperFunctions(unittest.TestCase):
         with self.assertRaises(ValueError), zmq_ctx("INVALID", "tcp://127.0.0.1:5555"):
             pass
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.make_zmq_socket")
     def test_zmq_ctx_ok(self, mock_make_socket):
         mock_socket = MagicMock()
         mock_make_socket.return_value = mock_socket
         with zmq_ctx(zmq.REQ, "tcp://localhost:1234") as s:  # type: ignore
             self.assertEqual(s, mock_socket)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.logger")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.logger")
     def test_ensure_zmq_send_success(self, _):
         mock_socket = MagicMock()
         path = "127.0.0.1:12345"
         ensure_zmq_send(mock_socket, b"hello", path)
         mock_socket.send.assert_called_once_with(b"hello")
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.logger")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.logger")
     def test_ensure_zmq_send_retry_and_fail(self, _):
         mock_socket = MagicMock()
         path = "127.0.0.1:12345"
@@ -1184,7 +1184,7 @@ class TestHelperFunctions(unittest.TestCase):
             ensure_zmq_send(mock_socket, b"hello", path, max_retries=2)
         self.assertEqual(mock_socket.send.call_count, 2)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.logger")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.logger")
     def test_ensure_zmq_recv_success(self, _):
         mock_socket = MagicMock()
         mock_socket.recv.return_value = b"response"
@@ -1196,7 +1196,7 @@ class TestHelperFunctions(unittest.TestCase):
         data = ensure_zmq_recv(mock_socket, mock_poller, path)
         self.assertEqual(data, b"response")
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.logger")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.logger")
     def test_ensure_zmq_recv_timeout_and_fail(self, _):
         mock_socket = MagicMock()
         mock_poller = MagicMock()

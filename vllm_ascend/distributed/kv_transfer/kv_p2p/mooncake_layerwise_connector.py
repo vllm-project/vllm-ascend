@@ -1,17 +1,14 @@
 # mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
-import contextlib
 import copy
-import hashlib
 import logging
 import math
 import os
 import queue
-import struct
 import threading
 import time
-from collections import OrderedDict, defaultdict, deque
-from collections.abc import Callable, Iterator
+from collections import defaultdict, deque
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -61,6 +58,12 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.protocol impo
     GET_META_MSG,
     LayerMetadata,
     LayerwiseAgentMetadata,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport import (
+    SizedDict,
+    ensure_zmq_send,
+    string_to_int64_hash,  # noqa: F401  (re-exported for existing callers/tests)
+    zmq_ctx,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
@@ -187,26 +190,6 @@ class SendReqInfo:
             self.local_computed_tokens,
             self.request,
         )
-
-
-@dataclass
-class SizedDict(OrderedDict):
-    def __init__(self, max_size=16000, *args, **kwargs):
-        self.max_size = max_size
-        super().__init__(*args, **kwargs)
-
-    def __setitem__(self, key, value):
-        super().__setitem__(key, value)
-        if len(self) > self.max_size:
-            self.popitem(last=False)
-
-    def __getitem__(self, key):
-        try:
-            return super().__getitem__(key)
-        except KeyError:
-            value: dict[int, list[int]] = {}
-            self[key] = value
-            return value
 
 
 class KVCacheSendingLayerThread(threading.Thread):
@@ -415,7 +398,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                 layer_local_kv_base_addr = local_layer_metadata.kv_caches_base_addr
                 layer_remote_kv_base_addr = remote_layer_metadata.kv_caches_base_addr
                 block_lens = local_layer_metadata.block_len
-                grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
+                grouped_remote_block_ids, grouped_local_block_ids = group_contiguous_ids(
                     remote_block_ids, local_block_ids
                 )
                 # kv cache quantization scenario
@@ -2083,7 +2066,7 @@ class MooncakeLayerwiseConnectorWorker:
                 sock = self._get_remote_socket(req_meta.remote_host, req_meta.remote_port)
                 path = f"{req_meta.remote_host}:{req_meta.remote_port}"
                 ensure_zmq_send(sock, encoded_data, path)
-                metadata_bytes = ensure_zmq_recv(sock, self.remote_poller, path)
+                metadata_bytes = ensure_zmq_recv_with_poller(sock, self.remote_poller, path)
                 agent_meta: MooncakeAgentMetadata = self.decoder.decode(metadata_bytes)
             except Exception as e:
                 logger.error(
@@ -2184,23 +2167,7 @@ class MooncakeLayerwiseConnectorWorker:
         pass
 
 
-@contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignore
-    """Context manager for a ZMQ socket"""
-
-    if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):  # type: ignore
-        raise ValueError(f"Unexpected socket type: {socket_type}")
-
-    ctx: zmq.Context | None = None  # type: ignore
-    try:
-        ctx = zmq.Context()  # type: ignore
-        yield make_zmq_socket(ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER)  # type: ignore
-    finally:
-        if ctx is not None:
-            ctx.destroy(linger=0)
-
-
-def group_concurrent_contiguous(
+def group_contiguous_ids(
     src: list[int], dst: list[int] | None = None
 ) -> tuple[list[npt.NDArray[np.int64]], list[npt.NDArray[np.int64]]]:
     """Vectorised NumPy implementation."""
@@ -2235,38 +2202,14 @@ def group_concurrent_contiguous(
         return src_groups, dst_groups
 
 
-def string_to_int64_hash(input_str):
-    """
-    Hash the string using SHA-256 and convert it into an int64 integer.
-    """
-    hashed_bytes = hashlib.sha256(input_str.encode("utf-8")).digest()
-    trunked_bytes = hashed_bytes[:8]
-    uint64_value = struct.unpack("<Q", trunked_bytes)[0]
-    return uint64_value
+# Back-compat alias for the historical name. This layerwise helper is not the
+# same as ``mooncake_v1.common.transport.group_concurrent_contiguous``: it takes
+# an optional destination list, groups on id adjacency only (no block stride or
+# block_len), and returns plain lists, so it is deliberately kept local.
+group_concurrent_contiguous = group_contiguous_ids
 
 
-def ensure_zmq_send(
-    socket: zmq.Socket,  # type: ignore
-    data: bytes,
-    path: str,
-    max_retries: int = 3,
-):
-    retries_left = max_retries
-    while True:
-        try:
-            socket.send(data)
-            return
-        except zmq.ZMQError as e:  # type: ignore
-            retries_left -= 1
-            if retries_left > 0:
-                logger.warning("Send failed. error=%s, attempts_left=%d. ", e, retries_left)
-                time.sleep(0.1)
-            else:
-                logger.error("Send failed after all retries. error=%s. ", e)
-                raise RuntimeError(f"Failed to send data to {path} after {max_retries} retries: {e}")
-
-
-def ensure_zmq_recv(
+def ensure_zmq_recv_with_poller(
     socket: zmq.Socket,  # type: ignore
     poller: zmq.Poller,  # type: ignore
     path: str,
@@ -2289,6 +2232,12 @@ def ensure_zmq_recv(
             else:
                 logger.error("Receive failed after all retries. error=%s. ", e)
                 raise RuntimeError(f"Failed to receive data from {path} after {max_retries} retries: {e}")
+
+
+# Back-compat alias for the historical name. Unlike
+# ``mooncake_v1.common.transport.ensure_zmq_recv`` this variant polls the socket
+# with a timeout before receiving, so it is deliberately kept local.
+ensure_zmq_recv = ensure_zmq_recv_with_poller
 
 
 def get_external_request_id(request_id: str):
