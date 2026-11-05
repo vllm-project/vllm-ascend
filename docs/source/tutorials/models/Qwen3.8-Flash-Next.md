@@ -956,7 +956,7 @@ The complete Prefill, Decode, and proxy commands are provided below.
     export VLLM_USE_MODELSCOPE=True
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
     export VLLM_ASCEND_PLE_BACKEND=torch
     export VLLM_PP_LAYER_PARTITION=25,23
     export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
@@ -992,7 +992,7 @@ The complete Prefill, Decode, and proxy commands are provided below.
     export VLLM_USE_MODELSCOPE=True
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export VLLM_ENGINE_READY_TIMEOUT_S=2400
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
     export VLLM_ASCEND_PLE_BACKEND=torch
     unset VLLM_PP_LAYER_PARTITION
     export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
@@ -1056,7 +1056,7 @@ The complete Prefill, Decode, and proxy commands are provided below.
     - Prefill partitions the layers across two pipeline stages with `VLLM_PP_LAYER_PARTITION=25,23`. Keep `pp_size=2` and `pp_layer_partition="25,23"` in both Mooncake configurations consistent with this partition.
     - Decode uses TP2 × DP2 behind one API endpoint on port `8248`; the proxy routes to that endpoint rather than separate DP-rank APIs.
     - Both roles enable prefix caching. Prefill disables graph capture and sets MTP `enforce_eager=true`. Decode uses `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, enables static kernels, and disables super kernels.
-    - Both roles enable Engram CPU offload with `dp_shared_memory=false`, use `HCCL_BUFFSIZE=512`, and retain the supplied case's startup timeout of 2400 seconds. Provide sufficient host memory for the checkpoint and the decode DP replicas.
+    - Both roles enable Engram CPU offload with `dp_shared_memory=false`, use `HCCL_BUFFSIZE=512`, and set `VLLM_ENGINE_READY_TIMEOUT_S=4800` to allow sufficient engine initialization time. Provide sufficient host memory for the checkpoint and the decode DP replicas.
     - This case retains `VLLM_ASCEND_PLE_BACKEND=torch` from the supplied scripts. It only selects a backend in runtimes that implement this variable; an unknown-variable warning means it has no effect.
 
 ## 6 Functional Verification
