@@ -135,20 +135,17 @@ class TestQuantizedAllReduceConfig(TestBase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 QuantizedAllReduceConfig(min_numel=value)
 
-    def test_a5_rejects_unvalidated_tp_size(self):
+    def test_rejects_tp_above_common_limit(self):
         config = QuantizedAllReduceConfig(enable=True)
         vllm_config = VllmConfig()
-        vllm_config.parallel_config.tensor_parallel_size = 8
-        with (
-            patch("vllm_ascend.ascend_config.is_950", return_value=True),
-            self.assertRaisesRegex(ValueError, "TP=2/4"),
-        ):
+        vllm_config.parallel_config.tensor_parallel_size = 16
+        with self.assertRaisesRegex(ValueError, "tensor_parallel_size <= 8"):
             config._validate_preconditions(vllm_config)
 
-    def test_a5_accepts_tp2_tp4(self):
+    def test_accepts_same_tp_sizes_on_a5(self):
         config = QuantizedAllReduceConfig(enable=True)
         with patch("vllm_ascend.ascend_config.is_950", return_value=True):
-            for tp_size in (1, 2, 4):
+            for tp_size in (1, 2, 4, 8):
                 vllm_config = VllmConfig()
                 vllm_config.parallel_config.tensor_parallel_size = tp_size
                 config._validate_preconditions(vllm_config)

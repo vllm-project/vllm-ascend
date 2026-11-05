@@ -401,17 +401,16 @@ class RlConfig:
 class QuantizedAllReduceConfig:
     """Configuration Object for ``additional_config["quantized_all_reduce_config"]``.
 
-    Opt-in int8 quantized all-reduce for large bf16 TP collectives. A2/A3 retain
-    their existing 1 < TP <= 8 behavior. A5 supports only the standard TP group
-    with TP=2/4, during eager pure prefill. A collective takes the int8 path only
-    when its payload reaches ``min_numel`` elements, i.e. ``min_numel * 2`` bytes
-    of bf16 data. The default is 16,777,216 elements (32 MiB), based on the
-    optimized PR #19000 crossover and the measured A5 TP=2/4 crossover.
+    Opt-in int8 quantized all-reduce for large bf16 collectives on A2/A3/A5.
+    All families use the same group-size, dtype, shape and payload gates.
+    A collective takes the int8 path only when its payload reaches
+    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data. The
+    default is 16,777,216 elements (32 MiB), based on the optimized PR #19000
+    crossover and the measured A5 TP=2/4 crossover.
 
-    On A2/A3 the wrapper is built for every parallel group, but groups larger
-    than 8 ranks keep bf16. On A5 only the standard TP group is wrapped. The TP
-    degree itself is validated here, so an unsupported TP fails at config
-    parsing time instead of when a parallel group is constructed.
+    The wrapper is built for every parallel group, but groups larger than
+    8 ranks keep bf16. The TP degree itself is validated here, so TP > 8 fails
+    at config parsing time instead of when a parallel group is constructed.
     """
 
     enable: bool = False
@@ -430,7 +429,6 @@ class QuantizedAllReduceConfig:
         # Imported lazily: the wrapper module imports torch_npu, which should not
         # be pulled in from the config factory at module import time.
         from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
-            _A5_VALID_WORLD_SIZES,
             _MAX_VALID_WORLD_SIZE,
         )
 
@@ -441,12 +439,6 @@ class QuantizedAllReduceConfig:
                 f"tensor_parallel_size <= {_MAX_VALID_WORLD_SIZE} (the integer-safe "
                 f"int8 bound leaves too few quantization levels beyond that), but "
                 f"tensor_parallel_size is {tp_size}. Disable the feature or lower TP."
-            )
-        if is_950() and tp_size not in (1, *_A5_VALID_WORLD_SIZES):
-            raise ValueError(
-                "additional_config.quantized_all_reduce_config supports "
-                f"tensor_parallel_size in (1, {', '.join(map(str, _A5_VALID_WORLD_SIZES))}) on A5, "
-                f"but tensor_parallel_size is {tp_size}. Disable the feature or use TP=2/4."
             )
 
 

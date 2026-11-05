@@ -21,7 +21,6 @@ from vllm.distributed.device_communicators.base_device_communicator import Devic
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.device.device_config import is_950
 from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
     QuantizedAllReduce,
 )
@@ -67,13 +66,12 @@ class NPUCommunicator(DeviceCommunicatorBase):
         # FlashInfer PCIe IPC backend on NPU.
         self.fi_pcie_ipc_ar_comm = None
         self.all2all_manager = _NpuAll2AllManager()
-        # Optional int8 quantized all-reduce for large bf16 collectives. A2/A3
-        # preserve the existing group behavior. A5 only wraps the standard TP
-        # group; the wrapper itself additionally gates eager pure prefill.
+        # Optional int8 quantized all-reduce for large bf16 collectives. A2,
+        # A3 and A5 wrap every group and share the same payload/shape routing.
+        # The wrapper keeps oversized groups on the ordinary bf16 path.
         quantized_cfg = get_ascend_config().quantized_all_reduce_config
         self.quantized_ar: QuantizedAllReduce | None = None
-        is_standard_tp = self.unique_name.split(":", 1)[0] == "tp"
-        if quantized_cfg.enable and (not is_950() or is_standard_tp):
+        if quantized_cfg.enable:
             self.quantized_ar = QuantizedAllReduce(
                 self.device_group, min_numel=quantized_cfg.min_numel, group_name=self.unique_name
             )

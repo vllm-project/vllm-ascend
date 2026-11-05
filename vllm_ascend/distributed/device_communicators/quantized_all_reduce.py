@@ -20,10 +20,10 @@ only pays off for large messages, so it is gated by a payload threshold.
 
 Group scope
 -----------
-On A2/A3 the existing wrapper behavior is preserved: groups with at most 8
-ranks can take the int8 path. On A5, only the standard TP group with TP=2/4 is
-eligible, and only during eager pure prefill. Decode, mixed batches, graph
-capture and non-TP groups keep the plain bf16 path.
+The wrapper uses the same routing rules on A2, A3 and A5. It is constructed
+for every parallel group, and groups with at most 8 ranks can take the int8
+path. Larger EP/MC2 groups keep bf16. Eligible bf16 tensors are selected by
+shape and payload size, without inspecting the forward phase or graph mode.
 
 Configuration
 -------------
@@ -36,7 +36,8 @@ Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
              its payload reaches min_numel elements, i.e. min_numel * 2 bytes of
              bf16 data. The default 16,777,216 is 32 MiB, i.e. 8192 tokens at
              hidden_size 2048 or 3277 tokens at hidden_size 5120. Concurrency
-             matters only through batching; decode steps never qualify on A5.
+             matters only through the collective payload. Mixed batches and
+             decode take the int8 path if they meet the same size/shape gates.
 
   The optimized A2/A3 implementation breaks even at ~20-24 MiB: 16 MiB +13%,
   32 MiB -29%, 42 MiB -32%, 64 MiB -37%, 128 MiB -37% versus BF16 on
@@ -56,13 +57,10 @@ Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
 
 import logging
 import math
-from numbers import Integral
 
 import torch
 import torch.distributed as dist
 import torch_npu  # noqa: F401
-from vllm.config import CUDAGraphMode
-from vllm.forward_context import get_forward_context, is_forward_context_available
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -71,44 +69,11 @@ from vllm_ascend.logger import init_logger_ascend
 logger = init_logger_ascend(__name__)
 
 # A2 is measured end to end; A3 supports the kernels; A5 TP=2/4 has standalone
-# numerical and performance evidence and is gated to eager pure prefill.
+# numerical and performance evidence. All families share the A2 routing rules.
 _VALID_DEVICE_TYPES = (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5)
 # Groups larger than 8 ranks leave too few int8 levels (ws=16 -> max_q=7), so
 # they keep bf16 instead of failing. The TP degree is rejected at config time.
 _MAX_VALID_WORLD_SIZE = 8
-_A5_VALID_WORLD_SIZES = (2, 4)
-
-
-def _is_eager_pure_prefill() -> bool:
-    """Use host forward metadata; unknown, mixed and graph batches fall back."""
-    if not is_forward_context_available():
-        return False
-    ctx = get_forward_context()
-    if ctx.cudagraph_runtime_mode != CUDAGraphMode.NONE:
-        return False
-    additional_kwargs = getattr(ctx, "additional_kwargs", None) or {}
-    for flag in ("capturing", "in_profile_run", "is_draft_model"):
-        if getattr(ctx, flag, False) is True or additional_kwargs.get(flag, False) is True:
-            return False
-    metadata = ctx.attn_metadata
-    if not isinstance(metadata, dict) or not metadata:
-        return False
-    seen = set()
-    for layer_metadata in metadata.values():
-        if id(layer_metadata) in seen:
-            continue
-        seen.add(id(layer_metadata))
-        counts = (
-            getattr(layer_metadata, "num_prefills", None),
-            getattr(layer_metadata, "num_decodes", None),
-            getattr(layer_metadata, "num_spec_decodes", 0),
-        )
-        if not all(isinstance(count, Integral) and not isinstance(count, bool) for count in counts):
-            return False
-        prefills, decodes, spec_decodes = counts
-        if prefills <= 0 or decodes != 0 or spec_decodes != 0:
-            return False
-    return True
 
 
 class QuantizedAllReduce:
@@ -129,15 +94,9 @@ class QuantizedAllReduce:
                 f"but the current device family is {device_type.name}. "
                 "Disable it or use a supported device."
             )
-        # A5 is deliberately narrower than A2/A3: only the standard TP group
-        # and the measured TP sizes are eligible. Other groups stay BF16.
-        if device_type == AscendDeviceType.A5:
-            is_standard_tp = group_name.split(":", 1)[0] == "tp"
-            self.supported = is_standard_tp and self.world_size in _A5_VALID_WORLD_SIZES
-        else:
-            # Existing A2/A3 behavior: non-TP groups of at most 8 ranks retain
-            # the historical quantized path; oversized EP/MC2 groups fall back.
-            self.supported = self.world_size <= _MAX_VALID_WORLD_SIZE
+        # Match A2 routing on every family, including non-TP groups. Oversized
+        # EP/MC2 groups fall back without failing communicator construction.
+        self.supported = self.world_size <= _MAX_VALID_WORLD_SIZE
         # Integer-safe bound: scale = amax / max_q keeps every rank within
         # +/-max_q, so the TP-way sum is <= 127 and int8 cannot wrap.
         # ws=2 -> 63 (sum 126), ws=4 -> 31 (sum 124), ws=8 -> 15 (sum 120).
@@ -155,21 +114,12 @@ class QuantizedAllReduce:
             return "degenerate_shape"
         if input_.numel() < self.min_numel:
             return "below_threshold"
-        if self.device_type == AscendDeviceType.A5:
-            if not input_.is_contiguous():
-                return "layout"
-            if not _is_eager_pure_prefill():
-                return "not_eager_pure_prefill"
-            is_capturing = getattr(torch.npu, "is_current_stream_capturing", None)
-            if callable(is_capturing) and is_capturing():
-                return "capturing"
         return None
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         reason = self._skip_reason(input_)
         if reason == "unsupported_group":
-            # Unsupported groups stay on the plain BF16 path. For A2/A3 these
-            # are oversized groups; A5 additionally excludes non-TP groups.
+            # Unsupported, oversized groups stay on the plain BF16 path.
             logger.warning_once(
                 "quantized all-reduce disabled for unsupported group %s "
                 "(world_size=%d, device=%s); its collectives stay bf16.",

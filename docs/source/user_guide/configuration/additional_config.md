@@ -402,15 +402,17 @@ PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-
 
 `min_numel` counts BF16 elements, so `16777216` corresponds to a 32 MiB input. All workers must use the same configuration.
 
-On A5 the optimized path requires all of the following:
+A2, A3 and A5 use the same routing conditions:
 
-- standard TP group with TP=2 or TP=4;
-- Eager pure prefill identified from host forward metadata;
-- contiguous BF16 input;
-- `numel >= min_numel`;
-- execution outside graph capture.
+- a communication group with 2 to 8 ranks;
+- BF16 input with at least two dimensions and a last dimension of at least 64;
+- `numel >= min_numel`.
 
-Decode, mixed prefill/decode batches, speculative decode, draft-model forwards, profiling, graph execution/capture, unknown metadata and non-TP groups use ordinary BF16 all-reduce. ReduceScatter and fused communication paths are not intercepted.
+The wrapper is created for every parallel group, including non-TP groups. Groups larger than 8 ranks use ordinary BF16 all-reduce; configuring TP greater than 8 while enabling the feature raises an error at startup. A single-rank communicator bypasses quantization.
+
+Routing does not inspect attention metadata, prefill/decode phase, draft-model flags, profiling, graph mode or input contiguity. A mixed prefill/decode batch meeting the same payload and shape conditions takes the INT8 path for its entire tensor. Decode and draft-model calls below the size threshold keep ordinary all-reduce. ReduceScatter and fused communication paths are not intercepted.
+
+There is no A5-specific Eager restriction. During graph capture, the path is selected for the captured input shape and recorded in the graph; graph replay does not rerun the Python routing conditions.
 
 Each rank computes a per-channel maximum. An FP32 MAX all-reduce creates a shared scale, with `max_q = 127 // TP`; the activations are quantized, summed through ordinary INT8 HCCL all-reduce, then dequantized directly to a BF16 result. The bound guarantees `TP * max_q <= 127`, so same-sign INT8 sums do not wrap. This path uses `npu_quantize`, `npu_anti_quant` and ordinary HCCL; it does not require `ops-transformer`, native QuantAllReduce or a separate communication domain.
 
