@@ -35,25 +35,6 @@ variants:
       ascend_910c:
         docker_image: "quay.io/ascend/vllm-ascend:nightly-main-a3"
         docker_serve_command: "vllm serve"
-        install:
-          pip:
-            command: |-
-              source /usr/local/Ascend/ascend-toolkit/set_env.sh
-              if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
-                source /usr/local/Ascend/nnal/atb/set_env.sh
-              fi
-              curl -LsSf https://astral.sh/uv/install.sh | sed 's/verify_checksum "$_file"/true/' | INSTALLER_DOWNLOAD_URL=https://wheelnext.astral.sh sh
-              source "$HOME/.local/bin/env"
-              python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cpu/ "vllm==0.23.0"
-              uv pip install --system \
-                --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant \
-                --index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
-                --find-links https://mirrors.huaweicloud.com/ascend/repos/pypi/triton-ascend/ \
-                "vllm-ascend==0.23.0"
-              python3 -m pip uninstall -y triton triton-ascend
-              python3 -m pip install --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi "triton-ascend==3.2.2"
-            note: >-
-              For Ascend A3, use this official WheelNext uv flow in an existing compatible CANN + NNAL environment. Ordinary pip prebuilt wheels target A2. This model's last documented tutorial is v0.23.0; see https://docs.vllm.ai/projects/ascend/en/latest/getting_started/installation.html
         extra_args:
           - "--max-model-len"
           - "1024"
