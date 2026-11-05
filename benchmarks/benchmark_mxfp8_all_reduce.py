@@ -90,32 +90,39 @@ class Mxfp8AllToAllAllReduce:
             src_type=_FLOAT8_E4M3FN_TYPE,
         )
 
-    def reduce_quantized(
-        self,
-        values: torch.Tensor,
-        scales: torch.Tensor,
-        output: torch.Tensor,
-        markers: list | None = None,
-    ) -> torch.Tensor:
-        rows, hidden = values.shape
-        if rows % self.world_size:
-            raise ValueError("The row count must be divisible by TP for AllToAll sharding.")
-        if markers is not None:
-            markers[1].record()
+    @staticmethod
+    def pack_payload(values: torch.Tensor, scales: torch.Tensor) -> tuple[torch.Tensor, torch.dtype]:
+        rows = values.shape[0]
         scale_dtype = scales.dtype
         scale_bytes = scales.contiguous().view(torch.uint8).reshape(rows, -1)
         send = torch.cat((values.contiguous().view(torch.uint8), scale_bytes), dim=-1)
-        if markers is not None:
-            markers[2].record()
+        return send, scale_dtype
+
+    def exchange_payload(
+        self,
+        send: torch.Tensor,
+        markers: list | None = None,
+    ) -> torch.Tensor:
         received = torch.empty_like(send)
         dist.all_to_all_single(received, send, group=self.group)
         if markers is not None:
             markers[3].record()
+        return received
+
+    def finish_received(
+        self,
+        received: torch.Tensor,
+        scale_dtype: torch.dtype,
+        output: torch.Tensor,
+        markers: list | None = None,
+    ) -> torch.Tensor:
+        rows, hidden = output.shape
         received_values = received[:, :hidden].contiguous().view(torch.float8_e4m3fn)
         received_scales = received[:, hidden:].contiguous().view(scale_dtype)
         dequantized = self.dequantize(received_values, received_scales)
         shard_rows = rows // self.world_size
         partial = dequantized.reshape(self.world_size, shard_rows, hidden).sum(dim=0).to(torch.bfloat16)
+        del received, received_values, received_scales, dequantized
         if markers is not None:
             markers[4].record()
         dist.all_gather_into_tensor(output.view(rows, hidden), partial, group=self.group)
@@ -123,11 +130,38 @@ class Mxfp8AllToAllAllReduce:
             markers[5].record()
         return output
 
+    def reduce_quantized(
+        self,
+        values: torch.Tensor,
+        scales: torch.Tensor,
+        output: torch.Tensor,
+        markers: list | None = None,
+    ) -> torch.Tensor:
+        rows = values.shape[0]
+        if rows % self.world_size:
+            raise ValueError("The row count must be divisible by TP for AllToAll sharding.")
+        if markers is not None:
+            markers[1].record()
+        send, scale_dtype = self.pack_payload(values, scales)
+        if markers is not None:
+            markers[2].record()
+        received = self.exchange_payload(send, markers)
+        del send
+        return self.finish_received(received, scale_dtype, output, markers)
+
     def __call__(self, x: torch.Tensor, markers: list | None = None) -> torch.Tensor:
         if markers is not None:
             markers[0].record()
         values, scales = self.quantize(x)
-        return self.reduce_quantized(values, scales, x, markers)
+        if markers is not None:
+            markers[1].record()
+        send, scale_dtype = self.pack_payload(values, scales)
+        del values, scales
+        if markers is not None:
+            markers[2].record()
+        received = self.exchange_payload(send, markers)
+        del send
+        return self.finish_received(received, scale_dtype, x, markers)
 
 
 def decode_mxfp8_cpu(values: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
