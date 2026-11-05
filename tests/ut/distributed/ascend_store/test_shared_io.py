@@ -14,6 +14,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_layout impo
 
 
 class MemoryBackend:
+    def set_device(self):
+        pass
+
     def __init__(self):
         self.objects = {}
         self.readable = set()

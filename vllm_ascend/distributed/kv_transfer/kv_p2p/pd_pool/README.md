@@ -10,6 +10,12 @@ Concurrent logprob deviations remain unexplained; this does not establish
 bitwise equivalence across compute paths or production readiness. See the
 Flash design document for the recorded limitations and validation scope.
 
+The subsequent asynchronous layerwise-write change reuses the existing pool
+sender and drains at every step boundary, including PD tail/state copies.
+Its remote CPU regressions cover queue overlap and state/lease lifetimes;
+the earlier model results above predate this change. A new native NPU run is
+required to establish its model correctness, actual overlap and performance.
+
 ## Scope
 
 Implement the public `LayerwisePoolConnector` here. Support both bulk and

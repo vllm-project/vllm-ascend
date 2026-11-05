@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Real upstream layouts and ordinary ReqMeta, with only device I/O simulated."""
 
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -24,6 +25,139 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_transfer im
 
 from .test_shared_io import MemoryBackend
 from .test_shared_layout import attention
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_pd_live_state_waits_for_copy_before_finish_or_cancel(monkeypatch, cancel):
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.worker import PoolPDWorker
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_layout import PoolObject, PoolRange
+
+    copying, proceed, returned = threading.Event(), threading.Event(), threading.Event()
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=MagicMock), raising=False)
+    backend = MemoryBackend()
+    common, _ = transfer(backend, 2, 0, True, True)
+    pd = PoolPDWorker(SimpleNamespace(shared_pool=common))
+    # These are live source views, as in KDA conv/recurrent and circular tail.
+    tensors = [torch.arange(8, dtype=torch.float32) + i * 10 for i in range(3)]
+    owners = ("conv", "recurrent", "ring")
+    common.layer_bundles["kda"] = owners
+    plans = tuple(
+        PoolObject(name, tensor.numel() * 4, 1, (PoolRange(name, tensor.data_ptr(), 0, tensor.numel() * 4),))
+        for name, tensor in zip(owners, tensors, strict=True)
+    )
+    pd.tails.append(common.io.begin(plans, writing=True))
+    native_copy = backend.batch_copy
+
+    def blocked_copy(*args):
+        copying.set()
+        assert proceed.wait(5)
+        return native_copy(*args)
+
+    backend.batch_copy = blocked_copy
+    errors = []
+
+    def finish():
+        try:
+            pd.abort() if cancel else pd.finish()
+        except Exception as error:
+            errors.append(error)
+        finally:
+            returned.set()
+
+    thread = threading.Thread(target=finish)
+    try:
+        pd.save_layer("kda")
+        assert copying.wait(2)
+        thread.start()
+        assert not returned.wait(0.1)
+        assert backend.leases == set(owners)
+        assert not backend.readable
+    finally:
+        proceed.set()
+        if thread.ident is not None:
+            thread.join(5)
+        common.close()
+    assert returned.is_set() and not errors
+    assert not backend.leases
+    for name, tensor in zip(owners, tensors, strict=True):
+        saved = bytes(backend.objects[name])
+        assert saved == tensor.numpy().tobytes()
+        tensor.fill_(-1)  # The next step may overwrite only after drain.
+        assert bytes(backend.objects[name]) == saved
+    assert backend.readable == (set() if cancel else set(owners))
+
+
+@pytest.mark.parametrize("abort", [False, True])
+def test_layerwise_copy_overlaps_compute_but_drains_before_release(monkeypatch, abort):
+    entered, allow_copy, drained = threading.Event(), threading.Event(), threading.Event()
+
+    class ReadyEvent:
+        def record(self):
+            pass
+
+        def synchronize(self):
+            entered.set()
+            assert allow_copy.wait(5)
+
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=ReadyEvent), raising=False)
+    backend = MemoryBackend()
+    writer, caches = transfer(backend, 2, 0, True, True)
+    request = saved_request()
+    request.event_id = 7
+    writer.prepare_step(step(request))
+    failures = []
+
+    def finish():
+        try:
+            writer.abort_step() if abort else writer.finish_step()
+        except Exception as error:
+            failures.append(error)
+        finally:
+            drained.set()
+
+    thread = threading.Thread(target=finish)
+    try:
+        for owner in caches:
+            writer.save_layer(owner)
+        # The forward thread returned while the sender still waits for NPU
+        # readiness. Neither publication nor source-release ACK may happen.
+        assert entered.wait(2)
+        assert backend.leases and not backend.readable
+        assert not writer.completed_events
+        thread.start()
+        assert not drained.wait(0.1)
+        assert backend.leases
+    finally:
+        allow_copy.set()
+        if thread.ident is not None:
+            thread.join(5)
+        writer.close()
+    assert drained.is_set() and not failures
+    assert not backend.leases
+    assert bool(backend.readable) is not abort
+    assert writer.completed_events == ({} if abort else {7: 1})
+
+
+def test_layerwise_failure_drains_pending_tasks_without_publication(monkeypatch):
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=MagicMock), raising=False)
+    backend = MemoryBackend()
+    backend.fail_copy = True
+    writer, caches = transfer(backend, 2, 0, True, True)
+    writer.prepare_step(step(saved_request()))
+    try:
+        for owner in caches:
+            writer.save_layer(owner)
+        writer.finish_step()
+    except RuntimeError:
+        pass
+    else:
+        pytest.fail("Failed asynchronous copy was not reported")
+    with pytest.raises(RuntimeError):
+        writer.close()
+    assert not backend.readable and not backend.leases
+    assert not writer.completed_events
+    assert not writer._sender.is_alive()
+    assert writer._sender.request_queue.unfinished_tasks == 0
 
 
 def transfer(backend, tp, rank, layerwise, source):
@@ -51,6 +185,9 @@ def transfer(backend, tp, rank, layerwise, source):
         tp_rank=rank,
         model_name="test-model",
         hash_block_size=2,
+        block_size=4,
+        dcp_size=1,
+        token_database=SimpleNamespace(group_block_len=[[1]]),
         _as_cache_tuple=tuple,
     )
     result = SharedPoolTransfer(worker)

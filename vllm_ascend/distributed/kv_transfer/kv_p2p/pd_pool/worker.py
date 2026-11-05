@@ -112,14 +112,7 @@ class PoolPDWorker:
             self.results.finished_recving.add(request.request_id)
 
     def save_layer(self, name):
-        name = self.transfer.save_layer(name)
-        if self.tails:
-            event = torch.npu.Event()
-            event.record()
-            event.synchronize()
-            owners = set(self.transfer.layer_bundles.get(name, (name,)))
-            for session in self.tails:
-                self.transfer.io.copy(session, owners)
+        self.transfer.save_layer(name, self.tails)
 
     def finish(self):
         try:
@@ -137,6 +130,10 @@ class PoolPDWorker:
 
     def abort(self):
         errors = []
+        try:
+            self.transfer.drain_saves()
+        except Exception as error:
+            errors.append(error)
         for session in self.tails:
             try:
                 self.transfer.io.abort(session)

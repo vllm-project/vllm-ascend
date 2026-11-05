@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -13,6 +13,26 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     normalize_block_ids_by_group,
 )
+
+if TYPE_CHECKING:
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_io import (
+        MemcacheStoreLayoutIO,
+        StoreIOSession,
+    )
+
+
+@dataclass(frozen=True)
+class StoreLayerTask:
+    """Preplanned shared-object ranges on the existing layerwise send queue.
+
+    Sessions remain owned by the caller: publish/release only after draining.
+    Each submission owns its event; it must not be rerecorded by another step.
+    """
+
+    ready: torch.npu.Event
+    io: MemcacheStoreLayoutIO
+    sessions: tuple[StoreIOSession, ...]
+    owners: frozenset[str]
 
 
 @dataclass(order=True)

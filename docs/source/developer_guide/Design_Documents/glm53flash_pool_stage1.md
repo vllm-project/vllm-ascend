@@ -90,6 +90,18 @@ or look up partial tails. PD final tails are scheduled once the final prompt
 chunk reaches the handoff boundary; this is distinct from ordinary full-block
 save scheduling. Objects remain in the pool after handoff.
 
+Layerwise writes enqueue `StoreLayerTask` on the existing
+`KVCacheStoreLayerSendingThread`. The forward thread records a fresh ready
+event and returns; the sender waits for readiness and copies full-block and
+PD tail/state ranges. `wait_for_save` drains the queue before publishing,
+returning checkpoint completion events or allowing the next step to overwrite
+live state. Abort and shutdown also drain before releasing leases or buffers.
+This enables inter-layer overlap without enabling deferred cross-step writes
+or shared-HBM reuse. It does not change MTP checkpoint selection or commit timing.
+Post-change remote tests cover blocked copies, drain/abort and asynchronous
+failure; earlier model acceptance does not establish this change's NPU overlap
+or throughput, which still needs a new hardware run.
+
 If D later crosses a committed full-block boundary, `save_decode_cache` can
 publish that checkpoint. A later P request looks up the same objects, restores
 the common attention/state boundary, and skips the corresponding prefix work.

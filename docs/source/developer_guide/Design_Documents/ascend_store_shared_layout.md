@@ -130,7 +130,7 @@ including after cancellation. Speculative scratch blocks must not be pinned.
 
 ## Guardrails and follow-up work
 
-Current runtime requires synchronous MemCache, MRV2 eager, PP=PCP=DCP=1,
+Current runtime requires MemCache with synchronous reads, MRV2 eager, PP=PCP=DCP=1,
 explicit compatible schema/weight namespaces and supported cache specs.
 Shared layer-buffer reuse, KV events, host-resident groups and dense NHD are
 not enabled by this change. Address-level TP tests are not heterogeneous

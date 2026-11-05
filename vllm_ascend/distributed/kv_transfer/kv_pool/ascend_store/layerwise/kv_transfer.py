@@ -28,6 +28,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     LayerRangeReqMeta,
     LayerTransferTask,
     SharedBlockData,
+    StoreLayerTask,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase, ReqMeta
 
@@ -848,15 +849,17 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
         self._active_put_keys: set[str] | None = None
         self._group_put_keys: dict[int, set[str] | None] = {}
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
-        if group_builders is not None:
+        if group_builders:
             self.layer_batch_builder = group_builders[0]
-        else:
+        elif group_builders is None:
             self.layer_batch_builder = LayerBatchBuilder(
                 token_database,
                 page_size_bytes,
                 num_layers,
                 group_id=0,
             )
+        # An explicitly empty builder list is for StoreLayerTask: its ranges
+        # are already planned and must not be reinterpreted by a legacy layout.
 
     def delete_finished_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -986,8 +989,20 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             self.request_queue.task_done()
 
     def _handle_request(  # type: ignore[override]
-        self, request: list[LayerTransferTask] | _LayerRevokeTask
+        self, request: list[LayerTransferTask] | _LayerRevokeTask | StoreLayerTask
     ):
+        if isinstance(request, StoreLayerTask):
+            try:
+                request.ready.synchronize()
+                for session in request.sessions:
+                    request.io.copy(session, request.owners)
+            except Exception as error:
+                # Publish failure before task_done wakes a draining caller.
+                self._fatal_error = error
+                raise
+            finally:
+                self.request_queue.task_done()
+            return
         if isinstance(request, _LayerRevokeTask):
             try:
                 self._revoke_range_keys(list(request.keys))

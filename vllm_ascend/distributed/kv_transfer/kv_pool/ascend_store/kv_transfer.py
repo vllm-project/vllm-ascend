@@ -149,6 +149,29 @@ class KVTransferThread(threading.Thread):
         if self._fatal_error is not None:
             raise RuntimeError(f"{self.name} failed during asynchronous transfer") from self._fatal_error
 
+    def drain(self) -> None:
+        """Wait for copies before callers publish or release source buffers.
+
+        A failed worker may leave unstarted tasks queued. Join it first so no
+        native copy can still read the source, then discard those tasks. The
+        caller retains ownership of task resources and receives the failure.
+        """
+        pending = self.request_queue
+        with pending.all_tasks_done:
+            while pending.unfinished_tasks and self._fatal_error is None:
+                if not self.is_alive():
+                    raise RuntimeError(f"{self.name} stopped with pending transfers")
+                pending.all_tasks_done.wait(timeout=0.1)
+        if self._fatal_error is not None:
+            self.join()
+            while True:
+                try:
+                    pending.get_nowait()
+                except queue.Empty:
+                    break
+                pending.task_done()
+        self.raise_if_failed()
+
     def set_finished_request(self, req_id):
         with self.done_task_lock:
             self.finished_requests.add(req_id)

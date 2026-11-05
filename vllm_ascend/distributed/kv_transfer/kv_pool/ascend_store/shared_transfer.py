@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Synchronous execution of shared layouts inside the existing pool worker.
+"""Shared layouts executed through the pool's existing layerwise send queue.
 
 This owns no scheduler, model state, or RPC server. The existing connector
 supplies step metadata and layer readiness; the existing backend owns transport.
@@ -9,6 +9,7 @@ supplies step metadata and layer readiness; the existing backend owns transport.
 from __future__ import annotations
 
 import math
+import threading
 
 import torch
 from vllm.logger import logger
@@ -21,6 +22,10 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
+    KVCacheStoreLayerSendingThread,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import StoreLayerTask
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import KeyMetadata, block_hash_to_str
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_io import MemcacheStoreLayoutIO
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_layout import RequestStateLayout, SharedPoolLayout
@@ -91,7 +96,7 @@ def validate_shared_pool(config, cache_config, *, worker=True):
     if not config.use_v2_model_runner or not config.model_config.enforce_eager:
         raise ValueError("Shared pool currently requires MRV2 eager")
     if extra.get("backend", "mooncake").lower() != "memcache" or extra.get("load_async", False):
-        raise ValueError("Shared pool currently requires synchronous MemCache transfers")
+        raise ValueError("Shared pool currently requires MemCache with synchronous reads")
     if extra.get("discard_partial_chunks", True) is not True:
         raise ValueError("Shared pool currently publishes complete cache blocks only")
     if config.kv_events_config and config.kv_events_config.enable_kv_cache_events:
@@ -167,6 +172,7 @@ class SharedPoolTransfer:
         self.layer_bundles = {}
         self._executing_owner = None
         self._registered = False
+        self._sender = None
 
     def register(self, caches):
         worker = self.worker
@@ -318,19 +324,46 @@ class SharedPoolTransfer:
         self._executing_owner = None
         return owner
 
-    def save_layer(self, owner):
+    def save_layer(self, owner, extra_sessions=()):
         owner = self.resolve_save_owner(owner)
-        if not self.saves:
+        sessions = tuple(session for _, session in self.saves) + tuple(extra_sessions)
+        if not sessions:
             return owner
+        if self._sender is None:
+            worker = self.worker
+            self._sender = KVCacheStoreLayerSendingThread(
+                worker.m_store,
+                worker.token_database,
+                worker.block_size,
+                worker.tp_rank,
+                worker.tp_size,
+                worker.dcp_size,
+                0,
+                threading.Event(),
+                0,
+                [],
+                [],
+                group_builders=[],
+            )
+            self._sender.start()
+        self._sender.raise_if_failed()
         event = torch.npu.Event()
         event.record()
-        event.synchronize()
-        for _, session in self.saves:
-            self.io.copy(session, set(self.layer_bundles.get(owner, (owner,))))
+        self._sender.add_request(
+            StoreLayerTask(event, self.io, sessions, frozenset(self.layer_bundles.get(owner, (owner,))))
+        )
+        self._sender.raise_if_failed()
         return owner
+
+    def drain_saves(self):
+        # KDA and circular pages are live views, not private snapshots. Drain
+        # before the next step, publication, cancellation or allocator release.
+        if self._sender is not None:
+            self._sender.drain()
 
     def finish_step(self):
         try:
+            self.drain_saves()
             for request, session in self.loads:
                 self.io.finish(session)
                 logger.info("Ascend shared GET req=%s objects=%d", request.req_id, len(session.plans))
@@ -375,6 +408,10 @@ class SharedPoolTransfer:
 
     def _abort_all(self):
         errors = []
+        try:
+            self.drain_saves()
+        except Exception as error:
+            errors.append(error)
         for _, session in self.loads + self.saves:
             try:
                 self.io.abort(session)
@@ -391,8 +428,21 @@ class SharedPoolTransfer:
         self._abort_all()
 
     def close(self):
-        self._abort_all()
-        self.io.retry_cleanup()
-        if self.regions:
-            self.worker.m_store.unregister_buffer(list(self.regions), list(self.regions.values()))
-            self.regions.clear()
+        errors = []
+        try:
+            self._abort_all()
+        except Exception as error:
+            errors.append(error)
+        finally:
+            if self._sender is not None:
+                self._sender.stop()
+                self._sender.join()
+        try:
+            self.io.retry_cleanup()
+            if self.regions:
+                self.worker.m_store.unregister_buffer(list(self.regions), list(self.regions.values()))
+                self.regions.clear()
+        except Exception as error:
+            errors.append(error)
+        if errors:
+            raise RuntimeError("Shared pool shutdown failed") from errors[0]
