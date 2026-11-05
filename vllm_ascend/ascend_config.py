@@ -401,20 +401,23 @@ class RlConfig:
 class QuantizedAllReduceConfig:
     """Configuration Object for ``additional_config["quantized_all_reduce_config"]``.
 
-    Opt-in int8 quantized all-reduce for large bf16 collectives on A2/A3/A5.
-    All families use the same group-size, dtype, shape and payload gates.
-    A collective takes the int8 path only when its payload reaches
+    Opt-in quantized all-reduce for large bf16 collectives. ``quant_dtype``
+    selects shared-scale int8 (default, A2/A3/A5) or MXFP8 AllToAll/AllGather
+    with BF16 dequantization and local SUM output (A5 only). Both select calls
+    by group size, dtype, shape and payload rather than forward phase.
+    A collective takes the selected path only when its payload reaches
     ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data. The
-    default is 16,777,216 elements (32 MiB), based on the optimized PR #19000
-    crossover and the measured A5 TP=2/4 crossover.
+    default is 16,777,216 elements (32 MiB), retained from the INT8 crossover
+    measurements. Benchmark MXFP8 independently on the intended A5 workload.
 
-    The wrapper is built for every parallel group, but groups larger than
-    8 ranks keep bf16. The TP degree itself is validated here, so TP > 8 fails
-    at config parsing time instead of when a parallel group is constructed.
+    The wrapper is built for every parallel group; unsupported group sizes
+    keep bf16. MXFP8 supports groups of 2/4/8 ranks, while INT8 supports up to
+    8 ranks. The TP degree itself is validated here before group construction.
     """
 
     enable: bool = False
     min_numel: int = 16777216
+    quant_dtype: Literal["int8", "mxfp8"] = "int8"
 
     @field_validator("min_numel")
     @classmethod
@@ -433,13 +436,22 @@ class QuantizedAllReduceConfig:
         )
 
         tp_size = vllm_config.parallel_config.tensor_parallel_size
-        if tp_size > _MAX_VALID_WORLD_SIZE:
+        if self.quant_dtype == "int8" and tp_size > _MAX_VALID_WORLD_SIZE:
             raise ValueError(
                 "additional_config.quantized_all_reduce_config supports "
                 f"tensor_parallel_size <= {_MAX_VALID_WORLD_SIZE} (the integer-safe "
                 f"int8 bound leaves too few quantization levels beyond that), but "
                 f"tensor_parallel_size is {tp_size}. Disable the feature or lower TP."
             )
+        if self.quant_dtype == "mxfp8":
+            from vllm_ascend.distributed.device_communicators.mxfp8_all_reduce import (
+                _SUPPORTED_WORLD_SIZES,
+            )
+
+            if not is_950():
+                raise ValueError("quantized_all_reduce_config.quant_dtype='mxfp8' requires Atlas A5.")
+            if tp_size != 1 and tp_size not in _SUPPORTED_WORLD_SIZES:
+                raise ValueError("MXFP8 AllToAll quantized all-reduce requires TP=2/4/8 (or TP=1 to bypass).")
 
 
 @config
@@ -537,7 +549,8 @@ class AscendConfig:
             },
             "quantized_all_reduce_config": {
                 "enable": false,
-                "min_numel": 16777216
+                "min_numel": 16777216,
+                "quant_dtype": "int8"
             },
             "xlite_graph_config": {
                 "enabled": false,

@@ -387,15 +387,18 @@ KVPP can be combined with `MooncakeConnectorV2` for P/D disaggregation and `Asce
 
 PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-forward cache contents before attention; the broadcast decision uses the global scheduled batch rather than PCP-local segment offsets.
 
-### INT8 quantized all-reduce
+### Quantized all-reduce
 
-`quantized_all_reduce_config` enables a shared-scale INT8 SUM path for large BF16 collectives. It is disabled by default. The default threshold is 32 MiB. On Atlas A5, enable it only after validating the intended model:
+`quantized_all_reduce_config` selects an opt-in communication backend for large BF16 collectives. `quant_dtype="int8"` is the default on A2/A3/A5; `quant_dtype="mxfp8"` selects the experimental MXFP8 AllToAll/AllGather path on A5. The feature is disabled by default and the default threshold is 32 MiB. Existing configurations without `quant_dtype` retain INT8 behavior.
+
+#### INT8 (default)
 
 ```json
 {
     "quantized_all_reduce_config": {
         "enable": true,
-        "min_numel": 16777216
+        "min_numel": 16777216,
+        "quant_dtype": "int8"
     }
 }
 ```
@@ -430,3 +433,50 @@ python3 -m torch.distributed.run --standalone --nproc-per-node 2 \
 ```
 
 For routing diagnostics, enable debug logging for `distributed.device_communicators.quantized_all_reduce` through `runtime_config.ascend_log.debug` and inspect `QAR-HIT` / `QAR-SKIP`. Disable debug logging for performance measurements. A microbenchmark gain does not establish model-level accuracy, TTFT or throughput improvement.
+
+#### MXFP8 AllToAll/AllGather (A5)
+
+Select this backend explicitly while keeping INT8 available through the same configuration:
+
+```json
+{
+    "quantized_all_reduce_config": {
+        "enable": true,
+        "min_numel": 16777216,
+        "quant_dtype": "mxfp8"
+    }
+}
+```
+
+This mode uses ordinary collectives on the existing process group:
+
+```text
+BF16 activation -> dynamic MXFP8 E4M3FN + E8M0 scales
+  -> pack raw data/scales -> AllToAll to row-shard owners
+  -> BF16 dequantization -> local SUM with BF16 output
+  -> BF16 AllGather -> BF16 result with the original shape
+```
+
+No `ops-transformer`, native QuantAllReduce or dedicated HCCL group is required. The installed `torch_npu`/CANN must expose `npu_dynamic_mx_quant` and `npu_anti_mx_quant` (through the facade or registered NPU anti-quant operator). Unsupported hardware or missing operators fails at startup for eligible groups. A backend does not switch to the other quantization method automatically.
+
+The MXFP8 wrapper is created for all parallel groups. It requires group size 2/4/8, BF16 input with at least two dimensions, `numel >= min_numel`, a last dimension divisible by 64, and a flattened row count divisible by the group size. Calls outside these tensor/group conditions use ordinary all-reduce. TP=1 bypasses communication; configuring other TP sizes for MXFP8 raises an error. The threshold counts original BF16 elements, just as for INT8.
+
+Routing does not require pure prefill or Eager mode. Mixed prefill/decode batches meeting these conditions use MXFP8 for the entire tensor, including their decode rows. Decode graphs below the threshold retain ordinary BF16 communication. Captured paths are fixed for their captured shapes and are not reevaluated during replay. Validate graph capture and model accuracy on the intended A5 stack before deployment.
+
+`npu_anti_mx_quant` uses `dst_type=15` to produce BF16 directly. The local SUM also returns BF16; its internal accumulator and workspace are backend-defined. The implementation does not explicitly materialize a full FP32 dequantization tensor. It releases temporary payload/staging references before allocating the full result, which is returned out of place like the INT8 path. Peak memory still includes packing, unpacking, communication buffers and the result; measure total process HBM as well as allocator peaks.
+
+Use the BF16 variant of the standalone benchmark to validate the selected numerical path:
+
+```bash
+export HCCL_NPU_SOCKET_PORT_RANGE="61000-61050"
+python3 -m torch.distributed.run --standalone --nproc-per-node 2 \
+    benchmarks/benchmark_mxfp8_all_reduce.py \
+    --tokens 2048 4096 8192 16384 --hidden-sizes 5120 \
+    --dequant-dtype bf16 \
+    --warmup 10 --iterations 50 --rounds 4 --breakdown \
+    --output mxfp8_alltoall_tp2_bf16.json
+```
+
+The benchmark writes its result in place; the runtime wrapper returns a separate result to satisfy the communicator contract, so their memory peaks need not match. Both should be compared against independent FP32 references and ordinary BF16 all-reduce, then validated with the actual mixed workload and MTP acceptance metrics.
+
+For runtime routing diagnostics, add `distributed.device_communicators.mxfp8_all_reduce` to `runtime_config.ascend_log.debug` and inspect `MXFP8-AR-HIT` / `MXFP8-AR-SKIP`. Disable debug logging during performance measurements.

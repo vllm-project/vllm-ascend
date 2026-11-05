@@ -120,6 +120,7 @@ class TestQuantizedAllReduceConfig(TestBase):
         config = QuantizedAllReduceConfig()
         self.assertFalse(config.enable)
         self.assertEqual(config.min_numel, 16777216)
+        self.assertEqual(config.quant_dtype, "int8")
 
     def test_explicit_values_and_lax_bool(self):
         config = QuantizedAllReduceConfig(enable="true", min_numel="2097152")  # type: ignore[arg-type]
@@ -134,6 +135,33 @@ class TestQuantizedAllReduceConfig(TestBase):
         for value in (0, -1):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 QuantizedAllReduceConfig(min_numel=value)
+
+    def test_quant_dtype_selection(self):
+        self.assertEqual(QuantizedAllReduceConfig(quant_dtype="mxfp8").quant_dtype, "mxfp8")
+        for value in ("fp16", "alltoall", "auto"):
+            with self.subTest(quant_dtype=value), self.assertRaises(ValueError):
+                QuantizedAllReduceConfig(quant_dtype=value)
+
+    def test_mxfp8_requires_a5(self):
+        config = QuantizedAllReduceConfig(enable=True, quant_dtype="mxfp8")
+        vllm_config = VllmConfig()
+        vllm_config.parallel_config.tensor_parallel_size = 2
+        with (
+            patch("vllm_ascend.ascend_config.is_950", return_value=False),
+            self.assertRaisesRegex(ValueError, "requires Atlas A5"),
+        ):
+            config._validate_preconditions(vllm_config)
+
+    def test_mxfp8_tp_validation(self):
+        config = QuantizedAllReduceConfig(enable=True, quant_dtype="mxfp8")
+        vllm_config = VllmConfig()
+        with patch("vllm_ascend.ascend_config.is_950", return_value=True):
+            for tp_size in (1, 2, 4, 8):
+                vllm_config.parallel_config.tensor_parallel_size = tp_size
+                config._validate_preconditions(vllm_config)
+            vllm_config.parallel_config.tensor_parallel_size = 3
+            with self.assertRaisesRegex(ValueError, "TP=2/4/8"):
+                config._validate_preconditions(vllm_config)
 
     def test_rejects_tp_above_common_limit(self):
         config = QuantizedAllReduceConfig(enable=True)
