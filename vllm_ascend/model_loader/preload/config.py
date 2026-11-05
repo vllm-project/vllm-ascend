@@ -39,7 +39,7 @@ def validate_preload_config(vllm_config: VllmConfig, *, mode: str = "zero_copy")
         reasons.append("KV and encoder cache transfer are unsupported")
     finegrained = getattr(ascend, "finegrained_tp_config", None)
     if any(
-        getattr(finegrained, field, 0) > 0
+        getattr(finegrained, field, 1) > 1
         for field in (
             "oproj_tensor_parallel_size",
             "lmhead_tensor_parallel_size",

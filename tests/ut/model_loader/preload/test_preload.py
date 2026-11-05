@@ -13,6 +13,7 @@ import torch
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry, WeightCacheState
 
+from vllm_ascend.ascend_config import FinegrainedTPConfig
 from vllm_ascend.model_loader.preload import config, transport
 from vllm_ascend.model_loader.preload.loader import AscendIpcModelLoader
 
@@ -42,6 +43,7 @@ def _config():
         speculative_config=None,
         lora_config=None,
         cache_config=SimpleNamespace(),
+        kernel_config=SimpleNamespace(),
         offload_config=SimpleNamespace(
             uva=SimpleNamespace(cpu_offload_gb=0), prefetch=SimpleNamespace(offload_group_size=0)
         ),
@@ -100,6 +102,12 @@ def test_nonstandard_weight_sharding_is_rejected(valid_config, monkeypatch):
     monkeypatch.setattr(config, "init_ascend_config", lambda _: ascend)
     with pytest.raises(ValueError, match="fine-grained"):
         config.validate_preload_config(valid_config)
+
+
+def test_default_finegrained_tp_config_is_supported(valid_config, monkeypatch):
+    ascend = SimpleNamespace(weight_nz_mode=0, finegrained_tp_config=FinegrainedTPConfig())
+    monkeypatch.setattr(config, "init_ascend_config", lambda _: ascend)
+    config.validate_preload_config(valid_config)
 
 
 def test_cpu_offload_rejected(valid_config):
@@ -496,7 +504,8 @@ def test_daemon_load_retains_its_rendezvous(monkeypatch, daemon_loading_setup, n
         assert get_current_vllm_config() is current
 
     load_mock = Mock(side_effect=lambda: load_upstream(instance))
-    monkeypatch.setattr(daemon.upstream.WeightCacheDaemon, "load_model", load_mock)
+    # The platform patch rebinds upstream.WeightCacheDaemon to the subclass.
+    monkeypatch.setattr(daemon.AscendWeightCacheDaemon.__bases__[0], "load_model", load_mock)
     instance.load_model()
     load_mock.assert_called_once()
     assert get_current_vllm_config_or_none() is previous_config
@@ -515,7 +524,9 @@ def test_daemon_load_restores_config_after_failure(monkeypatch, daemon_loading_s
     instance.model_config.seed = 0
     instance.local_rank = 0
     previous_config = get_current_vllm_config_or_none()
-    monkeypatch.setattr(daemon.upstream.WeightCacheDaemon, "load_model", Mock(side_effect=RuntimeError("load failed")))
+    monkeypatch.setattr(
+        daemon.AscendWeightCacheDaemon.__bases__[0], "load_model", Mock(side_effect=RuntimeError("load failed"))
+    )
     with pytest.raises(RuntimeError, match="load failed"):
         instance.load_model()
     assert get_current_vllm_config_or_none() is previous_config
