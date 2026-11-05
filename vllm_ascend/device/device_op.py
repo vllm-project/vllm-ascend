@@ -573,54 +573,45 @@ class BaseDeviceAdaptor:
         *,
         sparse_mode: int = 3,
         return_lse: bool = False,
+        packed_query: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # torch.cat allocates a fresh contiguous output, so no extra
-        # .contiguous() pass is needed here.
-        query = ql_nope.contiguous() if q_pe is None else torch.cat([ql_nope, q_pe], dim=-1)
-        qk_rope_head_dim = getattr(sfa_impl, "qk_rope_head_dim", 0 if q_pe is None else q_pe.shape[-1])
-        if return_lse or qk_rope_head_dim == 0:
+        # The custom QSFA kernel supports native query groups 1..128 on A3/A5.
+        # Reuse the packed gather without splitting and concatenating it again.
+        query = packed_query if packed_query is not None else (
+            ql_nope.contiguous() if q_pe is None else torch.cat([ql_nope, q_pe], dim=-1)
+        )
+        rope_head_dim = (
+            sfa_impl.qk_rope_head_dim
+            if packed_query is not None
+            else getattr(sfa_impl, "qk_rope_head_dim", 0 if q_pe is None else q_pe.shape[-1])
+        )
+        kwargs = dict(
+            query=query.contiguous(),
+            key=kv,
+            value=kv,
+            sparse_indices=topk_indices,
+            scale_value=sfa_impl.scale,
+            sparse_block_size=1,
+            block_table=block_table,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_kv=actual_seq_lengths_key,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=sparse_mode,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
+            key_quant_mode=2,
+            value_quant_mode=2,
+            rope_head_dim=rope_head_dim,
+        )
+        use_kimi_path = sfa_impl.is_kimi_k31 or packed_query is not None
+        if use_kimi_path or return_lse or rope_head_dim == 0:
+            # Kimi requires the LSE path to trim trailing invalid candidates.
             return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
-                query=query,
-                key=kv,
-                value=kv,
-                sparse_indices=topk_indices,
-                scale_value=sfa_impl.scale,
-                sparse_block_size=1,
-                block_table=block_table,
-                actual_seq_lengths_query=actual_seq_lengths_query,
-                actual_seq_lengths_kv=actual_seq_lengths_key,
-                layout_query="TND",
-                layout_kv="PA_BSND",
-                sparse_mode=sparse_mode,
-                attention_mode=2,
-                quant_scale_repo_mode=1,
-                tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
-                key_quant_mode=2,
-                value_quant_mode=2,
-                rope_head_dim=qk_rope_head_dim,
-                return_softmax_lse=return_lse,
+                **kwargs, return_softmax_lse=use_kimi_path or return_lse
             )
-        else:
-            return torch_npu.npu_kv_quant_sparse_flash_attention(
-                query=query,
-                key=kv,
-                value=kv,
-                sparse_indices=topk_indices,
-                scale_value=sfa_impl.scale,
-                sparse_block_size=1,
-                block_table=block_table,
-                actual_seq_lengths_query=actual_seq_lengths_query,
-                actual_seq_lengths_kv=actual_seq_lengths_key,
-                layout_query="TND",
-                layout_kv="PA_BSND",
-                sparse_mode=sparse_mode,
-                attention_mode=2,
-                quant_scale_repo_mode=1,
-                tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
-                key_quant_mode=2,
-                value_quant_mode=2,
-                rope_head_dim=qk_rope_head_dim,
-            )
+        return torch_npu.npu_kv_quant_sparse_flash_attention(**kwargs)
 
     # ===== SWA / Compressor KV Scatter =====
 
@@ -1087,70 +1078,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             scale=scale,
             **kwargs,
         )
-
-    @staticmethod
-    def _execute_kv_quant_sparse_flash_attention_vllm(
-        sfa_impl,
-        ql_nope: torch.Tensor,
-        q_pe: torch.Tensor | None,
-        kv: torch.Tensor,
-        block_table: torch.Tensor,
-        topk_indices: torch.Tensor,
-        actual_seq_lengths_query: torch.Tensor,
-        actual_seq_lengths_key: torch.Tensor,
-        *,
-        sparse_mode: int = 3,
-        return_lse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        qk_rope_head_dim = getattr(sfa_impl, "qk_rope_head_dim", 0 if q_pe is None else q_pe.shape[-1])
-        if return_lse or qk_rope_head_dim == 0:
-            # RoPE0 packed C8 is implemented by the vllm-ascend custom operator
-            # (csrc/attention/kv_quant_sparse_flash_attention_vllm). The torch_npu
-            # built-in aclnn op has no RoPE0 contract: it sizes its outputs from
-            # rope_head_dim=64 and faults while registering them. Route RoPE0 to
-            # the custom operator. LSE requests also require the custom operator;
-            # keep RoPE64 without LSE on the built-in one.
-            return BaseDeviceAdaptor._execute_kv_quant_sparse_flash_attention_vllm(
-                sfa_impl,
-                ql_nope,
-                q_pe,
-                kv,
-                block_table,
-                topk_indices,
-                actual_seq_lengths_query,
-                actual_seq_lengths_key,
-                sparse_mode=sparse_mode,
-                return_lse=return_lse,
-            )
-        # torch.cat allocates a fresh contiguous output, so no extra
-        # .contiguous() pass is needed here.
-        query = torch.cat([ql_nope, q_pe], dim=-1)
-        result = torch_npu.npu_kv_quant_sparse_flash_attention(
-            query=query,
-            key=kv,
-            value=kv,
-            sparse_indices=topk_indices,
-            scale_value=sfa_impl.scale,
-            sparse_block_size=1,
-            block_table=block_table,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_kv=actual_seq_lengths_key,
-            layout_query="TND",
-            layout_kv="PA_BSND",
-            sparse_mode=sparse_mode,
-            attention_mode=2,
-            quant_scale_repo_mode=1,
-            tile_size=getattr(sfa_impl, "sfa_qsfa_tile_size", 128),
-            key_quant_mode=2,
-            value_quant_mode=2,
-            rope_head_dim=qk_rope_head_dim,
-        )
-        if return_lse:
-            raise RuntimeError(
-                "C8 sparse flash attention via torch_npu only returns attention_out; "
-                "cannot return softmax max/sum for DCP LSE merge."
-            )
-        return result
 
     @staticmethod
     def npu_moe_init_routing(
