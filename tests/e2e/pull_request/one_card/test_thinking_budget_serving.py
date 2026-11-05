@@ -136,14 +136,19 @@ def test_thinking_budget_serving(enforce_eager, speculative, tmp_path, runner_ve
         # Invalid requests must not poison the engine or a reused request slot.
         run(0)
         unlimited = []
-        for extra in [{}, {"thinking_token_budget": None}, {"thinking_token_budget": -1}]:
+        unlimited_overrides: list[dict[str, int | None]] = [
+            {},
+            {"thinking_token_budget": None},
+            {"thinking_token_budget": -1},
+        ]
+        for extra in unlimited_overrides:
             response = requests.post(url, json={**base, "temperature": 0, **extra}, timeout=REQUEST_TIMEOUT)
             assert response.status_code == 200, response.text
             unlimited.append(response.json()["choices"][0]["token_ids"])
         assert unlimited[0] == unlimited[1] == unlimited[2]
         print(json.dumps({"unlimited_equal": True, "eager": enforce_eager, "speculative": speculative}))
 
-        stream_ids = []
+        stream_ids: list[int] = []
         answer_parts = []
         with requests.post(
             url,
@@ -186,7 +191,7 @@ def test_thinking_budget_serving(enforce_eager, speculative, tmp_path, runner_ve
             }
             response = requests.post(url, json=repeat_body, timeout=REQUEST_TIMEOUT)
             assert response.status_code == 200, response.text
-            counters = {}
+            counters: dict[str, float] = {}
             for _ in range(15):
                 metrics = requests.get(server.url_for("metrics"), timeout=10)
                 metrics.raise_for_status()

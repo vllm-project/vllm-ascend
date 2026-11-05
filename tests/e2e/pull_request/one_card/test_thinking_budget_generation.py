@@ -100,6 +100,7 @@ def test_thinking_budget_mixed_generation(monkeypatch, model_name, enforce_eager
             # Repeat with new requests to catch stale state after slots are reused.
             outputs = runner.model.generate([prompt] * 2, [params[-1], params[BUDGETS.index(0)]])
             for budget, output in zip([BUDGETS[-1], 0], outputs):
+                assert budget is not None
                 assert list(output.outputs[0].token_ids).index(end_ids[0]) <= budget
 
 
@@ -124,22 +125,23 @@ def test_plain_model_unlimited_budget_preserves_output(enforce_eager):
 
 def test_thinking_budget_preemption_matches_unconstrained_cache(monkeypatch):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    common = dict(
-        max_model_len=256,
-        max_num_seqs=4,
-        max_num_batched_tokens=256,
-        disable_log_stats=False,
-        enable_prefix_caching=False,
-        enforce_eager=True,
-        reasoning_config={
-            "reasoning_parser": "qwen3",
-            "reasoning_start_str": "<think>",
-            "reasoning_end_str": "</think>",
-        },
-    )
     outputs = []
     for blocks in [128, 6]:
-        with VllmRunner("Qwen/Qwen3-1.7B", num_gpu_blocks_override=blocks, **common) as runner:
+        with VllmRunner(
+            "Qwen/Qwen3-1.7B",
+            num_gpu_blocks_override=blocks,
+            max_model_len=256,
+            max_num_seqs=4,
+            max_num_batched_tokens=256,
+            disable_log_stats=False,
+            enable_prefix_caching=False,
+            enforce_eager=True,
+            reasoning_config={
+                "reasoning_parser": "qwen3",
+                "reasoning_start_str": "<think>",
+                "reasoning_end_str": "</think>",
+            },
+        ) as runner:
             tokenizer = runner.model.get_tokenizer()
             start = tokenizer.encode("<think>", add_special_tokens=False)
             filler = tokenizer.encode("Think carefully about basic arithmetic. ", add_special_tokens=False)

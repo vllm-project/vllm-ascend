@@ -177,7 +177,7 @@ def test_draftless_step_keeps_each_request_row(num_spec, bonus):
 @pytest.mark.parametrize("num_spec", [0, 3])
 def test_end_progress_survives_repeated_update_and_returns_to_answer(budget, num_spec):
     holder = ThinkingBudgetStateHolder(_Config(), 2, num_spec, torch.device("cpu"), False)
-    output = []
+    output: list[int] = []
     holder.sync_batch(
         BatchUpdate(
             batch_size=1,
