@@ -152,6 +152,6 @@ class AscendQFA3PrefillBackendImpl(AscendAttentionBackendImpl):
             softmax_scale=self.scale,
             return_softmax_lse=False,
         )
-        # [T, Hq, D] BF16 -> the padded output buffer's layout.
-        output[:num_tokens] = attn_out.reshape(num_tokens, self.hidden_size)
+        # attn_out is [T, Hq, D] and the runner's output buffer shares that layout.
+        output[:num_tokens] = attn_out
         return output
