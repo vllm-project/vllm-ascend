@@ -26,10 +26,7 @@ vLLM Ascend supports W4A8 and W8A8 deployment on A2 products, A3 products,
 and 950DT products. This guide provides a single-node colocated A3
 configuration and a two-node A3 Prefill-Decode (PD) disaggregated
 configuration. It also supports a two-node hybrid A2 configuration and a
-four-node A2 PD disaggregated configuration.
-
-This document covers supported features, environment preparation, deployment,
-and accuracy and performance evaluation.
+four-node Prefill-Decode (PD) disaggregated configuration.
 
 DeepSeek-V4.1-Flash is supported in **vLLM Ascend v0.30.0rc1 and later**.
 This guide uses the deployment configurations for **vLLM Ascend v0.32.0**
