@@ -66,6 +66,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.utils import collect_pp_group_owners
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -99,7 +100,13 @@ class KVPoolWorker:
 
         self._init_parallelism_info(model_config, parallel_config)
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
-        self._init_pp_group_owners()
+        pp_cpu_group = getattr(get_pp_group(), "cpu_group", None) if self.pp_size > 1 else None
+        self._pp_group_owners = collect_pp_group_owners(
+            self.kv_cache_config,
+            self.pp_size,
+            self.num_kv_cache_groups,
+            pp_cpu_group,
+        )
         self._init_key_head_config(model_config, parallel_config)
         self._init_metadata(model_config, vllm_config, extra_config)
         self._init_backend(parallel_config, extra_config)
@@ -213,45 +220,6 @@ class KVPoolWorker:
 
     def _compute_use_hybrid(self, vllm_config, kv_cache_groups) -> bool:
         return uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
-
-    def _init_pp_group_owners(self) -> None:
-        """Collect cache-group ownership from every PP stage.
-
-        ``kv_cache_config`` is worker-local after vLLM projects the model onto
-        pipeline stages.  The rank-0 lookup server therefore cannot infer PP
-        ownership from its own ``layer_names``.  Gather the per-stage presence
-        mask while every worker is initializing and retain the resulting
-        global manifest for lookup key expansion.
-        """
-        self._pp_group_owners: tuple[tuple[int, ...], ...] | None = None
-        if self.pp_size <= 1:
-            self._pp_group_owners = tuple((0,) for _ in range(self.num_kv_cache_groups))
-            return
-        groups = getattr(self.kv_cache_config, "kv_cache_groups", None)
-        pp_group = get_pp_group()
-        cpu_group = getattr(pp_group, "cpu_group", None)
-        if groups is None or cpu_group is None:
-            return
-
-        local_presence = tuple(bool(group.layer_names) for group in groups)
-        gathered: list[tuple[bool, ...] | None] = [None] * self.pp_size
-        try:
-            torch.distributed.all_gather_object(gathered, local_presence, group=cpu_group)
-        except (RuntimeError, ValueError) as error:
-            logger.warning("Failed to collect PP cache-group ownership; lookup will check all PP ranks: %s", error)
-            return
-        if any(presence is None or len(presence) != self.num_kv_cache_groups for presence in gathered):
-            logger.warning("Inconsistent PP cache-group manifests; lookup will check all PP ranks")
-            return
-
-        owners = tuple(
-            tuple(pp_rank for pp_rank, presence in enumerate(gathered) if presence is not None and presence[group_id])
-            for group_id in range(self.num_kv_cache_groups)
-        )
-        if any(not group_owners for group_owners in owners):
-            logger.warning("PP cache-group manifest contains an unowned group; lookup will check all PP ranks")
-            return
-        self._pp_group_owners = owners
 
     def _init_key_head_config(self, model_config, parallel_config) -> None:
         self.current_layer = 0
