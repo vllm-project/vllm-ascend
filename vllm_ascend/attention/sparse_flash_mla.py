@@ -43,18 +43,31 @@ def _drop_paged_kv_cu_seqlens(kwargs: dict[str, Any]) -> None:
     kwargs.pop("cu_seqlens_cmp_kv", None)
 
 
-def sparse_flash_mla_metadata(**kwargs):
-    """Adapt existing DSA metadata kwargs to SparseFlashMla BF16 KV."""
+def _translate_dsa_kwargs(kwargs: dict[str, Any]) -> None:
+    """Translate the DSA-side names shared by both SparseFlashMla adapters.
+
+    The 950 CANN toolkit op and the A3 compiled binding wrap the same
+    aclnnSparseFlashMla kernel, so the DSA-to-op translation is one concern:
+    drop the args neither variant takes on the paged path and rename the KV
+    lengths to the op's seqused_ori_kv spelling. Each adapter keeps its own
+    tail — the toolkit op is called with pass-through kwargs, the binding
+    has a strict schema the adapter builds explicitly.
+    """
     kwargs.pop("device", None)
     kwargs.pop("kv_quant_mode", None)
+    if "seqused_kv" in kwargs:
+        kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
+    _drop_paged_kv_cu_seqlens(kwargs)
+
+
+def sparse_flash_mla_metadata(**kwargs):
+    """Adapt existing DSA metadata kwargs to SparseFlashMla BF16 KV."""
+    _translate_dsa_kwargs(kwargs)
     # This adapter is only selected for the BF16 paged-KV path. SparseFlashMla
     # accepts PA_BBND for this cache; PA_ND belongs to the FP8 quantized op.
     kwargs["layout_kv"] = "PA_BBND"
-    if "seqused_kv" in kwargs:
-        kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
     if "max_seqlen_kv" in kwargs:
         kwargs["max_seqlen_ori_kv"] = kwargs.pop("max_seqlen_kv")
-    _drop_paged_kv_cu_seqlens(kwargs)
     _add_compressed_kv_lengths(kwargs)
     _, metadata_op = _get_sparse_flash_mla_ops()
     return metadata_op(**kwargs)
@@ -96,7 +109,6 @@ def _fullcov_sparse_indices(si: torch.Tensor, max_used: int) -> bool:
 
 def sparse_flash_mla(q: torch.Tensor, **kwargs):
     """Adapt existing DSA attention kwargs to SparseFlashMla BF16 KV."""
-    kwargs.pop("kv_quant_mode", None)
     kwargs.pop("tile_size", None)
     kwargs.pop("rope_head_dim", None)
     kwargs["layout_kv"] = "PA_BBND"
@@ -122,9 +134,7 @@ def sparse_flash_mla(q: torch.Tensor, **kwargs):
             win_r = int(q.shape[0]) - 1
     kwargs["ori_win_left"] = int(kwargs.get("ori_win_left", 0))
     kwargs["ori_win_right"] = win_r
-    if "seqused_kv" in kwargs:
-        kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
-    _drop_paged_kv_cu_seqlens(kwargs)
+    _translate_dsa_kwargs(kwargs)
     _add_compressed_kv_lengths(kwargs)
     _ensure_sinks(kwargs)
     attention_op, _ = _get_sparse_flash_mla_ops()
@@ -183,12 +193,7 @@ def a3_sparse_flash_mla_metadata(**kwargs):
     takes explicit ``seqused_ori_kv`` / ``max_seqlen_ori_kv`` names and
     always addresses the paged cache. DSA names are translated here.
     """
-    kwargs.pop("device", None)
-    kwargs.pop("kv_quant_mode", None)
-    kwargs.pop("cu_seqlens_ori_kv", None)
-    kwargs.pop("cu_seqlens_cmp_kv", None)
-    if "seqused_kv" in kwargs:
-        kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
+    _translate_dsa_kwargs(kwargs)
     if "max_seqlen_kv" in kwargs:
         kwargs["max_seqlen_ori_kv"] = int(kwargs.pop("max_seqlen_kv"))
     kwargs.pop("seqused_q", None)
@@ -250,14 +255,9 @@ def a3_sparse_flash_mla(q: torch.Tensor, **kwargs):
         kwargs["cmp_ratio"] = 0
         kwargs["topk_value_mode"] = 1
 
-    kwargs.pop("device", None)
-    kwargs.pop("kv_quant_mode", None)
     kwargs.pop("tile_size", None)
     kwargs.pop("rope_head_dim", None)
-    kwargs.pop("cu_seqlens_ori_kv", None)
-    kwargs.pop("cu_seqlens_cmp_kv", None)
-    if "seqused_kv" in kwargs:
-        kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
+    _translate_dsa_kwargs(kwargs)
     kwargs.pop("layout_q", None)
     kwargs.pop("layout_kv", None)
     _add_compressed_kv_lengths(kwargs)
