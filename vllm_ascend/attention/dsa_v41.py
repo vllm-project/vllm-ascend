@@ -17,6 +17,11 @@ import torch.nn.functional as F
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+    is_v1_kv_transfer_group,
+)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -66,6 +71,28 @@ def dsa_v41_forward(
     forward_context = get_forward_context()
     attn = forward_context.no_compile_layers[layer_name]
     attn.v41_impl.forward(attn, None, hidden_states, output)
+    _maybe_trigger_ced_save(attn)
+
+
+def _maybe_trigger_ced_save(attn: Any) -> None:
+    """Notify the KV pool connector that a V4.1 layer's caches are final.
+
+    The AscendStore CED path uses this as the per-slice save trigger; every
+    other connector ignores it, and the pool-side dispatch is a no-op unless
+    CED_layerwise is enabled.
+    """
+    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
+        return
+    forward_context = get_forward_context()
+    if forward_context.attn_metadata is None:
+        return
+    layer_idx = getattr(attn, "layer_idx", None)
+    if layer_idx is None:
+        return
+    connector = get_kv_transfer_group()
+    save_group = getattr(connector, "save_kv_group", None)
+    if callable(save_group):
+        save_group(layer_idx)
 
 
 def dsa_v41_forward_fake(
@@ -97,6 +124,9 @@ def dsa_v41_write_kv(
     metadata = attn.v41_impl._get_layer_metadata(forward_context.attn_metadata)
     hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
     attn.v41_impl._update_caches(attn, hidden_states, metadata)
+    # The cut layer reaches its cache-only write through this op during a
+    # bounded-replay prefill; its source slot is final here.
+    _maybe_trigger_ced_save(attn)
 
 
 def dsa_v41_write_kv_fake(
