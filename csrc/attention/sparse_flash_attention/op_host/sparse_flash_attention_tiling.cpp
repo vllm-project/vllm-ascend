@@ -342,6 +342,15 @@ void SFAMlaTiling::SplitBalanced()
     tilingData_.innerSplitParams.set_s2BaseSize(innerSplitParams.s2BaseSize);
 
     usedCoreNum_ = aicNum_;
+    if (!sfaInfo_->isA5 && sfaInfo_->qLayout == SFALayout::TND &&
+        sfaInfo_->kvLayout == SFALayout::PA_BSND && sfaInfo_->n2Size == 1 &&
+        sfaInfo_->ropeHeadDim == 0 && sfaInfo_->sparseBlockSize == 1 && sfaInfo_->s1Size > 0) {
+        // TND tensor rows bound the number of query groups, including graph
+        // padding. Preserve the existing one-group-per-query kernel schedule.
+        usedCoreNum_ = std::min(usedCoreNum_, sfaInfo_->s1Size);
+        // Kernel scratch regions use GetBlockNum() for their core stride.
+        coreNum_ = usedCoreNum_;
+    }
 }
 
 void SFAMlaTiling::Split()
