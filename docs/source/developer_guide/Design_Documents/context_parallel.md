@@ -108,6 +108,8 @@ The normal v1 builders remain the source of truth for request classification, pa
 
 For PCP, `AscendPCPAttentionContext` supplies the global request view and restore maps to the backend metadata builders. The same local-query/global-cache distinction applies when PCP is stacked with DCP.
 
+The concrete builder and implementation classes are resolved through `vllm_ascend/attention/context_parallel/registry.py`: every backend registers a `CPBackendProvider`, and the v1 backend classes obtain their metadata builder and attention implementation from `resolve_cp_classes`. The DCP specializations described above are therefore not hard-coded in each v1 module, and a new backend can be added without editing the existing ones; see [Extension interface](#extension-interface).
+
 ### Prefill and chunked prefill
 
 During chunked or cached prefill, the local query must attend to KV-cache shards distributed across the DCP group.
@@ -180,10 +182,236 @@ Configuration and connector compatibility are listed in the [Context Parallel us
 
 Extensions need consistent topology checks, query/cache mappings, and output layouts for projection and sampling. Reuse the base metadata builders and shared DCP helpers. Compare against non-CP attention, including cached/chunked prefill and uneven local work; graph and draft paths need their own metadata coverage. See the [testing guide](../contribution/testing.md).
 
+## Extension interface
+
+The context-parallel implementation is split into layers with one-way dependencies. A new PCP/DCP backend adds its own adapter module and provider; existing adapters, v1 backend modules, and `vllm_ascend/platform.py` stay unchanged.
+
+### Layered modules
+
+| Layer | Modules | Responsibility |
+| --- | --- | --- |
+| L0 topology | `vllm_ascend/attention/context_parallel/topology.py` | Derives and validates the TP × PCP × DCP grid from `VllmConfig` without touching the distributed runtime. |
+| L1 contracts and metadata math | `context_parallel/context.py`, `context_parallel/metadata.py`, `context_parallel/dcp_metadata.py` | `PCPAttentionContext`/`AscendPCPAttentionContext` global view; shared metadata helpers (`CPKVScope`, `use_history_current_split_decode`, `build_pcp_ordered_slot_mapping`, `DCPMetadataBuilderMixin`, `DCPImplMixin`); DCP local-length, slot-layout and cache-metadata helpers. |
+| L2 adapters | `context_parallel/{attention_cp,mla_cp,sfa_cp,dsa_cp,dsa_v41_cp}.py` | Backend-specific metadata builders and implementations; each module registers one `CPBackendProvider` at import. |
+| L3 registry | `context_parallel/registry.py` | `CPBackendProvider` plus the `register_cp_backend`, `get_cp_backend`, `list_cp_backends`, `resolve_cp_classes` and `find_cp_backend_for_builder` API. |
+| L4 entry points | `vllm_ascend/attention/{attention_v1,mla_v1,sfa_v1,dsa_v1,dsa_v41}.py`, `vllm_ascend/worker/v2/pcp_manager.py`, `vllm_ascend/worker/dcp_utils.py` | v1 backend classes delegate `get_impl_cls`/`get_builder_cls` to the registry; worker modules consume the L1 contract and re-export `AscendPCPAttentionContext`. |
+
+```text
+topology.py --> context.py, metadata.py, dcp_metadata.py     leaf modules: no adapter, v1-backend or worker imports
+                        ^
+                        | shared by
+   *_cp.py adapters --> registry.py <-- *_v1.py backends     adapters register, backends resolve
+                        ^
+                        | consumed by
+   worker/v2/pcp_manager.py, worker/dcp_utils.py             worker may depend on attention
+```
+
+### Topology
+
+`CPTopology` is an immutable description of the rank grid inside one DP replica and PP stage. `resolve_cp_topology(vllm_config)` builds it from `vllm_config.parallel_config`: `prefill_context_parallel_size` and `decode_context_parallel_size` are required, while `tensor_parallel_size`, `cp_kv_cache_interleave_size` and `pipeline_parallel_size` fall back to `1` so partial configs used by tests and draft helpers resolve.
+
+| API | Meaning |
+| --- | --- |
+| `tp_size`, `pcp_size`, `dcp_size`, `interleave_size`, `pipeline_parallel_size` | Frozen dataclass fields; `interleave_size` defaults to `1`, `pipeline_parallel_size` to `1`. |
+| `is_pcp_enabled`, `is_dcp_enabled` | `pcp_size > 1` and `dcp_size > 1` respectively. |
+| `dcp_axis` | `DCPGroupAxis` value describing which axis hosts the DCP groups. |
+| `dcp_reuses_tp_ranks` | `True` for the `TP` and `TP_PCP` axes. |
+| `pcp_face_ranks()` | One rank per PCP coordinate, with the TP coordinate fixed at `0`. |
+| `dcp_logical_rank_order()` | Logical DCP rank order; the PCP coordinate varies before the TP coordinate. |
+| `to_parallel_config_fields()` | The matching `ParallelConfig` fields (`tensor_parallel_size`, `prefill_context_parallel_size`, `decode_context_parallel_size`, `cp_kv_cache_interleave_size`, `pipeline_parallel_size`). |
+
+`DCPGroupAxis` derives the layout from the sizes alone:
+
+| Axis | Condition | Rank layout |
+| --- | --- | --- |
+| `DISABLED` | `dcp_size == 1` | No DCP groups. |
+| `TP` | `pcp_size == 1` | The DCP group lies on the TP axis. |
+| `PCP` | `dcp_size == pcp_size > 1` | The DCP group lies on the PCP axis. |
+| `TP_PCP` | `dcp_size == tp_size * pcp_size` | The DCP group spans the whole TP × PCP grid. |
+
+A rank maps to grid coordinates as `rank = pcp_coord * tp_size + tp_coord`, which matches the tables in [Parallel topology](#parallel-topology): for TP=2 and PCP=2 the PCP groups are `[0, 2]` and `[1, 3]`, and the full-grid DCP logical order is `[0, 2, 1, 3]`. DCP adds no devices; the world size stays `DP * PP * TP * PCP`.
+
+`validate_common_topology(topology, model_config=None, cache_config=None, *, vllm_config=None)` covers the backend-agnostic checks only:
+
+- PCP requires the v2 model runner (checked only when `vllm_config` is passed).
+- GQA/MQA PCP+DCP stacking requires `pcp_size == dcp_size` (checked only when `model_config` is passed and the model does not use MLA).
+- With `dcp_size > 1` and a `cache_config`, `cp_kv_cache_interleave_size` must be positive and divide `block_size`.
+
+It does not cover the upstream DCP-size rule (valid sizes are `1`, `tp`, `pcp` and `tp * pcp`, already enforced by `ParallelConfig`) or backend-specific constraints such as MLA `TP % DCP == 0`, sparse SFA `DCP == TP`, or the GQA KV-head rules listed in the user guide. Those belong to the backend or deployment layer.
+
+`dcp_axis` raises `ValueError` for a combination outside the four layouts above. That is a defensive derived-API check: it is not wired into platform validation and must not replace the upstream `ParallelConfig` checks.
+
+### Backend providers
+
+`CPBackendProvider` declares one backend. All fields except `name` have defaults:
+
+| Field | Purpose |
+| --- | --- |
+| `name` | Registry key (`gqa`, `mla`, `sfa`, `dsa`, `dsa_v41` for the built-in backends). |
+| `base_builder_cls`, `base_impl_cls` | Classes used when the backend keeps its base (non-CP) path. |
+| `cp_builder_cls`, `cp_impl_cls` | Static CP specialization pair used when `cp_resolver` is not set. |
+| `supports_pcp`, `supports_dcp` | Which axes this backend can serve; both default to `False`. |
+| `validate` | Reserved per-backend validation hook. `resolve_classes` does not call it yet; its docstring states that routing validation through the provider is a follow-up change. |
+| `cp_resolver` | Multi-layout hook `(vllm_config, topology) -> (builder_cls, impl_cls)`. When set it replaces the static `cp_*` pair; SFA uses it because it has three builder layouts and four implementation layouts. |
+| `spec_decode_drafting_updater` | Optional hook for speculative-decoding drafting metadata. It returns `True` when it handled the update; otherwise the shared `dcp_metadata.validate_spec_decode_drafting_metadata` checks run. Only SFA registers it today. |
+
+The registry module is the only selection entry point:
+
+- `register_cp_backend(provider)` stores a provider in the process-global registry. A duplicate name raises `ValueError` containing the backend name; adapters call it at import time.
+- `get_cp_backend(name)` returns the provider or `None`, and `list_cp_backends()` returns the registered names as a sorted tuple.
+- `resolve_cp_classes(name, vllm_config, topology)` returns the `(metadata builder class, attention implementation class)` pair. For the five built-in names a not-yet-imported adapter module is imported on demand from the internal lazy-loading table, so importing the registry alone stays lightweight; an unknown name raises `NotImplementedError` containing the name.
+- `find_cp_backend_for_builder(attn_metadata_builder)` returns the provider whose `base_builder_cls` or `cp_builder_cls` matches the builder instance, or `None` for an unknown builder. `vllm_ascend/worker/dcp_utils.py` uses it to route speculative-decoding drafting updates through the optional hook.
+
+Selection has two gates. First `uses_cp(topology)` is `(dcp enabled and supports_dcp) or (pcp enabled and supports_pcp)`. When it is false the backend keeps its base pair, so a topology that enables only an unsupported axis stays on the base path (PCP is inlined in the GQA and MLA v1 backends, and those providers declare `supports_pcp=False`). When it is true, `cp_resolver` is used if present, otherwise `cp_builder_cls`/`cp_impl_cls`. A missing pair raises `NotImplementedError` with the backend name (`no base implementation` or `requires CP but has no CP implementation`).
+
+Provider registration is import-time and cached for the process lifetime; adapters are not reloaded. Tests that register a temporary provider must remove it again, as the `sim_provider` fixture in `tests/ut/attention/test_cp_registry.py` does for its `sim` backend.
+
+### Adding a new PCP/DCP backend
+
+1. Add an adapter module `vllm_ascend/attention/context_parallel/<name>_cp.py` containing the CP metadata builder and attention implementation. Reuse `DCPMetadataBuilderMixin`, `DCPImplMixin` and the `context_parallel/dcp_metadata.py` helpers, and inherit from the backend's v1 builder and implementation where possible. Register the provider at module scope as shown below.
+2. Make the backend's v1 module resolve through the registry. The existing `attention_v1`, `mla_v1`, `sfa_v1`, `dsa_v1` and `dsa_v41` modules already do this; a new v1 backend should mirror them:
+   ```python
+   @staticmethod
+   def get_impl_cls():
+       vllm_config = get_current_vllm_config()
+       return resolve_cp_classes("<name>", vllm_config, resolve_cp_topology(vllm_config))[1]
+   ```
+   Import the adapter module from the backend's v1 module so the provider is registered before the first `resolve_cp_classes` call; the internal lazy-loading table in `registry.py` only covers the built-in backend names. Do not add a second selection table or edit `vllm_ascend/platform.py`.
+3. Declare optional hooks only when the backend needs them: `cp_resolver` for more than one CP layout, `spec_decode_drafting_updater` for graph-stable drafting metadata (return `True` only for builders the hook handles), and `validate` once provider-routed validation exists.
+4. Add an isolated test to `tests/ut/attention/test_cp_registry.py`: register the provider, resolve it for a base and a CP topology, and assert that the built-in providers are unchanged. `test_simulated_backend_registers_without_touching_existing_backends` is the reference; its `sim_provider` fixture removes the temporary provider during teardown.
+
+Minimal registration and resolution example, using the same API that the test above exercises:
+
+```python
+from vllm_ascend.attention.context_parallel import registry
+from vllm_ascend.attention.context_parallel.registry import CPBackendProvider, register_cp_backend
+from vllm_ascend.attention.context_parallel.topology import CPTopology
+
+
+class _MyBaseBuilder: ...
+class _MyBaseImpl: ...
+class _MyCPBuilder: ...
+class _MyCPImpl: ...
+
+
+register_cp_backend(
+    CPBackendProvider(
+        name="my_backend",
+        base_builder_cls=_MyBaseBuilder,
+        base_impl_cls=_MyBaseImpl,
+        cp_builder_cls=_MyCPBuilder,
+        cp_impl_cls=_MyCPImpl,
+        supports_pcp=True,
+        supports_dcp=True,
+    )
+)
+
+assert registry.get_cp_backend("my_backend") is not None
+cp_on = CPTopology(tp_size=2, pcp_size=2, dcp_size=1)
+assert registry.resolve_cp_classes("my_backend", None, cp_on) == (_MyCPBuilder, _MyCPImpl)
+cp_off = CPTopology(tp_size=2, pcp_size=1, dcp_size=1)
+assert registry.resolve_cp_classes("my_backend", None, cp_off) == (_MyBaseBuilder, _MyBaseImpl)
+```
+
+### Dependency rules
+
+1. Leaf modules: `topology.py`, `context.py`, `metadata.py` and `dcp_metadata.py` must not import v1 backend modules, adapter modules, or `vllm_ascend.worker.*` at runtime. `context.py` uses a type-checking-only import for `AscendInputBatch`, which is allowed. `registry.py` imports only the standard library at module scope and loads adapter modules lazily inside `resolve_cp_classes` and `find_cp_backend_for_builder`.
+2. Adapters are independent: `attention_cp.py` (GQA) and `mla_cp.py` (MLA) must not import each other.
+3. New backends are additive: adding a backend adds its own adapter file and v1 module; it does not edit an existing adapter or a central backend table.
+4. Direction between layers: worker modules may import the attention layer, but attention modules must not runtime-import worker modules. `AscendPCPAttentionContext` lives in `context.py`, and `vllm_ascend/worker/v2/pcp_manager.py` re-exports it for compatibility.
+
+Violations are caught by AST-based unit tests rather than by review only: `test_registry_module_is_a_leaf` in `tests/ut/attention/test_cp_registry.py` checks the registry's module-level imports, and `test_dcp_manager_has_no_backend_module_imports` in `tests/ut/worker/test_dcp_manager.py` checks the worker DCP manager. For a quick local check, grep the leaf modules for forbidden runtime imports before committing:
+
+```bash
+git grep -n "from vllm_ascend.attention.*_v1\|from vllm_ascend.attention.context_parallel.*_cp\|from vllm_ascend.worker" -- \
+  vllm_ascend/attention/context_parallel/topology.py \
+  vllm_ascend/attention/context_parallel/context.py \
+  vllm_ascend/attention/context_parallel/metadata.py \
+  vllm_ascend/attention/context_parallel/dcp_metadata.py
+```
+
+The only allowed match is the `if TYPE_CHECKING` import in `context.py`; any runtime import is a layer violation.
+
+## Performance validation
+
+The refactor must preserve output and must not add measurable overhead. Correctness is covered by the E2E matrix (`tests/e2e/pull_request/four_card/context_parallel/test_cp_matrix.py` compares CP-on against CP-off greedy tokens); this section describes the performance comparison, which requires NPU hardware. CPU unit tests do not measure performance.
+
+### Baseline and workloads
+
+Use `main@b87b0d881`, the branch point of the refactor, as the baseline and compare it with the refactor HEAD. Keep CANN, torch_npu and vLLM versions identical for both runs, run both on the same host, and alternate between them for at least three repetitions each; report medians so thermal and scheduling drift cancels out.
+
+| Workload | Model | Topology | Requests and sizes | Purpose |
+| --- | --- | --- | --- | --- |
+| CP-off anchor | MLA model | TP2, PCP1, DCP1 | 200 prompts, 32768 input / 128 output tokens, max concurrency 8 | Absolute baseline and functional anchor |
+| PCP+DCP stacked | MLA model (for example `vllm-ascend/DeepSeek-V3.2-W8A8-Pruning`) | TP2, PCP2, DCP2 | Same as the anchor | PCP+DCP overhead |
+| PCP+DCP stacked | `Qwen/Qwen3-8B` | TP2, PCP2, DCP2 | Same as the anchor | GQA stacking overhead |
+
+Set `--block-size 128 --cp-kv-cache-interleave-size 128` for the DCP workloads; with `dcp_size > 1` the interleave size must divide the block size (see [KV-cache layout](#kv-cache-layout)). For SFA, keep `cp_kv_cache_interleave_size` equal to the block size.
+
+Start the server with the topology under test, using the same model-specific flags (quantization, expert parallel, and so on) as the functional runs:
+
+```bash
+vllm serve <model> \
+  --tensor-parallel-size 2 \
+  --prefill-context-parallel-size 2 \
+  --decode-context-parallel-size 2 \
+  --block-size 128 \
+  --cp-kv-cache-interleave-size 128 \
+  --max-model-len 40960 \
+  --gpu-memory-utilization 0.9
+```
+
+Then run the benchmark from another shell:
+
+```bash
+vllm bench serve \
+  --backend openai-chat \
+  --model <model> \
+  --dataset-name random \
+  --random-input-len 32768 \
+  --random-output-len 128 \
+  --num-prompts 200 \
+  --max-concurrency 8 \
+  --metric-percentiles 50,90,99 \
+  --ignore-eos \
+  --save-result \
+  --result-filename <version>.json
+```
+
+Keep the benchmark flags, request sizes and concurrency identical between baseline and refactor.
+
+### Metrics, thresholds and record template
+
+Report time to first token (TTFT) p50/p90/p99 and time per output token (TPOT) p50/p90/p99 in milliseconds, output tokens per second, requests per second, and peak HBM per device. Read peak HBM from `torch.npu.max_memory_allocated()`/`torch.npu.max_memory_reserved()` at the end of each run, or from `npu-smi info -t memory -i <device>` while the server is loaded.
+
+A run passes when:
+
+- Throughput and latency regressions stay within 2% of the baseline. Do not exceed 3%: that exceeds typical same-host run-to-run variance and must be profiled before merging.
+- Peak HBM is at most baseline + 1%, for both allocated and reserved memory.
+- Each metric comes from the median of three runs, not from a single run.
+
+Fill one row per run and attach the median rows to the pull request together with the functional results:
+
+```text
+| Workload | Version | TTFT p50/p99 (ms) | TPOT p50/p99 (ms) | out tok/s | req/s | Peak HBM (MiB) | Regression vs baseline |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| CP-off anchor, MLA TP2 | baseline main@b87b0d881 | | | | | | - |
+| CP-off anchor, MLA TP2 | refactor HEAD | | | | | | |
+| MLA TP2 PCP2 DCP2 | baseline main@b87b0d881 | | | | | | - |
+| MLA TP2 PCP2 DCP2 | refactor HEAD | | | | | | |
+| GQA TP2 PCP2 DCP2 | baseline main@b87b0d881 | | | | | | - |
+| GQA TP2 PCP2 DCP2 | refactor HEAD | | | | | | |
+```
+
+Run this on an NPU machine (or the nightly/PR NPU CI); CPU unit tests do not cover it.
+
 ## Related Files
 
 - Slot mapping: `vllm_ascend/worker/block_table.py`
 - Input and attention metadata: `vllm_ascend/worker/v1/model_runner.py`
+- CP topology derivation: `vllm_ascend/attention/context_parallel/topology.py`
+- CP attention contract and shared metadata helpers: `vllm_ascend/attention/context_parallel/context.py`, `vllm_ascend/attention/context_parallel/metadata.py`, `vllm_ascend/attention/context_parallel/dcp_metadata.py`
+- CP backend registry and selection: `vllm_ascend/attention/context_parallel/registry.py`
 - Shared DCP backend capabilities: `vllm_ascend/attention/context_parallel/common_cp.py`
 - GQA DCP backend: `vllm_ascend/attention/context_parallel/attention_cp.py`
 - MLA DCP backend: `vllm_ascend/attention/context_parallel/mla_cp.py`
@@ -192,5 +420,5 @@ Extensions need consistent topology checks, query/cache mappings, and output lay
 - Upstream PCP groups and virtual batches: `vllm/distributed/parallel_state.py`, `vllm/v1/worker/gpu/pcp_manager.py`
 - PCP batch and metadata: `vllm_ascend/worker/v2/pcp_manager.py`, `vllm_ascend/worker/v2/attn_utils.py`
 - PCP/DCP slot mapping: `vllm_ascend/worker/v2/block_table.py`
-- Backend selection and configuration: `vllm_ascend/platform.py`
+- Backend configuration and CP validation: `vllm_ascend/platform.py`
 - DSA V4.1 PCP backend: `vllm_ascend/attention/context_parallel/dsa_v41_cp.py`
