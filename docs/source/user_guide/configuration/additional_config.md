@@ -388,3 +388,22 @@ KVPP supports non-hybrid MLA/SFA models with eager execution or `PIECEWISE` grap
 KVPP can be combined with `MooncakeConnectorV2` for P/D disaggregation and `AscendStoreConnector` for KV pooling under the connector-specific restrictions in the [KVPP guide](../feature_guide/kvpp.md#kv-transfer-configuration). Enable KVPP only on the prefill node for P/D disaggregation. `MultiConnector` can combine these connectors; each child must satisfy its own type and role requirements.
 
 PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-forward cache contents before attention; the broadcast decision uses the global scheduled batch rather than PCP-local segment offsets.
+
+## GDN input projection overlap
+
+Enable with `--additional-config '{"gdn_projection_overlap_max_tokens": 64}'`.
+The default is 0 (disabled); 64 is a trial setting, not a measured 910C threshold.
+Only BF16 plain unquantized QKVZ and BA projections, PCP=1, no LoRA/DBO,
+no output gather or custom communication op, and ACLGraph capture outside
+Dynamo tracing are eligible. Other paths remain serial. Quantized projections
+and the split QKV/Z LoRA path are excluded. Both known upstream and Ascend
+unquantized linear methods are accepted. Weight tensors are not repacked.
+
+For whole-model evaluation, use MRV2 with an eager forward captured into a
+full decode ACLGraph, for example
+`--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}'`.
+`--enforce-eager` disables graph capture and therefore does not enable overlap.
+Dynamo-compiled forward regions stay serial; confirm the chosen serving path
+with a trace rather than assuming that the configuration flag proves overlap.
+
+Validate correctness, quality and performance on the deployment hardware before enabling in production.

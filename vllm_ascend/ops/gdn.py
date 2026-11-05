@@ -45,6 +45,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
+from vllm_ascend.ops.gdn_projection import project_gdn_inputs
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -399,20 +400,18 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             a = a.contiguous()
         else:
             if not self.gqa_interleaved_layout:
-                mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+                mixed_qkvz, ba = project_gdn_inputs(self, hidden_states)
                 num_tokens = mixed_qkvz.size(0)
                 qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
                 z_size = self.value_dim // self.tp_size
                 mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
                 z = z.reshape(z.size(0), -1, self.head_v_dim)
-                ba, _ = self.in_proj_ba(hidden_states)
                 b, a = self._split_ba_for_tp(ba)
 
                 b = b.contiguous()
                 a = a.contiguous()
             else:
-                projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-                projected_states_ba, _ = self.in_proj_ba(hidden_states)
+                projected_states_qkvz, projected_states_ba = project_gdn_inputs(self, hidden_states)
                 num_tokens = projected_states_qkvz.size(0)
 
                 mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat(

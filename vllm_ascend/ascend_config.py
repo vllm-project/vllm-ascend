@@ -642,6 +642,7 @@ class AscendConfig:
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
+    gdn_projection_overlap_max_tokens: int = 0
     enable_shared_expert_dp: bool = False
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_turboquant: bool = False
@@ -661,6 +662,8 @@ class AscendConfig:
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
+        if self.gdn_projection_overlap_max_tokens < 0:
+            raise ValueError("gdn_projection_overlap_max_tokens must be non-negative")
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.

@@ -1,0 +1,4 @@
+pr: 0  # Replace with the real PR number before submission.
+entries:
+  - category: feature
+    text: Added experimental opt-in gdn input projection overlap.
