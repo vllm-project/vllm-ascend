@@ -943,8 +943,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
         "multistream_overlap_shared_expert": true,
         "scheduler_config": {"recompute_scheduler_enable": true},
         "enable_shared_expert_dp": true,
-        "enable_flashcomm1": true,
-        "ascend_compilation_config": {"enable_npugraph_ex": false,"enable_static_kernel": true,"enable_super_kernel": false}
+        "enable_flashcomm1": true
       }' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "engine_id": "1", "kv_port": "36580"}'
@@ -1019,7 +1018,8 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       and `enable_shared_expert_dp` to `true`.
     - Prefill uses `--max-num-seqs 32` and
       `--max-num-batched-tokens 16384`. Decode uses `40` and `240`, respectively.
-    - Decode uses `FULL_DECODE_ONLY` with default capture sizes, static kernels, FlashComm1, shared-expert DP and multistream
+    - Decode uses `FULL_DECODE_ONLY` with default capture sizes, FlashComm1,
+      shared-expert DP and multistream
       overlap. Recompute scheduling is enabled through `scheduler_config`.
     - Both roles explicitly limit image input to one image per prompt.
     - `MooncakeConnectorV2` uses `kv_producer` and engine ID `0` on Prefill,
