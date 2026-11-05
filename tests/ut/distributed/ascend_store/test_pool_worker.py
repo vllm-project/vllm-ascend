@@ -594,6 +594,7 @@ class TestKVPPPoolWorker(unittest.TestCase):
 
     def test_pp_hybrid_lookup_requires_only_group_owners(self):
         worker = make_worker(self, pp_size=2, pp_partition=[1, 1])
+        worker._pp_group_owners = ((0,), (1,))
         worker.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[
                 SimpleNamespace(layer_names=["model.layers.0.self_attn"]),
@@ -628,6 +629,17 @@ class TestKVPPPoolWorker(unittest.TestCase):
         self.assertTrue(any("@group:1@" in key and "@pp_rank:1@" in key for key in queried_keys))
         self.assertFalse(any("@group:0@" in key and "@pp_rank:1@" in key for key in queried_keys))
         self.assertFalse(any("@group:1@" in key and "@pp_rank:0@" in key for key in queried_keys))
+
+    def test_pp_hybrid_lookup_does_not_report_partial_pipeline_hit(self):
+        worker = make_worker(self, pp_size=2, pp_partition=[1, 1])
+        worker._pp_group_owners = ((0, 1),)
+        worker.m_store.exists.return_value = [1, 0]
+
+        self.assertEqual(worker.lookup_scheduler(16, ["h0"], [0]), 0)
+        keys = worker.m_store.exists.call_args.args[0]
+        self.assertEqual(len(keys), 2)
+        self.assertIn("@pp_rank:0@", keys[0])
+        self.assertIn("@pp_rank:1@", keys[1])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")

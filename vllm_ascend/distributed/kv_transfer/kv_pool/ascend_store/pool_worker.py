@@ -5,7 +5,6 @@ import math
 import threading
 import time
 from collections.abc import Callable, Sequence
-from copy import copy
 
 import torch
 import vllm.envs as envs
@@ -100,6 +99,7 @@ class KVPoolWorker:
 
         self._init_parallelism_info(model_config, parallel_config)
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
+        self._init_pp_group_owners()
         self._init_key_head_config(model_config, parallel_config)
         self._init_metadata(model_config, vllm_config, extra_config)
         self._init_backend(parallel_config, extra_config)
@@ -213,6 +213,45 @@ class KVPoolWorker:
 
     def _compute_use_hybrid(self, vllm_config, kv_cache_groups) -> bool:
         return uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
+
+    def _init_pp_group_owners(self) -> None:
+        """Collect cache-group ownership from every PP stage.
+
+        ``kv_cache_config`` is worker-local after vLLM projects the model onto
+        pipeline stages.  The rank-0 lookup server therefore cannot infer PP
+        ownership from its own ``layer_names``.  Gather the per-stage presence
+        mask while every worker is initializing and retain the resulting
+        global manifest for lookup key expansion.
+        """
+        self._pp_group_owners: tuple[tuple[int, ...], ...] | None = None
+        if self.pp_size <= 1:
+            self._pp_group_owners = tuple((0,) for _ in range(self.num_kv_cache_groups))
+            return
+        groups = getattr(self.kv_cache_config, "kv_cache_groups", None)
+        pp_group = get_pp_group()
+        cpu_group = getattr(pp_group, "cpu_group", None)
+        if groups is None or cpu_group is None:
+            return
+
+        local_presence = tuple(bool(group.layer_names) for group in groups)
+        gathered: list[tuple[bool, ...] | None] = [None] * self.pp_size
+        try:
+            torch.distributed.all_gather_object(gathered, local_presence, group=cpu_group)
+        except (RuntimeError, ValueError) as error:
+            logger.warning("Failed to collect PP cache-group ownership; lookup will check all PP ranks: %s", error)
+            return
+        if any(presence is None or len(presence) != self.num_kv_cache_groups for presence in gathered):
+            logger.warning("Inconsistent PP cache-group manifests; lookup will check all PP ranks")
+            return
+
+        owners = tuple(
+            tuple(pp_rank for pp_rank, presence in enumerate(gathered) if presence is not None and presence[group_id])
+            for group_id in range(self.num_kv_cache_groups)
+        )
+        if any(not group_owners for group_owners in owners):
+            logger.warning("PP cache-group manifest contains an unowned group; lookup will check all PP ranks")
+            return
+        self._pp_group_owners = owners
 
     def _init_key_head_config(self, model_config, parallel_config) -> None:
         self.current_layer = 0
@@ -1546,40 +1585,15 @@ class KVPoolWorker:
     def _get_group_pp_ranks(self, group_id: int) -> list[int]:
         """Return PP stages that own at least one layer in a cache group.
 
-        Fall back to every stage when the global group manifest or a layer's
-        physical index is unavailable. A conservative fallback can only lose a
-        cache hit; it must never report a partial prefix as complete.
+        Fall back to every stage when the global ownership manifest is
+        unavailable. A conservative fallback can only lose a cache hit; it
+        must never report a partial prefix as complete.
         """
         all_ranks = list(range(self.pp_size))
-        if self.pp_size <= 1 or self.kv_cache_config is None:
+        owners = getattr(self, "_pp_group_owners", None)
+        if owners is None or group_id >= len(owners):
             return all_ranks
-        groups = getattr(self.kv_cache_config, "kv_cache_groups", None)
-        if groups is None or group_id >= len(groups):
-            return all_ranks
-        layer_names = groups[group_id].layer_names
-        if not layer_names:
-            return all_ranks
-
-        try:
-            layer_indices = [self._extract_physical_layer_index(name) for name in layer_names]
-            stage_ranges: list[tuple[int, int, int]] = []
-            parallel_config = self.vllm_config.parallel_config
-            for pp_rank in all_ranks:
-                stage_config = copy(parallel_config)
-                stage_config.rank = pp_rank * self.tp_size
-                start, end = self.vllm_config.model_config.get_layers_start_end_indices(stage_config)
-                stage_ranges.append((pp_rank, start, end))
-
-            owners: set[int] = set()
-            for index in layer_indices:
-                index_owners = {pp_rank for pp_rank, start, end in stage_ranges if start <= index < end}
-                if not index_owners:
-                    return all_ranks
-                owners.update(index_owners)
-            return sorted(owners)
-        except (AttributeError, IndexError, TypeError, ValueError):
-            pass
-        return all_ranks
+        return list(owners[group_id])
 
     def _expand_lookup_key_variants(self, key: str, group_id: int, include_all_ranks: bool) -> list[str]:
         if not include_all_ranks:
