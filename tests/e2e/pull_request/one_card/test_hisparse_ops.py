@@ -606,6 +606,70 @@ def test_random_request_unions(capture):
         mapping.close()
 
 
+@pytest.mark.parametrize("rows,topk,row_bytes", [(1, 17, 656), (4, 2048, 656), (16, 2048, 1152)])
+@pytest.mark.parametrize("capture", [False, True])
+def test_compact_refill_tiles_current_counts_and_preserves_page_gaps(rows, topk, row_bytes, capture):
+    block = 128
+    blocks = (rows * topk + block - 1) // block + 1
+    host = allocate_mapped_host((blocks * block, row_bytes), torch.uint8)
+    mapping = host._hisparse_registration
+    host.copy_((torch.arange(host.shape[0], dtype=torch.int32) % 251).to(torch.uint8)[:, None].expand_as(host))
+    backing = torch.full((blocks, 2, block, row_bytes), 203, dtype=torch.uint8, device="npu")
+    hot = backing[:, 1]
+    ops = HiSparseNPUOps(mapping)
+    original_source = torch.arange(rows * topk, dtype=torch.int32).view(rows, topk)
+    original_destination = original_source + block
+    original_source[:, 4] = -1
+    original_source[:, 6] = host.shape[0] + 7
+    original_destination[:, 2] = -1
+    original_destination[:, 5] = blocks * block + 3
+    source, destination = original_source.to("npu"), original_destination.to("npu")
+    counts = torch.zeros(rows, dtype=torch.int32, device="npu")
+
+    def forward():
+        ops.hisparse_gather_compact(host, hot, source, destination, counts)
+
+    graph = None
+    try:
+        forward()
+        torch.npu.synchronize()
+        if capture:
+            graph = torch.npu.NPUGraph()
+            with torch.npu.graph(graph):
+                forward()
+        for count in (0, 1, 7, 8, 9, 15, 16, 17, topk, 0):
+            backing.fill_(203)
+            current = torch.full((rows,), count, dtype=torch.int32)
+            if rows > 1:
+                current[1] = -3
+            if rows > 2 and count == topk:
+                current[2] = topk + 3
+            counts.copy_(current)
+            source.copy_(original_source if count else torch.full_like(original_source, -1))
+            destination.copy_(original_destination if count else torch.full_like(original_destination, -1))
+            if graph is None:
+                forward()
+            else:
+                graph.replay()
+            torch.npu.synchronize()
+            expected = torch.full(backing.shape, 203, dtype=torch.uint8)
+            for row in range(rows):
+                length = min(topk, max(0, int(current[row])))
+                src = original_source[row, :length].long()
+                dst = original_destination[row, :length].long()
+                valid = (src >= 0) & (dst >= 0) & (dst < blocks * block)
+                payload = torch.zeros((length, row_bytes), dtype=torch.uint8)
+                from_host = valid & (src < host.shape[0])
+                payload[from_host] = host[src[from_host]]
+                expected[dst[valid] // block, 1, dst[valid] % block] = payload[valid]
+            torch.testing.assert_close(backing.cpu(), expected, rtol=0, atol=0)
+    finally:
+        torch.npu.synchronize()
+        if graph is not None:
+            graph.reset()
+        mapping.close()
+
+
 def test_plan_gather_and_written_slot_invalidation():
     host = allocate_mapped_host((32, 16), torch.float32)
     mapping = host._hisparse_registration
