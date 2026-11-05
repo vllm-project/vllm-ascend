@@ -3156,16 +3156,22 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         indexer_layer_name = "model.layers.1.self_attn.indexer.k_cache"
         packed_head_dim = get_sfa_qsfa_packed_head_dim(512, 64)
 
-        for enable_sfa_c8, enable_li_c8 in (
-            (False, False),
-            (True, False),
-            (False, True),
-            (True, True),
+        for hybrid, enable_sfa_c8, enable_li_c8 in (
+            (False, False, False),
+            (False, True, False),
+            (False, False, True),
+            (False, True, True),
+            (True, False, False),
+            (True, True, False),
+            (True, False, True),
+            (True, True, True),
         ):
             with self.subTest(
+                hybrid=hybrid,
                 enable_sfa_c8=enable_sfa_c8,
                 enable_li_c8=enable_li_c8,
             ):
+                runner.hybrid_with_attn_and_mamba = hybrid
                 main_spec = AscendMLAAttentionSpec(
                     block_size=runner.block_size,
                     num_kv_heads=1,
