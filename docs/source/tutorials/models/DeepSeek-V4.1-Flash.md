@@ -59,8 +59,8 @@ Download the quantized checkpoint from ModelScope for the hardware shown below.
 
 | Checkpoint | Hardware | Deployment | Download | Notes |
 | --- | --- | --- | --- | --- |
-| `DeepSeek-V4.1-Flash-1017-w4a8` | A3 series (8 NPUs × 128GB per node; 16 logical devices) | 1 node for single-node deployment; 2 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8) | Recommended for performance. Includes DSpark draft parameters and INT8 Engram tables. |
-| `DeepSeek-V4.1-Flash-1017-w8a8` | A3 series (8 NPUs × 128GB per node; 16 logical devices) | 1 node for single-node deployment; 2 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8) | Also supported. For PD, use Prefill DP4/TP4 and Decode DP8/TP2. |
+| `DeepSeek-V4.1-Flash-1017-w4a8` | A3 series (64GB × 16) | 1 node for single-node deployment; 2 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8) | Recommended for performance. Includes DSpark draft parameters and INT8 Engram tables. |
+| `DeepSeek-V4.1-Flash-1017-w8a8` | A3 series (64GB × 16) | 1 node for single-node deployment; 2 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8) | Also supported. For PD, use Prefill DP4/TP4 and Decode DP8/TP2. |
 | `DeepSeek-V4.1-Flash-1017-w4a8` | A2 series (64GB × 8 per node) | 2 nodes for colocated deployment; 4 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8) | / |
 | `DeepSeek-V4.1-Flash-1017-w8a8` | A2 series (64GB × 8 per node) | 2 nodes for colocated deployment; 4 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8) | / |
 
