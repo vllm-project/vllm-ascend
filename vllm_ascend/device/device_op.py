@@ -51,13 +51,6 @@ else:
     triton_q_rms = None  # type: ignore
 
 
-@lru_cache(maxsize=1)
-def _load_a3_dcp_qli() -> None:
-    """Load the optional isolated bridge when the full extension lacks it."""
-    if not hasattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_dcp"):
-        torch.ops.load_library(os.path.join(os.path.dirname(os.path.dirname(__file__)), "_qli_a3_dcp.so"))
-
-
 class BaseDeviceAdaptor:
     native_dcp_indexer = False
 
@@ -76,8 +69,7 @@ class BaseDeviceAdaptor:
     ) -> torch.Tensor:
         if not uses_native_int8_sparse_adaptor(get_current_hardware_profile()):
             raise NotImplementedError("Owner-local INT8 QLI metadata requires the A3 native QLI kernel")
-        _load_a3_dcp_qli()
-        return torch.ops._C_ascend.npu_quant_lightning_indexer_dcp_metadata(
+        return torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
             num_heads_q,
             1,
             head_dim,
@@ -124,7 +116,7 @@ class BaseDeviceAdaptor:
             or kv_cache.dtype != torch.int8
         ):
             raise NotImplementedError("DCP QLI requires A3 INT8 query and key caches")
-        indices, scores, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_dcp(
+        indices, scores = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             q_li.contiguous(),
             kv_cache,
             weights.to(torch.float16).contiguous(),
@@ -140,7 +132,6 @@ class BaseDeviceAdaptor:
             layout_k="PA_BBND",
             mask_mode=3,
             cmp_ratio=1,
-            candidate_mode=3,
             output_idx_offset=None,
             enable_dcp=True,
             cp_world=cp_world,

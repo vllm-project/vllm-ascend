@@ -62,7 +62,6 @@ def load_adaptor(native, metadata, *, native_int8=True):
     namespace = {
         "get_current_hardware_profile": lambda: None,
         "uses_native_int8_sparse_adaptor": lambda profile: native_int8,
-        "_load_a3_dcp_qli": lambda: None,
         "torch": SimpleNamespace(
             Tensor=Tensor,
             int8="int8",
@@ -71,7 +70,6 @@ def load_adaptor(native, metadata, *, native_int8=True):
             ops=SimpleNamespace(
                 _C_ascend=SimpleNamespace(
                     npu_quant_lightning_indexer_v2_metadata=metadata,
-                    npu_quant_lightning_indexer_dcp_metadata=metadata,
                     npu_quant_lightning_indexer_local_candidates=native,
                 )
             ),

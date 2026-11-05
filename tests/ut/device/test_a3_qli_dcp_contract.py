@@ -27,12 +27,12 @@ class TestDcpContract(unittest.TestCase):
     def test_global_bounds_local_lengths_and_shard_parameters_are_distinct(self):
         calls = []
         indices, scores = object(), object()
-        native = lambda *a, **kw: calls.append((a, kw)) or (indices, scores, None)
+        native = lambda *a, **kw: calls.append((a, kw)) or (indices, scores)
         fake_torch = SimpleNamespace(
             Tensor=Tensor,
             int8="int8",
             float16="float16",
-            ops=SimpleNamespace(_C_ascend=SimpleNamespace(npu_quant_lightning_indexer_dcp=native)),
+            ops=SimpleNamespace(_C_ascend=SimpleNamespace(npu_quant_lightning_indexer_v2=native)),
         )
         namespace = dict(
             torch=fake_torch, uses_native_int8_sparse_adaptor=lambda _: True, get_current_hardware_profile=lambda: None
@@ -76,11 +76,11 @@ class TestDcpContract(unittest.TestCase):
             cp_rank=7,
             cp_kv_cache_interleave_size=768,
             return_value=1,
-            candidate_mode=3,
         ).items():
             self.assertEqual(kw[key], value)
+        self.assertNotIn("candidate_mode", kw)
 
-    def test_normalization_reuses_fp32_storage_and_rejects_old_bridge(self):
+    def test_normalization_reuses_fp32_storage_and_rejects_non_fp32_scores(self):
         launches = []
 
         class Kernel:

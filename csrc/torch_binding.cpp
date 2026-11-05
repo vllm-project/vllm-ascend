@@ -44,7 +44,6 @@
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
 #include "attention/kv_compress_epilog_v2/kv_compress_epilog_v2_torch_adpt.h"
 #include "attention/quant_lightning_indexer_v2/quant_lightning_indexer_v2_torch_adpt.h"
-#include "attention/quant_lightning_indexer_a3_dcp/torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention_vllm/kv_quant_sparse_flash_attention_vllm_torch_adpt.h"
 #include "attention/fused_sparse_attention_overlap/fused_sparse_attention_overlap_torch_adpt.h"
 #include "attention/fused_lightning_indexer_manage/fused_lightning_indexer_manage_torch_adpt.h"
@@ -3120,8 +3119,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
              &vllm_ascend::qli_v2::QuantLightningIndexerLocalCandidates);
     ops.impl("npu_quant_lightning_indexer_local_candidates", torch::kMeta,
              &vllm_ascend::qli_v2::QuantLightningIndexerLocalCandidates);
-
-#include "attention/quant_lightning_indexer_a3_dcp/register.inc"
 
     ops.def(
         "npu_quant_lightning_indexer_v3(Tensor query, Tensor key, Tensor weights, "
