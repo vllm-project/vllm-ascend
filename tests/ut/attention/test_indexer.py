@@ -598,7 +598,7 @@ def _query_shard_builder(query_lens, seq_lens, tp_size=2):
 def test_query_shards_preserve_every_causal_row_and_bound_padding(query_lens, seq_lens, tp):
     builder, common = _query_shard_builder(query_lens, seq_lens, tp)
     expected = [list(range(k - q + 1, k + 1)) for q, k in zip(query_lens, seq_lens)]
-    observed = [[] for _ in query_lens]
+    observed: list[list[int]] = [[] for _ in query_lens]
     shards = []
     for rank in range(tp):
         with patch("vllm_ascend.attention.indexer.get_tp_group", return_value=SimpleNamespace(rank_in_group=rank)):
