@@ -1,4 +1,0 @@
-pr: 21055
-entries:
-  - category: bugfix
-    text: Fixed missing image and video pixel normalization for GLM-5.3-Flash when device-side normalization is enabled on Ascend.
