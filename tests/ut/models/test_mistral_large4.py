@@ -54,6 +54,29 @@ class _Impl:
         return attn_metadata.slot_mapping
 
 
+class _ImplWithTopkHook(_Impl):
+    """An impl that defines the top-k hook AscendSFAImpl does not."""
+
+    def __init__(self, calls: list[str]):
+        self._calls = calls
+
+    def record_logical_topk_ready(self) -> None:
+        self._calls.append("topk_ready")
+
+
+class _Attn:
+    """Stand-in for the MLAAttention module: callable, and carries an impl."""
+
+    def __init__(self, impl: _Impl | None = None, on_call=None):
+        self.impl = impl if impl is not None else _Impl()
+        self._on_call = on_call
+
+    def __call__(self, *_args, **_kwargs):
+        if self._on_call is not None:
+            self._on_call()
+        return torch.zeros(3, 8)
+
+
 def _attn(spec):
     module = ml4.MistralMLAAttention.__new__(ml4.MistralMLAAttention)
     torch.nn.Module.__init__(module)
@@ -139,35 +162,36 @@ def test_adopt_switches_the_attention_class_and_drops_the_cuda_stream():
         assert layer.indexer_events == []
 
 
-def test_forward_runs_the_indexer_before_the_projections_and_skips_the_hook():
+def test_forward_projects_then_attends_and_skips_the_hook():
     """Serial order, and no call to a method the Ascend SFA impl lacks."""
-    calls = []
+    calls: list[str] = []
     attn = _attn(_spec(0, 0))
     attn.__class__ = ml4.AscendMistralMLAAttention
     attn.num_local_heads = 2
     attn.v_head_dim = 4
-    attn.indexer = lambda *a, **k: calls.append("indexer")
+    # Driving the indexer is AscendSFAImpl's job, not this module's.
+    attn.indexer = lambda *a, **k: pytest.fail("the model must not run the indexer")
 
     def _project(*_args):
         calls.append("project")
         return torch.zeros(3, 2, 8), torch.zeros(3, 16), torch.zeros(3, 1, 4)
 
+    def _o_proj(x):
+        calls.append("o_proj")
+        return (x,)
+
     attn._project_qkv = _project
-    attn.attn = SimpleNamespace(
-        impl=_Impl(),  # no record_logical_topk_ready, as on Ascend
-        __call__=None,
-    )
-    attn.attn = lambda *a, **k: (calls.append("attn"), torch.zeros(3, 8))[1]
-    attn.attn.impl = _Impl()
-    attn.o_proj = lambda x: (calls.append("o_proj"), x)[1:]
+    # A plain _Impl, which has no record_logical_topk_ready, as on Ascend.
+    attn.attn = _Attn(on_call=lambda: calls.append("attn"))
+    attn.o_proj = _o_proj
 
     attn.forward(torch.zeros(3), torch.zeros(3, 16), torch.zeros(3), None)
 
-    assert calls == ["indexer", "project", "attn", "o_proj"]
+    assert calls == ["project", "attn", "o_proj"]
 
 
 def test_forward_calls_the_topk_hook_when_the_impl_defines_it():
-    calls = []
+    calls: list[str] = []
     attn = _attn(_spec(0, 0))
     attn.__class__ = ml4.AscendMistralMLAAttention
     attn.num_local_heads = 2
@@ -178,10 +202,7 @@ def test_forward_calls_the_topk_hook_when_the_impl_defines_it():
         torch.zeros(3, 16),
         torch.zeros(3, 1, 4),
     )
-    impl = _Impl()
-    impl.record_logical_topk_ready = lambda: calls.append("topk_ready")
-    attn.attn = lambda *a, **k: torch.zeros(3, 8)
-    attn.attn.impl = impl
+    attn.attn = _Attn(impl=_ImplWithTopkHook(calls))
     attn.o_proj = lambda x: (x,)
 
     attn.forward(torch.zeros(3), torch.zeros(3, 16), torch.zeros(3), None)
@@ -372,8 +393,7 @@ def test_the_model_does_not_call_the_indexer_itself():
         torch.zeros(3, 16),
         torch.zeros(3, 1, 4),
     )
-    attn.attn = lambda *a, **k: torch.zeros(3, 8)
-    attn.attn.impl = _Impl()
+    attn.attn = _Attn()
     attn.o_proj = lambda x: (x,)
 
     attn.forward(torch.zeros(3), torch.zeros(3, 16), torch.zeros(3), None)

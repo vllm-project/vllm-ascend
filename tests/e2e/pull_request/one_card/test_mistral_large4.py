@@ -45,7 +45,7 @@ INDEX_SHARING = ["full", "full", "shared", "full", "full", "shared", "full", "fu
 SHARING_LAYERS = [i for i, src in enumerate(KV_SOURCE_LAYERS) if src != i]
 INDEXER_LAYERS = [i for i, kind in enumerate(INDEX_SHARING) if kind == "full"]
 
-CONFIG = {
+CONFIG: dict[str, Any] = {
     "model_type": "mistral_large4",
     "architectures": ["MistralLarge4ForCausalLM"],
     "vocab_size": VOCAB_SIZE,
