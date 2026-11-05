@@ -478,6 +478,21 @@ class NPUPlatform(Platform):
         if model_config is not None and model_config.hf_config.model_type == "deepseek_v4":
             return
 
+        # DeepSeek V4.1 keys its page geometry on the physical block size as well, and
+        # its cache specs are built with the size refresh_block_size() settled before
+        # the model is constructed. The parent's Phase 1 would replace that size with
+        # one derived from get_supported_kernel_block_sizes(); the V4.1 cache backend
+        # does not override that call, so it answers with the default 16 while the
+        # allocated cache keeps the settled size. AscendDSAV41MetadataBuilder then
+        # rebuilds the V4.1 MLA spec from the worker's *current* cache_config.block_size,
+        # so the metadata would describe a different page geometry (rows per page and
+        # the resulting sparse coordinates) than the cache it is applied to.
+        # Phase 2 is for hybrid models, Phase 3 for mixed KV dtypes, and the mamba
+        # handling below is gated on mamba_cache_mode; none of those is a DeepSeek V4.1
+        # configuration either. Keep the settled size, exactly as for DeepSeek V4.
+        if model_config is not None and _get_deepseek_v4_variant(model_config) == "V4.1":
+            return
+
         super().update_block_size_for_backend(vllm_config)
 
         # TODO: NPU still sets block_size in check_and_update_config.
