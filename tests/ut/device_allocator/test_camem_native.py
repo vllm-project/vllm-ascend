@@ -6,8 +6,6 @@ This verifies native ownership/error handling, not NPU graph correctness.
 Run independently with --confcutdir=tests/ut/device_allocator if no Torch exists.
 """
 
-import ctypes
-import importlib.util
 import pathlib
 import shutil
 import subprocess
@@ -107,37 +105,9 @@ def native_extension(tmp_path_factory):
     return extension
 
 
-@pytest.fixture(scope="module")
-def native(native_extension):
-    extension = native_extension
-    spec = importlib.util.spec_from_file_location("vllm_ascend_C", extension)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    lib = ctypes.PyDLL(str(extension))
-    lib.my_malloc.argtypes = [ctypes.c_ssize_t, ctypes.c_int, ctypes.c_void_p]
-    lib.my_malloc.restype = ctypes.c_void_p
-    lib.my_free.argtypes = [ctypes.c_void_p, ctypes.c_ssize_t, ctypes.c_int, ctypes.c_void_p]
-    lib.my_free.restype = None
-    allocations = {}
-
-    def remember(handle):
-        allocations[handle[2]] = handle
-
-    def forget(ptr):
-        return allocations[ptr]
-
-    def complete(ptr):
-        allocations.pop(ptr)
-
-    module.init_module(remember, forget, complete)
-    yield module, lib, allocations
-    assert allocations == {}
-    assert [lib.fake_balance(i) for i in (1, 2, 3)] == [0, 0, 0]
-
-
-# Faults that poison a native deleter run in a fresh interpreter: the production
-# error is deliberately sticky and has no reset that could resume stale graphs.
+# Every shim case runs in a fresh interpreter. Besides sticky deleter errors,
+# fake ACL symbols must be isolated from any real torch-npu runtime already
+# loaded by other tests in the parent pytest process.
 NATIVE_CHILD = r"""
 import ctypes, importlib.util, sys
 extension, case = sys.argv[1:]
@@ -181,6 +151,51 @@ elif case == "legacy":
     assert not allocations
     assert [lib.fake_balance(i) for i in (1, 2, 3)] == [0, 0, 0]
     module.python_check_free_error()
+elif case.startswith("repeat-"):
+    ptr = lib.my_malloc(100, 0, None)
+    handle = allocations[ptr]
+    assert handle[:3] == (0, 4096, ptr)
+    for _ in range(3):
+        module.python_unmap_and_release(*handle)
+        module.python_unmap_and_release(*handle)
+        assert [lib.fake_balance(i) for i in (1, 2)] == [0, 0]
+        module.python_create_and_map(*handle)
+        module.python_create_and_map(*handle)
+        assert [lib.fake_balance(i) for i in (1, 2)] == [1, 1]
+    if case == "repeat-asleep":
+        module.python_unmap_and_release(*handle)
+    lib.my_free(ptr, 100, 0, None)
+    assert not allocations
+    assert [lib.fake_balance(i) for i in (1, 2, 3)] == [0, 0, 0]
+elif case.startswith(("restore-", "release-")):
+    ptr = lib.my_malloc(100, 0, None)
+    handle = allocations[ptr]
+    operation = int(case.split("-")[1])
+    if case.startswith("restore-"):
+        module.python_unmap_and_release(*handle)
+        lib.fake_fail(operation)
+        try:
+            module.python_create_and_map(*handle)
+        except RuntimeError as error:
+            assert "aclrtMallocPhysical" in str(error) or "aclrtMapMem" in str(error)
+        else:
+            raise AssertionError("restore fault was not observed")
+        assert [lib.fake_balance(i) for i in (1, 2)] == [0, 0]
+        module.python_create_and_map(*handle)
+    else:
+        lib.fake_fail(operation)
+        try:
+            module.python_unmap_and_release(*handle)
+        except RuntimeError as error:
+            assert "aclrtUnmapMem" in str(error) or "aclrtFreePhysical" in str(error)
+        else:
+            raise AssertionError("release fault was not observed")
+        assert lib.fake_balance(1) == 1
+        assert lib.fake_balance(2) == (1 if operation == 3 else 0)
+        module.python_unmap_and_release(*handle)
+    lib.my_free(ptr, 100, 0, None)
+    assert not allocations
+    assert [lib.fake_balance(i) for i in (1, 2, 3)] == [0, 0, 0]
 else:
     ptr = lib.my_malloc(100, 0, None)
     handle = allocations[ptr]
@@ -218,6 +233,10 @@ print("native isolated case passed: " + case, flush=True)
     ["null-create_and_map", "null-unmap_and_release", "legacy", "3", "4", "5", "callback", "malformed", "completion"],
 )
 def test_native_callback_faults_do_not_abort_or_resume(native_extension, case):
+    _run_native_child(native_extension, case)
+
+
+def _run_native_child(native_extension, case):
     result = subprocess.run(
         [sys.executable, "-c", NATIVE_CHILD, str(native_extension), case],
         capture_output=True,
@@ -229,47 +248,15 @@ def test_native_callback_faults_do_not_abort_or_resume(native_extension, case):
 
 
 @pytest.mark.parametrize("asleep", [False, True])
-def test_free_after_repeated_sleep_wake(native, asleep):
-    module, lib, allocations = native
-    ptr = lib.my_malloc(100, 0, None)
-    handle = allocations[ptr]
-    assert handle[:3] == (0, 4096, ptr)
-    for _ in range(3):
-        module.python_unmap_and_release(*handle)
-        module.python_unmap_and_release(*handle)
-        assert [lib.fake_balance(i) for i in (1, 2)] == [0, 0]
-        module.python_create_and_map(*handle)
-        module.python_create_and_map(*handle)
-        assert [lib.fake_balance(i) for i in (1, 2)] == [1, 1]
-    if asleep:
-        module.python_unmap_and_release(*handle)
-    lib.my_free(ptr, 100, 0, None)
-    assert [lib.fake_balance(i) for i in (1, 2, 3)] == [0, 0, 0]
+def test_free_after_repeated_sleep_wake(native_extension, asleep):
+    _run_native_child(native_extension, "repeat-asleep" if asleep else "repeat-awake")
 
 
 @pytest.mark.parametrize("operation", [1, 2])
-def test_failed_restore_can_retry_without_physical_leak(native, operation):
-    module, lib, allocations = native
-    ptr = lib.my_malloc(100, 0, None)
-    handle = allocations[ptr]
-    module.python_unmap_and_release(*handle)
-    lib.fake_fail(operation)
-    with pytest.raises(RuntimeError, match="aclrtMallocPhysical|aclrtMapMem"):
-        module.python_create_and_map(*handle)
-    assert [lib.fake_balance(i) for i in (1, 2)] == [0, 0]
-    module.python_create_and_map(*handle)
-    lib.my_free(ptr, 100, 0, None)
+def test_failed_restore_can_retry_without_physical_leak(native_extension, operation):
+    _run_native_child(native_extension, f"restore-{operation}")
 
 
 @pytest.mark.parametrize("operation", [3, 4])
-def test_partial_release_can_retry_without_double_unmap(native, operation):
-    module, lib, allocations = native
-    ptr = lib.my_malloc(100, 0, None)
-    handle = allocations[ptr]
-    lib.fake_fail(operation)
-    with pytest.raises(RuntimeError, match="aclrtUnmapMem|aclrtFreePhysical"):
-        module.python_unmap_and_release(*handle)
-    assert lib.fake_balance(1) == 1
-    assert lib.fake_balance(2) == (1 if operation == 3 else 0)
-    module.python_unmap_and_release(*handle)
-    lib.my_free(ptr, 100, 0, None)
+def test_partial_release_can_retry_without_double_unmap(native_extension, operation):
+    _run_native_child(native_extension, f"release-{operation}")
