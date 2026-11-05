@@ -30,7 +30,6 @@ config:
     dp_address: "${NODE_1_IP}"
 
 env_common: &env_common
-  VLLM_VERSION: "0.11.0"
   VLLM_RPC_TIMEOUT: "3600000"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
   HCCL_EXEC_TIMEOUT: "204"
@@ -47,7 +46,6 @@ env_common: &env_common
   VLLM_USE_FASTOKENS: "1"
   VLLM_SERVER_DEV_MODE: "1"
   VLLM_TORCH_PROFILER_WITH_STACK: "0"
-  LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
 
