@@ -59,6 +59,26 @@ def test_310p_startup_skips_v1_patch_package() -> None:
     assert guarded
 
 
+def test_310p_bad_words_does_not_import_v1_sampler() -> None:
+    modules = _imported_modules(_tree("vllm_ascend/_310p/worker/v2/sample/bad_words.py"))
+    assert "vllm.v1.sample.ops.bad_words" not in modules
+    assert not any(name.startswith("vllm.v1.sample") for name in modules)
+
+
+def test_310p_rejection_sampler_defines_placeholder_locally() -> None:
+    tree = _tree("vllm_ascend/_310p/worker/v2/rejection_sampler.py")
+    modules = _imported_modules(tree)
+    assert "vllm.v1.sample.rejection_sampler" not in modules
+    assigned = {
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    assert "PLACEHOLDER_TOKEN_ID" in assigned
+
+
 def test_310p_mtp_shift_does_not_import_v1_proposer() -> None:
     source = (ROOT / "vllm_ascend/_310p/worker/v2/spec_utils.py").read_text()
     modules = _imported_modules(_tree("vllm_ascend/_310p/worker/v2/spec_utils.py"))
