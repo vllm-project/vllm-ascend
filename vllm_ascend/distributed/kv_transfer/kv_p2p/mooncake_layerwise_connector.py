@@ -404,23 +404,46 @@ class KVCacheSendingLayerThread(threading.Thread):
                     **send_task.send_request,
                     **send_task.failed_requests,
                 }
-                if completion_requests:
-                    primary_group_idx = self.layer_metadata[send_task.layer_name].tensor_group_idx[0]
-                    for req_id, req_meta in completion_requests.items():
-                        if not req_meta.chunk_finish:
-                            continue
-                        transfer_succeeded = req_id not in self.failed_reqs
-                        self.callback_func(
-                            req_id,
-                            req_meta,
-                            primary_group_idx,
-                            trans_flag=transfer_succeeded,
-                        )
-                        if not transfer_succeeded:
-                            self.failed_reqs.discard(req_id)
+                for req_id, req_meta in completion_requests.items():
+                    if not req_meta.chunk_finish:
+                        continue
+                    transfer_succeeded = req_id not in self.failed_reqs
+                    self.callback_func(
+                        req_id,
+                        req_meta,
+                        self._completion_group_idx(send_task, req_meta),
+                        trans_flag=transfer_succeeded,
+                    )
+                    if not transfer_succeeded:
+                        self.failed_reqs.discard(req_id)
             if self.reuse_completion_callback is not None:
                 self.reuse_completion_callback(send_task.layer_idx, error)
             self.send_queue.task_done()
+
+    def _completion_group_idx(self, send_task: SendTask, req_meta: ReqMeta) -> int:
+        """KV cache group whose ``trans_count`` the done signal announces.
+
+        The decode side marks a request done once ``trans_count`` distinct
+        prefill ranks have signalled, and a rank signals from the final layer
+        only when that layer's components hold blocks for the request. So the
+        count comes from the final layer's own groups, the largest when its
+        components span several: a smaller count could let the decode side
+        finish before every sender has written.
+
+        ``send_task.layer_name`` is not usable here: it names a component only
+        when one was staged, and is empty otherwise.
+        """
+        layer_names = send_task.layer_names or [send_task.layer_name]
+        group_idxs = sorted(
+            {self.layer_metadata[name].tensor_group_idx[0] for name in layer_names if name in self.layer_metadata}
+        )
+        if not group_idxs:
+            return 0
+        trans_count = req_meta.trans_count or []
+        counted_group_idxs = [group_idx for group_idx in group_idxs if group_idx < len(trans_count)]
+        if not counted_group_idxs:
+            return group_idxs[0]
+        return max(counted_group_idxs, key=lambda group_idx: trans_count[group_idx])
 
     def get_transfer_meta(
         self,
@@ -1464,36 +1487,41 @@ class MooncakeLayerwiseConnectorWorker:
         """A layer's own cache spec, unwrapped from its uniform-type group."""
         return self.layer_specs[self.layer_name_to_spec_index[layer_name]]
 
-    def _select_staging_component(self, layer_names: list[str], send_task: SendTask) -> str | None:
+    def _select_staging_component(self, hook_name: str, layer_names: list[str], send_task: SendTask) -> str | None:
         """The component the resharding/quantisation path stages, if any.
 
-        Selected from each component's spec and registered geometry rather
-        than its module name: staging gathers a key/value pair through
-        ``npu_gather_pa_kv_cache``, so the component must be two tensors.
+        Staging gathers ``kv_layer``, the tensors the attention hook passed in,
+        so only the hook's own component can be staged. Choosing any other
+        component would send the hook's bytes to that component's destination.
+        A hook that gives no name (linear-attention layers pass ``""`` with no
+        tensors) or whose module owns no cache (see ``build_hook_layer_aliases``)
+        has nothing to stage.
+
+        The hook's component then qualifies from its spec and registered
+        geometry: ``npu_gather_pa_kv_cache`` gathers a key/value pair, so it
+        must be two tensors.
 
         ``None`` means the caches are transferred in place -- the common case,
-        and the only correct answer for DeepSeek-V4, whose components are
-        registered separately and are never a K/V pair.
+        and the only answer for components that are not a K/V pair.
         """
-        for name in layer_names:
-            if name in self.sparse_sfa_c8_layers:
-                continue
-            layer_meta = self.layer_metadata.get(name)
-            if layer_meta is None or len(layer_meta.block_len) != 2:
-                continue
-            group_idx = layer_meta.tensor_group_idx[0]
-            if (
-                self.pd_head_ratio != 1
-                and isinstance(self.layer_spec(name), (FullAttentionSpec, SlidingWindowSpec))
-                and send_task.group_num_blocks is not None
-                and send_task.group_num_blocks[group_idx] > 0
-            ):
-                return name
-            # Read the quant config only behind a flag: some configs lack these fields.
-            if self.enable_c8_quant and self.current_layer in self._quant_layer_indices("c8_quant_layers"):
-                return name
-            if self.enable_kv_quant and self.current_layer in self._quant_layer_indices("kvcache_quant_layers"):
-                return name
+        if hook_name not in layer_names or hook_name in self.sparse_sfa_c8_layers:
+            return None
+        layer_meta = self.layer_metadata.get(hook_name)
+        if layer_meta is None or len(layer_meta.block_len) != 2:
+            return None
+        group_idx = layer_meta.tensor_group_idx[0]
+        if (
+            self.pd_head_ratio != 1
+            and isinstance(self.layer_spec(hook_name), (FullAttentionSpec, SlidingWindowSpec))
+            and send_task.group_num_blocks is not None
+            and send_task.group_num_blocks[group_idx] > 0
+        ):
+            return hook_name
+        # Read the quant config only behind a flag: some configs lack these fields.
+        if self.enable_c8_quant and self.current_layer in self._quant_layer_indices("c8_quant_layers"):
+            return hook_name
+        if self.enable_kv_quant and self.current_layer in self._quant_layer_indices("kvcache_quant_layers"):
+            return hook_name
         return None
 
     def _quant_layer_indices(self, attr_name: str) -> Iterable[int]:
@@ -1711,11 +1739,11 @@ class MooncakeLayerwiseConnectorWorker:
             self.index_to_name[layer_idx].append(layer_name)
         for layer_idx, layer_names in self.index_to_name.items():
             # Components of one physical layer may live in different KV cache
-            # groups: DeepSeek-V4 spreads a layer's five caches over at least
-            # three. Each component is addressed in its own group's block-ID
-            # space (_transfer_kv_cache) and the staging path picks its own
-            # component from the specs (_select_staging_component), so no
-            # component is privileged and the registration order stands.
+            # groups. Each component is addressed in its own group's block-ID
+            # space (_transfer_kv_cache), staging only ever takes the hook's
+            # own component (_select_staging_component), and the done signal
+            # reads its count from the layer's groups (_completion_group_idx).
+            # No component is privileged, so the registration order stands.
             logger.debug(
                 "Mooncake layerwise physical layer %d components: %s",
                 layer_idx,
@@ -2186,13 +2214,13 @@ class MooncakeLayerwiseConnectorWorker:
             # nothing about the others. A request is sent for the layer when any
             # component has blocks; each component then filters its own group.
             component_group_idxs = {self.layer_metadata[name].tensor_group_idx[0] for name in layer_names}
-            layer_name = self._select_staging_component(layer_names, send_task)
+            staged_name = self._select_staging_component(layer_name, layer_names, send_task)
             keys = None
             values = None
             quant_keys = None
             quant_values = None
-            if layer_name is not None:
-                layer_group_idx = self.layer_metadata[layer_name].tensor_group_idx[0]
+            if staged_name is not None:
+                layer_group_idx = self.layer_metadata[staged_name].tensor_group_idx[0]
                 assert self.resharding_stream is not None
                 with npu_stream_switch(self.resharding_stream):
                     cache_write_event.wait()
@@ -2241,7 +2269,7 @@ class MooncakeLayerwiseConnectorWorker:
 
                         (keys, values) = kv_alltoall_and_rearrange(self.pd_head_ratio, keys, values)
                     if self.enable_c8_quant:
-                        layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
+                        layer = self.vllm_config.compilation_config.static_forward_context[staged_name]
                         quant_keys = torch.clamp(
                             torch.round(keys * layer._c8_k_inv_scale + layer._c8_k_offset),
                             -128,
@@ -2258,7 +2286,7 @@ class MooncakeLayerwiseConnectorWorker:
                         self.enable_kv_quant
                         and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers
                     ):
-                        layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
+                        layer = self.vllm_config.compilation_config.static_forward_context[staged_name]
                         keys = torch.ops.vllm.quantize(
                             keys, layer.fak_descale, layer.fak_descale_reciprocal, layer.fak_offset
                         )
@@ -2274,7 +2302,7 @@ class MooncakeLayerwiseConnectorWorker:
                 v_quant_cache=quant_values,
                 layer_idx=self.current_layer,
                 # Empty unless a component was staged; see get_transfer_meta.
-                layer_name=layer_name or "",
+                layer_name=staged_name or "",
                 layer_names=layer_names,
                 group_rearrange_block_ids=send_task.group_rearrange_block_ids,
             )
@@ -2564,3 +2592,4 @@ def get_external_request_id(request_id: str):
     # NOTE(zxr): vLLM PR #27987 add additional suffix
     # to EngineCore request_id with len(suffix) == 9
     return request_id[:-9]
+
