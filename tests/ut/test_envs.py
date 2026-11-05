@@ -35,10 +35,10 @@ class TestEnvVariables(TestBase):
                     self.assertEqual(getattr(envs_ascend, var_name), var_handler())
 
                     handler_source = inspect.getsource(var_handler)
-                    if "int(" in handler_source:
+                    if var_name in envs_ascend.BOOLEAN_ENV_VARS:
+                        test_vals = ["1", "0", "true", "false", "YES", "Off"]
+                    elif "int(" in handler_source:
                         test_vals = ["123", "456"]
-                    elif "bool(int(" in handler_source:
-                        test_vals = ["0", "1"]
                     else:
                         test_vals = [f"test_{var_name}", f"custom_{var_name}"]
 
@@ -57,3 +57,28 @@ class TestEnvVariables(TestBase):
         for var_name in self.env_vars:
             with self.subTest(var=var_name):
                 getattr(envs_ascend, var_name)
+
+    def test_boolean_env_rejects_invalid_values(self):
+        for var_name in envs_ascend.BOOLEAN_ENV_VARS:
+            with self.subTest(var=var_name):
+                original_val = os.environ.get(var_name)
+                try:
+                    # Invalid value: error must name the variable so users can
+                    # locate the offending export immediately.
+                    os.environ[var_name] = "enabled"
+                    with self.assertRaises(ValueError) as ctx:
+                        getattr(envs_ascend, var_name)
+                    self.assertIn(var_name, str(ctx.exception))
+
+                    # Empty value (common with `export VAR=`) falls back to default.
+                    os.environ[var_name] = ""
+                    self.assertIsInstance(getattr(envs_ascend, var_name), bool)
+
+                    # Surrounding whitespace and mixed case are tolerated.
+                    os.environ[var_name] = "  True  "
+                    self.assertIs(getattr(envs_ascend, var_name), True)
+                finally:
+                    if original_val is None:
+                        os.environ.pop(var_name, None)
+                    else:
+                        os.environ[var_name] = original_val
