@@ -61,18 +61,55 @@ def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch
     assert registrations[type(draft)] is SlidingWindowManager
 
 
-def test_composite_config_selects_checkpoint_aux_layers():
+@pytest.mark.parametrize("composite", [False, True, None])
+@pytest.mark.parametrize("upstream_layers", [None, (38, 39, 40)])
+def test_v41_config_preserves_zero_based_checkpoint_aux_layers(composite, upstream_layers):
     runner = NPUModelRunner.__new__(NPUModelRunner)
-    text = SimpleNamespace(dspark_target_layer_ids=[37, 38, 39])
+    text = SimpleNamespace(model_type="deepseek_v41_text", dspark_target_layer_ids=[37, 38, 39])
+    if composite is None:
+        text.text_config = None
+    hf_config = SimpleNamespace(model_type="deepseek_v41", text_config=text) if composite else text
     runner.speculative_config = SimpleNamespace(
         use_dspark=lambda: True,
-        draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(text_config=text)),
+        draft_model_config=SimpleNamespace(hf_config=hf_config),
+    )
+    with patch.object(GPUModelRunner, "_get_eagle3_aux_layers_from_config", return_value=upstream_layers):
+        assert runner._get_eagle3_aux_layers_from_config() == (37, 38, 39)
+
+
+def test_other_dspark_composite_config_keeps_capture_after_convention():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.speculative_config = SimpleNamespace(
+        use_dspark=lambda: True,
+        draft_model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(text_config=SimpleNamespace(dspark_target_layer_ids=[37, 38, 39]))
+        ),
     )
     with patch.object(GPUModelRunner, "_get_eagle3_aux_layers_from_config", return_value=None):
         assert runner._get_eagle3_aux_layers_from_config() == (38, 39, 40)
 
 
-def test_target_exports_residual_entering_selected_layers(monkeypatch):
+@pytest.mark.parametrize("location", ["flat", "outer", "text_config"])
+@pytest.mark.parametrize("upstream_layers", [None, (2, 4, 5)])
+def test_v41_explicit_aux_layers_keep_precedence(location, upstream_layers):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    text = SimpleNamespace(model_type="deepseek_v41_text", dspark_target_layer_ids=[37, 38, 39])
+    hf_config = text if location == "flat" else SimpleNamespace(model_type="deepseek_v41", text_config=text)
+    holder = hf_config if location in ("flat", "outer") else text
+    holder.eagle_aux_hidden_state_layer_ids = [2, 4, 5]
+    runner.speculative_config = SimpleNamespace(
+        use_dspark=lambda: True,
+        draft_model_config=SimpleNamespace(hf_config=hf_config),
+    )
+    with patch.object(GPUModelRunner, "_get_eagle3_aux_layers_from_config", return_value=upstream_layers):
+        assert runner._get_eagle3_aux_layers_from_config() == (2, 4, 5)
+
+
+@pytest.mark.parametrize(
+    "depth,aux_layers,expected_offsets",
+    [(3, (0, 2), (0, 3)), (3, (1, 3), (1, 6)), (40, (37, 38, 39), (703, 741, 780))],
+)
+def test_target_exports_residual_entering_selected_layers(monkeypatch, depth, aux_layers, expected_offsets):
     monkeypatch.setattr(
         "vllm_ascend.models.deepseek_v41.model.get_pp_group",
         lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
@@ -96,9 +133,9 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
         needs_moe_input_ids=False,
         _mtp_hidden_buffer=None,
         prepare_engram=lambda input_ids, positions: ({}, torch.empty(0, dtype=torch.bool)),
-        aux_hidden_state_layers=(1, 3),
+        aux_hidden_state_layers=aux_layers,
         shared_attention_state=SimpleNamespace(reset=lambda: None),
-        layers=[Layer(i) for i in range(3)],
+        layers=[Layer(i) for i in range(depth)],
         norm=lambda hidden: hidden,
     )
     hidden = torch.arange(12, dtype=torch.float32).reshape(3, 4)
@@ -111,9 +148,47 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
         engram_lookups={},
         engram_mask=torch.empty(0, dtype=torch.bool),
     )
-    torch.testing.assert_close(aux[0], hidden)
-    torch.testing.assert_close(aux[1], hidden + 3)
-    torch.testing.assert_close(output, hidden + 6)
+    assert len(aux) == len(aux_layers)
+    # The official reference captures before zero-based layer i. The sum
+    # of toy increments entering i is 1 + ... + i = i * (i + 1) / 2.
+    for actual, offset in zip(aux, expected_offsets):
+        torch.testing.assert_close(actual, hidden + offset)
+    torch.testing.assert_close(output, hidden + depth * (depth + 1) // 2)
+
+
+def test_target_aux_includes_selected_layer_engram_injection():
+    class Layer:
+        layer_idx = 0
+        engram = staticmethod(lambda hidden, lookup, mask, rotation: hidden + lookup.unsqueeze(1))
+        hc_collapse = staticmethod(lambda hidden, pre_mix: hidden.mean(dim=1))
+
+        def __call__(self, positions, hidden, pre_mix, unused, input_ids):
+            return hidden + 1, pre_mix
+
+    hidden = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    lookup = torch.full_like(hidden, 100)
+    model = SimpleNamespace(
+        hc_mult=4,
+        decoder_replay_layers=None,
+        needs_moe_input_ids=False,
+        _mtp_hidden_buffer=None,
+        aux_hidden_state_layers=(0,),
+        shared_attention_state=SimpleNamespace(reset=lambda: None),
+        layers=[Layer()],
+        engram_rotated=False,
+        norm=lambda hidden: hidden,
+    )
+    output, aux = DeepseekV41Model.forward(
+        model,
+        torch.arange(3),
+        torch.arange(3),
+        None,
+        inputs_embeds=hidden,
+        engram_lookups={0: lookup},
+        engram_mask=torch.ones(3, dtype=torch.bool),
+    )
+    torch.testing.assert_close(aux[0], hidden + lookup)
+    torch.testing.assert_close(output, hidden + lookup + 1)
 
 
 def test_v41_draft_routes_to_v41():

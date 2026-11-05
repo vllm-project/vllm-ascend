@@ -224,7 +224,8 @@ def test_untrimmed_replica_enters_decoder_context_without_gathering():
     assert torch.equal(buffer, torch.arange(6))
 
 
-def test_model_replays_only_layers_after_kv_sources(monkeypatch):
+@pytest.mark.parametrize(("num_layers", "aux_layers"), [(3, (1, 3)), (40, (37, 38, 39))])
+def test_model_replays_only_layers_after_kv_sources(monkeypatch, num_layers, aux_layers):
     seen = []
 
     class Layer:
@@ -250,13 +251,13 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
     model.use_sequence_parallel = False
     model._mtp_hidden_buffer = None
     model.shared_attention_state = SimpleNamespace(reset=lambda: None)
-    model.layers = [Layer(i) for i in range(3)]
+    model.layers = [Layer(i) for i in range(num_layers)]
     model.norm = lambda hidden: hidden
-    model.end_layer = 3
+    model.end_layer = num_layers
     model.start_layer = 0
     model.needs_moe_input_ids = False
     model.decoder_replay_start = 1
-    model.aux_hidden_state_layers = (1, 3)
+    model.aux_hidden_state_layers = aux_layers
     model.decoder_replay_layer_name = "decoder_replay"
     replay = replay_mod.AscendDecoderReplayLayers(
         2, model._run_replay_layers, [], write_batch_kv=model.layers[1].write_kv
@@ -267,7 +268,7 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
     model.decoder_replay_layers = replay
 
     def run_replay(hidden, mix, positions, input_ids, num_late_aux, layer_name):
-        assert num_late_aux == 1
+        assert num_late_aux == sum(1 < layer_idx <= num_layers for layer_idx in aux_layers)
         assert layer_name == model.decoder_replay_layer_name
         return list(model.decoder_replay_layers(hidden, mix, positions, input_ids))
 
@@ -281,7 +282,10 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
         engram_lookups={},
         engram_mask=torch.empty(0, dtype=torch.bool),
     )
-    assert seen == [(0, [0, 1, 2, 3]), ("write_kv_1", [0, 1, 2, 3]), (1, [2, 3]), (2, [2, 3])]
-    assert output[:, 0].tolist() == [0, 0, 4, 4]
-    assert aux[0][:, 0].tolist() == [1, 1, 1, 1]
-    assert aux[1][:, 0].tolist() == [0, 0, 3, 3]
+    assert seen == [(0, [0, 1, 2, 3]), ("write_kv_1", [0, 1, 2, 3])] + [(i, [2, 3]) for i in range(1, num_layers)]
+    assert output[:, 0].tolist() == [0, 0, num_layers + 1, num_layers + 1]
+    assert len(aux) == len(aux_layers)
+    # Every layer adds one to an embedding initialized to one. Capture the
+    # selected layer's input, including the final boundary after the last layer.
+    for layer_idx, states in zip(aux_layers, aux):
+        assert states[:, 0].tolist() == [0, 0, layer_idx + 1, layer_idx + 1]
