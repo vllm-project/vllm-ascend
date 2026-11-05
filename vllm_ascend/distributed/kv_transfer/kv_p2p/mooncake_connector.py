@@ -87,6 +87,15 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.metadata import
     ReqMeta,
     TransferRequest,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    context_parallel_parameters_check as pull_context_parallel_parameters_check,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    cp_group_meta as pull_cp_group_meta,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    kv_head_groups as pull_kv_head_groups,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -2905,59 +2914,34 @@ class MooncakeConnectorWorker:
             )
 
         def context_parallel_parameters_check():
-            assert remote_cp_size % local_cp_size == 0 or local_cp_size % remote_cp_size == 0, (
-                f"P/D CP sizes must be divisible in either direction, got P={remote_cp_size}, D={local_cp_size}."
+            pull_context_parallel_parameters_check(
+                remote_cp_size=remote_cp_size,
+                local_cp_size=local_cp_size,
+                use_mla=self.use_mla,
+                use_sparse=self.use_sparse,
+                num_key_value_heads=self.num_key_value_heads,
+                prefill_tp_size=prefill_tp_size,
+                decode_tp_size=self.tp_size,
             )
-            if not (self.use_mla or self.use_sparse):
-                p_node_heads_per_rank = math.ceil(self.num_key_value_heads / prefill_tp_size)
-                d_node_heads_per_rank = math.ceil(self.num_key_value_heads / self.tp_size)
-                assert d_node_heads_per_rank % p_node_heads_per_rank == 0
 
         def get_kv_head_groups(tp_size):
-            if self.use_mla or self.use_sparse:
-                kv_head_groups = []
-                kv_head_ids = [0]
-                kv_head_groups.append(tuple(kv_head_ids))
-                return kv_head_groups
-            if self.num_key_value_heads // tp_size >= 1:
-                kv_head_groups = []
-                for tp_rank in range(tp_size):
-                    kv_head_ids = [
-                        head_idx + tp_rank * (self.num_key_value_heads // tp_size)
-                        for head_idx in range(self.num_key_value_heads // tp_size)
-                    ]
-                    kv_head_groups.append(tuple(kv_head_ids))
-                return kv_head_groups
-            if tp_size // self.num_key_value_heads > 1:
-                kv_head_groups = []
-                for kv_head_ids_ in range(self.num_key_value_heads):
-                    kv_head_groups.append(tuple([kv_head_ids_]))
-                return kv_head_groups
+            return pull_kv_head_groups(
+                num_key_value_heads=self.num_key_value_heads,
+                use_mla=self.use_mla,
+                use_sparse=self.use_sparse,
+                tp_size=tp_size,
+            )
 
         def get_cp_group_meta(tp_size, pcp_size, dcp_size, port_base):
-            # key is kv_head_group, value is cp_groups and which cp_groups to select
-            cp_group_meta: dict = {}
-            kv_head_groups = get_kv_head_groups(tp_size)
-            dcp_repeat_num = tp_size * pcp_size // len(kv_head_groups) // dcp_size
-
-            for kv_head_group_idx, kv_head_group in enumerate(kv_head_groups):
-                if kv_head_group not in cp_group_meta:
-                    cp_group_meta[kv_head_group] = {}
-                    cp_group_meta[kv_head_group]["cp_groups"] = []
-                    cp_group_meta[kv_head_group]["select_cp_groups_id"] = 0
-                kv_head_group_offset = tp_size // len(kv_head_groups) * kv_head_group_idx
-                for dcp_repeat_idx in range(dcp_repeat_num):
-                    # MRV2 orders DCP ranks along PCP first, then TP.
-                    cp_group = []
-                    dcp_repeat_offset = dcp_size * dcp_repeat_idx
-                    for dcp_rank in range(dcp_size):
-                        flat_rank = dcp_repeat_offset + dcp_rank
-                        pcp_rank = flat_rank % pcp_size
-                        tp_rank = flat_rank // pcp_size + kv_head_group_offset
-                        cp_group.append(port_base + pcp_rank * tp_size + tp_rank)
-                    cp_group_meta[kv_head_group]["cp_groups"].append(cp_group)
-
-            return cp_group_meta
+            return pull_cp_group_meta(
+                num_key_value_heads=self.num_key_value_heads,
+                use_mla=self.use_mla,
+                use_sparse=self.use_sparse,
+                tp_size=tp_size,
+                pcp_size=pcp_size,
+                dcp_size=dcp_size,
+                port_base=port_base,
+            )
 
         def get_local_remote_block_port_mappings():
             context_parallel_parameters_check()
