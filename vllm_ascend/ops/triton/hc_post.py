@@ -6,6 +6,8 @@ import torch
 from vllm.triton_utils import tl, triton
 
 MAX_HC_POST_FUSION_TOKENS = 128
+MIN_HC_POST_BLOCK = 256
+MAX_HC_POST_BLOCK = 2048
 
 
 def can_fuse_hc_post_add(
@@ -84,7 +86,11 @@ def fused_hc_post_add(
     tokens, _, dim = residual.shape
     output = torch.empty(residual.shape, device=residual.device, dtype=residual.dtype)
     if tokens:
-        _hc_post_add_kernel[(tokens, triton.cdiv(dim, 256))](
+        # A 256-column tile launches 20 programs per token at hidden size 5120.
+        # Wider tiles reduce repeated coefficient loads and scheduling waves;
+        # keep the same ordered FP32 operations and intermediate BF16 rounding.
+        block = min(MAX_HC_POST_BLOCK, max(MIN_HC_POST_BLOCK, triton.next_power_of_2(dim)))
+        _hc_post_add_kernel[(tokens, triton.cdiv(dim, block))](
             shared,
             routed,
             residual,
@@ -99,7 +105,7 @@ def fused_hc_post_add(
             comb.stride(0),
             comb.stride(1),
             DIM=dim,
-            BLOCK=256,
+            BLOCK=block,
             num_warps=4,
             enable_fp_fusion=False,
         )
