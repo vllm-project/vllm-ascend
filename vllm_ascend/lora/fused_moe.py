@@ -47,6 +47,21 @@ _MOE_LORA_INDEX_FIELDS = (
     "exchanged_lora_indices",
 )
 
+_DEBUG_COUNTS: dict[str, int] = {}
+
+
+def _debug_trace(site: str, message: str, limit: int = 3) -> None:
+    """Print a one-line trace of the MoE LoRA index pipeline when enabled."""
+    import os
+
+    if not os.environ.get("DSV41_LORA_DEBUG"):
+        return
+    seen = _DEBUG_COUNTS.get(site, 0)
+    if seen >= limit:
+        return
+    _DEBUG_COUNTS[site] = seen + 1
+    print(f"[dsv41-lora-debug][{site}][{seen}] {message}", flush=True)
+
 
 def has_lora(lora_context) -> bool:
     """Return whether the current batch contains at least one LoRA token."""
@@ -72,15 +87,89 @@ def prepare_lora_indices(
 
     Caller must ensure ``lora_context`` is not ``None``.
     """
-    token_indices = lora_context.punica_wrapper.token_lora_indices
-    token_indices = token_indices[:num_tokens]
-    if pad_size > 0:
-        token_indices = torch.nn.functional.pad(token_indices, (0, pad_size), value=-1)
+    wrapper = lora_context.punica_wrapper
+    target_len = num_tokens + max(pad_size, 0)
+    indices_len = getattr(wrapper, "indices_len", None) or []
+    if not indices_len or indices_len[0] is None:
+        # The wrapper never received a mapping for this step, which happens on
+        # idle/dummy batches that skip metadata setup. Its index buffers are
+        # allocated with ``torch.empty``, so reading them yields arbitrary
+        # int64 values that later get used as adapter slots and trap inside
+        # the gather kernel. Nothing can carry an adapter here, so use -1.
+        token_indices = torch.full((target_len,), -1, dtype=torch.long, device=wrapper.device)
+    else:
+        token_indices = wrapper.token_lora_indices[:num_tokens]
+        # ``num_tokens`` is the MoE input row count while ``token_lora_indices``
+        # is sized by the runner's own token bookkeeping. If the latter is
+        # shorter the dispatch exchange below would advertise more rows than
+        # the send buffer holds and read past it, so fill the gap with the -1
+        # "no adapter" marker.
+        if token_indices.numel() < target_len:
+            token_indices = torch.nn.functional.pad(token_indices, (0, target_len - token_indices.numel()), value=-1)
     if tp_size > 1:
         lora_context.split_lora_indices = torch.tensor_split(token_indices, tp_size, dim=0)[tp_rank]
     else:
         # use ep for dp without tp.
         lora_context.split_lora_indices = token_indices
+    _debug_trace(
+        "prepare",
+        f"num_tokens={num_tokens} pad_size={pad_size} tp={tp_rank}/{tp_size} "
+        f"indices_len={list(indices_len)} "
+        f"split_numel={lora_context.split_lora_indices.numel()} "
+        f"split={lora_context.split_lora_indices[:16].tolist()} "
+        f"split_minmax={_minmax(lora_context.split_lora_indices)}",
+    )
+
+
+def _minmax(tensor: torch.Tensor) -> tuple[int, int] | None:
+    """Return (min, max) for a non-empty tensor, else ``None`` (debug only)."""
+    if tensor.numel() == 0:
+        return None
+    return (int(tensor.min()), int(tensor.max()))
+
+
+def _align_rows(tensor: torch.Tensor, target: int, fill: int = -1) -> torch.Tensor:
+    """Force ``tensor`` to exactly ``target`` rows, padding with ``fill``.
+
+    The LoRA index tensors must stay aligned with the dispatch metadata that
+    drives the MoE AlltoAll. ``token_lora_indices`` is sized by the runner's
+    own token bookkeeping (``punica_wrapper.indices_len``), while the dispatch
+    splits are sized by the MoE input rows, so the two can disagree by a few
+    rows (dummy/idle steps, padding, a stale mapping). Letting the mismatch
+    through is dangerous: the permutation gather then reads past the index
+    tensor, which on device silently yields garbage instead of an error, and
+    the AlltoAll then advertises more rows than the send buffer holds. Both
+    end up as bogus adapter ids deep inside the MoE LoRA kernel, so the count
+    is normalised here.
+    """
+    current = tensor.numel()
+    if current == target:
+        return tensor
+    if current > target:
+        logger.warning_once(
+            "Ascend MoE LoRA: %d LoRA index rows exceed the %d rows the dispatch "
+            "metadata describes; truncating the tail.",
+            current,
+            target,
+        )
+        return tensor[:target]
+    logger.warning_once(
+        "Ascend MoE LoRA: %d LoRA index rows are fewer than the %d rows the "
+        "dispatch metadata describes; padding the tail with -1 (no adapter).",
+        current,
+        target,
+    )
+    return torch.cat((tensor, torch.full((target - current,), fill, dtype=tensor.dtype, device=tensor.device)))
+
+
+def _split_total(splits) -> int | None:
+    """Return the row count a split list describes, or ``None`` if unusable."""
+    if splits is None:
+        return None
+    try:
+        return int(sum(int(item) for item in splits))
+    except (TypeError, ValueError):
+        return None
 
 
 def preprocess_lora_indices(
@@ -102,9 +191,21 @@ def preprocess_lora_indices(
     split_indices = getattr(lora_context, "split_lora_indices", None)
     if split_indices is None:
         return
-    expanded = split_indices.repeat_interleave(topk_ids.shape[1])
     permutation = torch.argsort(reversed_permutation_mapping.reshape(-1).long())
+    expanded = split_indices.repeat_interleave(topk_ids.shape[1])
+    # ``reversed_permutation_mapping`` comes from the dispatch permute and is
+    # the authority for how many routed rows exist; ``split_indices`` comes
+    # from the runner's LoRA mapping. Align before gathering so ``expanded``
+    # can never be indexed out of bounds (see ``_align_rows``).
+    expanded = _align_rows(expanded, permutation.numel())
     lora_context.permuted_lora_indices = expanded[permutation]
+    _debug_trace(
+        "preprocess",
+        f"split_numel={split_indices.numel()} topk={topk_ids.shape[1]} "
+        f"expanded_numel={expanded.numel()} perm_numel={permutation.numel()} "
+        f"rev_numel={reversed_permutation_mapping.numel()} "
+        f"permuted_minmax={_minmax(lora_context.permuted_lora_indices)}",
+    )
 
 
 def postprocess_lora_indices(
@@ -126,6 +227,7 @@ def postprocess_lora_indices(
     if exchanged is None:
         return
     permutation = torch.argsort(reversed_permutation_mapping.reshape(-1).long())
+    exchanged = _align_rows(exchanged, permutation.numel())
     lora_context.exchanged_lora_indices = exchanged[permutation]
 
 
@@ -148,10 +250,24 @@ def all2all_lora_indices(
     permuted = getattr(lora_context, "permuted_lora_indices", None)
     if permuted is None:
         return
+    # `input_splits` describes what this rank sends, so it has to match the
+    # send buffer; a short buffer makes HCCL read past the tensor while the
+    # peers still expect the advertised rows.
+    send_total = _split_total(input_splits)
+    if send_total is not None:
+        permuted = _align_rows(permuted, send_total)
     lora_dtype = permuted.dtype
     _, exchanged, handle = async_all_to_all(permuted, output_splits, input_splits, ep_group)
     handle.wait()
     lora_context.exchanged_lora_indices = exchanged.to(lora_dtype)
+    _debug_trace(
+        "all2all",
+        f"permuted_numel={permuted.numel()} dtype={lora_dtype} "
+        f"in_total={send_total} out_total={_split_total(output_splits)} "
+        f"exchanged_numel={lora_context.exchanged_lora_indices.numel()} "
+        f"exchanged_minmax={_minmax(lora_context.exchanged_lora_indices)} "
+        f"exchanged_values={lora_context.exchanged_lora_indices[:32].tolist()}",
+    )
 
 
 def sync_lora_context(quant_method, lora_context):
@@ -247,6 +363,13 @@ def _recover_moe_lora_routing_all2all(
             f"received {lora_per_row.numel()} LoRA indices."
         )
 
+    _debug_trace(
+        "routing",
+        f"group_list={group_list.tolist()} expert_numel={expert_per_row.numel()} "
+        f"lora_numel={lora_per_row.numel()} "
+        f"lora_minmax={_minmax(lora_per_row)} "
+        f"lora_values={lora_per_row[:32].tolist()}",
+    )
     return expert_per_row, lora_per_row
 
 
