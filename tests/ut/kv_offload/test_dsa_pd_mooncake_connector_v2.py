@@ -79,7 +79,7 @@ def test_byte_views_and_resolved_targets_are_reused_per_receive(monkeypatch, pip
     resolve = MagicMock(wraps=staging_module.get_dsa_pd_mooncake_offloaded_kv_byte_tensor)
     monkeypatch.setattr(staging_module, "get_dsa_pd_mooncake_offloaded_kv_byte_tensor", resolve)
     original_view = torch.Tensor.view
-    flattened = []
+    flattened: list[int] = []
 
     def view(tensor, *args):
         if tensor is target:
@@ -87,7 +87,7 @@ def test_byte_views_and_resolved_targets_are_reused_per_receive(monkeypatch, pip
         return original_view(tensor, *args)
 
     monkeypatch.setattr(torch.Tensor, "view", view)
-    reads = []
+    reads: list[int] = []
 
     def read(_session, local, _remote, lengths):
         value = len(reads) % 3 + 1
@@ -183,7 +183,7 @@ def test_v2_native_bucket_routes_mixed_destinations_and_preserves_bytes(pipeline
     host = torch.zeros_like(source)
     hbm = torch.zeros_like(source)
     registry.register_dsa_pd_mooncake_offloaded_kv_tensor(host)
-    reads = []
+    reads: list[tuple[int, int, int]] = []
 
     def read(session, local, remote, lengths):
         reads.extend(zip(local, remote, lengths))
@@ -268,7 +268,7 @@ def test_peer_bucket_cannot_overwrite_staging_during_landing():
         return reader.batch_transfer_sync_read(*args)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        first = executor.submit(reader.batch_transfer_sync_read, *args)
+        first = executor.submit(lambda: reader.batch_transfer_sync_read(*args))
         try:
             assert landing_entered.wait(5)
             other = executor.submit(second)
