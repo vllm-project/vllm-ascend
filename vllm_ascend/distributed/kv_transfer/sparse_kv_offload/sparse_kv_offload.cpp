@@ -271,11 +271,17 @@ FORCE_INLINE void process_one_reuse_prioritized_lru_resident_row(
   }
   const int32_t stable = std::clamp(stable_prefix_lens[row], 0, max_token);
   const int32_t base = next_lru_resident_epoch(token_mark, token_pos, epoch, max_token);
+  bool has_duplicates = false;
   for (int32_t pos = 0; pos < topk; ++pos) {
     const int32_t token = selected[pos];
-    if (is_valid_lru_resident_token(token, max_token) && token_mark[token] != base) {
+    if (!is_valid_lru_resident_token(token, max_token)) {
+      continue;
+    }
+    if (token_mark[token] != base) {
       token_mark[token] = base;
       token_pos[token] = pos;
+    } else {
+      has_duplicates = true;
     }
   }
 
@@ -321,10 +327,13 @@ FORCE_INLINE void process_one_reuse_prioritized_lru_resident_row(
   miss_count[row] = count;
   // Preserve all attention positions for repeated selections, but load each
   // distinct token only once. Repetition within a round is not reuse evidence.
-  for (int32_t pos = 0; pos < topk; ++pos) {
-    const int32_t token = selected[pos];
-    if (is_valid_lru_resident_token(token, max_token)) {
-      current[pos] = current[token_pos[token]];
+  // Unique selections already have their slots filled by hit/miss handling.
+  if (UNLIKELY(has_duplicates)) {
+    for (int32_t pos = 0; pos < topk; ++pos) {
+      const int32_t token = selected[pos];
+      if (is_valid_lru_resident_token(token, max_token)) {
+        current[pos] = current[token_pos[token]];
+      }
     }
   }
 

@@ -217,26 +217,37 @@ extern "C" bool has_openmp() {
         # input/output conversion. No timing assertion: CI hosts differ.
         topk = 2048
         hot = list(range(topk))
-        trace = [hot, hot] + [list(range(i * topk, (i + 1) * topk)) for i in (1, 2, 3)] + [hot]
-        for reuse, expected_misses in ((False, 10240), (True, 8192)):
-            state = self.state(capacity=4096, topk=topk, reuse=reuse, max_token=16384)
-            durations = []
-            misses = 0
-            warmup_groups, measured_groups = 2, 16
-            for group in range(warmup_groups + measured_groups):
-                state.req_ids[0] = group + 1
-                for selected in trace:
-                    state.selected[:] = selected
-                    start = time.perf_counter()
-                    result = self.library.run_planner(reuse, state.pointers, state.dimensions, 4)
-                    duration = time.perf_counter() - start
-                    self.assertEqual(result, 0)
-                    if group >= warmup_groups:
-                        durations.append(duration)
-                        misses += state.counts[0]
-            self.assertEqual(misses, measured_groups * expected_misses)
-            policy = "reuse_prioritized_lru" if reuse else "lru"
-            print(f"CPU benchmark {policy}: median={statistics.median(durations) * 1e6:.2f} us/update")
+        scan = [hot, hot] + [list(range(i * topk, (i + 1) * topk)) for i in (1, 2, 3)] + [hot]
+        scenarios = (("hot", [hot] * 6, (topk, topk)), ("scan", scan, (10240, 8192)))
+        rounds, warmup_groups, measured_groups = 7, 2, 32
+        for name, trace, expected_misses in scenarios:
+            samples = {False: [], True: []}
+            for trial in range(rounds):
+                # Alternate policy order to reduce systematic timing bias.
+                for reuse in ((False, True) if trial % 2 == 0 else (True, False)):
+                    state = self.state(capacity=4096, topk=topk, reuse=reuse, max_token=16384)
+                    elapsed = 0.0
+                    misses = 0
+                    for group in range(warmup_groups + measured_groups):
+                        state.req_ids[0] = group + 1
+                        for selected in trace:
+                            state.selected[:] = selected
+                            start = time.perf_counter()
+                            result = self.library.run_planner(reuse, state.pointers, state.dimensions, 4)
+                            duration = time.perf_counter() - start
+                            self.assertEqual(result, 0)
+                            if group >= warmup_groups:
+                                elapsed += duration
+                                misses += state.counts[0]
+                    self.assertEqual(misses, measured_groups * expected_misses[int(reuse)])
+                    samples[reuse].append(elapsed * 1e6 / (measured_groups * len(trace)))
+            for reuse, durations in samples.items():
+                policy = "reuse_prioritized_lru" if reuse else "lru"
+                print(
+                    f"CPU benchmark {name} {policy}: {rounds} rounds, "
+                    f"median={statistics.median(durations):.2f} us/update, "
+                    f"range=[{min(durations):.2f}, {max(durations):.2f}]"
+                )
 
     def test_original_lru_batch_order_is_unchanged(self):
         state = self.state(capacity=4, topk=2, reuse=False)
@@ -248,7 +259,7 @@ extern "C" bool has_openmp() {
 
     def test_randomized_differential(self):
         rng = random.Random(42)
-        for capacity in (1, 3, 8, 16):
+        for capacity in (1, 3, 8, 16, 64):
             for probation_age in (0, 1, 4, MAX_AGE):
                 topk = capacity
                 state = self.state(capacity, topk, probation_age=probation_age)
@@ -256,8 +267,13 @@ extern "C" bool has_openmp() {
                 for turn in range(100):
                     req_id = 1 + turn // 17
                     stable = rng.choice([MAX_TOKEN, 64, 8, 0])
-                    selected = rng.sample(range(MAX_TOKEN), topk)
-                    selected = [t if rng.random() > 0.2 else -1 for t in selected]
+                    # Alternate unique and repeated selections on the same
+                    # resident state, with both padding and out-of-range IDs.
+                    if turn % 2 == 0:
+                        selected = rng.sample(range(MAX_TOKEN), topk)
+                    else:
+                        selected = rng.choices(range(MAX_TOKEN), k=topk)
+                    selected = [t if rng.random() > 0.2 else rng.choice((-1, MAX_TOKEN)) for t in selected]
                     reset = state.last_req_ids[0] != req_id
                     tokens, order, ages, current, misses = reference_step(
                         tokens, order, ages, selected, reset, stable, probation_age,
@@ -392,6 +408,29 @@ extern "C" bool has_openmp() {
         self.assertEqual(misses_again, [])
         self.assertEqual(list(state.counts), [0])
         self.assertEqual(state.ages[list(state.slots).index(current[0])], 0)
+
+    def test_unique_and_duplicate_rounds_match_reference(self):
+        # Exercise both paths on the same state, including repeated padding,
+        # invalid tokens, request resets and speculative suffix invalidation.
+        state = self.state(capacity=4, topk=4)
+        tokens, order, ages = [-1] * 4, list(range(4)), [0] * 4
+        rounds = (
+            ([7, 12, -1, -1], 1, MAX_TOKEN),
+            ([7, 7, 12, -1], 1, MAX_TOKEN),
+            ([12, 8, MAX_TOKEN, -1], 1, MAX_TOKEN),
+            ([8, 8, 12, -1], 1, 8),
+            ([8, 7, -1, -1], 2, MAX_TOKEN),
+            ([7, 7, 8, 8], 2, MAX_TOKEN),
+        )
+        for selected, req_id, stable in rounds:
+            with self.subTest(selected=selected, req_id=req_id, stable=stable):
+                reset = state.last_req_ids[0] != req_id
+                tokens, order, ages, current, misses = reference_step(
+                    tokens, order, ages, selected, reset, stable, state.probation_age,
+                )
+                actual = state.step([selected], [req_id], [stable])[0]
+                self.assertEqual(actual, (current, misses))
+                self.assertEqual(state.snapshot(), (tokens, order, ages, [req_id]))
 
     def test_invalid_parameters_rejected_before_mutation(self):
         state = self.state(probation_age=-1)
