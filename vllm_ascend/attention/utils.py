@@ -29,7 +29,8 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+# Re-exported for attention_v2_b1 (B1 backend), which imports it from here.
+from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE  # noqa: F401
 from vllm_ascend.ops.triton.attention_update import prepare_attention_update
 from vllm_ascend.utils import (
     _is_glm_model,
@@ -291,11 +292,9 @@ def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, he
         return False
     if not get_current_hardware_profile().supports(HardwareCapability.PAGED_ATTENTION):
         return False
-    # TODO: Remove this fallback when A2/A3 FIA TND supports Gemma4's
-    # 512-dim global attention heads. Decode can use PA directly; prefill is
-    # handled by the device adaptor.
-    if head_size == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
-        return True
+    # Gemma4's head_dim=512 layers no longer force PagedAttention: with the
+    # patched FIA tiling they run the same FIA TND path as every other head
+    # size (paged prefill/decode and dense no-cache prefill alike).
     from vllm.config.compilation import CUDAGraphMode
 
     cudagraph_mode = vllm_config.compilation_config.cudagraph_mode

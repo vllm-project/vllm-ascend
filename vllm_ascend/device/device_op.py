@@ -25,7 +25,6 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import try_load_strided_mla_cache
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
@@ -191,25 +190,10 @@ class BaseDeviceAdaptor:
         is_prefill_no_cache: bool,
         **kwargs,
     ):
-        # TODO: Remove this fallback when A2/A3 FIA TND supports Gemma4's
-        # 512-dim global attention heads. The FIA path slices/replaces
-        # query/key/value before this wrapper, so large-head prefill fallback
-        # must use the original current-token K/V.
-        if head_size == device_utils.FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
-            return device_utils.npu_large_head_prefill_attention(
-                query,
-                current_key,
-                current_value,
-                attn_metadata,
-                key_cache=key_cache,
-                value_cache=value_cache,
-                num_heads=num_heads,
-                num_kv_heads=num_key_value_heads,
-                head_size=head_size,
-                scale=scale,
-                is_prefill_no_cache=is_prefill_no_cache,
-            )
-
+        # Gemma4's head_dim=512 layers run the plain FIA path like every other
+        # head size: the patched FIA tiling supports TND with dense (no-cache)
+        # KV as well as paged KV views, so the dense-gather
+        # npu_fusion_attention fallback is no longer needed.
         if kwargs.get("block_table") is None:
             key = key.contiguous()
             value = value.contiguous()
