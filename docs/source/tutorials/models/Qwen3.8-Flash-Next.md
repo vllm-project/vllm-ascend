@@ -1297,7 +1297,7 @@ export MEMCACHE_TEMPLATE_DIR="<IMAGE_MEMCACHE_CONFIG_DIR>"
 ls "${MEMCACHE_TEMPLATE_DIR}"
 ```
 
-The template path varies with the image and Python version; `/usr/local/python3.11.10/lib/python3.11/site-packages/memcache_hybrid/config/` is only an example inside the container. Copy templates into your personal mounted `MEMCACHE_CONFIG_DIR`. `cp -n` preserves existing files, while `cat >` replaces them; retain required image-specific settings when editing an existing configuration.
+Use the templates shipped inside the selected image: `/usr/local/python3.11.10/lib/python3.11/site-packages/memcache_hybrid/config/` is an example, and the actual path varies with the Python version and installation location. Set `MEMCACHE_TEMPLATE_DIR` to that directory and copy its files into your personal mounted `MEMCACHE_CONFIG_DIR`. Edit only the keys listed below in those copies, preserving the other template entries; `cp -n` leaves existing personal files unchanged. In the INI examples, replace `<MEMCACHE_...>` with the actual value of the corresponding variable set above; configuration files do not expand shell variables.
 
 **A2/A3 configuration preparation:**
 
@@ -1316,15 +1316,17 @@ cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-meta.conf" "${MEMCACHE_CONFIG_DIR}/mmc-meta.
 export MEMCACHE_METRICS_URL="http://<METRICS_IP>:<METRICS_PORT>"
 export MEMCACHE_EVICT_HIGH="<HIGH_EVICTION_THRESHOLD_PERCENT>"
 export MEMCACHE_EVICT_LOW="<LOW_EVICTION_THRESHOLD_PERCENT>"
+```
 
-cat > "${MEMCACHE_CONFIG_DIR}/mmc-meta.conf" <<EOF
-ock.mmc.meta_service_url = ${MEMCACHE_META_URL}
-ock.mmc.meta_service.config_store_url = ${MEMCACHE_CONFIG_STORE_URL}
-ock.mmc.meta_service.metrics_url = ${MEMCACHE_METRICS_URL}
+In the copied `${MEMCACHE_CONFIG_DIR}/mmc-meta.conf`, edit the following keys:
+
+```ini
+ock.mmc.meta_service_url = <MEMCACHE_META_URL>
+ock.mmc.meta_service.config_store_url = <MEMCACHE_CONFIG_STORE_URL>
+ock.mmc.meta_service.metrics_url = <MEMCACHE_METRICS_URL>
 ock.mmc.log_level = info
-ock.mmc.evict_threshold_high = ${MEMCACHE_EVICT_HIGH}
-ock.mmc.evict_threshold_low = ${MEMCACHE_EVICT_LOW}
-EOF
+ock.mmc.evict_threshold_high = <MEMCACHE_EVICT_HIGH>
+ock.mmc.evict_threshold_low = <MEMCACHE_EVICT_LOW>
 ```
 
 Set each host's storage values from its deployment configuration and memory budget. Use the device paths mapped in Section 4.3, separated by `:` for multiple devices:
@@ -1351,25 +1353,23 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
 
 === "A2 series"
 
-    Keep the A2 model configuration from Section 5.2: TP4 × PP2 × DP1 for Prefill and TP2 × DP4 for Decode, on separate eight-device hosts. On each host, use the common MetaService and ConfigStore endpoints and pool `world_size`, but set SSD paths and memory values for that host. Write the RoCE configuration:
+    Keep the A2 model configuration from Section 5.2: TP4 × PP2 × DP1 for Prefill and TP2 × DP4 for Decode, on separate eight-device hosts. On each host, use the common MetaService and ConfigStore endpoints and pool `world_size`, but set SSD paths and memory values for that host. Edit the copied RoCE configuration:
 
-    ```bash
-    : "${MEMCACHE_CONFIG_DIR:?Set the personal configuration directory in Section 4.3}"
+    In the copied `${MEMCACHE_CONFIG_DIR}/mmc-local.conf`, edit the following keys:
 
-    cat > "${MEMCACHE_CONFIG_DIR}/mmc-local.conf" <<EOF
-    ock.mmc.meta_service_url = ${MEMCACHE_META_URL}
-    ock.mmc.local_service.config_store_url = ${MEMCACHE_CONFIG_STORE_URL}
+    ```ini
+    ock.mmc.meta_service_url = <MEMCACHE_META_URL>
+    ock.mmc.local_service.config_store_url = <MEMCACHE_CONFIG_STORE_URL>
     ock.mmc.log_level = info
-    ock.mmc.local_service.world_size = ${MEMCACHE_WORLD_SIZE}
+    ock.mmc.local_service.world_size = <MEMCACHE_WORLD_SIZE>
     ock.mmc.local_service.protocol = device_rdma
-    ock.mmc.local_service.dram.size = ${MEMCACHE_DRAM_SIZE}
-    ock.mmc.local_service.max.dram.size = ${MEMCACHE_MAX_DRAM_SIZE}
+    ock.mmc.local_service.dram.size = <MEMCACHE_DRAM_SIZE>
+    ock.mmc.local_service.max.dram.size = <MEMCACHE_MAX_DRAM_SIZE>
     ock.mmc.local_service.storage.enabled = true
-    ubsio.disk.path = ${MEMCACHE_SSD_PATHS}
-    ubsio.mem.size_in_gb = ${MEMCACHE_UBS_IO_MEM_GB}
-    ubsio.standalone.device_count = ${MEMCACHE_DEVICE_COUNT}
-    ubsio.standalone.force_new_disk = ${MEMCACHE_FORCE_NEW_DISK}
-    EOF
+    ubsio.disk.path = <MEMCACHE_SSD_PATHS>
+    ubsio.mem.size_in_gb = <MEMCACHE_UBS_IO_MEM_GB>
+    ubsio.standalone.device_count = <MEMCACHE_DEVICE_COUNT>
+    ubsio.standalone.force_new_disk = <MEMCACHE_FORCE_NEW_DISK>
     ```
 
     Export the following in the Prefill and Decode terminals. Section 5.2 sets each host's IP and socket interfaces; clear incompatible HCCS/UB settings inherited from another experiment:
@@ -1404,25 +1404,23 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
 
 === "A3 series"
 
-    Keep the A3 model configuration from Section 5.2. Use the endpoints and resource values set above to write the HCCS configuration:
+    Keep the A3 model configuration from Section 5.2. Use the endpoints and resource values set above to edit the copied HCCS configuration:
 
-    ```bash
-    : "${MEMCACHE_CONFIG_DIR:?Set the personal configuration directory in Section 4.3}"
+    In the copied `${MEMCACHE_CONFIG_DIR}/mmc-local.conf`, edit the following keys:
 
-    cat > "${MEMCACHE_CONFIG_DIR}/mmc-local.conf" <<EOF
-    ock.mmc.meta_service_url = ${MEMCACHE_META_URL}
-    ock.mmc.local_service.config_store_url = ${MEMCACHE_CONFIG_STORE_URL}
+    ```ini
+    ock.mmc.meta_service_url = <MEMCACHE_META_URL>
+    ock.mmc.local_service.config_store_url = <MEMCACHE_CONFIG_STORE_URL>
     ock.mmc.log_level = info
-    ock.mmc.local_service.world_size = ${MEMCACHE_WORLD_SIZE}
+    ock.mmc.local_service.world_size = <MEMCACHE_WORLD_SIZE>
     ock.mmc.local_service.protocol = device_sdma
-    ock.mmc.local_service.dram.size = ${MEMCACHE_DRAM_SIZE}
-    ock.mmc.local_service.max.dram.size = ${MEMCACHE_MAX_DRAM_SIZE}
+    ock.mmc.local_service.dram.size = <MEMCACHE_DRAM_SIZE>
+    ock.mmc.local_service.max.dram.size = <MEMCACHE_MAX_DRAM_SIZE>
     ock.mmc.local_service.storage.enabled = true
-    ubsio.disk.path = ${MEMCACHE_SSD_PATHS}
-    ubsio.mem.size_in_gb = ${MEMCACHE_UBS_IO_MEM_GB}
-    ubsio.standalone.device_count = ${MEMCACHE_DEVICE_COUNT}
-    ubsio.standalone.force_new_disk = ${MEMCACHE_FORCE_NEW_DISK}
-    EOF
+    ubsio.disk.path = <MEMCACHE_SSD_PATHS>
+    ubsio.mem.size_in_gb = <MEMCACHE_UBS_IO_MEM_GB>
+    ubsio.standalone.device_count = <MEMCACHE_DEVICE_COUNT>
+    ubsio.standalone.force_new_disk = <MEMCACHE_FORCE_NEW_DISK>
     ```
 
     Export the following in the Prefill and Decode terminals. Clear incompatible RoCE/UB settings inherited from another experiment:
@@ -1475,19 +1473,21 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
     cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-meta.conf" "${MEMCACHE_CONFIG_DIR}/mmc-meta.conf"
     cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-local.conf" "${MEMCACHE_CONFIG_DIR}/mmc-local-p.conf"
     cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-local.conf" "${MEMCACHE_CONFIG_DIR}/mmc-local-d.conf"
-
-    cat > "${MEMCACHE_CONFIG_DIR}/mmc-meta.conf" <<EOF
-    ock.mmc.meta_service_url = ${MEMCACHE_META_URL}
-    ock.mmc.meta_service.config_store_url = ${MEMCACHE_CONFIG_STORE_URL}
-    ock.mmc.meta_service.metrics_url = ${MEMCACHE_METRICS_URL}
-    ock.mmc.log_level = info
-    ock.mmc.log_output_target = screen
-    ock.mmc.evict_threshold_high = ${MEMCACHE_EVICT_HIGH}
-    ock.mmc.evict_threshold_low = ${MEMCACHE_EVICT_LOW}
-    EOF
     ```
 
-    Write the P/D LocalService files with the same endpoints and SSD mapping:
+    In the copied `${MEMCACHE_CONFIG_DIR}/mmc-meta.conf`, edit the following keys:
+
+    ```ini
+    ock.mmc.meta_service_url = <MEMCACHE_META_URL>
+    ock.mmc.meta_service.config_store_url = <MEMCACHE_CONFIG_STORE_URL>
+    ock.mmc.meta_service.metrics_url = <MEMCACHE_METRICS_URL>
+    ock.mmc.log_level = info
+    ock.mmc.log_output_target = screen
+    ock.mmc.evict_threshold_high = <MEMCACHE_EVICT_HIGH>
+    ock.mmc.evict_threshold_low = <MEMCACHE_EVICT_LOW>
+    ```
+
+    Set the resource values for both P/D LocalService copies:
 
     ```bash
     export MEMCACHE_WORLD_SIZE=256
@@ -1496,23 +1496,23 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
     export MEMCACHE_UBS_IO_MEM_GB=10
     export MEMCACHE_DEVICE_COUNT=8
     export MEMCACHE_FORCE_NEW_DISK=true
+    ```
 
-    for role in p d; do
-      cat > "${MEMCACHE_CONFIG_DIR}/mmc-local-${role}.conf" <<EOF
-    ock.mmc.meta_service_url = ${MEMCACHE_META_URL}
-    ock.mmc.local_service.config_store_url = ${MEMCACHE_CONFIG_STORE_URL}
+    In the copied `${MEMCACHE_CONFIG_DIR}/mmc-local-p.conf` and `${MEMCACHE_CONFIG_DIR}/mmc-local-d.conf`, edit the following keys:
+
+    ```ini
+    ock.mmc.meta_service_url = <MEMCACHE_META_URL>
+    ock.mmc.local_service.config_store_url = <MEMCACHE_CONFIG_STORE_URL>
     ock.mmc.log_level = info
-    ock.mmc.local_service.world_size = ${MEMCACHE_WORLD_SIZE}
+    ock.mmc.local_service.world_size = <MEMCACHE_WORLD_SIZE>
     ock.mmc.local_service.protocol = device_urma
-    ock.mmc.local_service.dram.size = ${MEMCACHE_DRAM_SIZE}
-    ock.mmc.local_service.max.dram.size = ${MEMCACHE_MAX_DRAM_SIZE}
+    ock.mmc.local_service.dram.size = <MEMCACHE_DRAM_SIZE>
+    ock.mmc.local_service.max.dram.size = <MEMCACHE_MAX_DRAM_SIZE>
     ock.mmc.local_service.storage.enabled = true
-    ubsio.disk.path = ${MEMCACHE_SSD_PATHS}
-    ubsio.mem.size_in_gb = ${MEMCACHE_UBS_IO_MEM_GB}
-    ubsio.standalone.device_count = ${MEMCACHE_DEVICE_COUNT}
-    ubsio.standalone.force_new_disk = ${MEMCACHE_FORCE_NEW_DISK}
-    EOF
-    done
+    ubsio.disk.path = <MEMCACHE_SSD_PATHS>
+    ubsio.mem.size_in_gb = <MEMCACHE_UBS_IO_MEM_GB>
+    ubsio.standalone.device_count = <MEMCACHE_DEVICE_COUNT>
+    ubsio.standalone.force_new_disk = <MEMCACHE_FORCE_NEW_DISK>
     ```
 
     The eight embedded LocalServices each contribute `10GB` of pool DRAM and reserve `10` GB for UBS IO; no separate storage process is needed. `force_new_disk=true` recreates the SSD cache at stack startup, so keep the stack running during cache-reuse tests.
