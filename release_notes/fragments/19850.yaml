@@ -1,0 +1,6 @@
+pr: 19850
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DeepSeek V4 TurboQuant startup failures and unnecessary KV cache
+      memory overhead on Ascend.
