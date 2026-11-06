@@ -1287,7 +1287,7 @@ The complete Prefill, Decode, and proxy commands are provided below.
 
 ### 5.4 PD Separation with MemCache Three-Tier KV Cache Pool
 
-This section adds MemCache three-tier KV caching (NPU HBM, DRAM, and SSD) to the A2 series, A3 series, and Ascend 950 DT basic PD examples in [Section 5.2](#52-basic-pd-separation-deployment); it does not cover the image-and-text 10K case. `MultiConnector` combines Mooncake P-to-D transport with `AscendStoreConnector` for external storage.
+This section describes PD deployment with MemCache three-tier KV caching (NPU HBM, DRAM, and SSD). A2 and A3 retain the model commands from [Section 5.2](#52-basic-pd-separation-deployment). Ascend 950 DT uses the dedicated two-command TP2 × DP2 configuration below, with a 262144-token context limit; it does not use the four rank commands from Section 5.2 or the image-and-text 10K case. `MultiConnector` combines Mooncake P-to-D transport with `AscendStoreConnector` for external storage.
 
 **1. Check the container environment:**
 
@@ -1331,7 +1331,19 @@ Set `MEMCACHE_TEMPLATE_DIR` to the existing `memcache_hybrid/config/` directory 
 ```bash
 export MEMCACHE_TEMPLATE_DIR="<IMAGE_MEMCACHE_CONFIG_DIR>"
 ls "${MEMCACHE_TEMPLATE_DIR}"
+```
+
+For A2/A3, copy the LocalService template into `mmc-local.conf`:
+
+```bash
 cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-local.conf" "${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
+```
+
+For 950 DT, copy the same image template into separate P/D files instead of using `mmc-local.conf`:
+
+```bash
+cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-local.conf" "${MEMCACHE_CONFIG_DIR}/mmc-local-p.conf"
+cp -n "${MEMCACHE_TEMPLATE_DIR}/mmc-local.conf" "${MEMCACHE_CONFIG_DIR}/mmc-local-d.conf"
 ```
 
 For a new pool, also copy the MetaService template:
@@ -1351,7 +1363,7 @@ export MEMCACHE_META_URL="tcp://<META_SERVICE_IP>:<META_SERVICE_PORT>"
 export MEMCACHE_CONFIG_STORE_URL="tcp://<CONFIG_STORE_IP>:<CONFIG_STORE_PORT>"
 ```
 
-For a new pool, set the metrics endpoint and eviction thresholds from the target deployment configuration, then write `${MEMCACHE_CONFIG_DIR}/mmc-meta.conf`:
+For a new pool, set the metrics endpoint and eviction thresholds from the target deployment configuration, then write `${MEMCACHE_CONFIG_DIR}/mmc-meta.conf`. The 950 DT reference uses MetaService/ConfigStore/metrics ports `25250`/`25251`/`25252` and high/low thresholds `70`/`60`; use the actual communication IP in all three URLs. For 950 DT, also set `ock.mmc.log_output_target = screen` in this file to match the reference's terminal logging:
 
 ```bash
 export MEMCACHE_METRICS_URL="http://<METRICS_IP>:<METRICS_PORT>"
@@ -1382,7 +1394,7 @@ export MEMCACHE_DEVICE_COUNT="<DRAM_ENABLED_LOCAL_SERVICE_COUNT_ON_THIS_HOST>"
 export MEMCACHE_FORCE_NEW_DISK="<true_OR_false_FOR_THIS_DEPLOYMENT>"
 ```
 
-Run these common exports in every P/D terminal:
+Run these common exports in every A2/A3 P/D terminal. The 950 DT commands in step 5 include their own exports and select the role-specific configuration files:
 
 ```bash
 export VLLM_USE_MODELSCOPE=True
@@ -1485,12 +1497,20 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
 
 === "Ascend 950 DT"
 
-    Keep the 950 DT model configuration from Section 5.2 and apply the common exports to all four P/D rank terminals. Use the endpoints and resource values set above to write the UB configuration:
+    The reference uses one eight-device host: Prefill on devices 0–3 and Decode on devices 4–7, with TP2 × DP2 for each role. The eight embedded LocalServices each contribute `10GB` of pool DRAM and reserve `10` GB for UBS IO. The source setup uses a dedicated 500 GiB SSD-backed loop device; use its actual mapped device path from Section 4.3 rather than assuming a fixed loop number.
+
+    Set the following reference values in the configuration-editing terminal, retaining the shared endpoints and actual `MEMCACHE_SSD_PATHS` set above. `force_new_disk=true` recreates the SSD cache when the stack starts; start the stack once and keep it running for requests and cache-reuse tests.
 
     ```bash
-    : "${MEMCACHE_CONFIG_DIR:?Set the personal configuration directory in Section 4.3}"
+    export MEMCACHE_WORLD_SIZE=256
+    export MEMCACHE_DRAM_SIZE=10GB
+    export MEMCACHE_MAX_DRAM_SIZE=1024GB
+    export MEMCACHE_UBS_IO_MEM_GB=10
+    export MEMCACHE_DEVICE_COUNT=8
+    export MEMCACHE_FORCE_NEW_DISK=true
 
-    cat > "${MEMCACHE_CONFIG_DIR}/mmc-local.conf" <<EOF
+    for role in p d; do
+      cat > "${MEMCACHE_CONFIG_DIR}/mmc-local-${role}.conf" <<EOF
     ock.mmc.meta_service_url = ${MEMCACHE_META_URL}
     ock.mmc.local_service.config_store_url = ${MEMCACHE_CONFIG_STORE_URL}
     ock.mmc.log_level = info
@@ -1504,26 +1524,46 @@ export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
     ubsio.standalone.device_count = ${MEMCACHE_DEVICE_COUNT}
     ubsio.standalone.force_new_disk = ${MEMCACHE_FORCE_NEW_DISK}
     EOF
+    done
     ```
 
-    Add the UB environment setting in every rank terminal and clear the HCCS/RoCE settings from other experiments:
+    Both files use the same pool endpoints and SSD mapping. Start only the P/D commands in step 5, whose workers initialize the eight LocalServices; no separate storage process is needed. The connector flags and model parameters are included in those commands.
 
-    ```bash
-    unset HCCL_INTRA_ROCE_ENABLE ASCEND_ENABLE_USE_FABRIC_MEM ASCEND_GLOBAL_RESOURCE_CONFIG
-    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-    ```
+**950 DT runtime preparation:**
 
-    **Prefill connector argument:**
+The source configuration ran in a prepared r67 image with changes from PRs #20699, #20642, #20499, and #20991. Use a runtime containing the required model and connector changes; the generic Docker version template alone does not establish equivalence to that environment. The example retains the tutorial's ModelScope ID; use the same compatible W4A8-MXFP checkpoint for both roles.
 
-    ```text
-    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":30000,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false}}]}}'
-    ```
+Before starting MetaService, Prefill, Decode, or Proxy, run the following in **each 950 DT service terminal**, together with the library exports from step 1. Initialize CANN/ATB as described in Section 4.1. `ASCEND_REPO` is the repository inside the container; `local_ip` and `nic_name` identify the native UB communication interface and must match the pool endpoint IP.
 
-    **Decode connector argument:**
+```bash
+export ASCEND_REPO="<VLLM_ASCEND_REPOSITORY_IN_CONTAINER>"
+local_ip="<POOL_COMMUNICATION_IP>"
+nic_name="<POOL_NETWORK_INTERFACE>"
 
-    ```text
-    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":30100,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false}}]}}'
-    ```
+unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY ALL_PROXY all_proxy
+unset HCCL_INTRA_ROCE_ENABLE ASCEND_ENABLE_USE_FABRIC_MEM ASCEND_GLOBAL_RESOURCE_CONFIG
+unset ASCEND_RT_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES MMC_LOCAL_CONFIG_PATH MMC_META_CONFIG_PATH
+export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+export VLLM_HOST_IP="${local_ip}"
+export HCCL_IF_IP="${local_ip}"
+export GLOO_SOCKET_IFNAME="${nic_name}"
+export TP_SOCKET_IFNAME="${nic_name}"
+export HCCL_SOCKET_IFNAME="${nic_name}"
+export NO_PROXY="localhost,127.0.0.1,${local_ip}"
+export no_proxy="${NO_PROXY}"
+export PYTHONHASHSEED=0
+export VLLM_USE_MODELSCOPE=True
+export VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+export VLLM_ENGINE_READY_TIMEOUT_S=2400
+export HCCL_BUFFSIZE=512
+export PYTHONPATH="${ASCEND_REPO}${PYTHONPATH:+:${PYTHONPATH}}"
+source "${ASCEND_REPO}/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash"
+export LD_LIBRARY_PATH="$(python -c 'import pathlib, mooncake, torch, torch_npu; print(":".join(str(p) for m in (mooncake, torch, torch_npu) for r in [pathlib.Path(next(iter(m.__path__)))] for p in (r / "lib", r) if p.is_dir()))'):${LD_LIBRARY_PATH:-}"
+ulimit -l unlimited
+ulimit -s 65536
+cd "${ASCEND_REPO}"
+```
 
 **4. Start MetaService:**
 
@@ -1544,15 +1584,106 @@ Open a separate container shell for each entry below using `docker exec -it vllm
 | --- | --- | --- | --- |
 | A2 series | Prefill on `PREFILL_HOST`; Decode on `DECODE_HOST` | 25568 on prefill host; 25569 on decode host | A2 Proxy from Section 5.2, on prefill host |
 | A3 series | Prefill; Decode | 25568; 25569 | A3 Proxy from Section 5.2 |
-| Ascend 950 DT | Prefill Rank 0; Prefill Rank 1; Decode Rank 0; Decode Rank 1 | 8088; 8089; 8092; 8093 | 950 DT Proxy from Section 5.2 |
+| Ascend 950 DT | Prefill; Decode | 8247; 8248 | 950 DT Proxy below, port 8249 |
 
-In each model terminal, apply the library, common P/D, and hardware-specific exports above, and confirm that `MMC_LOCAL_CONFIG_PATH` points to the readable file from step 3. Run the corresponding Section 5.2 command, replacing only its `--kv-transfer-config` argument with the matching argument above; keep all other model settings unchanged.
+For A2/A3, apply the library, common P/D, and hardware-specific exports above in each model terminal, and confirm that `MMC_LOCAL_CONFIG_PATH` points to the readable file from step 3. Run the corresponding Section 5.2 command, replacing only its `--kv-transfer-config` argument with the matching argument above; keep all other model settings unchanged. For 950 DT, use the complete commands below after its runtime preparation; start Prefill first, wait for its API, then start Decode and finally Proxy.
 
-Check each API with `curl --fail http://127.0.0.1:<API_PORT>/v1/models`, using the ports above on each service's own host; for A2, also run the cross-host API checks from Section 5.2 on the prefill host. Expect HTTP 200 and the configured model name. Once all APIs are ready, start the matching Section 5.2 Proxy command in its own terminal.
+Check each API with `curl --fail http://127.0.0.1:<API_PORT>/v1/models`, using the ports above on each service's own host; for A2, also run the cross-host API checks from Section 5.2 on the prefill host. Expect HTTP 200 and the configured model name. Once all APIs are ready, start the matching Section 5.2 Proxy command for A2/A3, or the 950 DT Proxy command below, in its own terminal.
+
+**Prefill (950 DT):**
+
+```bash
+export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local-p.conf"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
+
+vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp \
+  --host 0.0.0.0 \
+  --port 8247 \
+  --served-model-name qwen38-megamoe-sp-pd \
+  --trust-remote-code \
+  --quantization ascend \
+  --tensor-parallel-size 2 \
+  --data-parallel-size 2 \
+  --max-model-len 262144 \
+  --max-num-seqs 64 \
+  --max-num-batched-tokens 4096 \
+  --gpu-memory-utilization 0.9 \
+  --enable-prefix-caching \
+  --async-scheduling \
+  --enable-expert-parallel \
+  --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+  --compilation-config '{"cudagraph_mode":"NONE"}' \
+  --additional-config '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}' \
+  --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
+  --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":1},"decode":{"dp_size":2,"tp_size":2,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false,"load_async":false,"consumer_is_to_load":false,"consumer_is_to_put":false,"save_decode_cache":false}}]}}' \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_coder \
+  --reasoning-parser qwen3 \
+  --data-parallel-address "${VLLM_HOST_IP}" \
+  --data-parallel-rpc-port 29770
+```
+
+**Decode (950 DT):**
+
+```bash
+export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local-d.conf"
+export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
+export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
+
+vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8-mxfp \
+  --host 0.0.0.0 \
+  --port 8248 \
+  --served-model-name qwen38-megamoe-sp-pd \
+  --trust-remote-code \
+  --quantization ascend \
+  --tensor-parallel-size 2 \
+  --data-parallel-size 2 \
+  --max-model-len 262144 \
+  --max-num-seqs 64 \
+  --max-num-batched-tokens 4096 \
+  --gpu-memory-utilization 0.9 \
+  --enable-prefix-caching \
+  --async-scheduling \
+  --enable-expert-parallel \
+  --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
+  --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
+  --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":1},"decode":{"dp_size":2,"tp_size":2,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false,"load_async":false,"consumer_is_to_load":false,"consumer_is_to_put":false,"save_decode_cache":false}}]}}' \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_coder \
+  --reasoning-parser qwen3 \
+  --data-parallel-address "${VLLM_HOST_IP}" \
+  --data-parallel-rpc-port 29780
+```
+
+**Proxy (950 DT):**
+
+```bash
+python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    --host 0.0.0.0 --port 8249 \
+    --prefiller-hosts "${VLLM_HOST_IP}" --prefiller-ports 8247 \
+    --decoder-hosts "${VLLM_HOST_IP}" --decoder-ports 8248 \
+    --workers 1
+```
+
+**Service verification (950 DT):**
+
+```bash
+curl --fail "http://127.0.0.1:8249/v1/models"
+curl --fail "http://127.0.0.1:8249/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"qwen38-megamoe-sp-pd","messages":[{"role":"user","content":"Who are you?"}],"max_tokens":1024,"temperature":0}'
+```
+
+Both roles use TP2 × DP2 with PP1, 262144 context tokens, 64 sequences, 4096 batch tokens, and Engram CPU offload with `dp_shared_memory=true`. Prefill uses graph mode `NONE`; Decode uses `FULL_DECODE_ONLY`, static kernels, and MTP `enforce_eager=false`. The `qwen3_coder` tool-call parser follows this pooling configuration. P/D DP RPC ports are `29770`/`29780`, and Mooncake KV ports are `32470`/`32480`; keep these separate from the APIs and pool service ports.
+
+The pool connector explicitly sets `use_layerwise=false`, `load_async=false`, `consumer_is_to_load=false`, `consumer_is_to_put=false`, and `save_decode_cache=false`. Prefill performs synchronous external cache loading and writes; Decode receives KV/state through Mooncake without loading or saving the external pool cache.
 
 **6. Verify three-tier cache reuse:**
 
-1. **Service:** Run the Section 5.2 chat-completion request through the proxy and verify correct output and P-to-D transfer.
+1. **Service:** Run the Section 5.2 chat-completion request for A2/A3, or the 950 DT request above, through the matching proxy and verify correct output and P-to-D transfer.
 2. **External cache:** Send requests with shared prefixes and different suffixes; check MemCache lookup, put, get, and hit activity. A local prefix-cache hit alone does not prove external cache reuse.
 3. **SSD restore:** Fill DRAM past the eviction watermark, confirm SSD eviction, then request an evicted prefix again and verify SSD read/restore activity and correct output. Keep MetaService and P/D running; SSD writes alone do not prove restoration.
 
@@ -1576,8 +1707,9 @@ Use the OpenAI-compatible `/v1/chat/completions` API to verify generation. Use t
 | A3 series PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a3-pd` |
 | Ascend 950 DT PD proxy | `http://<LOCAL_SERVICE_IP>:8087` | `qwen38-flash-next-950-dt-pd` |
 | Ascend 950 DT image-and-text 10K PD proxy | `http://127.0.0.1:8246` | `qwen38-megamoe-sp-pd` |
+| Ascend 950 DT three-tier pooling PD proxy | `http://127.0.0.1:8249` | `qwen38-megamoe-sp-pd` |
 
-For PD, complete the proxy check in [Section 5.2](#52-basic-pd-separation-deployment), or [Section 5.3](#53-image-and-text-10k-pd-separation-deployment) for the image-and-text 10K case. For three-tier pooling, also complete the SSD eviction and restore checks in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool).
+For PD, complete the proxy check in [Section 5.2](#52-basic-pd-separation-deployment), or [Section 5.3](#53-image-and-text-10k-pd-separation-deployment) for the image-and-text 10K case. For three-tier pooling, use the startup and proxy checks for the matching hardware in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool), then complete its SSD eviction and restore checks.
 
 ### 6.1 Basic Chat Completion
 
@@ -1774,10 +1906,12 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | Ascend 950 DT | Decode | 4–7 | 2 × 1 × 2 | 141312 | 64 | 4096 |
 | Ascend 950 DT | Prefill (image-and-text 10K) | 0–3 | 2 × 2 × 1 | 143360 | 64 | 8192 |
 | Ascend 950 DT | Decode (image-and-text 10K) | 4–7 | 2 × 1 × 2 | 143360 | 64 | 8192 |
+| Ascend 950 DT | Prefill (three-tier pooling) | 0–3 | 2 × 1 × 2 | 262144 | 64 | 4096 |
+| Ascend 950 DT | Decode (three-tier pooling) | 4–7 | 2 × 1 × 2 | 262144 | 64 | 4096 |
 
 For A2 series and A3 series PD deployment, use the Prefill and Decode rows together: each role occupies eight devices, for 16 devices in total. A2 uses two eight-device hosts; A3 uses one 16-device host. Prefill uses eager execution with TP4 × PP2 × DP1; Decode enables static kernels with TP2 × DP4.
 
-For A2 series, A3 series, and Ascend 950 DT MemCache three-tier pooling, retain the basic PD token budgets above and apply the hardware-specific pooling settings in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool). Pool and UBS IO memory must be budgeted separately from Engram CPU offload.
+For A2/A3 MemCache three-tier pooling, retain the basic PD token budgets above. For 950 DT, use the dedicated three-tier pooling rows and the complete commands in [Section 5.4](#54-pd-separation-with-memcache-three-tier-kv-cache-pool); both roles use `HCCL_BUFFSIZE=512`. Pool and UBS IO memory must be budgeted separately from Engram CPU offload.
 
 ### 9.2 Tuning Guidelines
 
