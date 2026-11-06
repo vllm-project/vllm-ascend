@@ -27,8 +27,18 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+from vllm_ascend.worker.v2.sample.apply_top_k_top_p import _apply_top_k_top_p_pytorch
 
-pytestmark = pytest.mark.usefixtures("sampling_kernel_overrides")
+pytestmark = pytest.mark.usefixtures("sampling_kernel_overrides", "cpu_top_k_top_p")
+
+
+@pytest.fixture
+def cpu_top_k_top_p(monkeypatch):
+    """Run CPU sampler assertions with the reference filtering implementation."""
+    monkeypatch.setattr(
+        "vllm_ascend._310p.worker.v2.sampler.apply_top_k_top_p",
+        _apply_top_k_top_p_pytorch,
+    )
 
 
 def _add_request(sampler, req_idx, prompt_len, sampling_params):
