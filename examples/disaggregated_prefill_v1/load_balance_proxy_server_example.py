@@ -127,6 +127,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
@@ -167,6 +168,8 @@ class InstanceInfo:
 
 
 TAINT_PRIORITY = 1e15
+PREFILL_AFFINITY_POLICIES = ("rendezvous", "group-balanced")
+DEFAULT_PREFILL_AFFINITY_MAX_GROUPS = 100_000
 
 
 def extract_cached_tokens(response_json: dict) -> int | None:
@@ -228,8 +231,8 @@ def setup_logging(log_level: str) -> None:
     logger.setLevel(getattr(logging, log_level.upper()))
 
 
-def conversation_affinity_key(req_data: dict) -> str | None:
-    """Identify a conversation without hashing its growing message history."""
+def conversation_affinity_key(req_data: dict, prompt_prefix_chars: int = 0) -> str | None:
+    """Identify a conversation, optionally keying only the leading prompt text."""
     user = req_data.get("user")
     if isinstance(user, str) and user:
         identity = [req_data.get("model"), "session", user]
@@ -239,7 +242,28 @@ def conversation_affinity_key(req_data: dict) -> str | None:
         if first_user_index is None:
             return None
         instructions = [m for m in messages[:first_user_index] if m.get("role") in ("system", "developer")]
-        identity = [req_data.get("model"), instructions, messages[first_user_index]]
+        first_user = messages[first_user_index]
+        content = first_user.get("content")
+        if prompt_prefix_chars > 0 and isinstance(content, str):
+            first_user = {**first_user, "content": content[:prompt_prefix_chars]}
+        elif prompt_prefix_chars > 0 and isinstance(content, list):
+            text_index = next(
+                (
+                    i
+                    for i, part in enumerate(content)
+                    if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+                ),
+                None,
+            )
+            if text_index is not None:
+                truncated_content = list(content)
+                text_part = truncated_content[text_index]
+                truncated_content[text_index] = {
+                    **text_part,
+                    "text": text_part["text"][:prompt_prefix_chars],
+                }
+                first_user = {**first_user, "content": truncated_content}
+        identity = [req_data.get("model"), instructions, first_user]
     encoded = json.dumps(identity, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -288,7 +312,18 @@ class SharedProxyScheduler:
     not match) are skipped on pop.
     """
 
-    def __init__(self, prefiller_instances, decoder_instances):
+    def __init__(
+        self,
+        prefiller_instances,
+        decoder_instances,
+        *,
+        prefill_affinity_policy: str = "rendezvous",
+        prefill_affinity_max_groups: int = DEFAULT_PREFILL_AFFINITY_MAX_GROUPS,
+    ):
+        if prefill_affinity_policy not in PREFILL_AFFINITY_POLICIES:
+            raise ValueError(f"Unsupported prefill affinity policy: {prefill_affinity_policy}")
+        if prefill_affinity_max_groups <= 0:
+            raise ValueError("Prefill affinity max groups must be positive")
         self._lock = threading.RLock()
         self.request_num = 0
         self.waiting_nodes: dict[str, tuple[str, tuple[str, int], int]] = {}
@@ -297,6 +332,10 @@ class SharedProxyScheduler:
             ServerRole.DECODE: RolePools(),
         }
         self._ordinal = 0
+        self._prefill_affinity_policy = prefill_affinity_policy
+        self._prefill_affinity_max_groups = prefill_affinity_max_groups
+        self._prefill_affinity_backend: OrderedDict[str, str] = OrderedDict()
+        self._prefill_affinity_groups: dict[str, set[str]] = {}
 
         for host, port in prefiller_instances:
             self._add_server_no_lock(ServerRole.PREFILL, host, port)
@@ -364,6 +403,55 @@ class SharedProxyScheduler:
         self._push_heap(role, key)
         return True
 
+    @staticmethod
+    def _rendezvous_affinity_backend(affinity_key: str, candidates: set[str]) -> str:
+        return max(
+            candidates,
+            key=lambda k: (hashlib.sha256((affinity_key + "\0" + k).encode("utf-8")).digest(), k),
+        )
+
+    def _discard_prefill_affinity_key_no_lock(self, affinity_key: str) -> None:
+        assigned = self._prefill_affinity_backend.pop(affinity_key, None)
+        if assigned is None:
+            return
+        groups = self._prefill_affinity_groups.get(assigned)
+        if groups is not None:
+            groups.discard(affinity_key)
+            if not groups:
+                del self._prefill_affinity_groups[assigned]
+
+    def _remove_prefill_affinity_backend_no_lock(self, backend: str) -> None:
+        """Forget only groups owned by a removed prefiller; remap on next use."""
+        affected = [
+            affinity_key for affinity_key, assigned in self._prefill_affinity_backend.items() if assigned == backend
+        ]
+        for affinity_key in affected:
+            self._discard_prefill_affinity_key_no_lock(affinity_key)
+        self._prefill_affinity_groups.pop(backend, None)
+
+    def _pick_group_balanced_prefill_no_lock(self, affinity_key: str, healthy_candidates: set[str]) -> str:
+        assigned = self._prefill_affinity_backend.get(affinity_key)
+        if assigned in healthy_candidates:
+            self._prefill_affinity_backend.move_to_end(affinity_key)
+            return assigned
+        if assigned is not None:
+            self._discard_prefill_affinity_key_no_lock(affinity_key)
+
+        while len(self._prefill_affinity_backend) >= self._prefill_affinity_max_groups:
+            oldest_key = next(iter(self._prefill_affinity_backend))
+            self._discard_prefill_affinity_key_no_lock(oldest_key)
+
+        min_group_count = min(len(self._prefill_affinity_groups.get(candidate, ())) for candidate in healthy_candidates)
+        candidates = {
+            candidate
+            for candidate in healthy_candidates
+            if len(self._prefill_affinity_groups.get(candidate, ())) == min_group_count
+        }
+        selected = self._rendezvous_affinity_backend(affinity_key, candidates)
+        self._prefill_affinity_backend[affinity_key] = selected
+        self._prefill_affinity_groups.setdefault(selected, set()).add(affinity_key)
+        return selected
+
     def get_snapshot(self) -> dict[str, list[dict[str, Any]]]:
         with self._lock:
             return {
@@ -406,16 +494,25 @@ class SharedProxyScheduler:
     ) -> dict[str, Any]:
         if affinity_key and role is ServerRole.PREFILL:
             pool = self._pool(role)
-            candidates = pool.servers.keys() - pool.tainted
-            if not candidates:
+            healthy_candidates = pool.servers.keys() - pool.tainted
+            if not healthy_candidates:
                 raise RuntimeError("No available prefill servers for session affinity")
-            # Rendezvous hashing is stable across workers/restarts and only
-            # remaps conversations whose chosen endpoint is removed.
-            key = max(
-                candidates,
-                key=lambda k: (hashlib.sha256((affinity_key + "\0" + k).encode("utf-8")).digest(), k),
-            )
-            logger.debug("Prefill affinity key=%s backend=%s", affinity_key[:16], key)
+            if self._prefill_affinity_policy == "group-balanced":
+                key = self._pick_group_balanced_prefill_no_lock(affinity_key, healthy_candidates)
+                group_counts = {
+                    candidate: len(self._prefill_affinity_groups.get(candidate, ()))
+                    for candidate in sorted(healthy_candidates)
+                }
+                logger.debug(
+                    "Prefill affinity key=%s backend=%s group_counts=%s",
+                    affinity_key[:16],
+                    key,
+                    group_counts,
+                )
+            else:
+                # Preserve #19708's stable, stateless rendezvous routing by default.
+                key = self._rendezvous_affinity_backend(affinity_key, healthy_candidates)
+                logger.debug("Prefill affinity key=%s backend=%s", affinity_key[:16], key)
         else:
             key = self._pop_valid(role)
         entry = self._pool(role).servers[key]
@@ -535,6 +632,8 @@ class SharedProxyScheduler:
 
             removed = False
             for key in keys:
+                if role is ServerRole.PREFILL:
+                    self._remove_prefill_affinity_backend_no_lock(key)
                 removed = pool.servers.pop(key, None) is not None or removed
                 self.waiting_nodes.pop(key, None)
             pool.tainted.difference_update(keys)
@@ -553,6 +652,8 @@ class SharedProxyScheduler:
                     continue
                 keys = list(pool.tainted)
                 for key in keys:
+                    if role is ServerRole.PREFILL:
+                        self._remove_prefill_affinity_backend_no_lock(key)
                     pool.servers.pop(key, None)
                 pool.tainted.clear()
                 self._reset_heap(role, bump_seq=True)
@@ -712,6 +813,26 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Route conversations to stable prefill endpoints to reuse prefix cache; decode remains load balanced.",
     )
+    parser.add_argument(
+        "--prefill-affinity-policy",
+        choices=PREFILL_AFFINITY_POLICIES,
+        default="rendezvous",
+        help="Prefill affinity routing policy; group-balanced assigns new groups to the least-occupied endpoint.",
+    )
+    parser.add_argument(
+        "--prefill-affinity-prefix-chars",
+        type=int,
+        default=0,
+        help="Hash only this many leading characters of string or text-part user content; 0 keeps full content.",
+    )
+    parser.add_argument(
+        "--prefill-affinity-max-groups",
+        type=int,
+        default=DEFAULT_PREFILL_AFFINITY_MAX_GROUPS,
+        help=(
+            "Maximum sticky affinity groups retained by group-balanced routing; least-recently-used groups are evicted."
+        ),
+    )
     parser.add_argument("--max-retries", type=int, default=3, help="Maximum number of retries for HTTP requests")
     parser.add_argument(
         "--retry-delay", type=float, default=0.001, help="Base delay (seconds) for exponential backoff retries"
@@ -743,6 +864,14 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("Number of prefiller hosts must match number of prefiller ports")
     if len(args.decoder_hosts) != len(args.decoder_ports):
         raise ValueError("Number of decoder hosts must match number of decoder ports")
+    if args.prefill_affinity_policy != "rendezvous" and not args.enable_prefill_affinity:
+        raise ValueError("Non-default prefill affinity policy requires prefill affinity")
+    if args.prefill_affinity_prefix_chars < 0:
+        raise ValueError("Prefill affinity prefix chars must be non-negative")
+    if args.prefill_affinity_prefix_chars and not args.enable_prefill_affinity:
+        raise ValueError("Prefill affinity prefix chars requires prefill affinity")
+    if args.prefill_affinity_max_groups <= 0:
+        raise ValueError("Prefill affinity max groups must be positive")
     args.prefiller_instances = list(zip(args.prefiller_hosts, args.prefiller_ports))
     args.decoder_instances = list(zip(args.decoder_hosts, args.decoder_ports))
     return args
@@ -771,7 +900,12 @@ def bootstrap_parent_process(args: argparse.Namespace) -> None:
     if args.workers <= 1:
         return
 
-    shared_scheduler = SharedProxyScheduler(args.prefiller_instances, args.decoder_instances)
+    shared_scheduler = SharedProxyScheduler(
+        args.prefiller_instances,
+        args.decoder_instances,
+        prefill_affinity_policy=args.prefill_affinity_policy,
+        prefill_affinity_max_groups=args.prefill_affinity_max_groups,
+    )
     NodeListener(shared_scheduler)
 
     authkey = os.urandom(16)
@@ -787,7 +921,12 @@ def _ensure_scheduler(args) -> SharedProxyScheduler:
     global shared_scheduler
     if shared_scheduler is not None:
         return shared_scheduler
-    shared_scheduler = SharedProxyScheduler(args.prefiller_instances, args.decoder_instances)
+    shared_scheduler = SharedProxyScheduler(
+        args.prefiller_instances,
+        args.decoder_instances,
+        prefill_affinity_policy=args.prefill_affinity_policy,
+        prefill_affinity_max_groups=args.prefill_affinity_max_groups,
+    )
     NodeListener(shared_scheduler)
     return shared_scheduler
 
@@ -993,7 +1132,8 @@ async def assign_instances(
     request_id = req_data.get("request_id") or next_req_id()
     pick_prefill = "begin_request" if is_initial_request else "reserve_prefill_kv"
     if args.enable_prefill_affinity:
-        prefiller = await runtime.schedule(pick_prefill, prefiller_score, conversation_affinity_key(req_data))
+        affinity_key = conversation_affinity_key(req_data, args.prefill_affinity_prefix_chars)
+        prefiller = await runtime.schedule(pick_prefill, prefiller_score, affinity_key)
     else:
         prefiller = await runtime.schedule(pick_prefill, prefiller_score)
     prefiller_key = prefiller["key"]

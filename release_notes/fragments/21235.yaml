@@ -1,0 +1,4 @@
+pr: 21235
+entries:
+  - category: feature
+    text: Added opt-in group-balanced sticky prefix affinity for the disaggregated P/D proxy, including prefix-based fallback identity, deterministic group-count balancing, and bounded LRU assignment retention.
