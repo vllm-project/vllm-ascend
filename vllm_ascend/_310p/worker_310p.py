@@ -26,6 +26,7 @@ from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 
 from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend.utils import is_rc_device, vllm_version_is
+from vllm_ascend.worker.memory_profiling import validate_memory_profile
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 # vLLM #61183 moved `get_kv_cache_groups` to `kv_cache_planning` on main; the
@@ -116,14 +117,9 @@ class NPUWorker310(NPUWorker):
         self.peak_activation_memory = profile_result.torch_peak_increase
 
         free_gpu_memory = profile_result.after_profile.free_memory
-        assert self.init_snapshot.free_memory > free_gpu_memory, (
-            "Error in memory profiling. "
-            f"Initial free memory {GiB(self.init_snapshot.free_memory)} GiB, "
-            f"current free memory {GiB(free_gpu_memory)} GiB. "
-            "This happens when other processes sharing the same container "
-            "release GPU memory while vLLM is profiling during initialization. "
-            "To fix this, ensure consistent GPU memory allocation or "
-            "isolate vLLM in its own container."
+        validate_memory_profile(
+            init_free_memory=self.init_snapshot.free_memory,
+            after_profile_free_memory=free_gpu_memory,
         )
 
         # Divide the available memory by 2, to reserved more memory for other operators workspace and other cache
