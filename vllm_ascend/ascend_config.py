@@ -1655,6 +1655,17 @@ class SchedulerConfig:
         return cls(**resolved)  # type: ignore[arg-type]
 
 
+# Shared dummy hot-row ring for inactive/padded tokens in the fused copy-SFA
+# pipeline: dummy rows are written but never read (token_active masks their
+# attention), so a small modulo ring replaces one dedicated hot row per dummy
+# slot. The effective ring width is min(DUMMY_POOL_ROW_COUNT, capacity)
+# (see copy_sfa_dummy_ring_width): the highest pool row index is
+# capacity + ring_width - 1 <= 2 * capacity - 1, so the hot-row pool arena
+# never exceeds the dedicated-per-slot layout and the LIM history arrays
+# (2 * requests) cover every index for any max_num_seqs.
+DUMMY_POOL_ROW_COUNT = 8
+
+
 @config
 class SparseKVOffloadConfig:
     """

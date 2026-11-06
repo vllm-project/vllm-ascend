@@ -31,7 +31,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
-from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_pool_capacity
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
+    copy_sfa_dummy_ring_width,
+    copy_sfa_pool_capacity,
+)
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
 # Main BF16 cache:
@@ -119,11 +122,17 @@ def allocate_kv_offload_topk_buffer_pair(
         # The backend imports this manager; defer its layout constant import.
         from vllm_ascend.attention.sfa_kv_offload import COPY_SFA_TAIL_BLOCKS
 
-        # LIM merges all query selections into one request-owned hot row.
-        # Graph padding uses a second, private arena of the same capacity.
-        # Query-row metadata still needs max_num_seqs * decode_width, but
-        # multiplying the large hot K/V allocation by that width wastes HBM.
-        request_rows = 2 * copy_sfa_pool_capacity(vllm_config.scheduler_config.max_num_seqs)
+        # LIM merges all query selections into one request-owned hot row;
+        # inactive/padded slots share a small dummy-row ring instead of
+        # each consuming a dedicated hot row, so the arena needs one row
+        # per live request slot plus the ring. The ring width is capped by
+        # the capacity, so the arena never exceeds the dedicated-per-slot
+        # 2 * capacity layout. Query-row metadata still needs
+        # max_num_seqs * decode_width, but multiplying the large hot K/V
+        # allocation by that width wastes HBM.
+        request_rows = copy_sfa_pool_capacity(vllm_config.scheduler_config.max_num_seqs) + copy_sfa_dummy_ring_width(
+            vllm_config.scheduler_config.max_num_seqs
+        )
         max_num_topk_rows = request_rows
         topk_buffer_size += COPY_SFA_TAIL_BLOCKS * vllm_config.cache_config.block_size
     topk_buffer_k_size_bytes = max_num_topk_rows * topk_buffer_size * num_kv_heads * k_dim * torch.bfloat16.itemsize
