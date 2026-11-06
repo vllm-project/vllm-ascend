@@ -32,7 +32,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, has_effective_prefill
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     get_kv_cache_compression_ratio,
@@ -464,7 +464,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         metadata = self._build_metadata(common_attn_metadata, graph_capture)
         metadata.indexer_row_shard = self._build_indexer_row_shard(common_attn_metadata, graph_capture)
         pcp_context = common_attn_metadata.pcp_context
-        if pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any()):
+        if pcp_context is not None and has_effective_prefill(pcp_context.global_batch):
             cache_group_idx = common_attn_metadata.pcp_cache_group_idx
             if cache_group_idx is None:
                 raise RuntimeError("KPool PCP metadata requires the PCP cache-group index.")
@@ -671,7 +671,7 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         pcp_context = common_attn_metadata.pcp_context
         write_common = common_attn_metadata
-        if pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any()):
+        if pcp_context is not None and has_effective_prefill(pcp_context.global_batch):
             cache_group_idx = common_attn_metadata.pcp_cache_group_idx
             if cache_group_idx is None:
                 raise RuntimeError("KPool tail PCP metadata requires the PCP cache-group index.")

@@ -24,7 +24,12 @@ from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41Metadata,
     AscendDSAV41MetadataBuilder,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, is_pcp_enabled, uses_pcp_sharded_layout
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    has_effective_prefill,
+    is_pcp_enabled,
+    uses_pcp_sharded_layout,
+)
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, get_storage_block_size
 from vllm_ascend.ops.rope_dsv4 import get_full_cos_and_sin_dsa_for_layer
 
@@ -374,7 +379,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             raise ValueError("V4.1 PCP metadata sharing requires matching batch signatures")
         mode = shared.get("mode")
         if mode is None:
-            has_prefill = bool(pcp_context.global_batch.is_prefilling_np.any())
+            has_prefill = has_effective_prefill(pcp_context.global_batch)
             mode = (has_prefill, has_prefill or self._is_decode_sharded)
             shared["mode"] = mode
         has_prefill, needs_global_metadata = mode

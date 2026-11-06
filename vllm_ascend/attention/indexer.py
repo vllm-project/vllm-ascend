@@ -41,7 +41,11 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_pcp_global_metadata,
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
-from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
+from vllm_ascend.attention.utils import (
+    has_effective_prefill,
+    split_decodes_and_prefills,
+    uses_pcp_sharded_layout,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
@@ -1151,7 +1155,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         buffer_key: object,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         pcp_slot_mapping = None
-        if self.use_pcp and pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any()):
+        if self.use_pcp and pcp_context is not None and has_effective_prefill(pcp_context.global_batch):
             if pcp_cache_group_idx is None:
                 raise RuntimeError("PCP+DCP indexer metadata requires the PCP cache-group index.")
             pcp_slot_mapping = self._build_pcp_ordered_slot_mapping(

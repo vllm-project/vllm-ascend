@@ -6,6 +6,7 @@ from importlib import import_module
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_npu
@@ -39,6 +40,29 @@ from vllm_ascend.utils import (
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+def get_effective_prefill_flags(batch: Any) -> np.ndarray:
+    """Return request phases after PCP's prefill-as-decode override."""
+    is_prefilling_source = getattr(batch, "is_prefilling_np", None)
+    if is_prefilling_source is None:
+        is_prefilling_source = batch.is_prefilling
+    is_prefilling = np.asarray(is_prefilling_source, dtype=np.bool_)
+    prefill_runs_as_decode = getattr(batch, "prefill_runs_as_decode_np", None)
+    if prefill_runs_as_decode is None:
+        return is_prefilling
+    prefill_runs_as_decode = np.asarray(prefill_runs_as_decode, dtype=np.bool_)
+    if prefill_runs_as_decode.shape != is_prefilling.shape:
+        raise RuntimeError(
+            "Prefill-as-decode mask must match the request phase mask: "
+            f"{prefill_runs_as_decode.shape} != {is_prefilling.shape}."
+        )
+    return is_prefilling & ~prefill_runs_as_decode
+
+
+def has_effective_prefill(batch: Any) -> bool:
+    """Whether a batch still contains requests computed by the prefill path."""
+    return bool(get_effective_prefill_flags(batch).any())
 
 # Native npu_attention_update accepts at most 16 output/LSE pairs.
 ATTENTION_UPDATE_MAX_INPUTS = 16

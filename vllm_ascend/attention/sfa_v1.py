@@ -39,6 +39,7 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
     get_tq_fused_slot_bytes,
     get_tq_packed_bytes,
+    has_effective_prefill,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -684,7 +685,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             uses_pcp_sharded_layout=(
                 pcp_context is not None and uses_pcp_sharded_layout(common_attn_metadata, self.use_pcp)
             ),
-            pcp_has_global_prefill=bool(pcp_context is not None and pcp_context.global_batch.is_prefilling_np.any()),
+            pcp_has_global_prefill=bool(pcp_context is not None and has_effective_prefill(pcp_context.global_batch)),
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
             attn_state=common_attn_metadata.attn_state,

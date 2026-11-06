@@ -32,7 +32,11 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPMetadataBuilderMixin,
     use_history_current_split_decode,
 )
-from vllm_ascend.attention.utils import MLAPO_MAX_SUPPORTED_TOKENS, AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import (
+    MLAPO_MAX_SUPPORTED_TOKENS,
+    AscendCommonAttentionMetadata,
+    has_effective_prefill,
+)
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
@@ -183,7 +187,7 @@ class AscendMlaDCPMetadataBuilder(
             may have only one local fragment, so row counts need not be 2:1.
         """
         context = getattr(self, "_pcp_context", None)
-        if not self.use_pcp or context is None or not context.global_batch.is_prefilling_np.any():
+        if not self.use_pcp or context is None or not has_effective_prefill(context.global_batch):
             return None, None, None
         if self._pcp_cache_group_idx is None or context.local_to_global_req_indices is None:
             raise ValueError("PCP+DCP chunks require global tables and the upstream request mapping.")

@@ -779,13 +779,7 @@ class NPUModelRunner(GPUModelRunner):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
         pcp_manager = getattr(self, "pcp_manager", None)
         if pcp_manager is not None:
-            if not self._uses_flashmla and self._uses_mla_backend:
-                batch_state = pcp_manager.prepare_mla_batch_req_state(batch_state)
-            else:
-                # Clear the per-step dispatch mask for dummy, non-MLA, and
-                # FlashMLA batches. FlashMLA keeps prompt tails on its FIA
-                # prefill path.
-                pcp_manager.prepare_mla_batch_req_state(None)
+            batch_state = pcp_manager.prepare_pcp_batch_req_state(batch_state)
 
             if batch_state is not None and batch_state.prefill_runs_as_decode_np is not None:
                 max_query_len = int(batch_state.num_scheduled_tokens.max())

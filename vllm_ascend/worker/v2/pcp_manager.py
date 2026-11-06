@@ -89,7 +89,7 @@ class AscendPCPManager(PCPManager):
     # Draft input buffers and row count overwritten by staged rank-local
     # draft prefill inputs; the rows are stashed in the _draft_*_stash buffers.
     _staged_draft_inputs: tuple[InputBuffers, int] | None = None
-    # Short prefills that MLA dispatches through the decode path. The runner
+    # Short prefills that PCP dispatches through the decode path. The runner
     # publishes this before graph dispatch; partition_batch later receives the
     # same mask on AscendInputBatch and keeps the original request phase intact.
     _dispatch_prefill_runs_as_decode_np: np.ndarray | None = None
@@ -193,12 +193,12 @@ class AscendPCPManager(PCPManager):
         self.vllm_config = vllm_config
         self.shard_decode_requests: bool = self.shard_decode_requests and self.is_decode_sharded
 
-    def prepare_mla_batch_req_state(self, batch_state):
+    def prepare_pcp_batch_req_state(self, batch_state):
         """Classify cached one-token prompt tails as PCP decode work.
 
         Request lifecycle state remains in ``is_prefilling_np``. The separate
-        mask controls graph dispatch and PCP partitioning, matching the
-        non-PCP runner without making a fresh one-token prompt use decode.
+        mask controls graph dispatch and PCP partitioning for every attention
+        backend, without making a fresh one-token prompt use decode.
         PCP+DCP keeps its existing replicated-prefill policy.
         """
         self._dispatch_prefill_runs_as_decode_np = None
@@ -217,6 +217,10 @@ class AscendPCPManager(PCPManager):
             prefill_runs_as_decode_np=prefill_runs_as_decode,
             decode_graph_eligible=decode_graph_eligible,
         )
+
+    # Keep the old name for out-of-tree callers while the behavior is shared
+    # by every PCP attention backend.
+    prepare_mla_batch_req_state = prepare_pcp_batch_req_state
 
     @staticmethod
     def _effective_is_prefilling(input_batch: InputBatch) -> np.ndarray:

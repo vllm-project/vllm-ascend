@@ -27,6 +27,7 @@ from vllm.utils.torch_utils import direct_register_custom_op, get_kv_cache_torch
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.attention.utils import (
+    has_effective_prefill,
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
 )
@@ -441,7 +442,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         attn_metadata_raw = get_forward_context().attn_metadata
         attn_metadata = attn_metadata_raw.get(self.prefix) if isinstance(attn_metadata_raw, dict) else None
         pcp_context = getattr(attn_metadata, "pcp_context", None)
-        has_pcp_prefill = pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any())
+        has_pcp_prefill = pcp_context is not None and has_effective_prefill(pcp_context.global_batch)
         local_num_tokens = hidden_states.size(0)
         if has_pcp_prefill:
             assert pcp_context is not None
