@@ -1252,9 +1252,9 @@ async def handle_completions_impl(api: str, request: Request):
                         if not choices or not stream_flag:
                             if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
                                 chunk = encode_response_chunk(chunk_json, is_sse)
-                                if not choices:
-                                    yield chunk
-                                    continue
+                            if not choices:
+                                yield chunk
+                                continue
 
                         choice = choices[0]
                         delta = choice.get("delta") or {}
