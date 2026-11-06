@@ -16,8 +16,8 @@
 #
 
 # This workflow related to the resources atlas 800 A3
-# The weekly A3 pool has eight nodes. Run eight-node tests in an exclusive
-# phase before the existing multi-node, double-node, and single-node phases.
+# **Please note**: current A3 resource pool's maximum allowed concurrency is 5*16 NPUs
+# We will limit the concurrency of jobs on A3 to avoid the risk of insufficient resources
 name: Weekly-A3
 
 on:
