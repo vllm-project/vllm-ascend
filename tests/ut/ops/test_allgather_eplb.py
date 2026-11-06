@@ -22,7 +22,7 @@ from vllm_ascend.ops.fused_moe.eplb import map_to_physical, record_expert_tokens
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
-from vllm_ascend.patch.platform.patch_fused_moe import _ascend_apply_eplb_mapping
+from vllm_ascend.ops.fused_moe.router.eplb_router import AscendEplbRouter
 
 
 @pytest.fixture(autouse=True)
@@ -67,7 +67,7 @@ def test_allgather_routes_execute_and_count_each_token_once(monkeypatch, tp_size
             allgather_expert_replica_routing_table=table,
         )
         router = SimpleNamespace(eplb_state=layer_state, _validate_eplb_state=lambda: None)
-        physical = _ascend_apply_eplb_mapping(router, logical_ids)
+        physical = AscendEplbRouter._apply_eplb_mapping(router, logical_ids)
         local = (physical >= rank * 3) & (physical < (rank + 1) * 3)
         owners.add_(local)
         # TP ranks have the same inputs; ownership, rather than dividing load
@@ -155,7 +155,7 @@ def test_other_paths_keep_rank_dependent_mapping(monkeypatch, device, comm):
             expert_replica_routing_table=ranked, allgather_expert_replica_routing_table=torch.zeros_like(ranked)
         ),
     )
-    assert _ascend_apply_eplb_mapping(router, torch.tensor([[0, 1]])).tolist() == [[3, 3]]
+    assert AscendEplbRouter._apply_eplb_mapping(router, torch.tensor([[0, 1]])).tolist() == [[3, 3]]
 
 
 @pytest.mark.parametrize("padding_source", ["draft", "context", "unpadded_count"])

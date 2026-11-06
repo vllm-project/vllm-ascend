@@ -174,43 +174,6 @@
 #       available in the supported vLLM version. Retain only the NPU backend,
 #       operator, communicator, load normalization, and weight views.
 #
-# ** 8. File: platform/patch_fused_moe.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
-#    Why:
-#       vllm's MoE factory function (formerly FusedMoE, now FusedMoEFactory on main).
-#       deepseek_v2 and other models do
-#       `from vllm.model_executor.layers.fused_moe import FusedMoEFactory`
-#       and call it directly, so on Ascend we must redirect it to AscendMoERunner
-#       before any model is imported.
-#    How：
-#       Patch the FusedMoEFactory binding in both the package `__init__` and the layer
-#       module so model imports pick up the Ascend runner. `worker/patch_fused_moe.py`
-#       reuses this platform patch to avoid double-wrapping the factory during
-#       worker initialization.
-#    Related PR (if no, explain why):
-#       No, vllm-ascend-specific MoE runner integration.
-#    Future Plan:
-#       Remove this patch once upstream exposes a backend dispatch / plugin hook
-#       for selecting the MoE runner implementation.
-#
-#   2. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
-#    Why:
-#       DeepSeek-V4 vision routing supplies `bias_vl` and
-#       `image_sentinel_lo` through the upstream MoE factory. The Ascend
-#       replacement factory must preserve those arguments so image tokens use
-#       the checkpoint's vision-specific expert-routing bias.
-#    How:
-#       Accept the two DeepSeek-V4 vision arguments in `_ascend_FusedMoE` and
-#       pass them to the Ascend router while leaving every other model's
-#       defaults unchanged.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/54566
-#    Future Plan:
-#       Remove this DeepSeek-V4-specific argument bridge once upstream exposes
-#       a backend-neutral router configuration object or MoE factory extension
-#       hook that carries vision routing metadata into the Ascend runner.
-#
 # ** File: platform/patch_glm53_reasoning.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.parser.glm47_moe.Glm47MoeParser.__init__`
@@ -1001,23 +964,6 @@
 #    Future Plan:
 #       Remove this patch once upstream Eagle3 supports collecting aux hidden
 #       states that span PP stages without cross-stage propagation.
-#
-# ** 6. File: worker/patch_fused_moe.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
-#    Why:
-#       The worker process re-imports the MoE factory after the platform
-#       patch has already redirected it to AscendMoERunner. Re-applying the
-#       monkey-patch directly would wrap an already-patched factory.
-#    How：
-#       Reuse the platform patch (`platform/patch_fused_moe.py`) so the monkey
-#       patch lives in a single module and is applied idempotently during worker
-#       initialization.
-#    Related PR (if no, explain why):
-#       No, see platform/patch_fused_moe.py.
-#    Future Plan:
-#       Remove this module together with platform/patch_fused_moe.py once upstream
-#       exposes a backend dispatch / plugin hook for selecting the MoE runner.
 #
 # ** 7. File: worker/patch_idex_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
