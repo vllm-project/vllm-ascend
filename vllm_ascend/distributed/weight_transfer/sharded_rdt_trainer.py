@@ -134,49 +134,16 @@ class _HixlProducerServer(_RDTProducerServer):
             self._hixl_consumers.discard(endpoint)
 
     def publish_group(self, group_idx: int, entries: tuple) -> None:
-        """Rebuild one gather group's NPU-IPC tensors into the serve cache.
-
-        NEVER blocks: a gathered group is serveable immediately. The memory bound
-        lives in the engine's gather loop, which stops GATHERING (not publishing)
-        past ``gather_lookahead`` unfreed groups.
-
-        ``entries`` is ``(storages, views)``: one NPU-IPC export per storage,
-        plus per-name ``(sid, dtype_name, shape, stride, storage_offset)`` rebuilt
-        here as ``as_strided`` views.
-
-        Signals can arrive BEFORE their publish — a consumer pulling nothing of a
-        group signals it as its plan starts — so a group whose barrier is already
-        satisfied is released here. Freed groups reach the engine only through
-        ``wait_freed`` / ``end_sync``: a freed notice riding an unharvested async
-        publish result would wedge the loop.
-        """
         torch.npu.set_device(self._device_index)
-        storages, views = entries
-        bases: dict[int, torch.Tensor] = {}
-        for sid, reduce_args in storages.items():
-            cached = self._base_cache.get(reduce_args)
-            if cached is not None:
-                bases[sid] = cached
-                continue
-            list_args = list(reduce_args)
-            # Index 6 of reduce_tensor's args is the exporter's device index;
-            # rebuild on this server's device (same physical NPU as the rank).
-            list_args[6] = self._device_index
-            bases[sid] = self._base_cache[reduce_args] = rebuild_npu_tensor(*list_args)
-        rebuilt: dict[str, torch.Tensor] = {}
-        for name, (sid, dtype_name, shape, stride, storage_offset) in views.items():
-            typed = bases[sid].view(getattr(torch, dtype_name))
-            rebuilt[name] = torch.as_strided(typed, shape, stride, storage_offset)
-        del bases
-
-        with self._cache_cond:
-            self._cache.update(rebuilt)
-            self._inflight_groups.append(group_idx)
-            self._group_names[group_idx] = list(rebuilt)
-            if self._free_counts.get(group_idx, 0) >= self._live_count:
-                self._release_group_locked(group_idx)
-            self._note_progress_locked()
-            self._cache_cond.notify_all()
+        storages, _views = entries
+        # Seed the upstream IPC cache with NPU storage. Its cache-hit path
+        # then handles views and group publication without opening CUDA IPC.
+        for reduce_args in storages.values():
+            if reduce_args not in self._base_cache:
+                args = list(reduce_args)
+                args[6] = self._device_index
+                self._base_cache[reduce_args] = rebuild_npu_tensor(*args)
+        super().publish_group(group_idx, entries)
 
     def _new_serve_buffer(self, nbytes: int) -> torch.Tensor:
         """Allocate + HIXL-register one serve slot: the single allocation seam,
