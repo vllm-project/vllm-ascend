@@ -33,6 +33,11 @@ from vllm_ascend.distributed.weight_transfer.sharded_rdt_trainer import (
     ShardedRDTHixlTrainerWeightTransferEngine as ShardedRDTTrainerWeightTransferEngine,
 )
 
+pytestmark = pytest.mark.skipif(
+    not hasattr(ShardedRDTTrainerWeightTransferEngine, "_iter_owned_groups"),
+    reason="requires paired vLLM sharded RDT ownership/gather API (24420b7 or compatible)",
+)
+
 
 class RecordingClient:
     """A fake VLLMWeightSyncClient that records the order of calls."""

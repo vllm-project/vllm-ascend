@@ -109,6 +109,12 @@ def _publish(server, gi, names, **kw):
     return server.publish_group(gi, _entries(names, **kw))
 
 
+pytestmark = pytest.mark.skipif(
+    not hasattr(ShardedRDTTrainerWeightTransferEngine, "_iter_owned_groups"),
+    reason="requires paired vLLM sharded RDT ownership/gather API (24420b7 or compatible)",
+)
+
+
 class TestPublishAndRebuild:
     def test_publish_makes_every_name_serveable(self, server_factory):
         server = server_factory()
