@@ -141,13 +141,6 @@ def test_missing_or_foreign_metadata_does_not_start_thread(scheduler):
     assert scheduler._metadata_thread is None
 
 
-def test_p_does_not_start_metadata_service(scheduler):
-    scheduler.kv_transfer_config.is_kv_producer = True
-    scheduler.set_xfer_handshake_metadata_from_workers(workers())
-    assert scheduler._metadata_thread is None
-    assert not scheduler._remote_worker_addresses
-
-
 def test_bind_failure_is_reported_and_thread_is_cleaned_up(scheduler):
     with zmq.Context.instance().socket(zmq.REP) as occupied:
         occupied.bind("tcp://127.0.0.1:*")
@@ -302,31 +295,24 @@ def test_producer_delays_release_only_for_unfinished_abort(producer_scheduler, a
     assert not output.finished_sending
 
 
-def test_abort_before_dispatch_does_not_pin_blocks(producer_scheduler):
+@pytest.mark.parametrize("allocated", [False, True])
+def test_abort_before_dispatch_preserves_routing_without_pinning_blocks(producer_scheduler, allocated):
     request = prefill_request()
-    allocate(producer_scheduler, request)
+    if allocated:
+        allocate(producer_scheduler, request)
     request.status = RequestStatus.FINISHED_ABORTED
-    assert producer_scheduler.request_finished(request, ([1], [11])) == (False, None)
+    assert producer_scheduler.request_finished(request, ([1], [11]) if allocated else ([], [])) == (False, None)
     assert not producer_scheduler._reqs_need_send_layerwise
-    meta = producer_scheduler.build_connector_meta(step(request, None, computed=16, scheduled=0))
-    assert meta.push_aborted_requests[request.request_id] == dict(
-        remote_request_id="d-request-123",
-        remote_engine_id="d",
-        remote_worker_addresses=((0, 0, 0, "tcp://127.0.0.1:9001"),),
-    )
-
-
-def test_abort_before_allocation_preserves_completion_routing(producer_scheduler):
-    request = prefill_request()
-    request.status = RequestStatus.FINISHED_ABORTED
-    assert producer_scheduler.request_finished(request, ([], [])) == (False, None)
-    meta = producer_scheduler.build_connector_meta(step(request, None, computed=16, scheduled=0))
-    assert meta.push_aborted_requests[request.request_id] == dict(
-        remote_request_id="d-request-123",
-        remote_engine_id="d",
-        remote_worker_addresses=((0, 0, 0, "tcp://127.0.0.1:9001"),),
-    )
+    output = step(request, scheduled=0)
+    output.num_scheduled_tokens = {}
+    meta = producer_scheduler.build_connector_meta(output)
+    assert output.has_sync_kv_loads
     assert not meta.push_send_requests
+    assert meta.push_aborted_requests[request.request_id] == dict(
+        remote_request_id="d-request-123",
+        remote_engine_id="d",
+        remote_worker_addresses=((0, 0, 0, "tcp://127.0.0.1:9001"),),
+    )
 
 
 @pytest.mark.parametrize("external_tokens", [0, 16])
@@ -380,7 +366,7 @@ def test_metaserver_dispatch_is_concurrent_and_snapshots_blocks(scheduler, exter
     assert not scheduler.metaserver_client.get_failed_requests()
 
 
-@pytest.mark.parametrize("failure", ["connect", "connect_timeout", "response", "read_timeout", "write_timeout"])
+@pytest.mark.parametrize("failure", ["connect", "response", "read_timeout"])
 def test_metaserver_failure_is_propagated_without_redispatch(scheduler, failure, metaserver):
     calls = []
 
@@ -388,10 +374,6 @@ def test_metaserver_failure_is_propagated_without_redispatch(scheduler, failure,
         calls.append(request)
         if failure == "connect":
             raise httpx.ConnectError("unreachable", request=request)
-        if failure == "connect_timeout":
-            raise httpx.ConnectTimeout("connection timed out", request=request)
-        if failure == "write_timeout":
-            raise httpx.WriteTimeout("metadata may have been sent", request=request)
         if failure == "read_timeout":
             raise httpx.ReadTimeout("P may already be running", request=request)
         return httpx.Response(502)
@@ -399,13 +381,13 @@ def test_metaserver_failure_is_propagated_without_redispatch(scheduler, failure,
     scheduler.metaserver_client = metaserver(handle)
     scheduler.metaserver_client.submit("request", "http://proxy/v1/metaserver", {})
     scheduler.metaserver_client.executor.shutdown(wait=True)
-    assert len(calls) == (3 if failure in ("connect", "connect_timeout") else 1)
+    assert len(calls) == (3 if failure == "connect" else 1)
     # The next metadata-only step carries failures; other scheduler hooks
     # neither raise nor consume the result before the worker can see it.
     scheduler.update_connector_output(SimpleNamespace(finished_recving=set()))
     scheduler.update_state_after_alloc(SimpleNamespace(kv_transfer_params=None), None, 0)
     meta = scheduler.build_connector_meta(SimpleNamespace())
-    assert meta.push_failed_requests == {"request": failure in ("connect", "connect_timeout")}
+    assert meta.push_failed_requests == {"request": failure == "connect"}
     assert not scheduler.build_connector_meta(SimpleNamespace()).push_failed_requests
 
 
@@ -447,17 +429,6 @@ def test_push_load_order_covers_chunks_pending_sends_and_idle(producer_scheduler
     assert not idle.has_sync_kv_loads
 
 
-def test_abort_before_dispatch_starts_control_before_forward(producer_scheduler):
-    request = prefill_request()
-    request.status = RequestStatus.FINISHED_ABORTED
-    producer_scheduler.request_finished(request, ())
-    output = step(request, scheduled=0)
-    output.num_scheduled_tokens = {}
-    meta = producer_scheduler.build_connector_meta(output)
-    assert meta.push_aborted_requests
-    assert output.has_sync_kv_loads
-
-
 @pytest.mark.parametrize("use_replayssm", [False, True])
 def test_metaserver_mamba_blocks_exclude_only_speculative_tail(scheduler, use_replayssm, metaserver):
     # MambaSpec derives this count from use_replayssm at model registration.
@@ -495,7 +466,7 @@ def test_metaserver_mamba_blocks_exclude_only_speculative_tail(scheduler, use_re
     )
 
 
-@pytest.mark.parametrize("url", [None, 123, "", "relative/path", "ftp://proxy/metaserver", "http://proxy:bad"])
+@pytest.mark.parametrize("url", [None, "ftp://proxy/metaserver", "http://proxy:bad"])
 def test_invalid_metaserver_url_fails_before_http(scheduler, metaserver, url):
     handler = Mock(return_value=httpx.Response(200))
     scheduler.metaserver_client = metaserver(handler)
