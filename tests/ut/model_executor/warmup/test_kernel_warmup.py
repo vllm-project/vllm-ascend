@@ -139,13 +139,13 @@ def test_v2_initialize_kv_cache_upstream_holds_registry_window():
     with patch.object(V2BaseRunner, "initialize_kv_cache") as super_init:
         # init_attn_backend constructs the DSA builder, which registers here.
         super_init.side_effect = lambda *a, **k: rms_norm._TRITON_Q_RMS_KERNEL.register_warmup(config)
-        runner._initialize_kv_cache_upstream(MagicMock(), None)
+        runner._initialize_kv_cache_upstream(MagicMock(), is_profiling=False, kv_cache_allocation_context=None)
     super_init.assert_called_once()
     assert len(registry) == 1
 
     bare = V2Runner.__new__(V2Runner)  # no jit_warmup_registry attribute
     with patch.object(V2BaseRunner, "initialize_kv_cache") as super_init:
-        bare._initialize_kv_cache_upstream(MagicMock(), None)
+        bare._initialize_kv_cache_upstream(MagicMock(), is_profiling=False, kv_cache_allocation_context=None)
     super_init.assert_called_once()
 
 

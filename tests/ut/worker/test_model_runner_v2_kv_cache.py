@@ -33,6 +33,7 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
     config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[])
     registration_order = []
     runner._register_sparse_kv_caches.side_effect = lambda _: registration_order.append("offload")
+    runner.model_state.initialize_kv_cache.side_effect = lambda *_: registration_order.append("model_state")
 
     def register_connector(*_args):
         registration_order.append("connector")
@@ -54,12 +55,13 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
 
     assert [id(tensor) for tensor in runner.kv_caches] == [id(tensor) for tensor in (k, v, conv, ssm, single)]
     runner._register_sparse_kv_caches.assert_called_once_with(caches)
+    runner.model_state.initialize_kv_cache.assert_called_once_with(runner.kv_cache_config, runner.block_tables)
     if is_profiling:
-        assert registration_order == ["offload"]
+        assert registration_order == ["offload", "model_state"]
         connector.assert_not_called()
         assert runner.kv_connector is upstream.NO_OP_KV_CONNECTOR
     else:
-        assert registration_order == ["offload", "connector"]
+        assert registration_order == ["offload", "model_state", "connector"]
         assert connector.call_args.args[1] is caches
         assert type(caches["attention"]) is tuple
         assert type(caches["mamba"]) is list
