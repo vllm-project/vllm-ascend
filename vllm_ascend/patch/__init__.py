@@ -1,15 +1,6 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
-# Packed HCCL adaptation (installed lazily for standalone trainers too):
-# Target: torch.cuda.Stream/stream/current_stream,
-# vllm.distributed.weight_transfer.packed_tensor._get_streams,
-# unpack_tensor. Implementation: distributed/weight_transfer/packed_adapter.py.
-# Why: CUDA stream contexts and views do not satisfy native HCCL/NPU ownership.
-# How: NPU-only stream aliases and boundary hooks, preserving vLLM loops.
-# Related upstream PR: no hook PR yet; this branch evaluates the extension seam.
-# Removal: use device-neutral APIs and owning-unpack/callback-completion hooks
-# once supported vLLM pairings expose them. Generic torch.Event stays unchanged.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -786,8 +777,6 @@
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
 #      `torch.accelerator.reset_peak_memory_stats`, `torch.accelerator.get_memory_info`,
 #      `torch.accelerator.empty_cache`
-#   2. `torch.cuda.Stream/stream/current_stream` NPU aliases, also installed
-#      at the packed adapter entry for standalone trainers.
 #    Why:
 #       Upstream vLLM (commit 747b068) replaced `current_platform.memory_stats()`
 #       with `torch.accelerator.memory_stats()`, but `torch.accelerator` does not
@@ -797,14 +786,11 @@
 #       Monkey-patch `torch.accelerator` memory APIs to delegate to the
 #       corresponding `torch.npu` implementations, and patch `empty_cache` to a
 #       compatible wrapper.
-#       Install the shared stream aliases without replacing generic torch.Event.
 #    Related PR (if no, explain why):
 #       No, maps upstream torch.accelerator memory APIs to the NPU backend.
 #    Future Plan:
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
-#       Remove stream aliases when supported vLLM pairings use device-neutral
-#       stream creation and contexts (vLLM #63457 only migrates some APIs).
 #
 # ** 22. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

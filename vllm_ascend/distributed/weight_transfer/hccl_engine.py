@@ -4,8 +4,8 @@
 
 Reload lifecycle, ``send_weights`` orchestration, metadata checks and the worker
 init payload stay upstream. Only NPU operations, the HCCL rendezvous and the
-legacy per-update packed wire parameters are local. Packed producer/consumer
-loops run in vLLM, with shared NPU stream aliases and HCCL boundary adapters.
+legacy per-update packed wire parameters are local. The packed producer/consumer
+and the layerwise cross-chunk behaviour are unchanged.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -226,8 +226,8 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
         self.model_update_group = None
         self._state = "ready"
 
-    # Keep local rendezvous orchestration for v0.32 compatibility and failure
-    # cleanup. Adopting newer vLLM initialization hooks is a separate change.
+    # Mirror NCCLTrainerWeightTransferEngine.trainer_init orchestration until
+    # upstream exposes a hook for the endpoint opener and worker init-info type.
     @classmethod
     def trainer_init(  # type: ignore[override]
         cls,
