@@ -1773,23 +1773,49 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
             if q_li_scale is not None:
                 q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])
-                key_dequant_scale = kv_cache[indexer_scale_cache_idx].squeeze(2)
+                key_dequant_scale = kv_cache[indexer_scale_cache_idx].squeeze(-1)
+                # V2 per-token-head modes: FP8/FP32 scales (1), INT8/FP16 scales (2).
+                is_int8 = q_li.dtype == torch.int8
+                quant_mode = 2 if is_int8 else 1
+                weights_dtype = torch.float16 if is_int8 else torch.float32
+                # TND cumulative lengths include the initial zero in the V2 API.
+                cu_seqlens_q = F.pad(actual_seq_lengths_query, (1, 0), value=0)
+                quant_li_metadata_op, quant_li_op = A5DeviceAdaptor._load_cann_quant_lightning_indexer_ops()
+                metadata = quant_li_metadata_op(
+                    num_heads_q=q_li_shape_ori[1],
+                    num_heads_k=1,
+                    head_dim=q_li_shape_ori[-1],
+                    topk=2048,
+                    quant_mode=quant_mode,
+                    cu_seqlens_q=cu_seqlens_q,
+                    seqused_k=actual_seq_lengths_key,
+                    batch_size=actual_seq_lengths_key.shape[0],
+                    max_seqlen_q=-1,
+                    max_seqlen_k=-1,
+                    layout_q="TND",
+                    layout_k="PA_BBND",
+                    mask_mode=3,
+                    cmp_ratio=1,
+                )
 
-                topk_indices = torch_npu.npu_quant_lightning_indexer(
+                topk_indices, _ = quant_li_op(
                     query=q_li.view(q_li_shape_ori),
                     key=kv_cache[indexer_cache_idx],
-                    weights=weights,
+                    weights=weights.to(weights_dtype),
                     query_dequant_scale=q_li_scale,
                     key_dequant_scale=key_dequant_scale,
-                    actual_seq_lengths_query=actual_seq_lengths_query,
-                    actual_seq_lengths_key=actual_seq_lengths_key,
+                    topk=2048,
+                    quant_mode=quant_mode,
+                    cu_seqlens_q=cu_seqlens_q,
+                    seqused_k=actual_seq_lengths_key,
                     block_table=attn_metadata.block_table,
-                    query_quant_mode=0,
-                    key_quant_mode=0,
-                    layout_query="TND",
-                    layout_key="PA_BSND",
-                    sparse_count=2048,
-                    sparse_mode=3,
+                    metadata=metadata,
+                    max_seqlen_q=-1,
+                    layout_q="TND",
+                    layout_k="PA_BBND",
+                    mask_mode=3,
+                    cmp_ratio=1,
+                    return_value=0,
                 )
             else:
                 topk_indices, _ = torch_npu.npu_lightning_indexer(
