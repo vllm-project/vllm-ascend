@@ -342,9 +342,9 @@ jobs:
           set -euo pipefail
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          FLA_WHL=flash_linear_attention_npu_a3-26.9.1+deva4a7958-py3-none-manylinux_2_34_x86_64.whl
-          FLA_SHA256=da53bc5cd19fc7968c38c3b2684910012243ee9c1ae20cbc86a9667626614ff9
-          FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.9.1-beta2/$FLA_WHL"
+          FLA_WHL=flash_linear_attention_npu_a3-26.9.1-py3-none-manylinux_2_34_x86_64.whl
+          FLA_SHA256=18b8c9d54eadbefb264fd5989577e3bbdb6f2e5cfc8d60d86a0887f2d8a2f26a
+          FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.9.1-release/$FLA_WHL"
           if [ -n "${GIT_PROXY:-}" ]; then
             FLA_DOWNLOAD_URL="${GIT_PROXY}${FLA_DOWNLOAD_URL}"
           fi
