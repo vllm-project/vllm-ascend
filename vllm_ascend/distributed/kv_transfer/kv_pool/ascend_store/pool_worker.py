@@ -1358,15 +1358,25 @@ class KVPoolWorker:
             return False
         return True
 
-    def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
+    def retire_preempted_requests(self, req_ids: set[str] | None) -> None:
+        """Retire old generations after the release fence, before new work is queued."""
+        if not req_ids:
+            return
         if self.kv_send_thread is not None:
             send_thread = self.kv_send_thread
-            for req_id in meta.preempted_req_ids:
+            for req_id in req_ids:
                 if isinstance(send_thread, (KVCacheStoreSendingThread, KVCacheStoreLayerSendingThread)):
                     send_thread.delete_finished_stored_request(req_id)
                 if isinstance(send_thread, KVCacheStoreSendingThread):
                     send_thread.reset_saved_request(req_id)
                     self._retired_store_req_ids.discard(req_id)
+            send_thread.discard_finished_requests(req_ids)
+        if self.kv_recv_thread is not None:
+            self.kv_recv_thread.discard_finished_requests(req_ids)
+
+    def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
+        if self.kv_send_thread is not None:
+            send_thread = self.kv_send_thread
             if isinstance(send_thread, KVCacheStoreSendingThread):
                 for req_id in finished_req_ids:
                     if send_thread.is_stored_request(req_id):
@@ -1378,9 +1388,8 @@ class KVPoolWorker:
                     if not send_thread.is_stored_request(req_id):
                         send_thread.reset_saved_request(req_id)
                         self._retired_store_req_ids.discard(req_id)
-            self.kv_send_thread.discard_finished_requests(meta.preempted_req_ids)
-            # Saves complete synchronously in wait_for_save(), so the scheduler
-            # never waits for a request-level finished_sending notification.
+            # Released blocks are protected by the save fence; the scheduler
+            # does not wait for request-level finished_sending notifications.
             self.kv_send_thread.get_and_clear_finished_requests()
             done_sending: set[str] = set()
         else:
@@ -1388,7 +1397,6 @@ class KVPoolWorker:
 
         done_recving = set()
         if self.kv_recv_thread is not None:
-            self.kv_recv_thread.discard_finished_requests(meta.preempted_req_ids)
             if self.load_async and not self.use_layerwise:
                 done_recving = self.kv_recv_thread.get_and_clear_finished_requests(meta.loading_req_ids)
 

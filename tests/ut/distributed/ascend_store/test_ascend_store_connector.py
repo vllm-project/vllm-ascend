@@ -17,11 +17,17 @@
 
 import types
 import unittest
-from unittest.mock import MagicMock, patch
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import MagicMock, call, patch
+
+import pytest
 
 # isort: off
 from zmq.error import ZMQError
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from tests.ut.distributed.ascend_store import test_request_lifecycle as lifecycle
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
@@ -31,6 +37,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata
 
 # isort: on
+
+
+# Reuse the byte-copy lifecycle fixtures for connector-level integration.
+byte_pooling_session = lifecycle.byte_pooling_session
+devices_and_store = lifecycle.devices_and_store
 
 
 class TestKVPoolWorkerConstruction(unittest.TestCase):
@@ -89,6 +100,74 @@ class TestAscendStoreKVEvents(unittest.TestCase):
         ev._aggregator.clear_events.assert_called_once()
         ev._aggregator.add_events.assert_called_once_with(common)
         ev._aggregator.reset_workers.assert_called_once()
+
+
+# Exercise actual IPC, message codecs, the server thread, and resource cleanup.
+@pytest.mark.parametrize("scenario", ["lookup", "empty-hashes", "reset", "reset-error", "unknown", "malformed"])
+def test_lookup_server_protocol_results_and_cleanup(scenario, monkeypatch):
+    queries, resets = [], []
+
+    def lookup(token_len, hashes, groups, *, use_layerwise, hbm_hit_tokens):
+        queries.append((token_len, hashes, groups, use_layerwise, hbm_hit_tokens))
+        return 32
+
+    def reset():
+        resets.append(True)
+        if scenario == "reset-error":
+            raise RuntimeError("reset failed")
+
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+        kv_transfer_config=SimpleNamespace(kv_connector_extra_config={}),
+    )
+    # Keep IPC paths short; pytest's tmp_path can exceed the Unix path limit.
+    with TemporaryDirectory(dir="/tmp") as rpc_dir:
+        monkeypatch.setenv("VLLM_RPC_BASE_PATH", rpc_dir)
+        server = LookupKeyServer(SimpleNamespace(lookup_scheduler=lookup, reset_store=reset), config)
+        client = LookupKeyClient(config)
+        try:
+            if scenario in ("lookup", "empty-hashes"):
+                hashes = [] if scenario == "empty-hashes" else [bytes.fromhex("00ff")]
+                assert client.lookup(64, hashes, [0, 2], hbm_hit_tokens=16) == 32
+                assert queries == [(64, [h.hex() for h in hashes], [0, 2], False, 16)]
+                assert resets == []
+            elif scenario.startswith("reset"):
+                assert client.reset() is (scenario == "reset")
+                assert resets == [True]
+                assert queries == []
+            else:
+                client.socket.send_multipart([b"lookup"] if scenario == "malformed" else [b"unknown"])
+                assert client.socket.recv() == b"\x00"
+                assert queries == [] and resets == []
+        finally:
+            client.close()
+            server.close()
+        assert not server.thread.is_alive()
+        assert server.socket.closed and server.ctx.closed
+        assert client.socket.closed and client.ctx.closed
+
+
+@pytest.mark.parametrize("layout", ["contiguous", "strided"])
+def test_layerwise_kv_both_roundtrip_preserves_bytes(byte_pooling_session, layout):
+    session = byte_pooling_session(layout=layout, use_layerwise=True)
+    producer = session.new_request("layer-producer", list(range(256)))
+    old_blocks = []
+    session.run(producer, lambda output: old_blocks.extend(session.block_ids(producer)))
+    assert session.backend.payloads
+    session.clear_local_cache()
+    consumer = session.new_request("layer-consumer", list(range(257)))
+    restored = []
+
+    def verify_loaded(output):
+        for meta in output.kv_connector_metadata.requests:
+            if meta.load_spec is not None and meta.load_spec.can_load:
+                session.assert_loaded(consumer, 256)
+                restored.extend(session.block_ids(consumer)[:2])
+
+    session.run(consumer, verify_loaded)
+    assert len(restored) == 2 and restored != old_blocks[-2:]
+    assert session.backend.loads
+    assert [start for req_id, start, _ in session.computed if req_id == consumer.request_id] == [256]
 
 
 class TestLookupKeyServer(unittest.TestCase):
@@ -373,6 +452,24 @@ class TestAscendStoreConnector(unittest.TestCase):
         mock_worker.get_finished.return_value = ({"r1"}, {"r2"})
         done_s, done_r = connector.get_finished({"r1"})
         self.assertEqual(done_s, {"r1"})
+
+    def test_handle_preemptions_waits_before_retiring_old_requests(self):
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.connector_worker = MagicMock()
+        meta = AscendConnectorMetadata(preempted_req_ids={"p1"})
+        connector.handle_preemptions(meta)
+        connector.connector_worker.wait_for_previous_save.assert_called_once_with()
+        self.assertEqual(
+            connector.connector_worker.mock_calls,
+            [call.wait_for_previous_save(), call.retire_preempted_requests({"p1"})],
+        )
+
+    def test_handle_preemptions_tolerates_metadata_without_released_ids(self):
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.connector_worker = MagicMock()
+        connector.handle_preemptions(types.SimpleNamespace())
+        connector.connector_worker.wait_for_previous_save.assert_called_once_with()
+        connector.connector_worker.retire_preempted_requests.assert_called_once_with(None)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_worker")

@@ -128,6 +128,7 @@ class BaseKVPoolScheduler(ABC):
             "discard_partial_chunks", True
         )
         self._unfinished_requests: dict[str, tuple[Request, list[list[int]]]] = {}
+        self._allocated_req_ids: set[str] = set()
         self._async_loading_req_ids: set[str] = set()
 
         self._block_pool: BlockPool | None = None
@@ -348,6 +349,7 @@ class BaseKVPoolScheduler(ABC):
             local_block_ids = normalize_block_ids_by_group(blocks.get_block_ids())
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
+        self._allocated_req_ids.add(request.request_id)
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
             logger.debug(
@@ -612,11 +614,17 @@ class BaseKVPoolScheduler(ABC):
             self._unfinished_requests.pop(finished_req_id, None)
             self._preempted_req_ids.discard(finished_req_id)
 
+        # Allocation callbacks run before metadata construction. A request may
+        # already have a fresh allocation when a reset preempts and resumes it
+        # in the same tick; discard its tracker, but retain that allocation.
+        allocated_req_ids = self._allocated_req_ids
+        self._allocated_req_ids = set()
         for req_id in scheduler_output.preempted_req_ids:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
             self._request_trackers.pop(req_id, None)
-            self._unfinished_requests.pop(req_id, None)
-            self._async_loading_req_ids.discard(req_id)
+            if req_id not in allocated_req_ids:
+                self._unfinished_requests.pop(req_id, None)
+                self._async_loading_req_ids.discard(req_id)
 
         meta = AscendConnectorMetadata(
             scheduler_output.preempted_req_ids,

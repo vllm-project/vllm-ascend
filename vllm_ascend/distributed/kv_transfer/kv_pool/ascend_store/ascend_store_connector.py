@@ -347,6 +347,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """
         assert self.connector_worker is not None
         self.connector_worker.wait_for_previous_save()
+        # This is the step boundary: polling after forward must not discard
+        # work belonging to a resumed request with the same ID.
+        self.connector_worker.retire_preempted_requests(getattr(kv_connector_metadata, "preempted_req_ids", None))
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         super().bind_connector_metadata(connector_metadata)
