@@ -14,7 +14,6 @@ import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode import lmhead_tp_utils
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
@@ -50,32 +49,33 @@ def _speculator(cls=AscendMTPSpeculator):
 
 
 def _draft_cache():
-    if vllm_version_is("0.32.0"):
+    cache_cls = getattr(upstream_speculator, "DraftLogitsCache", None)
+    if cache_cls is None:
         values = torch.full((MAX_REQS, NUM_STEPS, VOCAB_SIZE), CACHE_FILL)
         return values, values
-    # This class is absent from the supported v0.32.0 lane.
-    from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
-
-    cache = DraftLogitsCache(MAX_REQS, NUM_STEPS, VOCAB_SIZE, dtype=torch.float32, fill=CACHE_FILL, device="cpu")
+    # Use the cache API supplied by the installed upstream, not a release number.
+    cache = cache_cls(MAX_REQS, NUM_STEPS, VOCAB_SIZE, dtype=torch.float32, fill=CACHE_FILL, device="cpu")
     return cache, cache.values
 
 
 @pytest.mark.parametrize(
-    "speculator_cls,rows_per_req,num_reqs,graph_padding",
+    "speculator_cls,rows_per_req,num_reqs,graph_padding,shared_reqs",
     [
-        (AscendMTPSpeculator, 1, 4, 0),
-        (AscendEagleSpeculator, 1, 4, 0),
-        (AscendGemma4Speculator, 1, 4, 0),
-        (AscendDFlashSpeculator, NUM_STEPS, 4, 0),
-        (AscendDFlashSpeculator, NUM_STEPS, MAX_REQS, 0),
+        (AscendMTPSpeculator, 1, 4, 0, None),
+        (AscendEagleSpeculator, 1, 4, 0, None),
+        (AscendGemma4Speculator, 1, 4, 0, None),
+        (AscendDFlashSpeculator, NUM_STEPS, 4, 0, None),
+        (AscendDFlashSpeculator, NUM_STEPS, MAX_REQS, 0, None),
         # Original graph-padding rows must survive the LM-head-only crop.
-        (AscendMTPSpeculator, 1, 4, 2),
+        (AscendMTPSpeculator, 1, 4, 2, None),
+        # Preserve main's smaller DP-wide MTP bound without leaking TP rows.
+        (AscendMTPSpeculator, 1, 4, 0, 6),
     ],
 )
 @pytest.mark.parametrize("probabilistic", [False, True])
 @pytest.mark.parametrize("lmhead_enabled", [False, True])
 def test_sample_draft_crops_before_sampling(
-    monkeypatch, speculator_cls, rows_per_req, num_reqs, graph_padding, probabilistic, lmhead_enabled
+    monkeypatch, speculator_cls, rows_per_req, num_reqs, graph_padding, shared_reqs, probabilistic, lmhead_enabled
 ):
     spec, weight = _speculator(speculator_cls)
     num_rows = (num_reqs + graph_padding) * rows_per_req
@@ -103,7 +103,9 @@ def test_sample_draft_crops_before_sampling(
         assert kwargs["apply_temperature"] is True
         assert kwargs["is_drafting"] is True
         assert kwargs["use_fp64"] is False
-        if not vllm_version_is("0.32.0"):
+        if isinstance(cache, torch.Tensor):
+            assert "logits_cache_row_mapping" not in kwargs
+        else:
             assert kwargs["logits_cache_row_mapping"] is None
         # Minimal CPU consumer contract, not a replacement probability sampler.
         # Check the full row count above before indexing; zip/truncation would
@@ -120,12 +122,18 @@ def test_sample_draft_crops_before_sampling(
     monkeypatch.setattr(lmhead_tp_utils, "lmhead_tp_enable", lambda: lmhead_enabled)
 
     # Keep both the real upstream sample_draft and the real Ascend logits hook.
-    tokens = spec.sample_draft(
-        hidden, positions, idx_mapping, temperature, seeds, step, cache if probabilistic else None
-    )
+    context = nullcontext()
+    if shared_reqs is not None:
+        spec.method = "mtp"
+        spec.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
+        context = spec._lmhead_pad_size_context(SimpleNamespace(num_reqs=shared_reqs))
+    with context:
+        tokens = spec.sample_draft(
+            hidden, positions, idx_mapping, temperature, seeds, step, cache if probabilistic else None
+        )
 
     compute_input = spec.model.compute_logits.call_args.args[0]
-    capacity = MAX_REQS * (NUM_STEPS + 1)
+    capacity = shared_reqs if shared_reqs is not None else MAX_REQS * (NUM_STEPS + 1)
     if lmhead_enabled:
         assert compute_input.shape == (capacity, HIDDEN_SIZE)
         torch.testing.assert_close(compute_input[:num_rows], hidden)
