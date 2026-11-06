@@ -1,0 +1,7 @@
+pr: 20650
+entries:
+  - category: feature
+    text: >-
+      Configurations that enable the multimodal encoder graph now use Model
+      Runner V2 when VLLM_USE_V2_MODEL_RUNNER is unset; VLLM_USE_V2_MODEL_RUNNER=0
+      still forces Model Runner V1.
