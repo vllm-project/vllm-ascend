@@ -569,7 +569,8 @@ jobs:
           cat "$LIST_FILE"
           python3 .github/workflows/scripts/select_tests.py \
             --test-list-file "$LIST_FILE" \
-            --skip-cpu-ut
+            --skip-cpu-ut \
+            --skip-a5
 
       - name: Select all tests
         id: scope-all
@@ -579,7 +580,8 @@ jobs:
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
             --all-tests \
-            --skip-cpu-ut
+            --skip-cpu-ut \
+            --skip-a5
 
       - name: Set no-tests output when no tests selected
         id: noop
@@ -594,7 +596,8 @@ jobs:
 
       - name: Select A5 tests
         id: scope-a5
-        if: needs.pre-commit.outputs.src == 'true'
+        # Temporarily keep A5 allocation opt-in while runner capacity is limited.
+        if: contains(github.event.pull_request.labels.*.name, 'ready-a5') && needs.pre-commit.outputs.src == 'true'
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install regex
@@ -602,9 +605,9 @@ jobs:
             --curated a5 \
             --runner-label-override linux-aarch64-a5-4
 
-      - name: Set no-tests output for A5 when source paths unchanged
+      - name: Set no-tests output for A5 when not requested or source paths unchanged
         id: noop-a5
-        if: needs.pre-commit.outputs.src != 'true'
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'ready-a5') || needs.pre-commit.outputs.src != 'true' }}
         run: |
           {
             echo "has_tests=false"
