@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -10,11 +10,19 @@ from vllm.config import set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.third_party.flash_linear_attention.ops import index as _fla_index
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend, GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.worker.gpu.spec_decode import adaptive_verification
+from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend._310p.ops.gdn_attn_builder_310 import GDNAttentionMetadataBuilder310
+from vllm_ascend._310p.ops.gdn_attn_builder_310 import (
+    AscendGDNAttentionBackend310,
+    GDNAttentionMetadataBuilder310,
+)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops import gdn as ascend_gdn
 from vllm_ascend.ops import gdn_attn_builder as ascend_gdn_attn_builder
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
@@ -182,6 +190,7 @@ def _make_vllm_config(
     max_num_batched_tokens: int = 8192,
     num_heads: int = 32,
     num_speculative_tokens: int = 0,
+    enable_adaptive_verification: bool = False,
     mamba_cache_mode: str = "none",
     cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
 ):
@@ -190,8 +199,8 @@ def _make_vllm_config(
         speculative_config = SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
             parallel_drafting=False,
+            enable_adaptive_verification=enable_adaptive_verification,
             use_eagle_block_drop=lambda: False,
-            enable_adaptive_verification=False,
         )
 
     model_config = SimpleNamespace(max_model_len=max_model_len, hf_text_config=SimpleNamespace())
@@ -225,6 +234,7 @@ def _make_builder(
     device: torch.device,
     num_heads: int,
     num_speculative_tokens: int,
+    enable_adaptive_verification: bool = False,
     builder_cls=AscendGDNAttentionMetadataBuilder,
     mamba_cache_mode: str = "none",
     block_size: int = 16,
@@ -234,6 +244,7 @@ def _make_builder(
     vllm_config = _make_vllm_config(
         num_heads=num_heads,
         num_speculative_tokens=num_speculative_tokens,
+        enable_adaptive_verification=enable_adaptive_verification,
         mamba_cache_mode=mamba_cache_mode,
         cudagraph_mode=cudagraph_mode,
     )
@@ -678,6 +689,212 @@ def test_non_spec_prefill_metadata_uses_prefill_tail_for_chunk_metadata(
         prefill_metadata.chunk,
         attn_metadata.prefill_query_start_loc,
     )
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
+@pytest.mark.parametrize("cache_mode,expected_slots", [("none", [12, 20]), ("align", [15, 23])])
+@pytest.mark.parametrize("draft_count", [0, 3])
+def test_spec_rows_preserve_previous_accepted_state(builder_cls, graph_mode, cache_mode, expected_slots, draft_count):
+    query_len = draft_count + 1
+    common = create_common_attn_metadata(BatchSpec([64, 64], [query_len, query_len]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.tensor([list(range(10, 18)), list(range(20, 28))], dtype=torch.int32)
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        mamba_cache_mode=cache_mode,
+        enable_adaptive_verification=True,
+        num_speculative_blocks=3,
+        cudagraph_mode=graph_mode,
+        builder_cls=builder_cls,
+    )
+    # Include one-token capture rows, before any draft tokens are admitted.
+    captured = builder.build_for_cudagraph_capture(common)
+    assert AscendGDNAttentionBackend.supports_device_cpu_query_lens_mismatch()
+    assert builder.get_varlen_cudagraph_max_query_len(builder.vllm_config, builder.kv_cache_spec) == 4
+    assert captured.num_spec_decodes == 2
+    assert captured.num_decodes == 0
+
+    accepted = torch.tensor([3, 1], dtype=torch.int32)
+    with patch.object(
+        ascend_gdn_attn_builder,
+        "_build_actual_seq_lengths",
+        side_effect=AssertionError("adaptive recurrent consumes device query boundaries directly"),
+    ):
+        metadata = builder.build(0, common, accepted, torch.full((2,), draft_count, dtype=torch.int32))
+    assert metadata.num_spec_decodes == 2
+    assert metadata.num_decodes == 0
+    assert metadata.non_spec_state_indices_tensor is None
+    assert metadata.num_accepted_tokens.tolist() == [3, 1]
+    slots = metadata.spec_state_indices_tensor
+    assert slots[torch.arange(2), accepted - 1].tolist() == expected_slots
+    assert metadata.spec_decode_metadata.actual_seq_lengths is None
+    assert metadata.spec_decode_metadata.use_upstream_recurrent
+    assert metadata.spec_decode_metadata.use_upstream_conv
+    assert metadata.spec_decode_metadata.spec_causal_conv1d.query_start_loc.tolist() == [0, query_len, 2 * query_len]
+    if graph_mode == CUDAGraphMode.NONE:
+        # Pure speculative rows reuse views rather than materializing a gather.
+        assert metadata.num_accepted_tokens.data_ptr() == accepted.data_ptr()
+        if cache_mode == "none":
+            assert slots.data_ptr() == common.block_table_tensor.data_ptr()
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize(
+    "draft_count,host_lens,device_queries,expected_queries,expected_lens",
+    [
+        (9, [5, 5, 2], [0, 1, 10, 12], [0, 1, 10, 10], [0, 1, 9, 0]),
+        (0, [1, 1, 2], [0, 1, 2, 4], [0, 1, 2, 2], [0, 1, 1, 0]),
+    ],
+)
+def test_adaptive_gdn_padding_preserves_device_query_boundaries(
+    builder_cls, draft_count, host_lens, device_queries, expected_queries, expected_lens
+):
+    common = create_common_attn_metadata(BatchSpec([64, 64, 0], host_lens), 16, torch.device("cpu"))
+    common.query_start_loc = torch.tensor(device_queries, dtype=torch.int32)
+    common.block_table_tensor = torch.arange(30, dtype=torch.int32).reshape(3, 10)
+    original_queries = common.query_start_loc.clone()
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=9,
+        enable_adaptive_verification=True,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        builder_cls=builder_cls,
+    )
+    metadata = builder.build(
+        0,
+        common,
+        num_accepted_tokens=torch.tensor([2, 3, 1], dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([draft_count, draft_count, -1], dtype=torch.int32),
+        num_actual_reqs=2,
+    )
+    # The host's [5, 5] split must not replace the admitted [1, 9] split.
+    assert metadata.spec_query_start_loc.tolist() == expected_queries
+    assert metadata.spec_decode_metadata.actual_seq_lengths is None
+    assert ascend_gdn_attn_builder._build_actual_seq_lengths(metadata.spec_query_start_loc, 3).tolist() == expected_lens
+    assert metadata.num_accepted_tokens.tolist() == [2, 3, 1]
+    assert metadata.num_spec_decode_tokens == expected_queries[-1]
+    assert torch.equal(common.query_start_loc, original_queries)
+
+
+@pytest.mark.parametrize("num_actual_reqs,shares_device_boundaries", [(2, True), (None, False)])
+def test_adaptive_gdn_padding_reuses_device_boundaries_when_suffix_is_unpadded(
+    num_actual_reqs, shares_device_boundaries
+):
+    common = create_common_attn_metadata(BatchSpec([64, 64, 0], [5, 5, 2]), 16, torch.device("cpu"))
+    common.query_start_loc = torch.tensor([0, 1, 10, 12], dtype=torch.int32)
+    original = common.query_start_loc.clone()
+
+    result = ascend_gdn_attn_builder._remove_spec_graph_padding_queries(
+        common,
+        torch.tensor([9, 9, -1], dtype=torch.int32),
+        num_actual_reqs=num_actual_reqs,
+    )
+
+    assert (result.query_start_loc.data_ptr() == common.query_start_loc.data_ptr()) is shares_device_boundaries
+    assert result.query_start_loc_cpu[-1] == 10
+    torch.testing.assert_close(common.query_start_loc, original)
+
+
+def test_310p_does_not_advertise_adaptive_recurrent_graphs():
+    assert not AscendGDNAttentionBackend310.supports_device_cpu_query_lens_mismatch()
+    assert GDNAttentionMetadataBuilder310.get_varlen_cudagraph_max_query_len(None, None) is None
+
+
+@pytest.mark.parametrize(
+    "backend_cls", [AscendGDNAttentionBackend, AscendGDNFusedAttentionBackend, AscendGDNAttentionBackend310]
+)
+@pytest.mark.parametrize("host_metadata", [False, True])
+@pytest.mark.parametrize("num_steps", [3, 9])
+def test_adaptive_gdn_real_initialization_gate(monkeypatch, backend_cls, host_metadata, num_steps):
+    """Exercise both upstream capability gates, even before vLLM #60229."""
+    # New vLLM versions supply these hooks on the parent classes. Simulate
+    # the PR's pinned revision so inheritance cannot conceal a missing hook.
+    monkeypatch.setattr(GDNAttentionBackend, "supports_device_cpu_query_lens_mismatch", classmethod(lambda cls: False))
+    monkeypatch.setattr(
+        GDNAttentionMetadataBuilder, "get_varlen_cudagraph_max_query_len", classmethod(lambda cls, config, spec: None)
+    )
+    monkeypatch.setattr(ascend_gdn_attn_builder, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(AscendGatedDeltaNetAttention, "_supports_host_metadata_prefill", lambda: host_metadata)
+    builder_cls = backend_cls.get_builder_cls()
+    config = _make_vllm_config(num_speculative_tokens=num_steps, enable_adaptive_verification=True)
+    config.use_v2_model_runner = True
+    group = AttentionGroup(
+        backend=backend_cls,
+        layer_names=["layer0"],
+        kv_cache_spec=Mock(spec=MambaSpec),
+        kv_cache_group_id=0,
+        metadata_builders=[builder_cls.__new__(builder_cls)],
+    )
+    kwargs = dict(
+        enable_adaptive_verification=True,
+        attn_groups=[[group]],
+        req_states=SimpleNamespace(num_speculative_steps=num_steps),
+        query_start_loc=torch.zeros(3, dtype=torch.int32),
+        num_bonus_tokens=1,
+        max_total_logits=32,
+        vllm_config=config,
+    )
+    # Only manager construction is stubbed; the initializer and both capability
+    # checks run unchanged against the real Ascend backend and builder.
+    with patch.object(adaptive_verification, "AdaptiveVerificationManager") as manager:
+        if backend_cls is AscendGDNAttentionBackend310:
+            with pytest.raises(ValueError, match="trims verification requests on device"):
+                adaptive_verification.maybe_create_adaptive_verification_manager(**kwargs)
+            manager.assert_not_called()
+            return
+        assert adaptive_verification.maybe_create_adaptive_verification_manager(**kwargs) is manager.return_value
+        manager.assert_called_once()
+        assert builder_cls.get_varlen_cudagraph_max_query_len(config, group.kv_cache_spec) == num_steps + 1
+        kwargs["req_states"].num_speculative_steps += 1
+        with pytest.raises(ValueError, match="per-request query lengths vary"):
+            adaptive_verification.maybe_create_adaptive_verification_manager(**kwargs)
+        assert manager.call_count == 1
+
+
+@pytest.mark.parametrize("adaptive", [False, True])
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+def test_varlen_graph_capability_requires_adaptive_recurrent_path(builder_cls, adaptive):
+    config = _make_vllm_config(num_speculative_tokens=3, enable_adaptive_verification=adaptive)
+    # The supported bound follows Ascend's state-table width, including when
+    # a caller asks before MRV2 configuration validation has completed.
+    config.speculative_config.parallel_drafting = True
+    assert builder_cls.get_varlen_cudagraph_max_query_len(config, None) == (4 if adaptive else None)
+
+
+def test_adaptive_mixed_batch_rejects_cpu_fused_layout():
+    builder = AscendGDNHostMetadataBuilder.__new__(AscendGDNHostMetadataBuilder)
+    builder._spec_conv_indices = torch.empty(3, dtype=torch.int32)
+    builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="align"))
+    builder.kv_cache_spec = SimpleNamespace(num_speculative_blocks=3)
+    builder.num_spec = 3
+    builder.speculative_config = SimpleNamespace(enable_adaptive_verification=True)
+    with patch.object(ascend_gdn_attn_builder, "prepare_gdn", side_effect=AssertionError("CPU layout is unsafe")):
+        assert builder._build_fused_metadata(SimpleNamespace(num_reqs=3), None, None, 2, 3, ()) is None
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("query_len", [1, 4])
+def test_static_capture_keeps_native_recurrent_route(builder_cls, query_len):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        builder_cls=builder_cls,
+    )
+    common = create_common_attn_metadata(BatchSpec([64, 64], [query_len, query_len]), 16, torch.device("cpu"))
+    metadata = builder.build_for_cudagraph_capture(common)
+    if query_len == 1:
+        assert metadata.num_spec_decodes == 0
+        assert metadata.num_decodes == 2
+        assert metadata.spec_decode_metadata is None
+    else:
+        assert metadata.num_spec_decodes == 2
+        assert metadata.num_decodes == 0
+        assert not metadata.spec_decode_metadata.use_upstream_recurrent
 
 
 def test_spec_conv1d_args_use_device_cache_and_accepted_tokens():
@@ -1273,7 +1490,9 @@ def test_full_graph_without_runtime_spec_resets_captured_spec_inputs(builder_cls
         assert replay_metadata.non_spec_decode_metadata.causal_conv1d.output_buffer is captured_output
 
 
-def test_full_graph_idle_dummy_uses_zero_length_recurrent_metadata():
+@pytest.mark.parametrize("num_actual_reqs", [None, 0])
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_full_graph_idle_dummy_uses_zero_length_recurrent_metadata(num_actual_reqs, adaptive):
     common_attn_metadata = create_common_attn_metadata(
         batch_spec=BatchSpec(
             seq_lens=[8, 8, 8, 8],
@@ -1291,6 +1510,7 @@ def test_full_graph_idle_dummy_uses_zero_length_recurrent_metadata():
         device=torch.device("cpu"),
         num_heads=32,
         num_speculative_tokens=3,
+        enable_adaptive_verification=adaptive,
         cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
     )
     builder.spec_state_indices_tensor.fill_(77)
@@ -1298,7 +1518,7 @@ def test_full_graph_idle_dummy_uses_zero_length_recurrent_metadata():
     builder.non_spec_state_indices_tensor.fill_(77)
     builder.non_spec_query_start_loc.fill_(77)
 
-    attn_metadata = builder.build(0, common_attn_metadata)
+    attn_metadata = builder.build(0, common_attn_metadata, num_actual_reqs=num_actual_reqs)
 
     assert attn_metadata.num_actual_tokens == 0
     assert attn_metadata.num_decode_tokens == 0
@@ -1599,3 +1819,118 @@ def test_host_conv_indices_are_shared_and_refreshed(monkeypatch):
     refreshed = builder.build(0, common).non_spec_prefill_metadata.causal_conv1d.cache_indices
     assert refreshed.data_ptr() == indices.data_ptr()
     assert indices.tolist() == [40, 50]
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("num_speculative_tokens", [7, 8, 9])
+def test_long_fixed_drafts_use_strided_recurrent_route(monkeypatch, builder_cls, device_type, num_speculative_tokens):
+    monkeypatch.setattr(
+        ascend_gdn_attn_builder, "get_current_hardware_profile", lambda: get_hardware_profile(device_type)
+    )
+    expected_fused = device_type == AscendDeviceType.A2 and num_speculative_tokens >= 8
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=num_speculative_tokens,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        builder_cls=builder_cls,
+    )
+    query_len = num_speculative_tokens + 1
+    common = create_common_attn_metadata(BatchSpec([64, 64], [query_len, query_len]), 16, torch.device("cpu"))
+    # The generic fixture has only ceil(64 / 16) == 4 cache columns.
+    # Speculative GDN needs one state slot per verification token; retain
+    # a wider physical row to exercise the strided state-table view too.
+    state_slots = torch.arange(1, 2 * (query_len + 2) + 1, dtype=torch.int32).view(2, query_len + 2)
+    common.block_table_tensor = state_slots
+    metadata = builder.build_for_cudagraph_capture(common)
+    assert metadata.num_spec_decodes == 2
+    torch.testing.assert_close(metadata.spec_state_indices_tensor, state_slots[:, :query_len])
+    assert metadata.spec_decode_metadata.use_upstream_recurrent is expected_fused
+    assert not metadata.spec_decode_metadata.use_upstream_conv
+    assert (metadata.spec_decode_metadata.actual_seq_lengths is None) is expected_fused
+
+
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("query_len", [1, 9])
+def test_adaptive_recurrent_route_is_hardware_independent(monkeypatch, builder_cls, device_type, query_len):
+    monkeypatch.setattr(
+        ascend_gdn_attn_builder, "get_current_hardware_profile", lambda: get_hardware_profile(device_type)
+    )
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=8,
+        enable_adaptive_verification=True,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        builder_cls=builder_cls,
+    )
+    common = create_common_attn_metadata(BatchSpec([64, 64], [query_len, query_len]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(1, 23, dtype=torch.int32).view(2, 11)
+    metadata = builder.build(
+        0,
+        common,
+        torch.tensor([9, 9], dtype=torch.int32),
+        torch.full((2,), query_len - 1, dtype=torch.int32),
+    )
+    spec = metadata.spec_decode_metadata
+    assert spec.use_upstream_recurrent and spec.use_upstream_conv
+    assert spec.actual_seq_lengths is None
+    assert spec.spec_causal_conv1d.num_accepted_tokens.tolist() == [9, 9]
+    torch.testing.assert_close(metadata.spec_state_indices_tensor, common.block_table_tensor[:, :9])
+
+
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_310p_never_selects_common_strided_recurrent_workaround(monkeypatch, adaptive):
+    monkeypatch.setattr(
+        ascend_gdn_attn_builder,
+        "get_current_hardware_profile",
+        Mock(side_effect=AssertionError("310P must not query the common recurrent workaround")),
+    )
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=8,
+        enable_adaptive_verification=adaptive,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        builder_cls=GDNAttentionMetadataBuilder310,
+    )
+    common = create_common_attn_metadata(BatchSpec([64, 64], [9, 9]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(1, 23, dtype=torch.int32).view(2, 11)
+    spec = builder.build_for_cudagraph_capture(common).spec_decode_metadata
+    assert not spec.use_upstream_recurrent
+    assert not spec.use_upstream_conv
+
+
+def test_adaptive_fused_descriptors_keep_prepared_conv_indices():
+    """The target branch's fused builder must select the migrated kernels too."""
+    builder = SimpleNamespace(
+        _USE_COMMON_KERNEL_METADATA=True,
+        speculative_config=SimpleNamespace(enable_adaptive_verification=True),
+        num_spec=8,
+        use_full_cuda_graph=True,
+        spec_actual_seq_lengths=torch.empty(3, dtype=torch.int32),
+    )
+    metadata = SimpleNamespace(
+        spec_sequence_masks=torch.tensor([True, False]),
+        spec_query_start_loc=torch.tensor([0, 9, 9], dtype=torch.int32),
+        spec_state_indices_tensor=torch.arange(18, dtype=torch.int32).reshape(2, 9),
+        num_accepted_tokens=torch.tensor([9, 1], dtype=torch.int32),
+        num_spec_decodes=1,
+        num_prefills=0,
+        num_decodes=0,
+    )
+    prepared_conv_indices = torch.tensor([1, 0], dtype=torch.int32)
+    native_lengths = torch.tensor([0, 9, 0], dtype=torch.int32)
+
+    AscendGDNAttentionMetadataBuilder._attach_spec_decode_metadata(
+        builder, metadata, native_lengths, prepared_conv_indices
+    )
+
+    spec = metadata.spec_decode_metadata
+    assert spec.use_upstream_conv and spec.use_upstream_recurrent
+    assert spec.actual_seq_lengths is None
+    assert spec.spec_causal_conv1d.cache_indices.data_ptr() == prepared_conv_indices.data_ptr()
+    assert spec.spec_causal_conv1d.query_start_loc is metadata.spec_query_start_loc
+    assert spec.spec_causal_conv1d.num_accepted_tokens.tolist() == [9, 1]

@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -1078,6 +1079,7 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
                 # pattern (quant_config=None for BF16 submodules).
                 quant_config=None,
                 prefix=maybe_prefix(prefix, "visual"),
+                input_norm=build_mm_input_norm(self.model_config),
             )
 
         with self._mark_language_model(vllm_config):
