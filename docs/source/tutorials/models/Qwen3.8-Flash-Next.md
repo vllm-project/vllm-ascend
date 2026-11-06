@@ -172,7 +172,7 @@ Use the following containers for the A3 series and Ascend 950 DT basic PD poolin
 
 Before creating the container, prepare the dedicated SSD or loop device using the storage preparation steps in Section 5.4. Replace `<SSD_DEVICE_PATH>` with its actual host path in both sides of the device mapping. For multiple devices, add one `--device` entry per device and join their container paths with colons in the storage configuration file, for example `ubsio.disk.path = /dev/loop0:/dev/loop1` when those are the allocated devices. Create loop devices on the host, not inside the container.
 
-Prepare a host directory containing the configuration files from Section 5.4 and replace `/path/to/memcache-config` below with that existing directory. `/etc/memcache` is the example container mount path chosen in this tutorial, not a required MemCache installation path. If you change it, update `<MEMCACHE_CONFIG_DIR>` in the service commands to the same container path. The file names follow the [MemCache configuration examples](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-3-configure-memcache-config-file): `mmc-meta.conf` configures MetaService, and `mmc-local.conf` configures the engine-side LocalServices. The A3 HCCS example additionally uses `mmc-local-standalone.conf` for its separate storage process, following the [separated-storage configuration](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-7-enable-memcache-ssd-cache). `MMC_META_CONFIG_PATH` and `MMC_LOCAL_CONFIG_PATH` select the files used by each process.
+Set `MEMCACHE_CONFIG_DIR` to the existing directory containing `mmc-local.conf` for the selected hardware. Docker mounts this directory at the same absolute path and passes the variable into the container. All configuration paths below use this variable. If starting new storage services with Section 5.4, prepare `mmc-meta.conf` in the same directory and, for A3 standalone storage, prepare `mmc-local-standalone.conf` there as well.
 
 Verify that all host device and file paths exist before running Docker. The 950 DT example retains the device, driver, and communication-tool mounts from the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
 
@@ -184,9 +184,11 @@ Additional communication-file mounts depend on the installed stack. The [950 DT 
     # Reuse the host model cache at /root/.cache.
     export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc-a3
     export NAME=vllm-ascend-qwen38-pool
+    export MEMCACHE_CONFIG_DIR="<EXISTING_MEMCACHE_CONFIG_DIR>"
 
     docker run --rm \
       --name $NAME \
+      -e MEMCACHE_CONFIG_DIR \
       --net=host \
       --privileged=true \
       --shm-size=128g \
@@ -218,7 +220,7 @@ Additional communication-file mounts depend on the installed stack. The [950 DT 
       -v /etc/ascend_install.info:/etc/ascend_install.info \
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /root/.cache:/root/.cache \
-      -v /path/to/memcache-config:/etc/memcache \
+      -v "${MEMCACHE_CONFIG_DIR}:${MEMCACHE_CONFIG_DIR}" \
       -it $IMAGE bash
     ```
 
@@ -228,9 +230,11 @@ Additional communication-file mounts depend on the installed stack. The [950 DT 
     # Reuse the host model cache at /root/.cache.
     export IMAGE=quay.io/ascend/vllm-ascend:v0.32.0rc-a5
     export NAME=vllm-ascend-qwen38-pool
+    export MEMCACHE_CONFIG_DIR="<EXISTING_MEMCACHE_CONFIG_DIR>"
 
     docker run --rm \
       --name $NAME \
+      -e MEMCACHE_CONFIG_DIR \
       --net=host \
       --privileged=true \
       --shm-size=500g \
@@ -259,7 +263,7 @@ Additional communication-file mounts depend on the installed stack. The [950 DT 
       -v /etc/hccn.conf:/etc/hccn.conf:ro \
       -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
       -v /root/.cache:/root/.cache \
-      -v /path/to/memcache-config:/etc/memcache \
+      -v "${MEMCACHE_CONFIG_DIR}:${MEMCACHE_CONFIG_DIR}" \
       -it $IMAGE bash
     ```
 
@@ -269,7 +273,6 @@ After entering the container, check that the model and storage dependencies are 
 
 ```bash
 python -c "import vllm, vllm_ascend, mooncake, memcache_hybrid, memfabric_hybrid; print('Model and pool dependencies are available')"
-ls -l /etc/memcache
 ```
 
 An import check does not validate version compatibility; complete the MemCache dependency checks in Section 5.4. `--shm-size` controls the container's `/dev/shm` limit and does not allocate the MemCache DRAM pool or the UBS IO buffers.
@@ -1182,7 +1185,7 @@ The A3 example extends the complete 1P1D serving path in Section 5.2: TP4 × PP2
 
 **Prepare the environment:**
 
-For Docker deployment, use [Section 4.3](#43-docker-for-three-tier-pd-pooling) and complete the host disk preparation below before creating the container. The configuration directory is mounted at `/etc/memcache`.
+For Docker deployment, use [Section 4.3](#43-docker-for-three-tier-pd-pooling) and complete the host disk preparation below before creating the container. `MEMCACHE_CONFIG_DIR` identifies the same existing directory on the host and inside the container. When running without Docker, set this variable to the existing configuration directory before starting any storage service or P/D engine.
 
 Follow the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend) for the matching HDK/CANN, communication libraries, container mounts, and host-memory preparation. Use compatible `memcache-hybrid` and `memfabric-hybrid` packages, both at least version 1.3.0 as required by that guide, together with Mooncake. A3 HCCS `device_sdma` requires a compatible LingQu Computing Network version (at least 1.5). Confirm that the installed vLLM-Ascend registers the connector named in the hardware tab.
 
@@ -1190,7 +1193,7 @@ Follow the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool
 pip show memcache-hybrid memfabric-hybrid
 ```
 
-Use the reported package location to find the MemCache `config` and `lib` directories. Keep a separate configuration directory for this deployment. In the examples, replace `<MEMCACHE_CONFIG_DIR>`, `<MEMCACHE_LIB_DIR>`, `<MEMFABRIC_LIB_DIR>`, and `<PYTHON_LIB_DIR>` with absolute paths. All P/D processes must use the same checkpoint and connect to the same MetaService and ConfigStore.
+Use the reported package location to find the MemCache and MemFabric library directories. Use `MEMCACHE_CONFIG_DIR` for the existing configuration directory used by the reference scripts. Replace `<MEMCACHE_LIB_DIR>`, `<MEMFABRIC_LIB_DIR>`, and `<PYTHON_LIB_DIR>` with the installed library paths. All P/D processes must use the same checkpoint and connect to the same MetaService and ConfigStore.
 
 **Prepare SSD storage:**
 
@@ -1219,7 +1222,7 @@ Record the returned device path and use it as `<SSD_DEVICE_PATH>` below. Pass th
 
 **Configure MetaService:**
 
-Configure `mmc-meta.conf` on the selected MetaService host. Use an address reachable from every participating host; `127.0.0.1` is suitable only when all clients share that host/network namespace. Keep ports 5000, 6000, and 8000 available for this deployment:
+If starting a new MetaService, prepare `mmc-meta.conf` in the configuration directory for the selected hardware, as mounted in Section 4.3. Reuse the existing MetaService when it already serves this pool. Use an address reachable from every participating host; `127.0.0.1` is suitable only when all clients share that host/network namespace. Keep ports 5000, 6000, and 8000 available for this deployment:
 
 ```ini
 ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
@@ -1239,7 +1242,7 @@ Add these exports in every Prefill and Decode terminal before its `vllm serve` c
 ```bash
 export VLLM_USE_MODELSCOPE=True
 export PYTHONHASHSEED=0
-export MMC_LOCAL_CONFIG_PATH="<MEMCACHE_CONFIG_DIR>/mmc-local.conf"
+export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
 export LD_LIBRARY_PATH="<MEMCACHE_LIB_DIR>:<MEMFABRIC_LIB_DIR>:<PYTHON_LIB_DIR>:${LD_LIBRARY_PATH:-}"
 ```
 
@@ -1247,7 +1250,7 @@ The `dram.size` and `ubsio.mem.size_in_gb` allocations are per DRAM-enabled Loca
 
 === "A3 series"
 
-    Use the single-host layout from Section 5.2: TP4 × PP2 × DP1 for Prefill and TP2 × DP4 for Decode. This tab follows the HCCS SSD deployment with a separate MemCache storage process. The vLLM clients do not allocate DRAM or own the SSD; configure their `mmc-local.conf` as follows:
+    Use the single-host layout from Section 5.2: TP4 × PP2 × DP1 for Prefill and TP2 × DP4 for Decode. This tab follows the HCCS SSD deployment with a separate MemCache storage process. The vLLM clients do not allocate DRAM or own the SSD. Configure `${MEMCACHE_CONFIG_DIR}/mmc-local.conf` as follows:
 
     ```ini
     ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
@@ -1260,7 +1263,7 @@ The `dram.size` and `ubsio.mem.size_in_gb` allocations are per DRAM-enabled Loca
     ock.mmc.local_service.storage.enabled = false
     ```
 
-    Configure `mmc-local-standalone.conf` for the storage process. Replace `<POOL_DRAM_SIZE>` with the validated pool capacity including its unit, such as `100GB`; reserve a further 50 GB for UBS IO and sufficient memory for Engram and vLLM. Both files must use the same MetaService, ConfigStore, protocol, and `world_size`.
+    Prepare `${MEMCACHE_CONFIG_DIR}/mmc-local-standalone.conf` for the storage process. Replace `<POOL_DRAM_SIZE>` with the validated pool capacity including its unit, such as `100GB`; reserve a further 50 GB for UBS IO and sufficient memory for Engram and vLLM. Both files must use the same MetaService, ConfigStore, protocol, and `world_size`.
 
     ```ini
     ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
@@ -1301,7 +1304,7 @@ The `dram.size` and `ubsio.mem.size_in_gb` allocations are per DRAM-enabled Loca
 
 === "Ascend 950 DT"
 
-    Use the eight-device TP2 × DP2 layout from Section 5.2. Apply the common exports and connector replacement to all four P/D rank commands. This retains the documented per-rank API endpoints. For UB, configure `mmc-local.conf` as follows:
+    Use the eight-device TP2 × DP2 layout from Section 5.2. Apply the common exports and connector replacement to all four P/D rank commands. This retains the documented per-rank API endpoints. For UB, configure `${MEMCACHE_CONFIG_DIR}/mmc-local.conf` as follows:
 
     ```ini
     ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
@@ -1344,14 +1347,14 @@ The `dram.size` and `ubsio.mem.size_in_gb` allocations are per DRAM-enabled Loca
 Start one MetaService for this pool, unless the matching service is already running:
 
 ```bash
-export MMC_META_CONFIG_PATH="<MEMCACHE_CONFIG_DIR>/mmc-meta.conf"
+export MMC_META_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-meta.conf"
 python -c "from memcache_hybrid import MetaService; MetaService.main()"
 ```
 
 For A3 HCCS only, open another terminal in the prepared container, set the HCCS exports from the A3 tab, and start the standalone storage process before either engine. Keep it running:
 
 ```bash
-export MMC_LOCAL_CONFIG_PATH="<MEMCACHE_CONFIG_DIR>/mmc-local-standalone.conf"
+export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local-standalone.conf"
 export LD_LIBRARY_PATH="<MEMCACHE_LIB_DIR>:<MEMFABRIC_LIB_DIR>:<PYTHON_LIB_DIR>:${LD_LIBRARY_PATH:-}"
 python -u - <<'PY'
 import time
