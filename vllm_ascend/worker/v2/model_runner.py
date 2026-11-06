@@ -577,12 +577,49 @@ class NPUModelRunner(GPUModelRunner):
 
         self._fill_c8_mxfp_v_scale_caches()
 
+        if self.vllm_config.attention_config.hisparse_config is not None:
+            self._bind_hisparse_direct_prolog()
+
         # Private candidate only: bind after Core seals all cache/stream owners.
         from vllm_ascend.hisparse.mirror_overlap import overlap_mtp_host_mirror
 
         overlap_connector = overlap_mtp_host_mirror(self)
         self._sampling_mirror = overlap_connector if overlap_connector is not self.kv_connector else None
         self.kv_connector = overlap_connector
+
+    def _bind_hisparse_direct_prolog(self) -> None:
+        from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+        from vllm.v1.hisparse.layout import HISPARSE_RESIDENT_SUFFIX
+        from vllm.v1.kv_cache_interface import HiSparseResidentSpec
+
+        from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+        from vllm_ascend.worker.v2.block_table import AscendBlockTables
+
+        block_tables = self.block_tables
+        # These graphs only replay decode, and the exact slot producer pads
+        # dummy requests and every unused row with native Prolog's -1 sentinel.
+        enable = (
+            get_ascend_device_type() == AscendDeviceType.A5
+            and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+            and type(block_tables) is AscendBlockTables
+            and self.pcp_manager is None
+            and block_tables.cp_size == 1
+            and PAD_SLOT_ID == -1
+        )
+        layers = self.compilation_config.static_forward_context
+        for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            if not isinstance(group.kv_cache_spec, HiSparseResidentSpec):
+                continue
+            for cache_name in group.layer_names:
+                layer = layers[cache_name.removesuffix(HISPARSE_RESIDENT_SUFFIX)]
+                impl = layer.impl
+                if type(impl) is AscendHiSparseImpl:
+                    impl._direct_prolog_slots = (
+                        block_tables.slot_mappings[group_id]
+                        if enable and block_tables.blocks_per_kv_block[group_id] == 1
+                        else None
+                    )
 
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
         """Initialize C8 V scales and retain views for page reassignment."""
