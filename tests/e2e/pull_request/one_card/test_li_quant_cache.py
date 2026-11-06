@@ -3,10 +3,10 @@
 from types import SimpleNamespace
 
 import pytest
-import scipy.linalg
+import scipy.linalg  # type: ignore[import-untyped]
 import torch
 import torch_npu
-import vllm_ascend.vllm_ascend_C  # noqa: F401
+import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 
 from vllm_ascend.attention import indexer as indexer_module
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
