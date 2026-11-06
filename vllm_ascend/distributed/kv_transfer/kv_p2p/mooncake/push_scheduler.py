@@ -11,7 +11,6 @@ import msgspec
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
-from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.request import RequestStatus
 
@@ -58,7 +57,6 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self._metadata_thread: MooncakePushMetadataThread | None = None
         self._reqs_pending_recv: dict[str, tuple[Request, BlockIds, int]] = {}
-        self._reqs_failed_recv: set[str] = set()
         self._reqs_need_send_layerwise: dict[str, tuple[Request, BlockIds]] = {}
         self._reqs_sent_to_worker: set[str] = set()
         self._reqs_need_send: dict[str, float] = {}
@@ -106,15 +104,6 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                     num_external_tokens,
                 )
             params["do_remote_prefill"] = False
-            if num_external_tokens > 0 and (self._metadata_thread is None or self._metadata_thread.error is not None):
-                # No addresses have been published for this request yet.
-                self._reqs_failed_recv.add(request.request_id)
-                logger.error("D metadata service is unavailable for request %s", request.request_id)
-                return
-            if self.metaserver_client is None:
-                self._reqs_failed_recv.add(request.request_id)
-                logger.error("Metaserver client is unavailable for request %s", request.request_id)
-                return
             # The proxy matches external IDs; workers retain the full D ID.
             external_request_id = request.request_id[:-9]
             message = dict(
@@ -195,10 +184,8 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         else:
             # Poll without waiting, including connector-only steps. Workers
             # decide when failed receives are safe to release.
-            meta.push_failed_requests = dict.fromkeys(self._reqs_failed_recv, True)
-            self._reqs_failed_recv.clear()
             if self.metaserver_client is not None:
-                meta.push_failed_requests.update(self.metaserver_client.get_failed_requests())
+                meta.push_failed_requests = self.metaserver_client.get_failed_requests()
             for req_id, (req, block_ids, num_external_tokens) in self._reqs_pending_recv.items():
                 assert req.kv_transfer_params is not None
                 meta.add_new_push_req(
