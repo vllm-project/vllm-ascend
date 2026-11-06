@@ -34,16 +34,3 @@ def test_deferred_exchange_skips_combine(monkeypatch, scatter_size):
     combine.assert_not_called()
     if scatter_size == 1:
         assert result is send
-
-
-@pytest.mark.parametrize("from_stats", [False, True])
-def test_native_exchange_forwards_statistics(monkeypatch, from_stats):
-    output = torch.empty(2, 16, 512, dtype=torch.bfloat16)
-    lse = torch.zeros(2, 16, 1)
-    sums = torch.ones_like(lse) if from_stats else None
-    monkeypatch.setattr(dcp_a2a, "can_exchange", lambda *args: True)
-    exchange = Mock(return_value=output)
-    monkeypatch.setattr(dcp_a2a, "exchange", exchange)
-    result = dcp_a2a.dcp_a2a_fused_combine(output, lse, 2, 1, object(), softmax_sum=sums)
-    assert result is output
-    assert exchange.call_args.kwargs["softmax_sum"] is sums

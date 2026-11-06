@@ -30,7 +30,7 @@
 
 ## Test Cases
 
-CPU routing tests use a test-only reference and verify error propagation. Device tests cover split views, feature stride two, non-power-of-two widths, zero-width fragments, empty inputs and changed graph inputs. CPU address simulation is supplementary and does not validate Triton lowering.
+Nightly NPU tests cover split views, feature stride two, non-power-of-two widths, zero-width fragments, empty inputs and changed graph inputs.
 
 ```bash
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_post.py -k query_prep
