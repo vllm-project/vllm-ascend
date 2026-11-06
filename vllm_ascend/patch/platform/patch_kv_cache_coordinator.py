@@ -529,12 +529,20 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     )
     # vLLM main (#54736) added allow_partial_hash_hits.
     hybrid_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
-    # Private state blocks are excluded by the block-size resolver. Keep
-    # their independent manager geometry when prefix caching is disabled too.
+    # Private state blocks retain their independent manager geometry even
+    # with prefix caching off; only CWS tail groups select checkpoints.
     num_cacheable_groups = sum(is_prefix_cacheable(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
     has_private_groups = 0 < num_cacheable_groups < len(kv_cache_config.kv_cache_groups)
     if _is_deepseek_v4_kv_cache_config(kv_cache_config) or has_private_groups:
-        return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
+        from vllm_ascend.core.compressor_checkpoint_coordinator import CompressorCheckpointCoordinator
+
+        coordinator_cls = AscendHybridKVCacheCoordinator
+        if enable_caching and any(
+            CompressorCheckpointCoordinator._is_tail_spec(group.kv_cache_spec)
+            for group in kv_cache_config.kv_cache_groups
+        ):
+            coordinator_cls = CompressorCheckpointCoordinator
+        return coordinator_cls(**hybrid_kwargs)  # type: ignore[call-arg]
 
     if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
         orig_kwargs = dict(

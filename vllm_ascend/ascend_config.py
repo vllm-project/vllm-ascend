@@ -38,6 +38,46 @@ if TYPE_CHECKING:
 _KVPP_SUPPORTED_CONNECTORS = ("MooncakeConnectorV2", "AscendStoreConnector")
 _MEGA_MOE_SUPPORTED = None
 
+DSV4_CHECKPOINT_SCHEDULER = "vllm_ascend.core.compressor_checkpoint_scheduler.CompressorCheckpointScheduler"
+DSV4_ASYNC_CHECKPOINT_SCHEDULER = "vllm_ascend.core.compressor_checkpoint_scheduler.CompressorCheckpointAsyncScheduler"
+
+
+def get_dsv4_checkpoint_fallback_reasons(
+    vllm_config: VllmConfig,
+    *,
+    checkpoint_capable: bool,
+    multistream_dsv4_dsa_overlap: bool,
+) -> list[str]:
+    """Validate the opt-in prefix path without changing prefix-off CWS."""
+    reasons = []
+    if not checkpoint_capable:
+        reasons.append("compressor checkpoints require A3 tail-copy support")
+    if not vllm_config.use_v2_model_runner:
+        reasons.append("compressor checkpoints require Model Runner V2")
+    if not vllm_config.model_config.enforce_eager:
+        reasons.append("compressor checkpoints require eager Attention")
+    if multistream_dsv4_dsa_overlap:
+        reasons.append("compressor checkpoints do not support multistream_dsv4_dsa_overlap")
+    if vllm_config.parallel_config.pipeline_parallel_size != 1:
+        reasons.append("compressor checkpoints require pipeline_parallel_size=1")
+    if vllm_config.cache_config.block_size not in (32, 128):
+        reasons.append("compressor checkpoints require block_size 32 or 128")
+    scheduler = vllm_config.scheduler_config
+    if scheduler.async_scheduling is None:
+        reasons.append("compressor checkpoints require an explicit scheduling mode")
+    selected = DSV4_ASYNC_CHECKPOINT_SCHEDULER if scheduler.async_scheduling else DSV4_CHECKPOINT_SCHEDULER
+    if scheduler.scheduler_cls not in (None, selected):
+        reasons.append("compressor checkpoints require the checkpoint scheduler")
+    if not scheduler.enable_chunked_prefill:
+        reasons.append("compressor checkpoints require chunked prefill")
+    if vllm_config.kv_transfer_config is not None:
+        reasons.append("compressor checkpoints do not support KV transfer/P-D")
+    if vllm_config.kv_events_config is not None and vllm_config.kv_events_config.enable_kv_cache_events:
+        reasons.append("compressor checkpoint KV events are not supported")
+    if vllm_config.speculative_config is not None:
+        reasons.append("compressor checkpoints do not support speculative decoding")
+    return reasons
+
 
 def is_mega_moe_supported() -> bool:
     """Whether the megamoe op is available at runtime.
@@ -568,14 +608,17 @@ class AscendConfig:
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Default to overlap on A5 only; explicit settings override this policy.
     multistream_engram_overlap: bool = dataclasses.field(
-        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
-        == DeviceAdaptorFamily.FP8_OPTIMIZED
+        default_factory=lambda: (
+            get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        )
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_dsa_cp: bool = False
+    # Fixed private FP32 compressor tails and invocation-local workspace.
+    enable_dsv4_shared_compressor_workspace: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
@@ -687,6 +730,38 @@ class AscendConfig:
             # DP-dummy ranks have no hash work in MRV2. Share host tables
             # across DP and PCP peers to avoid per-step lookup collectives.
             engram_config.dp_shared_memory = True
+        if self.enable_dsv4_shared_compressor_workspace:
+            if vc.model_config is None or vc.model_config.hf_text_config.model_type != "deepseek_v4":
+                raise ValueError("Shared compressor workspace requires DeepSeek-V4.")
+            if vc.speculative_config is not None:
+                raise ValueError("Shared compressor workspace requires speculative decoding off.")
+            if (
+                vc.parallel_config.decode_context_parallel_size != 1
+                or vc.parallel_config.prefill_context_parallel_size != 1
+            ):
+                raise ValueError("Shared compressor workspace requires PCP/DCP size one.")
+            if vc.cache_config.enable_prefix_caching:
+                reasons = get_dsv4_checkpoint_fallback_reasons(
+                    vc,
+                    checkpoint_capable=get_current_hardware_profile().supports(
+                        HardwareCapability.DSV4_COMPRESSOR_TAIL_CHECKPOINT
+                    ),
+                    multistream_dsv4_dsa_overlap=self.multistream_dsv4_dsa_overlap,
+                )
+                scheduler = self.scheduler_config
+                if (
+                    scheduler.enable_balance_scheduling
+                    or scheduler.recompute_scheduler_enable
+                    or scheduler.short_request_first_config.enabled
+                    or scheduler.dyntra_lb_config.enabled
+                    or scheduler.profiling_chunk_config.enabled
+                    or scheduler.batch_job_sched_config.enabled
+                ):
+                    reasons.append("compressor checkpoints cannot be combined with scheduler extensions")
+                if KVPPConfig.from_vllm_config(vc).size != 1:
+                    reasons.append("compressor checkpoints require KV layer parallel size one")
+                if reasons:
+                    raise ValueError("; ".join(reasons))
         if (
             self.enable_force_eplb
             and self.eplb_config.dynamic_eplb

@@ -610,7 +610,9 @@ __aicore__ inline void SASVectorBlock<SAST>::CopyInKv(int64_t &mte2Size, int64_t
         keySrcStride = ((keyOffset1 > keyOffset2 ? (keyOffset1 - keyOffset2) :
 	                    (keyOffset2 - keyOffset1)) - constInfo.sparseBlockSize) * constInfo.headDim * sizeof(KV_T);
     }
+    // A merged ascending-address DMA must not reverse logical sparse-index order.
     if (unlikely(keySrcStride >= INT32_MAX || keySrcStride < 0 ||
+        (keyOffset2 >= 0 && keyOffset1 > keyOffset2) ||
         realS2Idx1 + constInfo.sparseBlockSize >= s2IdLimit ||
         realS2Idx2 + constInfo.sparseBlockSize >= s2IdLimit)) {
         // stride溢出、stride为负数、s2超长等异常场景，还原成2条搬运指令

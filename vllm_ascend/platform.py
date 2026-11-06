@@ -31,7 +31,13 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import (
+    DSV4_ASYNC_CHECKPOINT_SCHEDULER,
+    DSV4_CHECKPOINT_SCHEDULER,
+    KVPPConfig,
+    get_ascend_config,
+    init_ascend_config,
+)
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
     HardwareCapability,
@@ -1405,6 +1411,13 @@ def _setup_worker_and_scheduler(
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
             )
+
+    if ascend_config.enable_dsv4_shared_compressor_workspace and vllm_config.cache_config.enable_prefix_caching:
+        vllm_config.scheduler_config.scheduler_cls = (
+            DSV4_ASYNC_CHECKPOINT_SCHEDULER
+            if vllm_config.scheduler_config.async_scheduling
+            else DSV4_CHECKPOINT_SCHEDULER
+        )
 
 
 def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:

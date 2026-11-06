@@ -41,13 +41,13 @@ ASCENDC_TPL_ARGS_DECL(compressor, // 算子唯一标识，与opType保持一致
 
 ASCENDC_TPL_SEL(
 
-    // A3场景: TH/BF16/interleave/continuous, 保留EMPTY_X与NORMAL
+    // A3场景: TH/BF16/interleave/continuous或cycle, 保留EMPTY_X与NORMAL
     // （TH布局不会触发FULL_LOAD，新kernel已移除rope_dtype维度）
     ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_UINT_SEL(X_LAYOUT, ASCENDC_TPL_UI_LIST, 1),
                         ASCENDC_TPL_UINT_SEL(X_DTYPE, ASCENDC_TPL_UI_LIST, 0),
                         ASCENDC_TPL_UINT_SEL(COFF, ASCENDC_TPL_UI_LIST, 1, 2),
                         ASCENDC_TPL_UINT_SEL(ROTARY_MODE, ASCENDC_TPL_UI_LIST, 2),
-                        ASCENDC_TPL_UINT_SEL(CACHE_MODE, ASCENDC_TPL_UI_LIST, 1),
+                        ASCENDC_TPL_UINT_SEL(CACHE_MODE, ASCENDC_TPL_UI_LIST, 1, 2),
                         ASCENDC_TPL_UINT_SEL(TEMPLATE_ID, ASCENDC_TPL_UI_LIST, 0, 1),
                         ASCENDC_TPL_TILING_STRUCT_SEL(optiling::CompressorTilingData)),
 );
