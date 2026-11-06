@@ -563,8 +563,9 @@ def rejection_sample(
         if has_draft_logits:
             local_residual_mass = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
             if num_logits > 1:
+                # Match the native grid; the kernel excludes unused rows.
                 if vllm_version_is("0.33.0"):
-                    _compute_local_residual_mass_kernel[(num_logits - 1, vocab_num_blocks)](
+                    _compute_local_residual_mass_kernel[(num_logits, vocab_num_blocks)](
                         local_residual_mass,
                         local_residual_mass.stride(0),
                         cumulative_log_p,
@@ -592,7 +593,7 @@ def rejection_sample(
                         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
                     )
                 else:
-                    _compute_local_residual_mass_kernel[(num_logits - 1, vocab_num_blocks)](
+                    _compute_local_residual_mass_kernel[(num_logits, vocab_num_blocks)](
                         local_residual_mass,
                         local_residual_mass.stride(0),
                         cumulative_log_p,
