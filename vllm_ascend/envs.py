@@ -22,9 +22,6 @@ import os
 from collections.abc import Callable
 from typing import Any
 
-_BOOL_TRUE = frozenset({"1", "true", "yes", "on"})
-_BOOL_FALSE = frozenset({"0", "false", "no", "off"})
-
 
 def _bool_env(name: str, default: bool) -> bool:
     """Parse a boolean environment variable with clear diagnostics.
@@ -37,13 +34,13 @@ def _bool_env(name: str, default: bool) -> bool:
     if raw is None or not raw.strip():
         return default
     value = raw.strip().lower()
-    if value in _BOOL_TRUE:
+    if value in ("1", "true", "yes", "on"):
         return True
-    if value in _BOOL_FALSE:
+    if value in ("0", "false", "no", "off"):
         return False
     raise ValueError(
         f"Invalid value for environment variable {name}: {raw!r}. "
-        f"Expected one of {sorted(_BOOL_TRUE | _BOOL_FALSE)} (case-insensitive)."
+        "Expected one of 1/0, true/false, yes/no, on/off (case-insensitive)."
     )
 
 
