@@ -45,6 +45,15 @@ class DefaultEplb(EplbPolicy):
     def original_compute_balanced_pack_redundancy(origin_weights, card_num, num_redundancy_expert):
         # Step 1: Sort the items by weight in descending order (we are sorting by weight now)
         # Sort based on the second element (the second value of each tuple)
+        if card_num == 0:
+            raise RuntimeError("card_num can not be 0.")
+        # Every redundant expert is packed into a distinct card during step 3,
+        # so the number of redundant experts can never exceed the number of cards.
+        if num_redundancy_expert > card_num:
+            raise ValueError(
+                f"the number of redundant experts {num_redundancy_expert} must not exceed the number of cards "
+                f"{card_num}: each redundant expert is packed into a distinct card."
+            )
         route_expert_num = len(origin_weights)
         route_expert_redundancy: list[list[int]] = [[] for _ in range(route_expert_num)]
         for i in range(num_redundancy_expert):
@@ -193,7 +202,7 @@ class DefaultEplb(EplbPolicy):
     @staticmethod
     def compute_balanced_pack(origin_weights, card_num):
         sorted_indices = np.argsort([t[1] for t in origin_weights])[::-1]
-        weights = origin_weights[sorted_indices]
+        weights = [origin_weights[idx] for idx in sorted_indices]
         expert_num = len(weights)
         if card_num == 0:
             raise RuntimeError("card_num can not be 0.")
