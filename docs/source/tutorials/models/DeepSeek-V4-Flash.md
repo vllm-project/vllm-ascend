@@ -2608,8 +2608,6 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 | Long Context (~1M Input, Reference) | Prefill Pool | 16 (1 A3 node) | 8 | 2 | 16 | 4096 | 1048576 | 5 | On | On | Off | PCP=1 |
 | Long Context (~1M Input, Reference) | Decode Pool | 16 (1 A3 node) | 1 | 16 | 60 | 480 | 1048576 | 5 | Off | On | Off | PCP=1 |
 
-> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment). For A3, refer to the two configurations in the tables above: Short Sequence and Long Context (~1M Input, Reference).
-
 ### 9.2 Tuning Guidelines
 
 #### 9.2.1 General Tuning Reference
