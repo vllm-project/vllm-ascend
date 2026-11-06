@@ -84,7 +84,7 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 2 cards / 4 cards test type
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.runner }}-${{inputs.model_list}}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.image }}-${{ inputs.runner }}-${{inputs.model_list}}
   cancel-in-progress: true
 
 jobs:

@@ -16,8 +16,8 @@
 #
 
 # This workflow related to the resources atlas 800 A3
-# **Please note**: current A3 resource pool's maximum allowed concurrency is 5*16 NPUs
-# We will limit the concurrency of jobs on A3 to avoid the risk of insufficient resources
+# All test jobs are submitted together; pending LWS jobs are queued in FIFO
+# order by the npu-scheduler instead of being serialized by workflow `needs`.
 name: Weekly-A3
 
 on:
@@ -76,7 +76,7 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  group: ascend-weekly-${{ github.ref }}-a3${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
+  group: ascend-weekly-${{ github.ref }}-a3-${{ inputs.vllm_ascend_branch }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 env:
@@ -193,7 +193,6 @@ jobs:
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
@@ -239,14 +238,13 @@ jobs:
 
   double-node-tests:
     name: double-node
-    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 3
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.double_node) }}
@@ -292,7 +290,7 @@ jobs:
 
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -340,13 +338,22 @@ jobs:
 
   clear-pre-logs:
     runs-on: linux-aarch64-a3-800t-0
-    needs: [double-node-tests]
-    if: needs.double-node-tests.result != 'skipped'
+    needs: [multi-node-tests, double-node-tests]
+    if: (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
     steps:
       - name: Clear pre-logs on pvc
+        env:
+          VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
         run: |
-          # Clear logs generated before the test to avoid confusion
-          rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
+          # Only clear this branch's directory so a concurrent run of another
+          # branch keeps its in-flight logs on the shared PVC.
+          branch=$(printf '%s' "$VLLM_ASCEND_BRANCH" | tr '/' '-')
+          if [ -z "$branch" ]; then
+            echo "vllm_ascend_branch is empty; skip clearing logs"
+            exit 0
+          fi
+          echo "Clearing ${ASCEND_LOG_PREFIX}/${branch}"
+          rm -rf "${ASCEND_LOG_PREFIX:?}/${branch:?}"/* || true
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into weekly-a3.zip
