@@ -432,9 +432,9 @@ class AscendDSAV41Impl:
         return self._preprocess(attn, hidden_states, hidden_states, metadata, metadata)
 
     def _use_multistream(self, query_tokens: int, cache_tokens: int) -> bool:
-        return (
-            self.multistream_dsv4_dsa_overlap
-            and max(query_tokens, cache_tokens) <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD
+        return self.multistream_dsv4_dsa_overlap and (
+            max(query_tokens, cache_tokens) <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD
+            or not torch.npu.is_current_stream_capturing()
         )
 
     def _preprocess(self, attn, query_hidden, cache_hidden, query_metadata, cache_metadata):

@@ -30,24 +30,28 @@ def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "configured,threshold,query_tokens,cache_tokens,expected",
+    "configured,capturing,threshold,query_tokens,cache_tokens,expected",
     [
-        (False, 1024, 4, 4, False),
-        (True, 0, 4, 4, False),
-        (True, 4, 4, 4, True),
-        (True, 3, 4, 4, False),
-        (True, 4, 2, 5, False),
+        (False, False, 1024, 4, 4, False),
+        (False, True, 1024, 4, 4, False),
+        (True, False, 0, 4, 4, True),
+        (True, True, 0, 4, 4, False),
+        (True, True, 4, 4, 4, True),
+        (True, True, 3, 4, 4, False),
+        (True, True, 4, 2, 5, False),
     ],
 )
 def test_multistream_policy_uses_largest_input(
     monkeypatch,
     configured,
+    capturing,
     threshold,
     query_tokens,
     cache_tokens,
     expected,
 ):
     monkeypatch.setattr(dsa_v41.envs, "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", threshold)
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: capturing)
     impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
     impl.multistream_dsv4_dsa_overlap = configured
 
@@ -55,10 +59,15 @@ def test_multistream_policy_uses_largest_input(
 
 
 @pytest.mark.parametrize(
-    "configured,threshold,expected_stream",
-    [(False, 4, "main"), (True, 3, "main"), (True, 4, "aux")],
+    "configured,capturing,threshold,expected_stream",
+    [
+        (False, False, 4, "main"),
+        (True, True, 3, "main"),
+        (True, True, 4, "aux"),
+        (True, False, 3, "aux"),
+    ],
 )
-def test_indexer_streams_follow_multistream_policy(monkeypatch, configured, threshold, expected_stream):
+def test_indexer_streams_follow_multistream_policy(monkeypatch, configured, capturing, threshold, expected_stream):
     trace = []
     active_stream = "main"
 
@@ -104,6 +113,7 @@ def test_indexer_streams_follow_multistream_policy(monkeypatch, configured, thre
     monkeypatch.setattr(torch.npu, "stream", switch)
     monkeypatch.setattr(dsa_v41, "dsv4_dsa_overlap_stream", lambda: aux_stream)
     monkeypatch.setattr(dsa_v41.envs, "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", threshold)
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: capturing)
 
     impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
     impl.multistream_dsv4_dsa_overlap = configured
