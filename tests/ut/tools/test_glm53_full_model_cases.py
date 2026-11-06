@@ -23,7 +23,7 @@ CONFIG_DIR = ROOT / "tests/e2e/cases/models/configs/GLM/full_model"
 class FullModelConfigTests(unittest.TestCase):
     def test_resolved_commands_fit_allocation_and_agree_on_transfer_topology(self):
         paths = sorted(CONFIG_DIR.glob("*.yaml"))
-        self.assertEqual(len(paths), 12)
+        self.assertEqual(len(paths), 9)
         for path in paths:
             with self.subTest(case=path.stem):
                 config = ExternalDPConfigLoader.from_yaml(
@@ -92,10 +92,9 @@ class FullModelConfigTests(unittest.TestCase):
                             compilation = additional["ascend_compilation_config"]
                             self.assertTrue(compilation["enable_npugraph_ex"])
                             self.assertEqual(compilation["enable_static_kernel"], not a5)
-                benchmarks = config["benchmarks"]
-                if path.stem.endswith("ACCURACY"):
-                    self.assertEqual(list(benchmarks), ["acc_gpqa"])
-                    continue
+                benchmarks = {
+                    name: bench for name, bench in config["benchmarks"].items() if bench["case_type"] == "performance"
+                }
                 self.assertEqual(len(benchmarks), 8 if a5 else 2)
                 for name, bench in benchmarks.items():
                     self.assertEqual(bench["max_out_len"], 1 if prefill_case else 1024)
@@ -121,7 +120,8 @@ class FullModelConfigTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 path = CONFIG_DIR / f"GLM-5.3-W8A8C8-A3-ALL-{mode}.yaml"
                 config = yaml.safe_load(path.read_text(encoding="utf-8"))
-                self.assertEqual(list(config["benchmarks"]), ["perf_16k_warmup", "perf_16k"])
+                names = ["perf_16k_warmup", "perf_16k"] + (["acc_gpqa"] if mode == "E2E" else [])
+                self.assertEqual(list(config["benchmarks"]), names)
                 perf = config["benchmarks"]["perf_16k"]
                 self.assertEqual(
                     (perf["batch_size"], perf["num_prompts"], perf["request_rate"], perf["max_out_len"]),
@@ -138,7 +138,7 @@ class FullModelConfigTests(unittest.TestCase):
 
     def test_matrix_entries_resolve_to_correct_hardware(self):
         resolver = ROOT / ".github/workflows/scripts/resolve_nightly_tests.py"
-        for frequency, expected_counts in (("weekly", {"a3": 4, "a5": 8}),):
+        for frequency, expected_counts in (("weekly", {"a3": 3, "a5": 6}),):
             path = ROOT / f".github/workflows/configs/{frequency}_config.yaml"
             matrix = yaml.safe_load(path.read_text(encoding="utf-8"))
             for soc, expected_count in expected_counts.items():
@@ -149,6 +149,7 @@ class FullModelConfigTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(entries), expected_count)
                 self.assertEqual(len({entry["name"] for entry in entries}), expected_count)
+                self.assertFalse(any(entry["name"].endswith("ACCURACY") for entry in entries))
                 for entry in entries:
                     with self.subTest(frequency=frequency, case=entry["name"]):
                         config_path = ROOT / entry["config_base_path"] / entry["config_file_path"]
@@ -173,6 +174,32 @@ class FullModelConfigTests(unittest.TestCase):
 
         nightly = (ROOT / ".github/workflows/configs/nightly_config.yaml").read_text(encoding="utf-8")
         self.assertNotIn("/GLM/full_model", nightly)
+
+    def test_gpqa_runs_once_per_family_after_e2e_performance(self):
+        for family in ("W8A8C8-A3", "W8A8C8-A5", "W4A4C8-A5"):
+            with self.subTest(family=family):
+                paths = sorted(CONFIG_DIR.glob(f"GLM-5.3-{family}-*.yaml"))
+                self.assertEqual(len(paths), 3)
+                accuracy_cases = []
+                for path in paths:
+                    config = ExternalDPConfigLoader.from_yaml(
+                        str(path), cluster_ips=[f"192.0.2.{index + 1}" for index in range(4)]
+                    )
+                    cases = config.benchmark_cases
+                    accuracy = [case for case in cases if case["case_type"] == "accuracy"]
+                    if path.stem.endswith("E2E"):
+                        self.assertEqual(len(accuracy), 1)
+                        self.assertEqual(cases[-1]["benchmark_name"], "acc_gpqa")
+                        self.assertTrue(all(case["case_type"] == "performance" for case in cases[:-1]))
+                        self.assertEqual(cases[-1]["dataset_path"], "vllm-ascend/gpqa")
+                        self.assertEqual(cases[-1]["max_out_len"], 65536)
+                        self.assertEqual(cases[-1]["batch_size"], 32)
+                        self.assertEqual(cases[-1]["baseline"], 86.92)
+                        self.assertEqual(cases[-1]["verify_mode"], "ge")
+                    else:
+                        self.assertEqual(accuracy, [])
+                    accuracy_cases.extend(accuracy)
+                self.assertEqual(len(accuracy_cases), 1)
 
     def test_weekly_a5_workflow_and_dispatch_are_connected(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/schedule_weekly_test_a5.yaml").read_text())
