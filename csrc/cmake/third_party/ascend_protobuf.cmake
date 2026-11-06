@@ -38,7 +38,7 @@ else()
         set(REQ_URL "file://${CANN_3RD_LIB_PATH}/pkg/${PROTOBUF_VERSION_PKG}")
         message(STATUS "[ThirdPartyLib][ascend protobuf] found in ${REQ_URL}.")
     else()
-        set(REQ_URL "https://gitcode.com/cann-src-third-party/protobuf/releases/download/v25.1/protobuf-25.1.tar.gz")
+        set(REQ_URL "${CANN_3RD_PARTY_BASE_URL}/protobuf/releases/download/v25.1/protobuf-25.1.tar.gz")
         message(STATUS "[ThirdPartyLib][ascend protobuf] ${REQ_URL} not found, need download.")
     endif()
     

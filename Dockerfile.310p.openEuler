@@ -31,8 +31,11 @@ RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_TAG=v0.32.0
 ARG VLLM_COMMIT=""
+# 绕开 github 直连限流（502）：GITHUB_PROXY 走内部 git-cdn（insteadOf 重写 https://github.com/）
+ARG GITHUB_PROXY=""
 ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
-RUN if [ -n "$VLLM_COMMIT" ]; then \
+RUN if [ -n "$GITHUB_PROXY" ]; then git config --global url."${GITHUB_PROXY}".insteadOf "https://github.com/"; fi && \
+    if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
       git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO "$VLLM_COMMIT" && \
       git -C /vllm-workspace/vllm checkout FETCH_HEAD; \
@@ -53,15 +56,26 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
 # Install vllm-ascend
 # Dependency versions used by the vllm-ascend build.
 ARG SOC_VERSION="ascend310p1"
+# Cap opc/c++/rust build parallelism to bound memory on shared buildkitd nodes:
+# the heavy vllm-ascend compile otherwise spawns unbounded jobs and can exhaust
+# a 128Gi node (OOM-killing kubelet). Overridable via --build-arg MAX_JOBS=N.
+ARG MAX_JOBS=32
+ARG CARGO_BUILD_JOBS=32
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
-    OMP_NUM_THREADS=1
+    OMP_NUM_THREADS=1 \
+    MAX_JOBS=$MAX_JOBS \
+    CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS
 COPY . /vllm-workspace/vllm-ascend/
 
 ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi \
     https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly"
 ARG COMPILE_CUSTOM_KERNELS=1
+# GITCODE_PROXY: 集群内 gitcode git-cdn 地址（非空时 csrc cmake 的 CANN 第三方依赖
+# 经 git-cdn 下载；为空则默认直连 gitcode.com）
+ARG GITCODE_PROXY=""
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
+    if [ -n "$GITCODE_PROXY" ]; then export CANN_3RD_PARTY_BASE_URL="${GITCODE_PROXY%/}/cann-src-third-party"; fi && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
