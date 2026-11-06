@@ -204,12 +204,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
-        # vLLM #53614 aligns exported Mamba checkpoints with EAGLE replay.
-        if use_eagle:
-            for group_id, manager in enumerate(self.single_type_managers):
-                if isinstance(manager, MambaManager) and group_id in self.eagle_group_ids:
-                    manager.drop_eagle_checkpoint_block = True
-
         # Upstream KVCacheCoordinator.__init__ exposes the per-group resolved
         # block sizes; SimpleCPUOffloadScheduler reads them. This subclass
         # builds the managers itself instead of calling super().__init__, so
@@ -266,6 +260,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # of typical ~2K prompts, pinning P-side prefix hits to 0.
         kv_transfer_config = getattr(kv_cache_config, "kv_transfer_config", None)
         self.skips_eagle_block_drop = _skips_eagle_block_drop(kv_transfer_config)
+        # Keep Mamba checkpoint writes on the same boundary as prefill split
+        # and cache lookup. Only roles using EAGLE replay need the block drop.
+        if use_eagle and not self.skips_eagle_block_drop:
+            for group_id, manager in enumerate(self.single_type_managers):
+                if isinstance(manager, MambaManager) and group_id in self.eagle_group_ids:
+                    manager.drop_eagle_checkpoint_block = True
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:
