@@ -87,7 +87,7 @@ templates:
       - "--max-model-len"
       - "1048576"
       - "--max-num-batched-tokens"
-      - "165000"
+      - "16500"
       - "--max-num-seqs"
       - "16"
       - "--no-disable-hybrid-kv-cache-manager"
